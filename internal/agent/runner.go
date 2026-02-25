@@ -8,8 +8,8 @@ import (
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
 
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/config"
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/tools"
+	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/tools"
 )
 
 // allBuiltInTools is the full list of Claude Code built-in tools available to agents.
@@ -36,6 +36,8 @@ type RunOptions struct {
 }
 
 // AgentResult is the final result of an agent invocation.
+//
+//nolint:revive // AgentResult is intentionally named with the package prefix for call-site clarity.
 type AgentResult struct {
 	SessionID string
 	Answer    string
@@ -267,7 +269,7 @@ func RunAgent(ctx context.Context, agentCfg *config.AgentConfig, question string
 				}
 				// Do NOT return early here. Drain the remaining events so the
 				// subprocess has time to finish writing the session to disk before
-				// the caller's context can be cancelled.
+				// the caller's context can be canceled.
 			}
 		}
 	}

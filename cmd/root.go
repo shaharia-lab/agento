@@ -5,23 +5,35 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+
+	"github.com/shaharia-lab/agento/internal/config"
 )
 
-var rootCmd = &cobra.Command{
-	Use:   "agents-platform",
-	Short: "Claude Agents Platform (Go)",
-	Long:  "A platform for running Claude agents defined in YAML configuration files.",
+// NewRootCmd returns the root cobra command wired with the provided AppConfig.
+func NewRootCmd(cfg *config.AppConfig) *cobra.Command {
+	root := &cobra.Command{
+		Use:   "agento",
+		Short: "Agento — AI Agents Platform",
+		Long:  "A platform for running Claude agents defined in YAML configuration files.",
+	}
+	return root
 }
 
-// Execute runs the root command.
+// Execute is the entrypoint called from main. It loads config, wires the
+// command tree, and runs the root command.
 func Execute() {
-	if err := rootCmd.Execute(); err != nil {
+	cfg, err := config.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+
+	root := NewRootCmd(cfg)
+	root.AddCommand(NewWebCmd(cfg))
+	root.AddCommand(NewAskCmd(cfg))
+
+	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-}
-
-func init() {
-	rootCmd.AddCommand(serveCmd)
-	rootCmd.AddCommand(askCmd)
 }

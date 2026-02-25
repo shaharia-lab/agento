@@ -1,10 +1,11 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { chatsApi, agentsApi } from '@/lib/api'
 import type { ChatSession, Agent } from '@/types'
 import { formatRelativeTime, truncate } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Textarea } from '@/components/ui/textarea'
 import {
   Dialog,
   DialogContent,
@@ -31,7 +32,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
-import { Plus, MessageSquare, Trash2, Search } from 'lucide-react'
+import { Plus, MessageSquare, Trash2, Search, Send } from 'lucide-react'
 
 export default function ChatsPage() {
   const navigate = useNavigate()
@@ -41,8 +42,10 @@ export default function ChatsPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [newChatOpen, setNewChatOpen] = useState(false)
-  const [selectedAgent, setSelectedAgent] = useState('')
+  const [selectedAgent, setSelectedAgent] = useState<string>('__none__')
+  const [firstMessage, setFirstMessage] = useState('')
   const [creating, setCreating] = useState(false)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // Filters
   const [search, setSearch] = useState('')
@@ -72,17 +75,44 @@ export default function ChatsPage() {
     }
   }, [searchParams, setSearchParams])
 
+  // Focus textarea when modal opens
+  useEffect(() => {
+    if (newChatOpen) {
+      setTimeout(() => textareaRef.current?.focus(), 50)
+    }
+  }, [newChatOpen])
+
+  const handleOpenChange = (open: boolean) => {
+    setNewChatOpen(open)
+    if (!open) {
+      setSelectedAgent('__none__')
+      setFirstMessage('')
+    }
+  }
+
   const createChat = async () => {
-    if (!selectedAgent) return
+    if (!firstMessage.trim() || creating) return
     setCreating(true)
+
+    const agentSlug = selectedAgent === '__none__' ? '' : selectedAgent
+
     try {
-      const session = await chatsApi.create(selectedAgent)
-      navigate(`/chats/${session.id}`)
+      const session = await chatsApi.create(agentSlug)
+      setNewChatOpen(false)
+
+      // Navigate immediately; send the first message in the background so the
+      // chat page can display the streaming response right away.
+      navigate(`/chats/${session.id}`, { state: { pendingMessage: firstMessage.trim() } })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create chat')
-    } finally {
       setCreating(false)
-      setNewChatOpen(false)
+    }
+  }
+
+  const handleModalKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      void createChat()
     }
   }
 
@@ -95,8 +125,7 @@ export default function ChatsPage() {
     }
   }
 
-  const getAgentName = (slug: string) =>
-    agents.find(a => a.slug === slug)?.name ?? slug
+  const getAgentName = (slug: string) => agents.find(a => a.slug === slug)?.name ?? slug
 
   const filtered = useMemo(() => {
     return sessions.filter(s => {
@@ -179,7 +208,7 @@ export default function ChatsPage() {
             </div>
             <h2 className="text-sm font-semibold text-zinc-900 mb-1">No chats yet</h2>
             <p className="text-xs text-zinc-500 mb-4 max-w-xs">
-              Start a conversation with one of your agents.
+              Start a conversation — with or without an agent.
             </p>
             <Button
               size="sm"
@@ -200,7 +229,7 @@ export default function ChatsPage() {
               <ChatRow
                 key={session.id}
                 session={session}
-                agentName={getAgentName(session.agent_slug)}
+                agentName={session.agent_slug ? getAgentName(session.agent_slug) : null}
                 onClick={() => navigate(`/chats/${session.id}`)}
                 onDelete={() => deleteSession(session.id)}
               />
@@ -210,22 +239,23 @@ export default function ChatsPage() {
       </div>
 
       {/* New Chat Dialog */}
-      <Dialog open={newChatOpen} onOpenChange={setNewChatOpen}>
-        <DialogContent className="sm:max-w-sm">
+      <Dialog open={newChatOpen} onOpenChange={handleOpenChange}>
+        <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>New Chat</DialogTitle>
-            <DialogDescription>Choose an agent to start a conversation with.</DialogDescription>
+            <DialogDescription>
+              Type your first message. Optionally choose an agent — or chat directly without one.
+            </DialogDescription>
           </DialogHeader>
-          {agents.length === 0 ? (
-            <p className="text-sm text-zinc-500 py-2">
-              No agents available. Create one first.
-            </p>
-          ) : (
+
+          <div className="flex flex-col gap-3 py-1">
+            {/* Agent selector (optional) */}
             <Select value={selectedAgent} onValueChange={setSelectedAgent}>
-              <SelectTrigger>
-                <SelectValue placeholder="Select an agent…" />
+              <SelectTrigger className="h-9 text-sm">
+                <SelectValue placeholder="No agent (direct chat)" />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="__none__">No agent (direct chat)</SelectItem>
                 {agents.map(a => (
                   <SelectItem key={a.slug} value={a.slug}>
                     {a.name}
@@ -233,22 +263,47 @@ export default function ChatsPage() {
                 ))}
               </SelectContent>
             </Select>
-          )}
-          <DialogFooter>
-            <Button variant="outline" size="sm" onClick={() => setNewChatOpen(false)}>
+
+            {/* First message input */}
+            <div className="relative">
+              <Textarea
+                ref={textareaRef}
+                value={firstMessage}
+                onChange={e => setFirstMessage(e.target.value)}
+                onKeyDown={handleModalKeyDown}
+                placeholder="Type your first message… (Enter to send)"
+                className="min-h-[100px] max-h-[220px] resize-none text-sm border-zinc-200 focus:border-zinc-900 focus:ring-zinc-900 pr-10"
+                rows={4}
+                disabled={creating}
+              />
+              <button
+                onClick={() => void createChat()}
+                disabled={!firstMessage.trim() || creating}
+                className="absolute right-2.5 bottom-2.5 h-7 w-7 flex items-center justify-center rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-zinc-900 text-white hover:bg-zinc-700"
+              >
+                <Send className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2">
+            <Button variant="outline" size="sm" onClick={() => handleOpenChange(false)}>
               Cancel
             </Button>
             <Button
               size="sm"
               className="bg-zinc-900 hover:bg-zinc-800 text-white"
-              onClick={createChat}
-              disabled={!selectedAgent || creating}
+              onClick={() => void createChat()}
+              disabled={!firstMessage.trim() || creating}
             >
-              {creating ? 'Creating…' : 'Start Chat'}
+              {creating ? 'Starting…' : 'Start Chat'}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Hidden component to send the first message after navigation */}
+      {/* Actual sending is handled by ChatSessionPage via location.state */}
     </div>
   )
 }
@@ -260,7 +315,7 @@ function ChatRow({
   onDelete,
 }: {
   session: ChatSession
-  agentName: string
+  agentName: string | null
   onClick: () => void
   onDelete: () => void
 }) {
@@ -273,16 +328,23 @@ function ChatRow({
         <MessageSquare className="h-3.5 w-3.5" />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-zinc-900 truncate">
-          {truncate(session.title, 70)}
-        </p>
+        <p className="text-sm font-medium text-zinc-900 truncate">{truncate(session.title, 70)}</p>
         <div className="flex items-center gap-2 mt-0.5">
-          <Badge
-            variant="secondary"
-            className="text-xs py-0 h-4 bg-zinc-100 text-zinc-600 hover:bg-zinc-100 border-0 font-normal"
-          >
-            {agentName}
-          </Badge>
+          {agentName ? (
+            <Badge
+              variant="secondary"
+              className="text-xs py-0 h-4 bg-zinc-100 text-zinc-600 hover:bg-zinc-100 border-0 font-normal"
+            >
+              {agentName}
+            </Badge>
+          ) : (
+            <Badge
+              variant="secondary"
+              className="text-xs py-0 h-4 bg-zinc-50 text-zinc-400 hover:bg-zinc-50 border-0 font-normal"
+            >
+              Direct chat
+            </Badge>
+          )}
           <span className="text-xs text-zinc-400">{formatRelativeTime(session.updated_at)}</span>
         </div>
       </div>

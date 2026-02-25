@@ -3,35 +3,27 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/config"
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/storage"
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/tools"
+	"github.com/shaharia-lab/agento/internal/service"
 )
 
 // Server holds all dependencies for the REST API handlers.
 type Server struct {
-	agents      storage.AgentStore
-	chats       storage.ChatStore
-	mcpRegistry *config.MCPRegistry
-	localMCP    *tools.LocalMCPConfig
+	agentSvc service.AgentService
+	chatSvc  service.ChatService
+	logger   *slog.Logger
 }
 
-// New creates a new API Server.
-func New(
-	agents storage.AgentStore,
-	chats storage.ChatStore,
-	mcpRegistry *config.MCPRegistry,
-	localMCP *tools.LocalMCPConfig,
-) *Server {
+// New creates a new API Server backed by the provided services.
+func New(agentSvc service.AgentService, chatSvc service.ChatService, logger *slog.Logger) *Server {
 	return &Server{
-		agents:      agents,
-		chats:       chats,
-		mcpRegistry: mcpRegistry,
-		localMCP:    localMCP,
+		agentSvc: agentSvc,
+		chatSvc:  chatSvc,
+		logger:   logger,
 	}
 }
 
@@ -66,7 +58,7 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 
 func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, data any) {
 	b, _ := json.Marshal(data)
-	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(b))
+	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(b))
 	if flusher != nil {
 		flusher.Flush()
 	}

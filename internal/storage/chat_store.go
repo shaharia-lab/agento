@@ -81,6 +81,7 @@ func newUUID() string {
 		b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
+// ListSessions returns all chat sessions ordered by most recently updated.
 func (s *FSChatStore) ListSessions() ([]*ChatSession, error) {
 	entries, err := os.ReadDir(s.dir)
 	if err != nil {
@@ -90,7 +91,7 @@ func (s *FSChatStore) ListSessions() ([]*ChatSession, error) {
 		return nil, fmt.Errorf("reading chats dir: %w", err)
 	}
 
-	var sessions []*ChatSession
+	sessions := make([]*ChatSession, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
@@ -111,6 +112,7 @@ func (s *FSChatStore) ListSessions() ([]*ChatSession, error) {
 	return sessions, nil
 }
 
+// GetSession returns session metadata for the given ID, or nil if not found.
 func (s *FSChatStore) GetSession(id string) (*ChatSession, error) {
 	f, err := os.Open(s.sessionPath(id))
 	if err != nil {
@@ -119,7 +121,7 @@ func (s *FSChatStore) GetSession(id string) (*ChatSession, error) {
 		}
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	if !scanner.Scan() {
@@ -143,6 +145,7 @@ func (s *FSChatStore) GetSession(id string) (*ChatSession, error) {
 	}, nil
 }
 
+// GetSessionWithMessages returns the session and its full message history.
 func (s *FSChatStore) GetSessionWithMessages(id string) (*ChatSession, []ChatMessage, error) {
 	f, err := os.Open(s.sessionPath(id))
 	if err != nil {
@@ -151,7 +154,7 @@ func (s *FSChatStore) GetSessionWithMessages(id string) (*ChatSession, []ChatMes
 		}
 		return nil, nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	var session *ChatSession
 	var messages []ChatMessage
@@ -193,6 +196,7 @@ func (s *FSChatStore) GetSessionWithMessages(id string) (*ChatSession, []ChatMes
 	return session, messages, scanner.Err()
 }
 
+// CreateSession creates a new chat session with the given agent slug (may be empty).
 func (s *FSChatStore) CreateSession(agentSlug string) (*ChatSession, error) {
 	id := newUUID()
 	now := time.Now().UTC()
@@ -216,12 +220,13 @@ func (s *FSChatStore) CreateSession(agentSlug string) (*ChatSession, error) {
 		return nil, err
 	}
 	path := s.sessionPath(id)
-	if err := os.WriteFile(path, append(data, '\n'), 0644); err != nil {
+	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
 		return nil, fmt.Errorf("creating session file: %w", err)
 	}
 	return session, nil
 }
 
+// AppendMessage appends a message to the session's JSONL file.
 func (s *FSChatStore) AppendMessage(sessionID string, msg ChatMessage) error {
 	rec := jsonlRecord{
 		Type:      "message",
@@ -233,18 +238,19 @@ func (s *FSChatStore) AppendMessage(sessionID string, msg ChatMessage) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(s.sessionPath(sessionID), os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(s.sessionPath(sessionID), os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("opening session for append: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = f.Write(append(data, '\n'))
 	return err
 }
 
+// UpdateSession rewrites the session metadata (first line) in the JSONL file.
 func (s *FSChatStore) UpdateSession(session *ChatSession) error {
 	path := s.sessionPath(session.ID)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path constructed from admin-configured data dir
 	if err != nil {
 		return fmt.Errorf("reading session file: %w", err)
 	}
@@ -269,9 +275,10 @@ func (s *FSChatStore) UpdateSession(session *ChatSession) error {
 		return err
 	}
 	lines[0] = string(firstLine)
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0600)
 }
 
+// DeleteSession removes the JSONL file for the given session ID.
 func (s *FSChatStore) DeleteSession(id string) error {
 	path := s.sessionPath(id)
 	if err := os.Remove(path); err != nil {

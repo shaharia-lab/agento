@@ -1,9 +1,10 @@
-module github.com/shaharia-lab/agents-platform-cc-go
+module github.com/shaharia-lab/agento
 
 go 1.24
 
 require (
-	github.com/go-chi/chi/v5 v5.2.1
+	github.com/go-chi/chi/v5 v5.2.5
+	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/modelcontextprotocol/go-sdk v1.3.1
 	github.com/shaharia-lab/claude-agent-sdk-go v0.1.0
 	github.com/spf13/cobra v1.9.1
