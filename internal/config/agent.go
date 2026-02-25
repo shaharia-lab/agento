@@ -11,25 +11,25 @@ import (
 
 // AgentConfig holds the full configuration for a single agent, as parsed from YAML.
 type AgentConfig struct {
-	Name         string            `yaml:"name"`
-	Slug         string            `yaml:"slug"`
-	Description  string            `yaml:"description"`
-	Model        string            `yaml:"model"`
-	Thinking     string            `yaml:"thinking"` // "adaptive", "disabled", or "enabled"
-	SystemPrompt string            `yaml:"system_prompt"`
-	Capabilities AgentCapabilities `yaml:"capabilities"`
+	Name         string            `yaml:"name"          json:"name"`
+	Slug         string            `yaml:"slug"          json:"slug"`
+	Description  string            `yaml:"description"   json:"description"`
+	Model        string            `yaml:"model"         json:"model"`
+	Thinking     string            `yaml:"thinking"      json:"thinking"` // "adaptive", "disabled", or "enabled"
+	SystemPrompt string            `yaml:"system_prompt" json:"system_prompt"`
+	Capabilities AgentCapabilities `yaml:"capabilities"  json:"capabilities"`
 }
 
 // AgentCapabilities defines what tools an agent can use.
 type AgentCapabilities struct {
-	BuiltIn []string               `yaml:"built_in"`
-	Local   []string               `yaml:"local"`
-	MCP     map[string]MCPCap      `yaml:"mcp"`
+	BuiltIn []string          `yaml:"built_in" json:"built_in"`
+	Local   []string          `yaml:"local"    json:"local"`
+	MCP     map[string]MCPCap `yaml:"mcp"      json:"mcp"`
 }
 
 // MCPCap specifies which tools from an MCP server an agent may use.
 type MCPCap struct {
-	Tools []string `yaml:"tools"`
+	Tools []string `yaml:"tools" json:"tools"`
 }
 
 // AgentRegistry is an in-memory lookup of agents by slug.
