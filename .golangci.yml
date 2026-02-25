@@ -25,6 +25,7 @@ linters:
     - unconvert
     - prealloc
     - revive
+    - gosec
 
   settings:
     revive:

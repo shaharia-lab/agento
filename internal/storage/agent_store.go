@@ -62,7 +62,7 @@ func (s *FSAgentStore) List() ([]*config.AgentConfig, error) {
 
 // Get returns the agent config for the given slug, or nil if not found.
 func (s *FSAgentStore) Get(slug string) (*config.AgentConfig, error) {
-	data, err := os.ReadFile(filepath.Join(s.dir, slug+".yaml"))
+	data, err := os.ReadFile(filepath.Join(s.dir, slug+".yaml")) //nolint:gosec // path constructed from admin-configured data dir
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -96,7 +96,7 @@ func (s *FSAgentStore) Save(agent *config.AgentConfig) error {
 		return fmt.Errorf("marshaling agent %q: %w", agent.Slug, err)
 	}
 	path := filepath.Join(s.dir, agent.Slug+".yaml")
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		return fmt.Errorf("writing agent %q: %w", agent.Slug, err)
 	}
 	return nil

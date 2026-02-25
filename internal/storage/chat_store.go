@@ -220,7 +220,7 @@ func (s *FSChatStore) CreateSession(agentSlug string) (*ChatSession, error) {
 		return nil, err
 	}
 	path := s.sessionPath(id)
-	if err := os.WriteFile(path, append(data, '\n'), 0644); err != nil {
+	if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
 		return nil, fmt.Errorf("creating session file: %w", err)
 	}
 	return session, nil
@@ -238,7 +238,7 @@ func (s *FSChatStore) AppendMessage(sessionID string, msg ChatMessage) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(s.sessionPath(sessionID), os.O_APPEND|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(s.sessionPath(sessionID), os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("opening session for append: %w", err)
 	}
@@ -250,7 +250,7 @@ func (s *FSChatStore) AppendMessage(sessionID string, msg ChatMessage) error {
 // UpdateSession rewrites the session metadata (first line) in the JSONL file.
 func (s *FSChatStore) UpdateSession(session *ChatSession) error {
 	path := s.sessionPath(session.ID)
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // path constructed from admin-configured data dir
 	if err != nil {
 		return fmt.Errorf("reading session file: %w", err)
 	}
@@ -275,7 +275,7 @@ func (s *FSChatStore) UpdateSession(session *ChatSession) error {
 		return err
 	}
 	lines[0] = string(firstLine)
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0644)
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0600)
 }
 
 // DeleteSession removes the JSONL file for the given session ID.

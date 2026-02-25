@@ -67,7 +67,7 @@ func LoadAgents(dir string, mcpRegistry *MCPRegistry) (*AgentRegistry, error) {
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		data, err := os.ReadFile(filepath.Join(dir, entry.Name())) //nolint:gosec // path is constructed from admin-configured data dir
 		if err != nil {
 			return nil, fmt.Errorf("reading agent file %q: %w", entry.Name(), err)
 		}

@@ -49,7 +49,7 @@ func (r *MCPRegistry) All() map[string]any {
 // LoadMCPRegistry reads the MCP registry YAML file at filePath and returns a populated
 // MCPRegistry. If the file does not exist, an empty registry is returned (not an error).
 func LoadMCPRegistry(filePath string) (*MCPRegistry, error) {
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(filePath) //nolint:gosec // path is from admin-configured data dir
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &MCPRegistry{servers: make(map[string]any)}, nil

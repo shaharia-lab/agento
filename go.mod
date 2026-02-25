@@ -3,7 +3,8 @@ module github.com/shaharia-lab/agento
 go 1.24
 
 require (
-	github.com/go-chi/chi/v5 v5.2.1
+	github.com/go-chi/chi/v5 v5.2.5
+	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/modelcontextprotocol/go-sdk v1.3.1
 	github.com/shaharia-lab/claude-agent-sdk-go v0.1.0
 	github.com/spf13/cobra v1.9.1
@@ -13,7 +14,6 @@ require (
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
-	github.com/kelseyhightower/envconfig v1.4.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.3 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect

@@ -43,27 +43,31 @@ type ChatService interface {
 
 // chatService is the default implementation of ChatService.
 type chatService struct {
-	chatRepo    storage.ChatStore
-	agentRepo   storage.AgentStore
-	mcpRegistry *config.MCPRegistry
-	localMCP    *tools.LocalMCPConfig
-	logger      *slog.Logger
+	chatRepo     storage.ChatStore
+	agentRepo    storage.AgentStore
+	mcpRegistry  *config.MCPRegistry
+	localMCP     *tools.LocalMCPConfig
+	defaultModel string
+	logger       *slog.Logger
 }
 
 // NewChatService constructs a ChatService backed by the provided repositories.
+// defaultModel is used for no-agent (direct) chat sessions.
 func NewChatService(
 	chatRepo storage.ChatStore,
 	agentRepo storage.AgentStore,
 	mcpRegistry *config.MCPRegistry,
 	localMCP *tools.LocalMCPConfig,
+	defaultModel string,
 	logger *slog.Logger,
 ) ChatService {
 	return &chatService{
-		chatRepo:    chatRepo,
-		agentRepo:   agentRepo,
-		mcpRegistry: mcpRegistry,
-		localMCP:    localMCP,
-		logger:      logger,
+		chatRepo:     chatRepo,
+		agentRepo:    agentRepo,
+		mcpRegistry:  mcpRegistry,
+		localMCP:     localMCP,
+		defaultModel: defaultModel,
+		logger:       logger,
 	}
 }
 
@@ -129,7 +133,8 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 		return nil, nil, &NotFoundError{Resource: "chat", ID: sessionID}
 	}
 
-	// Resolve agent config (nil is valid — means no-agent chat).
+	// Resolve agent config. For no-agent sessions, synthesize a minimal config
+	// using the configured default model so the SDK still has a model to target.
 	var agentCfg *config.AgentConfig
 	if session.AgentSlug != "" {
 		agentCfg, err = s.agentRepo.Get(session.AgentSlug)
@@ -138,6 +143,12 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 		}
 		if agentCfg == nil {
 			return nil, nil, &NotFoundError{Resource: "agent", ID: session.AgentSlug}
+		}
+	} else {
+		// No-agent (direct) chat: use the default model with no system prompt.
+		agentCfg = &config.AgentConfig{
+			Model:    s.defaultModel,
+			Thinking: "adaptive",
 		}
 	}
 

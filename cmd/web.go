@@ -94,7 +94,7 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	chatStore := storage.NewFSChatStore(cfg.ChatsDir())
 
 	agentSvc := service.NewAgentService(agentStore, sysLogger)
-	chatSvc := service.NewChatService(chatStore, agentStore, mcpRegistry, localToolsMCP, sysLogger)
+	chatSvc := service.NewChatService(chatStore, agentStore, mcpRegistry, localToolsMCP, cfg.DefaultModel, sysLogger)
 
 	apiSrv := api.New(agentSvc, chatSvc, sysLogger)
 	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger)

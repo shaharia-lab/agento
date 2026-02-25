@@ -57,8 +57,9 @@ func New(apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger) *S
 	r.Get("/*", s.spaHandler())
 
 	s.httpServer = &http.Server{
-		Addr:    fmt.Sprintf(":%d", port),
-		Handler: r,
+		Addr:              fmt.Sprintf(":%d", port),
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s
 }
