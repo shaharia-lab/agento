@@ -4,11 +4,9 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { chatsApi, sendMessage } from '@/lib/api'
 import type { ChatDetail, ChatMessage } from '@/types'
-import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { Badge } from '@/components/ui/badge'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { ArrowLeft, Send, Loader2, BrainCircuit } from 'lucide-react'
+import { ArrowLeft, Send, Loader2, ChevronDown, ChevronRight } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 export default function ChatSessionPage() {
   const { id } = useParams<{ id: string }>()
@@ -53,7 +51,6 @@ export default function ChatSessionPage() {
     const content = input.trim()
     setInput('')
 
-    // Optimistically show user message
     const userMsg: ChatMessage = {
       role: 'user',
       content,
@@ -82,7 +79,6 @@ export default function ChatSessionPage() {
             setStreamingText(accumulated)
           },
           onDone: () => {
-            // Add assistant message to state
             const assistantMsg: ChatMessage = {
               role: 'assistant',
               content: accumulated,
@@ -93,7 +89,6 @@ export default function ChatSessionPage() {
             setThinkingText('')
             setShowThinking(false)
 
-            // Refresh session title
             if (detail) {
               chatsApi.get(id).then(d => setDetail(d)).catch(() => undefined)
             }
@@ -125,7 +120,7 @@ export default function ChatSessionPage() {
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
-        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+        <Loader2 className="h-5 w-5 animate-spin text-zinc-400" />
       </div>
     )
   }
@@ -139,32 +134,36 @@ export default function ChatSessionPage() {
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-w-0 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 border-b border-border px-4 py-3 shrink-0">
+      <div className="flex items-center gap-3 border-b border-zinc-100 px-3 sm:px-4 py-3 shrink-0">
         <button
           onClick={() => navigate('/chats')}
-          className="h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-gray-100 transition-colors"
+          className="h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
         </button>
         <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold truncate">{detail?.session.title ?? 'Chat'}</h2>
+          <h2 className="text-sm font-semibold text-zinc-900 truncate">
+            {detail?.session.title ?? 'Chat'}
+          </h2>
         </div>
         {detail?.session.agent_slug && (
-          <Badge variant="secondary" className="text-xs shrink-0">
+          <span className="text-xs text-zinc-400 shrink-0 font-mono">
             {detail.session.agent_slug}
-          </Badge>
+          </span>
         )}
       </div>
 
       {/* Messages */}
-      <ScrollArea className="flex-1">
-        <div className="flex flex-col gap-4 px-4 py-6 max-w-3xl mx-auto w-full">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
+        <div className="flex flex-col gap-5 px-3 py-4 sm:px-6 sm:py-6 w-full max-w-4xl mx-auto">
           {messages.length === 0 && !streaming && (
             <div className="flex flex-col items-center justify-center py-16 text-center">
-              <div className="text-3xl mb-3">💬</div>
-              <p className="text-sm text-muted-foreground">
+              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-900 text-white text-sm font-bold mb-4">
+                A
+              </div>
+              <p className="text-sm text-zinc-400">
                 Send a message to start the conversation.
               </p>
             </div>
@@ -176,23 +175,16 @@ export default function ChatSessionPage() {
 
           {/* Streaming: thinking */}
           {streaming && showThinking && thinkingText && (
-            <div className="flex gap-3">
-              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-purple-100 text-purple-600 shrink-0 mt-0.5">
-                <BrainCircuit className="h-3.5 w-3.5" />
-              </div>
-              <div className="bg-purple-50 border border-purple-100 rounded-lg px-3 py-2 text-xs text-purple-700 max-w-2xl font-mono whitespace-pre-wrap opacity-80">
-                {thinkingText}
-              </div>
-            </div>
+            <ThinkingBlock text={thinkingText} />
           )}
 
           {/* Streaming: assistant response */}
           {streaming && streamingText && (
             <div className="flex gap-3">
-              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gray-100 text-gray-600 shrink-0 mt-0.5 text-xs font-bold">
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 text-white shrink-0 mt-0.5 text-xs font-bold">
                 A
               </div>
-              <div className="bg-gray-50 rounded-lg px-4 py-3 text-sm max-w-2xl">
+              <div className="bg-zinc-50 border border-zinc-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
                 <div className="prose prose-sm max-w-none">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
                 </div>
@@ -200,55 +192,59 @@ export default function ChatSessionPage() {
             </div>
           )}
 
-          {/* Loading indicator (no text yet) */}
+          {/* Typing indicator */}
           {streaming && !streamingText && !thinkingText && (
             <div className="flex gap-3 items-center">
-              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-gray-100 shrink-0">
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-500" />
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 shrink-0">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-white" />
               </div>
-              <div className="text-xs text-muted-foreground animate-pulse">Thinking…</div>
+              <div className="flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:0ms]" />
+                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:150ms]" />
+                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:300ms]" />
+              </div>
             </div>
           )}
 
-          {/* Error */}
           {error && (
-            <div className="rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
+            <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
               {error}
             </div>
           )}
 
           <div ref={bottomRef} />
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Input */}
-      <div className="border-t border-border px-4 py-3 shrink-0">
-        <div className="flex gap-2 max-w-3xl mx-auto">
+      <div className="border-t border-zinc-100 px-3 py-3 sm:px-6 shrink-0 bg-white">
+        <div className="flex gap-2 max-w-4xl mx-auto">
           <Textarea
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Message… (Enter to send, Shift+Enter for new line)"
-            className="min-h-[40px] max-h-[200px] resize-none text-sm"
+            className="min-h-[72px] max-h-[240px] resize-none text-sm border-zinc-200 focus:border-zinc-900 focus:ring-zinc-900"
             disabled={streaming}
-            rows={1}
+            rows={3}
           />
-          <Button
-            size="icon"
+          <button
             onClick={() => void handleSend()}
             disabled={!input.trim() || streaming}
-            className="h-9 w-9 shrink-0 self-end"
+            className={cn(
+              'flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors',
+              input.trim() && !streaming
+                ? 'bg-zinc-900 text-white hover:bg-zinc-700'
+                : 'bg-zinc-100 text-zinc-400 cursor-not-allowed',
+            )}
           >
             {streaming ? (
               <Loader2 className="h-4 w-4 animate-spin" />
             ) : (
               <Send className="h-4 w-4" />
             )}
-          </Button>
+          </button>
         </div>
-        <p className="text-center text-xs text-muted-foreground mt-1.5">
-          AI can make mistakes. Verify important information.
-        </p>
       </div>
     </div>
   )
@@ -260,7 +256,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   if (isUser) {
     return (
       <div className="flex justify-end">
-        <div className="bg-gray-900 text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm max-w-[75%] whitespace-pre-wrap">
+        <div className="bg-zinc-900 text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm max-w-[85%] sm:max-w-[75%] whitespace-pre-wrap break-words leading-relaxed">
           {message.content}
         </div>
       </div>
@@ -269,13 +265,39 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 
   return (
     <div className="flex gap-3">
-      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-indigo-100 text-indigo-700 shrink-0 mt-0.5 text-xs font-bold">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 text-white shrink-0 mt-0.5 text-xs font-bold">
         A
       </div>
-      <div className="bg-gray-50 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[80%]">
+      <div className="bg-zinc-50 border border-zinc-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
         <div className="prose prose-sm max-w-none">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function ThinkingBlock({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false)
+
+  return (
+    <div className="flex gap-3">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0 mt-0.5 text-xs">
+        ✦
+      </div>
+      <div className="flex-1 max-w-[82%]">
+        <button
+          onClick={() => setExpanded(e => !e)}
+          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors mb-1"
+        >
+          {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          Thinking
+        </button>
+        {expanded && (
+          <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 font-mono whitespace-pre-wrap leading-relaxed">
+            {text}
+          </div>
+        )}
       </div>
     </div>
   )

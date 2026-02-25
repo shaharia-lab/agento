@@ -36,7 +36,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
   const [slug, setSlug] = useState(agent?.slug ?? '')
   const [slugTouched, setSlugTouched] = useState(isEdit)
   const [description, setDescription] = useState(agent?.description ?? '')
-  const [model, setModel] = useState(agent?.model ?? 'claude-sonnet-4-6')
+  const [model, setModel] = useState(agent?.model ?? 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0')
   const [thinking, setThinking] = useState<Agent['thinking']>(agent?.thinking ?? 'adaptive')
   const [systemPrompt, setSystemPrompt] = useState(agent?.system_prompt ?? '')
   const [builtInTools, setBuiltInTools] = useState<string[]>(
@@ -190,7 +190,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
       {/* Built-in Tools */}
       <div className="space-y-2">
         <Label>Built-in Tools</Label>
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           {BUILT_IN_TOOLS.map(tool => (
             <label
               key={tool}

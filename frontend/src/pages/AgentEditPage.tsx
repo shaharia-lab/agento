@@ -37,11 +37,11 @@ export default function AgentEditPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="border-b border-border px-6 py-4">
+      <div className="border-b border-border px-4 sm:px-6 py-4">
         <h1 className="text-lg font-semibold">Edit Agent</h1>
         <p className="text-sm text-muted-foreground font-mono">{agent.slug}</p>
       </div>
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
         <AgentForm agent={agent} isEdit />
       </div>
     </div>
