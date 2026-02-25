@@ -5,7 +5,6 @@ import remarkGfm from 'remark-gfm'
 import { chatsApi, sendMessage } from '@/lib/api'
 import type { ChatDetail, ChatMessage } from '@/types'
 import { Textarea } from '@/components/ui/textarea'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { ArrowLeft, Send, Loader2, ChevronDown, ChevronRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -135,9 +134,9 @@ export default function ChatSessionPage() {
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full min-w-0 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 border-b border-zinc-100 px-4 py-3 shrink-0">
+      <div className="flex items-center gap-3 border-b border-zinc-100 px-3 sm:px-4 py-3 shrink-0">
         <button
           onClick={() => navigate('/chats')}
           className="h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors"
@@ -157,8 +156,8 @@ export default function ChatSessionPage() {
       </div>
 
       {/* Messages */}
-      <ScrollArea className="flex-1">
-        <div className="flex flex-col gap-5 px-4 py-6 max-w-3xl mx-auto w-full">
+      <div className="flex-1 overflow-y-auto overflow-x-hidden">
+        <div className="flex flex-col gap-5 px-3 py-4 sm:px-6 sm:py-6 w-full max-w-4xl mx-auto">
           {messages.length === 0 && !streaming && (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-900 text-white text-sm font-bold mb-4">
@@ -185,7 +184,7 @@ export default function ChatSessionPage() {
               <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 text-white shrink-0 mt-0.5 text-xs font-bold">
                 A
               </div>
-              <div className="bg-zinc-50 border border-zinc-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[82%]">
+              <div className="bg-zinc-50 border border-zinc-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
                 <div className="prose prose-sm max-w-none">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
                 </div>
@@ -215,19 +214,19 @@ export default function ChatSessionPage() {
 
           <div ref={bottomRef} />
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Input */}
-      <div className="border-t border-zinc-100 px-4 py-3 shrink-0 bg-white">
-        <div className="flex gap-2 max-w-3xl mx-auto">
+      <div className="border-t border-zinc-100 px-3 py-3 sm:px-6 shrink-0 bg-white">
+        <div className="flex gap-2 max-w-4xl mx-auto">
           <Textarea
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Message… (Enter to send, Shift+Enter for new line)"
-            className="min-h-[40px] max-h-[180px] resize-none text-sm border-zinc-200 focus:border-zinc-900 focus:ring-zinc-900"
+            className="min-h-[72px] max-h-[240px] resize-none text-sm border-zinc-200 focus:border-zinc-900 focus:ring-zinc-900"
             disabled={streaming}
-            rows={1}
+            rows={3}
           />
           <button
             onClick={() => void handleSend()}
@@ -257,7 +256,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   if (isUser) {
     return (
       <div className="flex justify-end">
-        <div className="bg-zinc-900 text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm max-w-[75%] whitespace-pre-wrap leading-relaxed">
+        <div className="bg-zinc-900 text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm max-w-[85%] sm:max-w-[75%] whitespace-pre-wrap break-words leading-relaxed">
           {message.content}
         </div>
       </div>
@@ -269,7 +268,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
       <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 text-white shrink-0 mt-0.5 text-xs font-bold">
         A
       </div>
-      <div className="bg-zinc-50 border border-zinc-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[82%]">
+      <div className="bg-zinc-50 border border-zinc-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
         <div className="prose prose-sm max-w-none">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
         </div>

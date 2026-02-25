@@ -63,7 +63,7 @@ export default function AgentsPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-zinc-100 px-6 py-4 shrink-0">
+      <div className="flex items-center justify-between border-b border-zinc-100 px-4 sm:px-6 py-4 shrink-0">
         <div>
           <h1 className="text-base font-semibold text-zinc-900">Agents</h1>
           <p className="text-xs text-zinc-500 mt-0.5">
@@ -87,7 +87,7 @@ export default function AgentsPage() {
       )}
 
       {/* Content */}
-      <div className="flex-1 overflow-y-auto p-6">
+      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
         {agents.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center">
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 mb-4">
@@ -108,7 +108,7 @@ export default function AgentsPage() {
             </Button>
           </div>
         ) : (
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid gap-3 grid-cols-1 sm:grid-cols-2 xl:grid-cols-3">
             {agents.map(agent => (
               <AgentCard
                 key={agent.slug}

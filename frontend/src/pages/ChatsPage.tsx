@@ -117,7 +117,7 @@ export default function ChatsPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-zinc-100 px-6 py-4 shrink-0">
+      <div className="flex items-center justify-between border-b border-zinc-100 px-4 sm:px-6 py-4 shrink-0">
         <div>
           <h1 className="text-base font-semibold text-zinc-900">Chats</h1>
           <p className="text-xs text-zinc-500 mt-0.5">
@@ -126,7 +126,7 @@ export default function ChatsPage() {
         </div>
         <Button
           size="sm"
-          className="gap-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs h-8"
+          className="gap-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs h-8 cursor-pointer"
           onClick={() => setNewChatOpen(true)}
         >
           <Plus className="h-3.5 w-3.5" />
@@ -136,8 +136,8 @@ export default function ChatsPage() {
 
       {/* Filters */}
       {sessions.length > 0 && (
-        <div className="flex items-center gap-3 px-6 py-3 border-b border-zinc-100 shrink-0">
-          <div className="relative flex-1 max-w-xs">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 px-4 sm:px-6 py-3 border-b border-zinc-100 shrink-0">
+          <div className="relative flex-1 sm:max-w-xs">
             <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400" />
             <input
               value={search}
@@ -148,7 +148,7 @@ export default function ChatsPage() {
           </div>
           {agents.length > 1 && (
             <Select value={filterAgent} onValueChange={setFilterAgent}>
-              <SelectTrigger className="w-40 h-8 text-xs">
+              <SelectTrigger className="w-full sm:w-40 h-8 text-xs">
                 <SelectValue placeholder="All agents" />
               </SelectTrigger>
               <SelectContent>
@@ -266,7 +266,7 @@ function ChatRow({
 }) {
   return (
     <div
-      className="flex items-center gap-3 px-6 py-3.5 hover:bg-zinc-50 cursor-pointer group transition-colors"
+      className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 cursor-pointer group transition-colors"
       onClick={onClick}
     >
       <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0">

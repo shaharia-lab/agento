@@ -67,6 +67,8 @@ body {
   border-radius: 3px;
   font-size: 0.875em;
   font-family: "SF Mono", "Fira Code", "Fira Mono", "Roboto Mono", monospace;
+  word-break: break-all;
+  overflow-wrap: break-word;
 }
 .prose pre {
   background: hsl(0 0% 9%);
@@ -74,13 +76,34 @@ body {
   padding: 1rem;
   border-radius: 0.375rem;
   overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
   margin-bottom: 0.75rem;
+}
+.prose pre code {
+  word-break: normal;
+  overflow-wrap: normal;
 }
 .prose pre code {
   background: transparent;
   padding: 0;
   color: inherit;
   font-size: 0.875rem;
+}
+.prose pre::-webkit-scrollbar {
+  height: 6px;
+}
+.prose pre::-webkit-scrollbar-track {
+  background: hsl(0 0% 18%);
+  border-radius: 0 0 4px 4px;
+}
+.prose pre::-webkit-scrollbar-thumb {
+  background: hsl(0 0% 45%);
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+.prose pre::-webkit-scrollbar-thumb:hover {
+  background: hsl(0 0% 62%);
 }
 .prose blockquote {
   border-left: 3px solid hsl(0 0% 89%);

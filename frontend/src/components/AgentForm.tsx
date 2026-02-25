@@ -190,7 +190,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
       {/* Built-in Tools */}
       <div className="space-y-2">
         <Label>Built-in Tools</Label>
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           {BUILT_IN_TOOLS.map(tool => (
             <label
               key={tool}
