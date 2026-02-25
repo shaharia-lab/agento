@@ -1,0 +1,17 @@
+# Binary
+agento
+agento-dev
+
+# Frontend build output (rebuilt by `make build-frontend`)
+# The placeholder frontend/dist/index.html IS committed so `go build` works out of the box.
+# Real build artifacts go here and should not be committed.
+frontend/dist/assets/
+
+# Node modules
+frontend/node_modules/
+
+# Go test cache
+*.test
+
+# macOS
+.DS_Store
