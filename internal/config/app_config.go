@@ -11,8 +11,9 @@ import (
 
 // AppConfig holds all application-level configuration loaded from environment variables.
 type AppConfig struct {
-	// AnthropicAPIKey is the API key for Anthropic Claude. Required.
-	AnthropicAPIKey string `envconfig:"ANTHROPIC_API_KEY" required:"true"`
+	// AnthropicAPIKey is forwarded to the claude CLI when set.
+	// Optional — the claude CLI uses its own stored credentials if not provided.
+	AnthropicAPIKey string `envconfig:"ANTHROPIC_API_KEY"`
 
 	// Port is the HTTP server port. Defaults to 8080.
 	Port int `envconfig:"PORT" default:"8080"`
