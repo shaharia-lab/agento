@@ -99,7 +99,10 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
           </Tooltip>
         ) : (
           <button
-            onClick={() => { navigate('/chats?new=1'); onMobileClose?.() }}
+            onClick={() => {
+              navigate('/chats?new=1')
+              onMobileClose?.()
+            }}
             className="flex w-full items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900 transition-colors cursor-pointer"
           >
             <Plus className="h-3.5 w-3.5 shrink-0" />
@@ -152,7 +155,9 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
 
       {/* Collapse toggle — desktop only */}
       {!isMobile && (
-        <div className={cn('border-t border-zinc-200 py-2 shrink-0', collapsed ? 'px-2.5' : 'px-2')}>
+        <div
+          className={cn('border-t border-zinc-200 py-2 shrink-0', collapsed ? 'px-2.5' : 'px-2')}
+        >
           <button
             onClick={() => setCollapsed(c => !c)}
             className={cn(
@@ -190,10 +195,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
       {mobileOpen && (
         <>
           {/* Backdrop */}
-          <div
-            className="fixed inset-0 z-40 bg-black/40 md:hidden"
-            onClick={onMobileClose}
-          />
+          <div className="fixed inset-0 z-40 bg-black/40 md:hidden" onClick={onMobileClose} />
           {/* Drawer */}
           <aside className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-zinc-50 text-zinc-900 border-r border-zinc-200 md:hidden">
             {sidebarContent(true)}

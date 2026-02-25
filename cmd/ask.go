@@ -5,48 +5,63 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
+	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
 	"github.com/spf13/cobra"
 
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/agent"
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/config"
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/tools"
-	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
+	"github.com/shaharia-lab/agento/internal/agent"
+	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/tools"
 )
 
-var askCmd = &cobra.Command{
-	Use:   "ask [flags] <question> [session-id]",
-	Short: "Ask a question via the CLI",
-	Long: `Ask a question directly via the CLI.
+// NewAskCmd returns the "ask" subcommand for one-shot CLI queries.
+func NewAskCmd(cfg *config.AppConfig) *cobra.Command {
+	var agentSlug string
+	var noThinking bool
+	var agentsDir string
+	var mcpsFile string
+
+	cmd := &cobra.Command{
+		Use:   "ask [flags] <question> [session-id]",
+		Short: "Ask a question via the CLI",
+		Long: `Ask a question directly via the CLI.
 
 Examples:
-  agents-platform ask "What is 2+2?"
-  agents-platform ask --agent hello-world "What time is it?"
-  agents-platform ask --agent hello-world "Follow up" <session-uuid>
-  agents-platform ask --agent hello-world --no-thinking "Quick question"`,
-	Args: cobra.RangeArgs(1, 2),
-	RunE: runAsk,
+  agento ask "What is 2+2?"
+  agento ask --agent hello-world "What time is it?"
+  agento ask --agent hello-world "Follow up" <session-uuid>
+  agento ask --agent hello-world --no-thinking "Quick question"`,
+		Args: cobra.RangeArgs(1, 2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			resolvedAgentsDir := cfg.AgentsDir()
+			if cmd.Flags().Changed("agents-dir") {
+				resolvedAgentsDir = expandHome(agentsDir)
+			}
+			resolvedMCPsFile := cfg.MCPsFile()
+			if cmd.Flags().Changed("mcps-file") {
+				resolvedMCPsFile = expandHome(mcpsFile)
+			}
+			return runAsk(args, agentSlug, noThinking, resolvedAgentsDir, resolvedMCPsFile)
+		},
+	}
+
+	cmd.Flags().StringVar(&agentSlug, "agent", "", "Agent slug to use")
+	cmd.Flags().BoolVar(&noThinking, "no-thinking", false, "Disable extended thinking")
+	cmd.Flags().StringVar(&agentsDir, "agents-dir", "", "Directory containing agent YAML files (overrides AGENTO_DATA_DIR)")
+	cmd.Flags().StringVar(&mcpsFile, "mcps-file", "", "Path to the MCP registry YAML file (overrides AGENTO_DATA_DIR)")
+
+	return cmd
 }
 
-func init() {
-	askCmd.Flags().String("agent", "", "Agent slug to use")
-	askCmd.Flags().Bool("no-thinking", false, "Disable extended thinking")
-	askCmd.Flags().String("agents-dir", "", "Directory containing agent YAML files (overrides AGENTS_DIR env var)")
-	askCmd.Flags().String("mcps-file", "", "Path to the MCP registry YAML file (overrides MCPS_FILE env var)")
-}
-
-func runAsk(cmd *cobra.Command, args []string) error {
+func runAsk(args []string, agentSlug string, noThinking bool, agentsDir, mcpsFile string) error {
 	question := args[0]
 	sessionID := ""
 	if len(args) == 2 {
 		sessionID = args[1]
 	}
-
-	agentSlug, _ := cmd.Flags().GetString("agent")
-	noThinking, _ := cmd.Flags().GetBool("no-thinking")
-	agentsDir := resolveAgentsDir(cmd)
-	mcpsFile := resolveMcpsFile(cmd)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -99,13 +114,6 @@ func runAsk(cmd *cobra.Command, args []string) error {
 					}
 				}
 			}
-		case claude.TypeAssistant:
-			if event.Assistant != nil {
-				text := event.Assistant.Text()
-				if text != "" {
-					// Only print if not already streamed via stream events
-				}
-			}
 		case claude.TypeResult:
 			if event.Result != nil {
 				fmt.Println()
@@ -120,4 +128,14 @@ func runAsk(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, path[2:])
+		}
+	}
+	return path
 }

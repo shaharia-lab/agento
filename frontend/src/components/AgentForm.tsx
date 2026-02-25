@@ -39,9 +39,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
   const [model, setModel] = useState(agent?.model ?? 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0')
   const [thinking, setThinking] = useState<Agent['thinking']>(agent?.thinking ?? 'adaptive')
   const [systemPrompt, setSystemPrompt] = useState(agent?.system_prompt ?? '')
-  const [builtInTools, setBuiltInTools] = useState<string[]>(
-    agent?.capabilities?.built_in ?? [],
-  )
+  const [builtInTools, setBuiltInTools] = useState<string[]>(agent?.capabilities?.built_in ?? [])
 
   // Auto-generate slug from name
   useEffect(() => {
@@ -51,9 +49,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
   }, [name, slugTouched])
 
   const toggleTool = (tool: string) => {
-    setBuiltInTools(prev =>
-      prev.includes(tool) ? prev.filter(t => t !== tool) : [...prev, tool],
-    )
+    setBuiltInTools(prev => (prev.includes(tool) ? prev.filter(t => t !== tool) : [...prev, tool]))
   }
 
   const handleSubmit = async (e: React.FormEvent) => {

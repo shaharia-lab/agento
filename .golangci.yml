@@ -1,0 +1,53 @@
+version: "2"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/shaharia-lab/agento
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - noctx
+    - bodyclose
+    - unconvert
+    - prealloc
+    - revive
+
+  settings:
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+        - name: error-return
+          severity: warning
+        - name: var-naming
+          severity: warning
+        # exported-type-stutters: disabled — AgentResult is intentional (package is 'agent')
+        - name: exported
+          disabled: false
+    misspell:
+      locale: US
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - errcheck
+    # AgentResult is intentionally named with the package prefix for clarity at call sites.
+    - path: internal/agent/runner\.go
+      linters:
+        - revive
+      text: "stutters"

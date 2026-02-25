@@ -2,18 +2,18 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
-	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
 
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/agent"
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/storage"
+	"github.com/shaharia-lab/agento/internal/service"
 )
 
 type createChatRequest struct {
+	// AgentSlug is optional. An empty value means no-agent (direct LLM) chat.
 	AgentSlug string `json:"agent_slug"`
 }
 
@@ -22,9 +22,10 @@ type sendMessageRequest struct {
 }
 
 func (s *Server) handleListChats(w http.ResponseWriter, r *http.Request) {
-	sessions, err := s.chats.ListSessions()
+	sessions, err := s.chatSvc.ListSessions(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.logger.Error("list chats failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list chats")
 		return
 	}
 	writeJSON(w, http.StatusOK, sessions)
@@ -36,24 +37,16 @@ func (s *Server) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.AgentSlug == "" {
-		writeError(w, http.StatusBadRequest, "agent_slug is required")
-		return
-	}
 
-	agentCfg, err := s.agents.Get(req.AgentSlug)
+	session, err := s.chatSvc.CreateSession(r.Context(), req.AgentSlug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if agentCfg == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("agent %q not found", req.AgentSlug))
-		return
-	}
-
-	session, err := s.chats.CreateSession(req.AgentSlug)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		var nfe *service.NotFoundError
+		if errors.As(err, &nfe) {
+			writeError(w, http.StatusNotFound, nfe.Error())
+			return
+		}
+		s.logger.Error("create chat failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to create chat")
 		return
 	}
 	writeJSON(w, http.StatusCreated, session)
@@ -61,13 +54,14 @@ func (s *Server) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetChat(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	session, messages, err := s.chats.GetSessionWithMessages(id)
+	session, messages, err := s.chatSvc.GetSessionWithMessages(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.logger.Error("get chat failed", "session_id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to get chat")
 		return
 	}
 	if session == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("chat %q not found", id))
+		writeError(w, http.StatusNotFound, "chat not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -78,8 +72,14 @@ func (s *Server) handleGetChat(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteChat(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.chats.DeleteSession(id); err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+	if err := s.chatSvc.DeleteSession(r.Context(), id); err != nil {
+		var nfe *service.NotFoundError
+		if errors.As(err, &nfe) {
+			writeError(w, http.StatusNotFound, nfe.Error())
+			return
+		}
+		s.logger.Error("delete chat failed", "session_id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to delete chat")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -98,53 +98,22 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := s.chats.GetSession(id)
+	// BeginMessage validates the session, stores the user message, and starts streaming.
+	stream, session, err := s.chatSvc.BeginMessage(r.Context(), id, req.Content)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if session == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("chat %q not found", id))
-		return
-	}
-
-	agentCfg, err := s.agents.Get(session.AgentSlug)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if agentCfg == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("agent %q not found", session.AgentSlug))
+		var nfe *service.NotFoundError
+		if errors.As(err, &nfe) {
+			writeError(w, http.StatusNotFound, nfe.Error())
+			return
+		}
+		s.logger.Error("begin message failed", "session_id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to start message")
 		return
 	}
 
-	// Store user message before streaming
-	userMsg := storage.ChatMessage{
-		Role:      "user",
-		Content:   req.Content,
-		Timestamp: time.Now().UTC(),
-	}
-	if err := s.chats.AppendMessage(id, userMsg); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to store message: "+err.Error())
-		return
-	}
-
-	// Start streaming — do this before setting SSE headers so we can return a
-	// proper error if the agent fails to start.
-	stream, err := agent.StreamAgent(r.Context(), agentCfg, req.Content, agent.RunOptions{
-		SessionID:     session.SDKSession,
-		LocalToolsMCP: s.localMCP,
-		MCPRegistry:   s.mcpRegistry,
-	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to start agent: "+err.Error())
-		return
-	}
-
-	// Update session title from first user message
 	isFirstMessage := session.Title == "New Chat"
 
-	// Set SSE headers — from here on we can only send events, not JSON errors
+	// Set SSE headers — from here on we can only send events, not JSON errors.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -196,25 +165,18 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Persist assistant message
-	if assistantText != "" {
-		assistantMsg := storage.ChatMessage{
-			Role:      "assistant",
-			Content:   assistantText,
-			Timestamp: time.Now().UTC(),
-		}
-		_ = s.chats.AppendMessage(id, assistantMsg)
-	}
-
-	// Update session metadata
-	session.SDKSession = sdkSessionID
-	session.UpdatedAt = time.Now().UTC()
+	// Update session title from first user message.
 	if isFirstMessage {
 		title := req.Content
-		if len([]rune(title)) > 60 {
-			title = string([]rune(title)[:60]) + "..."
+		if utf8.RuneCountInString(title) > 60 {
+			runes := []rune(title)
+			title = string(runes[:60]) + "..."
 		}
 		session.Title = title
 	}
-	_ = s.chats.UpdateSession(session)
+
+	// Persist assistant response and update session metadata.
+	if err := s.chatSvc.CommitMessage(r.Context(), session, assistantText, sdkSessionID, isFirstMessage); err != nil {
+		s.logger.Error("commit message failed", "session_id", id, "error", err)
+	}
 }

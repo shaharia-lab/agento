@@ -17,6 +17,7 @@ export interface Agent {
 export interface ChatSession {
   id: string
   title: string
+  /** Empty string when no agent is selected (direct chat). */
   agent_slug: string
   sdk_session_id: string
   created_at: string
@@ -43,6 +44,14 @@ export const MODELS = [
 ]
 
 export const BUILT_IN_TOOLS = [
-  'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep',
-  'WebFetch', 'WebSearch', 'Task', 'current_time',
+  'Read',
+  'Write',
+  'Edit',
+  'Bash',
+  'Glob',
+  'Grep',
+  'WebFetch',
+  'WebSearch',
+  'Task',
+  'current_time',
 ]

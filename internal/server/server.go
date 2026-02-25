@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -14,7 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/api"
+	"github.com/shaharia-lab/agento/internal/api"
 )
 
 // Server is the HTTP server for the agents platform.
@@ -22,20 +23,23 @@ type Server struct {
 	apiServer  *api.Server
 	frontendFS fs.FS // nil in dev mode
 	port       int
+	logger     *slog.Logger
 	httpServer *http.Server
 }
 
 // New creates a new Server. Pass frontendFS=nil to proxy to Vite dev server on port 5173.
-func New(apiSrv *api.Server, frontendFS fs.FS, port int) *Server {
+func New(apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger) *Server {
 	s := &Server{
 		apiServer:  apiSrv,
 		frontendFS: frontendFS,
 		port:       port,
+		logger:     logger,
 	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
+	r.Use(s.requestLogger)
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
@@ -59,9 +63,10 @@ func New(apiSrv *api.Server, frontendFS fs.FS, port int) *Server {
 	return s
 }
 
-// Run starts the HTTP server and blocks until ctx is cancelled.
+// Run starts the HTTP server and blocks until ctx is canceled.
 func (s *Server) Run(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.httpServer.Addr)
+	lc := &net.ListenConfig{}
+	ln, err := lc.Listen(ctx, "tcp", s.httpServer.Addr)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", s.httpServer.Addr, err)
 	}
@@ -77,10 +82,27 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		s.logger.Info("shutting down server")
 		return s.httpServer.Shutdown(shutdownCtx)
 	case err := <-errCh:
 		return err
 	}
+}
+
+// requestLogger is a chi middleware that logs each incoming request.
+func (s *Server) requestLogger(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r)
+		s.logger.Info("http request",
+			slog.String("method", r.Method),
+			slog.String("path", r.URL.Path),
+			slog.Int("status", ww.Status()),
+			slog.Duration("duration", time.Since(start)),
+			slog.String("request_id", middleware.GetReqID(r.Context())),
+		)
+	})
 }
 
 // spaHandler returns an http.HandlerFunc that serves the embedded SPA (or proxies
@@ -96,22 +118,20 @@ func (s *Server) spaHandler() http.HandlerFunc {
 	fileServer := http.FileServer(http.FS(s.frontendFS))
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Trim leading slash to get the file path within the FS
 		path := strings.TrimPrefix(r.URL.Path, "/")
 		if path == "" {
 			path = "index.html"
 		}
 
-		// Try to open the file in the embedded FS
 		f, err := s.frontendFS.Open(path)
 		if err != nil {
-			// File not found — serve index.html for SPA client-side routing
+			// File not found — serve index.html for SPA client-side routing.
 			r2 := r.Clone(r.Context())
 			r2.URL.Path = "/"
 			fileServer.ServeHTTP(w, r2)
 			return
 		}
-		f.Close()
+		_ = f.Close()
 		fileServer.ServeHTTP(w, r)
 	}
 }

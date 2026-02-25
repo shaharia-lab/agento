@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { chatsApi, sendMessage } from '@/lib/api'
@@ -11,6 +11,7 @@ import { cn } from '@/lib/utils'
 export default function ChatSessionPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
   const [detail, setDetail] = useState<ChatDetail | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [loading, setLoading] = useState(true)
@@ -24,6 +25,7 @@ export default function ChatSessionPage() {
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
+  const pendingSent = useRef(false)
 
   const scrollToBottom = useCallback(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -45,75 +47,96 @@ export default function ChatSessionPage() {
     scrollToBottom()
   }, [messages, streamingText, scrollToBottom])
 
-  const handleSend = async () => {
-    if (!input.trim() || streaming || !id) return
+  const doSend = useCallback(
+    async (content: string) => {
+      if (!content.trim() || streaming || !id) return
 
+      const userMsg: ChatMessage = {
+        role: 'user',
+        content,
+        timestamp: new Date().toISOString(),
+      }
+      setMessages(prev => [...prev, userMsg])
+      setStreaming(true)
+      setStreamingText('')
+      setThinkingText('')
+      setError(null)
+
+      abortRef.current = new AbortController()
+
+      try {
+        let accumulated = ''
+        await sendMessage(
+          id,
+          content,
+          {
+            onThinking: text => {
+              setThinkingText(prev => prev + text)
+              setShowThinking(true)
+            },
+            onText: delta => {
+              accumulated += delta
+              setStreamingText(accumulated)
+            },
+            onDone: () => {
+              const assistantMsg: ChatMessage = {
+                role: 'assistant',
+                content: accumulated,
+                timestamp: new Date().toISOString(),
+              }
+              setMessages(prev => [...prev, assistantMsg])
+              setStreamingText('')
+              setThinkingText('')
+              setShowThinking(false)
+
+              if (detail) {
+                chatsApi
+                  .get(id)
+                  .then(d => setDetail(d))
+                  .catch(() => undefined)
+              }
+            },
+            onError: msg => {
+              setError(msg)
+              setStreamingText('')
+            },
+          },
+          abortRef.current.signal,
+        )
+      } catch (err) {
+        if ((err as Error).name !== 'AbortError') {
+          setError(err instanceof Error ? err.message : 'Failed to send message')
+        }
+      } finally {
+        setStreaming(false)
+        setStreamingText('')
+      }
+    },
+    [id, streaming, detail],
+  )
+
+  // Auto-send first message passed from ChatsPage via navigation state.
+  useEffect(() => {
+    const pending = (location.state as { pendingMessage?: string } | null)?.pendingMessage
+    if (pending && !loading && !pendingSent.current) {
+      pendingSent.current = true
+      // Clear the navigation state so a page refresh doesn't resend.
+      window.history.replaceState({}, '')
+      void doSend(pending)
+    }
+  }, [loading, location.state, doSend])
+
+  const handleSend = () => {
+    if (!input.trim()) return
     const content = input.trim()
     setInput('')
-
-    const userMsg: ChatMessage = {
-      role: 'user',
-      content,
-      timestamp: new Date().toISOString(),
-    }
-    setMessages(prev => [...prev, userMsg])
-    setStreaming(true)
-    setStreamingText('')
-    setThinkingText('')
-    setError(null)
-
-    abortRef.current = new AbortController()
-
-    try {
-      let accumulated = ''
-      await sendMessage(
-        id,
-        content,
-        {
-          onThinking: text => {
-            setThinkingText(prev => prev + text)
-            setShowThinking(true)
-          },
-          onText: delta => {
-            accumulated += delta
-            setStreamingText(accumulated)
-          },
-          onDone: () => {
-            const assistantMsg: ChatMessage = {
-              role: 'assistant',
-              content: accumulated,
-              timestamp: new Date().toISOString(),
-            }
-            setMessages(prev => [...prev, assistantMsg])
-            setStreamingText('')
-            setThinkingText('')
-            setShowThinking(false)
-
-            if (detail) {
-              chatsApi.get(id).then(d => setDetail(d)).catch(() => undefined)
-            }
-          },
-          onError: msg => {
-            setError(msg)
-            setStreamingText('')
-          },
-        },
-        abortRef.current.signal,
-      )
-    } catch (err) {
-      if ((err as Error).name !== 'AbortError') {
-        setError(err instanceof Error ? err.message : 'Failed to send message')
-      }
-    } finally {
-      setStreaming(false)
-      setStreamingText('')
-    }
+    void doSend(content)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      void handleSend()
+      handleSend()
     }
   }
 
@@ -133,6 +156,8 @@ export default function ChatSessionPage() {
     )
   }
 
+  const agentLabel = detail?.session.agent_slug || null
+
   return (
     <div className="flex flex-col h-full min-w-0 overflow-hidden">
       {/* Header */}
@@ -148,11 +173,9 @@ export default function ChatSessionPage() {
             {detail?.session.title ?? 'Chat'}
           </h2>
         </div>
-        {detail?.session.agent_slug && (
-          <span className="text-xs text-zinc-400 shrink-0 font-mono">
-            {detail.session.agent_slug}
-          </span>
-        )}
+        <span className="text-xs text-zinc-400 shrink-0 font-mono">
+          {agentLabel ?? 'Direct chat'}
+        </span>
       </div>
 
       {/* Messages */}
@@ -161,11 +184,9 @@ export default function ChatSessionPage() {
           {messages.length === 0 && !streaming && (
             <div className="flex flex-col items-center justify-center py-16 text-center">
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-900 text-white text-sm font-bold mb-4">
-                A
+                {agentLabel ? agentLabel[0].toUpperCase() : 'C'}
               </div>
-              <p className="text-sm text-zinc-400">
-                Send a message to start the conversation.
-              </p>
+              <p className="text-sm text-zinc-400">Send a message to start the conversation.</p>
             </div>
           )}
 
@@ -174,15 +195,13 @@ export default function ChatSessionPage() {
           ))}
 
           {/* Streaming: thinking */}
-          {streaming && showThinking && thinkingText && (
-            <ThinkingBlock text={thinkingText} />
-          )}
+          {streaming && showThinking && thinkingText && <ThinkingBlock text={thinkingText} />}
 
           {/* Streaming: assistant response */}
           {streaming && streamingText && (
             <div className="flex gap-3">
               <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 text-white shrink-0 mt-0.5 text-xs font-bold">
-                A
+                {agentLabel ? agentLabel[0].toUpperCase() : 'C'}
               </div>
               <div className="bg-zinc-50 border border-zinc-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
                 <div className="prose prose-sm max-w-none">
@@ -229,7 +248,7 @@ export default function ChatSessionPage() {
             rows={3}
           />
           <button
-            onClick={() => void handleSend()}
+            onClick={handleSend}
             disabled={!input.trim() || streaming}
             className={cn(
               'flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors',
@@ -266,7 +285,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   return (
     <div className="flex gap-3">
       <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 text-white shrink-0 mt-0.5 text-xs font-bold">
-        A
+        C
       </div>
       <div className="bg-zinc-50 border border-zinc-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
         <div className="prose prose-sm max-w-none">

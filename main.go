@@ -1,6 +1,6 @@
 package main
 
-import "github.com/shaharia-lab/agents-platform-cc-go/cmd"
+import "github.com/shaharia-lab/agento/cmd"
 
 func main() {
 	webFS, _ := getFrontendFS()

@@ -40,10 +40,14 @@ export const chatsApi = {
 
   get: (id: string) => request<ChatDetail>(`/chats/${id}`),
 
-  create: (agentSlug: string) =>
+  /**
+   * Creates a new chat session.
+   * @param agentSlug - optional agent slug. Pass empty string or omit for no-agent chat.
+   */
+  create: (agentSlug?: string) =>
     request<ChatSession>('/chats', {
       method: 'POST',
-      body: JSON.stringify({ agent_slug: agentSlug }),
+      body: JSON.stringify({ agent_slug: agentSlug ?? '' }),
     }),
 
   delete: (id: string) =>

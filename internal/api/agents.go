@@ -2,17 +2,14 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
+	"errors"
 	"net/http"
-	"regexp"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/shaharia-lab/agents-platform-cc-go/internal/config"
+	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/service"
 )
-
-var slugRE = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 type agentRequest struct {
 	Name         string                   `json:"name"`
@@ -25,9 +22,10 @@ type agentRequest struct {
 }
 
 func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
-	agents, err := s.agents.List()
+	agents, err := s.agentSvc.List(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.logger.Error("list agents failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list agents")
 		return
 	}
 	writeJSON(w, http.StatusOK, agents)
@@ -39,35 +37,6 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
-		return
-	}
-	if req.Slug == "" {
-		req.Slug = toSlug(req.Name)
-	}
-	if !slugRE.MatchString(req.Slug) {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid slug %q: use lowercase letters, digits and hyphens", req.Slug))
-		return
-	}
-
-	// Uniqueness check
-	existing, err := s.agents.Get(req.Slug)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if existing != nil {
-		writeError(w, http.StatusConflict, fmt.Sprintf("agent with slug %q already exists", req.Slug))
-		return
-	}
-
-	if req.Model == "" {
-		req.Model = "claude-sonnet-4-6"
-	}
-	if req.Thinking == "" {
-		req.Thinking = "adaptive"
-	}
 
 	agent := &config.AgentConfig{
 		Name:         req.Name,
@@ -78,22 +47,35 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 		SystemPrompt: req.SystemPrompt,
 		Capabilities: req.Capabilities,
 	}
-	if err := s.agents.Save(agent); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+
+	created, err := s.agentSvc.Create(r.Context(), agent)
+	if err != nil {
+		var ve *service.ValidationError
+		var ce *service.ConflictError
+		switch {
+		case errors.As(err, &ve):
+			writeError(w, http.StatusBadRequest, ve.Error())
+		case errors.As(err, &ce):
+			writeError(w, http.StatusConflict, ce.Error())
+		default:
+			s.logger.Error("create agent failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to create agent")
+		}
 		return
 	}
-	writeJSON(w, http.StatusCreated, agent)
+	writeJSON(w, http.StatusCreated, created)
 }
 
 func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	agent, err := s.agents.Get(slug)
+	agent, err := s.agentSvc.Get(r.Context(), slug)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.logger.Error("get agent failed", "slug", slug, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to get agent")
 		return
 	}
 	if agent == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("agent %q not found", slug))
+		writeError(w, http.StatusNotFound, "agent not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, agent)
@@ -102,76 +84,51 @@ func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 
-	existing, err := s.agents.Get(slug)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if existing == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("agent %q not found", slug))
-		return
-	}
-
 	var req agentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body")
 		return
 	}
-	if req.Name == "" {
-		writeError(w, http.StatusBadRequest, "name is required")
-		return
-	}
 
 	agent := &config.AgentConfig{
 		Name:         req.Name,
-		Slug:         slug, // slug is the filename, never changed via PUT
+		Slug:         slug,
 		Description:  req.Description,
 		Model:        req.Model,
 		Thinking:     req.Thinking,
 		SystemPrompt: req.SystemPrompt,
 		Capabilities: req.Capabilities,
 	}
-	if agent.Model == "" {
-		agent.Model = "claude-sonnet-4-6"
-	}
-	if agent.Thinking == "" {
-		agent.Thinking = "adaptive"
-	}
 
-	if err := s.agents.Save(agent); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	updated, err := s.agentSvc.Update(r.Context(), slug, agent)
+	if err != nil {
+		var ve *service.ValidationError
+		var nfe *service.NotFoundError
+		switch {
+		case errors.As(err, &nfe):
+			writeError(w, http.StatusNotFound, nfe.Error())
+		case errors.As(err, &ve):
+			writeError(w, http.StatusBadRequest, ve.Error())
+		default:
+			s.logger.Error("update agent failed", "slug", slug, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to update agent")
+		}
 		return
 	}
-	writeJSON(w, http.StatusOK, agent)
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
-	if err := s.agents.Delete(slug); err != nil {
-		writeError(w, http.StatusNotFound, err.Error())
+	if err := s.agentSvc.Delete(r.Context(), slug); err != nil {
+		var nfe *service.NotFoundError
+		if errors.As(err, &nfe) {
+			writeError(w, http.StatusNotFound, nfe.Error())
+			return
+		}
+		s.logger.Error("delete agent failed", "slug", slug, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to delete agent")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// toSlug converts a human-readable name into a URL-safe slug.
-func toSlug(name string) string {
-	lower := strings.ToLower(name)
-	var result []byte
-	prevHyphen := false
-	for i := 0; i < len(lower); i++ {
-		c := lower[i]
-		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
-			result = append(result, c)
-			prevHyphen = false
-		} else if !prevHyphen && len(result) > 0 {
-			result = append(result, '-')
-			prevHyphen = true
-		}
-	}
-	// trim trailing hyphen
-	for len(result) > 0 && result[len(result)-1] == '-' {
-		result = result[:len(result)-1]
-	}
-	return string(result)
 }

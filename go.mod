@@ -1,4 +1,4 @@
-module github.com/shaharia-lab/agents-platform-cc-go
+module github.com/shaharia-lab/agento
 
 go 1.24
 
@@ -13,6 +13,7 @@ require (
 require (
 	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/kelseyhightower/envconfig v1.4.0 // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.3 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect

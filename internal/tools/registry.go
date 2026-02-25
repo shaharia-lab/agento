@@ -36,7 +36,7 @@ func (c *LocalMCPConfig) AllowedToolNames(names []string) []string {
 }
 
 // StartLocalMCPServer creates and starts the in-process MCP server with all local tools.
-// The server is bound to a random local port and runs until ctx is cancelled.
+// The server is bound to a random local port and runs until ctx is canceled.
 func StartLocalMCPServer(ctx context.Context) (*LocalMCPConfig, error) {
 	server := mcp.NewServer(&mcp.Implementation{
 		Name:    LocalMCPServerName,

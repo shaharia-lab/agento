@@ -8,10 +8,16 @@ function AgentoLogo() {
     <svg width="24" height="24" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
       <rect width="32" height="32" rx="7" fill="#000" />
       <text
-        x="16" y="23"
+        x="16"
+        y="23"
         fontFamily="-apple-system,BlinkMacSystemFont,'SF Pro Display',system-ui,sans-serif"
-        fontSize="19" fontWeight="700" fill="#fff" textAnchor="middle"
-      >A</text>
+        fontSize="19"
+        fontWeight="700"
+        fill="#fff"
+        textAnchor="middle"
+      >
+        A
+      </text>
     </svg>
   )
 }
