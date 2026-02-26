@@ -8,14 +8,16 @@ import (
 )
 
 type settingsResponse struct {
-	Settings config.UserSettings `json:"settings"`
-	Locked   map[string]string   `json:"locked"`
+	Settings     config.UserSettings `json:"settings"`
+	Locked       map[string]string   `json:"locked"`
+	ModelFromEnv bool                `json:"model_from_env"`
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, settingsResponse{
-		Settings: s.settingsMgr.Get(),
-		Locked:   s.settingsMgr.Locked(),
+		Settings:     s.settingsMgr.Get(),
+		Locked:       s.settingsMgr.Locked(),
+		ModelFromEnv: s.settingsMgr.ModelFromEnv(),
 	})
 }
 
@@ -32,7 +34,8 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, settingsResponse{
-		Settings: s.settingsMgr.Get(),
-		Locked:   s.settingsMgr.Locked(),
+		Settings:     s.settingsMgr.Get(),
+		Locked:       s.settingsMgr.Locked(),
+		ModelFromEnv: s.settingsMgr.ModelFromEnv(),
 	})
 }

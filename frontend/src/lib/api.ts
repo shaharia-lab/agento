@@ -9,6 +9,8 @@ import type {
   SDKAssistantEvent,
   SDKStreamEventMessage,
   SDKResultEvent,
+  ClaudeSettingsResponse,
+  ClaudeCodeSettings,
 } from '../types'
 
 const BASE = '/api'
@@ -80,6 +82,18 @@ export const settingsApi = {
 
   update: (data: Partial<UserSettings>) =>
     request<SettingsResponse>('/settings', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+}
+
+// ── Claude Code settings (~/.claude/settings.json) ────────────────────────────
+
+export const claudeSettingsApi = {
+  get: () => request<ClaudeSettingsResponse>('/claude-settings'),
+
+  update: (data: ClaudeCodeSettings) =>
+    request<ClaudeSettingsResponse>('/claude-settings', {
       method: 'PUT',
       body: JSON.stringify(data),
     }),

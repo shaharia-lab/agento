@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FolderOpen } from 'lucide-react'
+import { FolderOpen, Lock } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
@@ -16,12 +16,18 @@ import { MODELS } from '@/types'
 interface OnboardingWizardProps {
   defaultWorkingDir: string
   defaultModel: string
+  /** True when the model is pre-configured via an environment variable. */
+  modelFromEnv?: boolean
+  /** The name of the env var that set the model (e.g. "ANTHROPIC_DEFAULT_SONNET_MODEL"). */
+  modelEnvVar?: string
   onComplete: () => void
 }
 
 export default function OnboardingWizard({
   defaultWorkingDir,
   defaultModel,
+  modelFromEnv = false,
+  modelEnvVar,
   onComplete,
 }: OnboardingWizardProps) {
   const [step, setStep] = useState(1)
@@ -172,22 +178,36 @@ export default function OnboardingWizard({
                   Step 2 of 2 — Default AI Model
                 </h2>
                 <p className="text-xs text-zinc-500 mb-3">
-                  Choose the default model for direct chats. Agents can have their own model
-                  configured.
+                  {modelFromEnv
+                    ? 'The default model is pre-configured via an environment variable. You can change it later from Settings.'
+                    : 'Choose the default model for direct chats. Agents can have their own model configured.'}
                 </p>
 
-                <Select value={model} onValueChange={setModel}>
-                  <SelectTrigger className="w-full">
-                    <SelectValue placeholder="Select a model" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {MODELS.map(m => (
-                      <SelectItem key={m.value} value={m.value}>
-                        {m.label}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                {modelFromEnv ? (
+                  <div className="flex flex-col gap-1.5">
+                    <Input value={model} disabled className="font-mono text-sm" />
+                    <span className="flex items-center gap-1 text-xs text-zinc-400">
+                      <Lock className="h-3 w-3 shrink-0" />
+                      Set via{' '}
+                      <code className="font-mono">
+                        {modelEnvVar ?? 'ANTHROPIC_DEFAULT_SONNET_MODEL'}
+                      </code>
+                    </span>
+                  </div>
+                ) : (
+                  <Select value={model} onValueChange={setModel}>
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder="Select a model" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {MODELS.map(m => (
+                        <SelectItem key={m.value} value={m.value}>
+                          {m.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                )}
               </div>
 
               {error && <p className="text-sm text-red-600">{error}</p>}
@@ -199,7 +219,7 @@ export default function OnboardingWizard({
                 <Button
                   className="flex-1 bg-zinc-900 hover:bg-zinc-800 text-white"
                   onClick={() => void handleGetStarted()}
-                  disabled={saving || !model}
+                  disabled={saving || (!modelFromEnv && !model)}
                 >
                   {saving ? 'Saving…' : 'Get Started'}
                 </Button>

@@ -42,6 +42,11 @@ export default function App() {
         <OnboardingWizard
           defaultWorkingDir={settingsResp.settings.default_working_dir}
           defaultModel={settingsResp.settings.default_model}
+          modelFromEnv={settingsResp.model_from_env}
+          modelEnvVar={
+            settingsResp.locked['default_model'] ??
+            (settingsResp.model_from_env ? 'ANTHROPIC_DEFAULT_SONNET_MODEL' : undefined)
+          }
           onComplete={handleOnboardingComplete}
         />
       )}

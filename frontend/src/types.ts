@@ -36,6 +36,11 @@ export interface SettingsResponse {
   settings: UserSettings
   /** Map of field name → env var name for env-locked settings. */
   locked: Record<string, string>
+  /**
+   * True when the displayed default model comes from an environment variable
+   * (AGENTO_DEFAULT_MODEL or ANTHROPIC_DEFAULT_SONNET_MODEL).
+   */
+  model_from_env: boolean
 }
 
 export interface FSEntry {
@@ -191,6 +196,103 @@ export interface SDKResultEvent {
   uuid: string
   errors?: string[]
   stop_reason?: string | null
+}
+
+// ── Claude Code settings (~/.claude/settings.json) ────────────────────────────
+
+/**
+ * Represents the contents of $HOME/.claude/settings.json.
+ * All fields are optional since the user may only set a subset.
+ * The index signature allows forward-compatibility with future schema additions.
+ */
+export interface ClaudeCodeSettings {
+  $schema?: string
+
+  // Model & Language
+  model?: string
+  language?: string
+  effortLevel?: 'low' | 'medium' | 'high'
+  autoUpdatesChannel?: 'stable' | 'latest'
+  outputStyle?: string
+  availableModels?: string[]
+
+  // UI & Display
+  fastMode?: boolean
+  showTurnDuration?: boolean
+  spinnerTipsEnabled?: boolean
+  terminalProgressBarEnabled?: boolean
+  prefersReducedMotion?: boolean
+  alwaysThinkingEnabled?: boolean
+  teammateMode?: 'auto' | 'in-process' | 'tmux'
+  spinnerVerbs?: Record<string, unknown>
+  spinnerTipsOverride?: Record<string, unknown>
+
+  // Behaviour
+  cleanupPeriodDays?: number
+  respectGitignore?: boolean
+  skipWebFetchPreflight?: boolean
+  plansDirectory?: string
+  disableAllHooks?: boolean
+
+  // Permissions & Security
+  enableAllProjectMcpServers?: boolean
+  allowManagedHooksOnly?: boolean
+  allowManagedPermissionRulesOnly?: boolean
+  allowManagedMcpServersOnly?: boolean
+  allowManagedDomainsOnly?: boolean
+  /** @deprecated Use attribution instead */
+  includeCoAuthoredBy?: boolean
+  forceLoginMethod?: 'claudeai' | 'console'
+  forceLoginOrgUUID?: string
+
+  // MCP
+  enabledMcpjsonServers?: string[]
+  disabledMcpjsonServers?: string[]
+  allowedMcpServers?: string[]
+  deniedMcpServers?: string[]
+
+  // Plugins & Marketplaces
+  enabledPlugins?: Record<string, unknown>
+  pluginConfigs?: Record<string, unknown>
+  extraKnownMarketplaces?: Record<string, unknown>
+  strictKnownMarketplaces?: string[]
+  skippedMarketplaces?: string[]
+  skippedPlugins?: string[]
+  blockedMarketplaces?: string[]
+
+  // Complex objects (edited as raw JSON in the UI)
+  permissions?: {
+    allow?: string[]
+    deny?: string[]
+    ask?: string[]
+    defaultMode?: string
+    disableBypassPermissionsMode?: string
+    additionalDirectories?: string[]
+  }
+  hooks?: Record<string, unknown>
+  env?: Record<string, string>
+  sandbox?: Record<string, unknown>
+  attribution?: { commit?: string; pr?: string }
+  statusLine?: Record<string, unknown>
+  fileSuggestion?: Record<string, unknown>
+
+  // Helpers & integrations
+  apiKeyHelper?: string
+  awsCredentialExport?: string
+  awsAuthRefresh?: string
+  otelHeadersHelper?: string
+
+  // Misc
+  companyAnnouncements?: unknown[]
+
+  // Forward-compatibility: future schema additions pass through unchanged.
+  [key: string]: unknown
+}
+
+export interface ClaudeSettingsResponse {
+  exists: boolean
+  /** Undefined when exists is false. */
+  settings?: ClaudeCodeSettings
 }
 
 export const BUILT_IN_TOOLS = [

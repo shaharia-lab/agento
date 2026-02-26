@@ -25,8 +25,12 @@ type AppConfig struct {
 	LogLevel string `envconfig:"LOG_LEVEL" default:"info"`
 
 	// DefaultModel is the Claude model used for no-agent (direct) chat sessions.
-	// Can be overridden with the AGENTO_DEFAULT_MODEL environment variable.
-	DefaultModel string `envconfig:"AGENTO_DEFAULT_MODEL" default:"eu.anthropic.claude-sonnet-4-5-20250929-v1:0"`
+	// Priority: AGENTO_DEFAULT_MODEL > ANTHROPIC_DEFAULT_SONNET_MODEL > built-in default.
+	DefaultModel string `envconfig:"AGENTO_DEFAULT_MODEL"`
+
+	// AnthropicDefaultSonnetModel is the Anthropic-standard env var for a preferred Sonnet model.
+	// Used as a soft default when AGENTO_DEFAULT_MODEL is not set (not locked).
+	AnthropicDefaultSonnetModel string `envconfig:"ANTHROPIC_DEFAULT_SONNET_MODEL"`
 
 	// WorkingDir is the default working directory for chat sessions.
 	// Can be overridden with the AGENTO_WORKING_DIR environment variable.
@@ -47,6 +51,19 @@ func Load() (*AppConfig, error) {
 		}
 		c.DataDir = filepath.Join(home, ".agento")
 	}
+
+	// Resolve the effective default model:
+	//   1. AGENTO_DEFAULT_MODEL — highest priority, locks the field
+	//   2. ANTHROPIC_DEFAULT_SONNET_MODEL — soft default, user can still override from UI
+	//   3. Built-in hardcoded default
+	if c.DefaultModel == "" {
+		if c.AnthropicDefaultSonnetModel != "" {
+			c.DefaultModel = c.AnthropicDefaultSonnetModel
+		} else {
+			c.DefaultModel = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+		}
+	}
+
 	return &c, nil
 }
 
