@@ -171,13 +171,19 @@ export default function ChatSessionPage() {
                 blocks: blocks.length > 0 ? [...blocks] : undefined,
               }
               setMessages(prev => [...prev, assistantMsg])
-              // Clear streaming state — the message now owns the content.
+              // Reset per-turn local accumulators so a follow-up turn
+              // (e.g. after AskUserQuestion is answered) starts clean.
+              accumulated = ''
+              blocks = []
+              // Clear streaming UI state — the message now owns the content.
               setStreamingText('')
               setThinkingText('')
               setShowThinking(false)
               setToolCalls([])
               setSystemStatus(null)
-              setAwaitingInput(false)
+              // Do NOT clear awaitingInput here — if user_input_required follows
+              // this result event, onUserInputRequired will set it to true.
+              // The finally block handles final cleanup.
 
               if (detail) {
                 chatsApi
@@ -292,12 +298,26 @@ export default function ChatSessionPage() {
                       return <ThinkingBlock key={j} text={block.text} />
                     }
                     if (block.type === 'tool_use') {
+                      // Interactive when: (a) not streaming (historical card can doSend),
+                      // or (b) streaming AND awaiting user input via provideInput.
+                      const canInteract = isLastMsg && (awaitingInput || !streaming)
                       return (
                         <ToolCallCard
                           key={j}
                           block={block}
-                          isInteractive={isLastMsg && !streaming}
-                          onSubmit={answer => void doSend(answer)}
+                          isInteractive={canInteract}
+                          onSubmit={
+                            canInteract && id
+                              ? answer => {
+                                  if (awaitingInput) {
+                                    setAwaitingInput(false)
+                                    void provideInput(id, answer)
+                                  } else {
+                                    void doSend(answer)
+                                  }
+                                }
+                              : undefined
+                          }
                         />
                       )
                     }

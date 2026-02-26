@@ -33,6 +33,11 @@ type RunOptions struct {
 
 	// MCPRegistry provides the SDK configs for external MCP servers.
 	MCPRegistry *config.MCPRegistry
+
+	// PermissionHandler is an optional callback invoked for each can_use_tool
+	// control_request from claude. When set it overrides the default bypass-all
+	// behavior and may block (e.g. to ask a human before a tool runs).
+	PermissionHandler claude.PermissionHandler
 }
 
 // AgentResult is the final result of an agent invocation.
@@ -112,6 +117,10 @@ func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt
 		claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
 		claude.WithBypassPermissions(),
 		claude.WithIncludePartialMessages(),
+	}
+
+	if opts.PermissionHandler != nil {
+		sdkOpts = append(sdkOpts, claude.WithPermissionHandler(opts.PermissionHandler))
 	}
 
 	// Model
