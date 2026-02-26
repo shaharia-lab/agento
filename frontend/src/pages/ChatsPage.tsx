@@ -1,11 +1,14 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { chatsApi, agentsApi } from '@/lib/api'
+import { chatsApi, agentsApi, settingsApi } from '@/lib/api'
 import type { ChatSession, Agent } from '@/types'
+import { MODELS } from '@/types'
 import { formatRelativeTime, truncate } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Textarea } from '@/components/ui/textarea'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Dialog,
   DialogContent,
@@ -32,7 +35,8 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
-import { Plus, MessageSquare, Trash2, Search, Send } from 'lucide-react'
+import FilesystemBrowserModal from '@/components/FilesystemBrowserModal'
+import { Plus, MessageSquare, Trash2, Search, Send, FolderOpen, Lock } from 'lucide-react'
 
 export default function ChatsPage() {
   const navigate = useNavigate()
@@ -45,6 +49,9 @@ export default function ChatsPage() {
   const [selectedAgent, setSelectedAgent] = useState<string>('__none__')
   const [firstMessage, setFirstMessage] = useState('')
   const [creating, setCreating] = useState(false)
+  const [workingDir, setWorkingDir] = useState('/tmp/agento/work')
+  const [selectedModel, setSelectedModel] = useState('')
+  const [browserOpen, setBrowserOpen] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   // Filters
@@ -53,9 +60,15 @@ export default function ChatsPage() {
 
   const load = useCallback(async () => {
     try {
-      const [s, a] = await Promise.all([chatsApi.list(), agentsApi.list()])
+      const [s, a, settings] = await Promise.all([
+        chatsApi.list(),
+        agentsApi.list(),
+        settingsApi.get(),
+      ])
       setSessions(s)
       setAgents(a)
+      setWorkingDir(settings.settings.default_working_dir)
+      setSelectedModel(settings.settings.default_model)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load')
     } finally {
@@ -90,6 +103,11 @@ export default function ChatsPage() {
     }
   }
 
+  // When agent is selected, determine if model should be locked to agent's model.
+  const selectedAgentObj = agents.find(a => a.slug === selectedAgent)
+  const agentModelLocked = selectedAgentObj?.model ? true : false
+  const effectiveModel = agentModelLocked ? (selectedAgentObj?.model ?? '') : selectedModel
+
   const createChat = async () => {
     if (!firstMessage.trim() || creating) return
     setCreating(true)
@@ -97,12 +115,18 @@ export default function ChatsPage() {
     const agentSlug = selectedAgent === '__none__' ? '' : selectedAgent
 
     try {
-      const session = await chatsApi.create(agentSlug)
+      const session = await chatsApi.create(agentSlug, workingDir, effectiveModel)
       setNewChatOpen(false)
 
       // Navigate immediately; send the first message in the background so the
       // chat page can display the streaming response right away.
-      navigate(`/chats/${session.id}`, { state: { pendingMessage: firstMessage.trim() } })
+      navigate(`/chats/${session.id}`, {
+        state: {
+          pendingMessage: firstMessage.trim(),
+          workingDir: session.working_directory,
+          model: session.model,
+        },
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create chat')
       setCreating(false)
@@ -264,6 +288,60 @@ export default function ChatsPage() {
               </SelectContent>
             </Select>
 
+            {/* Working Directory */}
+            <div className="flex flex-col gap-1">
+              <Label className="text-xs text-zinc-600">Working Directory</Label>
+              <div className="flex gap-2">
+                <Input
+                  value={workingDir}
+                  onChange={e => setWorkingDir(e.target.value)}
+                  className="flex-1 font-mono text-xs h-8"
+                  placeholder="/tmp/agento/work"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-8 gap-1 text-xs shrink-0"
+                  onClick={() => setBrowserOpen(true)}
+                  type="button"
+                >
+                  <FolderOpen className="h-3 w-3" />
+                  Browse
+                </Button>
+              </div>
+            </div>
+
+            {/* Model selector */}
+            <div className="flex flex-col gap-1">
+              <Label className="text-xs text-zinc-600 flex items-center gap-1">
+                Model
+                {agentModelLocked && <Lock className="h-3 w-3 text-zinc-400" />}
+              </Label>
+              {agentModelLocked ? (
+                <Input
+                  value={effectiveModel}
+                  disabled
+                  className="font-mono text-xs h-8 bg-zinc-50"
+                />
+              ) : (
+                <Select value={selectedModel} onValueChange={setSelectedModel}>
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder="Select model" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {MODELS.map(m => (
+                      <SelectItem key={m.value} value={m.value} className="text-xs">
+                        {m.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
+              {agentModelLocked && (
+                <p className="text-xs text-zinc-400">Model set by agent configuration</p>
+              )}
+            </div>
+
             {/* First message input */}
             <div className="relative">
               <Textarea
@@ -304,6 +382,13 @@ export default function ChatsPage() {
 
       {/* Hidden component to send the first message after navigation */}
       {/* Actual sending is handled by ChatSessionPage via location.state */}
+
+      <FilesystemBrowserModal
+        open={browserOpen}
+        onOpenChange={setBrowserOpen}
+        initialPath={workingDir}
+        onSelect={path => setWorkingDir(path)}
+      />
     </div>
   )
 }

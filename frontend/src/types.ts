@@ -20,8 +20,34 @@ export interface ChatSession {
   /** Empty string when no agent is selected (direct chat). */
   agent_slug: string
   sdk_session_id: string
+  working_directory: string
+  model: string
   created_at: string
   updated_at: string
+}
+
+export interface UserSettings {
+  default_working_dir: string
+  default_model: string
+  onboarding_complete: boolean
+}
+
+export interface SettingsResponse {
+  settings: UserSettings
+  /** Map of field name → env var name for env-locked settings. */
+  locked: Record<string, string>
+}
+
+export interface FSEntry {
+  name: string
+  is_dir: boolean
+  path: string
+}
+
+export interface FSListResponse {
+  path: string
+  parent: string
+  entries: FSEntry[]
 }
 
 export interface ChatMessage {

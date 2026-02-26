@@ -58,6 +58,11 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 		}
 	}
 
+	// Create the default working directory if it doesn't exist.
+	if err := os.MkdirAll("/tmp/agento/work", 0750); err != nil {
+		return fmt.Errorf("creating default working directory: %w", err)
+	}
+
 	sysLogger, err := logger.NewSystemLogger(cfg.LogDir(), cfg.SlogLevel())
 	if err != nil {
 		return fmt.Errorf("initializing logger: %w", err)
@@ -93,10 +98,15 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 
 	chatStore := storage.NewFSChatStore(cfg.ChatsDir())
 
+	settingsMgr, err := config.NewSettingsManager(cfg.DataDir, cfg)
+	if err != nil {
+		return fmt.Errorf("initializing settings: %w", err)
+	}
+
 	agentSvc := service.NewAgentService(agentStore, sysLogger)
 	chatSvc := service.NewChatService(chatStore, agentStore, mcpRegistry, localToolsMCP, cfg.DefaultModel, sysLogger)
 
-	apiSrv := api.New(agentSvc, chatSvc, sysLogger)
+	apiSrv := api.New(agentSvc, chatSvc, settingsMgr, sysLogger)
 	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger)
 
 	url := fmt.Sprintf("http://localhost:%d", cfg.Port)
