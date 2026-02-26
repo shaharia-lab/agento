@@ -68,18 +68,20 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
       {/* Logo */}
       <div
         className={cn(
-          'flex items-center border-b border-zinc-200 h-14 shrink-0',
+          'flex items-center border-b border-zinc-200 dark:border-zinc-700/50 h-14 shrink-0',
           !isMobile && collapsed ? 'justify-center px-0' : 'gap-2.5 px-5',
         )}
       >
         <AgentoLogo size={28} />
         {(isMobile || !collapsed) && (
-          <span className="text-sm font-semibold tracking-wide text-zinc-900">Agento</span>
+          <span className="text-sm font-semibold tracking-wide text-zinc-900 dark:text-zinc-100">
+            Agento
+          </span>
         )}
         {isMobile && (
           <button
             onClick={onMobileClose}
-            className="ml-auto h-8 w-8 flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-200 transition-colors cursor-pointer"
+            className="ml-auto h-8 w-8 flex items-center justify-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors cursor-pointer"
           >
             <X className="h-4 w-4" />
           </button>
@@ -92,7 +94,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
           <Tooltip content="New Chat">
             <button
               onClick={() => navigate('/chats?new=1')}
-              className="flex h-9 w-9 items-center justify-center rounded-md bg-zinc-200 text-zinc-700 hover:bg-zinc-300 hover:text-zinc-900 transition-colors mx-auto cursor-pointer"
+              className="flex h-9 w-9 items-center justify-center rounded-md bg-zinc-200 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-300 dark:hover:bg-zinc-600 hover:text-zinc-900 dark:hover:text-white transition-colors mx-auto cursor-pointer"
             >
               <Plus className="h-4 w-4" />
             </button>
@@ -103,7 +105,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
               navigate('/chats?new=1')
               onMobileClose?.()
             }}
-            className="flex w-full items-center gap-2 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-100 hover:text-zinc-900 transition-colors cursor-pointer"
+            className="flex w-full items-center gap-2 rounded-md border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-800 px-3 py-1.5 text-sm text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-white transition-colors cursor-pointer"
           >
             <Plus className="h-3.5 w-3.5 shrink-0" />
             <span>New Chat</span>
@@ -123,8 +125,8 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
                     cn(
                       'flex h-9 w-9 items-center justify-center rounded-md transition-colors mx-auto',
                       isActive
-                        ? 'bg-zinc-900 text-white'
-                        : 'text-zinc-500 hover:bg-zinc-200 hover:text-zinc-900',
+                        ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                        : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100',
                     )
                   }
                 >
@@ -140,8 +142,8 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
                   cn(
                     'flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors',
                     isActive
-                      ? 'bg-zinc-900 text-white'
-                      : 'text-zinc-600 hover:bg-zinc-200 hover:text-zinc-900',
+                      ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                      : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100',
                   )
                 }
               >
@@ -156,7 +158,10 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
       {/* Settings link + Collapse toggle — desktop only */}
       {!isMobile && (
         <div
-          className={cn('border-t border-zinc-200 py-2 shrink-0', collapsed ? 'px-2.5' : 'px-2')}
+          className={cn(
+            'border-t border-zinc-200 dark:border-zinc-700/50 py-2 shrink-0',
+            collapsed ? 'px-2.5' : 'px-2',
+          )}
         >
           {/* Settings link */}
           {collapsed ? (
@@ -168,8 +173,8 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
                   cn(
                     'flex h-9 w-9 items-center justify-center rounded-md transition-colors mx-auto mb-1',
                     isActive
-                      ? 'bg-zinc-900 text-white'
-                      : 'text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700',
+                      ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                      : 'text-zinc-400 dark:text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200',
                   )
                 }
               >
@@ -182,8 +187,9 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
               onClick={handleNavClick}
               className={({ isActive }) =>
                 cn(
-                  'flex items-center rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-200 transition-colors h-8 w-full px-3 gap-2 mb-1',
-                  isActive && 'bg-zinc-900 text-white hover:bg-zinc-900 hover:text-white',
+                  'flex items-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors h-8 w-full px-3 gap-2 mb-1',
+                  isActive &&
+                    'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-900 dark:hover:bg-zinc-100 hover:text-white dark:hover:text-zinc-900',
                 )
               }
             >
@@ -196,7 +202,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
           <button
             onClick={() => setCollapsed(c => !c)}
             className={cn(
-              'flex items-center rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-200 transition-colors h-8 cursor-pointer',
+              'flex items-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-200 dark:hover:bg-zinc-700 transition-colors h-8 cursor-pointer',
               collapsed ? 'w-9 justify-center mx-auto' : 'w-full px-3 gap-2',
             )}
           >
@@ -219,7 +225,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
       {/* Desktop sidebar */}
       <aside
         className={cn(
-          'hidden md:flex h-full flex-col bg-zinc-50 text-zinc-900 border-r border-zinc-200 transition-[width] duration-200 ease-in-out shrink-0',
+          'hidden md:flex h-full flex-col bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 border-r border-zinc-200 dark:border-zinc-700/50 transition-[width] duration-200 ease-in-out shrink-0',
           collapsed ? 'w-[64px]' : 'w-[272px]',
         )}
       >
@@ -232,7 +238,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
           {/* Backdrop */}
           <div className="fixed inset-0 z-40 bg-black/40 md:hidden" onClick={onMobileClose} />
           {/* Drawer */}
-          <aside className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-zinc-50 text-zinc-900 border-r border-zinc-200 md:hidden">
+          <aside className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 border-r border-zinc-200 dark:border-zinc-700/50 md:hidden">
             {sidebarContent(true)}
           </aside>
         </>

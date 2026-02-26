@@ -13,11 +13,12 @@ import {
 import { Tooltip } from '@/components/ui/tooltip'
 import FilesystemBrowserModal from '@/components/FilesystemBrowserModal'
 import ClaudeSettingsTab from '@/components/ClaudeSettingsTab'
+import AppearanceTab from '@/components/AppearanceTab'
 import { settingsApi } from '@/lib/api'
 import type { SettingsResponse } from '@/types'
 import { MODELS } from '@/types'
 
-type Tab = 'general' | 'claude'
+type Tab = 'general' | 'claude' | 'appearance'
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<Tab>('general')
@@ -86,18 +87,18 @@ export default function SettingsPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="border-b border-zinc-100 px-4 sm:px-6 py-4 shrink-0">
-        <h1 className="text-base font-semibold text-zinc-900">Settings</h1>
+      <div className="border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 py-4 shrink-0">
+        <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Settings</h1>
       </div>
 
       <div className="flex flex-1 overflow-hidden">
         {/* Left tab sidebar */}
-        <nav className="w-44 shrink-0 border-r border-zinc-100 py-3 px-2 flex flex-col gap-1">
+        <nav className="w-44 shrink-0 border-r border-zinc-100 dark:border-zinc-700/50 py-3 px-2 flex flex-col gap-1">
           <button
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
               activeTab === 'general'
-                ? 'bg-zinc-900 text-white'
-                : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
+                ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
             }`}
             onClick={() => setActiveTab('general')}
           >
@@ -106,12 +107,22 @@ export default function SettingsPage() {
           <button
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
               activeTab === 'claude'
-                ? 'bg-zinc-900 text-white'
-                : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
+                ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
             }`}
             onClick={() => setActiveTab('claude')}
           >
             Claude Settings
+          </button>
+          <button
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
+              activeTab === 'appearance'
+                ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
+            }`}
+            onClick={() => setActiveTab('appearance')}
+          >
+            Appearance
           </button>
         </nav>
 
@@ -119,12 +130,16 @@ export default function SettingsPage() {
         <div className="flex-1 overflow-y-auto px-6 py-6">
           {activeTab === 'general' && (
             <>
-              <h2 className="text-sm font-semibold text-zinc-900 mb-6">General Settings</h2>
+              <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-6">
+                General Settings
+              </h2>
 
               <div className="max-w-md flex flex-col gap-6">
                 {/* Working Directory */}
                 <div className="flex flex-col gap-1.5">
-                  <Label className="text-sm font-medium text-zinc-700">Working Directory</Label>
+                  <Label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                    Working Directory
+                  </Label>
                   <div className="flex gap-2">
                     <Input
                       value={workingDir}
@@ -150,7 +165,9 @@ export default function SettingsPage() {
 
                 {/* Default Model */}
                 <div className="flex flex-col gap-1.5">
-                  <Label className="text-sm font-medium text-zinc-700">Default Model</Label>
+                  <Label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                    Default Model
+                  </Label>
                   {modelLocked ? (
                     <div className="flex items-center gap-2">
                       <Input value={model} disabled className="flex-1 font-mono text-sm" />
@@ -191,6 +208,8 @@ export default function SettingsPage() {
           )}
 
           {activeTab === 'claude' && <ClaudeSettingsTab />}
+
+          {activeTab === 'appearance' && <AppearanceTab />}
         </div>
       </div>
 

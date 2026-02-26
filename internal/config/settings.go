@@ -15,9 +15,12 @@ const (
 
 // UserSettings holds persisted user preferences.
 type UserSettings struct {
-	DefaultWorkingDir  string `json:"default_working_dir"`
-	DefaultModel       string `json:"default_model"`
-	OnboardingComplete bool   `json:"onboarding_complete"`
+	DefaultWorkingDir    string `json:"default_working_dir"`
+	DefaultModel         string `json:"default_model"`
+	OnboardingComplete   bool   `json:"onboarding_complete"`
+	AppearanceDarkMode   bool   `json:"appearance_dark_mode"`
+	AppearanceFontSize   int    `json:"appearance_font_size"`
+	AppearanceFontFamily string `json:"appearance_font_family"`
 }
 
 // SettingsManager loads and saves user settings to disk, and exposes which

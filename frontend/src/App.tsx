@@ -8,12 +8,15 @@ import ChatsPage from '@/pages/ChatsPage'
 import ChatSessionPage from '@/pages/ChatSessionPage'
 import SettingsPage from '@/pages/SettingsPage'
 import OnboardingWizard from '@/components/OnboardingWizard'
+import { AppearanceProvider } from '@/contexts/ThemeContext'
 import { settingsApi } from '@/lib/api'
 import type { SettingsResponse } from '@/types'
+import type { AppearanceSettings } from '@/contexts/ThemeContext'
 
 export default function App() {
   const [settingsResp, setSettingsResp] = useState<SettingsResponse | null>(null)
   const [onboardingDone, setOnboardingDone] = useState(true)
+  const [serverAppearance, setServerAppearance] = useState<Partial<AppearanceSettings>>({})
 
   useEffect(() => {
     settingsApi
@@ -21,6 +24,13 @@ export default function App() {
       .then(resp => {
         setSettingsResp(resp)
         setOnboardingDone(resp.settings.onboarding_complete)
+        const s = resp.settings
+        const ap: Partial<AppearanceSettings> = {}
+        if (typeof s.appearance_dark_mode === 'boolean') ap.darkMode = s.appearance_dark_mode
+        if (s.appearance_font_size && s.appearance_font_size >= 12 && s.appearance_font_size <= 24)
+          ap.fontSize = s.appearance_font_size
+        if (s.appearance_font_family) ap.fontFamily = s.appearance_font_family
+        if (Object.keys(ap).length > 0) setServerAppearance(ap)
       })
       .catch(() => {
         // If settings can't be loaded, skip onboarding.
@@ -37,7 +47,7 @@ export default function App() {
   }
 
   return (
-    <>
+    <AppearanceProvider serverSettings={serverAppearance}>
       {settingsResp && !onboardingDone && (
         <OnboardingWizard
           defaultWorkingDir={settingsResp.settings.default_working_dir}
@@ -63,6 +73,6 @@ export default function App() {
           </Route>
         </Routes>
       </BrowserRouter>
-    </>
+    </AppearanceProvider>
   )
 }
