@@ -198,6 +198,20 @@ export interface SDKResultEvent {
   stop_reason?: string | null
 }
 
+// ── Claude settings profiles ──────────────────────────────────────────────────
+
+export interface ClaudeSettingsProfile {
+  id: string
+  name: string
+  file_path: string
+  is_default: boolean
+}
+
+export interface ClaudeSettingsProfileDetail extends ClaudeSettingsProfile {
+  settings: ClaudeCodeSettings | null
+  exists: boolean
+}
+
 // ── Claude Code settings (~/.claude/settings.json) ────────────────────────────
 
 /**

@@ -1,5 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { ChevronDown, ChevronRight, Copy, Check, AlertCircle, FilePlus } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Check,
+  AlertCircle,
+  FilePlus,
+  Plus,
+  Star,
+  Trash2,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -11,8 +21,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { claudeSettingsApi } from '@/lib/api'
-import type { ClaudeCodeSettings } from '@/types'
+import { claudeSettingsApi, claudeSettingsProfilesApi } from '@/lib/api'
+import type { ClaudeCodeSettings, ClaudeSettingsProfile } from '@/types'
 
 // ─── Minimal toggle component ─────────────────────────────────────────────────
 
@@ -206,6 +216,11 @@ export default function ClaudeSettingsTab() {
   const [toast, setToast] = useState<string | null>(null)
   const [globalError, setGlobalError] = useState<string | null>(null)
 
+  // ── Profile state ────────────────────────────────────────────────────────────
+  const [profiles, setProfiles] = useState<ClaudeSettingsProfile[]>([])
+  const [activeProfileId, setActiveProfileId] = useState<string>('')
+  const [profileLoading, setProfileLoading] = useState(false)
+
   // ── Simple form fields ───────────────────────────────────────────────────────
   const [model, setModel] = useState('')
   const [language, setLanguage] = useState('')
@@ -336,12 +351,43 @@ export default function ClaudeSettingsTab() {
 
   // ─── Load ────────────────────────────────────────────────────────────────────
 
+  const loadProfile = useCallback(
+    async (profileId: string) => {
+      setProfileLoading(true)
+      try {
+        const detail = await claudeSettingsProfilesApi.get(profileId)
+        setExists(detail.exists)
+        if (detail.exists && detail.settings) {
+          applySettings(detail.settings as ClaudeCodeSettings)
+        }
+      } catch {
+        setGlobalError('Failed to load profile settings')
+      } finally {
+        setProfileLoading(false)
+      }
+    },
+    [applySettings],
+  )
+
   const load = useCallback(async () => {
     try {
-      const resp = await claudeSettingsApi.get()
-      setExists(resp.exists)
-      if (resp.exists && resp.settings) {
-        applySettings(resp.settings)
+      const profileList = await claudeSettingsProfilesApi.list()
+      setProfiles(profileList)
+      const defaultProfile = profileList.find(p => p.is_default) ?? profileList[0]
+      if (defaultProfile) {
+        setActiveProfileId(defaultProfile.id)
+        const detail = await claudeSettingsProfilesApi.get(defaultProfile.id)
+        setExists(detail.exists)
+        if (detail.exists && detail.settings) {
+          applySettings(detail.settings as ClaudeCodeSettings)
+        }
+      } else {
+        // No profiles yet — fall back to reading settings.json directly
+        const resp = await claudeSettingsApi.get()
+        setExists(resp.exists)
+        if (resp.exists && resp.settings) {
+          applySettings(resp.settings)
+        }
       }
     } catch {
       setGlobalError('Failed to load Claude settings')
@@ -439,9 +485,15 @@ export default function ClaudeSettingsTab() {
     setSaving(true)
     setGlobalError(null)
     try {
-      const resp = await claudeSettingsApi.update(settings)
-      setExists(resp.exists)
-      if (resp.settings) applySettings(resp.settings)
+      if (activeProfileId) {
+        const detail = await claudeSettingsProfilesApi.update(activeProfileId, { settings })
+        setExists(detail.exists)
+        if (detail.settings) applySettings(detail.settings as ClaudeCodeSettings)
+      } else {
+        const resp = await claudeSettingsApi.update(settings)
+        setExists(resp.exists)
+        if (resp.settings) applySettings(resp.settings)
+      }
       showToast('Claude settings saved')
     } catch (err) {
       setGlobalError(err instanceof Error ? err.message : 'Failed to save Claude settings')
@@ -458,6 +510,9 @@ export default function ClaudeSettingsTab() {
     try {
       const resp = await claudeSettingsApi.update({})
       setExists(resp.exists)
+      // Reload profiles after creating the file so the default profile picks it up.
+      const profileList = await claudeSettingsProfilesApi.list()
+      setProfiles(profileList)
       showToast('Created ~/.claude/settings.json')
     } catch (err) {
       setGlobalError(err instanceof Error ? err.message : 'Failed to create settings file')
@@ -465,6 +520,88 @@ export default function ClaudeSettingsTab() {
       setSaving(false)
     }
   }
+
+  // ─── Profile actions ──────────────────────────────────────────────────────────
+
+  const handleProfileSwitch = async (profileId: string) => {
+    setActiveProfileId(profileId)
+    await loadProfile(profileId)
+  }
+
+  const handleNewProfile = async () => {
+    const name = window.prompt('Profile name:')
+    if (!name?.trim()) return
+    setProfileLoading(true)
+    try {
+      const newProfile = await claudeSettingsProfilesApi.create(name.trim())
+      const profileList = await claudeSettingsProfilesApi.list()
+      setProfiles(profileList)
+      setActiveProfileId(newProfile.id)
+      await loadProfile(newProfile.id)
+      showToast(`Profile "${newProfile.name}" created`)
+    } catch (err) {
+      setGlobalError(err instanceof Error ? err.message : 'Failed to create profile')
+    } finally {
+      setProfileLoading(false)
+    }
+  }
+
+  const handleDuplicateProfile = async () => {
+    if (!activeProfileId) return
+    setProfileLoading(true)
+    try {
+      const copy = await claudeSettingsProfilesApi.duplicate(activeProfileId)
+      const profileList = await claudeSettingsProfilesApi.list()
+      setProfiles(profileList)
+      setActiveProfileId(copy.id)
+      await loadProfile(copy.id)
+      showToast(`Profile "${copy.name}" created`)
+    } catch (err) {
+      setGlobalError(err instanceof Error ? err.message : 'Failed to duplicate profile')
+    } finally {
+      setProfileLoading(false)
+    }
+  }
+
+  const handleSetDefault = async () => {
+    if (!activeProfileId) return
+    setProfileLoading(true)
+    try {
+      await claudeSettingsProfilesApi.setDefault(activeProfileId)
+      const profileList = await claudeSettingsProfilesApi.list()
+      setProfiles(profileList)
+      showToast('Default profile updated')
+    } catch (err) {
+      setGlobalError(err instanceof Error ? err.message : 'Failed to set default profile')
+    } finally {
+      setProfileLoading(false)
+    }
+  }
+
+  const handleDeleteProfile = async () => {
+    if (!activeProfileId) return
+    const profile = profiles.find(p => p.id === activeProfileId)
+    if (profile?.is_default) return
+    if (!window.confirm(`Delete profile "${profile?.name}"? This cannot be undone.`)) return
+    setProfileLoading(true)
+    try {
+      await claudeSettingsProfilesApi.delete(activeProfileId)
+      const profileList = await claudeSettingsProfilesApi.list()
+      setProfiles(profileList)
+      const defaultProfile = profileList.find(p => p.is_default) ?? profileList[0]
+      if (defaultProfile) {
+        setActiveProfileId(defaultProfile.id)
+        await loadProfile(defaultProfile.id)
+      }
+      showToast('Profile deleted')
+    } catch (err) {
+      setGlobalError(err instanceof Error ? err.message : 'Failed to delete profile')
+    } finally {
+      setProfileLoading(false)
+    }
+  }
+
+  const activeProfile = profiles.find(p => p.id === activeProfileId)
 
   // ─── Render ──────────────────────────────────────────────────────────────────
 
@@ -486,6 +623,78 @@ export default function ClaudeSettingsTab() {
           Code configuration file.
         </p>
       </div>
+
+      {/* Profile selector bar */}
+      {profiles.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2">
+          <Select
+            value={activeProfileId}
+            onValueChange={id => void handleProfileSwitch(id)}
+            disabled={profileLoading}
+          >
+            <SelectTrigger className="h-8 text-xs w-52">
+              <SelectValue placeholder="Select profile" />
+            </SelectTrigger>
+            <SelectContent>
+              {profiles.map(p => (
+                <SelectItem key={p.id} value={p.id} className="text-xs">
+                  {p.name}
+                  {p.is_default ? ' (default)' : ''}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs gap-1"
+            onClick={() => void handleNewProfile()}
+            disabled={profileLoading}
+          >
+            <Plus className="h-3 w-3" />
+            New
+          </Button>
+
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs gap-1"
+            onClick={() => void handleDuplicateProfile()}
+            disabled={profileLoading || !activeProfileId}
+          >
+            <Copy className="h-3 w-3" />
+            Duplicate
+          </Button>
+
+          {activeProfile && !activeProfile.is_default && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-8 text-xs gap-1"
+              onClick={() => void handleSetDefault()}
+              disabled={profileLoading}
+            >
+              <Star className="h-3 w-3" />
+              Set as Default
+            </Button>
+          )}
+
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs gap-1 text-red-600 hover:text-red-700 hover:border-red-300"
+            onClick={() => void handleDeleteProfile()}
+            disabled={profileLoading || !activeProfileId || activeProfile?.is_default}
+            title={
+              activeProfile?.is_default ? 'Cannot delete the default profile' : 'Delete profile'
+            }
+          >
+            <Trash2 className="h-3 w-3" />
+            Delete
+          </Button>
+        </div>
+      )}
 
       {/* File-not-found notice */}
       {!exists && (
@@ -800,9 +1009,13 @@ export default function ClaudeSettingsTab() {
           <Button
             className="bg-zinc-900 hover:bg-zinc-800 text-white w-full sm:w-auto self-start"
             onClick={() => void handleSave()}
-            disabled={saving}
+            disabled={saving || profileLoading}
           >
-            {saving ? 'Saving…' : 'Save Claude Settings'}
+            {saving
+              ? 'Saving…'
+              : activeProfile
+                ? `Save "${activeProfile.name}"`
+                : 'Save Claude Settings'}
           </Button>
         </>
       )}

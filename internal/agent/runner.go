@@ -38,6 +38,12 @@ type RunOptions struct {
 	// control_request from claude. When set it overrides the default bypass-all
 	// behavior and may block (e.g. to ask a human before a tool runs).
 	PermissionHandler claude.PermissionHandler
+
+	// SettingsFilePath is the absolute path to the Claude settings JSON file
+	// for this session. When set, the user settings source is loaded via
+	// WithSettingSources so the subprocess picks up the profile's configuration.
+	// (Future: use WithSettings(filePath) once SDK v0.2.1 is available.)
+	SettingsFilePath string
 }
 
 // AgentResult is the final result of an agent invocation.
@@ -115,6 +121,14 @@ func Interpolate(template string, vars map[string]string) (string, error) {
 func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt string) []claude.Option {
 	sdkOpts := []claude.Option{
 		claude.WithIncludePartialMessages(),
+	}
+
+	// Load the user settings source when a settings file path is configured.
+	// This ensures the claude subprocess reads the selected profile's settings.
+	// Note: WithSettingSources(SettingSourceUser) loads ~/.claude/settings.json;
+	// per-session custom paths will be supported once SDK WithSettings() is available.
+	if opts.SettingsFilePath != "" {
+		sdkOpts = append(sdkOpts, claude.WithSettingSources(claude.SettingSourceUser))
 	}
 
 	if opts.PermissionHandler != nil {

@@ -11,6 +11,8 @@ import type {
   SDKResultEvent,
   ClaudeSettingsResponse,
   ClaudeCodeSettings,
+  ClaudeSettingsProfile,
+  ClaudeSettingsProfileDetail,
 } from '../types'
 
 const BASE = '/api'
@@ -58,14 +60,21 @@ export const chatsApi = {
    * @param agentSlug - optional agent slug. Pass empty string or omit for no-agent chat.
    * @param workingDirectory - optional working directory for the session.
    * @param model - optional model override for the session.
+   * @param settingsProfileId - optional settings profile ID for the session.
    */
-  create: (agentSlug?: string, workingDirectory?: string, model?: string) =>
+  create: (
+    agentSlug?: string,
+    workingDirectory?: string,
+    model?: string,
+    settingsProfileId?: string,
+  ) =>
     request<ChatSession>('/chats', {
       method: 'POST',
       body: JSON.stringify({
         agent_slug: agentSlug ?? '',
         working_directory: workingDirectory ?? '',
         model: model ?? '',
+        settings_profile_id: settingsProfileId ?? '',
       }),
     }),
 
@@ -96,6 +105,41 @@ export const claudeSettingsApi = {
     request<ClaudeSettingsResponse>('/claude-settings', {
       method: 'PUT',
       body: JSON.stringify(data),
+    }),
+}
+
+// ── Claude settings profiles ──────────────────────────────────────────────────
+
+export const claudeSettingsProfilesApi = {
+  list: () => request<ClaudeSettingsProfile[]>('/claude-settings/profiles'),
+
+  create: (name: string) =>
+    request<ClaudeSettingsProfile>('/claude-settings/profiles', {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+
+  get: (id: string) => request<ClaudeSettingsProfileDetail>(`/claude-settings/profiles/${id}`),
+
+  update: (id: string, data: { name?: string; settings?: ClaudeCodeSettings }) =>
+    request<ClaudeSettingsProfileDetail>(`/claude-settings/profiles/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  delete: (id: string) =>
+    fetch(`${BASE}/claude-settings/profiles/${id}`, { method: 'DELETE' }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
+
+  duplicate: (id: string) =>
+    request<ClaudeSettingsProfile>(`/claude-settings/profiles/${id}/duplicate`, {
+      method: 'POST',
+    }),
+
+  setDefault: (id: string) =>
+    request<ClaudeSettingsProfile>(`/claude-settings/profiles/${id}/default`, {
+      method: 'PUT',
     }),
 }
 
