@@ -64,7 +64,14 @@ export interface FSListResponse {
 export type MessageBlock =
   | { type: 'thinking'; text: string }
   | { type: 'text'; text: string }
-  | { type: 'tool_use'; id?: string; name: string; input?: Record<string, unknown> }
+  | {
+      type: 'tool_use'
+      id?: string
+      name: string
+      input?: Record<string, unknown>
+      /** Tool execution result, captured from the SDK "user" event. In-memory only. */
+      toolResult?: Record<string, unknown>
+    }
 
 export interface ChatMessage {
   role: 'user' | 'assistant'
@@ -179,6 +186,57 @@ export interface SDKUsage {
   output_tokens: number
   cache_read_input_tokens: number
   cache_creation_input_tokens: number
+}
+
+/** A single hunk in a structured patch (from Edit tool result). */
+export interface SDKPatchHunk {
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  lines: string[]
+}
+
+/** Tool execution result for the Read tool. */
+export interface SDKToolUseResultFile {
+  type: 'text'
+  file: {
+    filePath: string
+    content: string
+    numLines: number
+    startLine: number
+    totalLines: number
+  }
+}
+
+/** Tool execution result for the Edit tool. */
+export interface SDKToolUseResultEdit {
+  filePath: string
+  oldString: string
+  newString: string
+  originalFile: string
+  structuredPatch: SDKPatchHunk[]
+  userModified: boolean
+  replaceAll: boolean
+}
+
+/**
+ * Emitted when a tool finishes executing (the SDK "user" event).
+ * Contains the raw tool result alongside the tool_use_id that links it to the tool call.
+ */
+export interface SDKUserEvent {
+  type: 'user'
+  message: {
+    role: 'user'
+    content: Array<{
+      tool_use_id: string
+      type: string
+      content: string
+    }>
+  }
+  tool_use_result?: SDKToolUseResultFile | SDKToolUseResultEdit | Record<string, unknown>
+  session_id: string
+  uuid: string
 }
 
 /** Terminal event emitted when the agent finishes (success or error). */

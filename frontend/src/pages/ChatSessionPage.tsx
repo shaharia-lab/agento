@@ -9,6 +9,7 @@ import type {
   MessageBlock,
   SDKContentBlock,
   AskUserQuestionItem,
+  SDKUserEvent,
 } from '@/types'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -40,6 +41,10 @@ export default function ChatSessionPage() {
   const [showThinking, setShowThinking] = useState(false)
   const [toolCalls, setToolCalls] = useState<SDKContentBlock[]>([])
   const [systemStatus, setSystemStatus] = useState<string | null>(null)
+  // Tool results keyed by tool_use_id — populated from SDK "user" events during streaming.
+  const [streamingToolResults, setStreamingToolResults] = useState<
+    Record<string, Record<string, unknown>>
+  >({})
   // awaitingInput is set when the backend sends user_input_required — the SSE
   // stream stays open and the AskUserQuestion card becomes interactive.
   const [awaitingInput, setAwaitingInput] = useState(false)
@@ -85,6 +90,7 @@ export default function ChatSessionPage() {
       setToolCalls([])
       setSystemStatus(null)
       setAwaitingInput(false)
+      setStreamingToolResults({})
       setError(null)
 
       abortRef.current = new AbortController()
@@ -96,6 +102,8 @@ export default function ChatSessionPage() {
         // tool_use → text, depending on what the agent did first).
         let accumulated = ''
         let blocks: MessageBlock[] = []
+        // Tool results by tool_use_id, captured from SDK "user" events.
+        let toolResults: Record<string, Record<string, unknown>> = {}
 
         await sendMessage(
           id,
@@ -152,6 +160,14 @@ export default function ChatSessionPage() {
               // Make the streaming AskUserQuestion card interactive.
               setAwaitingInput(true)
             },
+            onToolResult: (event: SDKUserEvent) => {
+              const toolUseId = event.message.content[0]?.tool_use_id
+              if (toolUseId && event.tool_use_result) {
+                const result = event.tool_use_result as Record<string, unknown>
+                toolResults[toolUseId] = result
+                setStreamingToolResults(prev => ({ ...prev, [toolUseId]: result }))
+              }
+            },
             onResult: event => {
               if (event.is_error) {
                 const errMsg =
@@ -165,17 +181,25 @@ export default function ChatSessionPage() {
               // Build a rich message with ordered blocks so the render
               // reflects the exact flow: thinking → text → tool_use (or any
               // other ordering the agent chose).
+              // Attach any captured tool results to their matching tool_use blocks.
+              const finalBlocks: MessageBlock[] = blocks.map(b => {
+                if (b.type === 'tool_use' && b.id && toolResults[b.id]) {
+                  return { ...b, toolResult: toolResults[b.id] }
+                }
+                return b
+              })
               const assistantMsg: ChatMessage = {
                 role: 'assistant',
                 content: accumulated || event.result,
                 timestamp: new Date().toISOString(),
-                blocks: blocks.length > 0 ? [...blocks] : undefined,
+                blocks: finalBlocks.length > 0 ? finalBlocks : undefined,
               }
               setMessages(prev => [...prev, assistantMsg])
               // Reset per-turn local accumulators so a follow-up turn
               // (e.g. after AskUserQuestion is answered) starts clean.
               accumulated = ''
               blocks = []
+              toolResults = {}
               // Clear streaming UI state — the message now owns the content.
               setStreamingText('')
               setThinkingText('')
@@ -208,6 +232,7 @@ export default function ChatSessionPage() {
         setToolCalls([])
         setSystemStatus(null)
         setAwaitingInput(false)
+        setStreamingToolResults({})
       }
     },
     [id, streaming, detail],
@@ -307,6 +332,7 @@ export default function ChatSessionPage() {
                           key={j}
                           block={block}
                           isInteractive={canInteract}
+                          toolResult={block.toolResult}
                           onSubmit={
                             canInteract && id
                               ? answer => {
@@ -343,6 +369,7 @@ export default function ChatSessionPage() {
                 key={`stream-tool-${call.id ?? call.name}-${i}`}
                 block={{ type: 'tool_use', id: call.id, name: call.name, input: call.input }}
                 isInteractive={awaitingInput && call.name === 'AskUserQuestion'}
+                toolResult={call.id ? streamingToolResults[call.id] : undefined}
                 onSubmit={
                   awaitingInput && call.name === 'AskUserQuestion' && id
                     ? answer => {
@@ -554,14 +581,117 @@ function toolCallSummary(name: string, input: Record<string, unknown> | undefine
   }
 }
 
+/** Renders the expanded detail panel for a tool call based on the tool name. */
+function ToolCallDetail({
+  name,
+  input,
+  toolResult,
+}: {
+  name: string
+  input: Record<string, unknown> | undefined
+  toolResult: Record<string, unknown> | undefined
+}) {
+  if (name === 'Write') {
+    const content = typeof input?.content === 'string' ? input.content : null
+    if (content !== null) {
+      return (
+        <pre className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64">
+          {content}
+        </pre>
+      )
+    }
+  }
+
+  if (name === 'Read') {
+    const fileResult = toolResult as { type?: string; file?: { content?: string } } | undefined
+    const content = fileResult?.file?.content
+    if (content !== undefined) {
+      return (
+        <pre className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64">
+          {content}
+        </pre>
+      )
+    }
+    return (
+      <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-400 italic">
+        File content not available
+      </div>
+    )
+  }
+
+  if (name === 'Edit') {
+    const editResult = toolResult as
+      | { structuredPatch?: Array<{ lines: string[] }> }
+      | undefined
+    const patch = editResult?.structuredPatch
+
+    if (patch && patch.length > 0) {
+      return (
+        <div className="rounded-lg border border-zinc-100 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
+          {patch.flatMap((hunk, hi) =>
+            hunk.lines.map((line, li) => (
+              <div
+                key={`${hi}-${li}`}
+                className={cn(
+                  'px-3 py-0.5 leading-5 whitespace-pre',
+                  line.startsWith('-')
+                    ? 'bg-red-50 text-red-700'
+                    : line.startsWith('+')
+                      ? 'bg-green-50 text-green-700'
+                      : 'bg-zinc-50 text-zinc-400',
+                )}
+              >
+                {line}
+              </div>
+            )),
+          )}
+        </div>
+      )
+    }
+
+    // Fallback: synthesize a simple diff from input old/new strings
+    const oldStr = typeof input?.old_string === 'string' ? input.old_string : ''
+    const newStr = typeof input?.new_string === 'string' ? input.new_string : ''
+    if (oldStr || newStr) {
+      return (
+        <div className="rounded-lg border border-zinc-100 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
+          {oldStr.split('\n').map((line, i) => (
+            <div key={`old-${i}`} className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 text-red-700">
+              -{line}
+            </div>
+          ))}
+          {newStr.split('\n').map((line, i) => (
+            <div key={`new-${i}`} className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 text-green-700">
+              +{line}
+            </div>
+          ))}
+        </div>
+      )
+    }
+  }
+
+  // Default: raw JSON
+  if (input !== undefined) {
+    return (
+      <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-48">
+        {JSON.stringify(input, null, 2)}
+      </div>
+    )
+  }
+
+  return null
+}
+
 function ToolCallCard({
   block,
   isInteractive,
   onSubmit,
+  toolResult,
 }: {
   block: Pick<SDKContentBlock, 'type' | 'id' | 'name' | 'input'>
   isInteractive?: boolean
   onSubmit?: (answer: string) => void
+  toolResult?: Record<string, unknown>
 }) {
   const [expanded, setExpanded] = useState(false)
   const name = block.name ?? 'unknown'
@@ -593,10 +723,8 @@ function ToolCallCard({
           <span className="font-mono font-medium shrink-0">{name}</span>
           {summary && <span className="font-mono text-zinc-400 truncate min-w-0">({summary})</span>}
         </button>
-        {expanded && block.input !== undefined && (
-          <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-48">
-            {JSON.stringify(block.input, null, 2)}
-          </div>
+        {expanded && (
+          <ToolCallDetail name={name} input={block.input} toolResult={toolResult} />
         )}
       </div>
     </div>
