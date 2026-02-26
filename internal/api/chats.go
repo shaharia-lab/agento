@@ -11,7 +11,22 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/agent"
 	"github.com/shaharia-lab/agento/internal/service"
+	"github.com/shaharia-lab/agento/internal/storage"
 )
+
+// assistantEventRaw is used to parse content blocks out of a raw "assistant" SSE event.
+type assistantEventRaw struct {
+	Message struct {
+		Content []struct {
+			Type     string          `json:"type"`
+			Text     string          `json:"text,omitempty"`
+			Thinking string          `json:"thinking,omitempty"`
+			ID       string          `json:"id,omitempty"`
+			Name     string          `json:"name,omitempty"`
+			Input    json.RawMessage `json:"input,omitempty"`
+		} `json:"content"`
+	} `json:"message"`
+}
 
 // sendSSERaw writes a raw JSON payload as an SSE event without re-marshaling.
 func sendSSERaw(w http.ResponseWriter, flusher http.Flusher, event string, raw json.RawMessage) {
@@ -186,6 +201,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	var assistantText string
 	var sdkSessionID string
+	// blocks accumulates ordered content blocks (thinking/text/tool_use) across
+	// all assistant events so they can be persisted and re-rendered after reload.
+	var blocks []storage.MessageBlock
 	// pendingInput holds the AskUserQuestion tool input from the most recent
 	// TypeAssistant event; non-nil means the agent asked the user something and
 	// we need to pause and collect the answer before the conversation can continue.
@@ -204,6 +222,29 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 			switch event.Type {
 			case claude.TypeAssistant:
+				// Parse content blocks to persist them for post-reload rendering.
+				var ae assistantEventRaw
+				if err := json.Unmarshal(event.Raw, &ae); err == nil {
+					for _, blk := range ae.Message.Content {
+						switch blk.Type {
+						case "thinking":
+							if blk.Thinking != "" {
+								blocks = append(blocks, storage.MessageBlock{Type: "thinking", Text: blk.Thinking})
+							}
+						case "text":
+							if blk.Text != "" {
+								blocks = append(blocks, storage.MessageBlock{Type: "text", Text: blk.Text})
+							}
+						case "tool_use":
+							blocks = append(blocks, storage.MessageBlock{
+								Type:  "tool_use",
+								ID:    blk.ID,
+								Name:  blk.Name,
+								Input: blk.Input,
+							})
+						}
+					}
+				}
 				// Detect AskUserQuestion tool_use so we know to pause on TypeResult.
 				if input := extractAskUserQuestionInput(event.Raw); input != nil {
 					pendingInput = input
@@ -271,7 +312,7 @@ done:
 		chatSession.Title = title
 	}
 
-	if err := s.chatSvc.CommitMessage(r.Context(), chatSession, assistantText, sdkSessionID, isFirstMessage); err != nil {
+	if err := s.chatSvc.CommitMessage(r.Context(), chatSession, assistantText, sdkSessionID, isFirstMessage, blocks); err != nil {
 		s.logger.Error("commit message failed", "session_id", id, "error", err)
 	}
 }

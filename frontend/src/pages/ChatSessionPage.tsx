@@ -291,19 +291,19 @@ export default function ChatSessionPage() {
   return (
     <div className="flex flex-col h-full min-w-0 overflow-hidden">
       {/* Header */}
-      <div className="flex items-center gap-3 border-b border-zinc-100 px-3 sm:px-4 py-3 shrink-0">
+      <div className="flex items-center gap-3 border-b border-zinc-100 dark:border-zinc-700/50 px-3 sm:px-4 py-3 shrink-0">
         <button
           onClick={() => navigate('/chats')}
-          className="h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-100 transition-colors"
+          className="h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
         </button>
         <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-zinc-900 truncate">
+          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate">
             {detail?.session.title ?? 'Chat'}
           </h2>
         </div>
-        <span className="text-xs text-zinc-400 shrink-0 font-mono">
+        <span className="text-xs text-zinc-400 dark:text-zinc-500 shrink-0 font-mono">
           {agentLabel ?? 'Direct chat'}
         </span>
       </div>
@@ -390,7 +390,7 @@ export default function ChatSessionPage() {
 
           {/* Streaming: system status (tool execution in progress) */}
           {streaming && systemStatus && (
-            <div className="flex items-center gap-2 pl-10 text-xs text-zinc-400">
+            <div className="flex items-center gap-2 pl-10 text-xs text-zinc-400 dark:text-zinc-500">
               <Loader2 className="h-3 w-3 animate-spin shrink-0" />
               {systemStatus}
             </div>
@@ -399,10 +399,10 @@ export default function ChatSessionPage() {
           {/* Streaming: assistant response */}
           {streaming && streamingText && (
             <div className="flex gap-3">
-              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 text-white shrink-0 mt-0.5 text-xs font-bold">
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shrink-0 mt-0.5 text-xs font-bold">
                 {agentLabel ? agentLabel[0].toUpperCase() : 'C'}
               </div>
-              <div className="bg-zinc-50 border border-zinc-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
+              <div className="bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-100 dark:border-zinc-700 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
                 <div className="prose prose-sm max-w-none">
                   <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
                 </div>
@@ -439,7 +439,7 @@ export default function ChatSessionPage() {
       </div>
 
       {/* Input */}
-      <div className="border-t border-zinc-100 px-3 py-3 sm:px-6 shrink-0 bg-white">
+      <div className="border-t border-zinc-100 dark:border-zinc-700/50 px-3 py-3 sm:px-6 shrink-0 bg-white dark:bg-zinc-950">
         <div className="flex gap-2 max-w-4xl mx-auto">
           <Textarea
             value={input}
@@ -465,8 +465,8 @@ export default function ChatSessionPage() {
               className={cn(
                 'flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors',
                 input.trim()
-                  ? 'bg-zinc-900 text-white hover:bg-zinc-700'
-                  : 'bg-zinc-100 text-zinc-400 cursor-not-allowed',
+                  ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-700 dark:hover:bg-zinc-300'
+                  : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-600 cursor-not-allowed',
               )}
             >
               <Send className="h-4 w-4" />
@@ -518,11 +518,11 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 
   return (
     <div className="flex gap-3">
-      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 text-white shrink-0 mt-0.5 text-xs font-bold">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shrink-0 mt-0.5 text-xs font-bold">
         C
       </div>
-      <div className="bg-zinc-50 border border-zinc-100 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
-        <div className="prose prose-sm max-w-none">
+      <div className="bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-100 dark:border-zinc-700 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
+        <div className="prose prose-sm max-w-none dark:text-zinc-200">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
         </div>
       </div>
@@ -535,19 +535,19 @@ function ThinkingBlock({ text }: { text: string }) {
 
   return (
     <div className="flex gap-3">
-      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0 mt-0.5 text-xs">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0 mt-0.5 text-xs">
         ✦
       </div>
       <div className="flex-1 max-w-[82%]">
         <button
           onClick={() => setExpanded(e => !e)}
-          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors mb-1 cursor-pointer"
+          className="flex items-center gap-1.5 text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors mb-1 cursor-pointer"
         >
           {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
           Thinking
         </button>
         {expanded && (
-          <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 font-mono whitespace-pre-wrap leading-relaxed">
+          <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400 font-mono whitespace-pre-wrap leading-relaxed">
             {text}
           </div>
         )}
@@ -751,7 +751,7 @@ function ToolCallCard({
       <div className="flex-1 min-w-0 max-w-[82%]">
         <button
           onClick={() => setExpanded(e => !e)}
-          className="flex w-full items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-800 transition-colors mb-1 min-w-0 cursor-pointer"
+          className="flex w-full items-center gap-1.5 text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors mb-1 min-w-0 cursor-pointer"
         >
           {expanded ? (
             <ChevronDown className="h-3 w-3 shrink-0" />
@@ -761,7 +761,7 @@ function ToolCallCard({
           <span className={cn('font-mono font-semibold shrink-0', color)}>{name}</span>
           {displaySummary && (
             <span
-              className="font-mono text-zinc-400 truncate min-w-0"
+              className="font-mono text-zinc-400 dark:text-zinc-500 truncate min-w-0"
               title={summary}
             >
               {displaySummary}
@@ -838,20 +838,25 @@ function AskUserQuestionCard({
 
   return (
     <div className="flex gap-3">
-      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0 mt-0.5">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0 mt-0.5">
         <MessageSquare className="h-3.5 w-3.5" />
       </div>
       <div className="flex-1 min-w-0 max-w-[82%] space-y-3">
         {questions.map((q, i) => {
           const otherSelected = (selections[i] ?? []).includes(OTHER_LABEL)
           return (
-            <div key={i} className="rounded-lg border border-zinc-200 bg-white p-3">
+            <div
+              key={i}
+              className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800/60 p-3"
+            >
               {q.header && (
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-1">
                   {q.header}
                 </div>
               )}
-              <div className="text-sm font-medium text-zinc-800 mb-2">{q.question}</div>
+              <div className="text-sm font-medium text-zinc-800 dark:text-zinc-200 mb-2">
+                {q.question}
+              </div>
               <div className="flex flex-wrap gap-1.5">
                 {q.options.map((opt, j) => {
                   const selected = (selections[i] ?? []).includes(opt.label)
@@ -866,8 +871,8 @@ function AskUserQuestionCard({
                           ? 'cursor-pointer hover:border-zinc-400'
                           : 'cursor-default',
                         selected
-                          ? 'border-zinc-900 bg-zinc-900 text-white'
-                          : 'border-zinc-200 bg-zinc-50 text-zinc-700',
+                          ? 'border-zinc-900 dark:border-zinc-100 bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                          : 'border-zinc-200 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-700/50 text-zinc-700 dark:text-zinc-300',
                       )}
                     >
                       <span className="font-medium">{opt.label}</span>
@@ -890,8 +895,8 @@ function AskUserQuestionCard({
                       ? 'cursor-pointer hover:border-zinc-400'
                       : 'cursor-default',
                     otherSelected
-                      ? 'border-zinc-900 bg-zinc-900 text-white'
-                      : 'border-zinc-200 bg-zinc-50 text-zinc-700',
+                      ? 'border-zinc-900 dark:border-zinc-100 bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                      : 'border-zinc-200 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-700/50 text-zinc-700 dark:text-zinc-300',
                   )}
                 >
                   <span className="font-medium">Other</span>
@@ -908,11 +913,13 @@ function AskUserQuestionCard({
                     if (e.key === 'Enter' && hasSelections) handleSubmit()
                   }}
                   placeholder="Type your answer…"
-                  className="mt-2 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-zinc-900 focus:outline-none"
+                  className="mt-2 w-full rounded-md border border-zinc-200 dark:border-zinc-600 bg-zinc-50 dark:bg-zinc-700/50 px-2.5 py-1.5 text-xs text-zinc-800 dark:text-zinc-200 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:border-zinc-900 dark:focus:border-zinc-400 focus:outline-none"
                 />
               )}
               {q.multiSelect && !submitted && (
-                <div className="mt-2 text-[10px] text-zinc-400">Multiple selections allowed</div>
+                <div className="mt-2 text-[10px] text-zinc-400 dark:text-zinc-500">
+                  Multiple selections allowed
+                </div>
               )}
             </div>
           )
@@ -925,14 +932,16 @@ function AskUserQuestionCard({
             className={cn(
               'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
               hasSelections
-                ? 'bg-zinc-900 text-white hover:bg-zinc-700'
-                : 'bg-zinc-100 text-zinc-400 cursor-not-allowed',
+                ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-700 dark:hover:bg-zinc-300'
+                : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-600 cursor-not-allowed',
             )}
           >
             Send answers
           </button>
         )}
-        {submitted && <div className="text-[10px] text-zinc-400">Answers sent</div>}
+        {submitted && (
+          <div className="text-[10px] text-zinc-400 dark:text-zinc-500">Answers sent</div>
+        )}
       </div>
     </div>
   )

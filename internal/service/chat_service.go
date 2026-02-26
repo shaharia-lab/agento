@@ -42,7 +42,9 @@ type ChatService interface {
 	BeginMessage(ctx context.Context, sessionID, content string, opts agent.RunOptions) (*claude.Session, *storage.ChatSession, error)
 
 	// CommitMessage persists the assistant response and updates session metadata.
-	CommitMessage(ctx context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, isFirstMessage bool) error
+	// blocks contains the ordered content blocks (thinking/text/tool_use) captured
+	// during streaming so they can be re-rendered faithfully after a page reload.
+	CommitMessage(ctx context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, isFirstMessage bool, blocks []storage.MessageBlock) error
 }
 
 // chatService is the default implementation of ChatService.
@@ -198,12 +200,13 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 	return agentSession, session, nil
 }
 
-func (s *chatService) CommitMessage(_ context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, _ bool) error {
+func (s *chatService) CommitMessage(_ context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, _ bool, blocks []storage.MessageBlock) error {
 	if assistantText != "" {
 		msg := storage.ChatMessage{
 			Role:      "assistant",
 			Content:   assistantText,
 			Timestamp: time.Now().UTC(),
+			Blocks:    blocks,
 		}
 		if err := s.chatRepo.AppendMessage(session.ID, msg); err != nil {
 			return fmt.Errorf("storing assistant message: %w", err)
