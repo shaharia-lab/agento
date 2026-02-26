@@ -522,6 +522,38 @@ function ThinkingBlock({ text }: { text: string }) {
   )
 }
 
+/** Returns a short one-line summary for a tool call based on its input fields. */
+function toolCallSummary(name: string, input: Record<string, unknown> | undefined): string {
+  if (!input) return ''
+  const str = (v: unknown) => (typeof v === 'string' ? v : '')
+  switch (name) {
+    case 'Bash':
+      return str(input.description) || str(input.command)
+    case 'Read':
+    case 'Write':
+    case 'Edit':
+      return str(input.file_path)
+    case 'Glob':
+      return str(input.pattern)
+    case 'Grep':
+      return [str(input.pattern), str(input.path)].filter(Boolean).join(' in ')
+    case 'WebFetch':
+      return str(input.url)
+    case 'WebSearch':
+      return str(input.query)
+    case 'Task':
+      return str(input.description) || str(input.subagent_type)
+    default: {
+      // Generic fallback: first string value found
+      for (const v of Object.values(input)) {
+        const s = str(v)
+        if (s) return s
+      }
+      return ''
+    }
+  }
+}
+
 function ToolCallCard({
   block,
   isInteractive,
@@ -541,6 +573,8 @@ function ToolCallCard({
     )
   }
 
+  const summary = toolCallSummary(name, block.input)
+
   return (
     <div className="flex gap-3">
       <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0 mt-0.5">
@@ -549,10 +583,15 @@ function ToolCallCard({
       <div className="flex-1 min-w-0 max-w-[82%]">
         <button
           onClick={() => setExpanded(e => !e)}
-          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors mb-1"
+          className="flex w-full items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors mb-1 min-w-0"
         >
-          {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-          <span className="font-mono font-medium">{name}</span>
+          {expanded ? (
+            <ChevronDown className="h-3 w-3 shrink-0" />
+          ) : (
+            <ChevronRight className="h-3 w-3 shrink-0" />
+          )}
+          <span className="font-mono font-medium shrink-0">{name}</span>
+          {summary && <span className="font-mono text-zinc-400 truncate min-w-0">({summary})</span>}
         </button>
         {expanded && block.input !== undefined && (
           <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-48">
