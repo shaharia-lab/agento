@@ -20,6 +20,7 @@ import {
   Folder,
   Terminal,
   MessageSquare,
+  Square,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -415,22 +416,28 @@ export default function ChatSessionPage() {
             disabled={streaming}
             rows={3}
           />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || streaming}
-            className={cn(
-              'flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors',
-              input.trim() && !streaming
-                ? 'bg-zinc-900 text-white hover:bg-zinc-700'
-                : 'bg-zinc-100 text-zinc-400 cursor-not-allowed',
-            )}
-          >
-            {streaming ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
+          {streaming ? (
+            <button
+              onClick={() => abortRef.current?.abort()}
+              title="Stop generation"
+              className="flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors bg-zinc-900 text-white hover:bg-zinc-700"
+            >
+              <Square className="h-4 w-4 fill-current" />
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!input.trim()}
+              className={cn(
+                'flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors',
+                input.trim()
+                  ? 'bg-zinc-900 text-white hover:bg-zinc-700'
+                  : 'bg-zinc-100 text-zinc-400 cursor-not-allowed',
+              )}
+            >
               <Send className="h-4 w-4" />
-            )}
-          </button>
+            </button>
+          )}
         </div>
         {/* Session info pills */}
         {detail && (detail.session.working_directory || detail.session.model) && (
