@@ -33,6 +33,11 @@ type RunOptions struct {
 
 	// MCPRegistry provides the SDK configs for external MCP servers.
 	MCPRegistry *config.MCPRegistry
+
+	// PermissionHandler is an optional callback invoked for each can_use_tool
+	// control_request from claude. When set it overrides the default bypass-all
+	// behavior and may block (e.g. to ask a human before a tool runs).
+	PermissionHandler claude.PermissionHandler
 }
 
 // AgentResult is the final result of an agent invocation.
@@ -109,9 +114,24 @@ func Interpolate(template string, vars map[string]string) (string, error) {
 // buildSDKOptions constructs the claude SDK options for the given agent config and run options.
 func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt string) []claude.Option {
 	sdkOpts := []claude.Option{
-		claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
-		claude.WithBypassPermissions(),
 		claude.WithIncludePartialMessages(),
+	}
+
+	if opts.PermissionHandler != nil {
+		// The SDK defaults to bypassPermissions + AllowDangerouslySkipPermissions=true.
+		// WithDefaultPermissions() overrides BOTH so the subprocess sends
+		// can_use_tool control_requests, which our handler can intercept.
+		// Without this, bypassPermissions means can_use_tool is never sent.
+		sdkOpts = append(sdkOpts,
+			claude.WithDefaultPermissions(),
+			claude.WithPermissionHandler(opts.PermissionHandler),
+		)
+	} else {
+		// No custom handler: bypass all permissions for unattended agent runs.
+		sdkOpts = append(sdkOpts,
+			claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
+			claude.WithBypassPermissions(),
+		)
 	}
 
 	// Model
@@ -209,6 +229,34 @@ func StreamAgent(ctx context.Context, agentCfg *config.AgentConfig, question str
 
 	sdkOpts := buildSDKOptions(agentCfg, opts, systemPrompt)
 	return claude.Query(ctx, question, sdkOpts...)
+}
+
+// StartSession creates a persistent Claude session and sends the first message.
+// The subprocess stays alive across TypeResult events; callers can inject follow-up
+// messages via session.Send() without spawning a new process.
+// The caller must call session.Close() when the conversation is done.
+func StartSession(ctx context.Context, agentCfg *config.AgentConfig, firstMessage string, opts RunOptions) (*claude.Session, error) {
+	systemPrompt := ""
+	if agentCfg != nil {
+		interpolated, err := Interpolate(agentCfg.SystemPrompt, opts.Variables)
+		if err != nil {
+			return nil, err
+		}
+		systemPrompt = interpolated
+	}
+
+	sdkOpts := buildSDKOptions(agentCfg, opts, systemPrompt)
+	session, err := claude.NewSession(ctx, sdkOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("creating session: %w", err)
+	}
+
+	if err := session.Send(firstMessage); err != nil {
+		_ = session.Close()
+		return nil, fmt.Errorf("sending first message: %w", err)
+	}
+
+	return session, nil
 }
 
 // RunAgent runs the agent to completion and returns the final AgentResult.

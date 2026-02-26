@@ -5,6 +5,10 @@ import type {
   SettingsResponse,
   UserSettings,
   FSListResponse,
+  SDKSystemEvent,
+  SDKAssistantEvent,
+  SDKStreamEventMessage,
+  SDKResultEvent,
 } from '../types'
 
 const BASE = '/api'
@@ -99,11 +103,24 @@ export const filesystemApi = {
 
 // ── Streaming message ─────────────────────────────────────────────────────────
 
+/**
+ * Typed callbacks for the raw SDK event stream.
+ * Each callback corresponds to one SSE event type emitted by the backend.
+ */
 export interface StreamCallbacks {
-  onThinking?: (text: string) => void
-  onText?: (delta: string) => void
-  onDone?: (data: { sdk_session_id: string; cost_usd: number }) => void
-  onError?: (msg: string) => void
+  /** Emitted at session start (subtype "init") and for tool-execution status (subtype "status"). */
+  onSystem?: (event: SDKSystemEvent) => void
+  /** Emitted when the LLM completes a turn — may contain tool_use and/or text content blocks. */
+  onAssistant?: (event: SDKAssistantEvent) => void
+  /** Emitted for every LLM output delta (text, thinking, tool-input streaming). */
+  onStreamEvent?: (event: SDKStreamEventMessage) => void
+  /** Terminal event — either a successful result or an error. Check event.is_error. */
+  onResult?: (event: SDKResultEvent) => void
+  /**
+   * Emitted when the agent called AskUserQuestion and is waiting for the user's answer.
+   * The SSE connection stays open. Call provideInput() with the answer to continue.
+   */
+  onUserInputRequired?: (data: { input: Record<string, unknown> }) => void
 }
 
 export async function sendMessage(
@@ -144,17 +161,20 @@ export async function sendMessage(
         try {
           const data = JSON.parse(line.slice(6))
           switch (currentEvent) {
-            case 'thinking':
-              callbacks.onThinking?.(data.text)
+            case 'system':
+              callbacks.onSystem?.(data as SDKSystemEvent)
               break
-            case 'text':
-              callbacks.onText?.(data.delta)
+            case 'assistant':
+              callbacks.onAssistant?.(data as SDKAssistantEvent)
               break
-            case 'done':
-              callbacks.onDone?.(data)
+            case 'stream_event':
+              callbacks.onStreamEvent?.(data as SDKStreamEventMessage)
               break
-            case 'error':
-              callbacks.onError?.(data.error)
+            case 'result':
+              callbacks.onResult?.(data as SDKResultEvent)
+              break
+            case 'user_input_required':
+              callbacks.onUserInputRequired?.(data as { input: Record<string, unknown> })
               break
           }
         } catch {
@@ -163,5 +183,21 @@ export async function sendMessage(
         currentEvent = ''
       }
     }
+  }
+}
+
+/**
+ * Sends the user's answer to an AskUserQuestion prompt back to the agent.
+ * The SSE stream for the chat stays open; the agent will continue after this call.
+ */
+export async function provideInput(chatId: string, answer: string): Promise<void> {
+  const res = await fetch(`${BASE}/chats/${chatId}/input`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ answer }),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(body.error || `HTTP ${res.status}`)
   }
 }

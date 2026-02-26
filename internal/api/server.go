@@ -14,19 +14,21 @@ import (
 
 // Server holds all dependencies for the REST API handlers.
 type Server struct {
-	agentSvc    service.AgentService
-	chatSvc     service.ChatService
-	settingsMgr *config.SettingsManager
-	logger      *slog.Logger
+	agentSvc     service.AgentService
+	chatSvc      service.ChatService
+	settingsMgr  *config.SettingsManager
+	logger       *slog.Logger
+	liveSessions *liveSessionStore
 }
 
 // New creates a new API Server backed by the provided services.
 func New(agentSvc service.AgentService, chatSvc service.ChatService, settingsMgr *config.SettingsManager, logger *slog.Logger) *Server {
 	return &Server{
-		agentSvc:    agentSvc,
-		chatSvc:     chatSvc,
-		settingsMgr: settingsMgr,
-		logger:      logger,
+		agentSvc:     agentSvc,
+		chatSvc:      chatSvc,
+		settingsMgr:  settingsMgr,
+		logger:       logger,
+		liveSessions: newLiveSessionStore(),
 	}
 }
 
@@ -45,6 +47,7 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/chats/{id}", s.handleGetChat)
 	r.Delete("/chats/{id}", s.handleDeleteChat)
 	r.Post("/chats/{id}/messages", s.handleSendMessage)
+	r.Post("/chats/{id}/input", s.handleProvideInput)
 
 	// Settings
 	r.Get("/settings", s.handleGetSettings)

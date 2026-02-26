@@ -1,11 +1,27 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { Fragment, useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { chatsApi, sendMessage } from '@/lib/api'
-import type { ChatDetail, ChatMessage } from '@/types'
+import { chatsApi, sendMessage, provideInput } from '@/lib/api'
+import type {
+  ChatDetail,
+  ChatMessage,
+  MessageBlock,
+  SDKContentBlock,
+  AskUserQuestionItem,
+} from '@/types'
 import { Textarea } from '@/components/ui/textarea'
-import { ArrowLeft, Send, Loader2, ChevronDown, ChevronRight, Folder } from 'lucide-react'
+import {
+  ArrowLeft,
+  Send,
+  Loader2,
+  ChevronDown,
+  ChevronRight,
+  Folder,
+  Terminal,
+  MessageSquare,
+  Square,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export default function ChatSessionPage() {
@@ -22,6 +38,11 @@ export default function ChatSessionPage() {
   const [streamingText, setStreamingText] = useState('')
   const [thinkingText, setThinkingText] = useState('')
   const [showThinking, setShowThinking] = useState(false)
+  const [toolCalls, setToolCalls] = useState<SDKContentBlock[]>([])
+  const [systemStatus, setSystemStatus] = useState<string | null>(null)
+  // awaitingInput is set when the backend sends user_input_required — the SSE
+  // stream stays open and the AskUserQuestion card becomes interactive.
+  const [awaitingInput, setAwaitingInput] = useState(false)
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -60,34 +81,110 @@ export default function ChatSessionPage() {
       setStreaming(true)
       setStreamingText('')
       setThinkingText('')
+      setShowThinking(false)
+      setToolCalls([])
+      setSystemStatus(null)
+      setAwaitingInput(false)
       setError(null)
 
       abortRef.current = new AbortController()
 
       try {
+        // Local accumulators — avoids stale-closure issues with React state.
+        // `blocks` preserves the exact order blocks arrived in the stream so
+        // the stored message renders correctly (thinking → text → tool_use or
+        // tool_use → text, depending on what the agent did first).
         let accumulated = ''
+        let blocks: MessageBlock[] = []
+
         await sendMessage(
           id,
           content,
           {
-            onThinking: text => {
-              setThinkingText(prev => prev + text)
-              setShowThinking(true)
+            onSystem: event => {
+              if (event.subtype === 'status' && event.message) {
+                setSystemStatus(event.message)
+              }
             },
-            onText: delta => {
-              accumulated += delta
-              setStreamingText(accumulated)
+            onAssistant: event => {
+              // Collect completed tool_use blocks in stream order.
+              const toolUseBlocks = event.message.content.filter(
+                b => b.type === 'tool_use' && b.name,
+              )
+              if (toolUseBlocks.length > 0) {
+                const newBlocks: MessageBlock[] = toolUseBlocks.map(b => ({
+                  type: 'tool_use' as const,
+                  id: b.id,
+                  name: b.name!,
+                  input: b.input,
+                }))
+                blocks = [...blocks, ...newBlocks]
+                setToolCalls(prev => [...prev, ...toolUseBlocks])
+              }
             },
-            onDone: () => {
+            onStreamEvent: event => {
+              const delta = event.event.delta
+              if (!delta) return
+              if (delta.type === 'thinking_delta' && delta.thinking) {
+                // Append to the last thinking block or start a new one.
+                const last = blocks[blocks.length - 1]
+                if (last?.type === 'thinking') {
+                  last.text += delta.thinking
+                } else {
+                  blocks.push({ type: 'thinking', text: delta.thinking })
+                }
+                setThinkingText(prev => prev + delta.thinking)
+                setShowThinking(true)
+              } else if (delta.type === 'text_delta' && delta.text) {
+                accumulated += delta.text
+                // Append to the last text block or start a new one.
+                const last = blocks[blocks.length - 1]
+                if (last?.type === 'text') {
+                  last.text += delta.text
+                } else {
+                  blocks.push({ type: 'text', text: delta.text })
+                }
+                setStreamingText(accumulated)
+              }
+            },
+            onUserInputRequired: () => {
+              // Backend is paused waiting for us to POST /api/chats/{id}/input.
+              // Make the streaming AskUserQuestion card interactive.
+              setAwaitingInput(true)
+            },
+            onResult: event => {
+              if (event.is_error) {
+                const errMsg =
+                  event.errors && event.errors.length > 0
+                    ? event.errors.join('; ')
+                    : (event.result ?? 'Unknown error')
+                setError(errMsg)
+                setStreamingText('')
+                return
+              }
+              // Build a rich message with ordered blocks so the render
+              // reflects the exact flow: thinking → text → tool_use (or any
+              // other ordering the agent chose).
               const assistantMsg: ChatMessage = {
                 role: 'assistant',
-                content: accumulated,
+                content: accumulated || event.result,
                 timestamp: new Date().toISOString(),
+                blocks: blocks.length > 0 ? [...blocks] : undefined,
               }
               setMessages(prev => [...prev, assistantMsg])
+              // Reset per-turn local accumulators so a follow-up turn
+              // (e.g. after AskUserQuestion is answered) starts clean.
+              accumulated = ''
+              blocks = []
+              // Clear streaming UI state — the message now owns the content.
               setStreamingText('')
               setThinkingText('')
               setShowThinking(false)
+              setToolCalls([])
+              setSystemStatus(null)
+              // Do NOT clear awaitingInput here — if user_input_required follows
+              // this result event, onUserInputRequired will set it to true.
+              // The finally block handles final cleanup.
 
               if (detail) {
                 chatsApi
@@ -95,10 +192,6 @@ export default function ChatSessionPage() {
                   .then(d => setDetail(d))
                   .catch(() => undefined)
               }
-            },
-            onError: msg => {
-              setError(msg)
-              setStreamingText('')
             },
           },
           abortRef.current.signal,
@@ -110,6 +203,11 @@ export default function ChatSessionPage() {
       } finally {
         setStreaming(false)
         setStreamingText('')
+        setThinkingText('')
+        setShowThinking(false)
+        setToolCalls([])
+        setSystemStatus(null)
+        setAwaitingInput(false)
       }
     },
     [id, streaming, detail],
@@ -190,12 +288,79 @@ export default function ChatSessionPage() {
             </div>
           )}
 
-          {messages.map((msg, i) => (
-            <MessageBubble key={i} message={msg} />
-          ))}
+          {messages.map((msg, i) => {
+            const isLastMsg = i === messages.length - 1
+            if (msg.role === 'assistant' && msg.blocks && msg.blocks.length > 0) {
+              // Render blocks in the exact order they arrived in the stream.
+              return (
+                <Fragment key={i}>
+                  {msg.blocks.map((block, j) => {
+                    if (block.type === 'thinking') {
+                      return <ThinkingBlock key={j} text={block.text} />
+                    }
+                    if (block.type === 'tool_use') {
+                      // Interactive when: (a) not streaming (historical card can doSend),
+                      // or (b) streaming AND awaiting user input via provideInput.
+                      const canInteract = isLastMsg && (awaitingInput || !streaming)
+                      return (
+                        <ToolCallCard
+                          key={j}
+                          block={block}
+                          isInteractive={canInteract}
+                          onSubmit={
+                            canInteract && id
+                              ? answer => {
+                                  if (awaitingInput) {
+                                    setAwaitingInput(false)
+                                    void provideInput(id, answer)
+                                  } else {
+                                    void doSend(answer)
+                                  }
+                                }
+                              : undefined
+                          }
+                        />
+                      )
+                    }
+                    // text block
+                    return <MessageBubble key={j} message={{ ...msg, content: block.text }} />
+                  })}
+                </Fragment>
+              )
+            }
+            // Fallback: messages loaded from DB (no blocks) — render text only.
+            return <MessageBubble key={i} message={msg} />
+          })}
 
           {/* Streaming: thinking */}
           {streaming && showThinking && thinkingText && <ThinkingBlock text={thinkingText} />}
+
+          {/* Streaming: tool call cards. AskUserQuestion becomes interactive once
+               the backend signals user_input_required (awaitingInput=true). */}
+          {streaming &&
+            toolCalls.map((call, i) => (
+              <ToolCallCard
+                key={`stream-tool-${call.id ?? call.name}-${i}`}
+                block={{ type: 'tool_use', id: call.id, name: call.name, input: call.input }}
+                isInteractive={awaitingInput && call.name === 'AskUserQuestion'}
+                onSubmit={
+                  awaitingInput && call.name === 'AskUserQuestion' && id
+                    ? answer => {
+                        setAwaitingInput(false)
+                        void provideInput(id, answer)
+                      }
+                    : undefined
+                }
+              />
+            ))}
+
+          {/* Streaming: system status (tool execution in progress) */}
+          {streaming && systemStatus && (
+            <div className="flex items-center gap-2 pl-10 text-xs text-zinc-400">
+              <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+              {systemStatus}
+            </div>
+          )}
 
           {/* Streaming: assistant response */}
           {streaming && streamingText && (
@@ -211,19 +376,23 @@ export default function ChatSessionPage() {
             </div>
           )}
 
-          {/* Typing indicator */}
-          {streaming && !streamingText && !thinkingText && (
-            <div className="flex gap-3 items-center">
-              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 shrink-0">
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-white" />
+          {/* Typing indicator — only when no content has arrived yet */}
+          {streaming &&
+            !streamingText &&
+            !thinkingText &&
+            toolCalls.length === 0 &&
+            !systemStatus && (
+              <div className="flex gap-3 items-center">
+                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 shrink-0">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-white" />
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:0ms]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:150ms]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:300ms]" />
+                </div>
               </div>
-              <div className="flex items-center gap-1">
-                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:0ms]" />
-                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:150ms]" />
-                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:300ms]" />
-              </div>
-            </div>
-          )}
+            )}
 
           {error && (
             <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -247,22 +416,28 @@ export default function ChatSessionPage() {
             disabled={streaming}
             rows={3}
           />
-          <button
-            onClick={handleSend}
-            disabled={!input.trim() || streaming}
-            className={cn(
-              'flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors',
-              input.trim() && !streaming
-                ? 'bg-zinc-900 text-white hover:bg-zinc-700'
-                : 'bg-zinc-100 text-zinc-400 cursor-not-allowed',
-            )}
-          >
-            {streaming ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
+          {streaming ? (
+            <button
+              onClick={() => abortRef.current?.abort()}
+              title="Stop generation"
+              className="flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors bg-zinc-900 text-white hover:bg-zinc-700"
+            >
+              <Square className="h-4 w-4 fill-current" />
+            </button>
+          ) : (
+            <button
+              onClick={handleSend}
+              disabled={!input.trim()}
+              className={cn(
+                'flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors',
+                input.trim()
+                  ? 'bg-zinc-900 text-white hover:bg-zinc-700'
+                  : 'bg-zinc-100 text-zinc-400 cursor-not-allowed',
+              )}
+            >
               <Send className="h-4 w-4" />
-            )}
-          </button>
+            </button>
+          )}
         </div>
         {/* Session info pills */}
         {detail && (detail.session.working_directory || detail.session.model) && (
@@ -342,6 +517,207 @@ function ThinkingBlock({ text }: { text: string }) {
             {text}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function ToolCallCard({
+  block,
+  isInteractive,
+  onSubmit,
+}: {
+  block: Pick<SDKContentBlock, 'type' | 'id' | 'name' | 'input'>
+  isInteractive?: boolean
+  onSubmit?: (answer: string) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const name = block.name ?? 'unknown'
+
+  // AskUserQuestion gets its own rich interactive UI.
+  if (name === 'AskUserQuestion' && block.input) {
+    return (
+      <AskUserQuestionCard input={block.input} isInteractive={isInteractive} onSubmit={onSubmit} />
+    )
+  }
+
+  return (
+    <div className="flex gap-3">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0 mt-0.5">
+        <Terminal className="h-3.5 w-3.5" />
+      </div>
+      <div className="flex-1 min-w-0 max-w-[82%]">
+        <button
+          onClick={() => setExpanded(e => !e)}
+          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors mb-1"
+        >
+          {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          <span className="font-mono font-medium">{name}</span>
+        </button>
+        {expanded && block.input !== undefined && (
+          <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-48">
+            {JSON.stringify(block.input, null, 2)}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const OTHER_LABEL = 'Other'
+
+function AskUserQuestionCard({
+  input,
+  isInteractive,
+  onSubmit,
+}: {
+  input: Record<string, unknown>
+  isInteractive?: boolean
+  onSubmit?: (answer: string) => void
+}) {
+  const questions = (input.questions as AskUserQuestionItem[] | undefined) ?? []
+  // selections[questionIndex] = array of selected option labels (may include OTHER_LABEL)
+  const [selections, setSelections] = useState<Record<number, string[]>>({})
+  // otherTexts[questionIndex] = free-text typed when "Other" is selected
+  const [otherTexts, setOtherTexts] = useState<Record<number, string>>({})
+  const [submitted, setSubmitted] = useState(false)
+
+  if (questions.length === 0) return null
+
+  const toggle = (qIdx: number, label: string, multiSelect: boolean) => {
+    if (!isInteractive || submitted) return
+    setSelections(prev => {
+      const current = prev[qIdx] ?? []
+      if (multiSelect) {
+        const next = current.includes(label)
+          ? current.filter(l => l !== label)
+          : [...current, label]
+        return { ...prev, [qIdx]: next }
+      } else {
+        return { ...prev, [qIdx]: [label] }
+      }
+    })
+  }
+
+  const hasSelections = questions.every((_, i) => {
+    const sel = selections[i] ?? []
+    if (sel.length === 0) return false
+    // If "Other" is selected, require non-empty text
+    if (sel.includes(OTHER_LABEL)) return (otherTexts[i] ?? '').trim().length > 0
+    return true
+  })
+
+  const handleSubmit = () => {
+    if (!onSubmit || submitted) return
+    const lines = questions.map((q, i) => {
+      const chosen = (selections[i] ?? [])
+        .map(label => (label === OTHER_LABEL ? (otherTexts[i] ?? '').trim() : label))
+        .filter(Boolean)
+        .join(', ')
+      const header = q.header ?? `Q${i + 1}`
+      return `${header}: ${chosen}`
+    })
+    onSubmit(lines.join('\n'))
+    setSubmitted(true)
+  }
+
+  return (
+    <div className="flex gap-3">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0 mt-0.5">
+        <MessageSquare className="h-3.5 w-3.5" />
+      </div>
+      <div className="flex-1 min-w-0 max-w-[82%] space-y-3">
+        {questions.map((q, i) => {
+          const otherSelected = (selections[i] ?? []).includes(OTHER_LABEL)
+          return (
+            <div key={i} className="rounded-lg border border-zinc-200 bg-white p-3">
+              {q.header && (
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                  {q.header}
+                </div>
+              )}
+              <div className="text-sm font-medium text-zinc-800 mb-2">{q.question}</div>
+              <div className="flex flex-wrap gap-1.5">
+                {q.options.map((opt, j) => {
+                  const selected = (selections[i] ?? []).includes(opt.label)
+                  return (
+                    <button
+                      key={j}
+                      disabled={!isInteractive || submitted}
+                      onClick={() => toggle(i, opt.label, !!q.multiSelect)}
+                      className={cn(
+                        'rounded-md border px-2.5 py-1 text-xs text-left transition-colors',
+                        isInteractive && !submitted
+                          ? 'cursor-pointer hover:border-zinc-400'
+                          : 'cursor-default',
+                        selected
+                          ? 'border-zinc-900 bg-zinc-900 text-white'
+                          : 'border-zinc-200 bg-zinc-50 text-zinc-700',
+                      )}
+                    >
+                      <span className="font-medium">{opt.label}</span>
+                      {opt.description && (
+                        <span className={cn('ml-1', selected ? 'text-zinc-300' : 'text-zinc-400')}>
+                          {' '}
+                          — {opt.description}
+                        </span>
+                      )}
+                    </button>
+                  )
+                })}
+                {/* Always add an "Other" chip for free-form input */}
+                <button
+                  disabled={!isInteractive || submitted}
+                  onClick={() => toggle(i, OTHER_LABEL, !!q.multiSelect)}
+                  className={cn(
+                    'rounded-md border px-2.5 py-1 text-xs text-left transition-colors',
+                    isInteractive && !submitted
+                      ? 'cursor-pointer hover:border-zinc-400'
+                      : 'cursor-default',
+                    otherSelected
+                      ? 'border-zinc-900 bg-zinc-900 text-white'
+                      : 'border-zinc-200 bg-zinc-50 text-zinc-700',
+                  )}
+                >
+                  <span className="font-medium">Other</span>
+                </button>
+              </div>
+              {/* Free-text input shown when "Other" is selected */}
+              {otherSelected && isInteractive && !submitted && (
+                <input
+                  type="text"
+                  autoFocus
+                  value={otherTexts[i] ?? ''}
+                  onChange={e => setOtherTexts(prev => ({ ...prev, [i]: e.target.value }))}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && hasSelections) handleSubmit()
+                  }}
+                  placeholder="Type your answer…"
+                  className="mt-2 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-zinc-900 focus:outline-none"
+                />
+              )}
+              {q.multiSelect && !submitted && (
+                <div className="mt-2 text-[10px] text-zinc-400">Multiple selections allowed</div>
+              )}
+            </div>
+          )
+        })}
+
+        {isInteractive && !submitted && (
+          <button
+            disabled={!hasSelections}
+            onClick={handleSubmit}
+            className={cn(
+              'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+              hasSelections
+                ? 'bg-zinc-900 text-white hover:bg-zinc-700'
+                : 'bg-zinc-100 text-zinc-400 cursor-not-allowed',
+            )}
+          >
+            Send answers
+          </button>
+        )}
+        {submitted && <div className="text-[10px] text-zinc-400">Answers sent</div>}
       </div>
     </div>
   )

@@ -35,9 +35,10 @@ type ChatService interface {
 	DeleteSession(ctx context.Context, id string) error
 
 	// BeginMessage stores the user message, resolves the agent config, and starts
-	// the agent stream. The caller must consume all events from the returned stream
-	// and then call CommitMessage.
-	BeginMessage(ctx context.Context, sessionID, content string) (*claude.Stream, *storage.ChatSession, error)
+	// a persistent agent session. The caller must consume events from session.Events()
+	// (breaking at each TypeResult), inject follow-up messages via session.Send() as
+	// needed, call session.Close() when done, and then call CommitMessage.
+	BeginMessage(ctx context.Context, sessionID, content string, opts agent.RunOptions) (*claude.Session, *storage.ChatSession, error)
 
 	// CommitMessage persists the assistant response and updates session metadata.
 	CommitMessage(ctx context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, isFirstMessage bool) error
@@ -126,7 +127,7 @@ func (s *chatService) DeleteSession(_ context.Context, id string) error {
 	return nil
 }
 
-func (s *chatService) BeginMessage(ctx context.Context, sessionID, content string) (*claude.Stream, *storage.ChatSession, error) {
+func (s *chatService) BeginMessage(ctx context.Context, sessionID, content string, opts agent.RunOptions) (*claude.Session, *storage.ChatSession, error) {
 	session, err := s.chatRepo.GetSession(sessionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading session: %w", err)
@@ -175,17 +176,17 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 		return nil, nil, fmt.Errorf("storing user message: %w", err)
 	}
 
-	stream, err := agent.StreamAgent(ctx, agentCfg, content, agent.RunOptions{
-		SessionID:     session.SDKSession,
-		LocalToolsMCP: s.localMCP,
-		MCPRegistry:   s.mcpRegistry,
-	})
+	opts.SessionID = session.SDKSession
+	opts.LocalToolsMCP = s.localMCP
+	opts.MCPRegistry = s.mcpRegistry
+
+	agentSession, err := agent.StartSession(ctx, agentCfg, content, opts)
 	if err != nil {
-		return nil, nil, fmt.Errorf("starting agent stream: %w", err)
+		return nil, nil, fmt.Errorf("starting agent session: %w", err)
 	}
 
-	s.logger.Info("message stream started", "session_id", sessionID)
-	return stream, session, nil
+	s.logger.Info("agent session started", "session_id", sessionID)
+	return agentSession, session, nil
 }
 
 func (s *chatService) CommitMessage(_ context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, _ bool) error {

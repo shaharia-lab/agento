@@ -9,11 +9,21 @@ import (
 	"github.com/go-chi/chi/v5"
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
 
+	"github.com/shaharia-lab/agento/internal/agent"
 	"github.com/shaharia-lab/agento/internal/service"
 )
 
+// sendSSERaw writes a raw JSON payload as an SSE event without re-marshaling.
+func sendSSERaw(w http.ResponseWriter, flusher http.Flusher, event string, raw json.RawMessage) {
+	_, _ = w.Write([]byte("event: " + event + "\ndata: "))
+	_, _ = w.Write(raw)
+	_, _ = w.Write([]byte("\n\n"))
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
 type createChatRequest struct {
-	// AgentSlug is optional. An empty value means no-agent (direct LLM) chat.
 	AgentSlug        string `json:"agent_slug"`
 	WorkingDirectory string `json:"working_directory"`
 	Model            string `json:"model"`
@@ -21,6 +31,10 @@ type createChatRequest struct {
 
 type sendMessageRequest struct {
 	Content string `json:"content"`
+}
+
+type provideInputRequest struct {
+	Answer string `json:"answer"`
 }
 
 func (s *Server) handleListChats(w http.ResponseWriter, r *http.Request) {
@@ -100,8 +114,41 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// BeginMessage validates the session, stores the user message, and starts streaming.
-	stream, session, err := s.chatSvc.BeginMessage(r.Context(), id, req.Content)
+	// inputCh receives the user's answer to an AskUserQuestion prompt.
+	// questionCh carries the question input data from the PermissionHandler
+	// (which runs in the SDK reader goroutine) to this HTTP handler goroutine
+	// so we can write user_input_required to SSE without a data race.
+	inputCh := make(chan string, 1)
+	questionCh := make(chan json.RawMessage, 4)
+
+	// PermissionHandler is called synchronously in the SDK reader goroutine
+	// before a tool executes. For AskUserQuestion we block here — the claude
+	// subprocess naturally pauses because it is waiting for our control_response.
+	permHandler := claude.PermissionHandler(func(toolName string, input json.RawMessage, _ claude.PermissionContext) claude.PermissionResult {
+		if toolName != "AskUserQuestion" {
+			return claude.PermissionResult{Behavior: "allow"}
+		}
+
+		// Signal the HTTP handler goroutine to send user_input_required over SSE.
+		select {
+		case questionCh <- input:
+		default:
+		}
+
+		// Block until the user submits their answer or the request is canceled.
+		select {
+		case answer := <-inputCh:
+			// Return the answers as the tool-call "error" content so the agent
+			// receives them and can process them in its next reasoning step.
+			return claude.PermissionResult{Behavior: "deny", Message: answer}
+		case <-r.Context().Done():
+			return claude.PermissionResult{Behavior: "deny", Message: "request canceled"}
+		}
+	})
+
+	agentSession, chatSession, err := s.chatSvc.BeginMessage(r.Context(), id, req.Content, agent.RunOptions{
+		PermissionHandler: permHandler,
+	})
 	if err != nil {
 		var nfe *service.NotFoundError
 		if errors.As(err, &nfe) {
@@ -113,9 +160,8 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	isFirstMessage := session.Title == "New Chat"
+	isFirstMessage := chatSession.Title == "New Chat"
 
-	// Set SSE headers — from here on we can only send events, not JSON errors.
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -125,60 +171,158 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		sendSSEEvent(w, nil, "error", map[string]string{"error": "streaming not supported"})
+		_ = agentSession.Close()
 		return
 	}
 
+	// Register the live session so handleProvideInput can inject answers.
+	s.liveSessions.put(id, &liveSession{session: agentSession, inputCh: inputCh})
+	defer func() {
+		s.liveSessions.delete(id)
+		_ = agentSession.Close()
+		close(questionCh)
+	}()
+
 	var assistantText string
 	var sdkSessionID string
+	// pendingInput holds the AskUserQuestion tool input from the most recent
+	// TypeAssistant event; non-nil means the agent asked the user something and
+	// we need to pause and collect the answer before the conversation can continue.
+	var pendingInput json.RawMessage
 
-	for event := range stream.Events() {
-		switch event.Type {
-		case claude.TypeStreamEvent:
-			if event.StreamEvent != nil {
-				delta := event.StreamEvent.Event.Delta
-				if delta != nil {
-					if delta.Type == "thinking_delta" && delta.Thinking != "" {
-						sendSSEEvent(w, flusher, "thinking", map[string]string{"text": delta.Thinking})
-					} else if delta.Type == "text_delta" && delta.Text != "" {
-						sendSSEEvent(w, flusher, "text", map[string]string{"delta": delta.Text})
-					}
-				}
+	eventsCh := agentSession.Events()
+	for {
+		select {
+		case event, ok := <-eventsCh:
+			if !ok {
+				goto done
+			}
+			if len(event.Raw) > 0 {
+				sendSSERaw(w, flusher, string(event.Type), event.Raw)
 			}
 
-		case claude.TypeResult:
-			if event.Result != nil {
+			switch event.Type {
+			case claude.TypeAssistant:
+				// Detect AskUserQuestion tool_use so we know to pause on TypeResult.
+				if input := extractAskUserQuestionInput(event.Raw); input != nil {
+					pendingInput = input
+					s.logger.Info("AskUserQuestion detected in stream", "session_id", id)
+				}
+
+			case claude.TypeResult:
+				if event.Result == nil {
+					continue
+				}
 				sdkSessionID = event.Result.SessionID
 				if event.Result.IsError {
-					sendSSEEvent(w, flusher, "error", map[string]string{"error": event.Result.Result})
 					return
 				}
 				assistantText = event.Result.Result
-				sendSSEEvent(w, flusher, "done", map[string]any{
-					"sdk_session_id": event.Result.SessionID,
-					"cost_usd":       event.Result.TotalCostUSD,
-					"usage": map[string]int{
-						"input_tokens":                event.Result.Usage.InputTokens,
-						"output_tokens":               event.Result.Usage.OutputTokens,
-						"cache_read_input_tokens":     event.Result.Usage.CacheReadInputTokens,
-						"cache_creation_input_tokens": event.Result.Usage.CacheCreationInputTokens,
-					},
-				})
+
+				if pendingInput != nil {
+					// Agent called AskUserQuestion — tell the frontend and wait for
+					// the user's answer before continuing the session.
+					s.logger.Info("sending user_input_required, waiting for answer", "session_id", id)
+					sendSSEEvent(w, flusher, "user_input_required", map[string]any{
+						"input": pendingInput,
+					})
+					pendingInput = nil
+
+					select {
+					case answer := <-inputCh:
+						s.logger.Info("received user answer, resuming session", "session_id", id)
+						if err := agentSession.Send(answer); err != nil {
+							s.logger.Error("inject answer failed", "session_id", id, "error", err)
+							return
+						}
+						assistantText = "" // reset for the next turn
+					case <-r.Context().Done():
+						return
+					}
+					// Continue event loop — second turn events are incoming.
+				} else {
+					// No pending question: this is the final result.
+					goto done
+				}
 			}
+
+		case qInput := <-questionCh:
+			// PermissionHandler path: subprocess paused on can_use_tool for
+			// AskUserQuestion (future-proofing; currently AskUserQuestion does
+			// not go through can_use_tool in any permission mode).
+			pendingInput = nil // prevent double-trigger from TypeResult
+			sendSSEEvent(w, flusher, "user_input_required", map[string]any{
+				"input": qInput,
+			})
+
+		case <-r.Context().Done():
+			return
 		}
 	}
 
-	// Update session title from first user message.
+done:
 	if isFirstMessage {
 		title := req.Content
 		if utf8.RuneCountInString(title) > 60 {
 			runes := []rune(title)
 			title = string(runes[:60]) + "..."
 		}
-		session.Title = title
+		chatSession.Title = title
 	}
 
-	// Persist assistant response and update session metadata.
-	if err := s.chatSvc.CommitMessage(r.Context(), session, assistantText, sdkSessionID, isFirstMessage); err != nil {
+	if err := s.chatSvc.CommitMessage(r.Context(), chatSession, assistantText, sdkSessionID, isFirstMessage); err != nil {
 		s.logger.Error("commit message failed", "session_id", id, "error", err)
+	}
+}
+
+// extractAskUserQuestionInput parses a raw assistant event and returns the
+// input JSON of the first AskUserQuestion tool_use content block, or nil.
+func extractAskUserQuestionInput(raw json.RawMessage) json.RawMessage {
+	var msg struct {
+		Message struct {
+			Content []struct {
+				Type  string          `json:"type"`
+				Name  string          `json:"name,omitempty"`
+				Input json.RawMessage `json:"input,omitempty"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return nil
+	}
+	for _, block := range msg.Message.Content {
+		if block.Type == "tool_use" && block.Name == "AskUserQuestion" {
+			return block.Input
+		}
+	}
+	return nil
+}
+
+// handleProvideInput injects the user's answer to an AskUserQuestion prompt.
+// It unblocks the PermissionHandler which was pausing the subprocess.
+func (s *Server) handleProvideInput(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var req provideInputRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+	if req.Answer == "" {
+		writeError(w, http.StatusBadRequest, "answer is required")
+		return
+	}
+
+	ls, ok := s.liveSessions.get(id)
+	if !ok {
+		writeError(w, http.StatusConflict, "no active session awaiting input for this chat")
+		return
+	}
+
+	select {
+	case ls.inputCh <- req.Answer:
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusConflict, "session is not currently awaiting input")
 	}
 }
