@@ -9,6 +9,7 @@ import type {
   MessageBlock,
   SDKContentBlock,
   AskUserQuestionItem,
+  SDKUserEvent,
 } from '@/types'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -21,6 +22,13 @@ import {
   Terminal,
   MessageSquare,
   Square,
+  FilePen,
+  FileText,
+  FileEdit,
+  Search,
+  Globe,
+  Bot,
+  type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -40,6 +48,10 @@ export default function ChatSessionPage() {
   const [showThinking, setShowThinking] = useState(false)
   const [toolCalls, setToolCalls] = useState<SDKContentBlock[]>([])
   const [systemStatus, setSystemStatus] = useState<string | null>(null)
+  // Tool results keyed by tool_use_id — populated from SDK "user" events during streaming.
+  const [streamingToolResults, setStreamingToolResults] = useState<
+    Record<string, Record<string, unknown>>
+  >({})
   // awaitingInput is set when the backend sends user_input_required — the SSE
   // stream stays open and the AskUserQuestion card becomes interactive.
   const [awaitingInput, setAwaitingInput] = useState(false)
@@ -85,6 +97,7 @@ export default function ChatSessionPage() {
       setToolCalls([])
       setSystemStatus(null)
       setAwaitingInput(false)
+      setStreamingToolResults({})
       setError(null)
 
       abortRef.current = new AbortController()
@@ -96,6 +109,8 @@ export default function ChatSessionPage() {
         // tool_use → text, depending on what the agent did first).
         let accumulated = ''
         let blocks: MessageBlock[] = []
+        // Tool results by tool_use_id, captured from SDK "user" events.
+        let toolResults: Record<string, Record<string, unknown>> = {}
 
         await sendMessage(
           id,
@@ -152,6 +167,14 @@ export default function ChatSessionPage() {
               // Make the streaming AskUserQuestion card interactive.
               setAwaitingInput(true)
             },
+            onToolResult: (event: SDKUserEvent) => {
+              const toolUseId = event.message.content[0]?.tool_use_id
+              if (toolUseId && event.tool_use_result) {
+                const result = event.tool_use_result as Record<string, unknown>
+                toolResults[toolUseId] = result
+                setStreamingToolResults(prev => ({ ...prev, [toolUseId]: result }))
+              }
+            },
             onResult: event => {
               if (event.is_error) {
                 const errMsg =
@@ -165,17 +188,25 @@ export default function ChatSessionPage() {
               // Build a rich message with ordered blocks so the render
               // reflects the exact flow: thinking → text → tool_use (or any
               // other ordering the agent chose).
+              // Attach any captured tool results to their matching tool_use blocks.
+              const finalBlocks: MessageBlock[] = blocks.map(b => {
+                if (b.type === 'tool_use' && b.id && toolResults[b.id]) {
+                  return { ...b, toolResult: toolResults[b.id] }
+                }
+                return b
+              })
               const assistantMsg: ChatMessage = {
                 role: 'assistant',
                 content: accumulated || event.result,
                 timestamp: new Date().toISOString(),
-                blocks: blocks.length > 0 ? [...blocks] : undefined,
+                blocks: finalBlocks.length > 0 ? finalBlocks : undefined,
               }
               setMessages(prev => [...prev, assistantMsg])
               // Reset per-turn local accumulators so a follow-up turn
               // (e.g. after AskUserQuestion is answered) starts clean.
               accumulated = ''
               blocks = []
+              toolResults = {}
               // Clear streaming UI state — the message now owns the content.
               setStreamingText('')
               setThinkingText('')
@@ -208,6 +239,7 @@ export default function ChatSessionPage() {
         setToolCalls([])
         setSystemStatus(null)
         setAwaitingInput(false)
+        setStreamingToolResults({})
       }
     },
     [id, streaming, detail],
@@ -307,6 +339,7 @@ export default function ChatSessionPage() {
                           key={j}
                           block={block}
                           isInteractive={canInteract}
+                          toolResult={block.toolResult}
                           onSubmit={
                             canInteract && id
                               ? answer => {
@@ -343,6 +376,7 @@ export default function ChatSessionPage() {
                 key={`stream-tool-${call.id ?? call.name}-${i}`}
                 block={{ type: 'tool_use', id: call.id, name: call.name, input: call.input }}
                 isInteractive={awaitingInput && call.name === 'AskUserQuestion'}
+                toolResult={call.id ? streamingToolResults[call.id] : undefined}
                 onSubmit={
                   awaitingInput && call.name === 'AskUserQuestion' && id
                     ? answer => {
@@ -507,7 +541,7 @@ function ThinkingBlock({ text }: { text: string }) {
       <div className="flex-1 max-w-[82%]">
         <button
           onClick={() => setExpanded(e => !e)}
-          className="flex items-center gap-1.5 text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors mb-1"
+          className="flex items-center gap-1.5 text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors mb-1 cursor-pointer"
         >
           {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
           Thinking
@@ -520,6 +554,64 @@ function ThinkingBlock({ text }: { text: string }) {
       </div>
     </div>
   )
+}
+
+/** Returns icon component, icon container background, and icon colour for a given tool name. */
+function getToolConfig(name: string): { Icon: LucideIcon; bg: string; color: string } {
+  switch (name) {
+    case 'Write':
+      return {
+        Icon: FilePen,
+        bg: 'bg-emerald-50 dark:bg-emerald-950/50',
+        color: 'text-emerald-600 dark:text-emerald-400',
+      }
+    case 'Read':
+      return {
+        Icon: FileText,
+        bg: 'bg-blue-50 dark:bg-blue-950/50',
+        color: 'text-blue-600 dark:text-blue-400',
+      }
+    case 'Edit':
+      return {
+        Icon: FileEdit,
+        bg: 'bg-orange-50 dark:bg-orange-950/50',
+        color: 'text-orange-600 dark:text-orange-400',
+      }
+    case 'Bash':
+      return {
+        Icon: Terminal,
+        bg: 'bg-zinc-100 dark:bg-zinc-800',
+        color: 'text-zinc-500 dark:text-zinc-400',
+      }
+    case 'Glob':
+    case 'Grep':
+      return {
+        Icon: Search,
+        bg: 'bg-violet-50 dark:bg-violet-950/50',
+        color: 'text-violet-500 dark:text-violet-400',
+      }
+    case 'WebFetch':
+    case 'WebSearch':
+      return {
+        Icon: Globe,
+        bg: 'bg-sky-50 dark:bg-sky-950/50',
+        color: 'text-sky-600 dark:text-sky-400',
+      }
+    case 'Task':
+    case 'TaskOutput':
+    case 'TaskStop':
+      return {
+        Icon: Bot,
+        bg: 'bg-amber-50 dark:bg-amber-950/50',
+        color: 'text-amber-600 dark:text-amber-400',
+      }
+    default:
+      return {
+        Icon: Terminal,
+        bg: 'bg-zinc-100 dark:bg-zinc-800',
+        color: 'text-zinc-500 dark:text-zinc-400',
+      }
+  }
 }
 
 /** Returns a short one-line summary for a tool call based on its input fields. */
@@ -554,14 +646,121 @@ function toolCallSummary(name: string, input: Record<string, unknown> | undefine
   }
 }
 
+/** Renders the expanded detail panel for a tool call based on the tool name. */
+function ToolCallDetail({
+  name,
+  input,
+  toolResult,
+}: {
+  name: string
+  input: Record<string, unknown> | undefined
+  toolResult: Record<string, unknown> | undefined
+}) {
+  if (name === 'Write') {
+    const content = typeof input?.content === 'string' ? input.content : null
+    if (content !== null) {
+      return (
+        <pre className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64">
+          {content}
+        </pre>
+      )
+    }
+  }
+
+  if (name === 'Read') {
+    const fileResult = toolResult as { type?: string; file?: { content?: string } } | undefined
+    const content = fileResult?.file?.content
+    if (content !== undefined) {
+      return (
+        <pre className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64">
+          {content}
+        </pre>
+      )
+    }
+    return (
+      <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-400 dark:text-zinc-500 italic">
+        File content not available
+      </div>
+    )
+  }
+
+  if (name === 'Edit') {
+    const editResult = toolResult as { structuredPatch?: Array<{ lines: string[] }> } | undefined
+    const patch = editResult?.structuredPatch
+
+    if (patch && patch.length > 0) {
+      return (
+        <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
+          {patch.flatMap((hunk, hi) =>
+            hunk.lines.map((line, li) => (
+              <div
+                key={`${hi}-${li}`}
+                className={cn(
+                  'px-3 py-0.5 leading-5 whitespace-pre',
+                  line.startsWith('-')
+                    ? 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400'
+                    : line.startsWith('+')
+                      ? 'bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400'
+                      : 'bg-zinc-50 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500',
+                )}
+              >
+                {line}
+              </div>
+            )),
+          )}
+        </div>
+      )
+    }
+
+    // Fallback: synthesize a simple diff from input old/new strings
+    const oldStr = typeof input?.old_string === 'string' ? input.old_string : ''
+    const newStr = typeof input?.new_string === 'string' ? input.new_string : ''
+    if (oldStr || newStr) {
+      return (
+        <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
+          {oldStr.split('\n').map((line, i) => (
+            <div
+              key={`old-${i}`}
+              className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400"
+            >
+              -{line}
+            </div>
+          ))}
+          {newStr.split('\n').map((line, i) => (
+            <div
+              key={`new-${i}`}
+              className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400"
+            >
+              +{line}
+            </div>
+          ))}
+        </div>
+      )
+    }
+  }
+
+  // Default: raw JSON
+  if (input !== undefined) {
+    return (
+      <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-48">
+        {JSON.stringify(input, null, 2)}
+      </div>
+    )
+  }
+
+  return null
+}
+
 function ToolCallCard({
   block,
   isInteractive,
   onSubmit,
+  toolResult,
 }: {
   block: Pick<SDKContentBlock, 'type' | 'id' | 'name' | 'input'>
   isInteractive?: boolean
   onSubmit?: (answer: string) => void
+  toolResult?: Record<string, unknown>
 }) {
   const [expanded, setExpanded] = useState(false)
   const name = block.name ?? 'unknown'
@@ -574,34 +773,45 @@ function ToolCallCard({
   }
 
   const summary = toolCallSummary(name, block.input)
+  const { Icon, bg, color } = getToolConfig(name)
+  // For file-based tools show just the basename in the header; tooltip shows full path.
+  const isFileTool = name === 'Read' || name === 'Write' || name === 'Edit'
+  const displaySummary = isFileTool && summary ? (summary.split('/').pop() ?? summary) : summary
 
   return (
     <div className="flex gap-3">
-      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0 mt-0.5">
-        <Terminal className="h-3.5 w-3.5" />
+      <div
+        className={cn('flex h-7 w-7 items-center justify-center rounded-full shrink-0 mt-0.5', bg)}
+      >
+        <Icon className={cn('h-3.5 w-3.5', color)} />
       </div>
       <div className="flex-1 min-w-0 max-w-[82%]">
         <button
           onClick={() => setExpanded(e => !e)}
-          className="flex w-full items-center gap-1.5 text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors mb-1 min-w-0"
+          className="flex w-full items-center gap-1.5 text-xs text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors mb-1 min-w-0 cursor-pointer"
         >
           {expanded ? (
             <ChevronDown className="h-3 w-3 shrink-0" />
           ) : (
             <ChevronRight className="h-3 w-3 shrink-0" />
           )}
-          <span className="font-mono font-medium shrink-0">{name}</span>
-          {summary && (
-            <span className="font-mono text-zinc-400 dark:text-zinc-500 truncate min-w-0">
-              ({summary})
+          <span className={cn('font-mono font-semibold shrink-0', color)}>{name}</span>
+          {displaySummary && (
+            <span
+              className="font-mono text-zinc-400 dark:text-zinc-500 truncate min-w-0"
+              title={summary}
+            >
+              {displaySummary}
             </span>
           )}
+          {toolResult && (
+            <span
+              className="ml-auto shrink-0 h-1.5 w-1.5 rounded-full bg-emerald-400"
+              title="Completed"
+            />
+          )}
         </button>
-        {expanded && block.input !== undefined && (
-          <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-48">
-            {JSON.stringify(block.input, null, 2)}
-          </div>
-        )}
+        {expanded && <ToolCallDetail name={name} input={block.input} toolResult={toolResult} />}
       </div>
     </div>
   )

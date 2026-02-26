@@ -25,11 +25,23 @@ type ChatSession struct {
 	UpdatedAt         time.Time `json:"updated_at"`
 }
 
+// MessageBlock represents a single ordered content block within an assistant message.
+// Blocks are stored alongside the message so the UI can reconstruct the full
+// thinking → text → tool_use rendering after a page reload.
+type MessageBlock struct {
+	Type  string          `json:"type"`            // "thinking" | "text" | "tool_use"
+	Text  string          `json:"text,omitempty"`  // for "thinking" and "text"
+	ID    string          `json:"id,omitempty"`    // for "tool_use"
+	Name  string          `json:"name,omitempty"`  // for "tool_use"
+	Input json.RawMessage `json:"input,omitempty"` // for "tool_use"
+}
+
 // ChatMessage represents a single message in a chat session.
 type ChatMessage struct {
-	Role      string    `json:"role"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
+	Role      string         `json:"role"`
+	Content   string         `json:"content"`
+	Timestamp time.Time      `json:"timestamp"`
+	Blocks    []MessageBlock `json:"blocks,omitempty"`
 }
 
 // ChatStore defines the interface for chat session persistence.
@@ -69,9 +81,10 @@ type jsonlRecord struct {
 	CreatedAt         time.Time `json:"created_at,omitempty"`
 	UpdatedAt         time.Time `json:"updated_at,omitempty"`
 	// message fields
-	Role      string    `json:"role,omitempty"`
-	Content   string    `json:"content,omitempty"`
-	Timestamp time.Time `json:"timestamp,omitempty"`
+	Role      string          `json:"role,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	Timestamp time.Time       `json:"timestamp,omitempty"`
+	Blocks    json.RawMessage `json:"blocks,omitempty"`
 }
 
 func (s *FSChatStore) sessionPath(id string) string {
@@ -169,7 +182,7 @@ func (s *FSChatStore) GetSessionWithMessages(id string) (*ChatSession, []ChatMes
 	var messages []ChatMessage
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
 
 	first := true
 	for scanner.Scan() {
@@ -195,11 +208,18 @@ func (s *FSChatStore) GetSessionWithMessages(id string) (*ChatSession, []ChatMes
 			continue
 		}
 		if rec.Type == "message" {
-			messages = append(messages, ChatMessage{
+			msg := ChatMessage{
 				Role:      rec.Role,
 				Content:   rec.Content,
 				Timestamp: rec.Timestamp,
-			})
+			}
+			if len(rec.Blocks) > 0 {
+				if err := json.Unmarshal(rec.Blocks, &msg.Blocks); err != nil {
+					// Non-fatal: skip malformed blocks rather than failing the whole load.
+					msg.Blocks = nil
+				}
+			}
+			messages = append(messages, msg)
 		}
 	}
 	if messages == nil {
@@ -247,11 +267,20 @@ func (s *FSChatStore) CreateSession(agentSlug, workingDir, model, settingsProfil
 
 // AppendMessage appends a message to the session's JSONL file.
 func (s *FSChatStore) AppendMessage(sessionID string, msg ChatMessage) error {
+	var blocksRaw json.RawMessage
+	if len(msg.Blocks) > 0 {
+		var err error
+		blocksRaw, err = json.Marshal(msg.Blocks)
+		if err != nil {
+			return fmt.Errorf("marshaling message blocks: %w", err)
+		}
+	}
 	rec := jsonlRecord{
 		Type:      "message",
 		Role:      msg.Role,
 		Content:   msg.Content,
 		Timestamp: msg.Timestamp,
+		Blocks:    blocksRaw,
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {

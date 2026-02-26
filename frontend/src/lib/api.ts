@@ -9,6 +9,7 @@ import type {
   SDKAssistantEvent,
   SDKStreamEventMessage,
   SDKResultEvent,
+  SDKUserEvent,
   ClaudeSettingsResponse,
   ClaudeCodeSettings,
   ClaudeSettingsProfile,
@@ -179,6 +180,11 @@ export interface StreamCallbacks {
    * The SSE connection stays open. Call provideInput() with the answer to continue.
    */
   onUserInputRequired?: (data: { input: Record<string, unknown> }) => void
+  /**
+   * Emitted when a tool finishes executing. Contains the tool result keyed by tool_use_id.
+   * Use this to render rich tool output (e.g. file content for Read, diff for Edit).
+   */
+  onToolResult?: (event: SDKUserEvent) => void
 }
 
 export async function sendMessage(
@@ -233,6 +239,9 @@ export async function sendMessage(
               break
             case 'user_input_required':
               callbacks.onUserInputRequired?.(data as { input: Record<string, unknown> })
+              break
+            case 'user':
+              callbacks.onToolResult?.(data as SDKUserEvent)
               break
           }
         } catch {

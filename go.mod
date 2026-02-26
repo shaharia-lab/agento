@@ -3,6 +3,7 @@ module github.com/shaharia-lab/agento
 go 1.24.11
 
 require (
+	github.com/creativeprojects/go-selfupdate v1.5.2
 	github.com/go-chi/chi/v5 v5.2.5
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/modelcontextprotocol/go-sdk v1.3.1
@@ -15,7 +16,6 @@ require (
 	code.gitea.io/sdk/gitea v0.22.1 // indirect
 	github.com/42wim/httpsig v1.2.3 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
-	github.com/creativeprojects/go-selfupdate v1.5.2 // indirect
 	github.com/davidmz/go-pageant v1.0.2 // indirect
 	github.com/go-fed/httpsig v1.1.0 // indirect
 	github.com/google/go-github/v74 v74.0.0 // indirect
