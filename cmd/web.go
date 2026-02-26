@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/shaharia-lab/agento/internal/api"
+	"github.com/shaharia-lab/agento/internal/build"
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/logger"
 	"github.com/shaharia-lab/agento/internal/server"
@@ -71,6 +72,9 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	sysLogger.Info("agento starting",
 		slog.Int("port", cfg.Port),
 		slog.String("data_dir", cfg.DataDir),
+		slog.String("version", build.Version),
+		slog.String("commit", build.CommitSHA),
+		slog.String("build_date", build.BuildDate),
 	)
 
 	agentStore := storage.NewFSAgentStore(cfg.AgentsDir())

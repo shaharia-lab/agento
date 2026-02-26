@@ -60,6 +60,9 @@ func (s *Server) Mount(r chi.Router) {
 	// Filesystem browser
 	r.Get("/fs", s.handleFSList)
 	r.Post("/fs/mkdir", s.handleFSMkdir)
+
+	// Build info
+	r.Get("/version", s.handleVersion)
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
