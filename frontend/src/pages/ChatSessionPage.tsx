@@ -1,11 +1,26 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { Fragment, useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { chatsApi, sendMessage } from '@/lib/api'
-import type { ChatDetail, ChatMessage, SDKContentBlock } from '@/types'
+import type {
+  ChatDetail,
+  ChatMessage,
+  SDKContentBlock,
+  ToolCallRecord,
+  AskUserQuestionItem,
+} from '@/types'
 import { Textarea } from '@/components/ui/textarea'
-import { ArrowLeft, Send, Loader2, ChevronDown, ChevronRight, Folder, Terminal } from 'lucide-react'
+import {
+  ArrowLeft,
+  Send,
+  Loader2,
+  ChevronDown,
+  ChevronRight,
+  Folder,
+  Terminal,
+  MessageSquare,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export default function ChatSessionPage() {
@@ -70,7 +85,11 @@ export default function ChatSessionPage() {
       abortRef.current = new AbortController()
 
       try {
+        // Local accumulators — avoids stale-closure issues with React state.
         let accumulated = ''
+        let thinkingAccumulated = ''
+        let toolCallsAccumulated: ToolCallRecord[] = []
+
         await sendMessage(
           id,
           content,
@@ -85,6 +104,12 @@ export default function ChatSessionPage() {
                 b => b.type === 'tool_use' && b.name,
               )
               if (toolUseBlocks.length > 0) {
+                const records: ToolCallRecord[] = toolUseBlocks.map(b => ({
+                  id: b.id,
+                  name: b.name!,
+                  input: b.input,
+                }))
+                toolCallsAccumulated = [...toolCallsAccumulated, ...records]
                 setToolCalls(prev => [...prev, ...toolUseBlocks])
               }
             },
@@ -92,6 +117,7 @@ export default function ChatSessionPage() {
               const delta = event.event.delta
               if (!delta) return
               if (delta.type === 'thinking_delta' && delta.thinking) {
+                thinkingAccumulated += delta.thinking
                 setThinkingText(prev => prev + delta.thinking)
                 setShowThinking(true)
               } else if (delta.type === 'text_delta' && delta.text) {
@@ -109,12 +135,16 @@ export default function ChatSessionPage() {
                 setStreamingText('')
                 return
               }
+              // Build a rich message that preserves thinking + tool calls.
               const assistantMsg: ChatMessage = {
                 role: 'assistant',
                 content: accumulated || event.result,
                 timestamp: new Date().toISOString(),
+                thinking: thinkingAccumulated || undefined,
+                toolCalls: toolCallsAccumulated.length > 0 ? toolCallsAccumulated : undefined,
               }
               setMessages(prev => [...prev, assistantMsg])
+              // Clear streaming state — the message now owns the content.
               setStreamingText('')
               setThinkingText('')
               setShowThinking(false)
@@ -138,6 +168,8 @@ export default function ChatSessionPage() {
       } finally {
         setStreaming(false)
         setStreamingText('')
+        setThinkingText('')
+        setShowThinking(false)
         setToolCalls([])
         setSystemStatus(null)
       }
@@ -221,7 +253,17 @@ export default function ChatSessionPage() {
           )}
 
           {messages.map((msg, i) => (
-            <MessageBubble key={i} message={msg} />
+            <Fragment key={i}>
+              {msg.role === 'assistant' && msg.thinking && <ThinkingBlock text={msg.thinking} />}
+              {msg.role === 'assistant' &&
+                msg.toolCalls?.map((call, j) => (
+                  <ToolCallCard
+                    key={`${i}-tool-${j}`}
+                    block={{ type: 'tool_use', id: call.id, name: call.name, input: call.input }}
+                  />
+                ))}
+              <MessageBubble message={msg} />
+            </Fragment>
           ))}
 
           {/* Streaming: thinking */}
@@ -230,7 +272,10 @@ export default function ChatSessionPage() {
           {/* Streaming: tool call cards (inline, in order of arrival) */}
           {streaming &&
             toolCalls.map((call, i) => (
-              <ToolCallCard key={`${call.id ?? call.name}-${i}`} block={call} />
+              <ToolCallCard
+                key={`stream-tool-${call.id ?? call.name}-${i}`}
+                block={{ type: 'tool_use', id: call.id, name: call.name, input: call.input }}
+              />
             ))}
 
           {/* Streaming: system status (tool execution in progress) */}
@@ -395,9 +440,18 @@ function ThinkingBlock({ text }: { text: string }) {
   )
 }
 
-function ToolCallCard({ block }: { block: SDKContentBlock }) {
+function ToolCallCard({
+  block,
+}: {
+  block: Pick<SDKContentBlock, 'type' | 'id' | 'name' | 'input'>
+}) {
   const [expanded, setExpanded] = useState(false)
   const name = block.name ?? 'unknown'
+
+  // AskUserQuestion gets its own rich UI instead of a generic JSON dump.
+  if (name === 'AskUserQuestion' && block.input) {
+    return <AskUserQuestionCard input={block.input} />
+  }
 
   return (
     <div className="flex gap-3">
@@ -417,6 +471,47 @@ function ToolCallCard({ block }: { block: SDKContentBlock }) {
             {JSON.stringify(block.input, null, 2)}
           </div>
         )}
+      </div>
+    </div>
+  )
+}
+
+function AskUserQuestionCard({ input }: { input: Record<string, unknown> }) {
+  const questions = (input.questions as AskUserQuestionItem[] | undefined) ?? []
+  if (questions.length === 0) return null
+
+  return (
+    <div className="flex gap-3">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0 mt-0.5">
+        <MessageSquare className="h-3.5 w-3.5" />
+      </div>
+      <div className="flex-1 min-w-0 max-w-[82%] space-y-3">
+        {questions.map((q, i) => (
+          <div key={i} className="rounded-lg border border-zinc-200 bg-white p-3">
+            {q.header && (
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                {q.header}
+              </div>
+            )}
+            <div className="text-sm font-medium text-zinc-800 mb-2">{q.question}</div>
+            <div className="flex flex-wrap gap-1.5">
+              {q.options.map((opt, j) => (
+                <div
+                  key={j}
+                  className="rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs"
+                >
+                  <span className="font-medium text-zinc-700">{opt.label}</span>
+                  {opt.description && (
+                    <span className="ml-1 text-zinc-400"> — {opt.description}</span>
+                  )}
+                </div>
+              ))}
+            </div>
+            {q.multiSelect && (
+              <div className="mt-2 text-[10px] text-zinc-400">Multiple selections allowed</div>
+            )}
+          </div>
+        ))}
       </div>
     </div>
   )

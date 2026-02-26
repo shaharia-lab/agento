@@ -50,10 +50,35 @@ export interface FSListResponse {
   entries: FSEntry[]
 }
 
+/** A tool call that was made during an assistant turn, stored with the message. */
+export interface ToolCallRecord {
+  id?: string
+  name: string
+  input?: Record<string, unknown>
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
   timestamp: string
+  /** Thinking text for assistant messages (in-memory only, not persisted). */
+  thinking?: string
+  /** Tool calls made during this assistant turn (in-memory only, not persisted). */
+  toolCalls?: ToolCallRecord[]
+}
+
+// ── AskUserQuestion tool types ─────────────────────────────────────────────
+
+export interface AskUserQuestionOption {
+  label: string
+  description?: string
+}
+
+export interface AskUserQuestionItem {
+  question: string
+  header?: string
+  multiSelect?: boolean
+  options: AskUserQuestionOption[]
 }
 
 export interface ChatDetail {
