@@ -14,6 +14,9 @@ import type {
   ClaudeCodeSettings,
   ClaudeSettingsProfile,
   ClaudeSettingsProfileDetail,
+  ClaudeProject,
+  ClaudeSessionSummary,
+  ClaudeSessionDetail,
 } from '../types'
 
 const BASE = '/api'
@@ -157,6 +160,43 @@ export const filesystemApi = {
     request<{ path: string }>('/fs/mkdir', {
       method: 'POST',
       body: JSON.stringify({ path }),
+    }),
+}
+
+// ── Claude Code sessions ──────────────────────────────────────────────────────
+
+export const claudeSessionsApi = {
+  /**
+   * List all Claude Code sessions, optionally filtered by project path or search query.
+   */
+  list: (params?: { project?: string; q?: string }) => {
+    const qs = new URLSearchParams()
+    if (params?.project) qs.set('project', params.project)
+    if (params?.q) qs.set('q', params.q)
+    const query = qs.toString()
+    return request<ClaudeSessionSummary[]>(`/claude-sessions${query ? `?${query}` : ''}`)
+  },
+
+  /** List all projects (decoded paths) found in ~/.claude/projects/. */
+  projects: () => request<ClaudeProject[]>('/claude-sessions/projects'),
+
+  /** Get the full detail of a single session including messages and todos. */
+  get: (id: string) => request<ClaudeSessionDetail>(`/claude-sessions/${id}`),
+
+  /** Invalidate the server-side session cache and trigger a background rescan. */
+  refresh: () =>
+    fetch(`${BASE}/claude-sessions/refresh`, { method: 'POST' }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
+
+  /**
+   * Create a new Agento chat session that inherits the given Claude Code session ID,
+   * allowing the conversation to be continued in Agento's chat interface.
+   * Returns the new Agento chat ID.
+   */
+  continue: (sessionId: string) =>
+    request<{ chat_id: string }>(`/claude-sessions/${sessionId}/continue`, {
+      method: 'POST',
     }),
 }
 

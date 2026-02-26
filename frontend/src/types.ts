@@ -24,6 +24,11 @@ export interface ChatSession {
   model: string
   created_at: string
   updated_at: string
+  /** Cumulative token usage across all turns. Zero when not yet populated. */
+  total_input_tokens?: number
+  total_output_tokens?: number
+  total_cache_creation_tokens?: number
+  total_cache_read_tokens?: number
 }
 
 export interface UserSettings {
@@ -382,3 +387,64 @@ export const BUILT_IN_TOOLS = [
   'Task',
   'current_time',
 ]
+
+// ── Claude Code sessions (~/.claude) ─────────────────────────────────────────
+
+export interface ClaudeTokenUsage {
+  input_tokens: number
+  output_tokens: number
+  cache_creation_tokens: number
+  cache_read_tokens: number
+}
+
+export interface ClaudeProject {
+  encoded_name: string
+  decoded_path: string
+  session_count: number
+}
+
+export interface ClaudeSessionSummary {
+  session_id: string
+  project_path: string
+  preview: string
+  start_time: string
+  last_activity: string
+  message_count: number
+  usage: ClaudeTokenUsage
+  git_branch?: string
+  model?: string
+  cwd?: string
+}
+
+export interface ClaudeNormalizedBlock {
+  type: 'thinking' | 'text' | 'tool_use'
+  text?: string
+  id?: string
+  name?: string
+  input?: Record<string, unknown>
+}
+
+export interface ClaudeMessage {
+  uuid: string
+  parent_uuid?: string
+  type: 'user' | 'assistant' | 'progress'
+  timestamp: string
+  role?: string
+  content?: string
+  blocks?: ClaudeNormalizedBlock[]
+  usage?: ClaudeTokenUsage
+  git_branch?: string
+  is_sidechain?: boolean
+  children?: ClaudeMessage[]
+}
+
+export interface ClaudeTodo {
+  content: string
+  status: 'completed' | 'in_progress' | 'pending'
+  active_form?: string
+}
+
+export interface ClaudeSessionDetail extends ClaudeSessionSummary {
+  messages: ClaudeMessage[]
+  todos: ClaudeTodo[]
+}

@@ -1,6 +1,15 @@
 import { useState, useEffect } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
-import { MessageSquare, Bot, Plus, PanelLeftClose, PanelLeftOpen, X, Settings } from 'lucide-react'
+import {
+  MessageSquare,
+  Bot,
+  Plus,
+  PanelLeftClose,
+  PanelLeftOpen,
+  X,
+  Settings,
+  History,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip } from '@/components/ui/tooltip'
 
@@ -56,6 +65,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
 
   const navItems = [
     { to: '/chats', icon: MessageSquare, label: 'Chats' },
+    { to: '/claude-sessions', icon: History, label: 'Claude Sessions' },
     { to: '/agents', icon: Bot, label: 'Agents' },
   ]
 

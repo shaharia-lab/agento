@@ -14,6 +14,33 @@ import (
 	"github.com/shaharia-lab/agento/internal/storage"
 )
 
+// tokenAccumulator accumulates token usage across multiple TypeResult events (multi-turn).
+type tokenAccumulator struct {
+	InputTokens              int
+	OutputTokens             int
+	CacheCreationInputTokens int
+	CacheReadInputTokens     int
+}
+
+func (t *tokenAccumulator) add(r *claude.Result) {
+	if r == nil {
+		return
+	}
+	t.InputTokens += r.Usage.InputTokens
+	t.OutputTokens += r.Usage.OutputTokens
+	t.CacheCreationInputTokens += r.Usage.CacheCreationInputTokens
+	t.CacheReadInputTokens += r.Usage.CacheReadInputTokens
+}
+
+func (t *tokenAccumulator) toUsageStats() agent.UsageStats {
+	return agent.UsageStats{
+		InputTokens:              t.InputTokens,
+		OutputTokens:             t.OutputTokens,
+		CacheCreationInputTokens: t.CacheCreationInputTokens,
+		CacheReadInputTokens:     t.CacheReadInputTokens,
+	}
+}
+
 // assistantEventRaw is used to parse content blocks out of a raw "assistant" SSE event.
 type assistantEventRaw struct {
 	Message struct {
@@ -204,6 +231,9 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	// blocks accumulates ordered content blocks (thinking/text/tool_use) across
 	// all assistant events so they can be persisted and re-rendered after reload.
 	var blocks []storage.MessageBlock
+	// tokens accumulates usage across all TypeResult events (multi-turn sessions
+	// may emit more than one).
+	var tokens tokenAccumulator
 	// pendingInput holds the AskUserQuestion tool input from the most recent
 	// TypeAssistant event; non-nil means the agent asked the user something and
 	// we need to pause and collect the answer before the conversation can continue.
@@ -256,6 +286,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				sdkSessionID = event.Result.SessionID
+				tokens.add(event.Result)
 				if event.Result.IsError {
 					return
 				}
@@ -312,7 +343,7 @@ done:
 		chatSession.Title = title
 	}
 
-	if err := s.chatSvc.CommitMessage(r.Context(), chatSession, assistantText, sdkSessionID, isFirstMessage, blocks); err != nil {
+	if err := s.chatSvc.CommitMessage(r.Context(), chatSession, assistantText, sdkSessionID, isFirstMessage, blocks, tokens.toUsageStats()); err != nil {
 		s.logger.Error("commit message failed", "session_id", id, "error", err)
 	}
 }

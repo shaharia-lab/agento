@@ -15,6 +15,7 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/api"
 	"github.com/shaharia-lab/agento/internal/build"
+	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/logger"
 	"github.com/shaharia-lab/agento/internal/server"
@@ -110,7 +111,11 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	agentSvc := service.NewAgentService(agentStore, sysLogger)
 	chatSvc := service.NewChatService(chatStore, agentStore, mcpRegistry, localToolsMCP, cfg.DefaultModel, sysLogger)
 
-	apiSrv := api.New(agentSvc, chatSvc, settingsMgr, sysLogger)
+	// Start background scan of ~/.claude/projects so Claude Sessions are available quickly.
+	sessionCache := claudesessions.NewCache(sysLogger)
+	sessionCache.StartBackgroundScan()
+
+	apiSrv := api.New(agentSvc, chatSvc, settingsMgr, sysLogger, sessionCache)
 	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger)
 
 	url := fmt.Sprintf("http://localhost:%d", cfg.Port)
