@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
-import { MessageSquare, Bot, Plus, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react'
+import { MessageSquare, Bot, Plus, PanelLeftClose, PanelLeftOpen, X, Settings } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip } from '@/components/ui/tooltip'
 
@@ -153,11 +153,46 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
         </div>
       </nav>
 
-      {/* Collapse toggle — desktop only */}
+      {/* Settings link + Collapse toggle — desktop only */}
       {!isMobile && (
         <div
           className={cn('border-t border-zinc-200 py-2 shrink-0', collapsed ? 'px-2.5' : 'px-2')}
         >
+          {/* Settings link */}
+          {collapsed ? (
+            <Tooltip content="Settings">
+              <NavLink
+                to="/settings"
+                onClick={handleNavClick}
+                className={({ isActive }) =>
+                  cn(
+                    'flex h-9 w-9 items-center justify-center rounded-md transition-colors mx-auto mb-1',
+                    isActive
+                      ? 'bg-zinc-900 text-white'
+                      : 'text-zinc-400 hover:bg-zinc-200 hover:text-zinc-700',
+                  )
+                }
+              >
+                <Settings className="h-4 w-4" />
+              </NavLink>
+            </Tooltip>
+          ) : (
+            <NavLink
+              to="/settings"
+              onClick={handleNavClick}
+              className={({ isActive }) =>
+                cn(
+                  'flex items-center rounded-md text-zinc-400 hover:text-zinc-700 hover:bg-zinc-200 transition-colors h-8 w-full px-3 gap-2 mb-1',
+                  isActive && 'bg-zinc-900 text-white hover:bg-zinc-900 hover:text-white',
+                )
+              }
+            >
+              <Settings className="h-4 w-4 shrink-0" />
+              <span className="text-xs">Settings</span>
+            </NavLink>
+          )}
+
+          {/* Collapse toggle */}
           <button
             onClick={() => setCollapsed(c => !c)}
             className={cn(

@@ -1,4 +1,11 @@
-import type { Agent, ChatSession, ChatDetail } from '../types'
+import type {
+  Agent,
+  ChatSession,
+  ChatDetail,
+  SettingsResponse,
+  UserSettings,
+  FSListResponse,
+} from '../types'
 
 const BASE = '/api'
 
@@ -43,16 +50,50 @@ export const chatsApi = {
   /**
    * Creates a new chat session.
    * @param agentSlug - optional agent slug. Pass empty string or omit for no-agent chat.
+   * @param workingDirectory - optional working directory for the session.
+   * @param model - optional model override for the session.
    */
-  create: (agentSlug?: string) =>
+  create: (agentSlug?: string, workingDirectory?: string, model?: string) =>
     request<ChatSession>('/chats', {
       method: 'POST',
-      body: JSON.stringify({ agent_slug: agentSlug ?? '' }),
+      body: JSON.stringify({
+        agent_slug: agentSlug ?? '',
+        working_directory: workingDirectory ?? '',
+        model: model ?? '',
+      }),
     }),
 
   delete: (id: string) =>
     fetch(`${BASE}/chats/${id}`, { method: 'DELETE' }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+
+export const settingsApi = {
+  get: () => request<SettingsResponse>('/settings'),
+
+  update: (data: Partial<UserSettings>) =>
+    request<SettingsResponse>('/settings', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+}
+
+// ── Filesystem ────────────────────────────────────────────────────────────────
+
+export const filesystemApi = {
+  list: (path?: string) => {
+    const params = new URLSearchParams()
+    if (path) params.set('path', path)
+    return request<FSListResponse>(`/fs?${params.toString()}`)
+  },
+
+  mkdir: (path: string) =>
+    request<{ path: string }>('/fs/mkdir', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
     }),
 }
 

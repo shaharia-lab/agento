@@ -25,8 +25,12 @@ type AppConfig struct {
 	LogLevel string `envconfig:"LOG_LEVEL" default:"info"`
 
 	// DefaultModel is the Claude model used for no-agent (direct) chat sessions.
-	// Can be overridden with the DEFAULT_MODEL environment variable.
-	DefaultModel string `envconfig:"DEFAULT_MODEL" default:"eu.anthropic.claude-sonnet-4-5-20250929-v1:0"`
+	// Can be overridden with the AGENTO_DEFAULT_MODEL environment variable.
+	DefaultModel string `envconfig:"AGENTO_DEFAULT_MODEL" default:"eu.anthropic.claude-sonnet-4-5-20250929-v1:0"`
+
+	// WorkingDir is the default working directory for chat sessions.
+	// Can be overridden with the AGENTO_WORKING_DIR environment variable.
+	WorkingDir string `envconfig:"AGENTO_WORKING_DIR"`
 }
 
 // Load reads AppConfig from environment variables using envconfig.

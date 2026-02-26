@@ -14,7 +14,9 @@ import (
 
 type createChatRequest struct {
 	// AgentSlug is optional. An empty value means no-agent (direct LLM) chat.
-	AgentSlug string `json:"agent_slug"`
+	AgentSlug        string `json:"agent_slug"`
+	WorkingDirectory string `json:"working_directory"`
+	Model            string `json:"model"`
 }
 
 type sendMessageRequest struct {
@@ -38,7 +40,7 @@ func (s *Server) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := s.chatSvc.CreateSession(r.Context(), req.AgentSlug)
+	session, err := s.chatSvc.CreateSession(r.Context(), req.AgentSlug, req.WorkingDirectory, req.Model)
 	if err != nil {
 		var nfe *service.NotFoundError
 		if errors.As(err, &nfe) {

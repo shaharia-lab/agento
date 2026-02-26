@@ -42,13 +42,13 @@ linters:
     misspell:
       locale: US
 
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - errcheck
-    # AgentResult is intentionally named with the package prefix for clarity at call sites.
-    - path: internal/agent/runner\.go
-      linters:
-        - revive
-      text: "stutters"
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+      # AgentResult is intentionally named with the package prefix for clarity at call sites.
+      - path: internal/agent/runner\.go
+        linters:
+          - revive
+        text: "stutters"

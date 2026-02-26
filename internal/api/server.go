@@ -8,22 +8,25 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/service"
 )
 
 // Server holds all dependencies for the REST API handlers.
 type Server struct {
-	agentSvc service.AgentService
-	chatSvc  service.ChatService
-	logger   *slog.Logger
+	agentSvc    service.AgentService
+	chatSvc     service.ChatService
+	settingsMgr *config.SettingsManager
+	logger      *slog.Logger
 }
 
 // New creates a new API Server backed by the provided services.
-func New(agentSvc service.AgentService, chatSvc service.ChatService, logger *slog.Logger) *Server {
+func New(agentSvc service.AgentService, chatSvc service.ChatService, settingsMgr *config.SettingsManager, logger *slog.Logger) *Server {
 	return &Server{
-		agentSvc: agentSvc,
-		chatSvc:  chatSvc,
-		logger:   logger,
+		agentSvc:    agentSvc,
+		chatSvc:     chatSvc,
+		settingsMgr: settingsMgr,
+		logger:      logger,
 	}
 }
 
@@ -42,6 +45,14 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/chats/{id}", s.handleGetChat)
 	r.Delete("/chats/{id}", s.handleDeleteChat)
 	r.Post("/chats/{id}/messages", s.handleSendMessage)
+
+	// Settings
+	r.Get("/settings", s.handleGetSettings)
+	r.Put("/settings", s.handleUpdateSettings)
+
+	// Filesystem browser
+	r.Get("/fs", s.handleFSList)
+	r.Post("/fs/mkdir", s.handleFSMkdir)
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────

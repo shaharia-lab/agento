@@ -5,7 +5,7 @@ import remarkGfm from 'remark-gfm'
 import { chatsApi, sendMessage } from '@/lib/api'
 import type { ChatDetail, ChatMessage } from '@/types'
 import { Textarea } from '@/components/ui/textarea'
-import { ArrowLeft, Send, Loader2, ChevronDown, ChevronRight } from 'lucide-react'
+import { ArrowLeft, Send, Loader2, ChevronDown, ChevronRight, Folder } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export default function ChatSessionPage() {
@@ -264,6 +264,31 @@ export default function ChatSessionPage() {
             )}
           </button>
         </div>
+        {/* Session info pills */}
+        {detail && (detail.session.working_directory || detail.session.model) && (
+          <div className="flex items-center gap-3 max-w-4xl mx-auto mt-1.5">
+            {detail.session.working_directory && (
+              <span
+                className="flex items-center gap-1 text-xs text-zinc-400 truncate max-w-[200px]"
+                title={detail.session.working_directory}
+              >
+                <Folder className="h-3 w-3 shrink-0" />
+                {detail.session.working_directory}
+              </span>
+            )}
+            {detail.session.working_directory && detail.session.model && (
+              <span className="text-zinc-200">•</span>
+            )}
+            {detail.session.model && (
+              <span
+                className="text-xs text-zinc-400 font-mono truncate max-w-[180px]"
+                title={detail.session.model}
+              >
+                {detail.session.model}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   )

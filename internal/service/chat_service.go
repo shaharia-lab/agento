@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
@@ -27,7 +28,8 @@ type ChatService interface {
 	GetSessionWithMessages(ctx context.Context, id string) (*storage.ChatSession, []storage.ChatMessage, error)
 
 	// CreateSession starts a new chat session. agentSlug may be empty for no-agent chat.
-	CreateSession(ctx context.Context, agentSlug string) (*storage.ChatSession, error)
+	// workingDir and model are stored with the session and used during message processing.
+	CreateSession(ctx context.Context, agentSlug, workingDir, model string) (*storage.ChatSession, error)
 
 	// DeleteSession removes a session and all its messages.
 	DeleteSession(ctx context.Context, id string) error
@@ -95,7 +97,7 @@ func (s *chatService) GetSessionWithMessages(_ context.Context, id string) (*sto
 	return session, msgs, nil
 }
 
-func (s *chatService) CreateSession(_ context.Context, agentSlug string) (*storage.ChatSession, error) {
+func (s *chatService) CreateSession(_ context.Context, agentSlug, workingDir, model string) (*storage.ChatSession, error) {
 	// Validate agent slug if provided.
 	if agentSlug != "" {
 		agentCfg, err := s.agentRepo.Get(agentSlug)
@@ -107,7 +109,7 @@ func (s *chatService) CreateSession(_ context.Context, agentSlug string) (*stora
 		}
 	}
 
-	session, err := s.chatRepo.CreateSession(agentSlug)
+	session, err := s.chatRepo.CreateSession(agentSlug, workingDir, model)
 	if err != nil {
 		return nil, fmt.Errorf("creating session: %w", err)
 	}
@@ -134,7 +136,7 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 	}
 
 	// Resolve agent config. For no-agent sessions, synthesize a minimal config
-	// using the configured default model so the SDK still has a model to target.
+	// using the session's model (or the default model) so the SDK still has a model to target.
 	var agentCfg *config.AgentConfig
 	if session.AgentSlug != "" {
 		agentCfg, err = s.agentRepo.Get(session.AgentSlug)
@@ -145,10 +147,21 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 			return nil, nil, &NotFoundError{Resource: "agent", ID: session.AgentSlug}
 		}
 	} else {
-		// No-agent (direct) chat: use the default model with no system prompt.
+		// No-agent (direct) chat: use the session's model, falling back to the default.
+		model := session.Model
+		if model == "" {
+			model = s.defaultModel
+		}
 		agentCfg = &config.AgentConfig{
-			Model:    s.defaultModel,
+			Model:    model,
 			Thinking: "adaptive",
+		}
+	}
+
+	// Change working directory if the session has one configured.
+	if session.WorkingDir != "" {
+		if err := os.Chdir(session.WorkingDir); err != nil {
+			return nil, nil, fmt.Errorf("changing working directory: %w", err)
 		}
 	}
 
