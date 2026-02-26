@@ -560,25 +560,57 @@ function ThinkingBlock({ text }: { text: string }) {
 function getToolConfig(name: string): { Icon: LucideIcon; bg: string; color: string } {
   switch (name) {
     case 'Write':
-      return { Icon: FilePen, bg: 'bg-emerald-50', color: 'text-emerald-600' }
+      return {
+        Icon: FilePen,
+        bg: 'bg-emerald-50 dark:bg-emerald-950/50',
+        color: 'text-emerald-600 dark:text-emerald-400',
+      }
     case 'Read':
-      return { Icon: FileText, bg: 'bg-blue-50', color: 'text-blue-600' }
+      return {
+        Icon: FileText,
+        bg: 'bg-blue-50 dark:bg-blue-950/50',
+        color: 'text-blue-600 dark:text-blue-400',
+      }
     case 'Edit':
-      return { Icon: FileEdit, bg: 'bg-orange-50', color: 'text-orange-600' }
+      return {
+        Icon: FileEdit,
+        bg: 'bg-orange-50 dark:bg-orange-950/50',
+        color: 'text-orange-600 dark:text-orange-400',
+      }
     case 'Bash':
-      return { Icon: Terminal, bg: 'bg-zinc-100', color: 'text-zinc-500' }
+      return {
+        Icon: Terminal,
+        bg: 'bg-zinc-100 dark:bg-zinc-800',
+        color: 'text-zinc-500 dark:text-zinc-400',
+      }
     case 'Glob':
     case 'Grep':
-      return { Icon: Search, bg: 'bg-violet-50', color: 'text-violet-500' }
+      return {
+        Icon: Search,
+        bg: 'bg-violet-50 dark:bg-violet-950/50',
+        color: 'text-violet-500 dark:text-violet-400',
+      }
     case 'WebFetch':
     case 'WebSearch':
-      return { Icon: Globe, bg: 'bg-sky-50', color: 'text-sky-600' }
+      return {
+        Icon: Globe,
+        bg: 'bg-sky-50 dark:bg-sky-950/50',
+        color: 'text-sky-600 dark:text-sky-400',
+      }
     case 'Task':
     case 'TaskOutput':
     case 'TaskStop':
-      return { Icon: Bot, bg: 'bg-amber-50', color: 'text-amber-600' }
+      return {
+        Icon: Bot,
+        bg: 'bg-amber-50 dark:bg-amber-950/50',
+        color: 'text-amber-600 dark:text-amber-400',
+      }
     default:
-      return { Icon: Terminal, bg: 'bg-zinc-100', color: 'text-zinc-500' }
+      return {
+        Icon: Terminal,
+        bg: 'bg-zinc-100 dark:bg-zinc-800',
+        color: 'text-zinc-500 dark:text-zinc-400',
+      }
   }
 }
 
@@ -628,7 +660,7 @@ function ToolCallDetail({
     const content = typeof input?.content === 'string' ? input.content : null
     if (content !== null) {
       return (
-        <pre className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64">
+        <pre className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64">
           {content}
         </pre>
       )
@@ -640,13 +672,13 @@ function ToolCallDetail({
     const content = fileResult?.file?.content
     if (content !== undefined) {
       return (
-        <pre className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-700 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64">
+        <pre className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64">
           {content}
         </pre>
       )
     }
     return (
-      <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-400 italic">
+      <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-400 dark:text-zinc-500 italic">
         File content not available
       </div>
     )
@@ -660,7 +692,7 @@ function ToolCallDetail({
 
     if (patch && patch.length > 0) {
       return (
-        <div className="rounded-lg border border-zinc-100 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
+        <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
           {patch.flatMap((hunk, hi) =>
             hunk.lines.map((line, li) => (
               <div
@@ -668,10 +700,10 @@ function ToolCallDetail({
                 className={cn(
                   'px-3 py-0.5 leading-5 whitespace-pre',
                   line.startsWith('-')
-                    ? 'bg-red-50 text-red-700'
+                    ? 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400'
                     : line.startsWith('+')
-                      ? 'bg-green-50 text-green-700'
-                      : 'bg-zinc-50 text-zinc-400',
+                      ? 'bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400'
+                      : 'bg-zinc-50 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500',
                 )}
               >
                 {line}
@@ -687,14 +719,14 @@ function ToolCallDetail({
     const newStr = typeof input?.new_string === 'string' ? input.new_string : ''
     if (oldStr || newStr) {
       return (
-        <div className="rounded-lg border border-zinc-100 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
+        <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
           {oldStr.split('\n').map((line, i) => (
-            <div key={`old-${i}`} className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 text-red-700">
+            <div key={`old-${i}`} className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400">
               -{line}
             </div>
           ))}
           {newStr.split('\n').map((line, i) => (
-            <div key={`new-${i}`} className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 text-green-700">
+            <div key={`new-${i}`} className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400">
               +{line}
             </div>
           ))}
@@ -706,7 +738,7 @@ function ToolCallDetail({
   // Default: raw JSON
   if (input !== undefined) {
     return (
-      <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-48">
+      <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-48">
         {JSON.stringify(input, null, 2)}
       </div>
     )
