@@ -185,10 +185,10 @@ export default function ChatsPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-zinc-100 px-4 sm:px-6 py-4 shrink-0">
+      <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 py-4 shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-zinc-900">Chats</h1>
-          <p className="text-xs text-zinc-500 mt-0.5">
+          <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Chats</h1>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
             {sessions.length} conversation{sessions.length !== 1 ? 's' : ''}
           </p>
         </div>
@@ -204,14 +204,14 @@ export default function ChatsPage() {
 
       {/* Filters */}
       {sessions.length > 0 && (
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 px-4 sm:px-6 py-3 border-b border-zinc-100 shrink-0">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 px-4 sm:px-6 py-3 border-b border-zinc-100 dark:border-zinc-700/50 shrink-0">
           <div className="relative flex-1 sm:max-w-xs">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400" />
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500" />
             <input
               value={search}
               onChange={e => setSearch(e.target.value)}
               placeholder="Search conversations…"
-              className="w-full rounded-md border border-zinc-200 bg-white pl-8 pr-3 py-1.5 text-sm placeholder:text-zinc-400 focus:outline-none focus:ring-1 focus:ring-zinc-900 focus:border-zinc-900"
+              className="w-full rounded-md border border-zinc-200 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 pl-8 pr-3 py-1.5 text-sm placeholder:text-zinc-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400 focus:border-zinc-900 dark:focus:border-zinc-400"
             />
           </div>
           {agents.length > 1 && (
@@ -263,7 +263,7 @@ export default function ChatsPage() {
             <p className="text-sm text-zinc-400">No conversations match your filters.</p>
           </div>
         ) : (
-          <div className="divide-y divide-zinc-100">
+          <div className="divide-y divide-zinc-100 dark:divide-zinc-700/50">
             {filtered.map(session => (
               <ChatRow
                 key={session.id}
@@ -441,37 +441,41 @@ function ChatRow({
 }) {
   return (
     <div
-      className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 cursor-pointer group transition-colors"
+      className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors"
       onClick={onClick}
     >
-      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0">
+      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0">
         <MessageSquare className="h-3.5 w-3.5" />
       </div>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-zinc-900 truncate">{truncate(session.title, 70)}</p>
+        <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">
+          {truncate(session.title, 70)}
+        </p>
         <div className="flex items-center gap-2 mt-0.5">
           {agentName ? (
             <Badge
               variant="secondary"
-              className="text-xs py-0 h-4 bg-zinc-100 text-zinc-600 hover:bg-zinc-100 border-0 font-normal"
+              className="text-xs py-0 h-4 bg-zinc-100 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 border-0 font-normal"
             >
               {agentName}
             </Badge>
           ) : (
             <Badge
               variant="secondary"
-              className="text-xs py-0 h-4 bg-zinc-50 text-zinc-400 hover:bg-zinc-50 border-0 font-normal"
+              className="text-xs py-0 h-4 bg-zinc-50 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800 border-0 font-normal"
             >
               Direct chat
             </Badge>
           )}
-          <span className="text-xs text-zinc-400">{formatRelativeTime(session.updated_at)}</span>
+          <span className="text-xs text-zinc-400 dark:text-zinc-500">
+            {formatRelativeTime(session.updated_at)}
+          </span>
         </div>
       </div>
       <AlertDialog>
         <AlertDialogTrigger asChild>
           <button
-            className="opacity-0 group-hover:opacity-100 h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 hover:text-red-500 hover:bg-red-50 transition-all shrink-0"
+            className="opacity-0 group-hover:opacity-100 h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-all shrink-0"
             onClick={e => e.stopPropagation()}
           >
             <Trash2 className="h-3.5 w-3.5" />

@@ -26,23 +26,23 @@ export default function Layout() {
   const [mobileOpen, setMobileOpen] = useState(false)
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-white">
+    <div className="flex h-screen w-screen overflow-hidden bg-white dark:bg-zinc-950">
       <Sidebar mobileOpen={mobileOpen} onMobileClose={() => setMobileOpen(false)} />
 
       <div className="flex flex-1 flex-col overflow-hidden">
         {/* Mobile top bar */}
-        <header className="flex items-center gap-3 border-b border-zinc-200 px-4 h-14 shrink-0 md:hidden">
+        <header className="flex items-center gap-3 border-b border-zinc-200 dark:border-zinc-700/50 px-4 h-14 shrink-0 md:hidden">
           <button
             onClick={() => setMobileOpen(true)}
-            className="h-8 w-8 flex items-center justify-center rounded-md text-zinc-500 hover:bg-zinc-100 hover:text-zinc-900 transition-colors cursor-pointer"
+            className="h-8 w-8 flex items-center justify-center rounded-md text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
           >
             <Menu className="h-5 w-5" />
           </button>
           <AgentoLogo />
-          <span className="text-sm font-semibold text-zinc-900">Agento</span>
+          <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Agento</span>
         </header>
 
-        <main className="flex flex-1 flex-col overflow-hidden bg-white">
+        <main className="flex flex-1 flex-col overflow-hidden bg-white dark:bg-zinc-950">
           <Outlet />
         </main>
       </div>

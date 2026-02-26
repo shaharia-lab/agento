@@ -30,6 +30,9 @@ export interface UserSettings {
   default_working_dir: string
   default_model: string
   onboarding_complete: boolean
+  appearance_dark_mode?: boolean
+  appearance_font_size?: number
+  appearance_font_family?: string
 }
 
 export interface SettingsResponse {
