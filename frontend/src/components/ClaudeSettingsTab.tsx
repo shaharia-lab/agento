@@ -216,20 +216,30 @@ export default function ClaudeSettingsTab() {
   const [plansDirectory, setPlansDirectory] = useState('')
   const [apiKeyHelper, setApiKeyHelper] = useState('')
 
-  // Toggles
-  const [fastMode, setFastMode] = useState(false)
-  const [showTurnDuration, setShowTurnDuration] = useState(false)
-  const [spinnerTipsEnabled, setSpinnerTipsEnabled] = useState(false)
-  const [terminalProgressBarEnabled, setTerminalProgressBarEnabled] = useState(false)
-  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false)
-  const [alwaysThinkingEnabled, setAlwaysThinkingEnabled] = useState(false)
-  const [respectGitignore, setRespectGitignore] = useState(true)
-  const [skipWebFetchPreflight, setSkipWebFetchPreflight] = useState(false)
-  const [disableAllHooks, setDisableAllHooks] = useState(false)
-  const [enableAllProjectMcpServers, setEnableAllProjectMcpServers] = useState(false)
-  const [allowManagedHooksOnly, setAllowManagedHooksOnly] = useState(false)
-  const [allowManagedPermissionRulesOnly, setAllowManagedPermissionRulesOnly] = useState(false)
-  const [allowManagedMcpServersOnly, setAllowManagedMcpServersOnly] = useState(false)
+  // Toggles — undefined means "not present in the file"; only written when explicitly set.
+  // This preserves explicit false values and keeps the file clean when nothing was changed.
+  const [fastMode, setFastMode] = useState<boolean | undefined>(undefined)
+  const [showTurnDuration, setShowTurnDuration] = useState<boolean | undefined>(undefined)
+  const [spinnerTipsEnabled, setSpinnerTipsEnabled] = useState<boolean | undefined>(undefined)
+  const [terminalProgressBarEnabled, setTerminalProgressBarEnabled] = useState<boolean | undefined>(
+    undefined,
+  )
+  const [prefersReducedMotion, setPrefersReducedMotion] = useState<boolean | undefined>(undefined)
+  const [alwaysThinkingEnabled, setAlwaysThinkingEnabled] = useState<boolean | undefined>(undefined)
+  // respectGitignore defaults to true in Claude Code; undefined renders as checked (on).
+  const [respectGitignore, setRespectGitignore] = useState<boolean | undefined>(undefined)
+  const [skipWebFetchPreflight, setSkipWebFetchPreflight] = useState<boolean | undefined>(undefined)
+  const [disableAllHooks, setDisableAllHooks] = useState<boolean | undefined>(undefined)
+  const [enableAllProjectMcpServers, setEnableAllProjectMcpServers] = useState<boolean | undefined>(
+    undefined,
+  )
+  const [allowManagedHooksOnly, setAllowManagedHooksOnly] = useState<boolean | undefined>(undefined)
+  const [allowManagedPermissionRulesOnly, setAllowManagedPermissionRulesOnly] = useState<
+    boolean | undefined
+  >(undefined)
+  const [allowManagedMcpServersOnly, setAllowManagedMcpServersOnly] = useState<boolean | undefined>(
+    undefined,
+  )
 
   const [teammateMode, setTeammateMode] = useState<'auto' | 'in-process' | 'tmux' | SelectNone>('')
 
@@ -263,19 +273,21 @@ export default function ClaudeSettingsTab() {
     setPlansDirectory(strVal(s.plansDirectory))
     setApiKeyHelper(strVal(s.apiKeyHelper))
 
-    setFastMode(s.fastMode ?? false)
-    setShowTurnDuration(s.showTurnDuration ?? false)
-    setSpinnerTipsEnabled(s.spinnerTipsEnabled ?? false)
-    setTerminalProgressBarEnabled(s.terminalProgressBarEnabled ?? false)
-    setPrefersReducedMotion(s.prefersReducedMotion ?? false)
-    setAlwaysThinkingEnabled(s.alwaysThinkingEnabled ?? false)
-    setRespectGitignore(s.respectGitignore ?? true)
-    setSkipWebFetchPreflight(s.skipWebFetchPreflight ?? false)
-    setDisableAllHooks(s.disableAllHooks ?? false)
-    setEnableAllProjectMcpServers(s.enableAllProjectMcpServers ?? false)
-    setAllowManagedHooksOnly(s.allowManagedHooksOnly ?? false)
-    setAllowManagedPermissionRulesOnly(s.allowManagedPermissionRulesOnly ?? false)
-    setAllowManagedMcpServersOnly(s.allowManagedMcpServersOnly ?? false)
+    // Load the raw value from the file. undefined means the field was absent — it will
+    // not be written back on save, keeping the file clean.
+    setFastMode(s.fastMode)
+    setShowTurnDuration(s.showTurnDuration)
+    setSpinnerTipsEnabled(s.spinnerTipsEnabled)
+    setTerminalProgressBarEnabled(s.terminalProgressBarEnabled)
+    setPrefersReducedMotion(s.prefersReducedMotion)
+    setAlwaysThinkingEnabled(s.alwaysThinkingEnabled)
+    setRespectGitignore(s.respectGitignore)
+    setSkipWebFetchPreflight(s.skipWebFetchPreflight)
+    setDisableAllHooks(s.disableAllHooks)
+    setEnableAllProjectMcpServers(s.enableAllProjectMcpServers)
+    setAllowManagedHooksOnly(s.allowManagedHooksOnly)
+    setAllowManagedPermissionRulesOnly(s.allowManagedPermissionRulesOnly)
+    setAllowManagedMcpServersOnly(s.allowManagedMcpServersOnly)
     setTeammateMode((s.teammateMode ?? '') as 'auto' | 'in-process' | 'tmux' | SelectNone)
 
     setPermissionsJson(s.permissions ? prettyJson(s.permissions) : '')
@@ -379,21 +391,26 @@ export default function ClaudeSettingsTab() {
     if (plansDirectory) settings.plansDirectory = plansDirectory
     if (apiKeyHelper) settings.apiKeyHelper = apiKeyHelper
 
-    if (fastMode) settings.fastMode = fastMode
-    if (showTurnDuration) settings.showTurnDuration = showTurnDuration
-    if (spinnerTipsEnabled) settings.spinnerTipsEnabled = spinnerTipsEnabled
-    if (terminalProgressBarEnabled) settings.terminalProgressBarEnabled = terminalProgressBarEnabled
-    if (prefersReducedMotion) settings.prefersReducedMotion = prefersReducedMotion
-    if (alwaysThinkingEnabled) settings.alwaysThinkingEnabled = alwaysThinkingEnabled
-    // respectGitignore defaults to true in Claude Code; only write it when it's explicitly false.
-    if (!respectGitignore) settings.respectGitignore = false
-    if (skipWebFetchPreflight) settings.skipWebFetchPreflight = skipWebFetchPreflight
-    if (disableAllHooks) settings.disableAllHooks = disableAllHooks
-    if (enableAllProjectMcpServers) settings.enableAllProjectMcpServers = enableAllProjectMcpServers
-    if (allowManagedHooksOnly) settings.allowManagedHooksOnly = allowManagedHooksOnly
-    if (allowManagedPermissionRulesOnly)
+    // Only write booleans that were explicitly set (not undefined).
+    // This preserves round-trip fidelity: explicit false values survive, and
+    // untouched fields are never injected into the file.
+    if (fastMode !== undefined) settings.fastMode = fastMode
+    if (showTurnDuration !== undefined) settings.showTurnDuration = showTurnDuration
+    if (spinnerTipsEnabled !== undefined) settings.spinnerTipsEnabled = spinnerTipsEnabled
+    if (terminalProgressBarEnabled !== undefined)
+      settings.terminalProgressBarEnabled = terminalProgressBarEnabled
+    if (prefersReducedMotion !== undefined) settings.prefersReducedMotion = prefersReducedMotion
+    if (alwaysThinkingEnabled !== undefined) settings.alwaysThinkingEnabled = alwaysThinkingEnabled
+    if (respectGitignore !== undefined) settings.respectGitignore = respectGitignore
+    if (skipWebFetchPreflight !== undefined) settings.skipWebFetchPreflight = skipWebFetchPreflight
+    if (disableAllHooks !== undefined) settings.disableAllHooks = disableAllHooks
+    if (enableAllProjectMcpServers !== undefined)
+      settings.enableAllProjectMcpServers = enableAllProjectMcpServers
+    if (allowManagedHooksOnly !== undefined) settings.allowManagedHooksOnly = allowManagedHooksOnly
+    if (allowManagedPermissionRulesOnly !== undefined)
       settings.allowManagedPermissionRulesOnly = allowManagedPermissionRulesOnly
-    if (allowManagedMcpServersOnly) settings.allowManagedMcpServersOnly = allowManagedMcpServersOnly
+    if (allowManagedMcpServersOnly !== undefined)
+      settings.allowManagedMcpServersOnly = allowManagedMcpServersOnly
     if (teammateMode) settings.teammateMode = teammateMode as 'auto' | 'in-process' | 'tmux'
 
     if (permissions !== undefined)
@@ -460,7 +477,8 @@ export default function ClaudeSettingsTab() {
   }
 
   return (
-    <div className="flex flex-col gap-6 max-w-2xl">
+    <div className="flex flex-col gap-5">
+      {/* Header */}
       <div>
         <h2 className="text-sm font-semibold text-zinc-900">Claude Code Settings</h2>
         <p className="text-xs text-zinc-500 mt-1">
@@ -497,244 +515,280 @@ export default function ClaudeSettingsTab() {
 
       {exists && (
         <>
-          {/* ── Model & Language ─────────────────────────────────────────── */}
-          <section className="flex flex-col gap-0">
-            <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
-              Model &amp; Language
-            </h3>
-            <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
-              <FieldRow label="Model" description="Override the default Claude model">
-                <Input
-                  value={model}
-                  onChange={e => setModel(e.target.value)}
-                  className="w-64 font-mono text-sm"
-                  placeholder="claude-sonnet-4-6"
-                />
-              </FieldRow>
-              <FieldRow label="Language" description="Preferred response language">
-                <Input
-                  value={language}
-                  onChange={e => setLanguage(e.target.value)}
-                  className="w-48 text-sm"
-                  placeholder="en"
-                />
-              </FieldRow>
-              <FieldRow label="Effort Level" description="Opus 4.6 reasoning effort">
-                <Select
-                  value={effortLevel}
-                  onValueChange={v => setEffortLevel(v as 'low' | 'medium' | 'high' | SelectNone)}
-                >
-                  <SelectTrigger className="w-36">
-                    <SelectValue placeholder="Default" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="low">Low</SelectItem>
-                    <SelectItem value="medium">Medium</SelectItem>
-                    <SelectItem value="high">High</SelectItem>
-                  </SelectContent>
-                </Select>
-              </FieldRow>
-              <FieldRow label="Auto-Updates Channel" description="Release channel for updates">
-                <Select
-                  value={autoUpdatesChannel}
-                  onValueChange={v => setAutoUpdatesChannel(v as 'stable' | 'latest' | SelectNone)}
-                >
-                  <SelectTrigger className="w-36">
-                    <SelectValue placeholder="Default" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="stable">Stable</SelectItem>
-                    <SelectItem value="latest">Latest</SelectItem>
-                  </SelectContent>
-                </Select>
-              </FieldRow>
-              <FieldRow label="Output Style" description="Assistant response output style">
-                <Input
-                  value={outputStyle}
-                  onChange={e => setOutputStyle(e.target.value)}
-                  className="w-48 text-sm"
-                  placeholder=""
-                />
-              </FieldRow>
-              <FieldRow label="API Key Helper" description="Path to script outputting auth values">
-                <Input
-                  value={apiKeyHelper}
-                  onChange={e => setApiKeyHelper(e.target.value)}
-                  className="w-64 font-mono text-sm"
-                  placeholder="/path/to/script"
-                />
-              </FieldRow>
-            </div>
-          </section>
+          {/* ── Two-column grid (single column on small screens) ────────── */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* ── Left column ─────────────────────────────────────────── */}
+            <div className="flex flex-col gap-4">
+              {/* Model & Language */}
+              <section className="flex flex-col gap-0">
+                <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
+                  Model &amp; Language
+                </h3>
+                <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
+                  <FieldRow label="Model" description="Override the default Claude model">
+                    <Input
+                      value={model}
+                      onChange={e => setModel(e.target.value)}
+                      className="w-44 font-mono text-sm"
+                      placeholder="claude-sonnet-4-6"
+                    />
+                  </FieldRow>
+                  <FieldRow label="Language" description="Preferred response language">
+                    <Input
+                      value={language}
+                      onChange={e => setLanguage(e.target.value)}
+                      className="w-32 text-sm"
+                      placeholder="en"
+                    />
+                  </FieldRow>
+                  <FieldRow label="Effort Level" description="Opus 4.6 reasoning effort">
+                    <Select
+                      value={effortLevel}
+                      onValueChange={v =>
+                        setEffortLevel(v as 'low' | 'medium' | 'high' | SelectNone)
+                      }
+                    >
+                      <SelectTrigger className="w-32">
+                        <SelectValue placeholder="Default" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="low">Low</SelectItem>
+                        <SelectItem value="medium">Medium</SelectItem>
+                        <SelectItem value="high">High</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </FieldRow>
+                  <FieldRow label="Auto-Updates" description="Release channel for updates">
+                    <Select
+                      value={autoUpdatesChannel}
+                      onValueChange={v =>
+                        setAutoUpdatesChannel(v as 'stable' | 'latest' | SelectNone)
+                      }
+                    >
+                      <SelectTrigger className="w-32">
+                        <SelectValue placeholder="Default" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="stable">Stable</SelectItem>
+                        <SelectItem value="latest">Latest</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </FieldRow>
+                  <FieldRow label="Output Style" description="Response output style">
+                    <Input
+                      value={outputStyle}
+                      onChange={e => setOutputStyle(e.target.value)}
+                      className="w-32 text-sm"
+                    />
+                  </FieldRow>
+                  <FieldRow label="API Key Helper" description="Path to auth helper script">
+                    <Input
+                      value={apiKeyHelper}
+                      onChange={e => setApiKeyHelper(e.target.value)}
+                      className="w-44 font-mono text-sm"
+                      placeholder="/path/to/script"
+                    />
+                  </FieldRow>
+                </div>
+              </section>
 
-          {/* ── UI & Display ─────────────────────────────────────────────── */}
-          <section className="flex flex-col gap-0">
-            <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
-              UI &amp; Display
-            </h3>
-            <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
-              <FieldRow label="Fast Mode" description="Enable Opus 4.6 fast mode">
-                <Toggle checked={fastMode} onChange={setFastMode} />
-              </FieldRow>
-              <FieldRow label="Show Turn Duration" description="Display response duration">
-                <Toggle checked={showTurnDuration} onChange={setShowTurnDuration} />
-              </FieldRow>
-              <FieldRow label="Spinner Tips" description="Show tips during work">
-                <Toggle checked={spinnerTipsEnabled} onChange={setSpinnerTipsEnabled} />
-              </FieldRow>
-              <FieldRow label="Terminal Progress Bar" description="Enable terminal progress bar">
-                <Toggle
-                  checked={terminalProgressBarEnabled}
-                  onChange={setTerminalProgressBarEnabled}
-                />
-              </FieldRow>
-              <FieldRow label="Prefers Reduced Motion" description="Reduce UI animations">
-                <Toggle checked={prefersReducedMotion} onChange={setPrefersReducedMotion} />
-              </FieldRow>
-              <FieldRow label="Always Thinking" description="Enable extended thinking by default">
-                <Toggle checked={alwaysThinkingEnabled} onChange={setAlwaysThinkingEnabled} />
-              </FieldRow>
-              <FieldRow label="Teammate Mode" description="Agent team display mode">
-                <Select
-                  value={teammateMode}
-                  onValueChange={v =>
-                    setTeammateMode(v as 'auto' | 'in-process' | 'tmux' | SelectNone)
-                  }
-                >
-                  <SelectTrigger className="w-36">
-                    <SelectValue placeholder="Default" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="auto">Auto</SelectItem>
-                    <SelectItem value="in-process">In-Process</SelectItem>
-                    <SelectItem value="tmux">Tmux</SelectItem>
-                  </SelectContent>
-                </Select>
-              </FieldRow>
+              {/* Behaviour */}
+              <section className="flex flex-col gap-0">
+                <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
+                  Behaviour
+                </h3>
+                <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
+                  <FieldRow
+                    label="Cleanup Period (days)"
+                    description="Days to retain chat transcripts"
+                  >
+                    <Input
+                      type="number"
+                      value={cleanupPeriodDays}
+                      onChange={e => setCleanupPeriodDays(e.target.value)}
+                      className="w-20 text-sm"
+                      placeholder="30"
+                      min={1}
+                    />
+                  </FieldRow>
+                  <FieldRow label="Plans Directory" description="Custom plan file storage">
+                    <Input
+                      value={plansDirectory}
+                      onChange={e => setPlansDirectory(e.target.value)}
+                      className="w-44 font-mono text-sm"
+                      placeholder="/path/to/plans"
+                    />
+                  </FieldRow>
+                  <FieldRow
+                    label="Respect .gitignore"
+                    description="@ file picker respects .gitignore"
+                  >
+                    {/* Claude Code default is true, so undefined renders as checked */}
+                    <Toggle checked={respectGitignore ?? true} onChange={setRespectGitignore} />
+                  </FieldRow>
+                  <FieldRow
+                    label="Skip WebFetch Preflight"
+                    description="Skip WebFetch blocklist check"
+                  >
+                    <Toggle
+                      checked={skipWebFetchPreflight ?? false}
+                      onChange={setSkipWebFetchPreflight}
+                    />
+                  </FieldRow>
+                  <FieldRow label="Disable All Hooks" description="Disable all hooks execution">
+                    <Toggle checked={disableAllHooks ?? false} onChange={setDisableAllHooks} />
+                  </FieldRow>
+                </div>
+              </section>
             </div>
-          </section>
 
-          {/* ── Behaviour ────────────────────────────────────────────────── */}
-          <section className="flex flex-col gap-0">
-            <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
-              Behaviour
-            </h3>
-            <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
-              <FieldRow label="Cleanup Period (days)" description="Days to retain chat transcripts">
-                <Input
-                  type="number"
-                  value={cleanupPeriodDays}
-                  onChange={e => setCleanupPeriodDays(e.target.value)}
-                  className="w-24 text-sm"
-                  placeholder="30"
-                  min={1}
-                />
-              </FieldRow>
-              <FieldRow label="Plans Directory" description="Custom plan file storage location">
-                <Input
-                  value={plansDirectory}
-                  onChange={e => setPlansDirectory(e.target.value)}
-                  className="w-64 font-mono text-sm"
-                  placeholder="/path/to/plans"
-                />
-              </FieldRow>
-              <FieldRow
-                label="Respect .gitignore"
-                description="Whether @ file picker respects .gitignore"
-              >
-                <Toggle checked={respectGitignore} onChange={setRespectGitignore} />
-              </FieldRow>
-              <FieldRow label="Skip WebFetch Preflight" description="Skip WebFetch blocklist check">
-                <Toggle checked={skipWebFetchPreflight} onChange={setSkipWebFetchPreflight} />
-              </FieldRow>
-              <FieldRow label="Disable All Hooks" description="Disable all hooks execution">
-                <Toggle checked={disableAllHooks} onChange={setDisableAllHooks} />
-              </FieldRow>
+            {/* ── Right column ────────────────────────────────────────── */}
+            <div className="flex flex-col gap-4">
+              {/* UI & Display */}
+              <section className="flex flex-col gap-0">
+                <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
+                  UI &amp; Display
+                </h3>
+                <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
+                  <FieldRow label="Fast Mode" description="Enable Opus 4.6 fast mode">
+                    <Toggle checked={fastMode ?? false} onChange={setFastMode} />
+                  </FieldRow>
+                  <FieldRow label="Show Turn Duration" description="Display response duration">
+                    <Toggle checked={showTurnDuration ?? false} onChange={setShowTurnDuration} />
+                  </FieldRow>
+                  <FieldRow label="Spinner Tips" description="Show tips during work">
+                    <Toggle
+                      checked={spinnerTipsEnabled ?? false}
+                      onChange={setSpinnerTipsEnabled}
+                    />
+                  </FieldRow>
+                  <FieldRow label="Terminal Progress Bar" description="Enable progress bar">
+                    <Toggle
+                      checked={terminalProgressBarEnabled ?? false}
+                      onChange={setTerminalProgressBarEnabled}
+                    />
+                  </FieldRow>
+                  <FieldRow label="Reduced Motion" description="Reduce UI animations">
+                    <Toggle
+                      checked={prefersReducedMotion ?? false}
+                      onChange={setPrefersReducedMotion}
+                    />
+                  </FieldRow>
+                  <FieldRow label="Always Thinking" description="Extended thinking by default">
+                    <Toggle
+                      checked={alwaysThinkingEnabled ?? false}
+                      onChange={setAlwaysThinkingEnabled}
+                    />
+                  </FieldRow>
+                  <FieldRow label="Teammate Mode" description="Agent team display mode">
+                    <Select
+                      value={teammateMode}
+                      onValueChange={v =>
+                        setTeammateMode(v as 'auto' | 'in-process' | 'tmux' | SelectNone)
+                      }
+                    >
+                      <SelectTrigger className="w-32">
+                        <SelectValue placeholder="Default" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">Auto</SelectItem>
+                        <SelectItem value="in-process">In-Process</SelectItem>
+                        <SelectItem value="tmux">Tmux</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </FieldRow>
+                </div>
+              </section>
+
+              {/* Permissions & MCP */}
+              <section className="flex flex-col gap-0">
+                <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
+                  Permissions &amp; MCP
+                </h3>
+                <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
+                  <FieldRow
+                    label="Enable All Project MCPs"
+                    description="Auto-approve all project MCP servers"
+                  >
+                    <Toggle
+                      checked={enableAllProjectMcpServers ?? false}
+                      onChange={setEnableAllProjectMcpServers}
+                    />
+                  </FieldRow>
+                  <FieldRow label="Managed Hooks Only" description="Only load managed/SDK hooks">
+                    <Toggle
+                      checked={allowManagedHooksOnly ?? false}
+                      onChange={setAllowManagedHooksOnly}
+                    />
+                  </FieldRow>
+                  <FieldRow
+                    label="Managed Permission Rules"
+                    description="Only managed permission rules apply"
+                  >
+                    <Toggle
+                      checked={allowManagedPermissionRulesOnly ?? false}
+                      onChange={setAllowManagedPermissionRulesOnly}
+                    />
+                  </FieldRow>
+                  <FieldRow
+                    label="Managed MCP Servers Only"
+                    description="Only managed MCP servers respected"
+                  >
+                    <Toggle
+                      checked={allowManagedMcpServersOnly ?? false}
+                      onChange={setAllowManagedMcpServersOnly}
+                    />
+                  </FieldRow>
+                </div>
+              </section>
             </div>
-          </section>
+          </div>
 
-          {/* ── Permissions & MCP ────────────────────────────────────────── */}
-          <section className="flex flex-col gap-0">
-            <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
-              Permissions &amp; MCP
-            </h3>
-            <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
-              <FieldRow
-                label="Enable All Project MCP Servers"
-                description="Auto-approve all project MCP servers"
-              >
-                <Toggle
-                  checked={enableAllProjectMcpServers}
-                  onChange={setEnableAllProjectMcpServers}
-                />
-              </FieldRow>
-              <FieldRow label="Managed Hooks Only" description="Only load managed and SDK hooks">
-                <Toggle checked={allowManagedHooksOnly} onChange={setAllowManagedHooksOnly} />
-              </FieldRow>
-              <FieldRow
-                label="Managed Permission Rules Only"
-                description="Only managed permission rules apply"
-              >
-                <Toggle
-                  checked={allowManagedPermissionRulesOnly}
-                  onChange={setAllowManagedPermissionRulesOnly}
-                />
-              </FieldRow>
-              <FieldRow
-                label="Managed MCP Servers Only"
-                description="Only managed MCP servers respected"
-              >
-                <Toggle
-                  checked={allowManagedMcpServersOnly}
-                  onChange={setAllowManagedMcpServersOnly}
-                />
-              </FieldRow>
-            </div>
-          </section>
-
-          {/* ── Advanced (complex JSON) ───────────────────────────────────── */}
+          {/* ── Advanced — full width ─────────────────────────────────────── */}
           <section className="flex flex-col gap-2">
             <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide">
               Advanced
             </h3>
-            <CollapsibleSection
-              title="Permissions"
-              description="Allow / deny / ask rules and default mode"
-              value={permissionsJson}
-              onChange={setPermissionsJson}
-              error={jsonErrors.permissions}
-            />
-            <CollapsibleSection
-              title="Hooks"
-              description="Custom commands for tool execution events"
-              value={hooksJson}
-              onChange={setHooksJson}
-              error={jsonErrors.hooks}
-            />
-            <CollapsibleSection
-              title="Environment Variables (env)"
-              description="Extra environment variables injected into sessions"
-              value={envJson}
-              onChange={setEnvJson}
-              error={jsonErrors.env}
-            />
-            <CollapsibleSection
-              title="Sandbox"
-              description="Sandboxed bash execution configuration"
-              value={sandboxJson}
-              onChange={setSandboxJson}
-              error={jsonErrors.sandbox}
-            />
-            <CollapsibleSection
-              title="Attribution"
-              description="Git commit and PR attribution customization"
-              value={attributionJson}
-              onChange={setAttributionJson}
-              error={jsonErrors.attribution}
-            />
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              <CollapsibleSection
+                title="Permissions"
+                description="Allow / deny / ask rules"
+                value={permissionsJson}
+                onChange={setPermissionsJson}
+                error={jsonErrors.permissions}
+              />
+              <CollapsibleSection
+                title="Hooks"
+                description="Tool execution event commands"
+                value={hooksJson}
+                onChange={setHooksJson}
+                error={jsonErrors.hooks}
+              />
+              <CollapsibleSection
+                title="Environment (env)"
+                description="Extra environment variables"
+                value={envJson}
+                onChange={setEnvJson}
+                error={jsonErrors.env}
+              />
+              <CollapsibleSection
+                title="Sandbox"
+                description="Sandboxed bash configuration"
+                value={sandboxJson}
+                onChange={setSandboxJson}
+                error={jsonErrors.sandbox}
+              />
+              <CollapsibleSection
+                title="Attribution"
+                description="Git commit / PR attribution"
+                value={attributionJson}
+                onChange={setAttributionJson}
+                error={jsonErrors.attribution}
+              />
+            </div>
           </section>
 
-          {/* ── JSON Preview ─────────────────────────────────────────────── */}
+          {/* ── JSON Preview — full width ─────────────────────────────────── */}
           <JsonPreview json={previewJson} />
 
           {globalError && (

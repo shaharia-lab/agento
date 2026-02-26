@@ -36,6 +36,11 @@ export interface SettingsResponse {
   settings: UserSettings
   /** Map of field name → env var name for env-locked settings. */
   locked: Record<string, string>
+  /**
+   * True when the displayed default model comes from an environment variable
+   * (AGENTO_DEFAULT_MODEL or ANTHROPIC_DEFAULT_SONNET_MODEL).
+   */
+  model_from_env: boolean
 }
 
 export interface FSEntry {

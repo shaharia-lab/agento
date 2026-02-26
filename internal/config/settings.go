@@ -23,9 +23,11 @@ type UserSettings struct {
 // SettingsManager loads and saves user settings to disk, and exposes which
 // fields are locked by environment variables.
 type SettingsManager struct {
-	filePath string
-	settings UserSettings
-	locked   map[string]string // field name → env var name
+	filePath     string
+	settings     UserSettings
+	locked       map[string]string // field name → env var name
+	modelFromEnv bool              // true when the displayed model originates from an env var
+	modelInFile  bool              // true when default_model was explicitly present in the settings file
 }
 
 // NewSettingsManager creates a SettingsManager backed by dataDir/settings.json.
@@ -51,7 +53,14 @@ func NewSettingsManager(dataDir string, cfg *AppConfig) (*SettingsManager, error
 	// Apply env-locked overrides so Get() always returns env values for locked fields.
 	if _, ok := m.locked["default_model"]; ok {
 		m.settings.DefaultModel = cfg.DefaultModel
+		m.modelFromEnv = true
+	} else if cfg.AnthropicDefaultSonnetModel != "" && !m.modelInFile {
+		// ANTHROPIC_DEFAULT_SONNET_MODEL provides a soft default when the user has
+		// not explicitly saved a model choice to the settings file.
+		m.settings.DefaultModel = cfg.AnthropicDefaultSonnetModel
+		m.modelFromEnv = true
 	}
+
 	if _, ok := m.locked["default_working_dir"]; ok {
 		m.settings.DefaultWorkingDir = cfg.WorkingDir
 	}
@@ -78,6 +87,9 @@ func (m *SettingsManager) load() error {
 		return fmt.Errorf("parsing settings file: %w", err)
 	}
 
+	// Track whether each field was explicitly present in the file before we fill defaults.
+	m.modelInFile = m.settings.DefaultModel != ""
+
 	// Fill in any missing fields that were added after the file was created.
 	if m.settings.DefaultWorkingDir == "" {
 		m.settings.DefaultWorkingDir = defaultWorkingDir
@@ -91,6 +103,12 @@ func (m *SettingsManager) load() error {
 // Get returns a copy of the current settings (env-locked fields return env value).
 func (m *SettingsManager) Get() UserSettings {
 	return m.settings
+}
+
+// ModelFromEnv returns true when the displayed default model originates from an
+// environment variable (either AGENTO_DEFAULT_MODEL or ANTHROPIC_DEFAULT_SONNET_MODEL).
+func (m *SettingsManager) ModelFromEnv() bool {
+	return m.modelFromEnv
 }
 
 // Locked returns the map of field names to env var names for locked settings.
