@@ -49,9 +49,13 @@ func (s *Server) Mount(r chi.Router) {
 	r.Post("/chats/{id}/messages", s.handleSendMessage)
 	r.Post("/chats/{id}/input", s.handleProvideInput)
 
-	// Settings
+	// Agento settings
 	r.Get("/settings", s.handleGetSettings)
 	r.Put("/settings", s.handleUpdateSettings)
+
+	// Claude Code settings (~/.claude/settings.json)
+	r.Get("/claude-settings", s.handleGetClaudeSettings)
+	r.Put("/claude-settings", s.handleUpdateClaudeSettings)
 
 	// Filesystem browser
 	r.Get("/fs", s.handleFSList)
