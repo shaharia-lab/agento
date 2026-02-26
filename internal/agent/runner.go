@@ -118,12 +118,14 @@ func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt
 	}
 
 	if opts.PermissionHandler != nil {
-		// Custom handler: use default permission mode so the CLI subprocess
-		// sends can_use_tool control_requests for every tool call — including
-		// AskUserQuestion — which our handler can intercept and block on.
-		// bypassPermissions skips can_use_tool entirely, so the handler
-		// would never be called in that mode.
-		sdkOpts = append(sdkOpts, claude.WithPermissionHandler(opts.PermissionHandler))
+		// The SDK defaults to bypassPermissions + AllowDangerouslySkipPermissions=true.
+		// WithDefaultPermissions() overrides BOTH so the subprocess sends
+		// can_use_tool control_requests, which our handler can intercept.
+		// Without this, bypassPermissions means can_use_tool is never sent.
+		sdkOpts = append(sdkOpts,
+			claude.WithDefaultPermissions(),
+			claude.WithPermissionHandler(opts.PermissionHandler),
+		)
 	} else {
 		// No custom handler: bypass all permissions for unattended agent runs.
 		sdkOpts = append(sdkOpts,
