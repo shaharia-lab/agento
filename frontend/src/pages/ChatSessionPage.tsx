@@ -22,6 +22,13 @@ import {
   Terminal,
   MessageSquare,
   Square,
+  FilePen,
+  FileText,
+  FileEdit,
+  Search,
+  Globe,
+  Bot,
+  type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
@@ -534,7 +541,7 @@ function ThinkingBlock({ text }: { text: string }) {
       <div className="flex-1 max-w-[82%]">
         <button
           onClick={() => setExpanded(e => !e)}
-          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors mb-1"
+          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors mb-1 cursor-pointer"
         >
           {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
           Thinking
@@ -547,6 +554,32 @@ function ThinkingBlock({ text }: { text: string }) {
       </div>
     </div>
   )
+}
+
+/** Returns icon component, icon container background, and icon colour for a given tool name. */
+function getToolConfig(name: string): { Icon: LucideIcon; bg: string; color: string } {
+  switch (name) {
+    case 'Write':
+      return { Icon: FilePen, bg: 'bg-emerald-50', color: 'text-emerald-600' }
+    case 'Read':
+      return { Icon: FileText, bg: 'bg-blue-50', color: 'text-blue-600' }
+    case 'Edit':
+      return { Icon: FileEdit, bg: 'bg-orange-50', color: 'text-orange-600' }
+    case 'Bash':
+      return { Icon: Terminal, bg: 'bg-zinc-100', color: 'text-zinc-500' }
+    case 'Glob':
+    case 'Grep':
+      return { Icon: Search, bg: 'bg-violet-50', color: 'text-violet-500' }
+    case 'WebFetch':
+    case 'WebSearch':
+      return { Icon: Globe, bg: 'bg-sky-50', color: 'text-sky-600' }
+    case 'Task':
+    case 'TaskOutput':
+    case 'TaskStop':
+      return { Icon: Bot, bg: 'bg-amber-50', color: 'text-amber-600' }
+    default:
+      return { Icon: Terminal, bg: 'bg-zinc-100', color: 'text-zinc-500' }
+  }
 }
 
 /** Returns a short one-line summary for a tool call based on its input fields. */
@@ -704,24 +737,39 @@ function ToolCallCard({
   }
 
   const summary = toolCallSummary(name, block.input)
+  const { Icon, bg, color } = getToolConfig(name)
+  // For file-based tools show just the basename in the header; tooltip shows full path.
+  const isFileTool = name === 'Read' || name === 'Write' || name === 'Edit'
+  const displaySummary =
+    isFileTool && summary ? summary.split('/').pop() ?? summary : summary
 
   return (
     <div className="flex gap-3">
-      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0 mt-0.5">
-        <Terminal className="h-3.5 w-3.5" />
+      <div className={cn('flex h-7 w-7 items-center justify-center rounded-full shrink-0 mt-0.5', bg)}>
+        <Icon className={cn('h-3.5 w-3.5', color)} />
       </div>
       <div className="flex-1 min-w-0 max-w-[82%]">
         <button
           onClick={() => setExpanded(e => !e)}
-          className="flex w-full items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors mb-1 min-w-0"
+          className="flex w-full items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-800 transition-colors mb-1 min-w-0 cursor-pointer"
         >
           {expanded ? (
             <ChevronDown className="h-3 w-3 shrink-0" />
           ) : (
             <ChevronRight className="h-3 w-3 shrink-0" />
           )}
-          <span className="font-mono font-medium shrink-0">{name}</span>
-          {summary && <span className="font-mono text-zinc-400 truncate min-w-0">({summary})</span>}
+          <span className={cn('font-mono font-semibold shrink-0', color)}>{name}</span>
+          {displaySummary && (
+            <span
+              className="font-mono text-zinc-400 truncate min-w-0"
+              title={summary}
+            >
+              {displaySummary}
+            </span>
+          )}
+          {toolResult && (
+            <span className="ml-auto shrink-0 h-1.5 w-1.5 rounded-full bg-emerald-400" title="Completed" />
+          )}
         </button>
         {expanded && (
           <ToolCallDetail name={name} input={block.input} toolResult={toolResult} />
