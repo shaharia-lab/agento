@@ -6,8 +6,8 @@ import { chatsApi, sendMessage } from '@/lib/api'
 import type {
   ChatDetail,
   ChatMessage,
+  MessageBlock,
   SDKContentBlock,
-  ToolCallRecord,
   AskUserQuestionItem,
 } from '@/types'
 import { Textarea } from '@/components/ui/textarea'
@@ -86,9 +86,11 @@ export default function ChatSessionPage() {
 
       try {
         // Local accumulators — avoids stale-closure issues with React state.
+        // `blocks` preserves the exact order blocks arrived in the stream so
+        // the stored message renders correctly (thinking → text → tool_use or
+        // tool_use → text, depending on what the agent did first).
         let accumulated = ''
-        let thinkingAccumulated = ''
-        let toolCallsAccumulated: ToolCallRecord[] = []
+        let blocks: MessageBlock[] = []
 
         await sendMessage(
           id,
@@ -100,16 +102,18 @@ export default function ChatSessionPage() {
               }
             },
             onAssistant: event => {
+              // Collect completed tool_use blocks in stream order.
               const toolUseBlocks = event.message.content.filter(
                 b => b.type === 'tool_use' && b.name,
               )
               if (toolUseBlocks.length > 0) {
-                const records: ToolCallRecord[] = toolUseBlocks.map(b => ({
+                const newBlocks: MessageBlock[] = toolUseBlocks.map(b => ({
+                  type: 'tool_use' as const,
                   id: b.id,
                   name: b.name!,
                   input: b.input,
                 }))
-                toolCallsAccumulated = [...toolCallsAccumulated, ...records]
+                blocks = [...blocks, ...newBlocks]
                 setToolCalls(prev => [...prev, ...toolUseBlocks])
               }
             },
@@ -117,11 +121,24 @@ export default function ChatSessionPage() {
               const delta = event.event.delta
               if (!delta) return
               if (delta.type === 'thinking_delta' && delta.thinking) {
-                thinkingAccumulated += delta.thinking
+                // Append to the last thinking block or start a new one.
+                const last = blocks[blocks.length - 1]
+                if (last?.type === 'thinking') {
+                  last.text += delta.thinking
+                } else {
+                  blocks.push({ type: 'thinking', text: delta.thinking })
+                }
                 setThinkingText(prev => prev + delta.thinking)
                 setShowThinking(true)
               } else if (delta.type === 'text_delta' && delta.text) {
                 accumulated += delta.text
+                // Append to the last text block or start a new one.
+                const last = blocks[blocks.length - 1]
+                if (last?.type === 'text') {
+                  last.text += delta.text
+                } else {
+                  blocks.push({ type: 'text', text: delta.text })
+                }
                 setStreamingText(accumulated)
               }
             },
@@ -135,13 +152,14 @@ export default function ChatSessionPage() {
                 setStreamingText('')
                 return
               }
-              // Build a rich message that preserves thinking + tool calls.
+              // Build a rich message with ordered blocks so the render
+              // reflects the exact flow: thinking → text → tool_use (or any
+              // other ordering the agent chose).
               const assistantMsg: ChatMessage = {
                 role: 'assistant',
                 content: accumulated || event.result,
                 timestamp: new Date().toISOString(),
-                thinking: thinkingAccumulated || undefined,
-                toolCalls: toolCallsAccumulated.length > 0 ? toolCallsAccumulated : undefined,
+                blocks: blocks.length > 0 ? [...blocks] : undefined,
               }
               setMessages(prev => [...prev, assistantMsg])
               // Clear streaming state — the message now owns the content.
@@ -252,29 +270,46 @@ export default function ChatSessionPage() {
             </div>
           )}
 
-          {messages.map((msg, i) => (
-            <Fragment key={i}>
-              {msg.role === 'assistant' && msg.thinking && <ThinkingBlock text={msg.thinking} />}
-              {msg.role === 'assistant' &&
-                msg.toolCalls?.map((call, j) => (
-                  <ToolCallCard
-                    key={`${i}-tool-${j}`}
-                    block={{ type: 'tool_use', id: call.id, name: call.name, input: call.input }}
-                  />
-                ))}
-              <MessageBubble message={msg} />
-            </Fragment>
-          ))}
+          {messages.map((msg, i) => {
+            const isLastMsg = i === messages.length - 1
+            if (msg.role === 'assistant' && msg.blocks && msg.blocks.length > 0) {
+              // Render blocks in the exact order they arrived in the stream.
+              return (
+                <Fragment key={i}>
+                  {msg.blocks.map((block, j) => {
+                    if (block.type === 'thinking') {
+                      return <ThinkingBlock key={j} text={block.text} />
+                    }
+                    if (block.type === 'tool_use') {
+                      return (
+                        <ToolCallCard
+                          key={j}
+                          block={block}
+                          isInteractive={isLastMsg && !streaming}
+                          onSubmit={answer => void doSend(answer)}
+                        />
+                      )
+                    }
+                    // text block
+                    return <MessageBubble key={j} message={{ ...msg, content: block.text }} />
+                  })}
+                </Fragment>
+              )
+            }
+            // Fallback: messages loaded from DB (no blocks) — render text only.
+            return <MessageBubble key={i} message={msg} />
+          })}
 
           {/* Streaming: thinking */}
           {streaming && showThinking && thinkingText && <ThinkingBlock text={thinkingText} />}
 
-          {/* Streaming: tool call cards (inline, in order of arrival) */}
+          {/* Streaming: tool call cards (in arrival order, not interactive while streaming) */}
           {streaming &&
             toolCalls.map((call, i) => (
               <ToolCallCard
                 key={`stream-tool-${call.id ?? call.name}-${i}`}
                 block={{ type: 'tool_use', id: call.id, name: call.name, input: call.input }}
+                isInteractive={false}
               />
             ))}
 
@@ -442,15 +477,21 @@ function ThinkingBlock({ text }: { text: string }) {
 
 function ToolCallCard({
   block,
+  isInteractive,
+  onSubmit,
 }: {
   block: Pick<SDKContentBlock, 'type' | 'id' | 'name' | 'input'>
+  isInteractive?: boolean
+  onSubmit?: (answer: string) => void
 }) {
   const [expanded, setExpanded] = useState(false)
   const name = block.name ?? 'unknown'
 
-  // AskUserQuestion gets its own rich UI instead of a generic JSON dump.
+  // AskUserQuestion gets its own rich interactive UI.
   if (name === 'AskUserQuestion' && block.input) {
-    return <AskUserQuestionCard input={block.input} />
+    return (
+      <AskUserQuestionCard input={block.input} isInteractive={isInteractive} onSubmit={onSubmit} />
+    )
   }
 
   return (
@@ -476,9 +517,49 @@ function ToolCallCard({
   )
 }
 
-function AskUserQuestionCard({ input }: { input: Record<string, unknown> }) {
+function AskUserQuestionCard({
+  input,
+  isInteractive,
+  onSubmit,
+}: {
+  input: Record<string, unknown>
+  isInteractive?: boolean
+  onSubmit?: (answer: string) => void
+}) {
   const questions = (input.questions as AskUserQuestionItem[] | undefined) ?? []
+  // selections[questionIndex] = array of selected option labels
+  const [selections, setSelections] = useState<Record<number, string[]>>({})
+  const [submitted, setSubmitted] = useState(false)
+
   if (questions.length === 0) return null
+
+  const toggle = (qIdx: number, label: string, multiSelect: boolean) => {
+    if (!isInteractive || submitted) return
+    setSelections(prev => {
+      const current = prev[qIdx] ?? []
+      if (multiSelect) {
+        const next = current.includes(label)
+          ? current.filter(l => l !== label)
+          : [...current, label]
+        return { ...prev, [qIdx]: next }
+      } else {
+        return { ...prev, [qIdx]: [label] }
+      }
+    })
+  }
+
+  const hasSelections = questions.every((_, i) => (selections[i] ?? []).length > 0)
+
+  const handleSubmit = () => {
+    if (!onSubmit || submitted) return
+    const lines = questions.map((q, i) => {
+      const chosen = (selections[i] ?? []).join(', ')
+      const header = q.header ?? `Q${i + 1}`
+      return `${header}: ${chosen}`
+    })
+    onSubmit(lines.join('\n'))
+    setSubmitted(true)
+  }
 
   return (
     <div className="flex gap-3">
@@ -495,23 +576,55 @@ function AskUserQuestionCard({ input }: { input: Record<string, unknown> }) {
             )}
             <div className="text-sm font-medium text-zinc-800 mb-2">{q.question}</div>
             <div className="flex flex-wrap gap-1.5">
-              {q.options.map((opt, j) => (
-                <div
-                  key={j}
-                  className="rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-xs"
-                >
-                  <span className="font-medium text-zinc-700">{opt.label}</span>
-                  {opt.description && (
-                    <span className="ml-1 text-zinc-400"> — {opt.description}</span>
-                  )}
-                </div>
-              ))}
+              {q.options.map((opt, j) => {
+                const selected = (selections[i] ?? []).includes(opt.label)
+                return (
+                  <button
+                    key={j}
+                    disabled={!isInteractive || submitted}
+                    onClick={() => toggle(i, opt.label, !!q.multiSelect)}
+                    className={cn(
+                      'rounded-md border px-2.5 py-1 text-xs text-left transition-colors',
+                      isInteractive && !submitted
+                        ? 'cursor-pointer hover:border-zinc-400'
+                        : 'cursor-default',
+                      selected
+                        ? 'border-zinc-900 bg-zinc-900 text-white'
+                        : 'border-zinc-200 bg-zinc-50 text-zinc-700',
+                    )}
+                  >
+                    <span className="font-medium">{opt.label}</span>
+                    {opt.description && (
+                      <span className={cn('ml-1', selected ? 'text-zinc-300' : 'text-zinc-400')}>
+                        {' '}
+                        — {opt.description}
+                      </span>
+                    )}
+                  </button>
+                )
+              })}
             </div>
-            {q.multiSelect && (
+            {q.multiSelect && !submitted && (
               <div className="mt-2 text-[10px] text-zinc-400">Multiple selections allowed</div>
             )}
           </div>
         ))}
+
+        {isInteractive && !submitted && (
+          <button
+            disabled={!hasSelections}
+            onClick={handleSubmit}
+            className={cn(
+              'rounded-md px-3 py-1.5 text-xs font-medium transition-colors',
+              hasSelections
+                ? 'bg-zinc-900 text-white hover:bg-zinc-700'
+                : 'bg-zinc-100 text-zinc-400 cursor-not-allowed',
+            )}
+          >
+            Send answers
+          </button>
+        )}
+        {submitted && <div className="text-[10px] text-zinc-400">Answers sent</div>}
       </div>
     </div>
   )
