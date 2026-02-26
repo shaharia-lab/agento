@@ -685,9 +685,7 @@ function ToolCallDetail({
   }
 
   if (name === 'Edit') {
-    const editResult = toolResult as
-      | { structuredPatch?: Array<{ lines: string[] }> }
-      | undefined
+    const editResult = toolResult as { structuredPatch?: Array<{ lines: string[] }> } | undefined
     const patch = editResult?.structuredPatch
 
     if (patch && patch.length > 0) {
@@ -721,12 +719,18 @@ function ToolCallDetail({
       return (
         <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
           {oldStr.split('\n').map((line, i) => (
-            <div key={`old-${i}`} className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400">
+            <div
+              key={`old-${i}`}
+              className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400"
+            >
               -{line}
             </div>
           ))}
           {newStr.split('\n').map((line, i) => (
-            <div key={`new-${i}`} className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400">
+            <div
+              key={`new-${i}`}
+              className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400"
+            >
               +{line}
             </div>
           ))}
@@ -772,12 +776,13 @@ function ToolCallCard({
   const { Icon, bg, color } = getToolConfig(name)
   // For file-based tools show just the basename in the header; tooltip shows full path.
   const isFileTool = name === 'Read' || name === 'Write' || name === 'Edit'
-  const displaySummary =
-    isFileTool && summary ? summary.split('/').pop() ?? summary : summary
+  const displaySummary = isFileTool && summary ? (summary.split('/').pop() ?? summary) : summary
 
   return (
     <div className="flex gap-3">
-      <div className={cn('flex h-7 w-7 items-center justify-center rounded-full shrink-0 mt-0.5', bg)}>
+      <div
+        className={cn('flex h-7 w-7 items-center justify-center rounded-full shrink-0 mt-0.5', bg)}
+      >
         <Icon className={cn('h-3.5 w-3.5', color)} />
       </div>
       <div className="flex-1 min-w-0 max-w-[82%]">
@@ -800,12 +805,13 @@ function ToolCallCard({
             </span>
           )}
           {toolResult && (
-            <span className="ml-auto shrink-0 h-1.5 w-1.5 rounded-full bg-emerald-400" title="Completed" />
+            <span
+              className="ml-auto shrink-0 h-1.5 w-1.5 rounded-full bg-emerald-400"
+              title="Completed"
+            />
           )}
         </button>
-        {expanded && (
-          <ToolCallDetail name={name} input={block.input} toolResult={toolResult} />
-        )}
+        {expanded && <ToolCallDetail name={name} input={block.input} toolResult={toolResult} />}
       </div>
     </div>
   )
