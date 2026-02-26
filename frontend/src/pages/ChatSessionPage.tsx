@@ -3,9 +3,9 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { chatsApi, sendMessage } from '@/lib/api'
-import type { ChatDetail, ChatMessage } from '@/types'
+import type { ChatDetail, ChatMessage, SDKContentBlock } from '@/types'
 import { Textarea } from '@/components/ui/textarea'
-import { ArrowLeft, Send, Loader2, ChevronDown, ChevronRight, Folder } from 'lucide-react'
+import { ArrowLeft, Send, Loader2, ChevronDown, ChevronRight, Folder, Terminal } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
 export default function ChatSessionPage() {
@@ -22,6 +22,8 @@ export default function ChatSessionPage() {
   const [streamingText, setStreamingText] = useState('')
   const [thinkingText, setThinkingText] = useState('')
   const [showThinking, setShowThinking] = useState(false)
+  const [toolCalls, setToolCalls] = useState<SDKContentBlock[]>([])
+  const [systemStatus, setSystemStatus] = useState<string | null>(null)
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -60,6 +62,9 @@ export default function ChatSessionPage() {
       setStreaming(true)
       setStreamingText('')
       setThinkingText('')
+      setShowThinking(false)
+      setToolCalls([])
+      setSystemStatus(null)
       setError(null)
 
       abortRef.current = new AbortController()
@@ -70,24 +75,51 @@ export default function ChatSessionPage() {
           id,
           content,
           {
-            onThinking: text => {
-              setThinkingText(prev => prev + text)
-              setShowThinking(true)
+            onSystem: event => {
+              if (event.subtype === 'status' && event.message) {
+                setSystemStatus(event.message)
+              }
             },
-            onText: delta => {
-              accumulated += delta
-              setStreamingText(accumulated)
+            onAssistant: event => {
+              const toolUseBlocks = event.message.content.filter(
+                b => b.type === 'tool_use' && b.name,
+              )
+              if (toolUseBlocks.length > 0) {
+                setToolCalls(prev => [...prev, ...toolUseBlocks])
+              }
             },
-            onDone: () => {
+            onStreamEvent: event => {
+              const delta = event.event.delta
+              if (!delta) return
+              if (delta.type === 'thinking_delta' && delta.thinking) {
+                setThinkingText(prev => prev + delta.thinking)
+                setShowThinking(true)
+              } else if (delta.type === 'text_delta' && delta.text) {
+                accumulated += delta.text
+                setStreamingText(accumulated)
+              }
+            },
+            onResult: event => {
+              if (event.is_error) {
+                const errMsg =
+                  event.errors && event.errors.length > 0
+                    ? event.errors.join('; ')
+                    : (event.result ?? 'Unknown error')
+                setError(errMsg)
+                setStreamingText('')
+                return
+              }
               const assistantMsg: ChatMessage = {
                 role: 'assistant',
-                content: accumulated,
+                content: accumulated || event.result,
                 timestamp: new Date().toISOString(),
               }
               setMessages(prev => [...prev, assistantMsg])
               setStreamingText('')
               setThinkingText('')
               setShowThinking(false)
+              setToolCalls([])
+              setSystemStatus(null)
 
               if (detail) {
                 chatsApi
@@ -95,10 +127,6 @@ export default function ChatSessionPage() {
                   .then(d => setDetail(d))
                   .catch(() => undefined)
               }
-            },
-            onError: msg => {
-              setError(msg)
-              setStreamingText('')
             },
           },
           abortRef.current.signal,
@@ -110,6 +138,8 @@ export default function ChatSessionPage() {
       } finally {
         setStreaming(false)
         setStreamingText('')
+        setToolCalls([])
+        setSystemStatus(null)
       }
     },
     [id, streaming, detail],
@@ -197,6 +227,20 @@ export default function ChatSessionPage() {
           {/* Streaming: thinking */}
           {streaming && showThinking && thinkingText && <ThinkingBlock text={thinkingText} />}
 
+          {/* Streaming: tool call cards (inline, in order of arrival) */}
+          {streaming &&
+            toolCalls.map((call, i) => (
+              <ToolCallCard key={`${call.id ?? call.name}-${i}`} block={call} />
+            ))}
+
+          {/* Streaming: system status (tool execution in progress) */}
+          {streaming && systemStatus && (
+            <div className="flex items-center gap-2 pl-10 text-xs text-zinc-400">
+              <Loader2 className="h-3 w-3 animate-spin shrink-0" />
+              {systemStatus}
+            </div>
+          )}
+
           {/* Streaming: assistant response */}
           {streaming && streamingText && (
             <div className="flex gap-3">
@@ -211,19 +255,23 @@ export default function ChatSessionPage() {
             </div>
           )}
 
-          {/* Typing indicator */}
-          {streaming && !streamingText && !thinkingText && (
-            <div className="flex gap-3 items-center">
-              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 shrink-0">
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-white" />
+          {/* Typing indicator — only when no content has arrived yet */}
+          {streaming &&
+            !streamingText &&
+            !thinkingText &&
+            toolCalls.length === 0 &&
+            !systemStatus && (
+              <div className="flex gap-3 items-center">
+                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 shrink-0">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-white" />
+                </div>
+                <div className="flex items-center gap-1">
+                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:0ms]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:150ms]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:300ms]" />
+                </div>
               </div>
-              <div className="flex items-center gap-1">
-                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:0ms]" />
-                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:150ms]" />
-                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:300ms]" />
-              </div>
-            </div>
-          )}
+            )}
 
           {error && (
             <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -340,6 +388,33 @@ function ThinkingBlock({ text }: { text: string }) {
         {expanded && (
           <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 font-mono whitespace-pre-wrap leading-relaxed">
             {text}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ToolCallCard({ block }: { block: SDKContentBlock }) {
+  const [expanded, setExpanded] = useState(false)
+  const name = block.name ?? 'unknown'
+
+  return (
+    <div className="flex gap-3">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-500 shrink-0 mt-0.5">
+        <Terminal className="h-3.5 w-3.5" />
+      </div>
+      <div className="flex-1 min-w-0 max-w-[82%]">
+        <button
+          onClick={() => setExpanded(e => !e)}
+          className="flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-600 transition-colors mb-1"
+        >
+          {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+          <span className="font-mono font-medium">{name}</span>
+        </button>
+        {expanded && block.input !== undefined && (
+          <div className="rounded-lg border border-zinc-100 bg-zinc-50 px-3 py-2 text-xs text-zinc-500 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-48">
+            {JSON.stringify(block.input, null, 2)}
           </div>
         )}
       </div>

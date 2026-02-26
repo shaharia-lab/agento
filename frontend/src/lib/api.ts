@@ -5,6 +5,10 @@ import type {
   SettingsResponse,
   UserSettings,
   FSListResponse,
+  SDKSystemEvent,
+  SDKAssistantEvent,
+  SDKStreamEventMessage,
+  SDKResultEvent,
 } from '../types'
 
 const BASE = '/api'
@@ -99,11 +103,19 @@ export const filesystemApi = {
 
 // ── Streaming message ─────────────────────────────────────────────────────────
 
+/**
+ * Typed callbacks for the raw SDK event stream.
+ * Each callback corresponds to one SSE event type emitted by the backend.
+ */
 export interface StreamCallbacks {
-  onThinking?: (text: string) => void
-  onText?: (delta: string) => void
-  onDone?: (data: { sdk_session_id: string; cost_usd: number }) => void
-  onError?: (msg: string) => void
+  /** Emitted at session start (subtype "init") and for tool-execution status (subtype "status"). */
+  onSystem?: (event: SDKSystemEvent) => void
+  /** Emitted when the LLM completes a turn — may contain tool_use and/or text content blocks. */
+  onAssistant?: (event: SDKAssistantEvent) => void
+  /** Emitted for every LLM output delta (text, thinking, tool-input streaming). */
+  onStreamEvent?: (event: SDKStreamEventMessage) => void
+  /** Terminal event — either a successful result or an error. Check event.is_error. */
+  onResult?: (event: SDKResultEvent) => void
 }
 
 export async function sendMessage(
@@ -144,17 +156,17 @@ export async function sendMessage(
         try {
           const data = JSON.parse(line.slice(6))
           switch (currentEvent) {
-            case 'thinking':
-              callbacks.onThinking?.(data.text)
+            case 'system':
+              callbacks.onSystem?.(data as SDKSystemEvent)
               break
-            case 'text':
-              callbacks.onText?.(data.delta)
+            case 'assistant':
+              callbacks.onAssistant?.(data as SDKAssistantEvent)
               break
-            case 'done':
-              callbacks.onDone?.(data)
+            case 'stream_event':
+              callbacks.onStreamEvent?.(data as SDKStreamEventMessage)
               break
-            case 'error':
-              callbacks.onError?.(data.error)
+            case 'result':
+              callbacks.onResult?.(data as SDKResultEvent)
               break
           }
         } catch {

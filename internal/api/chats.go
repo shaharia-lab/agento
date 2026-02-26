@@ -12,6 +12,16 @@ import (
 	"github.com/shaharia-lab/agento/internal/service"
 )
 
+// sendSSERaw writes a raw JSON payload as an SSE event without re-marshaling.
+func sendSSERaw(w http.ResponseWriter, flusher http.Flusher, event string, raw json.RawMessage) {
+	_, _ = w.Write([]byte("event: " + event + "\ndata: "))
+	_, _ = w.Write(raw)
+	_, _ = w.Write([]byte("\n\n"))
+	if flusher != nil {
+		flusher.Flush()
+	}
+}
+
 type createChatRequest struct {
 	// AgentSlug is optional. An empty value means no-agent (direct LLM) chat.
 	AgentSlug        string `json:"agent_slug"`
@@ -132,38 +142,17 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	var sdkSessionID string
 
 	for event := range stream.Events() {
-		switch event.Type {
-		case claude.TypeStreamEvent:
-			if event.StreamEvent != nil {
-				delta := event.StreamEvent.Event.Delta
-				if delta != nil {
-					if delta.Type == "thinking_delta" && delta.Thinking != "" {
-						sendSSEEvent(w, flusher, "thinking", map[string]string{"text": delta.Thinking})
-					} else if delta.Type == "text_delta" && delta.Text != "" {
-						sendSSEEvent(w, flusher, "text", map[string]string{"delta": delta.Text})
-					}
-				}
-			}
+		// Forward every raw SDK event to the frontend as-is.
+		if len(event.Raw) > 0 {
+			sendSSERaw(w, flusher, string(event.Type), event.Raw)
+		}
 
-		case claude.TypeResult:
-			if event.Result != nil {
-				sdkSessionID = event.Result.SessionID
-				if event.Result.IsError {
-					sendSSEEvent(w, flusher, "error", map[string]string{"error": event.Result.Result})
-					return
-				}
-				assistantText = event.Result.Result
-				sendSSEEvent(w, flusher, "done", map[string]any{
-					"sdk_session_id": event.Result.SessionID,
-					"cost_usd":       event.Result.TotalCostUSD,
-					"usage": map[string]int{
-						"input_tokens":                event.Result.Usage.InputTokens,
-						"output_tokens":               event.Result.Usage.OutputTokens,
-						"cache_read_input_tokens":     event.Result.Usage.CacheReadInputTokens,
-						"cache_creation_input_tokens": event.Result.Usage.CacheCreationInputTokens,
-					},
-				})
+		if event.Type == claude.TypeResult && event.Result != nil {
+			sdkSessionID = event.Result.SessionID
+			if event.Result.IsError {
+				return
 			}
+			assistantText = event.Result.Result
 		}
 	}
 
