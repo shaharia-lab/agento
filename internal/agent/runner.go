@@ -114,13 +114,22 @@ func Interpolate(template string, vars map[string]string) (string, error) {
 // buildSDKOptions constructs the claude SDK options for the given agent config and run options.
 func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt string) []claude.Option {
 	sdkOpts := []claude.Option{
-		claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
-		claude.WithBypassPermissions(),
 		claude.WithIncludePartialMessages(),
 	}
 
 	if opts.PermissionHandler != nil {
+		// Custom handler: use default permission mode so the CLI subprocess
+		// sends can_use_tool control_requests for every tool call — including
+		// AskUserQuestion — which our handler can intercept and block on.
+		// bypassPermissions skips can_use_tool entirely, so the handler
+		// would never be called in that mode.
 		sdkOpts = append(sdkOpts, claude.WithPermissionHandler(opts.PermissionHandler))
+	} else {
+		// No custom handler: bypass all permissions for unattended agent runs.
+		sdkOpts = append(sdkOpts,
+			claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
+			claude.WithBypassPermissions(),
+		)
 	}
 
 	// Model
