@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { chatsApi, agentsApi, settingsApi } from '@/lib/api'
-import type { ChatSession, Agent } from '@/types'
+import { chatsApi, agentsApi, settingsApi, claudeSettingsProfilesApi } from '@/lib/api'
+import type { ChatSession, Agent, ClaudeSettingsProfile } from '@/types'
 import { MODELS } from '@/types'
 import { formatRelativeTime, truncate } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -43,6 +43,8 @@ export default function ChatsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
+  const [profiles, setProfiles] = useState<ClaudeSettingsProfile[]>([])
+  const [selectedProfileId, setSelectedProfileId] = useState<string>('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [newChatOpen, setNewChatOpen] = useState(false)
@@ -60,15 +62,19 @@ export default function ChatsPage() {
 
   const load = useCallback(async () => {
     try {
-      const [s, a, settings] = await Promise.all([
+      const [s, a, settings, profileList] = await Promise.all([
         chatsApi.list(),
         agentsApi.list(),
         settingsApi.get(),
+        claudeSettingsProfilesApi.list().catch(() => [] as ClaudeSettingsProfile[]),
       ])
       setSessions(s)
       setAgents(a)
       setWorkingDir(settings.settings.default_working_dir)
       setSelectedModel(settings.settings.default_model)
+      setProfiles(profileList)
+      const defaultProfile = profileList.find(p => p.is_default) ?? profileList[0]
+      setSelectedProfileId(defaultProfile?.id ?? '')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load')
     } finally {
@@ -97,7 +103,11 @@ export default function ChatsPage() {
 
   const handleOpenChange = (open: boolean) => {
     setNewChatOpen(open)
-    if (!open) {
+    if (open) {
+      // Reset profile to default each time the dialog opens.
+      const defaultProfile = profiles.find(p => p.is_default) ?? profiles[0]
+      setSelectedProfileId(defaultProfile?.id ?? '')
+    } else {
       setSelectedAgent('__none__')
       setFirstMessage('')
     }
@@ -115,7 +125,7 @@ export default function ChatsPage() {
     const agentSlug = selectedAgent === '__none__' ? '' : selectedAgent
 
     try {
-      const session = await chatsApi.create(agentSlug, workingDir, effectiveModel)
+      const session = await chatsApi.create(agentSlug, workingDir, effectiveModel, selectedProfileId)
       setNewChatOpen(false)
 
       // Navigate immediately; send the first message in the background so the
@@ -341,6 +351,25 @@ export default function ChatsPage() {
                 <p className="text-xs text-zinc-400">Model set by agent configuration</p>
               )}
             </div>
+
+            {/* Settings profile selector */}
+            {profiles.length > 0 && (
+              <div className="flex flex-col gap-1">
+                <Label className="text-xs text-zinc-600">Claude Settings Profile</Label>
+                <Select value={selectedProfileId} onValueChange={setSelectedProfileId}>
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder="Default profile" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {profiles.map(p => (
+                      <SelectItem key={p.id} value={p.id} className="text-xs">
+                        {p.name}{p.is_default ? ' (default)' : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             {/* First message input */}
             <div className="relative">

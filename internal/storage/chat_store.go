@@ -14,14 +14,15 @@ import (
 
 // ChatSession represents a chat session's metadata.
 type ChatSession struct {
-	ID         string    `json:"id"`
-	Title      string    `json:"title"`
-	AgentSlug  string    `json:"agent_slug"`
-	SDKSession string    `json:"sdk_session_id"`
-	WorkingDir string    `json:"working_directory"`
-	Model      string    `json:"model"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID                string    `json:"id"`
+	Title             string    `json:"title"`
+	AgentSlug         string    `json:"agent_slug"`
+	SDKSession        string    `json:"sdk_session_id"`
+	WorkingDir        string    `json:"working_directory"`
+	Model             string    `json:"model"`
+	SettingsProfileID string    `json:"settings_profile_id,omitempty"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 // ChatMessage represents a single message in a chat session.
@@ -36,7 +37,7 @@ type ChatStore interface {
 	ListSessions() ([]*ChatSession, error)
 	GetSession(id string) (*ChatSession, error)
 	GetSessionWithMessages(id string) (*ChatSession, []ChatMessage, error)
-	CreateSession(agentSlug, workingDir, model string) (*ChatSession, error)
+	CreateSession(agentSlug, workingDir, model, settingsProfileID string) (*ChatSession, error)
 	AppendMessage(sessionID string, msg ChatMessage) error
 	UpdateSession(session *ChatSession) error
 	DeleteSession(id string) error
@@ -58,14 +59,15 @@ func NewFSChatStore(dir string) *FSChatStore {
 type jsonlRecord struct {
 	Type string `json:"type"`
 	// session fields
-	ID         string    `json:"id,omitempty"`
-	Title      string    `json:"title,omitempty"`
-	AgentSlug  string    `json:"agent_slug,omitempty"`
-	SDKSession string    `json:"sdk_session_id,omitempty"`
-	WorkingDir string    `json:"working_directory,omitempty"`
-	Model      string    `json:"model,omitempty"`
-	CreatedAt  time.Time `json:"created_at,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at,omitempty"`
+	ID                string    `json:"id,omitempty"`
+	Title             string    `json:"title,omitempty"`
+	AgentSlug         string    `json:"agent_slug,omitempty"`
+	SDKSession        string    `json:"sdk_session_id,omitempty"`
+	WorkingDir        string    `json:"working_directory,omitempty"`
+	Model             string    `json:"model,omitempty"`
+	SettingsProfileID string    `json:"settings_profile_id,omitempty"`
+	CreatedAt         time.Time `json:"created_at,omitempty"`
+	UpdatedAt         time.Time `json:"updated_at,omitempty"`
 	// message fields
 	Role      string    `json:"role,omitempty"`
 	Content   string    `json:"content,omitempty"`
@@ -140,14 +142,15 @@ func (s *FSChatStore) GetSession(id string) (*ChatSession, error) {
 		return nil, fmt.Errorf("invalid session file: first record type is %q", rec.Type)
 	}
 	return &ChatSession{
-		ID:         rec.ID,
-		Title:      rec.Title,
-		AgentSlug:  rec.AgentSlug,
-		SDKSession: rec.SDKSession,
-		WorkingDir: rec.WorkingDir,
-		Model:      rec.Model,
-		CreatedAt:  rec.CreatedAt,
-		UpdatedAt:  rec.UpdatedAt,
+		ID:                rec.ID,
+		Title:             rec.Title,
+		AgentSlug:         rec.AgentSlug,
+		SDKSession:        rec.SDKSession,
+		WorkingDir:        rec.WorkingDir,
+		Model:             rec.Model,
+		SettingsProfileID: rec.SettingsProfileID,
+		CreatedAt:         rec.CreatedAt,
+		UpdatedAt:         rec.UpdatedAt,
 	}, nil
 }
 
@@ -178,14 +181,15 @@ func (s *FSChatStore) GetSessionWithMessages(id string) (*ChatSession, []ChatMes
 			first = false
 			if rec.Type == "session" {
 				session = &ChatSession{
-					ID:         rec.ID,
-					Title:      rec.Title,
-					AgentSlug:  rec.AgentSlug,
-					SDKSession: rec.SDKSession,
-					WorkingDir: rec.WorkingDir,
-					Model:      rec.Model,
-					CreatedAt:  rec.CreatedAt,
-					UpdatedAt:  rec.UpdatedAt,
+					ID:                rec.ID,
+					Title:             rec.Title,
+					AgentSlug:         rec.AgentSlug,
+					SDKSession:        rec.SDKSession,
+					WorkingDir:        rec.WorkingDir,
+					Model:             rec.Model,
+					SettingsProfileID: rec.SettingsProfileID,
+					CreatedAt:         rec.CreatedAt,
+					UpdatedAt:         rec.UpdatedAt,
 				}
 			}
 			continue
@@ -205,28 +209,30 @@ func (s *FSChatStore) GetSessionWithMessages(id string) (*ChatSession, []ChatMes
 }
 
 // CreateSession creates a new chat session with the given agent slug (may be empty),
-// working directory, and model.
-func (s *FSChatStore) CreateSession(agentSlug, workingDir, model string) (*ChatSession, error) {
+// working directory, model, and optional settings profile ID.
+func (s *FSChatStore) CreateSession(agentSlug, workingDir, model, settingsProfileID string) (*ChatSession, error) {
 	id := newUUID()
 	now := time.Now().UTC()
 	session := &ChatSession{
-		ID:         id,
-		Title:      "New Chat",
-		AgentSlug:  agentSlug,
-		WorkingDir: workingDir,
-		Model:      model,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		ID:                id,
+		Title:             "New Chat",
+		AgentSlug:         agentSlug,
+		WorkingDir:        workingDir,
+		Model:             model,
+		SettingsProfileID: settingsProfileID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	rec := jsonlRecord{
-		Type:       "session",
-		ID:         id,
-		Title:      session.Title,
-		AgentSlug:  agentSlug,
-		WorkingDir: workingDir,
-		Model:      model,
-		CreatedAt:  now,
-		UpdatedAt:  now,
+		Type:              "session",
+		ID:                id,
+		Title:             session.Title,
+		AgentSlug:         agentSlug,
+		WorkingDir:        workingDir,
+		Model:             model,
+		SettingsProfileID: settingsProfileID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -275,15 +281,16 @@ func (s *FSChatStore) UpdateSession(session *ChatSession) error {
 	}
 
 	rec := jsonlRecord{
-		Type:       "session",
-		ID:         session.ID,
-		Title:      session.Title,
-		AgentSlug:  session.AgentSlug,
-		SDKSession: session.SDKSession,
-		WorkingDir: session.WorkingDir,
-		Model:      session.Model,
-		CreatedAt:  session.CreatedAt,
-		UpdatedAt:  session.UpdatedAt,
+		Type:              "session",
+		ID:                session.ID,
+		Title:             session.Title,
+		AgentSlug:         session.AgentSlug,
+		SDKSession:        session.SDKSession,
+		WorkingDir:        session.WorkingDir,
+		Model:             session.Model,
+		SettingsProfileID: session.SettingsProfileID,
+		CreatedAt:         session.CreatedAt,
+		UpdatedAt:         session.UpdatedAt,
 	}
 	firstLine, err := json.Marshal(rec)
 	if err != nil {

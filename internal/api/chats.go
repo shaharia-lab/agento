@@ -24,9 +24,10 @@ func sendSSERaw(w http.ResponseWriter, flusher http.Flusher, event string, raw j
 }
 
 type createChatRequest struct {
-	AgentSlug        string `json:"agent_slug"`
-	WorkingDirectory string `json:"working_directory"`
-	Model            string `json:"model"`
+	AgentSlug         string `json:"agent_slug"`
+	WorkingDirectory  string `json:"working_directory"`
+	Model             string `json:"model"`
+	SettingsProfileID string `json:"settings_profile_id"`
 }
 
 type sendMessageRequest struct {
@@ -54,7 +55,7 @@ func (s *Server) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := s.chatSvc.CreateSession(r.Context(), req.AgentSlug, req.WorkingDirectory, req.Model)
+	session, err := s.chatSvc.CreateSession(r.Context(), req.AgentSlug, req.WorkingDirectory, req.Model, req.SettingsProfileID)
 	if err != nil {
 		var nfe *service.NotFoundError
 		if errors.As(err, &nfe) {

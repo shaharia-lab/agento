@@ -57,6 +57,15 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/claude-settings", s.handleGetClaudeSettings)
 	r.Put("/claude-settings", s.handleUpdateClaudeSettings)
 
+	// Claude settings profiles
+	r.Get("/claude-settings/profiles", s.handleListClaudeSettingsProfiles)
+	r.Post("/claude-settings/profiles", s.handleCreateClaudeSettingsProfile)
+	r.Get("/claude-settings/profiles/{id}", s.handleGetClaudeSettingsProfile)
+	r.Put("/claude-settings/profiles/{id}", s.handleUpdateClaudeSettingsProfile)
+	r.Delete("/claude-settings/profiles/{id}", s.handleDeleteClaudeSettingsProfile)
+	r.Post("/claude-settings/profiles/{id}/duplicate", s.handleDuplicateClaudeSettingsProfile)
+	r.Put("/claude-settings/profiles/{id}/default", s.handleSetDefaultClaudeSettingsProfile)
+
 	// Filesystem browser
 	r.Get("/fs", s.handleFSList)
 	r.Post("/fs/mkdir", s.handleFSMkdir)

@@ -29,7 +29,8 @@ type ChatService interface {
 
 	// CreateSession starts a new chat session. agentSlug may be empty for no-agent chat.
 	// workingDir and model are stored with the session and used during message processing.
-	CreateSession(ctx context.Context, agentSlug, workingDir, model string) (*storage.ChatSession, error)
+	// settingsProfileID optionally links the session to a named Claude settings profile.
+	CreateSession(ctx context.Context, agentSlug, workingDir, model, settingsProfileID string) (*storage.ChatSession, error)
 
 	// DeleteSession removes a session and all its messages.
 	DeleteSession(ctx context.Context, id string) error
@@ -98,7 +99,7 @@ func (s *chatService) GetSessionWithMessages(_ context.Context, id string) (*sto
 	return session, msgs, nil
 }
 
-func (s *chatService) CreateSession(_ context.Context, agentSlug, workingDir, model string) (*storage.ChatSession, error) {
+func (s *chatService) CreateSession(_ context.Context, agentSlug, workingDir, model, settingsProfileID string) (*storage.ChatSession, error) {
 	// Validate agent slug if provided.
 	if agentSlug != "" {
 		agentCfg, err := s.agentRepo.Get(agentSlug)
@@ -110,12 +111,12 @@ func (s *chatService) CreateSession(_ context.Context, agentSlug, workingDir, mo
 		}
 	}
 
-	session, err := s.chatRepo.CreateSession(agentSlug, workingDir, model)
+	session, err := s.chatRepo.CreateSession(agentSlug, workingDir, model, settingsProfileID)
 	if err != nil {
 		return nil, fmt.Errorf("creating session: %w", err)
 	}
 
-	s.logger.Info("chat session created", "session_id", session.ID, "agent_slug", agentSlug)
+	s.logger.Info("chat session created", "session_id", session.ID, "agent_slug", agentSlug, "settings_profile_id", settingsProfileID)
 	return session, nil
 }
 
@@ -179,6 +180,14 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 	opts.SessionID = session.SDKSession
 	opts.LocalToolsMCP = s.localMCP
 	opts.MCPRegistry = s.mcpRegistry
+
+	// Resolve the settings file path for the session's profile.
+	settingsFilePath, resolveErr := config.LoadProfileFilePath(session.SettingsProfileID)
+	if resolveErr != nil {
+		s.logger.Warn("failed to resolve settings profile path, using default", "error", resolveErr)
+	} else {
+		opts.SettingsFilePath = settingsFilePath
+	}
 
 	agentSession, err := agent.StartSession(ctx, agentCfg, content, opts)
 	if err != nil {
