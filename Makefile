@@ -2,6 +2,14 @@
 
 BINARY := agento
 
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+DATE    ?= $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+LDFLAGS := -s -w \
+  -X github.com/shaharia-lab/agento/internal/build.Version=$(VERSION) \
+  -X github.com/shaharia-lab/agento/internal/build.CommitSHA=$(COMMIT) \
+  -X github.com/shaharia-lab/agento/internal/build.BuildDate=$(DATE)
+
 # ── Production build ──────────────────────────────────────────────────────────
 build: build-frontend build-go
 
@@ -9,7 +17,7 @@ build-frontend:
 	cd frontend && npm install && npm run build
 
 build-go:
-	go build -o $(BINARY) .
+	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
 
 # ── Development (frontend + backend run separately) ────────────────────────────
 dev-frontend:
