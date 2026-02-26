@@ -185,9 +185,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	var assistantText string
 	var sdkSessionID string
+	// pendingInput holds the AskUserQuestion tool input from the most recent
+	// TypeAssistant event; non-nil means the agent asked the user something and
+	// we need to pause and collect the answer before the conversation can continue.
+	var pendingInput json.RawMessage
 
-	// Use select so we can interleave SDK events with user_input_required
-	// SSE writes from the same goroutine, avoiding any race on ResponseWriter.
 	eventsCh := agentSession.Events()
 	for {
 		select {
@@ -198,17 +200,57 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 			if len(event.Raw) > 0 {
 				sendSSERaw(w, flusher, string(event.Type), event.Raw)
 			}
-			if event.Type == claude.TypeResult && event.Result != nil {
+
+			switch event.Type {
+			case claude.TypeAssistant:
+				// Detect AskUserQuestion tool_use so we know to pause on TypeResult.
+				if input := extractAskUserQuestionInput(event.Raw); input != nil {
+					pendingInput = input
+					s.logger.Info("AskUserQuestion detected in stream", "session_id", id)
+				}
+
+			case claude.TypeResult:
+				if event.Result == nil {
+					continue
+				}
 				sdkSessionID = event.Result.SessionID
 				if event.Result.IsError {
 					return
 				}
 				assistantText = event.Result.Result
+
+				if pendingInput != nil {
+					// Agent called AskUserQuestion — tell the frontend and wait for
+					// the user's answer before continuing the session.
+					s.logger.Info("sending user_input_required, waiting for answer", "session_id", id)
+					sendSSEEvent(w, flusher, "user_input_required", map[string]any{
+						"input": pendingInput,
+					})
+					pendingInput = nil
+
+					select {
+					case answer := <-inputCh:
+						s.logger.Info("received user answer, resuming session", "session_id", id)
+						if err := agentSession.Send(answer); err != nil {
+							s.logger.Error("inject answer failed", "session_id", id, "error", err)
+							return
+						}
+						assistantText = "" // reset for the next turn
+					case <-r.Context().Done():
+						return
+					}
+					// Continue event loop — second turn events are incoming.
+				} else {
+					// No pending question: this is the final result.
+					goto done
+				}
 			}
 
 		case qInput := <-questionCh:
-			// PermissionHandler is blocking the subprocess, waiting for the user.
-			// Send the question over SSE then wait; the subprocess stays paused.
+			// PermissionHandler path: subprocess paused on can_use_tool for
+			// AskUserQuestion (future-proofing; currently AskUserQuestion does
+			// not go through can_use_tool in any permission mode).
+			pendingInput = nil // prevent double-trigger from TypeResult
 			sendSSEEvent(w, flusher, "user_input_required", map[string]any{
 				"input": qInput,
 			})
@@ -231,6 +273,29 @@ done:
 	if err := s.chatSvc.CommitMessage(r.Context(), chatSession, assistantText, sdkSessionID, isFirstMessage); err != nil {
 		s.logger.Error("commit message failed", "session_id", id, "error", err)
 	}
+}
+
+// extractAskUserQuestionInput parses a raw assistant event and returns the
+// input JSON of the first AskUserQuestion tool_use content block, or nil.
+func extractAskUserQuestionInput(raw json.RawMessage) json.RawMessage {
+	var msg struct {
+		Message struct {
+			Content []struct {
+				Type  string          `json:"type"`
+				Name  string          `json:"name,omitempty"`
+				Input json.RawMessage `json:"input,omitempty"`
+			} `json:"content"`
+		} `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return nil
+	}
+	for _, block := range msg.Message.Content {
+		if block.Type == "tool_use" && block.Name == "AskUserQuestion" {
+			return block.Input
+		}
+	}
+	return nil
 }
 
 // handleProvideInput injects the user's answer to an AskUserQuestion prompt.
