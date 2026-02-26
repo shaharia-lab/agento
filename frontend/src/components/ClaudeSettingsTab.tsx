@@ -1,5 +1,15 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { ChevronDown, ChevronRight, Copy, Check, AlertCircle, FilePlus, Plus, Star, Trash2 } from 'lucide-react'
+import {
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Check,
+  AlertCircle,
+  FilePlus,
+  Plus,
+  Star,
+  Trash2,
+} from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -341,20 +351,23 @@ export default function ClaudeSettingsTab() {
 
   // ─── Load ────────────────────────────────────────────────────────────────────
 
-  const loadProfile = useCallback(async (profileId: string) => {
-    setProfileLoading(true)
-    try {
-      const detail = await claudeSettingsProfilesApi.get(profileId)
-      setExists(detail.exists)
-      if (detail.exists && detail.settings) {
-        applySettings(detail.settings as ClaudeCodeSettings)
+  const loadProfile = useCallback(
+    async (profileId: string) => {
+      setProfileLoading(true)
+      try {
+        const detail = await claudeSettingsProfilesApi.get(profileId)
+        setExists(detail.exists)
+        if (detail.exists && detail.settings) {
+          applySettings(detail.settings as ClaudeCodeSettings)
+        }
+      } catch {
+        setGlobalError('Failed to load profile settings')
+      } finally {
+        setProfileLoading(false)
       }
-    } catch {
-      setGlobalError('Failed to load profile settings')
-    } finally {
-      setProfileLoading(false)
-    }
-  }, [applySettings])
+    },
+    [applySettings],
+  )
 
   const load = useCallback(async () => {
     try {
@@ -625,7 +638,8 @@ export default function ClaudeSettingsTab() {
             <SelectContent>
               {profiles.map(p => (
                 <SelectItem key={p.id} value={p.id} className="text-xs">
-                  {p.name}{p.is_default ? ' (default)' : ''}
+                  {p.name}
+                  {p.is_default ? ' (default)' : ''}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -672,7 +686,9 @@ export default function ClaudeSettingsTab() {
             className="h-8 text-xs gap-1 text-red-600 hover:text-red-700 hover:border-red-300"
             onClick={() => void handleDeleteProfile()}
             disabled={profileLoading || !activeProfileId || activeProfile?.is_default}
-            title={activeProfile?.is_default ? 'Cannot delete the default profile' : 'Delete profile'}
+            title={
+              activeProfile?.is_default ? 'Cannot delete the default profile' : 'Delete profile'
+            }
           >
             <Trash2 className="h-3 w-3" />
             Delete
@@ -995,7 +1011,11 @@ export default function ClaudeSettingsTab() {
             onClick={() => void handleSave()}
             disabled={saving || profileLoading}
           >
-            {saving ? 'Saving…' : activeProfile ? `Save "${activeProfile.name}"` : 'Save Claude Settings'}
+            {saving
+              ? 'Saving…'
+              : activeProfile
+                ? `Save "${activeProfile.name}"`
+                : 'Save Claude Settings'}
           </Button>
         </>
       )}

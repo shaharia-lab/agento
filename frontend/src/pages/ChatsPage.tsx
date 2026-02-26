@@ -125,7 +125,12 @@ export default function ChatsPage() {
     const agentSlug = selectedAgent === '__none__' ? '' : selectedAgent
 
     try {
-      const session = await chatsApi.create(agentSlug, workingDir, effectiveModel, selectedProfileId)
+      const session = await chatsApi.create(
+        agentSlug,
+        workingDir,
+        effectiveModel,
+        selectedProfileId,
+      )
       setNewChatOpen(false)
 
       // Navigate immediately; send the first message in the background so the
@@ -363,7 +368,8 @@ export default function ChatsPage() {
                   <SelectContent>
                     {profiles.map(p => (
                       <SelectItem key={p.id} value={p.id} className="text-xs">
-                        {p.name}{p.is_default ? ' (default)' : ''}
+                        {p.name}
+                        {p.is_default ? ' (default)' : ''}
                       </SelectItem>
                     ))}
                   </SelectContent>

@@ -8,7 +8,7 @@ import (
 
 // ClaudeSettingsProfile describes a named Claude settings profile.
 type ClaudeSettingsProfile struct {
-	ID        string `json:"id"`        // slugified name
+	ID        string `json:"id"` // slugified name
 	Name      string `json:"name"`
 	FilePath  string `json:"file_path"` // absolute path to settings_<id>.json
 	IsDefault bool   `json:"is_default"`

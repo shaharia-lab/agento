@@ -62,7 +62,12 @@ export const chatsApi = {
    * @param model - optional model override for the session.
    * @param settingsProfileId - optional settings profile ID for the session.
    */
-  create: (agentSlug?: string, workingDirectory?: string, model?: string, settingsProfileId?: string) =>
+  create: (
+    agentSlug?: string,
+    workingDirectory?: string,
+    model?: string,
+    settingsProfileId?: string,
+  ) =>
     request<ChatSession>('/chats', {
       method: 'POST',
       body: JSON.stringify({
