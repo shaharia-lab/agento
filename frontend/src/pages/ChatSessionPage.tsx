@@ -2,7 +2,7 @@ import { Fragment, useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { chatsApi, sendMessage } from '@/lib/api'
+import { chatsApi, sendMessage, provideInput } from '@/lib/api'
 import type {
   ChatDetail,
   ChatMessage,
@@ -39,6 +39,9 @@ export default function ChatSessionPage() {
   const [showThinking, setShowThinking] = useState(false)
   const [toolCalls, setToolCalls] = useState<SDKContentBlock[]>([])
   const [systemStatus, setSystemStatus] = useState<string | null>(null)
+  // awaitingInput is set when the backend sends user_input_required — the SSE
+  // stream stays open and the AskUserQuestion card becomes interactive.
+  const [awaitingInput, setAwaitingInput] = useState(false)
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -80,6 +83,7 @@ export default function ChatSessionPage() {
       setShowThinking(false)
       setToolCalls([])
       setSystemStatus(null)
+      setAwaitingInput(false)
       setError(null)
 
       abortRef.current = new AbortController()
@@ -142,6 +146,11 @@ export default function ChatSessionPage() {
                 setStreamingText(accumulated)
               }
             },
+            onUserInputRequired: () => {
+              // Backend is paused waiting for us to POST /api/chats/{id}/input.
+              // Make the streaming AskUserQuestion card interactive.
+              setAwaitingInput(true)
+            },
             onResult: event => {
               if (event.is_error) {
                 const errMsg =
@@ -168,6 +177,7 @@ export default function ChatSessionPage() {
               setShowThinking(false)
               setToolCalls([])
               setSystemStatus(null)
+              setAwaitingInput(false)
 
               if (detail) {
                 chatsApi
@@ -190,6 +200,7 @@ export default function ChatSessionPage() {
         setShowThinking(false)
         setToolCalls([])
         setSystemStatus(null)
+        setAwaitingInput(false)
       }
     },
     [id, streaming, detail],
@@ -303,13 +314,22 @@ export default function ChatSessionPage() {
           {/* Streaming: thinking */}
           {streaming && showThinking && thinkingText && <ThinkingBlock text={thinkingText} />}
 
-          {/* Streaming: tool call cards (in arrival order, not interactive while streaming) */}
+          {/* Streaming: tool call cards. AskUserQuestion becomes interactive once
+               the backend signals user_input_required (awaitingInput=true). */}
           {streaming &&
             toolCalls.map((call, i) => (
               <ToolCallCard
                 key={`stream-tool-${call.id ?? call.name}-${i}`}
                 block={{ type: 'tool_use', id: call.id, name: call.name, input: call.input }}
-                isInteractive={false}
+                isInteractive={awaitingInput && call.name === 'AskUserQuestion'}
+                onSubmit={
+                  awaitingInput && call.name === 'AskUserQuestion' && id
+                    ? answer => {
+                        setAwaitingInput(false)
+                        void provideInput(id, answer)
+                      }
+                    : undefined
+                }
               />
             ))}
 

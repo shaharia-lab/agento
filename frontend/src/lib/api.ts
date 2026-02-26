@@ -116,6 +116,11 @@ export interface StreamCallbacks {
   onStreamEvent?: (event: SDKStreamEventMessage) => void
   /** Terminal event — either a successful result or an error. Check event.is_error. */
   onResult?: (event: SDKResultEvent) => void
+  /**
+   * Emitted when the agent called AskUserQuestion and is waiting for the user's answer.
+   * The SSE connection stays open. Call provideInput() with the answer to continue.
+   */
+  onUserInputRequired?: (data: { input: Record<string, unknown> }) => void
 }
 
 export async function sendMessage(
@@ -168,6 +173,9 @@ export async function sendMessage(
             case 'result':
               callbacks.onResult?.(data as SDKResultEvent)
               break
+            case 'user_input_required':
+              callbacks.onUserInputRequired?.(data as { input: Record<string, unknown> })
+              break
           }
         } catch {
           // ignore parse errors
@@ -175,5 +183,21 @@ export async function sendMessage(
         currentEvent = ''
       }
     }
+  }
+}
+
+/**
+ * Sends the user's answer to an AskUserQuestion prompt back to the agent.
+ * The SSE stream for the chat stays open; the agent will continue after this call.
+ */
+export async function provideInput(chatId: string, answer: string): Promise<void> {
+  const res = await fetch(`${BASE}/chats/${chatId}/input`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ answer }),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(body.error || `HTTP ${res.status}`)
   }
 }

@@ -211,6 +211,34 @@ func StreamAgent(ctx context.Context, agentCfg *config.AgentConfig, question str
 	return claude.Query(ctx, question, sdkOpts...)
 }
 
+// StartSession creates a persistent Claude session and sends the first message.
+// The subprocess stays alive across TypeResult events; callers can inject follow-up
+// messages via session.Send() without spawning a new process.
+// The caller must call session.Close() when the conversation is done.
+func StartSession(ctx context.Context, agentCfg *config.AgentConfig, firstMessage string, opts RunOptions) (*claude.Session, error) {
+	systemPrompt := ""
+	if agentCfg != nil {
+		interpolated, err := Interpolate(agentCfg.SystemPrompt, opts.Variables)
+		if err != nil {
+			return nil, err
+		}
+		systemPrompt = interpolated
+	}
+
+	sdkOpts := buildSDKOptions(agentCfg, opts, systemPrompt)
+	session, err := claude.NewSession(ctx, sdkOpts...)
+	if err != nil {
+		return nil, fmt.Errorf("creating session: %w", err)
+	}
+
+	if err := session.Send(firstMessage); err != nil {
+		_ = session.Close()
+		return nil, fmt.Errorf("sending first message: %w", err)
+	}
+
+	return session, nil
+}
+
 // RunAgent runs the agent to completion and returns the final AgentResult.
 func RunAgent(ctx context.Context, agentCfg *config.AgentConfig, question string, opts RunOptions) (*AgentResult, error) {
 	systemPrompt := ""
