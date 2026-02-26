@@ -564,6 +564,8 @@ function ToolCallCard({
   )
 }
 
+const OTHER_LABEL = 'Other'
+
 function AskUserQuestionCard({
   input,
   isInteractive,
@@ -574,8 +576,10 @@ function AskUserQuestionCard({
   onSubmit?: (answer: string) => void
 }) {
   const questions = (input.questions as AskUserQuestionItem[] | undefined) ?? []
-  // selections[questionIndex] = array of selected option labels
+  // selections[questionIndex] = array of selected option labels (may include OTHER_LABEL)
   const [selections, setSelections] = useState<Record<number, string[]>>({})
+  // otherTexts[questionIndex] = free-text typed when "Other" is selected
+  const [otherTexts, setOtherTexts] = useState<Record<number, string>>({})
   const [submitted, setSubmitted] = useState(false)
 
   if (questions.length === 0) return null
@@ -595,12 +599,21 @@ function AskUserQuestionCard({
     })
   }
 
-  const hasSelections = questions.every((_, i) => (selections[i] ?? []).length > 0)
+  const hasSelections = questions.every((_, i) => {
+    const sel = selections[i] ?? []
+    if (sel.length === 0) return false
+    // If "Other" is selected, require non-empty text
+    if (sel.includes(OTHER_LABEL)) return (otherTexts[i] ?? '').trim().length > 0
+    return true
+  })
 
   const handleSubmit = () => {
     if (!onSubmit || submitted) return
     const lines = questions.map((q, i) => {
-      const chosen = (selections[i] ?? []).join(', ')
+      const chosen = (selections[i] ?? [])
+        .map(label => (label === OTHER_LABEL ? (otherTexts[i] ?? '').trim() : label))
+        .filter(Boolean)
+        .join(', ')
       const header = q.header ?? `Q${i + 1}`
       return `${header}: ${chosen}`
     })
@@ -614,48 +627,81 @@ function AskUserQuestionCard({
         <MessageSquare className="h-3.5 w-3.5" />
       </div>
       <div className="flex-1 min-w-0 max-w-[82%] space-y-3">
-        {questions.map((q, i) => (
-          <div key={i} className="rounded-lg border border-zinc-200 bg-white p-3">
-            {q.header && (
-              <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
-                {q.header}
+        {questions.map((q, i) => {
+          const otherSelected = (selections[i] ?? []).includes(OTHER_LABEL)
+          return (
+            <div key={i} className="rounded-lg border border-zinc-200 bg-white p-3">
+              {q.header && (
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400 mb-1">
+                  {q.header}
+                </div>
+              )}
+              <div className="text-sm font-medium text-zinc-800 mb-2">{q.question}</div>
+              <div className="flex flex-wrap gap-1.5">
+                {q.options.map((opt, j) => {
+                  const selected = (selections[i] ?? []).includes(opt.label)
+                  return (
+                    <button
+                      key={j}
+                      disabled={!isInteractive || submitted}
+                      onClick={() => toggle(i, opt.label, !!q.multiSelect)}
+                      className={cn(
+                        'rounded-md border px-2.5 py-1 text-xs text-left transition-colors',
+                        isInteractive && !submitted
+                          ? 'cursor-pointer hover:border-zinc-400'
+                          : 'cursor-default',
+                        selected
+                          ? 'border-zinc-900 bg-zinc-900 text-white'
+                          : 'border-zinc-200 bg-zinc-50 text-zinc-700',
+                      )}
+                    >
+                      <span className="font-medium">{opt.label}</span>
+                      {opt.description && (
+                        <span className={cn('ml-1', selected ? 'text-zinc-300' : 'text-zinc-400')}>
+                          {' '}
+                          — {opt.description}
+                        </span>
+                      )}
+                    </button>
+                  )
+                })}
+                {/* Always add an "Other" chip for free-form input */}
+                <button
+                  disabled={!isInteractive || submitted}
+                  onClick={() => toggle(i, OTHER_LABEL, !!q.multiSelect)}
+                  className={cn(
+                    'rounded-md border px-2.5 py-1 text-xs text-left transition-colors',
+                    isInteractive && !submitted
+                      ? 'cursor-pointer hover:border-zinc-400'
+                      : 'cursor-default',
+                    otherSelected
+                      ? 'border-zinc-900 bg-zinc-900 text-white'
+                      : 'border-zinc-200 bg-zinc-50 text-zinc-700',
+                  )}
+                >
+                  <span className="font-medium">Other</span>
+                </button>
               </div>
-            )}
-            <div className="text-sm font-medium text-zinc-800 mb-2">{q.question}</div>
-            <div className="flex flex-wrap gap-1.5">
-              {q.options.map((opt, j) => {
-                const selected = (selections[i] ?? []).includes(opt.label)
-                return (
-                  <button
-                    key={j}
-                    disabled={!isInteractive || submitted}
-                    onClick={() => toggle(i, opt.label, !!q.multiSelect)}
-                    className={cn(
-                      'rounded-md border px-2.5 py-1 text-xs text-left transition-colors',
-                      isInteractive && !submitted
-                        ? 'cursor-pointer hover:border-zinc-400'
-                        : 'cursor-default',
-                      selected
-                        ? 'border-zinc-900 bg-zinc-900 text-white'
-                        : 'border-zinc-200 bg-zinc-50 text-zinc-700',
-                    )}
-                  >
-                    <span className="font-medium">{opt.label}</span>
-                    {opt.description && (
-                      <span className={cn('ml-1', selected ? 'text-zinc-300' : 'text-zinc-400')}>
-                        {' '}
-                        — {opt.description}
-                      </span>
-                    )}
-                  </button>
-                )
-              })}
+              {/* Free-text input shown when "Other" is selected */}
+              {otherSelected && isInteractive && !submitted && (
+                <input
+                  type="text"
+                  autoFocus
+                  value={otherTexts[i] ?? ''}
+                  onChange={e => setOtherTexts(prev => ({ ...prev, [i]: e.target.value }))}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter' && hasSelections) handleSubmit()
+                  }}
+                  placeholder="Type your answer…"
+                  className="mt-2 w-full rounded-md border border-zinc-200 bg-zinc-50 px-2.5 py-1.5 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-zinc-900 focus:outline-none"
+                />
+              )}
+              {q.multiSelect && !submitted && (
+                <div className="mt-2 text-[10px] text-zinc-400">Multiple selections allowed</div>
+              )}
             </div>
-            {q.multiSelect && !submitted && (
-              <div className="mt-2 text-[10px] text-zinc-400">Multiple selections allowed</div>
-            )}
-          </div>
-        ))}
+          )
+        })}
 
         {isInteractive && !submitted && (
           <button
