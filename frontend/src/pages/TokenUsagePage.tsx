@@ -783,12 +783,71 @@ export default function TokenUsagePage() {
 
             {/* Cost estimation section */}
             <div className="rounded-lg border border-zinc-200 dark:border-zinc-700/50 bg-white dark:bg-zinc-900 p-4">
-              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-4">
+              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-3">
                 Estimated Cost (USD)
-                <span className="ml-2 text-xs font-normal text-zinc-400">
-                  based on Anthropic pricing
-                </span>
               </h3>
+
+              {/* Pricing methodology note */}
+              <div className="rounded-md border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/20 px-3 py-2.5 mb-4">
+                <p className="text-xs text-amber-800 dark:text-amber-300 font-medium mb-1.5">
+                  ⚠ Estimates only — based on Anthropic published pricing (February 2025)
+                </p>
+                <p className="text-xs text-amber-700 dark:text-amber-400 mb-2">
+                  Model tier is detected from the model name. Unknown models fall back to Sonnet
+                  pricing. Actual charges may differ.
+                </p>
+                <table className="w-full text-[11px] text-amber-800 dark:text-amber-300 border-collapse">
+                  <thead>
+                    <tr className="border-b border-amber-200 dark:border-amber-700/50">
+                      <th className="text-left font-medium pb-1 pr-4">Model</th>
+                      <th className="text-right font-medium pb-1 pr-4">Input</th>
+                      <th className="text-right font-medium pb-1 pr-4">Output</th>
+                      <th className="text-right font-medium pb-1 pr-4">Cache write</th>
+                      <th className="text-right font-medium pb-1">Cache read</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-amber-100 dark:divide-amber-800/30">
+                    {[
+                      {
+                        model: 'Claude Opus',
+                        input: '$15',
+                        output: '$75',
+                        cacheWrite: '$18.75',
+                        cacheRead: '$1.50',
+                      },
+                      {
+                        model: 'Claude Sonnet',
+                        input: '$3',
+                        output: '$15',
+                        cacheWrite: '$3.75',
+                        cacheRead: '$0.30',
+                      },
+                      {
+                        model: 'Claude Haiku',
+                        input: '$0.80',
+                        output: '$4',
+                        cacheWrite: '$1.00',
+                        cacheRead: '$0.08',
+                      },
+                    ].map(row => (
+                      <tr key={row.model}>
+                        <td className="py-0.5 pr-4 font-medium">{row.model}</td>
+                        <td className="py-0.5 pr-4 text-right">{row.input}</td>
+                        <td className="py-0.5 pr-4 text-right">{row.output}</td>
+                        <td className="py-0.5 pr-4 text-right">{row.cacheWrite}</td>
+                        <td className="py-0.5 text-right">{row.cacheRead}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr>
+                      <td colSpan={5} className="pt-1.5 text-amber-600 dark:text-amber-500 italic">
+                        All rates are per million tokens (MTok).
+                      </td>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
               <CostSummaryCards
                 cost={
                   report?.cost_summary ?? {
