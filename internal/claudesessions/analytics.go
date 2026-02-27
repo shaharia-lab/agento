@@ -17,11 +17,14 @@ type modelPricing struct {
 }
 
 // pricingTable maps a lowercase tier keyword to its USD per-million-token rates.
-// Source: Anthropic pricing page (February 2025).
+// Source: Anthropic API pricing page (February 2026).
+// Rates shown are for 5-minute prompt cache writes; cache reads are 0.1× base input.
+// Opus 4.5/4.6: $5 input / $25 output (down from $15/$75 for older Opus models).
+// Haiku 4.5: $1 input / $5 output (up from $0.80/$4 for Haiku 3.5).
 var pricingTable = map[string]modelPricing{
-	"opus":   {15.00, 75.00, 18.75, 1.50},
+	"opus":   {5.00, 25.00, 6.25, 0.50},
 	"sonnet": {3.00, 15.00, 3.75, 0.30},
-	"haiku":  {0.80, 4.00, 1.00, 0.08},
+	"haiku":  {1.00, 5.00, 1.25, 0.10},
 }
 
 var defaultPricing = pricingTable["sonnet"]
