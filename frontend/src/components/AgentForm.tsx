@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { agentsApi } from '@/lib/api'
-import type { Agent } from '@/types'
+import { agentsApi, integrationsApi } from '@/lib/api'
+import type { Agent, AvailableTool } from '@/types'
 import { MODELS, BUILT_IN_TOOLS } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -38,8 +38,18 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
   const [description, setDescription] = useState(agent?.description ?? '')
   const [model, setModel] = useState(agent?.model ?? 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0')
   const [thinking, setThinking] = useState<Agent['thinking']>(agent?.thinking ?? 'adaptive')
+  const [permissionMode, setPermissionMode] = useState<Agent['permission_mode']>(
+    agent?.permission_mode ?? 'default',
+  )
   const [systemPrompt, setSystemPrompt] = useState(agent?.system_prompt ?? '')
   const [builtInTools, setBuiltInTools] = useState<string[]>(agent?.capabilities?.built_in ?? [])
+
+  // Integration tools: { [integration_id]: string[] }
+  const [mcpTools, setMcpTools] = useState<Record<string, string[]>>(() => {
+    const mcp = agent?.capabilities?.mcp ?? {}
+    return Object.fromEntries(Object.entries(mcp).map(([id, v]) => [id, v.tools]))
+  })
+  const [availableTools, setAvailableTools] = useState<AvailableTool[]>([])
 
   // Auto-generate slug from name
   useEffect(() => {
@@ -48,23 +58,63 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
     }
   }, [name, slugTouched])
 
+  useEffect(() => {
+    integrationsApi
+      .availableTools()
+      .then(setAvailableTools)
+      .catch(() => {})
+  }, [])
+
   const toggleTool = (tool: string) => {
     setBuiltInTools(prev => (prev.includes(tool) ? prev.filter(t => t !== tool) : [...prev, tool]))
   }
+
+  const toggleMcpTool = (integrationId: string, toolName: string) => {
+    setMcpTools(prev => {
+      const current = prev[integrationId] ?? []
+      const next = current.includes(toolName)
+        ? current.filter(t => t !== toolName)
+        : [...current, toolName]
+      return { ...prev, [integrationId]: next }
+    })
+  }
+
+  // Group availableTools by integration_id → service
+  const toolsByIntegration = availableTools.reduce<
+    Record<string, { name: string; byService: Record<string, AvailableTool[]> }>
+  >((acc, tool) => {
+    if (!acc[tool.integration_id]) {
+      acc[tool.integration_id] = { name: tool.integration_name, byService: {} }
+    }
+    if (!acc[tool.integration_id].byService[tool.service]) {
+      acc[tool.integration_id].byService[tool.service] = []
+    }
+    acc[tool.integration_id].byService[tool.service].push(tool)
+    return acc
+  }, {})
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
     setSaving(true)
     try {
+      // Build mcp capabilities — only include integrations with at least one tool selected
+      const mcp: Record<string, { tools: string[] }> = {}
+      for (const [id, tools] of Object.entries(mcpTools)) {
+        if (tools.length > 0) mcp[id] = { tools }
+      }
       const payload: Partial<Agent> = {
         name,
         slug,
         description,
         model,
         thinking,
+        permission_mode: permissionMode,
         system_prompt: systemPrompt,
-        capabilities: { built_in: builtInTools },
+        capabilities: {
+          built_in: builtInTools,
+          ...(Object.keys(mcp).length > 0 ? { mcp } : {}),
+        },
       }
       if (isEdit && agent) {
         await agentsApi.update(agent.slug, payload)
@@ -166,6 +216,27 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
         </p>
       </div>
 
+      {/* Permission Mode */}
+      <div className="space-y-1.5">
+        <Label>Permission Mode</Label>
+        <Select
+          value={permissionMode}
+          onValueChange={v => setPermissionMode(v as Agent['permission_mode'])}
+        >
+          <SelectTrigger>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="default">Default — respect Claude Code settings</SelectItem>
+            <SelectItem value="bypass">Bypass — auto-approve all tool calls</SelectItem>
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          <strong>Default</strong> respects your Claude Code permission rules.{' '}
+          <strong>Bypass</strong> skips all permission checks and auto-approves every tool call.
+        </p>
+      </div>
+
       {/* System Prompt */}
       <div className="space-y-1.5">
         <Label htmlFor="system_prompt">System Prompt</Label>
@@ -206,6 +277,55 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
           Leave all unchecked to allow all built-in tools.
         </p>
       </div>
+
+      {/* Integration Tools */}
+      {Object.keys(toolsByIntegration).length > 0 && (
+        <div className="space-y-2">
+          <Label>Integration Tools</Label>
+          <p className="text-xs text-muted-foreground">
+            Tools from your connected integrations. Selected tools will be available to this agent.
+          </p>
+          <div className="space-y-3">
+            {Object.entries(toolsByIntegration).map(
+              ([integrationId, { name: integName, byService }]) => (
+                <div key={integrationId} className="rounded-lg border border-border p-3">
+                  <p className="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">
+                    {integName}
+                  </p>
+                  <div className="space-y-2">
+                    {Object.entries(byService).map(([service, tools]) => (
+                      <div key={service}>
+                        <p className="text-xs text-zinc-400 capitalize mb-1.5">{service}</p>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                          {tools.map(tool => {
+                            const selected = (mcpTools[integrationId] ?? []).includes(
+                              tool.tool_name,
+                            )
+                            return (
+                              <label
+                                key={tool.tool_name}
+                                className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-sm cursor-pointer hover:bg-muted/50 transition-colors"
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={selected}
+                                  onChange={() => toggleMcpTool(integrationId, tool.tool_name)}
+                                  className="h-3.5 w-3.5 rounded border-gray-300"
+                                />
+                                <span className="font-mono text-xs">{tool.tool_name}</span>
+                              </label>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ),
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Actions */}
       <div className="flex items-center gap-3 pt-2">

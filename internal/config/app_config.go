@@ -101,3 +101,8 @@ func (c *AppConfig) ChatsDir() string {
 func (c *AppConfig) MCPsFile() string {
 	return filepath.Join(c.DataDir, "mcps.yaml")
 }
+
+// IntegrationsDir returns the path to the integrations storage directory.
+func (c *AppConfig) IntegrationsDir() string {
+	return filepath.Join(c.DataDir, "integrations")
+}

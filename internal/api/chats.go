@@ -55,6 +55,13 @@ type assistantEventRaw struct {
 	} `json:"message"`
 }
 
+// permReq carries a tool permission request from the permission handler goroutine
+// to the SSE HTTP handler goroutine so it can be forwarded to the frontend.
+type permReq struct {
+	ToolName string          `json:"tool_name"`
+	Input    json.RawMessage `json:"input,omitempty"`
+}
+
 // sendSSERaw writes a raw JSON payload as an SSE event without re-marshaling.
 func sendSSERaw(w http.ResponseWriter, flusher http.Flusher, event string, raw json.RawMessage) {
 	_, _ = w.Write([]byte("event: " + event + "\ndata: "))
@@ -164,26 +171,50 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	inputCh := make(chan string, 1)
 	questionCh := make(chan json.RawMessage, 4)
 
+	// permissionReqCh carries tool permission requests from the PermissionHandler
+	// goroutine to this HTTP handler goroutine so we can forward them to the
+	// frontend over SSE.
+	permissionReqCh := make(chan permReq, 4)
+
+	// permissionRespCh receives the user's allow/deny decision from
+	// handlePermissionResponse after the frontend shows the approval dialog.
+	permissionRespCh := make(chan bool, 1)
+
 	// PermissionHandler is called synchronously in the SDK reader goroutine
 	// before a tool executes. For AskUserQuestion we block here — the claude
 	// subprocess naturally pauses because it is waiting for our control_response.
+	// For all other tools we send a permission_request SSE event and wait for
+	// the user to allow or deny via POST /chats/{id}/permission.
 	permHandler := claude.PermissionHandler(func(toolName string, input json.RawMessage, _ claude.PermissionContext) claude.PermissionResult {
-		if toolName != "AskUserQuestion" {
-			return claude.PermissionResult{Behavior: "allow"}
+		if toolName == "AskUserQuestion" {
+			// Signal the HTTP handler goroutine to send user_input_required over SSE.
+			select {
+			case questionCh <- input:
+			default:
+			}
+			// Block until the user submits their answer or the request is canceled.
+			select {
+			case answer := <-inputCh:
+				// Return the answers as the tool-call "error" content so the agent
+				// receives them and can process them in its next reasoning step.
+				return claude.PermissionResult{Behavior: "deny", Message: answer}
+			case <-r.Context().Done():
+				return claude.PermissionResult{Behavior: "deny", Message: "request canceled"}
+			}
 		}
 
-		// Signal the HTTP handler goroutine to send user_input_required over SSE.
+		// For all other tools: send a permission_request to the frontend and
+		// block until the user makes a decision.
 		select {
-		case questionCh <- input:
+		case permissionReqCh <- permReq{ToolName: toolName, Input: input}:
 		default:
 		}
-
-		// Block until the user submits their answer or the request is canceled.
 		select {
-		case answer := <-inputCh:
-			// Return the answers as the tool-call "error" content so the agent
-			// receives them and can process them in its next reasoning step.
-			return claude.PermissionResult{Behavior: "deny", Message: answer}
+		case allow := <-permissionRespCh:
+			if allow {
+				return claude.PermissionResult{Behavior: "allow"}
+			}
+			return claude.PermissionResult{Behavior: "deny", Message: "Permission denied by user"}
 		case <-r.Context().Done():
 			return claude.PermissionResult{Behavior: "deny", Message: "request canceled"}
 		}
@@ -218,8 +249,13 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Register the live session so handleProvideInput can inject answers.
-	s.liveSessions.put(id, &liveSession{session: agentSession, inputCh: inputCh})
+	// Register the live session so handleProvideInput and handlePermissionResponse
+	// can inject answers and permission decisions.
+	s.liveSessions.put(id, &liveSession{
+		session:          agentSession,
+		inputCh:          inputCh,
+		permissionRespCh: permissionRespCh,
+	})
 	defer func() {
 		s.liveSessions.delete(id)
 		_ = agentSession.Close()
@@ -328,6 +364,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 				"input": qInput,
 			})
 
+		case req := <-permissionReqCh:
+			// Permission handler is paused waiting for user to allow/deny a tool.
+			// Forward the request to the frontend so it can show an approval dialog.
+			sendSSEEvent(w, flusher, "permission_request", req)
+
 		case <-r.Context().Done():
 			return
 		}
@@ -345,6 +386,33 @@ done:
 
 	if err := s.chatSvc.CommitMessage(r.Context(), chatSession, assistantText, sdkSessionID, isFirstMessage, blocks, tokens.toUsageStats()); err != nil {
 		s.logger.Error("commit message failed", "session_id", id, "error", err)
+	}
+}
+
+// handlePermissionResponse receives the user's allow/deny decision for a pending
+// tool permission request and unblocks the PermissionHandler goroutine.
+func (s *Server) handlePermissionResponse(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var req struct {
+		Allow bool `json:"allow"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return
+	}
+
+	ls, ok := s.liveSessions.get(id)
+	if !ok {
+		writeError(w, http.StatusConflict, "no active session for this chat")
+		return
+	}
+
+	select {
+	case ls.permissionRespCh <- req.Allow:
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		writeError(w, http.StatusConflict, "session is not currently awaiting a permission response")
 	}
 }
 

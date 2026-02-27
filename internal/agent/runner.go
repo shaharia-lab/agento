@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
 
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/integrations"
 	"github.com/shaharia-lab/agento/internal/tools"
 )
 
@@ -33,6 +35,9 @@ type RunOptions struct {
 
 	// MCPRegistry provides the SDK configs for external MCP servers.
 	MCPRegistry *config.MCPRegistry
+
+	// IntegrationRegistry provides in-process MCP servers for external service integrations.
+	IntegrationRegistry *integrations.IntegrationRegistry
 
 	// PermissionHandler is an optional callback invoked for each can_use_tool
 	// control_request from claude. When set it overrides the default bypass-all
@@ -136,16 +141,22 @@ func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt
 		// WithDefaultPermissions() overrides BOTH so the subprocess sends
 		// can_use_tool control_requests, which our handler can intercept.
 		// Without this, bypassPermissions means can_use_tool is never sent.
-		sdkOpts = append(sdkOpts,
-			claude.WithDefaultPermissions(),
-			claude.WithPermissionHandler(opts.PermissionHandler),
-		)
+		//
+		// The allowed tools list is computed later in this function and injected
+		// into the handler wrapper via a closure. See wrapPermissionHandler below.
+		sdkOpts = append(sdkOpts, claude.WithDefaultPermissions())
 	} else {
-		// No custom handler: bypass all permissions for unattended agent runs.
-		sdkOpts = append(sdkOpts,
-			claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
-			claude.WithBypassPermissions(),
-		)
+		// No interactive handler. Use the agent's configured permission mode.
+		// "default" uses Claude Code's built-in permission rules.
+		// Anything else (empty or "bypass") skips all permission checks.
+		if agentCfg != nil && agentCfg.PermissionMode == "default" {
+			sdkOpts = append(sdkOpts, claude.WithDefaultPermissions())
+		} else {
+			sdkOpts = append(sdkOpts,
+				claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
+				claude.WithBypassPermissions(),
+			)
+		}
 	}
 
 	// Model
@@ -200,23 +211,36 @@ func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt
 			allowedTools = append(allowedTools, opts.LocalToolsMCP.AllowedToolNames(caps.Local)...)
 		}
 
-		// External MCP servers from capabilities.mcp
-		if len(caps.MCP) > 0 && opts.MCPRegistry != nil {
+		// External MCP servers from capabilities.mcp — checks both MCPRegistry and IntegrationRegistry.
+		if len(caps.MCP) > 0 {
 			for serverName, mcpCap := range caps.MCP {
-				sdkCfg := opts.MCPRegistry.GetSDKConfig(serverName)
+				var sdkCfg any
+
+				// Check external MCP registry first.
+				if opts.MCPRegistry != nil {
+					sdkCfg = opts.MCPRegistry.GetSDKConfig(serverName)
+				}
+				// Fall back to integration registry (in-process Google/etc. servers).
+				if sdkCfg == nil && opts.IntegrationRegistry != nil {
+					if cfg, ok := opts.IntegrationRegistry.GetServerConfig(serverName); ok {
+						sdkCfg = cfg
+					}
+				}
 				if sdkCfg == nil {
 					continue
 				}
+
 				mcpServers[serverName] = sdkCfg
 				for _, toolName := range mcpCap.Tools {
 					allowedTools = append(allowedTools, fmt.Sprintf("mcp__%s__%s", serverName, toolName))
 				}
 			}
 		}
-	} else {
-		// No agent config — allow all built-in tools
-		allowedTools = allBuiltInTools
 	}
+	// For no-agent direct chats, don't set WithAllowedTools at all.
+	// Setting an explicit allowlist of only built-in tools would block the
+	// claude.ai MCP servers (Gmail, Calendar, etc.) that the SDK loads from
+	// the user's Anthropic account. WithBypassPermissions handles those.
 
 	if len(allowedTools) > 0 {
 		sdkOpts = append(sdkOpts, claude.WithAllowedTools(allowedTools...))
@@ -226,7 +250,44 @@ func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt
 		sdkOpts = append(sdkOpts, claude.WithMcpServers(mcpServers))
 	}
 
+	// Now that the allowed tools list is finalized, attach the (possibly wrapped)
+	// permission handler. When the agent has an explicit allowlist we wrap the
+	// caller-supplied handler so that any tool call not on the list is denied
+	// at the permission layer — a second defense line after WithAllowedTools.
+	if opts.PermissionHandler != nil {
+		handler := wrapPermissionHandler(opts.PermissionHandler, allowedTools)
+		sdkOpts = append(sdkOpts, claude.WithPermissionHandler(handler))
+	}
+
 	return sdkOpts
+}
+
+// wrapPermissionHandler returns a PermissionHandler that enforces the allowed
+// tools list before delegating to inner. AskUserQuestion is always allowed
+// (it is a special interactive tool, not an external capability).
+// When allowedTools is empty (no-agent direct chat) the inner handler is
+// returned unwrapped so that all tools are reachable.
+func wrapPermissionHandler(inner claude.PermissionHandler, allowedTools []string) claude.PermissionHandler {
+	if len(allowedTools) == 0 {
+		return inner
+	}
+	set := make(map[string]struct{}, len(allowedTools))
+	for _, t := range allowedTools {
+		set[t] = struct{}{}
+	}
+	return func(toolName string, input json.RawMessage, ctx claude.PermissionContext) claude.PermissionResult {
+		// AskUserQuestion is always permitted — it drives the multi-turn Q&A flow.
+		if toolName == "AskUserQuestion" {
+			return inner(toolName, input, ctx)
+		}
+		if _, ok := set[toolName]; !ok {
+			return claude.PermissionResult{
+				Behavior: "deny",
+				Message:  fmt.Sprintf("tool %q is not in this agent's allowed capabilities", toolName),
+			}
+		}
+		return inner(toolName, input, ctx)
+	}
 }
 
 // StreamAgent starts a streaming agent invocation and returns the *claude.Stream.

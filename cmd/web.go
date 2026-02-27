@@ -20,6 +20,8 @@ import (
 	"github.com/shaharia-lab/agento/internal/build"
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/integrations"
+	googleintegration "github.com/shaharia-lab/agento/internal/integrations/google"
 	"github.com/shaharia-lab/agento/internal/logger"
 	"github.com/shaharia-lab/agento/internal/server"
 	"github.com/shaharia-lab/agento/internal/service"
@@ -115,19 +117,31 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 
 	chatStore := storage.NewFSChatStore(cfg.ChatsDir())
 
+	// Set up integrations registry.
+	if err := os.MkdirAll(cfg.IntegrationsDir(), 0750); err != nil {
+		return fmt.Errorf("creating integrations directory: %w", err)
+	}
+	integrationStore := storage.NewFSIntegrationStore(cfg.IntegrationsDir())
+	integrationRegistry := integrations.NewRegistry(integrationStore, sysLogger)
+	integrationRegistry.RegisterStarter("google", googleintegration.Start)
+	if err := integrationRegistry.Start(ctx); err != nil {
+		sysLogger.Warn("some integrations failed to start", "error", err)
+	}
+
 	settingsMgr, err := config.NewSettingsManager(cfg.DataDir, cfg)
 	if err != nil {
 		return fmt.Errorf("initializing settings: %w", err)
 	}
 
 	agentSvc := service.NewAgentService(agentStore, sysLogger)
-	chatSvc := service.NewChatService(chatStore, agentStore, mcpRegistry, localToolsMCP, cfg.DefaultModel, sysLogger)
+	chatSvc := service.NewChatService(chatStore, agentStore, mcpRegistry, localToolsMCP, integrationRegistry, cfg.DefaultModel, sysLogger)
+	integrationSvc := service.NewIntegrationService(integrationStore, integrationRegistry, sysLogger, ctx)
 
 	// Start background scan of ~/.claude/projects so Claude Sessions are available quickly.
 	sessionCache := claudesessions.NewCache(sysLogger)
 	sessionCache.StartBackgroundScan()
 
-	apiSrv := api.New(agentSvc, chatSvc, settingsMgr, sysLogger, sessionCache)
+	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, settingsMgr, sysLogger, sessionCache)
 	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger)
 
 	url := fmt.Sprintf("http://localhost:%d", cfg.Port)
