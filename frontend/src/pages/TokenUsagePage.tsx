@@ -37,7 +37,16 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { RefreshCw, TrendingUp, Zap, DollarSign, Hash, Clock, Layers } from 'lucide-react'
+import {
+  RefreshCw,
+  TrendingUp,
+  Zap,
+  DollarSign,
+  Hash,
+  Clock,
+  Layers,
+  ChevronDown,
+} from 'lucide-react'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -611,6 +620,102 @@ function DateRangePicker({
   )
 }
 
+// ─── Pricing Disclaimer ───────────────────────────────────────────────────────
+
+function PricingDisclaimer() {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="rounded-md border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/20 mb-4">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-300 cursor-pointer"
+      >
+        <span>⚠ Estimates only — these figures may be outdated</span>
+        <ChevronDown
+          className={`h-3.5 w-3.5 shrink-0 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+      {open && (
+        <div className="px-3 pb-2.5 border-t border-amber-200 dark:border-amber-700/50 pt-2">
+          <p className="text-xs text-amber-700 dark:text-amber-400 mb-2">
+            Rates below were sourced from the{' '}
+            <a
+              href="https://platform.claude.com/docs/en/about-claude/pricing"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline hover:text-amber-900 dark:hover:text-amber-200"
+            >
+              Anthropic API pricing page
+            </a>{' '}
+            in February 2026. Anthropic updates pricing periodically — always verify against the{' '}
+            <a
+              href="https://platform.claude.com/docs/en/about-claude/pricing"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline hover:text-amber-900 dark:hover:text-amber-200"
+            >
+              official pricing page
+            </a>{' '}
+            before relying on these numbers. Model tier is detected from the model name; unknown
+            models fall back to Sonnet pricing.
+          </p>
+          <table className="w-full text-[11px] text-amber-800 dark:text-amber-300 border-collapse">
+            <thead>
+              <tr className="border-b border-amber-200 dark:border-amber-700/50">
+                <th className="text-left font-medium pb-1 pr-4">Model</th>
+                <th className="text-right font-medium pb-1 pr-4">Input</th>
+                <th className="text-right font-medium pb-1 pr-4">Output</th>
+                <th className="text-right font-medium pb-1 pr-4">Cache write</th>
+                <th className="text-right font-medium pb-1">Cache read</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-amber-100 dark:divide-amber-800/30">
+              {[
+                {
+                  model: 'Claude Opus 4.5/4.6',
+                  input: '$5',
+                  output: '$25',
+                  cacheWrite: '$6.25',
+                  cacheRead: '$0.50',
+                },
+                {
+                  model: 'Claude Sonnet 4.x',
+                  input: '$3',
+                  output: '$15',
+                  cacheWrite: '$3.75',
+                  cacheRead: '$0.30',
+                },
+                {
+                  model: 'Claude Haiku 4.5',
+                  input: '$1',
+                  output: '$5',
+                  cacheWrite: '$1.25',
+                  cacheRead: '$0.10',
+                },
+              ].map(row => (
+                <tr key={row.model}>
+                  <td className="py-0.5 pr-4 font-medium">{row.model}</td>
+                  <td className="py-0.5 pr-4 text-right">{row.input}</td>
+                  <td className="py-0.5 pr-4 text-right">{row.output}</td>
+                  <td className="py-0.5 pr-4 text-right">{row.cacheWrite}</td>
+                  <td className="py-0.5 text-right">{row.cacheRead}</td>
+                </tr>
+              ))}
+            </tbody>
+            <tfoot>
+              <tr>
+                <td colSpan={5} className="pt-1.5 text-amber-600 dark:text-amber-500 italic">
+                  All rates are per million tokens (MTok).
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function TokenUsagePage() {
@@ -787,86 +892,8 @@ export default function TokenUsagePage() {
                 Estimated Cost (USD)
               </h3>
 
-              {/* Pricing methodology note */}
-              <div className="rounded-md border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/20 px-3 py-2.5 mb-4">
-                <p className="text-xs text-amber-800 dark:text-amber-300 font-medium mb-1.5">
-                  ⚠ Estimates only — these figures may be outdated
-                </p>
-                <p className="text-xs text-amber-700 dark:text-amber-400 mb-2">
-                  Rates below were sourced from the{' '}
-                  <a
-                    href="https://platform.claude.com/docs/en/about-claude/pricing"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline hover:text-amber-900 dark:hover:text-amber-200"
-                  >
-                    Anthropic API pricing page
-                  </a>{' '}
-                  in February 2026. Anthropic updates pricing periodically — always verify against
-                  the{' '}
-                  <a
-                    href="https://platform.claude.com/docs/en/about-claude/pricing"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="underline hover:text-amber-900 dark:hover:text-amber-200"
-                  >
-                    official pricing page
-                  </a>{' '}
-                  before relying on these numbers. Model tier is detected from the model name;
-                  unknown models fall back to Sonnet pricing.
-                </p>
-                <table className="w-full text-[11px] text-amber-800 dark:text-amber-300 border-collapse">
-                  <thead>
-                    <tr className="border-b border-amber-200 dark:border-amber-700/50">
-                      <th className="text-left font-medium pb-1 pr-4">Model</th>
-                      <th className="text-right font-medium pb-1 pr-4">Input</th>
-                      <th className="text-right font-medium pb-1 pr-4">Output</th>
-                      <th className="text-right font-medium pb-1 pr-4">Cache write</th>
-                      <th className="text-right font-medium pb-1">Cache read</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-amber-100 dark:divide-amber-800/30">
-                    {[
-                      {
-                        model: 'Claude Opus 4.5/4.6',
-                        input: '$5',
-                        output: '$25',
-                        cacheWrite: '$6.25',
-                        cacheRead: '$0.50',
-                      },
-                      {
-                        model: 'Claude Sonnet 4.x',
-                        input: '$3',
-                        output: '$15',
-                        cacheWrite: '$3.75',
-                        cacheRead: '$0.30',
-                      },
-                      {
-                        model: 'Claude Haiku 4.5',
-                        input: '$1',
-                        output: '$5',
-                        cacheWrite: '$1.25',
-                        cacheRead: '$0.10',
-                      },
-                    ].map(row => (
-                      <tr key={row.model}>
-                        <td className="py-0.5 pr-4 font-medium">{row.model}</td>
-                        <td className="py-0.5 pr-4 text-right">{row.input}</td>
-                        <td className="py-0.5 pr-4 text-right">{row.output}</td>
-                        <td className="py-0.5 pr-4 text-right">{row.cacheWrite}</td>
-                        <td className="py-0.5 text-right">{row.cacheRead}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                  <tfoot>
-                    <tr>
-                      <td colSpan={5} className="pt-1.5 text-amber-600 dark:text-amber-500 italic">
-                        All rates are per million tokens (MTok).
-                      </td>
-                    </tr>
-                  </tfoot>
-                </table>
-              </div>
+              {/* Pricing methodology note — collapsible */}
+              <PricingDisclaimer />
               <CostSummaryCards
                 cost={
                   report?.cost_summary ?? {
