@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 
 	"github.com/shaharia-lab/agento/internal/api"
@@ -159,9 +160,20 @@ func seedExampleAgent(store storage.AgentStore) error {
 // printBanner writes the startup banner to stdout. It is the only output
 // visible in the terminal during normal operation; all structured logs go
 // to the log file instead.
-const githubRepo = "https://github.com/shaharia-lab/agento"
+const (
+	githubRepo  = "https://github.com/shaharia-lab/agento"
+	description = "Your personal AI agent platform using Claude Code CLI"
+)
 
 func printBanner(version, serverURL, logFile string) {
+	if termenv.ColorProfile() == termenv.Ascii {
+		printPlainBanner(version, serverURL, logFile)
+		return
+	}
+	printFancyBanner(version, serverURL, logFile)
+}
+
+func printFancyBanner(version, serverURL, logFile string) {
 	logo := lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color("12")). // bright blue
@@ -173,6 +185,11 @@ func printBanner(version, serverURL, logFile string) {
 ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ╚██████╔╝
 ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝
 `)
+
+	desc := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("8")). // muted gray
+		Italic(true).
+		Render(description)
 
 	keyStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("8")). // dark gray
@@ -201,7 +218,20 @@ func printBanner(version, serverURL, logFile string) {
 	table := borderStyle.Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
 
 	fmt.Println(logo)
+	fmt.Println(desc)
+	fmt.Println()
 	fmt.Println(table)
+	fmt.Println()
+}
+
+func printPlainBanner(version, serverURL, logFile string) {
+	fmt.Println("Agento")
+	fmt.Println(description)
+	fmt.Println()
+	fmt.Printf("  Version  %s\n", version)
+	fmt.Printf("  URL      %s\n", serverURL)
+	fmt.Printf("  Logs     %s\n", logFile)
+	fmt.Printf("  GitHub   %s\n", githubRepo)
 	fmt.Println()
 }
 
