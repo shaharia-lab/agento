@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -158,6 +159,8 @@ func seedExampleAgent(store storage.AgentStore) error {
 // printBanner writes the startup banner to stdout. It is the only output
 // visible in the terminal during normal operation; all structured logs go
 // to the log file instead.
+const githubRepo = "https://github.com/shaharia-lab/agento"
+
 func printBanner(version, serverURL, logFile string) {
 	fmt.Print(`
  █████╗  ██████╗ ███████╗███╗   ██╗████████╗ ██████╗
@@ -168,9 +171,34 @@ func printBanner(version, serverURL, logFile string) {
 ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝
 
 `)
-	fmt.Printf("Agento %s running.\n", version)
-	fmt.Printf("Please visit %s\n", serverURL)
-	fmt.Printf("Logs: %s\n\n", logFile)
+
+	rows := [][2]string{
+		{"Version", version},
+		{"URL", serverURL},
+		{"Logs", logFile},
+		{"GitHub", githubRepo},
+	}
+
+	// Measure columns.
+	const keyW = 9 // width of widest key ("Version" + padding)
+	valW := 0
+	for _, r := range rows {
+		if len(r[1]) > valW {
+			valW = len(r[1])
+		}
+	}
+
+	sep := "  ├" + strings.Repeat("─", keyW+1) + "┼" + strings.Repeat("─", valW+3) + "┤"
+
+	fmt.Println("  ╭" + strings.Repeat("─", keyW+1) + "┬" + strings.Repeat("─", valW+3) + "╮")
+	for i, r := range rows {
+		fmt.Printf("  │ %-*s │ %-*s │\n", keyW, r[0], valW+1, r[1])
+		if i < len(rows)-1 {
+			fmt.Println(sep)
+		}
+	}
+	fmt.Println("  ╰" + strings.Repeat("─", keyW+1) + "┴" + strings.Repeat("─", valW+3) + "╯")
+	fmt.Println()
 }
 
 func openBrowser(url string) {
