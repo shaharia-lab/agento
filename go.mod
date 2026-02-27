@@ -5,6 +5,7 @@ go 1.24.11
 require (
 	github.com/creativeprojects/go-selfupdate v1.5.2
 	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/cors v1.2.2
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/modelcontextprotocol/go-sdk v1.3.1
 	github.com/shaharia-lab/claude-agent-sdk-go v0.2.0
