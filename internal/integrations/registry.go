@@ -146,6 +146,6 @@ func (r *IntegrationRegistry) startOne(parentCtx context.Context, cfg *config.In
 	r.cancels[cfg.ID] = cancel
 	r.mu.Unlock()
 
-	r.logger.Info("integration MCP server started", "id", cfg.ID, "type", cfg.Type)
+	r.logger.Info("integration MCP server started", "id", cfg.ID, "type", cfg.Type, "url", serverCfg.URL)
 	return nil
 }

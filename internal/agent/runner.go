@@ -237,10 +237,14 @@ func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt
 			}
 		}
 	}
-	// For no-agent direct chats, don't set WithAllowedTools at all.
-	// Setting an explicit allowlist of only built-in tools would block the
-	// claude.ai MCP servers (Gmail, Calendar, etc.) that the SDK loads from
-	// the user's Anthropic account. WithBypassPermissions handles those.
+	// For no-agent direct chats, don't set WithAllowedTools or WithStrictMcpConfig
+	// so the user's Anthropic-account MCP servers (claude.ai Gmail, Calendar, etc.)
+	// remain available alongside any built-in tools.
+	//
+	// For agents with explicit capabilities, use WithStrictMcpConfig so only the
+	// MCP servers we pass via --mcp-config are loaded. Without this, cloud servers
+	// from the user's Anthropic account also appear, and the model may pick those
+	// instead of the agent's configured tools — resulting in denied tool calls.
 
 	if len(allowedTools) > 0 {
 		sdkOpts = append(sdkOpts, claude.WithAllowedTools(allowedTools...))
@@ -248,6 +252,7 @@ func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt
 
 	if len(mcpServers) > 0 {
 		sdkOpts = append(sdkOpts, claude.WithMcpServers(mcpServers))
+		sdkOpts = append(sdkOpts, claude.WithStrictMcpConfig())
 	}
 
 	// Now that the allowed tools list is finalized, attach the (possibly wrapped)
