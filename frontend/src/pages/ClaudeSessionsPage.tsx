@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { History, Search, RefreshCw, ExternalLink, Zap } from 'lucide-react'
+import { Tooltip } from '@/components/ui/tooltip'
 
 function formatTokens(n: number): string {
   if (!n) return '—'
@@ -219,11 +220,39 @@ function SessionRow({ session, onClick }: { session: ClaudeSessionSummary; onCli
             {session.message_count} msg{session.message_count !== 1 ? 's' : ''}
           </span>
           {hasTokens && (
-            <span className="flex items-center gap-0.5 text-xs text-zinc-400 dark:text-zinc-500">
-              <Zap className="h-2.5 w-2.5" />
-              {formatTokens(session.usage.input_tokens)}↑&nbsp;
-              {formatTokens(session.usage.output_tokens)}↓
-            </span>
+            <Tooltip
+              side="top"
+              content={
+                <div className="space-y-1">
+                  <div className="flex justify-between gap-4">
+                    <span className="text-zinc-400">Input tokens</span>
+                    <span>{session.usage.input_tokens.toLocaleString()}</span>
+                  </div>
+                  <div className="flex justify-between gap-4">
+                    <span className="text-zinc-400">Output tokens</span>
+                    <span>{session.usage.output_tokens.toLocaleString()}</span>
+                  </div>
+                  {session.usage.cache_read_tokens > 0 && (
+                    <div className="flex justify-between gap-4">
+                      <span className="text-zinc-400">Cache read</span>
+                      <span>{session.usage.cache_read_tokens.toLocaleString()}</span>
+                    </div>
+                  )}
+                  {session.usage.cache_creation_tokens > 0 && (
+                    <div className="flex justify-between gap-4">
+                      <span className="text-zinc-400">Cache write</span>
+                      <span>{session.usage.cache_creation_tokens.toLocaleString()}</span>
+                    </div>
+                  )}
+                </div>
+              }
+            >
+              <span className="flex items-center gap-0.5 text-xs text-zinc-400 dark:text-zinc-500 cursor-default">
+                <Zap className="h-2.5 w-2.5" />
+                {formatTokens(session.usage.input_tokens)}↑&nbsp;
+                {formatTokens(session.usage.output_tokens)}↓
+              </span>
+            </Tooltip>
           )}
         </div>
         {/* Session ID */}
