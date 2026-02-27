@@ -1,71 +1,142 @@
 # Agento
 
-**Agento** is a Go-based platform for defining and running AI agents powered by [Anthropic's Claude](https://www.anthropic.com/claude) models. It provides a flexible, configuration-driven framework for creating agents with customizable capabilities — including built-in Claude Code tools, local in-process tools, and external [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) servers.
+**Agento** is a local platform for building and interacting with AI agents through a web UI and CLI. It runs on top of the [Claude Code CLI](https://claude.ai/code) already installed on your machine — no separate API key or cloud account needed.
+
+You can define agents with custom system prompts and tools, start multi-turn conversations with them, and manage everything from a browser or directly from your terminal.
+
+---
 
 ## Features
 
-- **Dual interface**: Run agents via CLI or expose them through an HTTP REST API
-- **YAML-driven agents**: Define agents declaratively — no code required for common use cases
-- **Multi-turn conversations**: Resume sessions across requests using session IDs
-- **Extended thinking**: Control Claude's thinking mode per agent or per request (`adaptive`, `enabled`, `disabled`)
-- **Template variables**: Inject dynamic values (date, time, custom variables) into system prompts
-- **Three-tier tool system**:
-  - Built-in Claude Code tools (`Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`)
-  - Local in-process tools via MCP (e.g., `current_time`)
-  - External MCP servers via `stdio`, `streamable_http`, or `sse` transports
-- **Streaming support**: Server-Sent Events (SSE) for real-time streaming responses
-- **Token usage and cost tracking**: Response metadata includes token counts and estimated USD cost
+- **Web UI + CLI** — Access agents from a browser or run one-shot queries from the terminal
+- **Agent builder** — Define agents declaratively with YAML: name, system prompt, model, thinking mode, and tools
+- **Multi-turn conversations** — Resume sessions using session IDs
+- **Extended thinking** — Control Claude's reasoning depth per agent (`adaptive`, `enabled`, `disabled`)
+- **Template variables** — Inject `{{current_date}}`, `{{current_time}}`, and custom values into system prompts
+- **Built-in Claude Code tools** — `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`
+- **External MCP servers** — Connect any MCP-compatible server via `stdio`, `streamable_http`, or `sse`
+- **Real-time streaming** — Responses stream live in the UI via Server-Sent Events
+
+---
 
 ## Requirements
 
-- Go 1.24+
-- An [Anthropic API key](https://console.anthropic.com/)
+- [Claude Code CLI](https://claude.ai/code) installed and authenticated on your machine
+- Go 1.24+ and Node.js *(only required when building from source)*
+
+No Anthropic API key is required. Agento uses the Claude Code CLI's existing authentication by default. If you prefer to call the Anthropic API directly, you can set `ANTHROPIC_API_KEY` as an optional override.
+
+---
 
 ## Installation
 
-Clone the repository and build the binary:
+### Download binary
+
+Download the latest release for your platform from [GitHub Releases](https://github.com/shaharia-lab/agento/releases):
+
+| Platform | File |
+|----------|------|
+| Linux (x86_64) | `agento_Linux_x86_64.tar.gz` |
+| Linux (arm64) | `agento_Linux_arm64.tar.gz` |
+| macOS Intel | `agento_Darwin_x86_64.tar.gz` |
+| macOS Apple Silicon | `agento_Darwin_arm64.tar.gz` |
+| Windows (x86_64) | `agento_Windows_x86_64.zip` |
+
+Extract the archive and move the `agento` binary to a directory in your `PATH`:
 
 ```bash
-git clone git@github.com:shaharia-lab/agento.git
+tar -xzf agento_Linux_x86_64.tar.gz
+sudo mv agento /usr/local/bin/
+```
+
+### Homebrew
+
+```bash
+brew install shaharia-lab/tap/agento
+```
+
+### Build from source
+
+Requires Go 1.24+ and Node.js.
+
+```bash
+git clone https://github.com/shaharia-lab/agento.git
 cd agento
 make build
 ```
 
-This produces an `agents-platform` binary in the project root.
+This produces an `agento` binary in the project root.
+
+---
+
+## Quick Start
+
+```bash
+agento web
+```
+
+This starts Agento on port **8990** and opens your browser automatically. To skip the browser:
+
+```bash
+agento web --no-browser
+```
+
+To use a different port:
+
+```bash
+agento web --port 3000
+```
+
+---
 
 ## Configuration
 
-### Environment Variables
+No configuration is required. Agento works out of the box using your local Claude Code setup.
 
-Copy `.env.example` and fill in your values:
+All settings are optional and can be overridden with environment variables:
 
-```bash
-cp .env.example .env
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `8990` | HTTP server port |
+| `AGENTO_DATA_DIR` | `~/.agento` | Root directory for agents, chats, and logs |
+| `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `ANTHROPIC_API_KEY` | — | Use the Anthropic API directly instead of Claude Code CLI authentication |
+| `AGENTO_DEFAULT_MODEL` | *(Claude default)* | Lock the Claude model used for direct chat sessions |
+| `AGENTO_WORKING_DIR` | `/tmp/agento/work` | Default working directory for agent sessions |
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `ANTHROPIC_API_KEY` | Yes | — | Your Anthropic API key |
-| `AGENTS_DIR` | No | `./agents` | Directory containing agent YAML files |
-| `MCPS_FILE` | No | `./mcps.yaml` | Path to the MCP registry YAML file |
-| `PORT` | No | `3000` | HTTP server port (for `serve` command) |
+### Logs
 
-### Agent Definitions
+All logs are written in JSON format to `~/.agento/logs/system.log` (or `$AGENTO_DATA_DIR/logs/system.log`). Per-session logs are stored at `~/.agento/logs/sessions/<session-id>.log`.
 
-Agents are defined as YAML files in the agents directory (default: `./agents`). Each file defines one agent.
+Set `LOG_LEVEL=debug` to include HTTP request logs.
+
+---
+
+## Agents
+
+Agents are specialized assistants with a custom system prompt, model, and set of tools. You create and manage them from the **Agents** page in the UI, then chat with them from the **Chats** page.
+
+### Agent Definition
+
+1. Open the UI and go to the **Agents** page.
+2. Click **New Agent**.
+3. Fill in the name, description, and system prompt.
+4. Choose the Claude model and thinking mode.
+5. Select which tools the agent can use.
+6. Click **Save**.
+
+Agents are stored as YAML files in `~/.agento/agents/`. You can also create or edit them directly:
 
 ```yaml
 name: My Assistant
-slug: my-assistant          # Used in API URLs; auto-derived from filename if omitted
-description: A helpful assistant for general questions.
-model: claude-sonnet-4-6    # Claude model to use (default: claude-sonnet-4-6)
-thinking: adaptive          # adaptive | enabled | disabled (default: adaptive)
+slug: my-assistant
+description: A helpful assistant.
+model: claude-sonnet-4-6
+thinking: adaptive          # adaptive | enabled | disabled
 
 system_prompt: |
   You are a helpful assistant.
-  Today's date is {{current_date}}.
-  Current time: {{current_time}}.
-  User context: {{user_context}}.
+  Today is {{current_date}}.
 
 capabilities:
   built_in:                 # Claude Code built-in tools
@@ -75,28 +146,26 @@ capabilities:
     - WebSearch
   local:                    # Local in-process tools
     - current_time
-  mcp:                      # External MCP servers (keys must match mcps.yaml)
-    my-external-server:
+  mcp:                      # External MCP servers
+    my-server:
       tools:
-        - tool_name_1
-        - tool_name_2
+        - tool_name
 ```
 
-**Available built-in tools**: `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`
+**Available built-in tools:** `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`
 
-**Thinking modes**:
+**Thinking modes:**
 - `adaptive` — Claude decides when to use extended thinking
 - `enabled` — Extended thinking always on
 - `disabled` — No extended thinking
 
-**Template variables**:
-- `{{current_date}}` — Current date in `YYYY-MM-DD` format
-- `{{current_time}}` — Current time in `HH:MM:SS` format
-- Any custom variable passed at runtime via `--variables` or the API request body
+**Template variables:** `{{current_date}}` (YYYY-MM-DD), `{{current_time}}` (HH:MM:SS), plus any custom variables.
 
-### MCP Registry
+---
 
-Define external MCP servers in `mcps.yaml`. Use `${ENV:VAR_NAME}` to reference environment variables:
+## MCP Registry
+
+To connect external MCP servers, create `~/.agento/mcps.yaml`:
 
 ```yaml
 # stdio-based MCP server (subprocess)
@@ -122,219 +191,39 @@ my-sse-server:
   url: https://stream.example.com/mcp
 ```
 
-## Usage
+Use `${ENV:VAR_NAME}` to reference environment variables in the config. Supported transports: `stdio`, `streamable_http`, `sse`.
 
-### CLI
+---
 
-```bash
-# Ask a question using the first available agent
-./agents-platform ask "What is the capital of France?"
+## CLI Usage
 
-# Use a specific agent by slug
-./agents-platform ask --agent my-assistant "Summarize the news today."
+### ask
 
-# Resume a multi-turn conversation
-./agents-platform ask --agent my-assistant "Follow up question" <session-id>
-
-# Disable extended thinking for this request
-./agents-platform ask --agent my-assistant --no-thinking "Quick calculation: 2+2"
-
-# Override agents directory and MCP registry file
-./agents-platform ask --agents-dir /path/to/agents --mcps-file /path/to/mcps.yaml "Hello"
-```
-
-Thinking tokens are written to **stderr**; the final response text goes to **stdout**. The session ID and token usage statistics are printed after each response.
-
-### HTTP Server
-
-Start the server:
+Run a one-shot query from the terminal:
 
 ```bash
-./agents-platform serve
-./agents-platform serve --port 8990
-./agents-platform serve --agents-dir ./my-agents --mcps-file ./my-mcps.yaml
+agento ask "What is the capital of France?"
+agento ask --agent my-assistant "Summarise this document"
+agento ask --agent my-assistant "Follow up question" <session-id>
 ```
 
-#### Endpoints
+### update
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Health check |
-| `GET` | `/agents` | List all loaded agents |
-| `POST` | `/{slug}/ask` | Run agent and return full JSON response |
-| `POST` | `/{slug}/ask/stream` | Run agent with Server-Sent Events (SSE) streaming |
+Update Agento to the latest release:
 
-#### Request Body (`/ask` and `/ask/stream`)
-
-```json
-{
-  "question": "What is quantum entanglement?",
-  "session_id": "optional-uuid-to-resume-session",
-  "thinking": true,
-  "variables": {
-    "user_context": "Professional physicist"
-  }
-}
+```bash
+agento update        # prompts for confirmation
+agento update --yes  # skip confirmation
 ```
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `question` | string | Yes | The question or instruction for the agent |
-| `session_id` | string | No | Resume a previous conversation session |
-| `thinking` | boolean | No | Override agent thinking config (`null` = use agent config) |
-| `variables` | object | No | Template variable values for the system prompt |
-
-#### Response (`/ask`)
-
-```json
-{
-  "session_id": "550e8400-e29b-41d4-a716-446655440000",
-  "question": "What is quantum entanglement?",
-  "answer": "Quantum entanglement is a phenomenon where...",
-  "thinking": "Let me think about how to explain this clearly...",
-  "cost_usd": 0.000342,
-  "usage": {
-    "input_tokens": 210,
-    "output_tokens": 148,
-    "cache_read_input_tokens": 0,
-    "cache_creation_input_tokens": 0
-  }
-}
-```
-
-#### SSE Stream Events (`/ask/stream`)
-
-Events are sent as `data: <json>\n\n` in the following format:
-
-| Event type | Description |
-|---|---|
-| `thinking` | Streaming thinking token |
-| `message` | Streaming response text chunk |
-| `result` | Final aggregated result (same schema as `/ask` response) |
-| `error` | Error message |
-| `done` | Stream completion signal |
-
-Example event:
-```
-data: {"type":"message","content":"Quantum entanglement is"}
-
-data: {"type":"done"}
-```
-
-## Project Structure
-
-```
-agento/
-├── agents/                    # Agent YAML definitions
-│   ├── hello-world.yaml
-│   └── hello-world-2.yaml
-├── cmd/                       # CLI commands (cobra)
-│   ├── root.go               # Root command setup
-│   ├── ask.go                # "ask" subcommand
-│   └── serve.go              # "serve" subcommand
-├── internal/
-│   ├── agent/
-│   │   └── runner.go         # Agent execution engine
-│   ├── config/
-│   │   ├── agent.go          # Agent YAML parsing and registry
-│   │   └── mcp.go            # MCP registry loading
-│   ├── server/
-│   │   └── server.go         # HTTP server and API handlers
-│   └── tools/
-│       ├── registry.go       # Local in-process MCP server
-│       └── current_time.go   # Built-in current_time tool
-├── main.go                    # Entry point
-├── go.mod
-├── Makefile
-└── .env.example
-```
+---
 
 ## Development
 
-```bash
-# Install dependencies
-make tidy
+For architecture overview, local development setup, and contribution guidelines, see the [developer documentation](docs/).
 
-# Build
-make build
-
-# Run tests
-make test
-
-# Lint
-make lint
-
-# Run the HTTP server directly
-make run-serve
-
-# Run the ask command
-make run-ask ARGS='--agent hello-world "What time is it?"'
-
-# Clean build artifacts
-make clean
-```
-
-## Adding a Custom Local Tool
-
-Local tools run in-process via an embedded MCP server. To add one:
-
-1. Create a new file in `internal/tools/` implementing your tool logic.
-2. Register it in `internal/tools/registry.go` alongside `current_time`.
-3. Add the tool name to an agent's `capabilities.local` list.
-
-See `internal/tools/current_time.go` for a reference implementation.
-
-## Adding an External MCP Server
-
-1. Add the server configuration to `mcps.yaml` (or the file pointed to by `MCPS_FILE`).
-2. Reference the server key in the agent's `capabilities.mcp` section.
-3. List the specific tools your agent is allowed to use.
-
-MCP tool names are automatically qualified as `mcp__{server_name}__{tool_name}` internally.
-
-## Example Agents
-
-### Hello World (local tool)
-
-`agents/hello-world.yaml` — Uses the built-in `current_time` local tool and adaptive thinking:
-
-```yaml
-name: Hello World Agent
-slug: hello-world
-description: A simple demo agent that answers general questions concisely.
-model: claude-sonnet-4-6
-thinking: adaptive
-
-system_prompt: |
-  You are a helpful assistant.
-  Today's date is {{current_date}}.
-  Answer concisely and accurately.
-
-capabilities:
-  local:
-    - current_time
-```
-
-### Hello World 2 (web search)
-
-`agents/hello-world-2.yaml` — Uses the `WebSearch` built-in tool, thinking disabled:
-
-```yaml
-name: Hello World Agent 2
-description: A second demo agent — greets users warmly and answers questions.
-model: claude-sonnet-4-6
-thinking: disabled
-
-system_prompt: |
-  You are a warm and friendly assistant named Alex.
-  Today's date is {{current_date}}.
-  Always greet the user before answering.
-
-capabilities:
-  built_in:
-    - WebSearch
-```
+---
 
 ## License
 
-This project is maintained by [Shaharia Lab](https://github.com/shaharia-lab).
+MIT. Maintained by [Shaharia Lab](https://github.com/shaharia-lab).
