@@ -11,5 +11,5 @@ var (
 
 // String returns a single human-readable build info string.
 func String() string {
-	return fmt.Sprintf("%s (commit %s, built %s)", Version, CommitSHA, BuildDate)
+	return fmt.Sprintf("%s (%s, %s)", Version, CommitSHA, BuildDate)
 }
