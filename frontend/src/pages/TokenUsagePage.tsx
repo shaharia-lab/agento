@@ -790,11 +790,30 @@ export default function TokenUsagePage() {
               {/* Pricing methodology note */}
               <div className="rounded-md border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/20 px-3 py-2.5 mb-4">
                 <p className="text-xs text-amber-800 dark:text-amber-300 font-medium mb-1.5">
-                  ⚠ Estimates only — based on Anthropic published pricing (February 2026)
+                  ⚠ Estimates only — these figures may be outdated
                 </p>
                 <p className="text-xs text-amber-700 dark:text-amber-400 mb-2">
-                  Model tier is detected from the model name. Unknown models fall back to Sonnet
-                  pricing. Actual charges may differ.
+                  Rates below were sourced from the{' '}
+                  <a
+                    href="https://platform.claude.com/docs/en/about-claude/pricing"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline hover:text-amber-900 dark:hover:text-amber-200"
+                  >
+                    Anthropic API pricing page
+                  </a>{' '}
+                  in February 2026. Anthropic updates pricing periodically — always verify against
+                  the{' '}
+                  <a
+                    href="https://platform.claude.com/docs/en/about-claude/pricing"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline hover:text-amber-900 dark:hover:text-amber-200"
+                  >
+                    official pricing page
+                  </a>{' '}
+                  before relying on these numbers. Model tier is detected from the model name;
+                  unknown models fall back to Sonnet pricing.
                 </p>
                 <table className="w-full text-[11px] text-amber-800 dark:text-amber-300 border-collapse">
                   <thead>
