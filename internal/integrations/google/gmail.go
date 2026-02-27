@@ -13,32 +13,40 @@ import (
 )
 
 // registerGmailTools adds Gmail MCP tools to the server.
-func registerGmailTools(server *mcp.Server, httpClient *http.Client) {
+// Only tools whose names are in the allowed set are registered.
+// If allowed is empty, all tools are registered.
+func registerGmailTools(server *mcp.Server, httpClient *http.Client, allowed map[string]bool) {
 	gmailSvc, err := gmail.NewService(context.Background(), option.WithHTTPClient(httpClient))
 	if err != nil {
 		return
 	}
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "send_email",
-		Description: "Sends an email via Gmail.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, params *sendEmailParams) (*mcp.CallToolResult, any, error) {
-		return handleSendEmail(ctx, gmailSvc, params)
-	})
+	if len(allowed) == 0 || allowed["send_email"] {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "send_email",
+			Description: "Sends an email via Gmail.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *sendEmailParams) (*mcp.CallToolResult, any, error) {
+			return handleSendEmail(ctx, gmailSvc, params)
+		})
+	}
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "read_email",
-		Description: "Reads the full content of a Gmail message by its ID.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, params *readEmailParams) (*mcp.CallToolResult, any, error) {
-		return handleReadEmail(ctx, gmailSvc, params)
-	})
+	if len(allowed) == 0 || allowed["read_email"] {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "read_email",
+			Description: "Reads the full content of a Gmail message by its ID.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *readEmailParams) (*mcp.CallToolResult, any, error) {
+			return handleReadEmail(ctx, gmailSvc, params)
+		})
+	}
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "search_email",
-		Description: "Searches Gmail messages using Gmail query syntax (e.g. 'from:alice@example.com is:unread').",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, params *searchEmailParams) (*mcp.CallToolResult, any, error) {
-		return handleSearchEmail(ctx, gmailSvc, params)
-	})
+	if len(allowed) == 0 || allowed["search_email"] {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "search_email",
+			Description: "Searches Gmail messages using Gmail query syntax (e.g. 'from:alice@example.com is:unread').",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *searchEmailParams) (*mcp.CallToolResult, any, error) {
+			return handleSearchEmail(ctx, gmailSvc, params)
+		})
+	}
 }
 
 type sendEmailParams struct {

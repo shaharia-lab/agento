@@ -13,32 +13,40 @@ import (
 )
 
 // registerDriveTools adds Google Drive MCP tools to the server.
-func registerDriveTools(server *mcp.Server, httpClient *http.Client) {
+// Only tools whose names are in the allowed set are registered.
+// If allowed is empty, all tools are registered.
+func registerDriveTools(server *mcp.Server, httpClient *http.Client, allowed map[string]bool) {
 	driveSvc, err := drive.NewService(context.Background(), option.WithHTTPClient(httpClient))
 	if err != nil {
 		return
 	}
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "list_files",
-		Description: "Lists files and folders in Google Drive.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, params *listFilesParams) (*mcp.CallToolResult, any, error) {
-		return handleListFiles(ctx, driveSvc, params)
-	})
+	if len(allowed) == 0 || allowed["list_files"] {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "list_files",
+			Description: "Lists files and folders in Google Drive.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *listFilesParams) (*mcp.CallToolResult, any, error) {
+			return handleListFiles(ctx, driveSvc, params)
+		})
+	}
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "create_file",
-		Description: "Creates a new file in Google Drive with the provided content.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, params *createFileParams) (*mcp.CallToolResult, any, error) {
-		return handleCreateFile(ctx, driveSvc, params)
-	})
+	if len(allowed) == 0 || allowed["create_file"] {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "create_file",
+			Description: "Creates a new file in Google Drive with the provided content.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *createFileParams) (*mcp.CallToolResult, any, error) {
+			return handleCreateFile(ctx, driveSvc, params)
+		})
+	}
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "download_file",
-		Description: "Downloads and returns the text content of a Google Drive file by its ID.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, params *downloadFileParams) (*mcp.CallToolResult, any, error) {
-		return handleDownloadFile(ctx, driveSvc, params)
-	})
+	if len(allowed) == 0 || allowed["download_file"] {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "download_file",
+			Description: "Downloads and returns the text content of a Google Drive file by its ID.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *downloadFileParams) (*mcp.CallToolResult, any, error) {
+			return handleDownloadFile(ctx, driveSvc, params)
+		})
+	}
 }
 
 type listFilesParams struct {

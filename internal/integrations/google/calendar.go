@@ -12,26 +12,32 @@ import (
 )
 
 // registerCalendarTools adds Google Calendar MCP tools to the server.
-func registerCalendarTools(server *mcp.Server, httpClient *http.Client) {
+// Only tools whose names are in the allowed set are registered.
+// If allowed is empty, all tools are registered.
+func registerCalendarTools(server *mcp.Server, httpClient *http.Client, allowed map[string]bool) {
 	calSvc, err := calendar.NewService(context.Background(), option.WithHTTPClient(httpClient))
 	if err != nil {
 		// If we can't create the service, skip registration — server will start without calendar tools.
 		return
 	}
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "create_event",
-		Description: "Creates a new event on the user's primary Google Calendar.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, params *createEventParams) (*mcp.CallToolResult, any, error) {
-		return handleCreateEvent(ctx, calSvc, params)
-	})
+	if len(allowed) == 0 || allowed["create_event"] {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "create_event",
+			Description: "Creates a new event on the user's primary Google Calendar.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *createEventParams) (*mcp.CallToolResult, any, error) {
+			return handleCreateEvent(ctx, calSvc, params)
+		})
+	}
 
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "view_events",
-		Description: "Lists events from the user's primary Google Calendar within an optional time range.",
-	}, func(ctx context.Context, _ *mcp.CallToolRequest, params *viewEventsParams) (*mcp.CallToolResult, any, error) {
-		return handleViewEvents(ctx, calSvc, params)
-	})
+	if len(allowed) == 0 || allowed["view_events"] {
+		mcp.AddTool(server, &mcp.Tool{
+			Name:        "view_events",
+			Description: "Lists events from the user's primary Google Calendar within an optional time range.",
+		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *viewEventsParams) (*mcp.CallToolResult, any, error) {
+			return handleViewEvents(ctx, calSvc, params)
+		})
+	}
 }
 
 type createEventParams struct {

@@ -116,6 +116,68 @@ func (r *IntegrationRegistry) AllServerConfigs() map[string]claude.McpHTTPServer
 	return out
 }
 
+// StartFilteredServer starts a new MCP server for the given integration with only the
+// specified tools registered. The server runs until ctx is canceled, so callers should
+// pass a session-scoped context for automatic cleanup.
+// This is used by agents that only need a subset of an integration's tools.
+func (r *IntegrationRegistry) StartFilteredServer(ctx context.Context, id string, tools []string) (claude.McpHTTPServer, error) {
+	cfg, err := r.store.Get(id)
+	if err != nil {
+		return claude.McpHTTPServer{}, fmt.Errorf("loading integration %q: %w", id, err)
+	}
+	if cfg == nil {
+		return claude.McpHTTPServer{}, fmt.Errorf("integration %q not found", id)
+	}
+	if !cfg.Enabled || cfg.Auth == nil {
+		return claude.McpHTTPServer{}, fmt.Errorf("integration %q is not enabled or not authenticated", id)
+	}
+
+	r.mu.RLock()
+	starter, ok := r.starters[cfg.Type]
+	r.mu.RUnlock()
+	if !ok {
+		return claude.McpHTTPServer{}, fmt.Errorf("no starter registered for integration type %q", cfg.Type)
+	}
+
+	// Build a filtered copy of the config with only the requested tools.
+	filtered := filterConfigTools(cfg, tools)
+	return starter(ctx, filtered)
+}
+
+// filterConfigTools returns a shallow copy of cfg whose Services only contain
+// the tools present in the requested list.
+func filterConfigTools(cfg *config.IntegrationConfig, tools []string) *config.IntegrationConfig {
+	if len(tools) == 0 {
+		return cfg
+	}
+
+	want := make(map[string]bool, len(tools))
+	for _, t := range tools {
+		want[t] = true
+	}
+
+	out := *cfg
+	out.Services = make(map[string]config.ServiceConfig, len(cfg.Services))
+	for svcName, svc := range cfg.Services {
+		if !svc.Enabled {
+			continue
+		}
+		var kept []string
+		for _, t := range svc.Tools {
+			if want[t] {
+				kept = append(kept, t)
+			}
+		}
+		if len(kept) > 0 {
+			out.Services[svcName] = config.ServiceConfig{
+				Enabled: true,
+				Tools:   kept,
+			}
+		}
+	}
+	return &out
+}
+
 // AllowedToolNames returns fully qualified tool names ("mcp__<id>__<tool>") for the given
 // integration id and bare tool names.
 func AllowedToolNames(id string, tools []string) []string {

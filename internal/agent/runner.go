@@ -17,6 +17,7 @@ import (
 // allBuiltInTools is the full list of Claude Code built-in tools available to agents.
 var allBuiltInTools = []string{
 	"Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch", "Task",
+	"TaskOutput", "TaskStop", "NotebookEdit",
 }
 
 // RunOptions configures an agent invocation.
@@ -123,7 +124,8 @@ func Interpolate(template string, vars map[string]string) (string, error) {
 }
 
 // buildSDKOptions constructs the claude SDK options for the given agent config and run options.
-func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt string) []claude.Option {
+// ctx is used to scope the lifetime of any per-session MCP servers started for integrations.
+func buildSDKOptions(ctx context.Context, agentCfg *config.AgentConfig, opts RunOptions, systemPrompt string) []claude.Option {
 	sdkOpts := []claude.Option{
 		claude.WithIncludePartialMessages(),
 	}
@@ -220,10 +222,11 @@ func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt
 				if opts.MCPRegistry != nil {
 					sdkCfg = opts.MCPRegistry.GetSDKConfig(serverName)
 				}
-				// Fall back to integration registry (in-process Google/etc. servers).
+				// Fall back to integration registry — start a filtered server with
+				// only the tools this agent needs so the model doesn't see extras.
 				if sdkCfg == nil && opts.IntegrationRegistry != nil {
-					if cfg, ok := opts.IntegrationRegistry.GetServerConfig(serverName); ok {
-						sdkCfg = cfg
+					if serverCfg, err := opts.IntegrationRegistry.StartFilteredServer(ctx, serverName, mcpCap.Tools); err == nil {
+						sdkCfg = serverCfg
 					}
 				}
 				if sdkCfg == nil {
@@ -248,6 +251,25 @@ func buildSDKOptions(agentCfg *config.AgentConfig, opts RunOptions, systemPrompt
 
 	if len(allowedTools) > 0 {
 		sdkOpts = append(sdkOpts, claude.WithAllowedTools(allowedTools...))
+	}
+
+	// Compute disallowed built-in tools: everything the agent did NOT select.
+	// --disallowedTools tells the CLI to hide these tools from the model entirely,
+	// whereas --allowedTools only gates execution.
+	if agentCfg != nil && len(agentCfg.Capabilities.BuiltIn) > 0 {
+		selected := make(map[string]bool, len(agentCfg.Capabilities.BuiltIn))
+		for _, t := range agentCfg.Capabilities.BuiltIn {
+			selected[t] = true
+		}
+		var disallowed []string
+		for _, t := range allBuiltInTools {
+			if !selected[t] {
+				disallowed = append(disallowed, t)
+			}
+		}
+		if len(disallowed) > 0 {
+			sdkOpts = append(sdkOpts, claude.WithDisallowedTools(disallowed...))
+		}
 	}
 
 	if len(mcpServers) > 0 {
@@ -307,7 +329,7 @@ func StreamAgent(ctx context.Context, agentCfg *config.AgentConfig, question str
 		systemPrompt = interpolated
 	}
 
-	sdkOpts := buildSDKOptions(agentCfg, opts, systemPrompt)
+	sdkOpts := buildSDKOptions(ctx, agentCfg, opts, systemPrompt)
 	return claude.Query(ctx, question, sdkOpts...)
 }
 
@@ -325,7 +347,7 @@ func StartSession(ctx context.Context, agentCfg *config.AgentConfig, firstMessag
 		systemPrompt = interpolated
 	}
 
-	sdkOpts := buildSDKOptions(agentCfg, opts, systemPrompt)
+	sdkOpts := buildSDKOptions(ctx, agentCfg, opts, systemPrompt)
 	session, err := claude.NewSession(ctx, sdkOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("creating session: %w", err)
@@ -350,7 +372,7 @@ func RunAgent(ctx context.Context, agentCfg *config.AgentConfig, question string
 		systemPrompt = interpolated
 	}
 
-	sdkOpts := buildSDKOptions(agentCfg, opts, systemPrompt)
+	sdkOpts := buildSDKOptions(ctx, agentCfg, opts, systemPrompt)
 
 	stream, err := claude.Query(ctx, question, sdkOpts...)
 	if err != nil {
