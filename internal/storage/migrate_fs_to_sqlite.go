@@ -54,6 +54,10 @@ func MigrateFromFS(db *sql.DB, dataDir string, logger *slog.Logger) error {
 	}
 
 	logger.Info("filesystem-to-SQLite migration completed successfully")
+
+	// Clean up old filesystem data after successful migration.
+	cleanupFSData(dataDir, logger)
+
 	return nil
 }
 
@@ -339,4 +343,38 @@ func migrateSettings(ctx context.Context, tx *sql.Tx, settingsFile string, logge
 	}
 	logger.Info("migrated user settings")
 	return nil
+}
+
+// cleanupFSData removes the old filesystem-based data directories and settings
+// file after a successful migration to SQLite. Each removal is logged
+// individually; failures are warned but do not prevent the app from starting.
+func cleanupFSData(dataDir string, logger *slog.Logger) {
+	logger.Info("cleaning up old filesystem storage after successful migration")
+
+	dirs := []string{
+		filepath.Join(dataDir, "agents"),
+		filepath.Join(dataDir, "chats"),
+		filepath.Join(dataDir, "integrations"),
+	}
+	for _, dir := range dirs {
+		if _, err := os.Stat(dir); os.IsNotExist(err) {
+			continue
+		}
+		if err := os.RemoveAll(dir); err != nil {
+			logger.Warn("failed to remove legacy directory", "path", dir, "error", err)
+		} else {
+			logger.Info("removed legacy directory", "path", dir)
+		}
+	}
+
+	settingsFile := filepath.Join(dataDir, "settings.json")
+	if _, err := os.Stat(settingsFile); err == nil {
+		if err := os.Remove(settingsFile); err != nil {
+			logger.Warn("failed to remove legacy settings file", "path", settingsFile, "error", err)
+		} else {
+			logger.Info("removed legacy settings file", "path", settingsFile)
+		}
+	}
+
+	logger.Info("filesystem cleanup complete — all data is now in agento.db")
 }

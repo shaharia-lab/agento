@@ -567,6 +567,17 @@ capabilities:
 	if !settings.OnboardingComplete {
 		t.Error("expected onboarding_complete=true")
 	}
+
+	// Verify old FS data was cleaned up
+	if _, err := os.Stat(agentsDir); !os.IsNotExist(err) {
+		t.Error("expected agents directory to be removed after migration")
+	}
+	if _, err := os.Stat(chatsDir); !os.IsNotExist(err) {
+		t.Error("expected chats directory to be removed after migration")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "settings.json")); !os.IsNotExist(err) {
+		t.Error("expected settings.json to be removed after migration")
+	}
 }
 
 func TestMigrateFromFS_Idempotent(t *testing.T) {
