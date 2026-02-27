@@ -76,6 +76,9 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/claude-sessions/{id}", s.handleGetClaudeSession)
 	r.Post("/claude-sessions/{id}/continue", s.handleContinueClaudeSession)
 
+	// Claude Code analytics
+	r.Get("/claude-analytics", s.handleGetClaudeAnalytics)
+
 	// Filesystem browser
 	r.Get("/fs", s.handleFSList)
 	r.Post("/fs/mkdir", s.handleFSMkdir)

@@ -9,6 +9,7 @@ import ChatSessionPage from '@/pages/ChatSessionPage'
 import SettingsPage from '@/pages/SettingsPage'
 import ClaudeSessionsPage from '@/pages/ClaudeSessionsPage'
 import ClaudeSessionDetailPage from '@/pages/ClaudeSessionDetailPage'
+import TokenUsagePage from '@/pages/TokenUsagePage'
 import OnboardingWizard from '@/components/OnboardingWizard'
 import { AppearanceProvider } from '@/contexts/ThemeContext'
 import { settingsApi } from '@/lib/api'
@@ -73,6 +74,7 @@ export default function App() {
             <Route path="agents/:slug/edit" element={<AgentEditPage />} />
             <Route path="claude-sessions" element={<ClaudeSessionsPage />} />
             <Route path="claude-sessions/:id" element={<ClaudeSessionDetailPage />} />
+            <Route path="analytics/token-usage" element={<TokenUsagePage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>
         </Routes>
