@@ -23,20 +23,9 @@ import type {
   TimeSeriesPoint,
   CacheEfficiencyPoint,
   ModelStat,
-  ModelSessionStat,
-  DayActivity,
-  HeatmapCell,
-  HourlyActivity,
   CostPoint,
   CostSummary,
 } from '@/types'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import {
   RefreshCw,
   TrendingUp,
@@ -47,67 +36,19 @@ import {
   Layers,
   ChevronDown,
 } from 'lucide-react'
+import {
+  MODEL_COLORS,
+  DatePreset,
+  presetToRange,
+  formatTokens,
+  formatModelName,
+  formatDateLabel,
+  KPICard,
+  ChartCard,
+  DateRangePicker,
+} from './analyticsShared'
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const MODEL_COLORS = [
-  '#6366f1', // indigo
-  '#22c55e', // green
-  '#f59e0b', // amber
-  '#ef4444', // red
-  '#8b5cf6', // violet
-  '#14b8a6', // teal
-  '#f97316', // orange
-  '#ec4899', // pink
-]
-
-const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-
-type DatePreset = '7d' | '30d' | '90d' | 'this-month' | 'last-month' | 'all-time' | 'custom'
-
-// ─── Utilities ────────────────────────────────────────────────────────────────
-
-function fmt(d: Date) {
-  return d.toISOString().slice(0, 10)
-}
-
-function subDays(d: Date, n: number): Date {
-  const r = new Date(d)
-  r.setDate(r.getDate() - n)
-  return r
-}
-
-function presetToRange(preset: DatePreset): { from: string; to: string } {
-  const today = new Date()
-  switch (preset) {
-    case '7d':
-      return { from: fmt(subDays(today, 7)), to: fmt(today) }
-    case '30d':
-      return { from: fmt(subDays(today, 30)), to: fmt(today) }
-    case '90d':
-      return { from: fmt(subDays(today, 90)), to: fmt(today) }
-    case 'this-month': {
-      const start = new Date(today.getFullYear(), today.getMonth(), 1)
-      return { from: fmt(start), to: fmt(today) }
-    }
-    case 'last-month': {
-      const start = new Date(today.getFullYear(), today.getMonth() - 1, 1)
-      const end = new Date(today.getFullYear(), today.getMonth(), 0)
-      return { from: fmt(start), to: fmt(end) }
-    }
-    case 'all-time':
-      return { from: '2020-01-01', to: fmt(today) }
-    default:
-      return { from: fmt(subDays(today, 30)), to: fmt(today) }
-  }
-}
-
-function formatTokens(n: number): string {
-  if (!n) return '0'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
-}
+// ─── USD formatting ────────────────────────────────────────────────────────────
 
 const usdFmt2 = new Intl.NumberFormat('en-US', {
   style: 'currency',
@@ -129,73 +70,7 @@ function formatCost(n: number): string {
   return usdFmt2.format(n) // $1.23 / $1,234.56
 }
 
-function formatModelName(model: string): string {
-  if (!model || model === 'unknown') return 'Unknown'
-  const lower = model.toLowerCase()
-  if (lower.includes('opus'))
-    return model
-      .replace(/claude-/i, '')
-      .replace(/-/g, ' ')
-      .replace(/\b\w/g, c => c.toUpperCase())
-  if (lower.includes('sonnet'))
-    return model
-      .replace(/claude-/i, '')
-      .replace(/-/g, ' ')
-      .replace(/\b\w/g, c => c.toUpperCase())
-  if (lower.includes('haiku'))
-    return model
-      .replace(/claude-/i, '')
-      .replace(/-/g, ' ')
-      .replace(/\b\w/g, c => c.toUpperCase())
-  return model
-}
-
-function formatDateLabel(date: string): string {
-  // "2024-01-15" → "Jan 15" or "2024-01-15T14" → "Jan 15 14:00"
-  if (date.includes('T')) {
-    const [d, h] = date.split('T')
-    const parsed = new Date(d + 'T00:00:00')
-    return `${parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })} ${h}:00`
-  }
-  const parsed = new Date(date + 'T00:00:00')
-  return parsed.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
-}
-
-// ─── Sub-components ───────────────────────────────────────────────────────────
-
-function KPICard({
-  icon: Icon,
-  label,
-  value,
-  sub,
-  color = 'text-zinc-900 dark:text-zinc-100',
-}: {
-  icon: React.ElementType
-  label: string
-  value: string
-  sub?: string
-  color?: string
-}) {
-  return (
-    <div className="rounded-lg border border-zinc-200 dark:border-zinc-700/50 bg-white dark:bg-zinc-900 p-4">
-      <div className="flex items-center gap-2 mb-2">
-        <Icon className="h-4 w-4 text-zinc-400 dark:text-zinc-500 shrink-0" />
-        <span className="text-xs text-zinc-500 dark:text-zinc-400">{label}</span>
-      </div>
-      <p className={`text-2xl font-semibold ${color}`}>{value}</p>
-      {sub && <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-0.5">{sub}</p>}
-    </div>
-  )
-}
-
-function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div className="rounded-lg border border-zinc-200 dark:border-zinc-700/50 bg-white dark:bg-zinc-900 p-4">
-      <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-4">{title}</h3>
-      {children}
-    </div>
-  )
-}
+// ─── Charts ───────────────────────────────────────────────────────────────────
 
 function TokenTimeSeriesChart({ data }: { data: TimeSeriesPoint[] }) {
   const formatted = data.map(d => ({ ...d, date: formatDateLabel(d.date) }))
@@ -384,254 +259,6 @@ function ModelPieChart({ data }: { data: ModelStat[] }) {
   )
 }
 
-function SessionsPerModelChart({ data }: { data: ModelSessionStat[] }) {
-  const formatted = data.map(d => ({ ...d, model: formatModelName(d.model) }))
-  return (
-    <ChartCard title="Sessions per Model">
-      <ResponsiveContainer width="100%" height={280}>
-        <BarChart
-          data={formatted}
-          layout="vertical"
-          margin={{ top: 4, right: 16, left: 8, bottom: 0 }}
-        >
-          <CartesianGrid
-            strokeDasharray="3 3"
-            stroke="#27272a"
-            strokeOpacity={0.5}
-            horizontal={false}
-          />
-          <XAxis type="number" tick={{ fontSize: 11 }} tickLine={false} />
-          <YAxis
-            type="category"
-            dataKey="model"
-            tick={{ fontSize: 11 }}
-            tickLine={false}
-            axisLine={false}
-            width={90}
-          />
-          <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
-          <Bar dataKey="sessions" name="Sessions" radius={[0, 2, 2, 0]}>
-            {formatted.map((_, i) => (
-              <Cell key={i} fill={MODEL_COLORS[i % MODEL_COLORS.length]} />
-            ))}
-          </Bar>
-        </BarChart>
-      </ResponsiveContainer>
-    </ChartCard>
-  )
-}
-
-function MostActiveDaysChart({ data }: { data: DayActivity[] }) {
-  // Sort chronologically for bar chart display
-  const sorted = [...data].sort((a, b) => a.date.localeCompare(b.date))
-  const formatted = sorted.map(d => ({ ...d, date: formatDateLabel(d.date) }))
-  return (
-    <ChartCard title="Most Active Days (Top 30 by Tokens)">
-      <ResponsiveContainer width="100%" height={240}>
-        <BarChart data={formatted} margin={{ top: 4, right: 8, left: 0, bottom: 24 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" strokeOpacity={0.5} />
-          <XAxis
-            dataKey="date"
-            tick={{ fontSize: 10 }}
-            tickLine={false}
-            angle={-35}
-            textAnchor="end"
-            interval={0}
-          />
-          <YAxis
-            tickFormatter={formatTokens}
-            tick={{ fontSize: 11 }}
-            tickLine={false}
-            axisLine={false}
-            width={48}
-          />
-          <Tooltip
-            formatter={(v: number | undefined, name: string | undefined) => [
-              name === 'tokens' ? formatTokens(v ?? 0) : (v ?? 0),
-              name === 'tokens' ? 'Tokens' : 'Sessions',
-            ]}
-            contentStyle={{ fontSize: 12, borderRadius: 6 }}
-          />
-          <Bar dataKey="tokens" name="tokens" fill="#6366f1" radius={[2, 2, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
-    </ChartCard>
-  )
-}
-
-function ActivityHeatmap({ data }: { data: HeatmapCell[] }) {
-  // Build a 7×24 lookup
-  const grid: number[][] = Array.from({ length: 7 }, () => new Array(24).fill(0))
-  let maxSessions = 0
-  for (const cell of data) {
-    grid[cell.day_of_week][cell.hour] = cell.sessions
-    if (cell.sessions > maxSessions) maxSessions = cell.sessions
-  }
-
-  const cellMap = new Map(data.map(c => [`${c.day_of_week}-${c.hour}`, c]))
-
-  return (
-    <ChartCard title="Activity Heatmap (Day × Hour)">
-      <div className="overflow-x-auto">
-        <div className="min-w-[560px]">
-          {/* Hour labels */}
-          <div className="flex ml-8 mb-1">
-            {Array.from({ length: 24 }, (_, h) => (
-              <div
-                key={h}
-                className="flex-1 text-center text-[9px] text-zinc-400 dark:text-zinc-500"
-              >
-                {h % 3 === 0 ? h : ''}
-              </div>
-            ))}
-          </div>
-          {/* Rows */}
-          {DAY_NAMES.map((day, dow) => (
-            <div key={dow} className="flex items-center mb-0.5">
-              <span className="w-8 text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0">
-                {day}
-              </span>
-              {Array.from({ length: 24 }, (_, h) => {
-                const cell = cellMap.get(`${dow}-${h}`)
-                const intensity = maxSessions > 0 ? (cell?.sessions ?? 0) / maxSessions : 0
-                const bg =
-                  intensity === 0
-                    ? 'bg-zinc-100 dark:bg-zinc-800'
-                    : intensity < 0.25
-                      ? 'bg-indigo-200 dark:bg-indigo-900/60'
-                      : intensity < 0.5
-                        ? 'bg-indigo-400 dark:bg-indigo-700'
-                        : intensity < 0.75
-                          ? 'bg-indigo-600 dark:bg-indigo-500'
-                          : 'bg-indigo-800 dark:bg-indigo-400'
-                return (
-                  <div
-                    key={h}
-                    className={`flex-1 aspect-square rounded-[2px] mx-px ${bg} cursor-default`}
-                    title={
-                      cell
-                        ? `${day} ${h}:00 — ${cell.sessions} sessions, ${formatTokens(cell.tokens)} tokens`
-                        : `${day} ${h}:00 — no activity`
-                    }
-                  />
-                )
-              })}
-            </div>
-          ))}
-          {/* Legend */}
-          <div className="flex items-center gap-1 mt-2 ml-8">
-            <span className="text-[10px] text-zinc-400 dark:text-zinc-500 mr-1">Less</span>
-            {[
-              'bg-zinc-100 dark:bg-zinc-800',
-              'bg-indigo-200 dark:bg-indigo-900/60',
-              'bg-indigo-400 dark:bg-indigo-700',
-              'bg-indigo-600 dark:bg-indigo-500',
-              'bg-indigo-800 dark:bg-indigo-400',
-            ].map((cls, i) => (
-              <div key={i} className={`w-3 h-3 rounded-[2px] ${cls}`} />
-            ))}
-            <span className="text-[10px] text-zinc-400 dark:text-zinc-500 ml-1">More</span>
-          </div>
-        </div>
-      </div>
-    </ChartCard>
-  )
-}
-
-function HourlyActivityChart({ data }: { data: HourlyActivity[] }) {
-  return (
-    <ChartCard title="Activity by Hour of Day">
-      <ResponsiveContainer width="100%" height={240}>
-        <BarChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" strokeOpacity={0.5} />
-          <XAxis
-            dataKey="hour"
-            tickFormatter={h => `${h}:00`}
-            tick={{ fontSize: 10 }}
-            tickLine={false}
-            interval={2}
-          />
-          <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={32} />
-          <Tooltip
-            formatter={(v: number | undefined, name: string | undefined) => [
-              v ?? 0,
-              name === 'sessions' ? 'Sessions' : 'Tokens',
-            ]}
-            labelFormatter={h => `Hour ${h}:00`}
-            contentStyle={{ fontSize: 12, borderRadius: 6 }}
-          />
-          <Bar dataKey="sessions" name="sessions" fill="#22c55e" radius={[2, 2, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
-    </ChartCard>
-  )
-}
-
-// ─── Date Range Picker ────────────────────────────────────────────────────────
-
-const PRESETS: { label: string; value: DatePreset }[] = [
-  { label: '7d', value: '7d' },
-  { label: '30d', value: '30d' },
-  { label: '90d', value: '90d' },
-  { label: 'This month', value: 'this-month' },
-  { label: 'Last month', value: 'last-month' },
-  { label: 'All time', value: 'all-time' },
-  { label: 'Custom', value: 'custom' },
-]
-
-function DateRangePicker({
-  preset,
-  from,
-  to,
-  onPreset,
-  onFrom,
-  onTo,
-}: {
-  preset: DatePreset
-  from: string
-  to: string
-  onPreset: (p: DatePreset) => void
-  onFrom: (v: string) => void
-  onTo: (v: string) => void
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-2">
-      <div className="flex flex-wrap gap-1">
-        {PRESETS.map(p => (
-          <button
-            key={p.value}
-            onClick={() => onPreset(p.value)}
-            className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
-              preset === p.value
-                ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
-                : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'
-            }`}
-          >
-            {p.label}
-          </button>
-        ))}
-      </div>
-      {preset === 'custom' && (
-        <div className="flex items-center gap-2">
-          <input
-            type="date"
-            value={from}
-            onChange={e => onFrom(e.target.value)}
-            className="rounded-md border border-zinc-200 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400"
-          />
-          <span className="text-xs text-zinc-400">to</span>
-          <input
-            type="date"
-            value={to}
-            onChange={e => onTo(e.target.value)}
-            className="rounded-md border border-zinc-200 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400"
-          />
-        </div>
-      )}
-    </div>
-  )
-}
-
 // ─── Pricing Disclaimer ───────────────────────────────────────────────────────
 
 function PricingDisclaimer() {
@@ -810,7 +437,7 @@ export default function TokenUsagePage() {
       </div>
 
       {/* Controls */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 px-4 sm:px-6 py-3 border-b border-zinc-100 dark:border-zinc-700/50 shrink-0">
+      <div className="px-4 sm:px-6 py-3 border-b border-zinc-100 dark:border-zinc-700/50 shrink-0">
         <DateRangePicker
           preset={preset}
           from={from}
@@ -824,22 +451,10 @@ export default function TokenUsagePage() {
             setTo(v)
             setPreset('custom')
           }}
+          projects={report?.projects}
+          project={project}
+          onProject={setProject}
         />
-        {(report?.projects?.length ?? 0) > 1 && (
-          <Select value={project} onValueChange={setProject}>
-            <SelectTrigger className="w-full sm:w-56 h-7 text-xs">
-              <SelectValue placeholder="All projects" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All projects</SelectItem>
-              {report!.projects.map(p => (
-                <SelectItem key={p} value={p} className="text-xs font-mono">
-                  {p.split('/').slice(-2).join('/')}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        )}
       </div>
 
       {/* Content */}
@@ -898,13 +513,16 @@ export default function TokenUsagePage() {
               <CacheEfficiencyChart data={report?.cache_efficiency ?? []} />
             </div>
 
+            {/* Token distribution by model */}
+            {(report?.model_breakdown?.length ?? 0) > 0 && (
+              <ModelPieChart data={report!.model_breakdown} />
+            )}
+
             {/* Cost estimation section */}
             <div className="rounded-lg border border-zinc-200 dark:border-zinc-700/50 bg-white dark:bg-zinc-900 p-4">
               <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-3">
                 Estimated Cost (USD)
               </h3>
-
-              {/* Pricing methodology note — collapsible */}
               <PricingDisclaimer />
               <CostSummaryCards
                 cost={
@@ -918,27 +536,6 @@ export default function TokenUsagePage() {
                 }
               />
               <CostOverTimeChart data={report?.cost_over_time ?? []} />
-            </div>
-
-            {/* Model breakdown */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              {(report?.model_breakdown?.length ?? 0) > 0 && (
-                <ModelPieChart data={report!.model_breakdown} />
-              )}
-              {(report?.sessions_per_model?.length ?? 0) > 0 && (
-                <SessionsPerModelChart data={report!.sessions_per_model} />
-              )}
-            </div>
-
-            {/* Most active days */}
-            {(report?.most_active_days?.length ?? 0) > 0 && (
-              <MostActiveDaysChart data={report!.most_active_days} />
-            )}
-
-            {/* Heatmap + Hourly */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <ActivityHeatmap data={report?.heatmap ?? []} />
-              <HourlyActivityChart data={report?.hourly_activity ?? []} />
             </div>
           </>
         )}

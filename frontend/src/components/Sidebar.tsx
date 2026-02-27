@@ -10,6 +10,7 @@ import {
   Settings,
   History,
   BarChart2,
+  LayoutDashboard,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -73,6 +74,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
 
   const analyticsNavItems = [
     { to: '/analytics/token-usage', icon: BarChart2, label: 'Token Usage' },
+    { to: '/analytics/general-usage', icon: LayoutDashboard, label: 'General Usage' },
   ]
 
   const handleNavClick = () => {
