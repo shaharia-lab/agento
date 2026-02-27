@@ -1,0 +1,45 @@
+repos:
+  # ── General hygiene ──────────────────────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: no-commit-to-branch
+        args: [--branch, main]
+
+  # ── Go — golangci-lint ───────────────────────────────────────────────────────
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: golangci-lint
+        args: [--config=.golangci.yml]
+
+  # ── Frontend — ESLint ────────────────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: frontend-eslint
+        name: Frontend ESLint
+        language: node
+        entry: sh -c 'cd frontend && npm run lint'
+        files: ^frontend/src/.*\.(ts|tsx)$
+        pass_filenames: false
+
+      # ── Frontend — Prettier ──────────────────────────────────────────────────
+      - id: frontend-prettier
+        name: Frontend Prettier
+        language: node
+        entry: sh -c 'cd frontend && npm run format:check'
+        files: ^frontend/src/.*\.(ts|tsx|css)$
+        pass_filenames: false
+
+      # ── Frontend — TypeScript type check ────────────────────────────────────
+      - id: frontend-typecheck
+        name: Frontend TypeScript type check
+        language: node
+        entry: sh -c 'cd frontend && npm run typecheck'
+        files: ^frontend/src/.*\.(ts|tsx)$
+        pass_filenames: false

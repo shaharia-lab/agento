@@ -1,0 +1,191 @@
+@import 'tailwindcss';
+
+/* Enable class-based dark mode: `dark:` variants activate when html has .dark class */
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --color-border: hsl(0 0% 89%);
+  --color-input: hsl(0 0% 89%);
+  --color-ring: hsl(0 0% 60%);
+  --color-background: hsl(0 0% 98%);
+  --color-foreground: hsl(0 0% 9%);
+  --color-primary: hsl(0 0% 9%);
+  --color-primary-foreground: hsl(0 0% 98%);
+  --color-secondary: hsl(0 0% 94%);
+  --color-secondary-foreground: hsl(0 0% 9%);
+  --color-muted: hsl(0 0% 94%);
+  --color-muted-foreground: hsl(0 0% 45%);
+  --color-accent: hsl(0 0% 94%);
+  --color-accent-foreground: hsl(0 0% 9%);
+  --color-destructive: hsl(0 72% 51%);
+  --color-destructive-foreground: hsl(0 0% 98%);
+  --color-card: hsl(0 0% 100%);
+  --color-card-foreground: hsl(0 0% 9%);
+  --color-popover: hsl(0 0% 100%);
+  --color-popover-foreground: hsl(0 0% 9%);
+  --radius: 0.5rem;
+}
+
+/* Dark mode variable overrides */
+html.dark {
+  --color-background: hsl(0 0% 10%);
+  --color-foreground: hsl(0 0% 94%);
+  --color-card: hsl(0 0% 13%);
+  --color-card-foreground: hsl(0 0% 94%);
+  --color-border: hsl(0 0% 22%);
+  --color-input: hsl(0 0% 22%);
+  --color-ring: hsl(0 0% 45%);
+  --color-muted: hsl(0 0% 18%);
+  --color-muted-foreground: hsl(0 0% 63%);
+  --color-secondary: hsl(0 0% 18%);
+  --color-secondary-foreground: hsl(0 0% 94%);
+  --color-accent: hsl(0 0% 18%);
+  --color-accent-foreground: hsl(0 0% 94%);
+  --color-primary: hsl(0 0% 94%);
+  --color-primary-foreground: hsl(0 0% 10%);
+  --color-popover: hsl(0 0% 13%);
+  --color-popover-foreground: hsl(0 0% 94%);
+  --color-destructive: hsl(0 65% 55%);
+  --color-destructive-foreground: hsl(0 0% 98%);
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+body {
+  background-color: var(--color-background);
+  color: var(--color-foreground);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(0 0% 80%);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(0 0% 65%);
+}
+
+/* Markdown prose styling */
+.prose h1,
+.prose h2,
+.prose h3 {
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+}
+.prose h1 {
+  font-size: 1.25rem;
+}
+.prose h2 {
+  font-size: 1.1rem;
+}
+.prose h3 {
+  font-size: 1rem;
+}
+.prose p {
+  margin-bottom: 0.75rem;
+  line-height: 1.6;
+}
+.prose p:last-child {
+  margin-bottom: 0;
+}
+.prose ul,
+.prose ol {
+  margin-bottom: 0.75rem;
+  padding-left: 1.5rem;
+}
+.prose li {
+  margin-bottom: 0.25rem;
+}
+.prose ul {
+  list-style-type: disc;
+}
+.prose ol {
+  list-style-type: decimal;
+}
+.prose code {
+  background: var(--color-muted);
+  padding: 0.1em 0.3em;
+  border-radius: 3px;
+  font-size: 0.875em;
+  font-family: 'SF Mono', 'Fira Code', 'Fira Mono', 'Roboto Mono', monospace;
+  word-break: break-all;
+  overflow-wrap: break-word;
+}
+.prose pre {
+  background: hsl(0 0% 9%);
+  color: hsl(0 0% 90%);
+  padding: 1rem;
+  border-radius: 0.375rem;
+  overflow-x: auto;
+  overflow-y: hidden;
+  max-width: 100%;
+  margin-bottom: 0.75rem;
+}
+html.dark .prose pre {
+  background: hsl(0 0% 6%);
+}
+.prose pre code {
+  word-break: normal;
+  overflow-wrap: normal;
+}
+.prose pre code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+  font-size: 0.875rem;
+}
+.prose pre::-webkit-scrollbar {
+  height: 6px;
+}
+.prose pre::-webkit-scrollbar-track {
+  background: hsl(0 0% 18%);
+  border-radius: 0 0 4px 4px;
+}
+.prose pre::-webkit-scrollbar-thumb {
+  background: hsl(0 0% 45%);
+  border-radius: 3px;
+  transition: background 0.2s;
+}
+.prose pre::-webkit-scrollbar-thumb:hover {
+  background: hsl(0 0% 62%);
+}
+.prose blockquote {
+  border-left: 3px solid var(--color-border);
+  padding-left: 1rem;
+  color: var(--color-muted-foreground);
+  margin-bottom: 0.75rem;
+}
+.prose a {
+  color: var(--color-foreground);
+  text-decoration: underline;
+}
+.prose hr {
+  border-color: var(--color-border);
+  margin: 1rem 0;
+}
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 0.75rem;
+  font-size: 0.875rem;
+}
+.prose th,
+.prose td {
+  border: 1px solid var(--color-border);
+  padding: 0.375rem 0.75rem;
+}
+.prose th {
+  background: var(--color-muted);
+  font-weight: 600;
+}

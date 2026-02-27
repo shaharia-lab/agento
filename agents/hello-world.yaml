@@ -1,0 +1,14 @@
+name: Hello World Agent
+slug: hello-world
+description: A simple demo agent that answers general questions concisely.
+model: claude-sonnet-4-6
+thinking: adaptive
+
+system_prompt: |
+  You are a helpful assistant.
+  Today's date is {{current_date}}.
+  Answer concisely and accurately.
+
+capabilities:
+  local:
+    - current_time
