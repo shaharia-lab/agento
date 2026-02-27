@@ -197,9 +197,9 @@ function TokenTimeSeriesChart({ data }: { data: TimeSeriesPoint[] }) {
             width={48}
           />
           <Tooltip
-            formatter={(v: number | undefined, name: string) => [
+            formatter={(v: number | undefined, name: string | undefined) => [
               formatTokens(v ?? 0),
-              name.replace(/_/g, ' '),
+              (name ?? '').replace(/_/g, ' '),
             ]}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
@@ -351,9 +351,9 @@ function ModelPieChart({ data }: { data: ModelStat[] }) {
             ))}
           </Pie>
           <Tooltip
-            formatter={(v: number | undefined, name: string) => [
+            formatter={(v: number | undefined, name: string | undefined) => [
               formatTokens(v ?? 0),
-              formatModelName(name),
+              formatModelName(name ?? ''),
             ]}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
@@ -425,7 +425,7 @@ function MostActiveDaysChart({ data }: { data: DayActivity[] }) {
             width={48}
           />
           <Tooltip
-            formatter={(v: number | undefined, name: string) => [
+            formatter={(v: number | undefined, name: string | undefined) => [
               name === 'tokens' ? formatTokens(v ?? 0) : (v ?? 0),
               name === 'tokens' ? 'Tokens' : 'Sessions',
             ]}
@@ -532,7 +532,7 @@ function HourlyActivityChart({ data }: { data: HourlyActivity[] }) {
           />
           <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={32} />
           <Tooltip
-            formatter={(v: number | undefined, name: string) => [
+            formatter={(v: number | undefined, name: string | undefined) => [
               v ?? 0,
               name === 'sessions' ? 'Sessions' : 'Tokens',
             ]}
