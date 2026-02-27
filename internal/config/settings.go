@@ -1,11 +1,9 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"os"
-	"path/filepath"
 )
 
 const (
@@ -23,22 +21,28 @@ type UserSettings struct {
 	AppearanceFontFamily string `json:"appearance_font_family"`
 }
 
-// SettingsManager loads and saves user settings to disk, and exposes which
-// fields are locked by environment variables.
+// SettingsStore defines the interface for persisting user settings.
+type SettingsStore interface {
+	Load() (UserSettings, error)
+	Save(settings UserSettings) error
+}
+
+// SettingsManager loads and saves user settings via a SettingsStore, and exposes
+// which fields are locked by environment variables.
 type SettingsManager struct {
-	filePath     string
+	store        SettingsStore
 	settings     UserSettings
 	locked       map[string]string // field name → env var name
 	modelFromEnv bool              // true when the displayed model originates from an env var
-	modelInFile  bool              // true when default_model was explicitly present in the settings file
+	modelInFile  bool              // true when default_model was explicitly present in the store
 }
 
-// NewSettingsManager creates a SettingsManager backed by dataDir/settings.json.
+// NewSettingsManager creates a SettingsManager backed by the given SettingsStore.
 // Fields that are set via AppConfig environment variables are marked as locked.
-func NewSettingsManager(dataDir string, cfg *AppConfig) (*SettingsManager, error) {
+func NewSettingsManager(store SettingsStore, cfg *AppConfig) (*SettingsManager, error) {
 	m := &SettingsManager{
-		filePath: filepath.Join(dataDir, "settings.json"),
-		locked:   make(map[string]string),
+		store:  store,
+		locked: make(map[string]string),
 	}
 
 	// Determine which fields are locked by env vars.
@@ -72,28 +76,16 @@ func NewSettingsManager(dataDir string, cfg *AppConfig) (*SettingsManager, error
 }
 
 func (m *SettingsManager) load() error {
-	data, err := os.ReadFile(m.filePath) //nolint:gosec // path constructed from admin-configured data dir
+	settings, err := m.store.Load()
 	if err != nil {
-		if os.IsNotExist(err) {
-			// First run — initialize with defaults.
-			m.settings = UserSettings{
-				DefaultWorkingDir:  defaultWorkingDir,
-				DefaultModel:       defaultModel,
-				OnboardingComplete: false,
-			}
-			return nil
-		}
-		return fmt.Errorf("reading settings file: %w", err)
+		return err
 	}
+	m.settings = settings
 
-	if err := json.Unmarshal(data, &m.settings); err != nil {
-		return fmt.Errorf("parsing settings file: %w", err)
-	}
-
-	// Track whether each field was explicitly present in the file before we fill defaults.
+	// Track whether the model field was explicitly set.
 	m.modelInFile = m.settings.DefaultModel != ""
 
-	// Fill in any missing fields that were added after the file was created.
+	// Fill in any missing defaults.
 	if m.settings.DefaultWorkingDir == "" {
 		m.settings.DefaultWorkingDir = defaultWorkingDir
 	}
@@ -140,12 +132,8 @@ func (m *SettingsManager) Update(incoming UserSettings) error {
 
 	m.settings = incoming
 
-	data, err := json.MarshalIndent(m.settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling settings: %w", err)
-	}
-	if err := os.WriteFile(m.filePath, data, 0600); err != nil {
-		return fmt.Errorf("writing settings file: %w", err)
+	if err := m.store.Save(m.settings); err != nil {
+		return fmt.Errorf("persisting settings: %w", err)
 	}
 	return nil
 }
