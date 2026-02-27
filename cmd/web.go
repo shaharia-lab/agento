@@ -9,10 +9,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
 	"github.com/shaharia-lab/agento/internal/api"
@@ -162,42 +162,46 @@ func seedExampleAgent(store storage.AgentStore) error {
 const githubRepo = "https://github.com/shaharia-lab/agento"
 
 func printBanner(version, serverURL, logFile string) {
-	fmt.Print(`
+	logo := lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("12")). // bright blue
+		Render(`
  █████╗  ██████╗ ███████╗███╗   ██╗████████╗ ██████╗
 ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝██╔═══██╗
 ███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║   ██║   ██║
 ██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║   ██║   ██║
 ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║   ╚██████╔╝
 ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝
-
 `)
 
-	rows := [][2]string{
-		{"Version", version},
-		{"URL", serverURL},
-		{"Logs", logFile},
-		{"GitHub", githubRepo},
+	keyStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("8")). // dark gray
+		Width(10)
+
+	valStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("15")) // bright white
+
+	urlStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("14")). // bright cyan
+		Underline(true)
+
+	borderStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("8")).
+		PaddingLeft(1).
+		PaddingRight(2)
+
+	rows := []string{
+		keyStyle.Render("Version") + valStyle.Render(version),
+		keyStyle.Render("URL") + urlStyle.Render(serverURL),
+		keyStyle.Render("Logs") + valStyle.Render(logFile),
+		keyStyle.Render("GitHub") + urlStyle.Render(githubRepo),
 	}
 
-	// Measure columns.
-	const keyW = 9 // width of widest key ("Version" + padding)
-	valW := 0
-	for _, r := range rows {
-		if len(r[1]) > valW {
-			valW = len(r[1])
-		}
-	}
+	table := borderStyle.Render(lipgloss.JoinVertical(lipgloss.Left, rows...))
 
-	sep := "  ├" + strings.Repeat("─", keyW+1) + "┼" + strings.Repeat("─", valW+3) + "┤"
-
-	fmt.Println("  ╭" + strings.Repeat("─", keyW+1) + "┬" + strings.Repeat("─", valW+3) + "╮")
-	for i, r := range rows {
-		fmt.Printf("  │ %-*s │ %-*s │\n", keyW, r[0], valW+1, r[1])
-		if i < len(rows)-1 {
-			fmt.Println(sep)
-		}
-	}
-	fmt.Println("  ╰" + strings.Repeat("─", keyW+1) + "┴" + strings.Repeat("─", valW+3) + "╯")
+	fmt.Println(logo)
+	fmt.Println(table)
 	fmt.Println()
 }
 
