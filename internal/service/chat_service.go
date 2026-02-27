@@ -11,6 +11,7 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/agent"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/integrations"
 	"github.com/shaharia-lab/agento/internal/storage"
 	"github.com/shaharia-lab/agento/internal/tools"
 )
@@ -54,12 +55,13 @@ type ChatService interface {
 
 // chatService is the default implementation of ChatService.
 type chatService struct {
-	chatRepo     storage.ChatStore
-	agentRepo    storage.AgentStore
-	mcpRegistry  *config.MCPRegistry
-	localMCP     *tools.LocalMCPConfig
-	defaultModel string
-	logger       *slog.Logger
+	chatRepo            storage.ChatStore
+	agentRepo           storage.AgentStore
+	mcpRegistry         *config.MCPRegistry
+	localMCP            *tools.LocalMCPConfig
+	integrationRegistry *integrations.IntegrationRegistry
+	defaultModel        string
+	logger              *slog.Logger
 }
 
 // NewChatService constructs a ChatService backed by the provided repositories.
@@ -69,16 +71,18 @@ func NewChatService(
 	agentRepo storage.AgentStore,
 	mcpRegistry *config.MCPRegistry,
 	localMCP *tools.LocalMCPConfig,
+	integrationRegistry *integrations.IntegrationRegistry,
 	defaultModel string,
 	logger *slog.Logger,
 ) ChatService {
 	return &chatService{
-		chatRepo:     chatRepo,
-		agentRepo:    agentRepo,
-		mcpRegistry:  mcpRegistry,
-		localMCP:     localMCP,
-		defaultModel: defaultModel,
-		logger:       logger,
+		chatRepo:            chatRepo,
+		agentRepo:           agentRepo,
+		mcpRegistry:         mcpRegistry,
+		localMCP:            localMCP,
+		integrationRegistry: integrationRegistry,
+		defaultModel:        defaultModel,
+		logger:              logger,
 	}
 }
 
@@ -187,6 +191,7 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 	opts.SessionID = session.SDKSession
 	opts.LocalToolsMCP = s.localMCP
 	opts.MCPRegistry = s.mcpRegistry
+	opts.IntegrationRegistry = s.integrationRegistry
 
 	// Resolve the settings file path for the session's profile.
 	settingsFilePath, resolveErr := config.LoadProfileFilePath(session.SettingsProfileID)

@@ -80,6 +80,12 @@ func (s *agentService) Create(_ context.Context, agent *config.AgentConfig) (*co
 	if agent.Thinking == "" {
 		agent.Thinking = "adaptive"
 	}
+	switch agent.PermissionMode {
+	case "", "bypass", "default":
+		// valid
+	default:
+		return nil, &ValidationError{Field: "permission_mode", Message: "must be bypass or default"}
+	}
 
 	existing, err := s.repo.Get(agent.Slug)
 	if err != nil {
@@ -114,6 +120,12 @@ func (s *agentService) Update(_ context.Context, slug string, agent *config.Agen
 	agent.Slug = slug
 	if agent.Model == "" {
 		agent.Model = "claude-sonnet-4-6"
+	}
+	switch agent.PermissionMode {
+	case "", "bypass", "default":
+		// valid
+	default:
+		return nil, &ValidationError{Field: "permission_mode", Message: "must be bypass or default"}
 	}
 	if agent.Thinking == "" {
 		agent.Thinking = "adaptive"

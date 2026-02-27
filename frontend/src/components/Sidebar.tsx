@@ -6,6 +6,7 @@ import {
   Plus,
   PanelLeftClose,
   PanelLeftOpen,
+  Plug,
   X,
   Settings,
   History,
@@ -68,6 +69,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
   const mainNavItems = [
     { to: '/chats', icon: MessageSquare, label: 'Chats' },
     { to: '/agents', icon: Bot, label: 'Agents' },
+    { to: '/integrations', icon: Plug, label: 'Integrations' },
   ]
 
   const claudeNavItems = [{ to: '/claude-sessions', icon: History, label: 'Claude Sessions' }]

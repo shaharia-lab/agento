@@ -17,6 +17,7 @@ import (
 type Server struct {
 	agentSvc           service.AgentService
 	chatSvc            service.ChatService
+	integrationSvc     service.IntegrationService
 	settingsMgr        *config.SettingsManager
 	logger             *slog.Logger
 	liveSessions       *liveSessionStore
@@ -24,10 +25,11 @@ type Server struct {
 }
 
 // New creates a new API Server backed by the provided services.
-func New(agentSvc service.AgentService, chatSvc service.ChatService, settingsMgr *config.SettingsManager, logger *slog.Logger, sessionCache *claudesessions.Cache) *Server {
+func New(agentSvc service.AgentService, chatSvc service.ChatService, integrationSvc service.IntegrationService, settingsMgr *config.SettingsManager, logger *slog.Logger, sessionCache *claudesessions.Cache) *Server {
 	return &Server{
 		agentSvc:           agentSvc,
 		chatSvc:            chatSvc,
+		integrationSvc:     integrationSvc,
 		settingsMgr:        settingsMgr,
 		logger:             logger,
 		liveSessions:       newLiveSessionStore(),
@@ -51,6 +53,7 @@ func (s *Server) Mount(r chi.Router) {
 	r.Delete("/chats/{id}", s.handleDeleteChat)
 	r.Post("/chats/{id}/messages", s.handleSendMessage)
 	r.Post("/chats/{id}/input", s.handleProvideInput)
+	r.Post("/chats/{id}/permission", s.handlePermissionResponse)
 
 	// Agento settings
 	r.Get("/settings", s.handleGetSettings)
@@ -82,6 +85,16 @@ func (s *Server) Mount(r chi.Router) {
 	// Filesystem browser
 	r.Get("/fs", s.handleFSList)
 	r.Post("/fs/mkdir", s.handleFSMkdir)
+
+	// Integrations
+	r.Get("/integrations/available-tools", s.handleAvailableTools)
+	r.Get("/integrations", s.handleListIntegrations)
+	r.Post("/integrations", s.handleCreateIntegration)
+	r.Get("/integrations/{id}", s.handleGetIntegration)
+	r.Put("/integrations/{id}", s.handleUpdateIntegration)
+	r.Delete("/integrations/{id}", s.handleDeleteIntegration)
+	r.Post("/integrations/{id}/auth/start", s.handleStartOAuth)
+	r.Get("/integrations/{id}/auth/status", s.handleGetAuthStatus)
 
 	// Build info
 	r.Get("/version", s.handleVersion)

@@ -2,7 +2,7 @@ import { Fragment, useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { chatsApi, sendMessage, provideInput } from '@/lib/api'
+import { chatsApi, sendMessage, provideInput, permissionResponse } from '@/lib/api'
 import type {
   ChatDetail,
   ChatMessage,
@@ -28,6 +28,7 @@ import {
   Search,
   Globe,
   Bot,
+  ShieldQuestion,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -55,6 +56,12 @@ export default function ChatSessionPage() {
   // awaitingInput is set when the backend sends user_input_required — the SSE
   // stream stays open and the AskUserQuestion card becomes interactive.
   const [awaitingInput, setAwaitingInput] = useState(false)
+  // permissionRequest is set when the backend sends permission_request — the SSE
+  // stream pauses until the user allows or denies the tool call.
+  const [permissionRequest, setPermissionRequest] = useState<{
+    toolName: string
+    input: unknown
+  } | null>(null)
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -97,6 +104,7 @@ export default function ChatSessionPage() {
       setToolCalls([])
       setSystemStatus(null)
       setAwaitingInput(false)
+      setPermissionRequest(null)
       setStreamingToolResults({})
       setError(null)
 
@@ -166,6 +174,10 @@ export default function ChatSessionPage() {
               // Backend is paused waiting for us to POST /api/chats/{id}/input.
               // Make the streaming AskUserQuestion card interactive.
               setAwaitingInput(true)
+            },
+            onPermissionRequest: data => {
+              // Backend permission handler is paused waiting for user decision.
+              setPermissionRequest({ toolName: data.tool_name, input: data.input })
             },
             onToolResult: (event: SDKUserEvent) => {
               const toolUseId = event.message.content[0]?.tool_use_id
@@ -239,6 +251,7 @@ export default function ChatSessionPage() {
         setToolCalls([])
         setSystemStatus(null)
         setAwaitingInput(false)
+        setPermissionRequest(null)
         setStreamingToolResults({})
       }
     },
@@ -427,6 +440,18 @@ export default function ChatSessionPage() {
                 </div>
               </div>
             )}
+
+          {/* Permission request dialog — shown when agent needs approval to use a tool */}
+          {streaming && permissionRequest && id && (
+            <PermissionRequestCard
+              toolName={permissionRequest.toolName}
+              input={permissionRequest.input}
+              onDecide={allow => {
+                setPermissionRequest(null)
+                void permissionResponse(id, allow)
+              }}
+            />
+          )}
 
           {error && (
             <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -812,6 +837,84 @@ function ToolCallCard({
           )}
         </button>
         {expanded && <ToolCallDetail name={name} input={block.input} toolResult={toolResult} />}
+      </div>
+    </div>
+  )
+}
+
+function PermissionRequestCard({
+  toolName,
+  input,
+  onDecide,
+}: {
+  toolName: string
+  input: unknown
+  onDecide: (allow: boolean) => void
+}) {
+  const [decided, setDecided] = useState(false)
+  const [decision, setDecision] = useState<boolean | null>(null)
+
+  const handleDecide = (allow: boolean) => {
+    if (decided) return
+    setDecided(true)
+    setDecision(allow)
+    onDecide(allow)
+  }
+
+  // Format a short summary of the input for display.
+  const inputSummary = (() => {
+    if (!input || typeof input !== 'object') return null
+    const entries = Object.entries(input as Record<string, unknown>)
+    if (entries.length === 0) return null
+    return entries
+      .slice(0, 3)
+      .map(([k, v]) => `${k}: ${typeof v === 'string' ? v : JSON.stringify(v)}`)
+      .join(', ')
+  })()
+
+  return (
+    <div className="flex gap-3">
+      <div className="flex h-7 w-7 items-center justify-center rounded-full bg-amber-50 dark:bg-amber-950/50 shrink-0 mt-0.5">
+        <ShieldQuestion className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
+      </div>
+      <div className="flex-1 min-w-0 max-w-[82%]">
+        <div className="rounded-lg border border-amber-200 dark:border-amber-800/60 bg-amber-50 dark:bg-amber-950/30 p-3 space-y-2">
+          <div className="flex items-start gap-2">
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-semibold text-amber-800 dark:text-amber-300">
+                Permission request
+              </p>
+              <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
+                The agent wants to use <code className="font-mono font-semibold">{toolName}</code>
+              </p>
+              {inputSummary && (
+                <p className="text-[11px] text-amber-600 dark:text-amber-500 mt-1 font-mono truncate">
+                  {inputSummary}
+                </p>
+              )}
+            </div>
+          </div>
+          {!decided ? (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleDecide(true)}
+                className="rounded-md px-3 py-1.5 text-xs font-medium bg-emerald-600 dark:bg-emerald-700 text-white hover:bg-emerald-700 dark:hover:bg-emerald-600 transition-colors"
+              >
+                Allow
+              </button>
+              <button
+                onClick={() => handleDecide(false)}
+                className="rounded-md px-3 py-1.5 text-xs font-medium bg-zinc-200 dark:bg-zinc-700 text-zinc-700 dark:text-zinc-300 hover:bg-zinc-300 dark:hover:bg-zinc-600 transition-colors"
+              >
+                Deny
+              </button>
+            </div>
+          ) : (
+            <p className="text-[11px] text-amber-600 dark:text-amber-500">
+              {decision ? 'Allowed' : 'Denied'}
+            </p>
+          )}
+        </div>
       </div>
     </div>
   )

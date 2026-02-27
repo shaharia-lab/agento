@@ -10,6 +10,8 @@ export interface Agent {
   description: string
   model: string
   thinking: 'adaptive' | 'enabled' | 'disabled'
+  /** Controls tool permission behaviour. Empty string means "bypass" (default). */
+  permission_mode: 'bypass' | 'default' | ''
   system_prompt: string
   capabilities: AgentCapabilities
 }
@@ -262,6 +264,37 @@ export interface SDKResultEvent {
   uuid: string
   errors?: string[]
   stop_reason?: string | null
+}
+
+// ── Integrations ──────────────────────────────────────────────────────────────
+
+export interface ServiceConfig {
+  enabled: boolean
+  tools: string[]
+}
+
+export interface Integration {
+  id: string
+  name: string
+  type: 'google'
+  enabled: boolean
+  authenticated: boolean
+  services: Record<string, ServiceConfig>
+  created_at: string
+  updated_at: string
+}
+
+export interface GoogleCredentials {
+  client_id: string
+  client_secret: string
+}
+
+export interface AvailableTool {
+  integration_id: string
+  integration_name: string
+  tool_name: string
+  qualified_name: string
+  service: string
 }
 
 // ── Claude settings profiles ──────────────────────────────────────────────────

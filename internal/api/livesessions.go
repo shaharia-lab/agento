@@ -6,11 +6,13 @@ import (
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
 )
 
-// liveSession holds a running SDK session and a channel the SSE handler blocks
-// on while waiting for the user to answer an AskUserQuestion prompt.
+// liveSession holds a running SDK session and channels the SSE handler blocks
+// on while waiting for the user to answer an AskUserQuestion prompt or approve
+// a tool permission request.
 type liveSession struct {
-	session *claude.Session
-	inputCh chan string
+	session          *claude.Session
+	inputCh          chan string
+	permissionRespCh chan bool
 }
 
 // liveSessionStore is an in-memory map of chat-session-ID → liveSession.

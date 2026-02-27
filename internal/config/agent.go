@@ -11,13 +11,14 @@ import (
 
 // AgentConfig holds the full configuration for a single agent, as parsed from YAML.
 type AgentConfig struct {
-	Name         string            `yaml:"name"          json:"name"`
-	Slug         string            `yaml:"slug"          json:"slug"`
-	Description  string            `yaml:"description"   json:"description"`
-	Model        string            `yaml:"model"         json:"model"`
-	Thinking     string            `yaml:"thinking"      json:"thinking"` // "adaptive", "disabled", or "enabled"
-	SystemPrompt string            `yaml:"system_prompt" json:"system_prompt"`
-	Capabilities AgentCapabilities `yaml:"capabilities"  json:"capabilities"`
+	Name           string            `yaml:"name"            json:"name"`
+	Slug           string            `yaml:"slug"            json:"slug"`
+	Description    string            `yaml:"description"     json:"description"`
+	Model          string            `yaml:"model"           json:"model"`
+	Thinking       string            `yaml:"thinking"        json:"thinking"`        // "adaptive", "disabled", or "enabled"
+	PermissionMode string            `yaml:"permission_mode" json:"permission_mode"` // "bypass" (default), "default"
+	SystemPrompt   string            `yaml:"system_prompt"   json:"system_prompt"`
+	Capabilities   AgentCapabilities `yaml:"capabilities"    json:"capabilities"`
 }
 
 // AgentCapabilities defines what tools an agent can use.
@@ -116,6 +117,13 @@ func validateAgent(cfg *AgentConfig) error {
 	case "adaptive", "disabled", "enabled":
 	default:
 		return fmt.Errorf("invalid thinking value %q: must be adaptive, disabled, or enabled", cfg.Thinking)
+	}
+
+	switch cfg.PermissionMode {
+	case "", "bypass", "default":
+		// valid
+	default:
+		return fmt.Errorf("invalid permission_mode %q: must be bypass or default", cfg.PermissionMode)
 	}
 
 	return nil

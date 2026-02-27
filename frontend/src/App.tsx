@@ -11,6 +11,9 @@ import ClaudeSessionsPage from '@/pages/ClaudeSessionsPage'
 import ClaudeSessionDetailPage from '@/pages/ClaudeSessionDetailPage'
 import TokenUsagePage from '@/pages/TokenUsagePage'
 import GeneralUsagePage from '@/pages/GeneralUsagePage'
+import IntegrationsPage from '@/pages/IntegrationsPage'
+import IntegrationNewPage from '@/pages/IntegrationNewPage'
+import IntegrationDetailPage from '@/pages/IntegrationDetailPage'
 import OnboardingWizard from '@/components/OnboardingWizard'
 import { AppearanceProvider } from '@/contexts/ThemeContext'
 import { settingsApi } from '@/lib/api'
@@ -77,6 +80,9 @@ export default function App() {
             <Route path="claude-sessions/:id" element={<ClaudeSessionDetailPage />} />
             <Route path="analytics/token-usage" element={<TokenUsagePage />} />
             <Route path="analytics/general-usage" element={<GeneralUsagePage />} />
+            <Route path="integrations" element={<IntegrationsPage />} />
+            <Route path="integrations/new" element={<IntegrationNewPage />} />
+            <Route path="integrations/:id" element={<IntegrationDetailPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>
         </Routes>

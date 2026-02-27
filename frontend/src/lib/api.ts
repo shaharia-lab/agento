@@ -18,6 +18,9 @@ import type {
   ClaudeSessionSummary,
   ClaudeSessionDetail,
   AnalyticsReport,
+  Integration,
+  GoogleCredentials,
+  AvailableTool,
 } from '../types'
 
 const BASE = '/api'
@@ -222,6 +225,11 @@ export interface StreamCallbacks {
    */
   onUserInputRequired?: (data: { input: Record<string, unknown> }) => void
   /**
+   * Emitted when a tool needs user approval before executing.
+   * The SSE connection stays open. Call permissionResponse() with allow=true/false.
+   */
+  onPermissionRequest?: (data: { tool_name: string; input: unknown }) => void
+  /**
    * Emitted when a tool finishes executing. Contains the tool result keyed by tool_use_id.
    * Use this to render rich tool output (e.g. file content for Read, diff for Edit).
    */
@@ -281,6 +289,9 @@ export async function sendMessage(
             case 'user_input_required':
               callbacks.onUserInputRequired?.(data as { input: Record<string, unknown> })
               break
+            case 'permission_request':
+              callbacks.onPermissionRequest?.(data as { tool_name: string; input: unknown })
+              break
             case 'user':
               callbacks.onToolResult?.(data as SDKUserEvent)
               break
@@ -291,6 +302,22 @@ export async function sendMessage(
         currentEvent = ''
       }
     }
+  }
+}
+
+/**
+ * Sends the user's allow/deny decision for a pending tool permission request.
+ * The SSE stream for the chat stays open; the agent will continue after this call.
+ */
+export async function permissionResponse(chatId: string, allow: boolean): Promise<void> {
+  const res = await fetch(`${BASE}/chats/${chatId}/permission`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ allow }),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(body.error || `HTTP ${res.status}`)
   }
 }
 
@@ -308,6 +335,33 @@ export async function provideInput(chatId: string, answer: string): Promise<void
     const body = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(body.error || `HTTP ${res.status}`)
   }
+}
+
+// ── Integrations ─────────────────────────────────────────────────────────────
+
+export const integrationsApi = {
+  list: () => request<Integration[]>('/integrations'),
+
+  get: (id: string) => request<Integration>(`/integrations/${id}`),
+
+  create: (data: Partial<Integration> & { credentials: GoogleCredentials }) =>
+    request<Integration>('/integrations', { method: 'POST', body: JSON.stringify(data) }),
+
+  update: (id: string, data: Partial<Integration> & { credentials?: GoogleCredentials }) =>
+    request<Integration>(`/integrations/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  delete: (id: string) =>
+    fetch(`${BASE}/integrations/${id}`, { method: 'DELETE' }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
+
+  startOAuth: (id: string) =>
+    request<{ auth_url: string }>(`/integrations/${id}/auth/start`, { method: 'POST' }),
+
+  getAuthStatus: (id: string) =>
+    request<{ authenticated: boolean }>(`/integrations/${id}/auth/status`),
+
+  availableTools: () => request<AvailableTool[]>('/integrations/available-tools'),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
