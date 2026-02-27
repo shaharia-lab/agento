@@ -44,7 +44,12 @@ type ChatService interface {
 	// CommitMessage persists the assistant response and updates session metadata.
 	// blocks contains the ordered content blocks (thinking/text/tool_use) captured
 	// during streaming so they can be re-rendered faithfully after a page reload.
-	CommitMessage(ctx context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, isFirstMessage bool, blocks []storage.MessageBlock) error
+	// usage holds the cumulative token counts for the completed turn(s); they are
+	// added to the session's running totals.
+	CommitMessage(ctx context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, isFirstMessage bool, blocks []storage.MessageBlock, usage agent.UsageStats) error
+
+	// UpdateSession persists updated session metadata (e.g. after linking an SDK session ID).
+	UpdateSession(ctx context.Context, session *storage.ChatSession) error
 }
 
 // chatService is the default implementation of ChatService.
@@ -200,7 +205,7 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 	return agentSession, session, nil
 }
 
-func (s *chatService) CommitMessage(_ context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, _ bool, blocks []storage.MessageBlock) error {
+func (s *chatService) CommitMessage(_ context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, _ bool, blocks []storage.MessageBlock, usage agent.UsageStats) error {
 	if assistantText != "" {
 		msg := storage.ChatMessage{
 			Role:      "assistant",
@@ -215,11 +220,24 @@ func (s *chatService) CommitMessage(_ context.Context, session *storage.ChatSess
 
 	session.SDKSession = sdkSessionID
 	session.UpdatedAt = time.Now().UTC()
+	// Accumulate token usage into the session running totals.
+	session.TotalInputTokens += usage.InputTokens
+	session.TotalOutputTokens += usage.OutputTokens
+	session.TotalCacheCreationTokens += usage.CacheCreationInputTokens
+	session.TotalCacheReadTokens += usage.CacheReadInputTokens
 
 	if err := s.chatRepo.UpdateSession(session); err != nil {
 		return fmt.Errorf("updating session: %w", err)
 	}
 
 	s.logger.Info("message committed", "session_id", session.ID, "sdk_session_id", sdkSessionID)
+	return nil
+}
+
+func (s *chatService) UpdateSession(_ context.Context, session *storage.ChatSession) error {
+	session.UpdatedAt = time.Now().UTC()
+	if err := s.chatRepo.UpdateSession(session); err != nil {
+		return fmt.Errorf("updating session: %w", err)
+	}
 	return nil
 }

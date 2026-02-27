@@ -7,6 +7,8 @@ import AgentEditPage from '@/pages/AgentEditPage'
 import ChatsPage from '@/pages/ChatsPage'
 import ChatSessionPage from '@/pages/ChatSessionPage'
 import SettingsPage from '@/pages/SettingsPage'
+import ClaudeSessionsPage from '@/pages/ClaudeSessionsPage'
+import ClaudeSessionDetailPage from '@/pages/ClaudeSessionDetailPage'
 import OnboardingWizard from '@/components/OnboardingWizard'
 import { AppearanceProvider } from '@/contexts/ThemeContext'
 import { settingsApi } from '@/lib/api'
@@ -69,6 +71,8 @@ export default function App() {
             <Route path="agents" element={<AgentsPage />} />
             <Route path="agents/new" element={<AgentCreatePage />} />
             <Route path="agents/:slug/edit" element={<AgentEditPage />} />
+            <Route path="claude-sessions" element={<ClaudeSessionsPage />} />
+            <Route path="claude-sessions/:id" element={<ClaudeSessionDetailPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>
         </Routes>

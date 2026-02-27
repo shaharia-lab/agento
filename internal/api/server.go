@@ -8,27 +8,30 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/service"
 )
 
 // Server holds all dependencies for the REST API handlers.
 type Server struct {
-	agentSvc     service.AgentService
-	chatSvc      service.ChatService
-	settingsMgr  *config.SettingsManager
-	logger       *slog.Logger
-	liveSessions *liveSessionStore
+	agentSvc           service.AgentService
+	chatSvc            service.ChatService
+	settingsMgr        *config.SettingsManager
+	logger             *slog.Logger
+	liveSessions       *liveSessionStore
+	claudeSessionCache *claudesessions.Cache
 }
 
 // New creates a new API Server backed by the provided services.
-func New(agentSvc service.AgentService, chatSvc service.ChatService, settingsMgr *config.SettingsManager, logger *slog.Logger) *Server {
+func New(agentSvc service.AgentService, chatSvc service.ChatService, settingsMgr *config.SettingsManager, logger *slog.Logger, sessionCache *claudesessions.Cache) *Server {
 	return &Server{
-		agentSvc:     agentSvc,
-		chatSvc:      chatSvc,
-		settingsMgr:  settingsMgr,
-		logger:       logger,
-		liveSessions: newLiveSessionStore(),
+		agentSvc:           agentSvc,
+		chatSvc:            chatSvc,
+		settingsMgr:        settingsMgr,
+		logger:             logger,
+		liveSessions:       newLiveSessionStore(),
+		claudeSessionCache: sessionCache,
 	}
 }
 
@@ -65,6 +68,13 @@ func (s *Server) Mount(r chi.Router) {
 	r.Delete("/claude-settings/profiles/{id}", s.handleDeleteClaudeSettingsProfile)
 	r.Post("/claude-settings/profiles/{id}/duplicate", s.handleDuplicateClaudeSettingsProfile)
 	r.Put("/claude-settings/profiles/{id}/default", s.handleSetDefaultClaudeSettingsProfile)
+
+	// Claude Code sessions (read from ~/.claude)
+	r.Get("/claude-sessions", s.handleListClaudeSessions)
+	r.Get("/claude-sessions/projects", s.handleListClaudeProjects)
+	r.Post("/claude-sessions/refresh", s.handleRefreshClaudeSessionCache)
+	r.Get("/claude-sessions/{id}", s.handleGetClaudeSession)
+	r.Post("/claude-sessions/{id}/continue", s.handleContinueClaudeSession)
 
 	// Filesystem browser
 	r.Get("/fs", s.handleFSList)

@@ -36,7 +36,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
 import FilesystemBrowserModal from '@/components/FilesystemBrowserModal'
-import { Plus, MessageSquare, Trash2, Search, Send, FolderOpen, Lock } from 'lucide-react'
+import { Plus, MessageSquare, Trash2, Search, Send, FolderOpen, Lock, Zap } from 'lucide-react'
 
 export default function ChatsPage() {
   const navigate = useNavigate()
@@ -428,6 +428,13 @@ export default function ChatsPage() {
   )
 }
 
+function formatTokens(n: number | undefined): string {
+  if (!n) return '—'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
 function ChatRow({
   session,
   agentName,
@@ -439,6 +446,8 @@ function ChatRow({
   onClick: () => void
   onDelete: () => void
 }) {
+  const hasTokens = (session.total_input_tokens ?? 0) > 0 || (session.total_output_tokens ?? 0) > 0
+
   return (
     <div
       className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors"
@@ -451,7 +460,7 @@ function ChatRow({
         <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">
           {truncate(session.title, 70)}
         </p>
-        <div className="flex items-center gap-2 mt-0.5">
+        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
           {agentName ? (
             <Badge
               variant="secondary"
@@ -470,6 +479,13 @@ function ChatRow({
           <span className="text-xs text-zinc-400 dark:text-zinc-500">
             {formatRelativeTime(session.updated_at)}
           </span>
+          {hasTokens && (
+            <span className="flex items-center gap-0.5 text-xs text-zinc-400 dark:text-zinc-500">
+              <Zap className="h-2.5 w-2.5" />
+              {formatTokens(session.total_input_tokens)}↑&nbsp;
+              {formatTokens(session.total_output_tokens)}↓
+            </span>
+          )}
         </div>
       </div>
       <AlertDialog>
