@@ -96,7 +96,7 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 		start := time.Now()
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		next.ServeHTTP(ww, r)
-		s.logger.Info("http request",
+		s.logger.Debug("http request",
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.Int("status", ww.Status()),

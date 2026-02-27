@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
@@ -39,7 +40,16 @@ embedded React UI. Open http://localhost:<port> in your browser.`,
 			if cmd.Flags().Changed("port") {
 				cfg.Port = port
 			}
-			return runWeb(cfg, noBrowser)
+
+			serverURL := fmt.Sprintf("http://localhost:%d", cfg.Port)
+			logFile := filepath.Join(cfg.LogDir(), "system.log")
+			printBanner(build.Version, serverURL, logFile)
+
+			if err := runWeb(cfg, noBrowser); err != nil {
+				fmt.Fprintf(os.Stderr, "An error occurred. Please check the logs at: %s\n", logFile)
+				os.Exit(1)
+			}
+			return nil
 		},
 	}
 
@@ -143,6 +153,24 @@ func seedExampleAgent(store storage.AgentStore) error {
 		},
 	}
 	return store.Save(agent)
+}
+
+// printBanner writes the startup banner to stdout. It is the only output
+// visible in the terminal during normal operation; all structured logs go
+// to the log file instead.
+func printBanner(version, serverURL, logFile string) {
+	fmt.Print(`
+    _                       _
+   / \   __ _  ___ _ __ | |_ ___
+  / _ \ / _` + "`" + `|/ _ \ '_ \| __/ _ \
+ / ___ \ (_| |  __/ | | | || (_) |
+/_/   \_\__, |\___|_| |_|\__\___/
+         |___/
+
+`)
+	fmt.Printf("Agento %s running.\n", version)
+	fmt.Printf("Please visit %s\n", serverURL)
+	fmt.Printf("Logs: %s\n\n", logFile)
 }
 
 func openBrowser(url string) {
