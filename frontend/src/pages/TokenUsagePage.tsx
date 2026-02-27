@@ -109,12 +109,24 @@ function formatTokens(n: number): string {
   return String(n)
 }
 
+const usdFmt2 = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
+const usdFmt4 = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 4,
+})
+
 function formatCost(n: number): string {
-  if (n < 0.0001) return '$0.00'
-  if (n < 0.01) return '< $0.01'
-  if (n >= 1000)
-    return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-  return `$${n.toFixed(4)}`
+  if (n < 0.0001) return usdFmt2.format(0) // $0.00
+  if (n < 0.01) return `< ${usdFmt2.format(0.01)}` // < $0.01
+  if (n < 1) return usdFmt4.format(n) // $0.0123 — extra precision for sub-dollar amounts
+  return usdFmt2.format(n) // $1.23 / $1,234.56
 }
 
 function formatModelName(model: string): string {
@@ -299,7 +311,7 @@ function CostOverTimeChart({ data }: { data: CostPoint[] }) {
             interval="preserveStartEnd"
           />
           <YAxis
-            tickFormatter={v => `$${v.toFixed(3)}`}
+            tickFormatter={v => formatCost(v as number)}
             tick={{ fontSize: 11 }}
             tickLine={false}
             axisLine={false}
