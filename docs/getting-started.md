@@ -35,13 +35,13 @@ make build
 agento web
 ```
 
-This starts Agento on port **8080** and opens your browser automatically.
+This starts Agento on port **8990** and opens your browser automatically.
 
 ---
 
 ## Open the UI
 
-Visit [http://localhost:8080](http://localhost:8080) in your browser.
+Visit [http://localhost:8990](http://localhost:8990) in your browser.
 
 ---
 
@@ -49,7 +49,7 @@ Visit [http://localhost:8080](http://localhost:8080) in your browser.
 
 | Flag | Environment variable | Default | Description |
 |------|---------------------|---------|-------------|
-| `--port` | `PORT` | `8080` | HTTP server port |
+| `--port` | `PORT` | `8990` | HTTP server port |
 | `--no-browser` | — | false | Do not open the browser on startup |
 | — | `AGENTO_DATA_DIR` | `~/.agento` | Directory where agents, chats, and logs are stored |
 | — | `AGENTO_DEFAULT_MODEL` | Claude Sonnet | Claude model used for direct (no-agent) chat |

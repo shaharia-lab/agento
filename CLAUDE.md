@@ -31,8 +31,8 @@ npm run format               # Prettier
 
 ### Development Setup
 Two terminals are needed in dev mode:
-1. `make dev-backend` — Go API server on `:8080` (or `PORT` env)
-2. `make dev-frontend` — Vite dev server on `:5173` (proxies API calls to `:8080`)
+1. `make dev-backend` — Go API server on `:8990` (or `PORT` env)
+2. `make dev-frontend` — Vite dev server on `:5173` (proxies API calls to `:8990`)
 
 ### Required Environment
 ```bash

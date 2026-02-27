@@ -151,7 +151,7 @@ Start the server:
 
 ```bash
 ./agents-platform serve
-./agents-platform serve --port 8080
+./agents-platform serve --port 8990
 ./agents-platform serve --agents-dir ./my-agents --mcps-file ./my-mcps.yaml
 ```
 
