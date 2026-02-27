@@ -9,6 +9,8 @@ import {
   X,
   Settings,
   History,
+  BarChart2,
+  LayoutDashboard,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -63,10 +65,16 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
     }
   }, [collapsed])
 
-  const navItems = [
+  const mainNavItems = [
     { to: '/chats', icon: MessageSquare, label: 'Chats' },
-    { to: '/claude-sessions', icon: History, label: 'Claude Sessions' },
     { to: '/agents', icon: Bot, label: 'Agents' },
+  ]
+
+  const claudeNavItems = [{ to: '/claude-sessions', icon: History, label: 'Claude Sessions' }]
+
+  const analyticsNavItems = [
+    { to: '/analytics/token-usage', icon: BarChart2, label: 'Token Usage' },
+    { to: '/analytics/general-usage', icon: LayoutDashboard, label: 'General Usage' },
   ]
 
   const handleNavClick = () => {
@@ -125,8 +133,9 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
 
       {/* Nav */}
       <nav className="flex-1 overflow-y-auto py-3 px-2">
+        {/* Main nav items */}
         <div className="space-y-0.5">
-          {navItems.map(({ to, icon: Icon, label }) =>
+          {mainNavItems.map(({ to, icon: Icon, label }) =>
             !isMobile && collapsed ? (
               <Tooltip key={to} content={label}>
                 <NavLink
@@ -162,6 +171,108 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
               </NavLink>
             ),
           )}
+        </div>
+
+        {/* Claude Usage section */}
+        <div className="mt-4">
+          {/* Section label — hidden when collapsed */}
+          {(!collapsed || isMobile) && (
+            <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 select-none">
+              Claude Usage
+            </p>
+          )}
+          {/* Collapsed: just a thin divider */}
+          {!isMobile && collapsed && (
+            <div className="mx-2 mb-2 border-t border-zinc-200 dark:border-zinc-700/50" />
+          )}
+          <div className="space-y-0.5">
+            {claudeNavItems.map(({ to, icon: Icon, label }) =>
+              !isMobile && collapsed ? (
+                <Tooltip key={to} content={label}>
+                  <NavLink
+                    to={to}
+                    className={({ isActive }) =>
+                      cn(
+                        'flex h-9 w-9 items-center justify-center rounded-md transition-colors mx-auto',
+                        isActive
+                          ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                          : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100',
+                      )
+                    }
+                  >
+                    <Icon className="h-4 w-4" />
+                  </NavLink>
+                </Tooltip>
+              ) : (
+                <NavLink
+                  key={to}
+                  to={to}
+                  onClick={handleNavClick}
+                  className={({ isActive }) =>
+                    cn(
+                      'flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors',
+                      isActive
+                        ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                        : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100',
+                    )
+                  }
+                >
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span>{label}</span>
+                </NavLink>
+              ),
+            )}
+          </div>
+        </div>
+
+        {/* Analytics section */}
+        <div className="mt-4">
+          {(!collapsed || isMobile) && (
+            <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 select-none">
+              Analytics
+            </p>
+          )}
+          {!isMobile && collapsed && (
+            <div className="mx-2 mb-2 border-t border-zinc-200 dark:border-zinc-700/50" />
+          )}
+          <div className="space-y-0.5">
+            {analyticsNavItems.map(({ to, icon: Icon, label }) =>
+              !isMobile && collapsed ? (
+                <Tooltip key={to} content={label}>
+                  <NavLink
+                    to={to}
+                    className={({ isActive }) =>
+                      cn(
+                        'flex h-9 w-9 items-center justify-center rounded-md transition-colors mx-auto',
+                        isActive
+                          ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                          : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100',
+                      )
+                    }
+                  >
+                    <Icon className="h-4 w-4" />
+                  </NavLink>
+                </Tooltip>
+              ) : (
+                <NavLink
+                  key={to}
+                  to={to}
+                  onClick={handleNavClick}
+                  className={({ isActive }) =>
+                    cn(
+                      'flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors',
+                      isActive
+                        ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                        : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100',
+                    )
+                  }
+                >
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span>{label}</span>
+                </NavLink>
+              ),
+            )}
+          </div>
         </div>
       </nav>
 

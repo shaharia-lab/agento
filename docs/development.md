@@ -39,7 +39,7 @@ make dev-backend
 make dev-frontend
 ```
 
-The backend serves the API on `:8080`. The frontend dev server proxies API calls to it.
+The backend serves the API on `:8990`. The frontend dev server proxies API calls to it.
 
 ---
 

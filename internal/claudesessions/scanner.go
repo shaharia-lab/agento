@@ -59,15 +59,75 @@ func ClaudeHome() string {
 	return filepath.Join(home, ".claude")
 }
 
-// DecodeProjectPath converts an encoded Claude Code directory name to the original path.
-// Claude Code encodes paths by replacing '/' separators with '-' and prepending '-'.
-// e.g. "-home-user-Projects-foo" → "/home/user/Projects/foo"
+// DecodeProjectPath converts an encoded Claude Code directory name to the original
+// filesystem path.
 //
-// Note: this encoding is ambiguous when directory names contain hyphens, but it
-// matches what Claude Code itself uses, so decoded paths may differ in that edge case.
+// Claude Code encodes project paths for use as directory names by replacing both
+// '/' and '.' with '-' and prepending a leading '-'. Because literal hyphens in
+// directory names are encoded identically, the mapping is ambiguous.
+//
+// This function resolves the ambiguity with a greedy filesystem walk: for each
+// hyphen-separated token it checks whether the accumulated segment (or its
+// dot-prefixed variant, to recover hidden directories like ".claude") forms an
+// existing directory, advancing to the next level when it does. This correctly
+// decodes the vast majority of real-world project paths (e.g. "homebrew-tap",
+// "claude-agent-sdk-go", and worktree paths under ".claude/worktrees/").
+//
+// If the final resolved path does not exist on the filesystem (deleted projects,
+// unresolvable worktrees, etc.) the raw encoded name is returned unchanged so
+// callers always have something meaningful to display.
 func DecodeProjectPath(encoded string) string {
 	trimmed := strings.TrimPrefix(encoded, "-")
-	return "/" + strings.ReplaceAll(trimmed, "-", "/")
+	tokens := strings.Split(trimmed, "-")
+
+	currentPath := ""
+	currentSegment := ""
+
+	for _, token := range tokens {
+		// Skip empty tokens produced by consecutive hyphens (e.g. from "--").
+		// They are handled implicitly: the next token continues building the segment,
+		// and findExistingDir also checks the dot-prefixed variant which covers
+		// hidden directories like ".claude" that Claude Code encodes as "--claude".
+		if token == "" {
+			continue
+		}
+
+		if currentSegment == "" {
+			currentSegment = token
+		} else {
+			currentSegment += "-" + token
+		}
+
+		// Greedily advance when the accumulated segment matches an existing directory.
+		if next, ok := findExistingDir(currentPath, currentSegment); ok {
+			currentPath = next
+			currentSegment = ""
+		}
+	}
+
+	result := currentPath
+	if currentSegment != "" {
+		result = currentPath + "/" + currentSegment
+	}
+
+	// Verify the resolved path exists; return the raw encoded name as fallback.
+	if _, err := os.Stat(result); err == nil {
+		return result
+	}
+	return encoded
+}
+
+// findExistingDir checks whether parent/segment or parent/.segment is an existing
+// directory. The dot-prefix variant recovers hidden directories (e.g. ".claude")
+// because Claude Code encodes '.' as '-', the same character used for '/'.
+func findExistingDir(parent, segment string) (string, bool) {
+	for _, name := range []string{segment, "." + segment} {
+		candidate := parent + "/" + name
+		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
+			return candidate, true
+		}
+	}
+	return "", false
 }
 
 // ListProjects returns all projects found in ~/.claude/projects/.

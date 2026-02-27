@@ -9,7 +9,6 @@ package logger
 
 import (
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -27,9 +26,7 @@ func NewSystemLogger(logDir string, level slog.Level) (*slog.Logger, error) {
 		return nil, err
 	}
 
-	// Write to both file and stderr so operators can see logs in the terminal.
-	w := io.MultiWriter(f, os.Stderr)
-	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})
+	handler := slog.NewJSONHandler(f, &slog.HandlerOptions{Level: level})
 	return slog.New(handler), nil
 }
 

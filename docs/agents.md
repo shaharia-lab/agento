@@ -104,7 +104,7 @@ Leave `tools` empty to allow all tools from that server.
 
 ## Chat with an agent
 
-1. Open the Agento UI at [http://localhost:8080](http://localhost:8080).
+1. Open the Agento UI at [http://localhost:8990](http://localhost:8990).
 2. Select the agent from the sidebar.
 3. Type your message and press Enter.
 

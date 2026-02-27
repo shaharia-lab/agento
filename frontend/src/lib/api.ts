@@ -17,6 +17,7 @@ import type {
   ClaudeProject,
   ClaudeSessionSummary,
   ClaudeSessionDetail,
+  AnalyticsReport,
 } from '../types'
 
 const BASE = '/api'
@@ -307,4 +308,17 @@ export async function provideInput(chatId: string, answer: string): Promise<void
     const body = await res.json().catch(() => ({ error: res.statusText }))
     throw new Error(body.error || `HTTP ${res.status}`)
   }
+}
+
+// ── Analytics ─────────────────────────────────────────────────────────────────
+
+export const analyticsApi = {
+  get: (params?: { from?: string; to?: string; project?: string }): Promise<AnalyticsReport> => {
+    const qs = new URLSearchParams()
+    if (params?.from) qs.set('from', params.from)
+    if (params?.to) qs.set('to', params.to)
+    if (params?.project) qs.set('project', params.project)
+    const query = qs.toString()
+    return request<AnalyticsReport>(`/claude-analytics${query ? `?${query}` : ''}`)
+  },
 }

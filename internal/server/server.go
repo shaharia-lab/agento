@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
 
 	"github.com/shaharia-lab/agento/internal/api"
 )
@@ -39,6 +40,7 @@ func New(apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger) *S
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
+	r.Use(s.corsMiddleware())
 	r.Use(s.requestLogger)
 
 	// Health check
@@ -90,13 +92,36 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 }
 
+// corsMiddleware returns a CORS middleware configured for the current mode.
+//
+// In dev mode (frontendFS == nil) the Vite dev server on :5173 is the only
+// allowed origin. In production the frontend is embedded and served from the
+// same origin as the API, so no cross-origin access is permitted at all —
+// the absence of CORS headers causes browsers to block every cross-origin
+// request by default.
+func (s *Server) corsMiddleware() func(http.Handler) http.Handler {
+	if s.frontendFS != nil {
+		// Production: same-origin only — return a no-op middleware.
+		return func(next http.Handler) http.Handler { return next }
+	}
+
+	// Dev mode: allow the Vite dev server origin.
+	return cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:5173"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	})
+}
+
 // requestLogger is a chi middleware that logs each incoming request.
 func (s *Server) requestLogger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
 		next.ServeHTTP(ww, r)
-		s.logger.Info("http request",
+		s.logger.Debug("http request",
 			slog.String("method", r.Method),
 			slog.String("path", r.URL.Path),
 			slog.Int("status", ww.Status()),

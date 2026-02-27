@@ -15,8 +15,8 @@ type AppConfig struct {
 	// Optional — the claude CLI uses its own stored credentials if not provided.
 	AnthropicAPIKey string `envconfig:"ANTHROPIC_API_KEY"`
 
-	// Port is the HTTP server port. Defaults to 8080.
-	Port int `envconfig:"PORT" default:"8080"`
+	// Port is the HTTP server port. Defaults to 8990.
+	Port int `envconfig:"PORT" default:"8990"`
 
 	// DataDir is the root data directory. Defaults to ~/.agento.
 	DataDir string `envconfig:"AGENTO_DATA_DIR"`

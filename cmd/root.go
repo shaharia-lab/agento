@@ -18,6 +18,7 @@ func NewRootCmd(cfg *config.AppConfig) *cobra.Command {
 		Long:    "A platform for running Claude agents defined in YAML configuration files.",
 		Version: build.String(),
 	}
+	root.SetVersionTemplate("{{.Version}}\n")
 	return root
 }
 

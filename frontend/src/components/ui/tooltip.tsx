@@ -2,7 +2,7 @@ import * as React from 'react'
 import { cn } from '@/lib/utils'
 
 interface TooltipProps {
-  content: string
+  content: React.ReactNode
   children: React.ReactElement
   side?: 'right' | 'left' | 'top' | 'bottom'
 }

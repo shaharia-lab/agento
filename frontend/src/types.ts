@@ -448,3 +448,91 @@ export interface ClaudeSessionDetail extends ClaudeSessionSummary {
   messages: ClaudeMessage[]
   todos: ClaudeTodo[]
 }
+
+// ── Analytics ─────────────────────────────────────────────────────────────────
+
+export interface AnalyticsSummary {
+  total_sessions: number
+  total_tokens: number
+  total_input_tokens: number
+  total_output_tokens: number
+  total_cache_read_tokens: number
+  total_cache_creation_tokens: number
+  most_used_model: string
+  avg_tokens_per_session: number
+  estimated_cost_usd: number
+}
+
+export interface TimeSeriesPoint {
+  date: string
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cache_creation_tokens: number
+  total_tokens: number
+  sessions: number
+}
+
+export interface CacheEfficiencyPoint {
+  date: string
+  cache_hit_rate: number
+  cached_tokens: number
+  total_input_tokens: number
+}
+
+export interface ModelStat {
+  model: string
+  tokens: number
+  percentage: number
+}
+
+export interface ModelSessionStat {
+  model: string
+  sessions: number
+}
+
+export interface DayActivity {
+  date: string
+  sessions: number
+  tokens: number
+}
+
+export interface HeatmapCell {
+  day_of_week: number // 0=Sunday … 6=Saturday
+  hour: number // 0-23
+  sessions: number
+  tokens: number
+}
+
+export interface HourlyActivity {
+  hour: number
+  sessions: number
+  tokens: number
+}
+
+export interface CostPoint {
+  date: string
+  estimated_cost_usd: number
+}
+
+export interface CostSummary {
+  input_cost_usd: number
+  output_cost_usd: number
+  cache_read_cost_usd: number
+  cache_write_cost_usd: number
+  total_cost_usd: number
+}
+
+export interface AnalyticsReport {
+  summary: AnalyticsSummary
+  time_series: TimeSeriesPoint[]
+  cache_efficiency: CacheEfficiencyPoint[]
+  model_breakdown: ModelStat[]
+  sessions_per_model: ModelSessionStat[]
+  most_active_days: DayActivity[]
+  heatmap: HeatmapCell[]
+  hourly_activity: HourlyActivity[]
+  cost_over_time: CostPoint[]
+  cost_summary: CostSummary
+  projects: string[]
+}
