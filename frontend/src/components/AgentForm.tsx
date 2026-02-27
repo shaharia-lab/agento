@@ -1,11 +1,10 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { agentsApi, integrationsApi } from '@/lib/api'
 import type { Agent, AvailableTool } from '@/types'
 import { MODELS, BUILT_IN_TOOLS } from '@/types'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
 import { Label } from '@/components/ui/label'
 import {
   Select,
@@ -14,6 +13,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 
 interface AgentFormProps {
   agent?: Agent
@@ -27,10 +27,56 @@ function toSlug(name: string): string {
     .replace(/^-+|-+$/g, '')
 }
 
+function CollapsibleSection({
+  title,
+  defaultOpen = false,
+  children,
+}: {
+  title: string
+  defaultOpen?: boolean
+  children: React.ReactNode
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div className="border border-border rounded-lg">
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center justify-between w-full px-4 py-3 text-left"
+      >
+        <span className="text-sm font-medium">{title}</span>
+        {open ? (
+          <ChevronDown className="h-4 w-4 text-muted-foreground shrink-0" />
+        ) : (
+          <ChevronRight className="h-4 w-4 text-muted-foreground shrink-0" />
+        )}
+      </button>
+      {open && <div className="px-4 pb-4 space-y-4">{children}</div>}
+    </div>
+  )
+}
+
+function LineNumberGutter({ value }: { value: string }) {
+  const lineCount = value.split('\n').length
+  return (
+    <div
+      className="select-none text-right pr-3 pt-[9px] pb-[9px] text-xs font-mono text-muted-foreground/50 leading-[1.625] shrink-0"
+      aria-hidden
+    >
+      {Array.from({ length: lineCount }, (_, i) => (
+        <div key={i}>{i + 1}</div>
+      ))}
+    </div>
+  )
+}
+
+type MobileTab = 'prompt' | 'config'
+
 export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
   const navigate = useNavigate()
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [mobileTab, setMobileTab] = useState<MobileTab>('prompt')
 
   const [name, setName] = useState(agent?.name ?? '')
   const [slug, setSlug] = useState(agent?.slug ?? '')
@@ -44,14 +90,22 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
   const [systemPrompt, setSystemPrompt] = useState(agent?.system_prompt ?? '')
   const [builtInTools, setBuiltInTools] = useState<string[]>(agent?.capabilities?.built_in ?? [])
 
-  // Integration tools: { [integration_id]: string[] }
   const [mcpTools, setMcpTools] = useState<Record<string, string[]>>(() => {
     const mcp = agent?.capabilities?.mcp ?? {}
     return Object.fromEntries(Object.entries(mcp).map(([id, v]) => [id, v.tools]))
   })
   const [availableTools, setAvailableTools] = useState<AvailableTool[]>([])
 
-  // Auto-generate slug from name
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const gutterRef = useRef<HTMLDivElement>(null)
+
+  // Sync gutter scroll with textarea
+  const handleTextareaScroll = useCallback(() => {
+    if (textareaRef.current && gutterRef.current) {
+      gutterRef.current.scrollTop = textareaRef.current.scrollTop
+    }
+  }, [])
+
   useEffect(() => {
     if (!slugTouched && name) {
       setSlug(toSlug(name))
@@ -79,7 +133,6 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
     })
   }
 
-  // Group availableTools by integration_id → service
   const toolsByIntegration = availableTools.reduce<
     Record<string, { name: string; byService: Record<string, AvailableTool[]> }>
   >((acc, tool) => {
@@ -98,7 +151,6 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
     setError(null)
     setSaving(true)
     try {
-      // Build mcp capabilities — only include integrations with at least one tool selected
       const mcp: Record<string, { tools: string[] }> = {}
       for (const [id, tools] of Object.entries(mcpTools)) {
         if (tools.length > 0) mcp[id] = { tools }
@@ -129,135 +181,141 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
     }
   }
 
-  return (
-    <form onSubmit={handleSubmit} className="space-y-6 max-w-2xl">
-      {error && (
-        <div className="rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700">
-          {error}
-        </div>
-      )}
+  const hasIntegrationTools = Object.keys(toolsByIntegration).length > 0
 
-      {/* Name */}
-      <div className="space-y-1.5">
-        <Label htmlFor="name">Name *</Label>
-        <Input
-          id="name"
-          value={name}
-          onChange={e => setName(e.target.value)}
-          placeholder="My Helpful Agent"
-          required
-        />
-      </div>
+  // --- Shared sub-components for reuse in both layouts ---
 
-      {/* Slug */}
-      <div className="space-y-1.5">
-        <Label htmlFor="slug">Slug *</Label>
-        <Input
-          id="slug"
-          value={slug}
-          onChange={e => {
-            setSlug(e.target.value)
-            setSlugTouched(true)
-          }}
-          placeholder="my-helpful-agent"
-          pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
-          title="Lowercase letters, numbers and hyphens only"
-          disabled={isEdit}
-          required
-        />
-        {isEdit && (
-          <p className="text-xs text-muted-foreground">Slug cannot be changed after creation.</p>
-        )}
-      </div>
-
-      {/* Description */}
-      <div className="space-y-1.5">
-        <Label htmlFor="description">Description</Label>
-        <Input
-          id="description"
-          value={description}
-          onChange={e => setDescription(e.target.value)}
-          placeholder="What does this agent do?"
-        />
-      </div>
-
-      {/* Model */}
-      <div className="space-y-1.5">
-        <Label>Model</Label>
-        <Select value={model} onValueChange={setModel}>
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {MODELS.map(m => (
-              <SelectItem key={m.value} value={m.value}>
-                {m.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-
-      {/* Thinking */}
-      <div className="space-y-1.5">
-        <Label>Thinking Mode</Label>
-        <Select value={thinking} onValueChange={v => setThinking(v as Agent['thinking'])}>
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="adaptive">Adaptive (recommended)</SelectItem>
-            <SelectItem value="enabled">Always enabled</SelectItem>
-            <SelectItem value="disabled">Disabled</SelectItem>
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          Adaptive lets Claude decide when extended thinking is helpful.
-        </p>
-      </div>
-
-      {/* Permission Mode */}
-      <div className="space-y-1.5">
-        <Label>Permission Mode</Label>
-        <Select
-          value={permissionMode}
-          onValueChange={v => setPermissionMode(v as Agent['permission_mode'])}
+  const systemPromptEditor = (
+    <div className="flex flex-col flex-1 min-h-0">
+      <Label htmlFor="system_prompt" className="mb-1.5 shrink-0">
+        System Prompt
+      </Label>
+      <div className="flex flex-1 min-h-[400px] rounded-md border border-input bg-background overflow-hidden">
+        <div
+          ref={gutterRef}
+          className="overflow-hidden shrink-0 bg-muted/30 border-r border-border"
         >
-          <SelectTrigger>
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="default">Default — respect Claude Code settings</SelectItem>
-            <SelectItem value="bypass">Bypass — auto-approve all tool calls</SelectItem>
-          </SelectContent>
-        </Select>
-        <p className="text-xs text-muted-foreground">
-          <strong>Default</strong> respects your Claude Code permission rules.{' '}
-          <strong>Bypass</strong> skips all permission checks and auto-approves every tool call.
-        </p>
-      </div>
-
-      {/* System Prompt */}
-      <div className="space-y-1.5">
-        <Label htmlFor="system_prompt">System Prompt</Label>
-        <Textarea
+          <LineNumberGutter value={systemPrompt} />
+        </div>
+        <textarea
+          ref={textareaRef}
           id="system_prompt"
           value={systemPrompt}
           onChange={e => setSystemPrompt(e.target.value)}
+          onScroll={handleTextareaScroll}
           placeholder="You are a helpful assistant. Today is {{current_date}}."
-          className="min-h-[120px] font-mono text-xs"
+          className="flex-1 resize-none bg-transparent px-3 py-2 text-sm font-mono leading-[1.625] placeholder:text-muted-foreground focus-visible:outline-none"
         />
-        <p className="text-xs text-muted-foreground">
-          Use <code className="rounded bg-muted px-1 py-0.5">{'{{current_date}}'}</code> and{' '}
-          <code className="rounded bg-muted px-1 py-0.5">{'{{current_time}}'}</code> as dynamic
-          placeholders.
-        </p>
       </div>
+      <p className="text-xs text-muted-foreground mt-1.5 shrink-0">
+        Use <code className="rounded bg-muted px-1 py-0.5">{'{{current_date}}'}</code> and{' '}
+        <code className="rounded bg-muted px-1 py-0.5">{'{{current_time}}'}</code> as dynamic
+        placeholders.
+      </p>
+    </div>
+  )
 
-      {/* Built-in Tools */}
-      <div className="space-y-2">
-        <Label>Built-in Tools</Label>
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+  const configPanel = (
+    <div className="space-y-3">
+      {/* Basic Info — expanded by default */}
+      <CollapsibleSection title="Basic Info" defaultOpen>
+        <div className="space-y-1.5">
+          <Label htmlFor="name">Name *</Label>
+          <Input
+            id="name"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            placeholder="My Helpful Agent"
+            required
+          />
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="slug">Slug *</Label>
+          <Input
+            id="slug"
+            value={slug}
+            onChange={e => {
+              setSlug(e.target.value)
+              setSlugTouched(true)
+            }}
+            placeholder="my-helpful-agent"
+            pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
+            title="Lowercase letters, numbers and hyphens only"
+            disabled={isEdit}
+            required
+          />
+          {isEdit && (
+            <p className="text-xs text-muted-foreground">Slug cannot be changed after creation.</p>
+          )}
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="description">Description</Label>
+          <Input
+            id="description"
+            value={description}
+            onChange={e => setDescription(e.target.value)}
+            placeholder="What does this agent do?"
+          />
+        </div>
+      </CollapsibleSection>
+
+      {/* Model & Behavior — collapsed */}
+      <CollapsibleSection title="Model & Behavior">
+        <div className="space-y-1.5">
+          <Label>Model</Label>
+          <Select value={model} onValueChange={setModel}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {MODELS.map(m => (
+                <SelectItem key={m.value} value={m.value}>
+                  {m.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <div className="space-y-1.5">
+          <Label>Thinking Mode</Label>
+          <Select value={thinking} onValueChange={v => setThinking(v as Agent['thinking'])}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="adaptive">Adaptive (recommended)</SelectItem>
+              <SelectItem value="enabled">Always enabled</SelectItem>
+              <SelectItem value="disabled">Disabled</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            Adaptive lets Claude decide when extended thinking is helpful.
+          </p>
+        </div>
+        <div className="space-y-1.5">
+          <Label>Permission Mode</Label>
+          <Select
+            value={permissionMode}
+            onValueChange={v => setPermissionMode(v as Agent['permission_mode'])}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="default">Default — respect Claude Code settings</SelectItem>
+              <SelectItem value="bypass">Bypass — auto-approve all tool calls</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            <strong>Default</strong> respects your Claude Code permission rules.{' '}
+            <strong>Bypass</strong> skips all permission checks and auto-approves every tool call.
+          </p>
+        </div>
+      </CollapsibleSection>
+
+      {/* Built-in Tools — collapsed */}
+      <CollapsibleSection title="Built-in Tools">
+        <div className="grid grid-cols-2 gap-2">
           {BUILT_IN_TOOLS.map(tool => (
             <label
               key={tool}
@@ -276,12 +334,11 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
         <p className="text-xs text-muted-foreground">
           Leave all unchecked to allow all built-in tools.
         </p>
-      </div>
+      </CollapsibleSection>
 
-      {/* Integration Tools */}
-      {Object.keys(toolsByIntegration).length > 0 && (
-        <div className="space-y-2">
-          <Label>Integration Tools</Label>
+      {/* Integration Tools — collapsed, conditional */}
+      {hasIntegrationTools && (
+        <CollapsibleSection title="Integration Tools">
           <p className="text-xs text-muted-foreground">
             Tools from your connected integrations. Selected tools will be available to this agent.
           </p>
@@ -296,7 +353,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
                     {Object.entries(byService).map(([service, tools]) => (
                       <div key={service}>
                         <p className="text-xs text-zinc-400 capitalize mb-1.5">{service}</p>
-                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+                        <div className="grid grid-cols-2 gap-1.5">
                           {tools.map(tool => {
                             const selected = (mcpTools[integrationId] ?? []).includes(
                               tool.tool_name,
@@ -324,17 +381,71 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
               ),
             )}
           </div>
-        </div>
+        </CollapsibleSection>
       )}
 
       {/* Actions */}
       <div className="flex items-center gap-3 pt-2">
         <Button type="submit" disabled={saving}>
-          {saving ? 'Saving…' : isEdit ? 'Update Agent' : 'Create Agent'}
+          {saving ? 'Saving...' : isEdit ? 'Update Agent' : 'Create Agent'}
         </Button>
         <Button type="button" variant="outline" onClick={() => navigate('/agents')}>
           Cancel
         </Button>
+      </div>
+    </div>
+  )
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+      {error && (
+        <div className="rounded-md bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700 mb-4 shrink-0">
+          {error}
+        </div>
+      )}
+
+      {/* Desktop: two-column layout (lg+) */}
+      <div className="hidden lg:grid lg:grid-cols-[3fr_2fr] lg:gap-6 flex-1 min-h-0">
+        {/* Left column: system prompt */}
+        <div className="flex flex-col min-h-0">{systemPromptEditor}</div>
+
+        {/* Right column: config sections, scrollable */}
+        <div className="overflow-y-auto min-h-0 pr-1">{configPanel}</div>
+      </div>
+
+      {/* Mobile/Tablet: tabbed layout (<lg) */}
+      <div className="flex flex-col flex-1 min-h-0 lg:hidden">
+        {/* Tab bar */}
+        <div className="flex border-b border-border mb-4 shrink-0">
+          <button
+            type="button"
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              mobileTab === 'prompt'
+                ? 'border-foreground text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+            onClick={() => setMobileTab('prompt')}
+          >
+            System Prompt
+          </button>
+          <button
+            type="button"
+            className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+              mobileTab === 'config'
+                ? 'border-foreground text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+            onClick={() => setMobileTab('config')}
+          >
+            Configuration
+          </button>
+        </div>
+
+        {/* Tab content */}
+        <div className="flex-1 min-h-0 overflow-y-auto">
+          {mobileTab === 'prompt' && systemPromptEditor}
+          {mobileTab === 'config' && configPanel}
+        </div>
       </div>
     </form>
   )

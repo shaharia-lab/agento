@@ -115,3 +115,16 @@ Tool calls made by the agent are shown inline in the conversation. If the agent 
 ## Manage agents from the UI
 
 You can create, edit, and delete agents from the **Agents** section in the UI without editing YAML files by hand. Changes take effect immediately.
+
+### Creating or editing an agent in the UI
+
+Go to **Agents → New Agent** (or click **Edit** on an existing agent). The form has two areas:
+
+- **System Prompt** (left side on desktop, first tab on mobile) — A full-height editor where you write the agent's instructions. Line numbers are shown for reference. Use `{{current_date}}` and `{{current_time}}` as placeholders.
+- **Configuration** (right side on desktop, second tab on mobile) — Collapsible sections for all other settings:
+  - **Basic Info** — Name, slug, and description.
+  - **Model & Behavior** — Model selection, thinking mode, and permission mode.
+  - **Built-in Tools** — Select which built-in tools the agent can use. Leave all unchecked to allow all.
+  - **Integration Tools** — If you have connected integrations (e.g. Google), their tools appear here for selection.
+
+Click **Create Agent** or **Update Agent** to save.
