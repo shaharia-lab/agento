@@ -197,7 +197,10 @@ function TokenTimeSeriesChart({ data }: { data: TimeSeriesPoint[] }) {
             width={48}
           />
           <Tooltip
-            formatter={(v: number, name: string) => [formatTokens(v), name.replace(/_/g, ' ')]}
+            formatter={(v: number | undefined, name: string) => [
+              formatTokens(v ?? 0),
+              name.replace(/_/g, ' '),
+            ]}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
           <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -256,7 +259,7 @@ function CacheEfficiencyChart({ data }: { data: CacheEfficiencyPoint[] }) {
             width={40}
           />
           <Tooltip
-            formatter={(v: number) => [`${v.toFixed(1)}%`, 'Cache Hit Rate']}
+            formatter={(v: number | undefined) => [`${(v ?? 0).toFixed(1)}%`, 'Cache Hit Rate']}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
           <Line
@@ -294,7 +297,7 @@ function CostOverTimeChart({ data }: { data: CostPoint[] }) {
             width={56}
           />
           <Tooltip
-            formatter={(v: number) => [formatCost(v), 'Estimated Cost']}
+            formatter={(v: number | undefined) => [formatCost(v ?? 0), 'Estimated Cost']}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
           <Bar dataKey="estimated_cost_usd" name="Cost" fill="#6366f1" radius={[2, 2, 0, 0]} />
@@ -338,7 +341,9 @@ function ModelPieChart({ data }: { data: ModelStat[] }) {
             cx="50%"
             cy="45%"
             outerRadius={90}
-            label={({ name, percentage }) => `${formatModelName(name)} ${percentage}%`}
+            label={({ name, percent }) =>
+              `${formatModelName(name as string)} ${((percent as number) * 100).toFixed(1)}%`
+            }
             labelLine={true}
           >
             {data.map((_, i) => (
@@ -346,7 +351,10 @@ function ModelPieChart({ data }: { data: ModelStat[] }) {
             ))}
           </Pie>
           <Tooltip
-            formatter={(v: number, name: string) => [formatTokens(v), formatModelName(name)]}
+            formatter={(v: number | undefined, name: string) => [
+              formatTokens(v ?? 0),
+              formatModelName(name),
+            ]}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
         </PieChart>
@@ -417,8 +425,8 @@ function MostActiveDaysChart({ data }: { data: DayActivity[] }) {
             width={48}
           />
           <Tooltip
-            formatter={(v: number, name: string) => [
-              name === 'tokens' ? formatTokens(v) : v,
+            formatter={(v: number | undefined, name: string) => [
+              name === 'tokens' ? formatTokens(v ?? 0) : (v ?? 0),
               name === 'tokens' ? 'Tokens' : 'Sessions',
             ]}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
@@ -524,8 +532,8 @@ function HourlyActivityChart({ data }: { data: HourlyActivity[] }) {
           />
           <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={32} />
           <Tooltip
-            formatter={(v: number, name: string) => [
-              v,
+            formatter={(v: number | undefined, name: string) => [
+              v ?? 0,
               name === 'sessions' ? 'Sessions' : 'Tokens',
             ]}
             labelFormatter={h => `Hour ${h}:00`}
