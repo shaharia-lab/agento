@@ -25,7 +25,7 @@ builds:
     ldflags:
       - -s -w
       - -X github.com/shaharia-lab/agento/internal/build.Version={{.Version}}
-      - -X github.com/shaharia-lab/agento/internal/build.CommitSHA={{.Commit}}
+      - -X github.com/shaharia-lab/agento/internal/build.CommitSHA={{.ShortCommit}}
       - -X github.com/shaharia-lab/agento/internal/build.BuildDate={{.Date}}
 
 archives:
