@@ -87,6 +87,20 @@ Agents are defined as YAML files in `~/.agento/agents/` (or `AGENTS_DIR`). Field
 ### MCP Integration
 External MCP servers defined in `mcps.yaml` (or `MCPS_FILE`). Local in-process tools registered via `internal/tools/registry.go`. Claude settings profiles stored as `~/.claude/settings_<slug>.json` with metadata at `~/.claude/settings_profiles.json`.
 
+## Available Skills
+
+Custom Claude Code skills in `.claude/skills/`. Invoke with `/skill-name <args>`.
+
+| Skill | Purpose | Usage |
+|-------|---------|-------|
+| `/architect-reviewer` | Architecture audit — patterns, code smells, tech debt, maintainability | `/architect-reviewer audit the codebase` or `review last 7 days changes` |
+| `/security-reviewer` | Security audit — OWASP, CWE, CVSS, attack scenarios, remediation | `/security-reviewer audit the API handlers` |
+| `/pr-reviewer` | PR review — correctness, quality, security, UI/UX, cross-platform, docs | `/pr-reviewer 42` or `/pr-reviewer feature/my-branch` |
+| `/context-updater` | Documentation & context maintenance — keeps CLAUDE.md, README, docs/ current | `/context-updater since last 7 days` |
+| `/engineering` | Development agent — features, bugs, refactoring with full project context | `/engineering add pagination to list endpoints` |
+
+All review skills use Opus model, run in forked context, and include cross-platform checks (Linux, macOS, Windows).
+
 ## Linting
 
 Go linters active: `errcheck`, `govet`, `staticcheck`, `unused`, `gosec`, `revive`, `bodyclose`, `noctx`. Config in `.golangci.yml`. Pre-commit hooks enforce linting, formatting, and TypeScript checks before every commit.
