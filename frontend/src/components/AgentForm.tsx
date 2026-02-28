@@ -31,11 +31,11 @@ function CollapsibleSection({
   title,
   defaultOpen = false,
   children,
-}: {
+}: Readonly<{
   title: string
   defaultOpen?: boolean
   children: React.ReactNode
-}) {
+}>) {
   const [open, setOpen] = useState(defaultOpen)
   return (
     <div className="border border-border rounded-lg">
@@ -56,7 +56,7 @@ function CollapsibleSection({
   )
 }
 
-function LineNumberGutter({ value }: { value: string }) {
+function LineNumberGutter({ value }: Readonly<{ value: string }>) {
   const lineCount = value.split('\n').length
   return (
     <div

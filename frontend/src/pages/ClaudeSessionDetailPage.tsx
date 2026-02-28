@@ -43,7 +43,7 @@ function todoIcon(status: string) {
 
 // ── Block renderer ────────────────────────────────────────────────────────────
 
-function ThinkingBlock({ text }: { text: string }) {
+function ThinkingBlock({ text }: Readonly<{ text: string }>) {
   const [open, setOpen] = useState(false)
   return (
     <div className="rounded-md border border-purple-200 dark:border-purple-900/50 bg-purple-50 dark:bg-purple-950/20 text-xs overflow-hidden">
@@ -68,7 +68,7 @@ function ThinkingBlock({ text }: { text: string }) {
   )
 }
 
-function ToolUseBlock({ block }: { block: ClaudeNormalizedBlock }) {
+function ToolUseBlock({ block }: Readonly<{ block: ClaudeNormalizedBlock }>) {
   const [open, setOpen] = useState(false)
   const toolName = block.name ?? 'unknown'
   const inputStr = block.input ? JSON.stringify(block.input, null, 2) : ''
@@ -120,7 +120,7 @@ function ToolUseBlock({ block }: { block: ClaudeNormalizedBlock }) {
   )
 }
 
-function MessageBlocks({ blocks }: { blocks: ClaudeNormalizedBlock[] }) {
+function MessageBlocks({ blocks }: Readonly<{ blocks: ClaudeNormalizedBlock[] }>) {
   return (
     <div className="flex flex-col gap-2">
       {blocks.map((b, i) => {
@@ -148,7 +148,7 @@ function MessageBlocks({ blocks }: { blocks: ClaudeNormalizedBlock[] }) {
 
 // ── Progress children ─────────────────────────────────────────────────────────
 
-function ProgressChildren({ children }: { children: ClaudeMessage[] }) {
+function ProgressChildren({ children }: Readonly<{ children: ClaudeMessage[] }>) {
   const [open, setOpen] = useState(false)
   if (!children || children.length === 0) return null
   return (
@@ -175,7 +175,7 @@ function ProgressChildren({ children }: { children: ClaudeMessage[] }) {
 
 // ── Message components ────────────────────────────────────────────────────────
 
-function UserMessage({ msg }: { msg: ClaudeMessage }) {
+function UserMessage({ msg }: Readonly<{ msg: ClaudeMessage }>) {
   return (
     <div className="flex gap-3">
       <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 shrink-0 text-xs font-semibold mt-0.5">
@@ -193,7 +193,7 @@ function UserMessage({ msg }: { msg: ClaudeMessage }) {
   )
 }
 
-function AssistantMessage({ msg }: { msg: ClaudeMessage }) {
+function AssistantMessage({ msg }: Readonly<{ msg: ClaudeMessage }>) {
   const hasBlocks = (msg.blocks ?? []).length > 0
   const hasChildren = (msg.children ?? []).length > 0
 
@@ -227,7 +227,7 @@ function AssistantMessage({ msg }: { msg: ClaudeMessage }) {
 
 // ── Todos ─────────────────────────────────────────────────────────────────────
 
-function TodosSection({ todos }: { todos: ClaudeTodo[] }) {
+function TodosSection({ todos }: Readonly<{ todos: ClaudeTodo[] }>) {
   const [open, setOpen] = useState(false)
   if (!todos || todos.length === 0) return null
 
@@ -294,7 +294,7 @@ export default function ClaudeSessionDetailPage() {
   }, [id])
 
   useEffect(() => {
-    void load()
+    load()
   }, [load])
 
   const handleContinue = async () => {
@@ -384,7 +384,7 @@ export default function ClaudeSessionDetailPage() {
           <Button
             size="sm"
             className="gap-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs h-8 shrink-0"
-            onClick={() => void handleContinue()}
+            onClick={() => handleContinue()}
             disabled={continuing}
           >
             {continuing ? (

@@ -264,8 +264,8 @@ export default function ChatSessionPage() {
     if (pending && !loading && !pendingSent.current) {
       pendingSent.current = true
       // Clear the navigation state so a page refresh doesn't resend.
-      window.history.replaceState({}, '')
-      void doSend(pending)
+      globalThis.history.replaceState({}, '')
+      doSend(pending)
     }
   }, [loading, location.state, doSend])
 
@@ -273,7 +273,7 @@ export default function ChatSessionPage() {
     if (!input.trim()) return
     const content = input.trim()
     setInput('')
-    void doSend(content)
+    doSend(content)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -358,9 +358,9 @@ export default function ChatSessionPage() {
                               ? answer => {
                                   if (awaitingInput) {
                                     setAwaitingInput(false)
-                                    void provideInput(id, answer)
+                                    provideInput(id, answer)
                                   } else {
-                                    void doSend(answer)
+                                    doSend(answer)
                                   }
                                 }
                               : undefined
@@ -394,7 +394,7 @@ export default function ChatSessionPage() {
                   awaitingInput && call.name === 'AskUserQuestion' && id
                     ? answer => {
                         setAwaitingInput(false)
-                        void provideInput(id, answer)
+                        provideInput(id, answer)
                       }
                     : undefined
                 }
@@ -448,7 +448,7 @@ export default function ChatSessionPage() {
               input={permissionRequest.input}
               onDecide={allow => {
                 setPermissionRequest(null)
-                void permissionResponse(id, allow)
+                permissionResponse(id, allow)
               }}
             />
           )}
@@ -528,7 +528,7 @@ export default function ChatSessionPage() {
   )
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({ message }: Readonly<{ message: ChatMessage }>) {
   const isUser = message.role === 'user'
 
   if (isUser) {
@@ -555,7 +555,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   )
 }
 
-function ThinkingBlock({ text }: { text: string }) {
+function ThinkingBlock({ text }: Readonly<{ text: string }>) {
   const [expanded, setExpanded] = useState(false)
 
   return (
@@ -676,11 +676,11 @@ function ToolCallDetail({
   name,
   input,
   toolResult,
-}: {
+}: Readonly<{
   name: string
   input: Record<string, unknown> | undefined
   toolResult: Record<string, unknown> | undefined
-}) {
+}>) {
   if (name === 'Write') {
     const content = typeof input?.content === 'string' ? input.content : null
     if (content !== null) {
@@ -781,12 +781,12 @@ function ToolCallCard({
   isInteractive,
   onSubmit,
   toolResult,
-}: {
+}: Readonly<{
   block: Pick<SDKContentBlock, 'type' | 'id' | 'name' | 'input'>
   isInteractive?: boolean
   onSubmit?: (answer: string) => void
   toolResult?: Record<string, unknown>
-}) {
+}>) {
   const [expanded, setExpanded] = useState(false)
   const name = block.name ?? 'unknown'
 
@@ -846,11 +846,11 @@ function PermissionRequestCard({
   toolName,
   input,
   onDecide,
-}: {
+}: Readonly<{
   toolName: string
   input: unknown
   onDecide: (allow: boolean) => void
-}) {
+}>) {
   const [decided, setDecided] = useState(false)
   const [decision, setDecision] = useState<boolean | null>(null)
 
@@ -926,11 +926,11 @@ function AskUserQuestionCard({
   input,
   isInteractive,
   onSubmit,
-}: {
+}: Readonly<{
   input: Record<string, unknown>
   isInteractive?: boolean
   onSubmit?: (answer: string) => void
-}) {
+}>) {
   const questions = (input.questions as AskUserQuestionItem[] | undefined) ?? []
   // selections[questionIndex] = array of selected option labels (may include OTHER_LABEL)
   const [selections, setSelections] = useState<Record<number, string[]>>({})

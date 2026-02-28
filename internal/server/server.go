@@ -85,7 +85,8 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// ctx is already canceled; need a fresh context for graceful shutdown.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second) //nolint:govet
 		defer cancel()
 		s.logger.Info("shutting down server")
 		return s.httpServer.Shutdown(shutdownCtx)

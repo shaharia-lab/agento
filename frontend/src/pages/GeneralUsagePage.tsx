@@ -37,7 +37,7 @@ import {
 
 // ─── Charts ───────────────────────────────────────────────────────────────────
 
-function SessionsTimeSeriesChart({ data }: { data: TimeSeriesPoint[] }) {
+function SessionsTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>) {
   const formatted = data.map(d => ({ ...d, date: formatDateLabel(d.date) }))
   return (
     <ChartCard title="Sessions Over Time">
@@ -77,7 +77,7 @@ function SessionsTimeSeriesChart({ data }: { data: TimeSeriesPoint[] }) {
   )
 }
 
-function SessionsPerModelChart({ data }: { data: ModelSessionStat[] }) {
+function SessionsPerModelChart({ data }: Readonly<{ data: ModelSessionStat[] }>) {
   const formatted = data.map(d => ({ ...d, model: formatModelName(d.model) }))
   return (
     <ChartCard title="Sessions per Model">
@@ -114,7 +114,7 @@ function SessionsPerModelChart({ data }: { data: ModelSessionStat[] }) {
   )
 }
 
-function ActivityHeatmap({ data }: { data: HeatmapCell[] }) {
+function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
   const grid: number[][] = Array.from({ length: 7 }, () => new Array(24).fill(0))
   let maxSessions = 0
   for (const cell of data) {
@@ -192,7 +192,7 @@ function ActivityHeatmap({ data }: { data: HeatmapCell[] }) {
   )
 }
 
-function HourlyActivityChart({ data }: { data: HourlyActivity[] }) {
+function HourlyActivityChart({ data }: Readonly<{ data: HourlyActivity[] }>) {
   return (
     <ChartCard title="Activity by Hour of Day">
       <ResponsiveContainer width="100%" height={240}>
@@ -266,7 +266,7 @@ export default function GeneralUsagePage() {
   }, [])
 
   useEffect(() => {
-    void load(from, to, project)
+    load(from, to, project)
   }, [load, from, to, project])
 
   const handlePreset = (p: DatePreset) => {
@@ -280,7 +280,7 @@ export default function GeneralUsagePage() {
 
   const handleRefresh = () => {
     setRefreshing(true)
-    void load(from, to, project)
+    load(from, to, project)
   }
 
   const summary: AnalyticsSummary = report?.summary ?? {

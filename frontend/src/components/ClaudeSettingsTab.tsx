@@ -30,11 +30,11 @@ function Toggle({
   checked,
   onChange,
   disabled,
-}: {
+}: Readonly<{
   checked: boolean
   onChange: (val: boolean) => void
   disabled?: boolean
-}) {
+}>) {
   return (
     <button
       type="button"
@@ -65,11 +65,11 @@ function FieldRow({
   label,
   description,
   children,
-}: {
+}: Readonly<{
   label: string
   description?: string
   children: React.ReactNode
-}) {
+}>) {
   return (
     <div className="flex items-start justify-between gap-4 py-3 border-b border-zinc-100 last:border-b-0">
       <div className="flex flex-col gap-0.5 min-w-0 flex-1">
@@ -89,13 +89,13 @@ function CollapsibleSection({
   value,
   onChange,
   error,
-}: {
+}: Readonly<{
   title: string
   description: string
   value: string
   onChange: (v: string) => void
   error?: string
-}) {
+}>) {
   const [open, setOpen] = useState(false)
 
   return (
@@ -138,7 +138,7 @@ function CollapsibleSection({
 
 // ─── JSON preview with copy button ────────────────────────────────────────────
 
-function JsonPreview({ json }: { json: string }) {
+function JsonPreview({ json }: Readonly<{ json: string }>) {
   const [copied, setCopied] = useState(false)
 
   const copy = async () => {
@@ -155,7 +155,7 @@ function JsonPreview({ json }: { json: string }) {
         </span>
         <button
           type="button"
-          onClick={() => void copy()}
+          onClick={() => copy()}
           className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-900 transition-colors"
         >
           {copied ? (
@@ -397,7 +397,7 @@ export default function ClaudeSettingsTab() {
   }, [applySettings])
 
   useEffect(() => {
-    void load()
+    load()
   }, [load])
 
   // ─── Build the full settings object from current form state ─────────────────
@@ -431,8 +431,8 @@ export default function ClaudeSettingsTab() {
     if (autoUpdatesChannel) settings.autoUpdatesChannel = autoUpdatesChannel as 'stable' | 'latest'
     if (outputStyle) settings.outputStyle = outputStyle
     if (cleanupPeriodDays !== '') {
-      const n = parseInt(cleanupPeriodDays, 10)
-      if (!isNaN(n)) settings.cleanupPeriodDays = n
+      const n = Number.parseInt(cleanupPeriodDays, 10)
+      if (!Number.isNaN(n)) settings.cleanupPeriodDays = n
     }
     if (plansDirectory) settings.plansDirectory = plansDirectory
     if (apiKeyHelper) settings.apiKeyHelper = apiKeyHelper
@@ -529,7 +529,7 @@ export default function ClaudeSettingsTab() {
   }
 
   const handleNewProfile = async () => {
-    const name = window.prompt('Profile name:')
+    const name = globalThis.prompt('Profile name:')
     if (!name?.trim()) return
     setProfileLoading(true)
     try {
@@ -582,7 +582,7 @@ export default function ClaudeSettingsTab() {
     if (!activeProfileId) return
     const profile = profiles.find(p => p.id === activeProfileId)
     if (profile?.is_default) return
-    if (!window.confirm(`Delete profile "${profile?.name}"? This cannot be undone.`)) return
+    if (!globalThis.confirm(`Delete profile "${profile?.name}"? This cannot be undone.`)) return
     setProfileLoading(true)
     try {
       await claudeSettingsProfilesApi.delete(activeProfileId)
@@ -629,7 +629,7 @@ export default function ClaudeSettingsTab() {
         <div className="flex flex-wrap items-center gap-2">
           <Select
             value={activeProfileId}
-            onValueChange={id => void handleProfileSwitch(id)}
+            onValueChange={id => handleProfileSwitch(id)}
             disabled={profileLoading}
           >
             <SelectTrigger className="h-8 text-xs w-52">
@@ -649,7 +649,7 @@ export default function ClaudeSettingsTab() {
             variant="outline"
             size="sm"
             className="h-8 text-xs gap-1"
-            onClick={() => void handleNewProfile()}
+            onClick={() => handleNewProfile()}
             disabled={profileLoading}
           >
             <Plus className="h-3 w-3" />
@@ -660,7 +660,7 @@ export default function ClaudeSettingsTab() {
             variant="outline"
             size="sm"
             className="h-8 text-xs gap-1"
-            onClick={() => void handleDuplicateProfile()}
+            onClick={() => handleDuplicateProfile()}
             disabled={profileLoading || !activeProfileId}
           >
             <Copy className="h-3 w-3" />
@@ -672,7 +672,7 @@ export default function ClaudeSettingsTab() {
               variant="outline"
               size="sm"
               className="h-8 text-xs gap-1"
-              onClick={() => void handleSetDefault()}
+              onClick={() => handleSetDefault()}
               disabled={profileLoading}
             >
               <Star className="h-3 w-3" />
@@ -684,7 +684,7 @@ export default function ClaudeSettingsTab() {
             variant="outline"
             size="sm"
             className="h-8 text-xs gap-1 text-red-600 hover:text-red-700 hover:border-red-300"
-            onClick={() => void handleDeleteProfile()}
+            onClick={() => handleDeleteProfile()}
             disabled={profileLoading || !activeProfileId || activeProfile?.is_default}
             title={
               activeProfile?.is_default ? 'Cannot delete the default profile' : 'Delete profile'
@@ -713,7 +713,7 @@ export default function ClaudeSettingsTab() {
             variant="outline"
             size="sm"
             className="self-start gap-1.5 border-amber-300 bg-white text-amber-800 hover:bg-amber-50"
-            onClick={() => void handleCreate()}
+            onClick={() => handleCreate()}
             disabled={saving}
           >
             <FilePlus className="h-3.5 w-3.5" />
@@ -1008,7 +1008,7 @@ export default function ClaudeSettingsTab() {
 
           <Button
             className="bg-zinc-900 hover:bg-zinc-800 text-white w-full sm:w-auto self-start"
-            onClick={() => void handleSave()}
+            onClick={() => handleSave()}
             disabled={saving || profileLoading}
           >
             {saving

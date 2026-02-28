@@ -18,7 +18,7 @@ import { Tooltip } from '@/components/ui/tooltip'
 
 const STORAGE_KEY = 'agento-sidebar-collapsed'
 
-function AgentoLogo({ size = 28 }: { size?: number }) {
+function AgentoLogo({ size = 28 }: Readonly<{ size?: number }>) {
   return (
     <svg
       width={size}
@@ -359,7 +359,18 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
       {mobileOpen && (
         <>
           {/* Backdrop */}
-          <div className="fixed inset-0 z-40 bg-black/40 md:hidden" onClick={onMobileClose} />
+          <div
+            className="fixed inset-0 z-40 bg-black/40 md:hidden"
+            role="button"
+            tabIndex={0}
+            onClick={onMobileClose}
+            onKeyDown={e => {
+              if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault()
+                onMobileClose?.()
+              }
+            }}
+          />
           {/* Drawer */}
           <aside className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col bg-zinc-50 dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 border-r border-zinc-200 dark:border-zinc-700/50 md:hidden">
             {sidebarContent(true)}

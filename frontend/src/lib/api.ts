@@ -178,7 +178,8 @@ export const claudeSessionsApi = {
     if (params?.project) qs.set('project', params.project)
     if (params?.q) qs.set('q', params.q)
     const query = qs.toString()
-    return request<ClaudeSessionSummary[]>(`/claude-sessions${query ? `?${query}` : ''}`)
+    const suffix = query ? `?${query}` : ''
+    return request<ClaudeSessionSummary[]>(`/claude-sessions${suffix}`)
   },
 
   /** List all projects (decoded paths) found in ~/.claude/projects/. */
@@ -373,6 +374,7 @@ export const analyticsApi = {
     if (params?.to) qs.set('to', params.to)
     if (params?.project) qs.set('project', params.project)
     const query = qs.toString()
-    return request<AnalyticsReport>(`/claude-analytics${query ? `?${query}` : ''}`)
+    const suffix = query ? `?${query}` : ''
+    return request<AnalyticsReport>(`/claude-analytics${suffix}`)
   },
 }

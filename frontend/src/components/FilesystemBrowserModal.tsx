@@ -43,7 +43,7 @@ export default function FilesystemBrowserModal({
 
   useEffect(() => {
     if (open) {
-      void navigate(initialPath)
+      navigate(initialPath)
     }
   }, [open, initialPath, navigate])
 
@@ -70,7 +70,7 @@ export default function FilesystemBrowserModal({
               <span key={crumb.path} className="flex items-center gap-1">
                 {i > 0 && <ChevronRight className="h-3 w-3 shrink-0" />}
                 <button
-                  onClick={() => void navigate(crumb.path)}
+                  onClick={() => navigate(crumb.path)}
                   className="hover:text-zinc-900 transition-colors truncate max-w-[120px]"
                   title={crumb.label}
                 >
@@ -86,7 +86,7 @@ export default function FilesystemBrowserModal({
           {/* Go up */}
           {current && current.path !== current.parent && (
             <button
-              onClick={() => void navigate(current.parent)}
+              onClick={() => navigate(current.parent)}
               className="flex items-center gap-2 w-full px-3 py-2 text-sm text-zinc-500 hover:bg-zinc-50 border-b border-zinc-100 transition-colors"
             >
               <Folder className="h-4 w-4 shrink-0 text-zinc-400" />
@@ -109,7 +109,7 @@ export default function FilesystemBrowserModal({
               current?.entries.map(entry => (
                 <button
                   key={entry.path}
-                  onClick={() => void navigate(entry.path)}
+                  onClick={() => navigate(entry.path)}
                   className="flex items-center gap-2 w-full px-3 py-2 text-sm text-zinc-700 hover:bg-zinc-50 border-b border-zinc-50 last:border-0 transition-colors text-left"
                 >
                   <FolderOpen className="h-4 w-4 shrink-0 text-zinc-400" />

@@ -40,7 +40,7 @@ export default function AgentsPage() {
   }
 
   useEffect(() => {
-    void loadAgents()
+    loadAgents()
   }, [])
 
   const handleDelete = async (slug: string) => {
@@ -128,11 +128,11 @@ function AgentCard({
   agent,
   onEdit,
   onDelete,
-}: {
+}: Readonly<{
   agent: Agent
   onEdit: () => void
   onDelete: () => void
-}) {
+}>) {
   return (
     <div className="flex flex-col rounded-lg border border-zinc-200 bg-white p-4 hover:border-zinc-300 transition-colors">
       {/* Icon + Name */}

@@ -49,7 +49,7 @@ export default function IntegrationsPage() {
   }
 
   useEffect(() => {
-    void loadIntegrations()
+    loadIntegrations()
   }, [])
 
   const handleDelete = async (id: string) => {
@@ -139,12 +139,12 @@ export default function IntegrationsPage() {
   )
 }
 
-function IntegrationTypeIcon({ type, size }: { type: string; size: number }) {
+function IntegrationTypeIcon({ type, size }: Readonly<{ type: string; size: number }>) {
   if (type === 'google') return <GoogleIcon size={size} />
   return <Plug className="h-4 w-4 text-zinc-400" />
 }
 
-function ServiceIcon({ service, size }: { service: string; size: number }) {
+function ServiceIcon({ service, size }: Readonly<{ service: string; size: number }>) {
   if (service === 'calendar') return <GoogleCalendarIcon size={size} />
   if (service === 'gmail') return <GmailIcon size={size} />
   if (service === 'drive') return <GoogleDriveIcon size={size} />
@@ -155,11 +155,11 @@ function IntegrationCard({
   integration,
   onEdit,
   onDelete,
-}: {
+}: Readonly<{
   integration: Integration
   onEdit: () => void
   onDelete: () => void
-}) {
+}>) {
   const enabledServices = Object.entries(integration.services ?? {})
     .filter(([, svc]) => svc.enabled)
     .map(([name]) => name)

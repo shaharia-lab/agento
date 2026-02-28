@@ -106,7 +106,7 @@ func (s *Server) handleListChats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 	var req createChatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
@@ -182,7 +182,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	var req sendMessageRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 	if req.Content == "" {
@@ -458,7 +458,7 @@ func (s *Server) handlePermissionResponse(w http.ResponseWriter, r *http.Request
 		Allow bool `json:"allow"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
@@ -506,7 +506,7 @@ func (s *Server) handleProvideInput(w http.ResponseWriter, r *http.Request) {
 
 	var req provideInputRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 	if req.Answer == "" {

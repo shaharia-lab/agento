@@ -83,7 +83,7 @@ export default function ChatsPage() {
   }, [])
 
   useEffect(() => {
-    void load()
+    load()
   }, [load])
 
   // Auto-open new chat dialog if ?new=1
@@ -115,7 +115,7 @@ export default function ChatsPage() {
 
   // When agent is selected, determine if model should be locked to agent's model.
   const selectedAgentObj = agents.find(a => a.slug === selectedAgent)
-  const agentModelLocked = selectedAgentObj?.model ? true : false
+  const agentModelLocked = !!selectedAgentObj?.model
   const effectiveModel = agentModelLocked ? (selectedAgentObj?.model ?? '') : selectedModel
 
   const createChat = async () => {
@@ -151,7 +151,7 @@ export default function ChatsPage() {
   const handleModalKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      void createChat()
+      createChat()
     }
   }
 
@@ -390,7 +390,7 @@ export default function ChatsPage() {
                 disabled={creating}
               />
               <button
-                onClick={() => void createChat()}
+                onClick={() => createChat()}
                 disabled={!firstMessage.trim() || creating}
                 className="absolute right-2.5 bottom-2.5 h-7 w-7 flex items-center justify-center rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-zinc-900 text-white hover:bg-zinc-700"
               >
@@ -406,7 +406,7 @@ export default function ChatsPage() {
             <Button
               size="sm"
               className="bg-zinc-900 hover:bg-zinc-800 text-white"
-              onClick={() => void createChat()}
+              onClick={() => createChat()}
               disabled={!firstMessage.trim() || creating}
             >
               {creating ? 'Starting…' : 'Start Chat'}
@@ -440,18 +440,26 @@ function ChatRow({
   agentName,
   onClick,
   onDelete,
-}: {
+}: Readonly<{
   session: ChatSession
   agentName: string | null
   onClick: () => void
   onDelete: () => void
-}) {
+}>) {
   const hasTokens = (session.total_input_tokens ?? 0) > 0 || (session.total_output_tokens ?? 0) > 0
 
   return (
     <div
       className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors"
+      role="button"
+      tabIndex={0}
       onClick={onClick}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onClick()
+        }
+      }}
     >
       <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0">
         <MessageSquare className="h-3.5 w-3.5" />

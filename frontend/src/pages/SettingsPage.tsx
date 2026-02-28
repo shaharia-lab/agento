@@ -46,7 +46,7 @@ export default function SettingsPage() {
   }, [])
 
   useEffect(() => {
-    void load()
+    load()
   }, [load])
 
   const showToast = (msg: string) => {
@@ -198,7 +198,7 @@ export default function SettingsPage() {
 
                 <Button
                   className="bg-zinc-900 hover:bg-zinc-800 text-white w-full sm:w-auto"
-                  onClick={() => void handleSave()}
+                  onClick={() => handleSave()}
                   disabled={saving}
                 >
                   {saving ? 'Saving…' : 'Save Settings'}
@@ -230,7 +230,7 @@ export default function SettingsPage() {
   )
 }
 
-function LockedNote({ envVar, inline = false }: { envVar: string; inline?: boolean }) {
+function LockedNote({ envVar, inline = false }: Readonly<{ envVar: string; inline?: boolean }>) {
   const content = (
     <span className={`flex items-center gap-1 text-xs text-zinc-400 ${inline ? '' : 'mt-0.5'}`}>
       <Lock className="h-3 w-3" />
