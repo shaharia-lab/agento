@@ -97,13 +97,14 @@ linters:
         linters:
           - revive
         text: "stutters"
-      # Exclude complexity checks from test files
-      - path: "(_test|\\.test|\\.gen|\\.mock)\\.go$"
+      # Exclude complexity and style checks from test and mock files
+      - path: "(_test|\\.test|\\.gen|\\.mock)\\.go$|mock_.*\\.go$"
         linters:
           - gocognit
           - funlen
           - gocyclo
           - lll
+          - revive
       # Exclude errcheck for common test helper patterns
       - text: "Error return value of .*(Error|Errorf|Fatal|Fatalf|Log|Logf|Print|Printf|Skip|Skipf) is not checked"
         linters:

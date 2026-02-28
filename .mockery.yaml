@@ -1,0 +1,19 @@
+with-expecter: true
+dir: "{{.InterfaceDir}}/mocks"
+outpkg: "mocks"
+mockname: "Mock{{.InterfaceName}}"
+filename: "mock_{{.InterfaceName | snakecase}}.go"
+packages:
+  github.com/shaharia-lab/agento/internal/storage:
+    interfaces:
+      AgentStore:
+      ChatStore:
+      IntegrationStore:
+  github.com/shaharia-lab/agento/internal/config:
+    interfaces:
+      SettingsStore:
+  github.com/shaharia-lab/agento/internal/service:
+    interfaces:
+      AgentService:
+      ChatService:
+      IntegrationService:
