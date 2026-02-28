@@ -25,6 +25,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/integrations"
 	googleintegration "github.com/shaharia-lab/agento/internal/integrations/google"
 	"github.com/shaharia-lab/agento/internal/logger"
+	"github.com/shaharia-lab/agento/internal/scheduler"
 	"github.com/shaharia-lab/agento/internal/server"
 	"github.com/shaharia-lab/agento/internal/service"
 	"github.com/shaharia-lab/agento/internal/storage"
@@ -185,15 +186,50 @@ func buildWebServer(
 	agentSvc := service.NewAgentService(agentStore, sysLogger)
 	chatSvc := service.NewChatService(
 		chatStore, agentStore, mcpRegistry, localToolsMCP,
-		integrationRegistry, cfg.DefaultModel, sysLogger,
+		integrationRegistry, settingsMgr, sysLogger,
 	)
 	integrationSvc := service.NewIntegrationService(integrationStore, integrationRegistry, sysLogger, ctx)
+
+	taskStore := storage.NewSQLiteTaskStore(db)
+	taskSvc := service.NewTaskService(taskStore, sysLogger)
+
+	taskScheduler, err := initTaskScheduler(ctx, taskStore, chatStore, agentStore,
+		mcpRegistry, localToolsMCP, integrationRegistry, settingsMgr, sysLogger)
+	if err != nil {
+		return nil, err
+	}
 
 	sessionCache := claudesessions.NewCache(db, sysLogger)
 	sessionCache.StartBackgroundScan()
 
-	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, settingsMgr, sysLogger, sessionCache)
+	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, taskSvc, settingsMgr, sysLogger, sessionCache, taskScheduler)
 	return server.New(apiSrv, WebFS, cfg.Port, sysLogger), nil
+}
+
+func initTaskScheduler(
+	ctx context.Context,
+	taskStore storage.TaskStore, chatStore storage.ChatStore, agentStore storage.AgentStore,
+	mcpRegistry *config.MCPRegistry, localMCP *tools.LocalMCPConfig,
+	integrationRegistry *integrations.IntegrationRegistry,
+	settingsMgr *config.SettingsManager, sysLogger *slog.Logger,
+) (*scheduler.Scheduler, error) {
+	taskScheduler, err := scheduler.New(scheduler.Config{
+		TaskStore:           taskStore,
+		ChatStore:           chatStore,
+		AgentStore:          agentStore,
+		MCPRegistry:         mcpRegistry,
+		LocalMCP:            localMCP,
+		IntegrationRegistry: integrationRegistry,
+		SettingsManager:     settingsMgr,
+		Logger:              sysLogger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating task scheduler: %w", err)
+	}
+	if startErr := taskScheduler.Start(ctx); startErr != nil {
+		sysLogger.Warn("failed to start task scheduler", "error", startErr)
+	}
+	return taskScheduler, nil
 }
 
 func seedExampleAgent(store storage.AgentStore) error {
@@ -201,7 +237,7 @@ func seedExampleAgent(store storage.AgentStore) error {
 		Name:        "Hello World",
 		Slug:        "hello-world",
 		Description: "A friendly assistant to help you get started with Agento.",
-		Model:       "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+		Model:       "",
 		Thinking:    "adaptive",
 		SystemPrompt: "You are a friendly and helpful assistant. " +
 			"You help users understand and use the Agento AI agents platform. " +

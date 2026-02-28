@@ -14,6 +14,10 @@ import GeneralUsagePage from '@/pages/GeneralUsagePage'
 import IntegrationsPage from '@/pages/IntegrationsPage'
 import IntegrationGooglePage from '@/pages/IntegrationGooglePage'
 import IntegrationDetailPage from '@/pages/IntegrationDetailPage'
+import TasksPage from '@/pages/TasksPage'
+import TaskCreatePage from '@/pages/TaskCreatePage'
+import TaskEditPage from '@/pages/TaskEditPage'
+import JobHistoriesPage from '@/pages/JobHistoriesPage'
 import OnboardingWizard from '@/components/OnboardingWizard'
 import { AppearanceProvider } from '@/contexts/ThemeContext'
 import { settingsApi } from '@/lib/api'
@@ -83,6 +87,10 @@ export default function App() {
             <Route path="integrations" element={<IntegrationsPage />} />
             <Route path="integrations/google" element={<IntegrationGooglePage />} />
             <Route path="integrations/:id" element={<IntegrationDetailPage />} />
+            <Route path="tasks" element={<TasksPage />} />
+            <Route path="tasks/new" element={<TaskCreatePage />} />
+            <Route path="tasks/:id/edit" element={<TaskEditPage />} />
+            <Route path="job-history" element={<JobHistoriesPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>
         </Routes>
