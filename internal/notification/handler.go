@@ -43,7 +43,7 @@ func (h *NotificationHandler) Handle(eventType string, payload map[string]string
 	}
 
 	provider := NewSMTPProvider(settings.Provider)
-	subject := fmt.Sprintf("Agento Event: %s", eventType)
+	subject := buildSubject(eventType)
 
 	bodyParts := make([]string, 0, len(payload))
 	for k, v := range payload {

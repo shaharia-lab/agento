@@ -107,8 +107,8 @@ func (s *notificationServiceImpl) TestNotification(ctx context.Context) error {
 
 	provider := notification.NewSMTPProvider(ns.Provider)
 	return provider.Send(ctx, notification.Message{
-		Subject: "Agento: Test Notification",
-		Body:    "This is a test notification from Agento to verify your SMTP configuration.",
+		Subject: notification.SubjectPrefix + "Test Notification",
+		Body:    "This is a test notification from Agento.\n\nYour SMTP configuration is working correctly.",
 	})
 }
 

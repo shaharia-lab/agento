@@ -40,7 +40,14 @@ func (p *SMTPProvider) Send(ctx context.Context, msg Message) error {
 	}
 
 	m.Subject(msg.Subject)
+
+	// Plain-text fallback for clients that don't render HTML.
 	m.SetBodyString(mail.TypeTextPlain, msg.Body)
+
+	// Rich HTML email using the branded template.
+	if html, err := buildEmailHTML(msg.Subject, msg.Body); err == nil {
+		m.AddAlternativeString(mail.TypeTextHTML, html)
+	}
 
 	tlsPolicy := tlsPolicyFromEncryption(p.config.Encryption)
 
