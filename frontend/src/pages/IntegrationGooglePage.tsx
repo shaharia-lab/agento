@@ -118,7 +118,7 @@ export default function IntegrationGooglePage() {
               Google OAuth credentials
             </h2>
             <p className="text-sm text-zinc-500 dark:text-zinc-400 mb-4">
-              Create OAuth 2.0 credentials in the{' '}
+              {'Create OAuth 2.0 credentials in the '}
               <a
                 href="https://console.cloud.google.com/apis/credentials"
                 target="_blank"
@@ -128,19 +128,23 @@ export default function IntegrationGooglePage() {
                 Google Cloud Console
                 <ExternalLink className="h-3 w-3" />
               </a>
-              . Set the redirect URI to{' '}
+              {'. Set the redirect URI to '}
               <code className="text-xs bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded text-zinc-700 dark:text-zinc-300">
                 {globalThis.location.origin}/callback
               </code>
-              .
+              {'.'}
             </p>
 
             <div className="space-y-4 max-w-lg">
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                <label
+                  htmlFor="google-integration-name"
+                  className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1"
+                >
                   Integration name
                 </label>
                 <input
+                  id="google-integration-name"
                   type="text"
                   value={name}
                   onChange={e => setName(e.target.value)}
@@ -149,10 +153,14 @@ export default function IntegrationGooglePage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                <label
+                  htmlFor="google-client-id"
+                  className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1"
+                >
                   Client ID
                 </label>
                 <input
+                  id="google-client-id"
                   type="text"
                   value={clientId}
                   onChange={e => setClientId(e.target.value)}
@@ -161,10 +169,14 @@ export default function IntegrationGooglePage() {
                 />
               </div>
               <div>
-                <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+                <label
+                  htmlFor="google-client-secret"
+                  className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1"
+                >
                   Client secret
                 </label>
                 <input
+                  id="google-client-secret"
                   type="password"
                   value={clientSecret}
                   onChange={e => setClientSecret(e.target.value)}

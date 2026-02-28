@@ -70,6 +70,39 @@ function LineNumberGutter({ value }: Readonly<{ value: string }>) {
   )
 }
 
+function renderServiceTools(
+  service: string,
+  tools: AvailableTool[],
+  integrationId: string,
+  mcpTools: Record<string, string[]>,
+  toggleMcpTool: (integrationId: string, toolName: string) => void,
+) {
+  return (
+    <div key={service}>
+      <p className="text-xs text-zinc-400 capitalize mb-1.5">{service}</p>
+      <div className="grid grid-cols-2 gap-1.5">
+        {tools.map(tool => {
+          const selected = (mcpTools[integrationId] ?? []).includes(tool.tool_name)
+          return (
+            <label
+              key={tool.tool_name}
+              className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-sm cursor-pointer hover:bg-muted/50 transition-colors"
+            >
+              <input
+                type="checkbox"
+                checked={selected}
+                onChange={() => toggleMcpTool(integrationId, tool.tool_name)}
+                className="h-3.5 w-3.5 rounded border-gray-300"
+              />
+              <span className="font-mono text-xs">{tool.tool_name}</span>
+            </label>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 type MobileTab = 'prompt' | 'config'
 
 export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
@@ -215,6 +248,8 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
     </div>
   )
 
+  const submitLabel = isEdit ? 'Update Agent' : 'Create Agent'
+
   const configPanel = (
     <div className="space-y-3">
       {/* Basic Info — expanded by default */}
@@ -350,32 +385,9 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
                     {integName}
                   </p>
                   <div className="space-y-2">
-                    {Object.entries(byService).map(([service, tools]) => (
-                      <div key={service}>
-                        <p className="text-xs text-zinc-400 capitalize mb-1.5">{service}</p>
-                        <div className="grid grid-cols-2 gap-1.5">
-                          {tools.map(tool => {
-                            const selected = (mcpTools[integrationId] ?? []).includes(
-                              tool.tool_name,
-                            )
-                            return (
-                              <label
-                                key={tool.tool_name}
-                                className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5 text-sm cursor-pointer hover:bg-muted/50 transition-colors"
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={selected}
-                                  onChange={() => toggleMcpTool(integrationId, tool.tool_name)}
-                                  className="h-3.5 w-3.5 rounded border-gray-300"
-                                />
-                                <span className="font-mono text-xs">{tool.tool_name}</span>
-                              </label>
-                            )
-                          })}
-                        </div>
-                      </div>
-                    ))}
+                    {Object.entries(byService).map(([service, tools]) =>
+                      renderServiceTools(service, tools, integrationId, mcpTools, toggleMcpTool),
+                    )}
                   </div>
                 </div>
               ),
@@ -387,7 +399,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
       {/* Actions */}
       <div className="flex items-center gap-3 pt-2">
         <Button type="submit" disabled={saving}>
-          {saving ? 'Saving...' : isEdit ? 'Update Agent' : 'Create Agent'}
+          {saving ? 'Saving...' : submitLabel}
         </Button>
         <Button type="button" variant="outline" onClick={() => navigate('/agents')}>
           Cancel

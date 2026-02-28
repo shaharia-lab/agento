@@ -104,8 +104,8 @@ function SessionsPerModelChart({ data }: Readonly<{ data: ModelSessionStat[] }>)
           />
           <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6 }} />
           <Bar dataKey="sessions" name="Sessions" radius={[0, 2, 2, 0]}>
-            {formatted.map((_, i) => (
-              <Cell key={i} fill={MODEL_COLORS[i % MODEL_COLORS.length]} />
+            {formatted.map((entry, i) => (
+              <Cell key={`model-${entry.model}`} fill={MODEL_COLORS[i % MODEL_COLORS.length]} />
             ))}
           </Bar>
         </BarChart>
@@ -132,7 +132,7 @@ function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
           <div className="flex ml-8 mb-1">
             {Array.from({ length: 24 }, (_, h) => (
               <div
-                key={h}
+                key={`hour-${h}`}
                 className="flex-1 text-center text-[9px] text-zinc-400 dark:text-zinc-500"
               >
                 {h % 3 === 0 ? h : ''}
@@ -141,26 +141,26 @@ function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
           </div>
           {/* Rows */}
           {DAY_NAMES.map((day, dow) => (
-            <div key={dow} className="flex items-center mb-0.5">
+            <div key={`day-${day}`} className="flex items-center mb-0.5">
               <span className="w-8 text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0">
                 {day}
               </span>
               {Array.from({ length: 24 }, (_, h) => {
                 const cell = cellMap.get(`${dow}-${h}`)
                 const intensity = maxSessions > 0 ? (cell?.sessions ?? 0) / maxSessions : 0
-                const bg =
-                  intensity === 0
-                    ? 'bg-zinc-100 dark:bg-zinc-800'
-                    : intensity < 0.25
-                      ? 'bg-indigo-200 dark:bg-indigo-900/60'
-                      : intensity < 0.5
-                        ? 'bg-indigo-400 dark:bg-indigo-700'
-                        : intensity < 0.75
-                          ? 'bg-indigo-600 dark:bg-indigo-500'
-                          : 'bg-indigo-800 dark:bg-indigo-400'
+                let bg = 'bg-indigo-800 dark:bg-indigo-400'
+                if (intensity === 0) {
+                  bg = 'bg-zinc-100 dark:bg-zinc-800'
+                } else if (intensity < 0.25) {
+                  bg = 'bg-indigo-200 dark:bg-indigo-900/60'
+                } else if (intensity < 0.5) {
+                  bg = 'bg-indigo-400 dark:bg-indigo-700'
+                } else if (intensity < 0.75) {
+                  bg = 'bg-indigo-600 dark:bg-indigo-500'
+                }
                 return (
                   <div
-                    key={h}
+                    key={`cell-${dow}-${h}`}
                     className={`flex-1 aspect-square rounded-[2px] mx-px ${bg} cursor-default`}
                     title={
                       cell
@@ -181,8 +181,8 @@ function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
               'bg-indigo-400 dark:bg-indigo-700',
               'bg-indigo-600 dark:bg-indigo-500',
               'bg-indigo-800 dark:bg-indigo-400',
-            ].map((cls, i) => (
-              <div key={i} className={`w-3 h-3 rounded-[2px] ${cls}`} />
+            ].map(cls => (
+              <div key={cls} className={`w-3 h-3 rounded-[2px] ${cls}`} />
             ))}
             <span className="text-[10px] text-zinc-400 dark:text-zinc-500 ml-1">More</span>
           </div>
@@ -304,7 +304,7 @@ export default function GeneralUsagePage() {
             General Usage
           </h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            {summary.total_sessions} session{summary.total_sessions !== 1 ? 's' : ''} · {from} →{' '}
+            {summary.total_sessions} session{summary.total_sessions === 1 ? '' : 's'} · {from} →{' '}
             {to}
           </p>
         </div>

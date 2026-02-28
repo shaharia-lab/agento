@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 
 export interface AppearanceSettings {
@@ -84,7 +84,7 @@ interface AppearanceProviderProps {
 }
 
 export function AppearanceProvider({ children, serverSettings }: AppearanceProviderProps) {
-  const [appearance, setAppearanceState] = useState<AppearanceSettings>(() => {
+  const [appearance, setAppearance] = useState<AppearanceSettings>(() => {
     const local = loadFromStorage()
     return local
   })
@@ -100,19 +100,22 @@ export function AppearanceProvider({ children, serverSettings }: AppearanceProvi
     const merged = { ...appearance, ...serverSettings }
     saveToStorage(merged)
     applyToDom(merged)
-    setAppearanceState(merged)
+    setAppearance(merged)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serverSettings?.darkMode, serverSettings?.fontSize, serverSettings?.fontFamily])
 
-  const setAppearance = (settings: AppearanceSettings) => {
+  const updateAppearance = useCallback((settings: AppearanceSettings) => {
     applyToDom(settings)
     saveToStorage(settings)
-    setAppearanceState(settings)
-  }
+    setAppearance(settings)
+  }, [])
 
-  return (
-    <ThemeContext.Provider value={{ appearance, setAppearance }}>{children}</ThemeContext.Provider>
+  const contextValue = useMemo(
+    () => ({ appearance, setAppearance: updateAppearance }),
+    [appearance, updateAppearance],
   )
+
+  return <ThemeContext.Provider value={contextValue}>{children}</ThemeContext.Provider>
 }
 
 export function useAppearance(): ThemeContextValue {

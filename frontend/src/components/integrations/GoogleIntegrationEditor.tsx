@@ -130,6 +130,7 @@ export default function GoogleIntegrationEditor({
                       checked={isChecked}
                       onChange={() => handleToolToggle(svcName, tool.name)}
                       disabled={!svc.enabled}
+                      aria-label={tool.name}
                       className="h-3.5 w-3.5 rounded border-zinc-300 dark:border-zinc-600 mt-0.5 shrink-0 disabled:opacity-40"
                     />
                     <div className="min-w-0">

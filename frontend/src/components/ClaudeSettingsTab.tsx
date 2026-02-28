@@ -202,6 +202,9 @@ function parseJsonField(raw: string): { value: unknown; error?: string } {
 // ─── Empty value helpers ──────────────────────────────────────────────────────
 
 type SelectNone = ''
+type EffortLevel = 'low' | 'medium' | 'high' | SelectNone
+type UpdatesChannel = 'stable' | 'latest' | SelectNone
+type TeammateModeOption = 'auto' | 'in-process' | 'tmux' | SelectNone
 
 function strVal(v: string | undefined): string {
   return v ?? ''
@@ -224,8 +227,8 @@ export default function ClaudeSettingsTab() {
   // ── Simple form fields ───────────────────────────────────────────────────────
   const [model, setModel] = useState('')
   const [language, setLanguage] = useState('')
-  const [effortLevel, setEffortLevel] = useState<'low' | 'medium' | 'high' | SelectNone>('')
-  const [autoUpdatesChannel, setAutoUpdatesChannel] = useState<'stable' | 'latest' | SelectNone>('')
+  const [effortLevel, setEffortLevel] = useState<EffortLevel>('')
+  const [autoUpdatesChannel, setAutoUpdatesChannel] = useState<UpdatesChannel>('')
   const [outputStyle, setOutputStyle] = useState('')
   const [cleanupPeriodDays, setCleanupPeriodDays] = useState('')
   const [plansDirectory, setPlansDirectory] = useState('')
@@ -256,7 +259,7 @@ export default function ClaudeSettingsTab() {
     undefined,
   )
 
-  const [teammateMode, setTeammateMode] = useState<'auto' | 'in-process' | 'tmux' | SelectNone>('')
+  const [teammateMode, setTeammateMode] = useState<TeammateModeOption>('')
 
   // ── Complex JSON fields ──────────────────────────────────────────────────────
   const [permissionsJson, setPermissionsJson] = useState('')
@@ -281,10 +284,10 @@ export default function ClaudeSettingsTab() {
   const applySettings = useCallback((s: ClaudeCodeSettings) => {
     setModel(strVal(s.model))
     setLanguage(strVal(s.language))
-    setEffortLevel((s.effortLevel ?? '') as 'low' | 'medium' | 'high' | SelectNone)
-    setAutoUpdatesChannel((s.autoUpdatesChannel ?? '') as 'stable' | 'latest' | SelectNone)
+    setEffortLevel(s.effortLevel ?? '')
+    setAutoUpdatesChannel(s.autoUpdatesChannel ?? '')
     setOutputStyle(strVal(s.outputStyle))
-    setCleanupPeriodDays(s.cleanupPeriodDays !== undefined ? String(s.cleanupPeriodDays) : '')
+    setCleanupPeriodDays(s.cleanupPeriodDays === undefined ? '' : String(s.cleanupPeriodDays))
     setPlansDirectory(strVal(s.plansDirectory))
     setApiKeyHelper(strVal(s.apiKeyHelper))
 
@@ -303,7 +306,7 @@ export default function ClaudeSettingsTab() {
     setAllowManagedHooksOnly(s.allowManagedHooksOnly)
     setAllowManagedPermissionRulesOnly(s.allowManagedPermissionRulesOnly)
     setAllowManagedMcpServersOnly(s.allowManagedMcpServersOnly)
-    setTeammateMode((s.teammateMode ?? '') as 'auto' | 'in-process' | 'tmux' | SelectNone)
+    setTeammateMode(s.teammateMode ?? '')
 
     setPermissionsJson(s.permissions ? prettyJson(s.permissions) : '')
     setHooksJson(s.hooks ? prettyJson(s.hooks) : '')
@@ -358,7 +361,7 @@ export default function ClaudeSettingsTab() {
         const detail = await claudeSettingsProfilesApi.get(profileId)
         setExists(detail.exists)
         if (detail.exists && detail.settings) {
-          applySettings(detail.settings as ClaudeCodeSettings)
+          applySettings(detail.settings)
         }
       } catch {
         setGlobalError('Failed to load profile settings')
@@ -379,7 +382,7 @@ export default function ClaudeSettingsTab() {
         const detail = await claudeSettingsProfilesApi.get(defaultProfile.id)
         setExists(detail.exists)
         if (detail.exists && detail.settings) {
-          applySettings(detail.settings as ClaudeCodeSettings)
+          applySettings(detail.settings)
         }
       } else {
         // No profiles yet — fall back to reading settings.json directly
@@ -488,7 +491,7 @@ export default function ClaudeSettingsTab() {
       if (activeProfileId) {
         const detail = await claudeSettingsProfilesApi.update(activeProfileId, { settings })
         setExists(detail.exists)
-        if (detail.settings) applySettings(detail.settings as ClaudeCodeSettings)
+        if (detail.settings) applySettings(detail.settings)
       } else {
         const resp = await claudeSettingsApi.update(settings)
         setExists(resp.exists)
@@ -602,6 +605,8 @@ export default function ClaudeSettingsTab() {
   }
 
   const activeProfile = profiles.find(p => p.id === activeProfileId)
+
+  const saveButtonLabel = activeProfile ? `Save "${activeProfile.name}"` : 'Save Claude Settings'
 
   // ─── Render ──────────────────────────────────────────────────────────────────
 
@@ -753,9 +758,7 @@ export default function ClaudeSettingsTab() {
                   <FieldRow label="Effort Level" description="Opus 4.6 reasoning effort">
                     <Select
                       value={effortLevel}
-                      onValueChange={v =>
-                        setEffortLevel(v as 'low' | 'medium' | 'high' | SelectNone)
-                      }
+                      onValueChange={v => setEffortLevel(v as EffortLevel)}
                     >
                       <SelectTrigger className="w-32">
                         <SelectValue placeholder="Default" />
@@ -770,9 +773,7 @@ export default function ClaudeSettingsTab() {
                   <FieldRow label="Auto-Updates" description="Release channel for updates">
                     <Select
                       value={autoUpdatesChannel}
-                      onValueChange={v =>
-                        setAutoUpdatesChannel(v as 'stable' | 'latest' | SelectNone)
-                      }
+                      onValueChange={v => setAutoUpdatesChannel(v as UpdatesChannel)}
                     >
                       <SelectTrigger className="w-32">
                         <SelectValue placeholder="Default" />
@@ -892,9 +893,7 @@ export default function ClaudeSettingsTab() {
                   <FieldRow label="Teammate Mode" description="Agent team display mode">
                     <Select
                       value={teammateMode}
-                      onValueChange={v =>
-                        setTeammateMode(v as 'auto' | 'in-process' | 'tmux' | SelectNone)
-                      }
+                      onValueChange={v => setTeammateMode(v as TeammateModeOption)}
                     >
                       <SelectTrigger className="w-32">
                         <SelectValue placeholder="Default" />
@@ -1011,11 +1010,7 @@ export default function ClaudeSettingsTab() {
             onClick={() => handleSave()}
             disabled={saving || profileLoading}
           >
-            {saving
-              ? 'Saving…'
-              : activeProfile
-                ? `Save "${activeProfile.name}"`
-                : 'Save Claude Settings'}
+            {saving ? 'Saving…' : saveButtonLabel}
           </Button>
         </>
       )}

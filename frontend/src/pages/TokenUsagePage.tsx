@@ -242,8 +242,8 @@ function ModelPieChart({ data }: Readonly<{ data: ModelStat[] }>) {
             }
             labelLine={true}
           >
-            {data.map((_, i) => (
-              <Cell key={i} fill={MODEL_COLORS[i % MODEL_COLORS.length]} />
+            {data.map((entry, i) => (
+              <Cell key={`model-${entry.model}`} fill={MODEL_COLORS[i % MODEL_COLORS.length]} />
             ))}
           </Pie>
           <Tooltip
@@ -422,7 +422,7 @@ export default function TokenUsagePage() {
         <div>
           <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Token Usage</h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            {summary.total_sessions} session{summary.total_sessions !== 1 ? 's' : ''} · {from} →{' '}
+            {summary.total_sessions} session{summary.total_sessions === 1 ? '' : 's'} · {from} →{' '}
             {to}
           </p>
         </div>

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { claudeSessionsApi } from '@/lib/api'
 import type { ClaudeSessionSummary, ClaudeProject } from '@/types'
@@ -89,6 +89,41 @@ export default function ClaudeSessionsPage() {
     )
   }
 
+  let sessionListContent: ReactNode
+  if (sessions.length === 0) {
+    sessionListContent = (
+      <div className="flex flex-col items-center justify-center py-20 text-center">
+        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 mb-4">
+          <History className="h-5 w-5 text-zinc-400" />
+        </div>
+        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
+          No Claude sessions found
+        </h2>
+        <p className="text-xs text-zinc-500 mb-4 max-w-xs">
+          Sessions will appear here once you run Claude Code on this machine.
+        </p>
+      </div>
+    )
+  } else if (filtered.length === 0) {
+    sessionListContent = (
+      <div className="flex flex-col items-center justify-center py-16 text-center">
+        <p className="text-sm text-zinc-400">No sessions match your filters.</p>
+      </div>
+    )
+  } else {
+    sessionListContent = (
+      <div className="divide-y divide-zinc-100 dark:divide-zinc-700/50">
+        {filtered.map(session => (
+          <SessionRow
+            key={session.session_id}
+            session={session}
+            onClick={() => navigate(`/claude-sessions/${session.session_id}`)}
+          />
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -98,7 +133,7 @@ export default function ClaudeSessionsPage() {
             Claude Sessions
           </h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            {sessions.length} session{sessions.length !== 1 ? 's' : ''} from{' '}
+            {sessions.length} session{sessions.length === 1 ? '' : 's'} from{' '}
             <span className="font-mono">~/.claude</span>
           </p>
         </div>
@@ -150,35 +185,7 @@ export default function ClaudeSessionsPage() {
       )}
 
       {/* Session list */}
-      <div className="flex-1 overflow-y-auto">
-        {sessions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 mb-4">
-              <History className="h-5 w-5 text-zinc-400" />
-            </div>
-            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
-              No Claude sessions found
-            </h2>
-            <p className="text-xs text-zinc-500 mb-4 max-w-xs">
-              Sessions will appear here once you run Claude Code on this machine.
-            </p>
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-center">
-            <p className="text-sm text-zinc-400">No sessions match your filters.</p>
-          </div>
-        ) : (
-          <div className="divide-y divide-zinc-100 dark:divide-zinc-700/50">
-            {filtered.map(session => (
-              <SessionRow
-                key={session.session_id}
-                session={session}
-                onClick={() => navigate(`/claude-sessions/${session.session_id}`)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      <div className="flex-1 overflow-y-auto">{sessionListContent}</div>
     </div>
   )
 }
@@ -228,7 +235,7 @@ function SessionRow({
             {formatRelativeTime(session.last_activity)}
           </span>
           <span className="text-xs text-zinc-400 dark:text-zinc-500">
-            {session.message_count} msg{session.message_count !== 1 ? 's' : ''}
+            {session.message_count} msg{session.message_count === 1 ? '' : 's'}
           </span>
           {hasTokens && (
             <Tooltip

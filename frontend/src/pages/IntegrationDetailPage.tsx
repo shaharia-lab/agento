@@ -221,10 +221,14 @@ export default function IntegrationDetailPage() {
           </h2>
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1">
+              <label
+                htmlFor="integration-name"
+                className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1"
+              >
                 Name
               </label>
               <input
+                id="integration-name"
                 type="text"
                 value={name}
                 onChange={e => setName(e.target.value)}

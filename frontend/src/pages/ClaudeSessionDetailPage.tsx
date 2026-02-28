@@ -76,7 +76,7 @@ function ToolUseBlock({ block }: Readonly<{ block: ClaudeNormalizedBlock }>) {
   // Extract a short summary from the input for common tools.
   let summary = ''
   if (block.input) {
-    const inp = block.input as Record<string, unknown>
+    const inp = block.input
     if (toolName === 'Read' || toolName === 'Write' || toolName === 'Edit') {
       summary = String(inp.file_path ?? inp.filePath ?? '')
     } else if (toolName === 'Bash') {
@@ -124,13 +124,14 @@ function MessageBlocks({ blocks }: Readonly<{ blocks: ClaudeNormalizedBlock[] }>
   return (
     <div className="flex flex-col gap-2">
       {blocks.map((b, i) => {
+        const blockKey = b.id ?? `${b.type}-${i}`
         if (b.type === 'thinking') {
-          return <ThinkingBlock key={i} text={b.text ?? ''} />
+          return <ThinkingBlock key={`thinking-${blockKey}`} text={b.text ?? ''} />
         }
         if (b.type === 'text') {
           return (
             <p
-              key={i}
+              key={`text-${blockKey}`}
               className="text-sm text-zinc-800 dark:text-zinc-200 whitespace-pre-wrap leading-relaxed"
             >
               {b.text}
@@ -138,7 +139,7 @@ function MessageBlocks({ blocks }: Readonly<{ blocks: ClaudeNormalizedBlock[] }>
           )
         }
         if (b.type === 'tool_use') {
-          return <ToolUseBlock key={i} block={b} />
+          return <ToolUseBlock key={`tool-${blockKey}`} block={b} />
         }
         return null
       })}
@@ -148,9 +149,9 @@ function MessageBlocks({ blocks }: Readonly<{ blocks: ClaudeNormalizedBlock[] }>
 
 // ── Progress children ─────────────────────────────────────────────────────────
 
-function ProgressChildren({ children }: Readonly<{ children: ClaudeMessage[] }>) {
+function ProgressChildren({ messages }: Readonly<{ messages: ClaudeMessage[] }>) {
   const [open, setOpen] = useState(false)
-  if (!children || children.length === 0) return null
+  if (!messages || messages.length === 0) return null
   return (
     <div className="mt-2">
       <button
@@ -158,11 +159,11 @@ function ProgressChildren({ children }: Readonly<{ children: ClaudeMessage[] }>)
         onClick={() => setOpen(o => !o)}
       >
         {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        {children.length} sub-agent event{children.length !== 1 ? 's' : ''}
+        {messages.length} sub-agent event{messages.length === 1 ? '' : 's'}
       </button>
       {open && (
         <div className="mt-1 pl-3 border-l border-zinc-200 dark:border-zinc-700 flex flex-col gap-0.5">
-          {children.map(c => (
+          {messages.map(c => (
             <div key={c.uuid} className="text-xs text-zinc-400 dark:text-zinc-500 font-mono">
               {new Date(c.timestamp).toLocaleTimeString()}
             </div>
@@ -208,7 +209,7 @@ function AssistantMessage({ msg }: Readonly<{ msg: ClaudeMessage }>) {
         ) : (
           <p className="text-sm text-zinc-400 dark:text-zinc-500 italic">No text content</p>
         )}
-        {hasChildren && <ProgressChildren children={msg.children!} />}
+        {hasChildren && <ProgressChildren messages={msg.children!} />}
         <div className="flex items-center gap-3 mt-1">
           <span className="text-xs text-zinc-400 dark:text-zinc-500">
             {formatRelativeTime(msg.timestamp)}
@@ -252,7 +253,10 @@ function TodosSection({ todos }: Readonly<{ todos: ClaudeTodo[] }>) {
       {open && (
         <div className="divide-y divide-zinc-100 dark:divide-zinc-700/50">
           {todos.map((todo, i) => (
-            <div key={i} className="flex items-start gap-2 px-4 py-2">
+            <div
+              key={`todo-${todo.content.slice(0, 50)}-${i}`}
+              className="flex items-start gap-2 px-4 py-2"
+            >
               {todoIcon(todo.status)}
               <span
                 className={`text-xs leading-relaxed ${

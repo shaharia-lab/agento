@@ -67,7 +67,7 @@ export default function AgentsPage() {
         <div>
           <h1 className="text-base font-semibold text-zinc-900">Agents</h1>
           <p className="text-xs text-zinc-500 mt-0.5">
-            {agents.length} agent{agents.length !== 1 ? 's' : ''} defined
+            {agents.length} agent{agents.length === 1 ? '' : 's'} defined
           </p>
         </div>
         <Button

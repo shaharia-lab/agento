@@ -335,13 +335,15 @@ export default function ChatSessionPage() {
 
           {messages.map((msg, i) => {
             const isLastMsg = i === messages.length - 1
+            const msgKey = `${msg.role}-${msg.timestamp}-${i}`
             if (msg.role === 'assistant' && msg.blocks && msg.blocks.length > 0) {
               // Render blocks in the exact order they arrived in the stream.
               return (
-                <Fragment key={i}>
+                <Fragment key={msgKey}>
                   {msg.blocks.map((block, j) => {
+                    const blockKey = `${block.type}-${j}`
                     if (block.type === 'thinking') {
-                      return <ThinkingBlock key={j} text={block.text} />
+                      return <ThinkingBlock key={`thinking-${blockKey}`} text={block.text} />
                     }
                     if (block.type === 'tool_use') {
                       // Interactive when: (a) not streaming (historical card can doSend),
@@ -349,7 +351,7 @@ export default function ChatSessionPage() {
                       const canInteract = isLastMsg && (awaitingInput || !streaming)
                       return (
                         <ToolCallCard
-                          key={j}
+                          key={`tool-${blockKey}`}
                           block={block}
                           isInteractive={canInteract}
                           toolResult={block.toolResult}
@@ -369,13 +371,18 @@ export default function ChatSessionPage() {
                       )
                     }
                     // text block
-                    return <MessageBubble key={j} message={{ ...msg, content: block.text }} />
+                    return (
+                      <MessageBubble
+                        key={`text-${blockKey}`}
+                        message={{ ...msg, content: block.text }}
+                      />
+                    )
                   })}
                 </Fragment>
               )
             }
             // Fallback: messages loaded from DB (no blocks) — render text only.
-            return <MessageBubble key={i} message={msg} />
+            return <MessageBubble key={msgKey} message={msg} />
           })}
 
           {/* Streaming: thinking */}
@@ -717,21 +724,22 @@ function ToolCallDetail({
       return (
         <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
           {patch.flatMap((hunk, hi) =>
-            hunk.lines.map((line, li) => (
-              <div
-                key={`${hi}-${li}`}
-                className={cn(
-                  'px-3 py-0.5 leading-5 whitespace-pre',
-                  line.startsWith('-')
-                    ? 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400'
-                    : line.startsWith('+')
-                      ? 'bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400'
-                      : 'bg-zinc-50 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500',
-                )}
-              >
-                {line}
-              </div>
-            )),
+            hunk.lines.map((line, li) => {
+              let lineColor = 'bg-zinc-50 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500'
+              if (line.startsWith('-')) {
+                lineColor = 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400'
+              } else if (line.startsWith('+')) {
+                lineColor = 'bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400'
+              }
+              return (
+                <div
+                  key={`${hi}-${li}`}
+                  className={cn('px-3 py-0.5 leading-5 whitespace-pre', lineColor)}
+                >
+                  {line}
+                </div>
+              )
+            }),
           )}
         </div>
       )
@@ -745,7 +753,7 @@ function ToolCallDetail({
         <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
           {oldStr.split('\n').map((line, i) => (
             <div
-              key={`old-${i}`}
+              key={`old-${i}-${line.slice(0, 40)}`}
               className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400"
             >
               -{line}
@@ -753,7 +761,7 @@ function ToolCallDetail({
           ))}
           {newStr.split('\n').map((line, i) => (
             <div
-              key={`new-${i}`}
+              key={`new-${i}-${line.slice(0, 40)}`}
               className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400"
             >
               +{line}
@@ -894,7 +902,11 @@ function PermissionRequestCard({
               )}
             </div>
           </div>
-          {!decided ? (
+          {decided ? (
+            <p className="text-[11px] text-amber-600 dark:text-amber-500">
+              {decision ? 'Allowed' : 'Denied'}
+            </p>
+          ) : (
             <div className="flex items-center gap-2">
               <button
                 onClick={() => handleDecide(true)}
@@ -909,10 +921,6 @@ function PermissionRequestCard({
                 Deny
               </button>
             </div>
-          ) : (
-            <p className="text-[11px] text-amber-600 dark:text-amber-500">
-              {decision ? 'Allowed' : 'Denied'}
-            </p>
           )}
         </div>
       </div>
@@ -985,9 +993,10 @@ function AskUserQuestionCard({
       <div className="flex-1 min-w-0 max-w-[82%] space-y-3">
         {questions.map((q, i) => {
           const otherSelected = (selections[i] ?? []).includes(OTHER_LABEL)
+          const questionKey = q.header ?? `question-${q.question.slice(0, 40)}-${i}`
           return (
             <div
-              key={i}
+              key={questionKey}
               className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800/60 p-3"
             >
               {q.header && (
@@ -999,11 +1008,11 @@ function AskUserQuestionCard({
                 {q.question}
               </div>
               <div className="flex flex-wrap gap-1.5">
-                {q.options.map((opt, j) => {
+                {q.options.map(opt => {
                   const selected = (selections[i] ?? []).includes(opt.label)
                   return (
                     <button
-                      key={j}
+                      key={`opt-${opt.label}`}
                       disabled={!isInteractive || submitted}
                       onClick={() => toggle(i, opt.label, !!q.multiSelect)}
                       className={cn(
