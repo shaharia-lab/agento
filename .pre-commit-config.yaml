@@ -10,6 +10,10 @@ repos:
       - id: check-merge-conflict
       - id: no-commit-to-branch
         args: [--branch, main]
+      - id: no-commit-to-branch
+        name: no-push-to-main
+        args: [--branch, main]
+        stages: [pre-push]
 
   # ── Go — golangci-lint ───────────────────────────────────────────────────────
   - repo: https://github.com/dnephin/pre-commit-golang

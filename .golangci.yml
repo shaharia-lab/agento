@@ -1,5 +1,114 @@
 version: "2"
 
+run:
+  go: "1.25"
+  timeout: 5m
+  concurrency: 4
+
+linters:
+  default: none
+  enable:
+    # --- Core & Correctness ---
+    - govet          # Reports suspicious constructs (shadowing, etc.)
+    - errcheck       # Checks for unhandled errors
+    - staticcheck    # Large suite of static analysis checks
+    - ineffassign    # Detects ineffective assignments
+    - unused         # Checks for unused code
+    - bodyclose      # Checks for unclosed response bodies
+    - noctx          # Checks for missing context in HTTP requests
+    - unconvert      # Removes unnecessary type conversions
+
+    # --- Style & Readability ---
+    - revive         # Configurable linter, replaces golint
+    - misspell       # Catches misspelled English words
+    - nakedret       # Reports naked returns
+    - unparam        # Reports unused function parameters
+    - durationcheck  # Checks for multiplication of time.Duration
+
+    # --- Complexity & Maintainability ---
+    - gocognit       # Cognitive complexity
+    - funlen         # Function length
+    - lll            # Line length
+    - gocyclo        # Cyclomatic complexity
+
+    # --- Performance ---
+    - gocritic       # Diagnostics on style, performance, and bugs
+    - makezero       # Finds make calls that can use zero-length slice
+    - prealloc       # Finds places where pre-allocation could optimize loops
+
+    # --- Security ---
+    - gosec          # Scans for security vulnerabilities
+
+  settings:
+    govet:
+      check-shadowing: true
+      enable-all: true
+      disable:
+        - fieldalignment
+
+    errcheck:
+      check-blank: true
+
+    staticcheck:
+      checks: ["all", "-ST1000", "-ST1003", "-ST1020", "-ST1021", "-ST1022"]
+
+    gocognit:
+      min-complexity: 15
+
+    funlen:
+      lines: 60
+      statements: 40
+
+    lll:
+      line-length: 120
+
+    gocyclo:
+      min-complexity: 12
+
+    revive:
+      confidence: 0.8
+      rules:
+        - name: exported
+          severity: warning
+        - name: error-return
+          severity: warning
+        - name: var-naming
+          severity: warning
+        - name: package-comments
+          disabled: true
+        - name: dot-imports
+          disabled: true
+        - name: blank-imports
+          disabled: true
+
+    misspell:
+      locale: US
+
+    gosec:
+      excludes: []
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck
+      # AgentResult is intentionally named with the package prefix for clarity at call sites.
+      - path: internal/agent/runner\.go
+        linters:
+          - revive
+        text: "stutters"
+      # Exclude complexity checks from test files
+      - path: "(_test|\\.test|\\.gen|\\.mock)\\.go$"
+        linters:
+          - gocognit
+          - funlen
+          - gocyclo
+          - lll
+      # Exclude errcheck for common test helper patterns
+      - text: "Error return value of .*(Error|Errorf|Fatal|Fatalf|Log|Logf|Print|Printf|Skip|Skipf) is not checked"
+        linters:
+          - errcheck
+
 formatters:
   enable:
     - gofmt
@@ -12,43 +121,7 @@ formatters:
       local-prefixes:
         - github.com/shaharia-lab/agento
 
-linters:
-  enable:
-    - errcheck
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
-    - misspell
-    - noctx
-    - bodyclose
-    - unconvert
-    - prealloc
-    - revive
-    - gosec
-
-  settings:
-    revive:
-      rules:
-        - name: exported
-          severity: warning
-        - name: error-return
-          severity: warning
-        - name: var-naming
-          severity: warning
-        # exported-type-stutters: disabled — AgentResult is intentional (package is 'agent')
-        - name: exported
-          disabled: false
-    misspell:
-      locale: US
-
-  exclusions:
-    rules:
-      - path: _test\.go
-        linters:
-          - errcheck
-      # AgentResult is intentionally named with the package prefix for clarity at call sites.
-      - path: internal/agent/runner\.go
-        linters:
-          - revive
-        text: "stutters"
+issues:
+  exclude-use-default: false
+  max-issues-per-linter: 0
+  max-same-issues: 0
