@@ -117,11 +117,9 @@ export interface ChatDetail {
 }
 
 export const MODELS = [
-  { value: 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5 (EU)' },
-  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6' },
-  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
-  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5 (2025-10)' },
+  { value: 'sonnet', label: 'Sonnet' },
+  { value: 'opus', label: 'Opus' },
+  { value: 'haiku', label: 'Haiku' },
 ]
 
 // ── Raw SDK streaming event types ─────────────────────────────────────────────
@@ -509,6 +507,63 @@ export interface NotificationLogEntry {
   status: 'sent' | 'failed'
   error_msg: string
   created_at: string
+}
+
+// ── Scheduled Tasks ──────────────────────────────────────────────────────────
+
+export type ScheduleType = 'one_off' | 'interval' | 'cron'
+export type TaskStatus = 'active' | 'paused'
+export type JobStatus = 'running' | 'success' | 'failed'
+
+export interface ScheduleConfig {
+  run_at?: string
+  every_minutes?: number
+  every_hours?: number
+  every_days?: number
+  at_time?: string
+  expression?: string
+}
+
+export interface ScheduledTask {
+  id: string
+  name: string
+  description: string
+  prompt: string
+  agent_slug: string
+  working_directory: string
+  model: string
+  settings_profile_id: string
+  timeout_minutes: number
+  schedule_type: ScheduleType
+  schedule_config: ScheduleConfig
+  stop_after_count: number
+  stop_after_time?: string
+  status: TaskStatus
+  run_count: number
+  last_run_at?: string
+  last_run_status: string
+  next_run_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface JobHistoryEntry {
+  id: string
+  task_id: string
+  task_name: string
+  agent_slug: string
+  status: JobStatus
+  started_at: string
+  finished_at?: string
+  duration_ms: number
+  chat_session_id: string
+  model: string
+  prompt_preview: string
+  error_message: string
+  total_input_tokens: number
+  total_output_tokens: number
+  total_cache_creation_tokens: number
+  total_cache_read_tokens: number
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

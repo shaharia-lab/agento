@@ -60,7 +60,7 @@ func Load() (*AppConfig, error) {
 		if c.AnthropicDefaultSonnetModel != "" {
 			c.DefaultModel = c.AnthropicDefaultSonnetModel
 		} else {
-			c.DefaultModel = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+			c.DefaultModel = "sonnet"
 		}
 	}
 

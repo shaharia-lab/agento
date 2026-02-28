@@ -132,6 +132,52 @@ CREATE TABLE notification_log (
 );
 
 CREATE INDEX idx_notification_log_created ON notification_log(created_at DESC);
+
+CREATE TABLE scheduled_tasks (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    description         TEXT NOT NULL DEFAULT '',
+    prompt              TEXT NOT NULL,
+    agent_slug          TEXT NOT NULL DEFAULT '',
+    working_directory   TEXT NOT NULL DEFAULT '',
+    model               TEXT NOT NULL DEFAULT '',
+    settings_profile_id TEXT NOT NULL DEFAULT '',
+    timeout_minutes     INTEGER NOT NULL DEFAULT 30,
+    schedule_type       TEXT NOT NULL DEFAULT 'one_off',
+    schedule_config     TEXT NOT NULL DEFAULT '{}',
+    stop_after_count    INTEGER NOT NULL DEFAULT 0,
+    stop_after_time     DATETIME,
+    status              TEXT NOT NULL DEFAULT 'active',
+    run_count           INTEGER NOT NULL DEFAULT 0,
+    last_run_at         DATETIME,
+    last_run_status     TEXT NOT NULL DEFAULT '',
+    next_run_at         DATETIME,
+    created_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at          DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_scheduled_tasks_status ON scheduled_tasks(status);
+CREATE INDEX idx_scheduled_tasks_next_run ON scheduled_tasks(next_run_at);
+
+CREATE TABLE job_history (
+    id                          TEXT PRIMARY KEY,
+    task_id                     TEXT NOT NULL REFERENCES scheduled_tasks(id) ON DELETE CASCADE,
+    task_name                   TEXT NOT NULL,
+    agent_slug                  TEXT NOT NULL DEFAULT '',
+    status                      TEXT NOT NULL DEFAULT 'running',
+    started_at                  DATETIME NOT NULL,
+    finished_at                 DATETIME,
+    duration_ms                 INTEGER NOT NULL DEFAULT 0,
+    chat_session_id             TEXT NOT NULL DEFAULT '',
+    model                       TEXT NOT NULL DEFAULT '',
+    prompt_preview              TEXT NOT NULL DEFAULT '',
+    error_message               TEXT NOT NULL DEFAULT '',
+    total_input_tokens          INTEGER NOT NULL DEFAULT 0,
+    total_output_tokens         INTEGER NOT NULL DEFAULT 0,
+    total_cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    total_cache_read_tokens     INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_job_history_task ON job_history(task_id, started_at DESC);
+CREATE INDEX idx_job_history_started ON job_history(started_at DESC);
 `,
 	},
 }

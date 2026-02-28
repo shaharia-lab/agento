@@ -11,6 +11,7 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/scheduler"
 	"github.com/shaharia-lab/agento/internal/service"
 )
 
@@ -24,6 +25,8 @@ const (
 	routeAgentBySlug     = "/agents/{slug}"
 	routeIntegrationByID = "/integrations/{id}"
 	routeProfileByID     = "/claude-settings/profiles/{id}"
+	routeTaskByID        = "/tasks/{id}"
+	routeJobHistoryByID  = "/job-history/{id}"
 )
 
 // Server holds all dependencies for the REST API handlers.
@@ -32,10 +35,12 @@ type Server struct {
 	chatSvc            service.ChatService
 	integrationSvc     service.IntegrationService
 	notificationSvc    service.NotificationService
+	taskSvc            service.TaskService
 	settingsMgr        *config.SettingsManager
 	logger             *slog.Logger
 	liveSessions       *liveSessionStore
 	claudeSessionCache *claudesessions.Cache
+	scheduler          *scheduler.Scheduler
 }
 
 // New creates a new API Server backed by the provided services.
@@ -44,19 +49,23 @@ func New(
 	chatSvc service.ChatService,
 	integrationSvc service.IntegrationService,
 	notificationSvc service.NotificationService,
+	taskSvc service.TaskService,
 	settingsMgr *config.SettingsManager,
 	logger *slog.Logger,
 	sessionCache *claudesessions.Cache,
+	sched *scheduler.Scheduler,
 ) *Server {
 	return &Server{
 		agentSvc:           agentSvc,
 		chatSvc:            chatSvc,
 		integrationSvc:     integrationSvc,
 		notificationSvc:    notificationSvc,
+		taskSvc:            taskSvc,
 		settingsMgr:        settingsMgr,
 		logger:             logger,
 		liveSessions:       newLiveSessionStore(),
 		claudeSessionCache: sessionCache,
+		scheduler:          sched,
 	}
 }
 
@@ -98,6 +107,15 @@ func (s *Server) Mount(r chi.Router) {
 	// Claude Code sessions and analytics
 	s.mountClaudeSessionRoutes(r)
 
+	// Filesystem, integrations, tasks, job history
+	s.mountExtensionRoutes(r)
+
+	// Build info
+	r.Get("/version", s.handleVersion)
+}
+
+// mountExtensionRoutes registers filesystem, integration, task, and job-history routes.
+func (s *Server) mountExtensionRoutes(r chi.Router) {
 	// Filesystem browser
 	r.Get("/fs", s.handleFSList)
 	r.Post("/fs/mkdir", s.handleFSMkdir)
@@ -107,6 +125,9 @@ func (s *Server) Mount(r chi.Router) {
 
 	// Notifications
 	s.mountNotificationRoutes(r)
+
+	// Scheduled tasks and job history
+	s.mountTaskRoutes(r)
 
 	// Build info
 	r.Get("/version", s.handleVersion)
@@ -140,6 +161,20 @@ func (s *Server) mountNotificationRoutes(r chi.Router) {
 	r.Put("/notifications/settings", s.handleUpdateNotificationSettings)
 	r.Post("/notifications/test", s.handleTestNotification)
 	r.Get("/notifications/log", s.handleListNotificationLog)
+}
+
+// mountTaskRoutes registers scheduled task and job history routes.
+func (s *Server) mountTaskRoutes(r chi.Router) {
+	r.Get("/tasks", s.handleListTasks)
+	r.Post("/tasks", s.handleCreateTask)
+	r.Get(routeTaskByID, s.handleGetTask)
+	r.Put(routeTaskByID, s.handleUpdateTask)
+	r.Delete(routeTaskByID, s.handleDeleteTask)
+	r.Post(routeTaskByID+"/pause", s.handlePauseTask)
+	r.Post(routeTaskByID+"/resume", s.handleResumeTask)
+	r.Get(routeTaskByID+"/job-history", s.handleListTaskJobHistory)
+	r.Get("/job-history", s.handleListAllJobHistory)
+	r.Get(routeJobHistoryByID, s.handleGetJobHistory)
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────

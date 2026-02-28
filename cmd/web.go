@@ -28,6 +28,7 @@ import (
 	googleintegration "github.com/shaharia-lab/agento/internal/integrations/google"
 	"github.com/shaharia-lab/agento/internal/logger"
 	"github.com/shaharia-lab/agento/internal/notification"
+	"github.com/shaharia-lab/agento/internal/scheduler"
 	"github.com/shaharia-lab/agento/internal/server"
 	"github.com/shaharia-lab/agento/internal/service"
 	"github.com/shaharia-lab/agento/internal/storage"
@@ -185,10 +186,13 @@ func buildWebServer(
 		return nil, fmt.Errorf("initializing settings: %w", err)
 	}
 
-	apiSrv, bus := buildAPIServer(ctx, cfg, db, sysLogger,
+	apiSrv, bus, err := buildAPIServer(ctx, db, sysLogger,
 		agentStore, chatStore, integrationStore, integrationRegistry,
 		mcpRegistry, localToolsMCP, settingsMgr,
 	)
+	if err != nil {
+		return nil, err
+	}
 	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger)
 
 	// Ensure the event bus is drained cleanly on shutdown.
@@ -203,7 +207,6 @@ func buildWebServer(
 // buildAPIServer wires all services and returns the api.Server and the event bus.
 func buildAPIServer(
 	ctx context.Context,
-	cfg *config.AppConfig,
 	db *sql.DB,
 	sysLogger *slog.Logger,
 	agentStore storage.AgentStore,
@@ -213,22 +216,34 @@ func buildAPIServer(
 	mcpRegistry *config.MCPRegistry,
 	localToolsMCP *tools.LocalMCPConfig,
 	settingsMgr *config.SettingsManager,
-) (*api.Server, eventbus.EventBus) {
+) (*api.Server, eventbus.EventBus, error) {
 	notifStore, bus := setupNotifications(db, settingsMgr)
 
 	agentSvc := service.NewAgentService(agentStore, sysLogger)
 	chatSvc := service.NewChatService(
 		chatStore, agentStore, mcpRegistry, localToolsMCP,
-		integrationRegistry, cfg.DefaultModel, sysLogger,
+		integrationRegistry, settingsMgr, sysLogger,
 	)
 	integrationSvc := service.NewIntegrationService(integrationStore, integrationRegistry, sysLogger, ctx)
 	notificationSvc := service.NewNotificationService(settingsMgr, notifStore)
 
+	taskStore := storage.NewSQLiteTaskStore(db)
+	taskSvc := service.NewTaskService(taskStore, sysLogger)
+
+	taskScheduler, err := initTaskScheduler(ctx, taskStore, chatStore, agentStore,
+		mcpRegistry, localToolsMCP, integrationRegistry, settingsMgr, sysLogger)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	sessionCache := claudesessions.NewCache(db, sysLogger)
 	sessionCache.StartBackgroundScan()
 
-	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, notificationSvc, settingsMgr, sysLogger, sessionCache)
-	return apiSrv, bus
+	apiSrv := api.New(
+		agentSvc, chatSvc, integrationSvc, notificationSvc, taskSvc,
+		settingsMgr, sysLogger, sessionCache, taskScheduler,
+	)
+	return apiSrv, bus, nil
 }
 
 // setupNotifications creates the notification store, event bus, and wires the
@@ -272,12 +287,38 @@ func loadNotificationSettingsFromJSON(raw string) (*notification.NotificationSet
 	return &ns, nil
 }
 
+func initTaskScheduler(
+	ctx context.Context,
+	taskStore storage.TaskStore, chatStore storage.ChatStore, agentStore storage.AgentStore,
+	mcpRegistry *config.MCPRegistry, localMCP *tools.LocalMCPConfig,
+	integrationRegistry *integrations.IntegrationRegistry,
+	settingsMgr *config.SettingsManager, sysLogger *slog.Logger,
+) (*scheduler.Scheduler, error) {
+	taskScheduler, err := scheduler.New(scheduler.Config{
+		TaskStore:           taskStore,
+		ChatStore:           chatStore,
+		AgentStore:          agentStore,
+		MCPRegistry:         mcpRegistry,
+		LocalMCP:            localMCP,
+		IntegrationRegistry: integrationRegistry,
+		SettingsManager:     settingsMgr,
+		Logger:              sysLogger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("creating task scheduler: %w", err)
+	}
+	if startErr := taskScheduler.Start(ctx); startErr != nil {
+		sysLogger.Warn("failed to start task scheduler", "error", startErr)
+	}
+	return taskScheduler, nil
+}
+
 func seedExampleAgent(store storage.AgentStore) error {
 	agent := &config.AgentConfig{
 		Name:        "Hello World",
 		Slug:        "hello-world",
 		Description: "A friendly assistant to help you get started with Agento.",
-		Model:       "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+		Model:       "",
 		Thinking:    "adaptive",
 		SystemPrompt: "You are a friendly and helpful assistant. " +
 			"You help users understand and use the Agento AI agents platform. " +

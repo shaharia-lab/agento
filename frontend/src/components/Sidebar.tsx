@@ -12,6 +12,8 @@ import {
   History,
   BarChart2,
   LayoutDashboard,
+  CalendarClock,
+  ClipboardList,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -70,6 +72,11 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
     { to: '/chats', icon: MessageSquare, label: 'Chats' },
     { to: '/agents', icon: Bot, label: 'Agents' },
     { to: '/integrations', icon: Plug, label: 'Integrations' },
+  ]
+
+  const taskNavItems = [
+    { to: '/tasks', icon: CalendarClock, label: 'Manage Tasks' },
+    { to: '/job-history', icon: ClipboardList, label: 'Job History' },
   ]
 
   const claudeNavItems = [{ to: '/claude-sessions', icon: History, label: 'Claude Sessions' }]
@@ -173,6 +180,56 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
               </NavLink>
             ),
           )}
+        </div>
+
+        {/* Tasks section */}
+        <div className="mt-4">
+          {(!collapsed || isMobile) && (
+            <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 select-none">
+              Tasks
+            </p>
+          )}
+          {!isMobile && collapsed && (
+            <div className="mx-2 mb-2 border-t border-zinc-200 dark:border-zinc-700/50" />
+          )}
+          <div className="space-y-0.5">
+            {taskNavItems.map(({ to, icon: Icon, label }) =>
+              !isMobile && collapsed ? (
+                <Tooltip key={to} content={label}>
+                  <NavLink
+                    to={to}
+                    className={({ isActive }) =>
+                      cn(
+                        'flex h-9 w-9 items-center justify-center rounded-md transition-colors mx-auto',
+                        isActive
+                          ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                          : 'text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100',
+                      )
+                    }
+                  >
+                    <Icon className="h-4 w-4" />
+                  </NavLink>
+                </Tooltip>
+              ) : (
+                <NavLink
+                  key={to}
+                  to={to}
+                  onClick={handleNavClick}
+                  className={({ isActive }) =>
+                    cn(
+                      'flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors',
+                      isActive
+                        ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                        : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100',
+                    )
+                  }
+                >
+                  <Icon className="h-4 w-4 shrink-0" />
+                  <span>{label}</span>
+                </NavLink>
+              ),
+            )}
+          </div>
         </div>
 
         {/* Claude Usage section */}

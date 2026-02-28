@@ -115,7 +115,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
   const [slug, setSlug] = useState(agent?.slug ?? '')
   const [slugTouched, setSlugTouched] = useState(isEdit)
   const [description, setDescription] = useState(agent?.description ?? '')
-  const [model, setModel] = useState(agent?.model ?? 'eu.anthropic.claude-sonnet-4-5-20250929-v1:0')
+  const [model, setModel] = useState(agent?.model ?? '')
   const [thinking, setThinking] = useState<Agent['thinking']>(agent?.thinking ?? 'adaptive')
   const [permissionMode, setPermissionMode] = useState<Agent['permission_mode']>(
     agent?.permission_mode ?? 'default',
@@ -298,11 +298,15 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
       <CollapsibleSection title="Model & Behavior">
         <div className="space-y-1.5">
           <Label>Model</Label>
-          <Select value={model} onValueChange={setModel}>
+          <Select
+            value={model || '__default__'}
+            onValueChange={v => setModel(v === '__default__' ? '' : v)}
+          >
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
+              <SelectItem value="__default__">Default (from settings)</SelectItem>
               {MODELS.map(m => (
                 <SelectItem key={m.value} value={m.value}>
                   {m.label}

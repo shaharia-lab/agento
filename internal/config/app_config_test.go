@@ -64,7 +64,7 @@ func TestLoad(t *testing.T) {
 	assert.Equal(t, "debug", cfg.LogLevel)
 	assert.Equal(t, 9090, cfg.Port)
 	// DefaultModel should be the built-in default
-	assert.Equal(t, "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", cfg.DefaultModel)
+	assert.Equal(t, "sonnet", cfg.DefaultModel)
 }
 
 func TestLoad_DefaultModel_Priority(t *testing.T) {
@@ -90,7 +90,7 @@ func TestLoad_DefaultModel_Priority(t *testing.T) {
 			name:          "built-in default when neither env var set",
 			defaultModel:  "",
 			sonnetModel:   "",
-			expectedModel: "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+			expectedModel: "sonnet",
 		},
 	}
 	for _, tt := range tests {

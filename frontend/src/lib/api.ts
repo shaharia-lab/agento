@@ -23,6 +23,8 @@ import type {
   AvailableTool,
   NotificationSettings,
   NotificationLogEntry,
+  ScheduledTask,
+  JobHistoryEntry,
 } from '../types'
 
 const BASE = '/api'
@@ -386,6 +388,50 @@ export const notificationsApi = {
     const suffix = params.toString() ? `?${params.toString()}` : ''
     return request<NotificationLogEntry[]>(`/notifications/log${suffix}`)
   },
+}
+
+// ── Scheduled Tasks ──────────────────────────────────────────────────────────
+
+export const tasksApi = {
+  list: () => request<ScheduledTask[]>('/tasks'),
+
+  get: (id: string) => request<ScheduledTask>(`/tasks/${id}`),
+
+  create: (data: Partial<ScheduledTask>) =>
+    request<ScheduledTask>('/tasks', { method: 'POST', body: JSON.stringify(data) }),
+
+  update: (id: string, data: Partial<ScheduledTask>) =>
+    request<ScheduledTask>(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+
+  delete: (id: string) =>
+    fetch(`${BASE}/tasks/${id}`, { method: 'DELETE' }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
+
+  pause: (id: string) => request<ScheduledTask>(`/tasks/${id}/pause`, { method: 'POST' }),
+
+  resume: (id: string) => request<ScheduledTask>(`/tasks/${id}/resume`, { method: 'POST' }),
+
+  jobHistory: (id: string, limit?: number) => {
+    const params = new URLSearchParams()
+    if (limit) params.set('limit', String(limit))
+    const query = params.toString()
+    const suffix = query ? `?${query}` : ''
+    return request<JobHistoryEntry[]>(`/tasks/${id}/job-history${suffix}`)
+  },
+}
+
+export const jobHistoryApi = {
+  list: (limit?: number, offset?: number) => {
+    const params = new URLSearchParams()
+    if (limit) params.set('limit', String(limit))
+    if (offset) params.set('offset', String(offset))
+    const query = params.toString()
+    const suffix = query ? `?${query}` : ''
+    return request<JobHistoryEntry[]>(`/job-history${suffix}`)
+  },
+
+  get: (id: string) => request<JobHistoryEntry>(`/job-history/${id}`),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

@@ -22,7 +22,7 @@ import (
 // integrationRegistry) are left nil.
 func newTestService(chatRepo *mocks.MockChatStore, agentRepo *mocks.MockAgentStore) ChatService {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewChatService(chatRepo, agentRepo, nil, nil, nil, "claude-sonnet-4-20250514", logger)
+	return NewChatService(chatRepo, agentRepo, nil, nil, nil, nil, logger)
 }
 
 // ---------------------------------------------------------------------------

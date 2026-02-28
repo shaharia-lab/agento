@@ -48,7 +48,7 @@ func newHarness(t *testing.T) *testHarness {
 	require.NoError(t, err)
 
 	logger := slog.Default()
-	srv := api.New(agentSvc, chatSvc, integrationSvc, notificationSvc, mgr, logger, nil)
+	srv := api.New(agentSvc, chatSvc, integrationSvc, notificationSvc, nil, mgr, logger, nil, nil)
 
 	r := chi.NewRouter()
 	srv.Mount(r)

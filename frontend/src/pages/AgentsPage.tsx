@@ -17,9 +17,8 @@ import {
 import { Plus, Pencil, Trash2, Bot } from 'lucide-react'
 
 function shortModel(model: string): string {
-  // eu.anthropic.claude-X → claude-X, claude-sonnet-4-6 → sonnet-4-6
-  const m = model.replace(/^.*anthropic\./i, '').replace(/^claude-/, '')
-  return m.length > 28 ? m.slice(0, 28) + '…' : m
+  if (!model) return 'default'
+  return model
 }
 
 export default function AgentsPage() {
