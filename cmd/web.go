@@ -75,7 +75,7 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	}
 
 	// Create the default working directory if it doesn't exist.
-	if err := os.MkdirAll("/tmp/agento/work", 0750); err != nil {
+	if err := os.MkdirAll(config.DefaultWorkingDir(), 0750); err != nil {
 		return fmt.Errorf("creating default working directory: %w", err)
 	}
 
@@ -151,7 +151,7 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	integrationSvc := service.NewIntegrationService(integrationStore, integrationRegistry, sysLogger, ctx)
 
 	// Start background scan of ~/.claude/projects so Claude Sessions are available quickly.
-	sessionCache := claudesessions.NewCache(sysLogger)
+	sessionCache := claudesessions.NewCache(db, sysLogger)
 	sessionCache.StartBackgroundScan()
 
 	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, settingsMgr, sysLogger, sessionCache)

@@ -2,7 +2,10 @@ package claudesessions
 
 import (
 	"bufio"
+	"context"
+	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -205,6 +208,209 @@ func ScanAllSessions() ([]ClaudeSessionSummary, error) {
 		return sessions[i].LastActivity.After(sessions[j].LastActivity)
 	})
 	return sessions, nil
+}
+
+// diskFile holds the metadata for a JSONL file found on disk.
+type diskFile struct {
+	sessionID   string
+	projectPath string
+	filePath    string
+	mtime       time.Time
+}
+
+// IncrementalScan walks ~/.claude/projects/, compares files on disk with the
+// SQLite cache, and only re-reads files whose mtime has changed. New files are
+// inserted, modified files are updated, and deleted files are removed from the
+// cache. Returns all cached sessions sorted by last_activity desc.
+func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, error) {
+	projectsDir := filepath.Join(ClaudeHome(), "projects")
+
+	// 1. Walk disk and build map of current files keyed by file_path.
+	onDisk := make(map[string]diskFile)
+	entries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No projects dir — clear cache and return empty.
+			_, _ = db.ExecContext(context.Background(), "DELETE FROM claude_session_cache")
+			updateLastScanned(db)
+			return []ClaudeSessionSummary{}, nil
+		}
+		return nil, err
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		projectPath := DecodeProjectPath(e.Name())
+		files, err := os.ReadDir(filepath.Join(projectsDir, e.Name()))
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+				continue
+			}
+			sessionID := strings.TrimSuffix(f.Name(), ".jsonl")
+			fp := filepath.Join(projectsDir, e.Name(), f.Name())
+			info, err := f.Info()
+			if err != nil {
+				continue
+			}
+			onDisk[fp] = diskFile{
+				sessionID:   sessionID,
+				projectPath: projectPath,
+				filePath:    fp,
+				mtime:       info.ModTime().UTC(),
+			}
+		}
+	}
+
+	// 2. Query existing cache entries.
+	type cachedEntry struct {
+		filePath string
+		mtime    time.Time
+	}
+	cached := make(map[string]cachedEntry)
+	ctx := context.Background()
+	rows, err := db.QueryContext(ctx, "SELECT file_path, file_mtime FROM claude_session_cache")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var ce cachedEntry
+		if err := rows.Scan(&ce.filePath, &ce.mtime); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		cached[ce.filePath] = ce
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close()
+
+	// 3. Determine changes.
+	var toUpsert []diskFile
+	for fp, df := range onDisk {
+		ce, exists := cached[fp]
+		if !exists || !ce.mtime.Equal(df.mtime) {
+			toUpsert = append(toUpsert, df)
+		}
+	}
+
+	var toDelete []string
+	for fp := range cached {
+		if _, exists := onDisk[fp]; !exists {
+			toDelete = append(toDelete, fp)
+		}
+	}
+
+	// 4. Process changes.
+	if len(toUpsert) > 0 || len(toDelete) > 0 {
+		logger.Info("claude sessions: incremental scan",
+			"new_or_modified", len(toUpsert),
+			"deleted", len(toDelete),
+			"unchanged", len(onDisk)-len(toUpsert))
+	}
+
+	for _, df := range toUpsert {
+		summary, err := readSessionSummary(df.sessionID, df.projectPath, df.filePath)
+		if err != nil || summary == nil {
+			continue
+		}
+		if err := upsertCacheRow(db, df, summary); err != nil {
+			logger.Warn("claude sessions: failed to upsert cache row",
+				"file", df.filePath, "error", err)
+		}
+	}
+
+	for _, fp := range toDelete {
+		if _, err := db.ExecContext(context.Background(), "DELETE FROM claude_session_cache WHERE file_path = ?", fp); err != nil {
+			logger.Warn("claude sessions: failed to delete cache row",
+				"file", fp, "error", err)
+		}
+	}
+
+	// 5. Update metadata.
+	updateLastScanned(db)
+
+	// 6. Return all cached rows.
+	return loadAllSessions(db)
+}
+
+func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
+	ctx := context.Background()
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO claude_session_cache (
+			session_id, project_path, file_path, file_mtime,
+			preview, start_time, last_activity, message_count,
+			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+			git_branch, model, cwd
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id, project_path) DO UPDATE SET
+			file_path = excluded.file_path,
+			file_mtime = excluded.file_mtime,
+			preview = excluded.preview,
+			start_time = excluded.start_time,
+			last_activity = excluded.last_activity,
+			message_count = excluded.message_count,
+			input_tokens = excluded.input_tokens,
+			output_tokens = excluded.output_tokens,
+			cache_creation_tokens = excluded.cache_creation_tokens,
+			cache_read_tokens = excluded.cache_read_tokens,
+			git_branch = excluded.git_branch,
+			model = excluded.model,
+			cwd = excluded.cwd`,
+		s.SessionID, s.ProjectPath, df.filePath, df.mtime,
+		s.Preview, s.StartTime, s.LastActivity, s.MessageCount,
+		s.Usage.InputTokens, s.Usage.OutputTokens,
+		s.Usage.CacheCreationTokens, s.Usage.CacheReadTokens,
+		s.GitBranch, s.Model, s.CWD,
+	)
+	return err
+}
+
+func updateLastScanned(db *sql.DB) {
+	ctx := context.Background()
+	_, _ = db.ExecContext(ctx, `
+		INSERT INTO claude_cache_metadata (id, last_scanned_at) VALUES (1, ?)
+		ON CONFLICT(id) DO UPDATE SET last_scanned_at = excluded.last_scanned_at`,
+		time.Now().UTC(),
+	)
+}
+
+func loadAllSessions(db *sql.DB) ([]ClaudeSessionSummary, error) {
+	ctx := context.Background()
+	rows, err := db.QueryContext(ctx, `
+		SELECT session_id, project_path, preview, start_time, last_activity,
+		       message_count, input_tokens, output_tokens, cache_creation_tokens,
+		       cache_read_tokens, git_branch, model, cwd
+		FROM claude_session_cache
+		ORDER BY last_activity DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var sessions []ClaudeSessionSummary
+	for rows.Next() {
+		var s ClaudeSessionSummary
+		if err := rows.Scan(
+			&s.SessionID, &s.ProjectPath, &s.Preview,
+			&s.StartTime, &s.LastActivity, &s.MessageCount,
+			&s.Usage.InputTokens, &s.Usage.OutputTokens,
+			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
+			&s.GitBranch, &s.Model, &s.CWD,
+		); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, s)
+	}
+	if sessions == nil {
+		sessions = []ClaudeSessionSummary{}
+	}
+	return sessions, rows.Err()
 }
 
 // readSessionSummary reads a session JSONL file and extracts lightweight metadata.

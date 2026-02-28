@@ -146,7 +146,7 @@ export default function SettingsPage() {
                       onChange={e => setWorkingDir(e.target.value)}
                       disabled={wdirLocked}
                       className="flex-1 font-mono text-sm"
-                      placeholder="/tmp/agento/work"
+                      placeholder="Default working directory"
                     />
                     {!wdirLocked && (
                       <Button

@@ -4,12 +4,16 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"path/filepath"
 )
 
-const (
-	defaultWorkingDir = "/tmp/agento/work"
-	defaultModel      = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
-)
+const defaultModel = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+// DefaultWorkingDir returns the platform-appropriate default working directory
+// for agent sessions (e.g. /tmp/agento/work on Linux, %TEMP%\agento\work on Windows).
+func DefaultWorkingDir() string {
+	return filepath.Join(os.TempDir(), "agento", "work")
+}
 
 // UserSettings holds persisted user preferences.
 type UserSettings struct {
@@ -87,7 +91,7 @@ func (m *SettingsManager) load() error {
 
 	// Fill in any missing defaults.
 	if m.settings.DefaultWorkingDir == "" {
-		m.settings.DefaultWorkingDir = defaultWorkingDir
+		m.settings.DefaultWorkingDir = DefaultWorkingDir()
 	}
 	if m.settings.DefaultModel == "" {
 		m.settings.DefaultModel = defaultModel

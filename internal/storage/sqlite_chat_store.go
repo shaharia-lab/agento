@@ -2,11 +2,12 @@ package storage
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // SQLiteChatStore implements ChatStore backed by a SQLite database.
@@ -166,7 +167,7 @@ func (s *SQLiteChatStore) AppendMessage(sessionID string, msg ChatMessage) error
 // UpdateSession updates a session's metadata.
 func (s *SQLiteChatStore) UpdateSession(session *ChatSession) error {
 	ctx := context.Background()
-	_, err := s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE chat_sessions SET
 			title = ?, agent_slug = ?, sdk_session_id = ?, working_directory = ?,
 			model = ?, settings_profile_id = ?,
@@ -182,6 +183,10 @@ func (s *SQLiteChatStore) UpdateSession(session *ChatSession) error {
 	)
 	if err != nil {
 		return fmt.Errorf("updating session %q: %w", session.ID, err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("session %q not found", session.ID)
 	}
 	return nil
 }
@@ -216,10 +221,5 @@ func scanChatSession(rows *sql.Rows) (*ChatSession, error) {
 }
 
 func newSQLiteUUID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
+	return uuid.New().String()
 }

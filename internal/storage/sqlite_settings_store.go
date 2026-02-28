@@ -18,8 +18,8 @@ func NewSQLiteSettingsStore(db *sql.DB) *SQLiteSettingsStore {
 	return &SQLiteSettingsStore{db: db}
 }
 
-// Load returns the persisted user settings. If no row exists yet, it inserts
-// the default row and returns defaults.
+// Load returns the persisted user settings. If no row exists yet, it returns
+// zero-value settings so the SettingsManager can fill in defaults.
 func (s *SQLiteSettingsStore) Load() (config.UserSettings, error) {
 	var us config.UserSettings
 	var darkMode, onboarding int
@@ -33,14 +33,8 @@ func (s *SQLiteSettingsStore) Load() (config.UserSettings, error) {
 		&darkMode, &us.AppearanceFontSize, &us.AppearanceFontFamily,
 	)
 	if err == sql.ErrNoRows {
-		// Insert default row.
-		us = config.UserSettings{
-			DefaultWorkingDir: "/tmp/agento/work",
-		}
-		if err := s.Save(us); err != nil {
-			return us, fmt.Errorf("initializing default settings: %w", err)
-		}
-		return us, nil
+		// Return zero-value settings; SettingsManager fills defaults.
+		return config.UserSettings{}, nil
 	}
 	if err != nil {
 		return us, fmt.Errorf("loading settings: %w", err)

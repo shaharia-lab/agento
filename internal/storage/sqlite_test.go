@@ -26,7 +26,7 @@ func newTestDB(t *testing.T) *sql.DB {
 func TestNewSQLiteDB_CreatesTables(t *testing.T) {
 	db := newTestDB(t)
 
-	tables := []string{"agents", "chat_sessions", "chat_messages", "integrations", "user_settings", "schema_migrations"}
+	tables := []string{"agents", "chat_sessions", "chat_messages", "integrations", "user_settings", "schema_migrations", "claude_session_cache", "claude_cache_metadata"}
 	for _, table := range tables {
 		var name string
 		err := db.QueryRowContext(context.Background(), "SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name)
@@ -44,8 +44,8 @@ func TestNewSQLiteDB_MigrationVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("querying version: %v", err)
 	}
-	if version != 1 {
-		t.Errorf("expected version 1, got %d", version)
+	if version != 2 {
+		t.Errorf("expected version 2, got %d", version)
 	}
 }
 
@@ -428,16 +428,18 @@ func TestSQLiteSettingsStore_LoadSave(t *testing.T) {
 	db := newTestDB(t)
 	store := NewSQLiteSettingsStore(db)
 
-	// Load defaults (no row exists yet)
+	// Load defaults (no row exists yet) — returns zero-value settings;
+	// SettingsManager is responsible for filling in defaults.
 	settings, err := store.Load()
 	if err != nil {
 		t.Fatalf("load defaults: %v", err)
 	}
-	if settings.DefaultWorkingDir != "/tmp/agento/work" {
-		t.Errorf("expected default working dir, got %q", settings.DefaultWorkingDir)
+	if settings.DefaultWorkingDir != "" {
+		t.Errorf("expected empty default working dir on fresh load, got %q", settings.DefaultWorkingDir)
 	}
 
 	// Save
+	settings.DefaultWorkingDir = "/some/work/dir"
 	settings.DefaultModel = "test-model"
 	settings.OnboardingComplete = true
 	settings.AppearanceDarkMode = true

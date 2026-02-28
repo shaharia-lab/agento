@@ -272,8 +272,16 @@ func migrateIntegrations(ctx context.Context, tx *sql.Tx, dir string, logger *sl
 			continue
 		}
 
-		credJSON, _ := json.Marshal(cfg.Credentials)
-		servJSON, _ := json.Marshal(cfg.Services)
+		credJSON, err := json.Marshal(cfg.Credentials)
+		if err != nil {
+			logger.Warn("skipping integration with bad credentials", "id", cfg.ID, "error", err)
+			continue
+		}
+		servJSON, err := json.Marshal(cfg.Services)
+		if err != nil {
+			logger.Warn("skipping integration with bad services", "id", cfg.ID, "error", err)
+			continue
+		}
 
 		var authJSON *string
 		if cfg.Auth != nil {

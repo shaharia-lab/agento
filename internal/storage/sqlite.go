@@ -73,7 +73,7 @@ CREATE TABLE integrations (
 
 CREATE TABLE user_settings (
     id                     INTEGER PRIMARY KEY CHECK (id = 1),
-    default_working_dir    TEXT NOT NULL DEFAULT '/tmp/agento/work',
+    default_working_dir    TEXT NOT NULL DEFAULT '',
     default_model          TEXT NOT NULL DEFAULT '',
     onboarding_complete    INTEGER NOT NULL DEFAULT 0,
     appearance_dark_mode   INTEGER NOT NULL DEFAULT 0,
@@ -81,6 +81,34 @@ CREATE TABLE user_settings (
     appearance_font_family TEXT NOT NULL DEFAULT ''
 );
 
+`,
+	},
+	{
+		version: 2,
+		sql: `
+CREATE TABLE claude_session_cache (
+    session_id    TEXT NOT NULL,
+    project_path  TEXT NOT NULL,
+    file_path     TEXT NOT NULL,
+    file_mtime    DATETIME NOT NULL,
+    preview       TEXT NOT NULL DEFAULT '',
+    start_time    DATETIME NOT NULL,
+    last_activity DATETIME NOT NULL,
+    message_count INTEGER NOT NULL DEFAULT 0,
+    input_tokens  INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+    git_branch    TEXT NOT NULL DEFAULT '',
+    model         TEXT NOT NULL DEFAULT '',
+    cwd           TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (session_id, project_path)
+);
+
+CREATE TABLE claude_cache_metadata (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    last_scanned_at DATETIME NOT NULL
+);
 `,
 	},
 }
@@ -98,6 +126,12 @@ func NewSQLiteDB(dbPath string) (*sql.DB, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("opening database: %w", err)
 	}
+
+	// SQLite is single-writer; serialize all access through one connection
+	// to avoid SQLITE_BUSY errors from concurrent goroutines.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
 
 	ctx := context.Background()
 

@@ -51,7 +51,7 @@ export default function ChatsPage() {
   const [selectedAgent, setSelectedAgent] = useState<string>('__none__')
   const [firstMessage, setFirstMessage] = useState('')
   const [creating, setCreating] = useState(false)
-  const [workingDir, setWorkingDir] = useState('/tmp/agento/work')
+  const [workingDir, setWorkingDir] = useState('')
   const [selectedModel, setSelectedModel] = useState('')
   const [browserOpen, setBrowserOpen] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -311,7 +311,7 @@ export default function ChatsPage() {
                   value={workingDir}
                   onChange={e => setWorkingDir(e.target.value)}
                   className="flex-1 font-mono text-xs h-8"
-                  placeholder="/tmp/agento/work"
+                  placeholder="Default working directory"
                 />
                 <Button
                   variant="outline"
