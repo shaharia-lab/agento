@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -50,8 +52,8 @@ func saveProfilesMetadata(m config.ProfilesMetadata) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
+	if mkdirErr := os.MkdirAll(filepath.Dir(path), 0700); mkdirErr != nil {
+		return mkdirErr
 	}
 	data, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
@@ -101,8 +103,8 @@ func ensureDefaultProfileExists() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return err
+	if mkdirErr := os.MkdirAll(dir, 0700); mkdirErr != nil {
+		return mkdirErr
 	}
 
 	// Read existing settings.json (or use empty {}).
@@ -122,7 +124,10 @@ func ensureDefaultProfileExists() error {
 	if jsonErr := json.Unmarshal(content, &pretty); jsonErr != nil {
 		pretty = map[string]any{}
 	}
-	out, _ := json.MarshalIndent(pretty, "", "  ")
+	out, merr := json.MarshalIndent(pretty, "", "  ")
+	if merr != nil {
+		return fmt.Errorf("marshaling default profile settings: %w", merr)
+	}
 
 	profileFilePath := filepath.Join(dir, "settings_default.json")
 	if writeErr := os.WriteFile(profileFilePath, out, 0600); writeErr != nil { //nolint:gosec
@@ -137,6 +142,51 @@ func ensureDefaultProfileExists() error {
 	}
 	m.Profiles = []config.ClaudeSettingsProfile{defaultProfile}
 	return saveProfilesMetadata(m)
+}
+
+// findProfileIndex returns the index of the profile with the given ID, or -1.
+func findProfileIndex(profiles []config.ClaudeSettingsProfile, id string) int {
+	for i := range profiles {
+		if profiles[i].ID == id {
+			return i
+		}
+	}
+	return -1
+}
+
+// deduplicateID ensures id is unique among the given profiles by appending a numeric suffix.
+func deduplicateID(base string, profiles []config.ClaudeSettingsProfile) string {
+	id := base
+	for i := 2; findProfileIndex(profiles, id) != -1; i++ {
+		id = base + "-" + string(rune('0'+i))
+	}
+	return id
+}
+
+// readDefaultProfileContent reads the content from the current default profile, falling back to "{}".
+func readDefaultProfileContent(profiles []config.ClaudeSettingsProfile) []byte {
+	for _, p := range profiles {
+		if p.IsDefault {
+			if data, err := os.ReadFile(p.FilePath); err == nil { //nolint:gosec
+				return data
+			}
+			break
+		}
+	}
+	return []byte("{}")
+}
+
+// buildProfileDetail creates a ClaudeSettingsProfileDetail from a profile,
+// reading the settings file if it exists.
+func buildProfileDetail(profile config.ClaudeSettingsProfile) ClaudeSettingsProfileDetail {
+	detail := ClaudeSettingsProfileDetail{ClaudeSettingsProfile: profile}
+	if data, err := os.ReadFile(profile.FilePath); err == nil { //nolint:gosec
+		if json.Valid(data) {
+			detail.Settings = json.RawMessage(data)
+			detail.Exists = true
+		}
+	}
+	return detail
 }
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -180,35 +230,8 @@ func (s *Server) handleCreateClaudeSettingsProfile(w http.ResponseWriter, r *htt
 		return
 	}
 
-	id := slugify(req.Name)
-	base := id
-	for i := 2; ; i++ {
-		conflict := false
-		for _, p := range m.Profiles {
-			if p.ID == id {
-				conflict = true
-				break
-			}
-		}
-		if !conflict {
-			break
-		}
-		id = base + "-" + string(rune('0'+i))
-	}
-
-	// Copy content from the current default profile.
-	var content []byte
-	for _, p := range m.Profiles {
-		if p.IsDefault {
-			if data, readErr := os.ReadFile(p.FilePath); readErr == nil { //nolint:gosec
-				content = data
-			}
-			break
-		}
-	}
-	if content == nil {
-		content = []byte("{}")
-	}
+	id := deduplicateID(slugify(req.Name), m.Profiles)
+	content := readDefaultProfileContent(m.Profiles)
 
 	filePath, err := resolveProfileFilePath(id)
 	if err != nil {
@@ -221,10 +244,7 @@ func (s *Server) handleCreateClaudeSettingsProfile(w http.ResponseWriter, r *htt
 	}
 
 	newProfile := config.ClaudeSettingsProfile{
-		ID:        id,
-		Name:      req.Name,
-		FilePath:  filePath,
-		IsDefault: false,
+		ID: id, Name: req.Name, FilePath: filePath, IsDefault: false,
 	}
 	m.Profiles = append(m.Profiles, newProfile)
 	if err := saveProfilesMetadata(m); err != nil {
@@ -244,29 +264,13 @@ func (s *Server) handleGetClaudeSettingsProfile(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	var found *config.ClaudeSettingsProfile
-	for i := range m.Profiles {
-		if m.Profiles[i].ID == id {
-			found = &m.Profiles[i]
-			break
-		}
-	}
-	if found == nil {
+	idx := findProfileIndex(m.Profiles, id)
+	if idx == -1 {
 		writeError(w, http.StatusNotFound, "profile not found")
 		return
 	}
 
-	detail := ClaudeSettingsProfileDetail{
-		ClaudeSettingsProfile: *found,
-	}
-	if data, readErr := os.ReadFile(found.FilePath); readErr == nil { //nolint:gosec
-		if json.Valid(data) {
-			detail.Settings = json.RawMessage(data)
-			detail.Exists = true
-		}
-	}
-
-	writeJSON(w, http.StatusOK, detail)
+	writeJSON(w, http.StatusOK, buildProfileDetail(m.Profiles[idx]))
 }
 
 func (s *Server) handleUpdateClaudeSettingsProfile(w http.ResponseWriter, r *http.Request) {
@@ -287,13 +291,7 @@ func (s *Server) handleUpdateClaudeSettingsProfile(w http.ResponseWriter, r *htt
 		return
 	}
 
-	idx := -1
-	for i := range m.Profiles {
-		if m.Profiles[i].ID == id {
-			idx = i
-			break
-		}
-	}
+	idx := findProfileIndex(m.Profiles, id)
 	if idx == -1 {
 		writeError(w, http.StatusNotFound, "profile not found")
 		return
@@ -301,52 +299,16 @@ func (s *Server) handleUpdateClaudeSettingsProfile(w http.ResponseWriter, r *htt
 
 	profile := &m.Profiles[idx]
 
-	// Update name (and rename file if needed).
 	if req.Name != nil && *req.Name != "" && *req.Name != profile.Name {
-		newID := slugify(*req.Name)
-		if newID != id {
-			for i, p := range m.Profiles {
-				if i != idx && p.ID == newID {
-					writeError(w, http.StatusConflict, "a profile with that name already exists")
-					return
-				}
-			}
-			newFilePath, err := resolveProfileFilePath(newID)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "failed to resolve new profile path")
-				return
-			}
-			if data, readErr := os.ReadFile(profile.FilePath); readErr == nil { //nolint:gosec
-				if writeErr := os.WriteFile(newFilePath, data, 0600); writeErr != nil { //nolint:gosec
-					writeError(w, http.StatusInternalServerError, "failed to rename profile file")
-					return
-				}
-				_ = os.Remove(profile.FilePath)
-			}
-			profile.ID = newID
-			profile.FilePath = newFilePath
+		if err := renameProfile(profile, *req.Name, id, idx, m.Profiles); err != nil {
+			writeError(w, err.code, err.msg)
+			return
 		}
-		profile.Name = *req.Name
 	}
 
-	// Update settings content.
-	if len(req.Settings) > 0 && string(req.Settings) != "null" {
-		if !json.Valid(req.Settings) {
-			writeError(w, http.StatusBadRequest, "settings must be valid JSON")
-			return
-		}
-		var pretty any
-		_ = json.Unmarshal(req.Settings, &pretty)
-		out, _ := json.MarshalIndent(pretty, "", "  ")
-		if err := os.WriteFile(profile.FilePath, out, 0600); err != nil { //nolint:gosec
-			writeError(w, http.StatusInternalServerError, "failed to write profile settings")
-			return
-		}
-		if profile.IsDefault {
-			if err := syncDefaultToSettingsJSON(*profile); err != nil {
-				s.logger.Error("sync default profile failed", "error", err)
-			}
-		}
+	if err := s.updateProfileSettings(profile, req.Settings); err != nil {
+		writeError(w, err.code, err.msg)
+		return
 	}
 
 	if err := saveProfilesMetadata(m); err != nil {
@@ -354,17 +316,85 @@ func (s *Server) handleUpdateClaudeSettingsProfile(w http.ResponseWriter, r *htt
 		return
 	}
 
-	detail := ClaudeSettingsProfileDetail{
-		ClaudeSettingsProfile: *profile,
-	}
-	if data, readErr := os.ReadFile(profile.FilePath); readErr == nil { //nolint:gosec
-		if json.Valid(data) {
-			detail.Settings = json.RawMessage(data)
-			detail.Exists = true
+	writeJSON(w, http.StatusOK, buildProfileDetail(*profile))
+}
+
+// profileError is a helper for returning HTTP errors from profile sub-operations.
+type profileError struct {
+	code int
+	msg  string
+}
+
+func (e *profileError) Error() string { return e.msg }
+
+func renameProfile(
+	profile *config.ClaudeSettingsProfile,
+	newName, currentID string, currentIdx int,
+	profiles []config.ClaudeSettingsProfile,
+) *profileError {
+	newID := slugify(newName)
+	if newID != currentID {
+		// Check for conflicts excluding the current profile.
+		for i, p := range profiles {
+			if i != currentIdx && p.ID == newID {
+				return &profileError{http.StatusConflict, "a profile with that name already exists"}
+			}
+		}
+		if err := moveProfileFile(profile, newID); err != nil {
+			return err
 		}
 	}
+	profile.Name = newName
+	return nil
+}
 
-	writeJSON(w, http.StatusOK, detail)
+func moveProfileFile(profile *config.ClaudeSettingsProfile, newID string) *profileError {
+	newFilePath, err := resolveProfileFilePath(newID)
+	if err != nil {
+		return &profileError{http.StatusInternalServerError, "failed to resolve new profile path"}
+	}
+	data, readErr := os.ReadFile(profile.FilePath) //nolint:gosec
+	if readErr != nil {
+		// No file to move; just update metadata.
+		profile.ID = newID
+		profile.FilePath = newFilePath
+		return nil
+	}
+	if writeErr := os.WriteFile(newFilePath, data, 0600); writeErr != nil { //nolint:gosec
+		return &profileError{http.StatusInternalServerError, "failed to rename profile file"}
+	}
+	if rmErr := os.Remove(profile.FilePath); rmErr != nil {
+		log.Printf("failed to remove old profile file: %v", rmErr)
+	}
+	profile.ID = newID
+	profile.FilePath = newFilePath
+	return nil
+}
+
+func (s *Server) updateProfileSettings(profile *config.ClaudeSettingsProfile, settings json.RawMessage) *profileError {
+	if len(settings) == 0 || string(settings) == "null" {
+		return nil
+	}
+	if !json.Valid(settings) {
+		return &profileError{http.StatusBadRequest, "settings must be valid JSON"}
+	}
+	var pretty any
+	if uerr := json.Unmarshal(settings, &pretty); uerr != nil {
+		return &profileError{http.StatusBadRequest, "failed to parse settings JSON"}
+	}
+	out, merr := json.MarshalIndent(pretty, "", "  ")
+	if merr != nil {
+		return &profileError{http.StatusInternalServerError, "failed to format settings JSON"}
+	}
+	if err := os.WriteFile(profile.FilePath, out, 0600); err != nil { //nolint:gosec
+		return &profileError{http.StatusInternalServerError, "failed to write profile settings"}
+	}
+	if profile.IsDefault {
+		if err := syncDefaultToSettingsJSON(*profile); err != nil {
+			s.logger.Error("sync default profile failed", "error", err)
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleDeleteClaudeSettingsProfile(w http.ResponseWriter, r *http.Request) {
@@ -376,13 +406,7 @@ func (s *Server) handleDeleteClaudeSettingsProfile(w http.ResponseWriter, r *htt
 		return
 	}
 
-	idx := -1
-	for i := range m.Profiles {
-		if m.Profiles[i].ID == id {
-			idx = i
-			break
-		}
-	}
+	idx := findProfileIndex(m.Profiles, id)
 	if idx == -1 {
 		writeError(w, http.StatusNotFound, "profile not found")
 		return
@@ -401,7 +425,9 @@ func (s *Server) handleDeleteClaudeSettingsProfile(w http.ResponseWriter, r *htt
 		return
 	}
 
-	_ = os.Remove(filePath)
+	if rmErr := os.Remove(filePath); rmErr != nil {
+		log.Printf("failed to remove profile file %s: %v", filePath, rmErr)
+	}
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -415,39 +441,18 @@ func (s *Server) handleDuplicateClaudeSettingsProfile(w http.ResponseWriter, r *
 		return
 	}
 
-	var source *config.ClaudeSettingsProfile
-	for i := range m.Profiles {
-		if m.Profiles[i].ID == id {
-			source = &m.Profiles[i]
-			break
-		}
-	}
-	if source == nil {
+	idx := findProfileIndex(m.Profiles, id)
+	if idx == -1 {
 		writeError(w, http.StatusNotFound, "profile not found")
 		return
 	}
+	source := &m.Profiles[idx]
 
 	newName := "Copy of " + source.Name
-	newID := slugify(newName)
-	base := newID
-	for i := 2; ; i++ {
-		conflict := false
-		for _, p := range m.Profiles {
-			if p.ID == newID {
-				conflict = true
-				break
-			}
-		}
-		if !conflict {
-			break
-		}
-		newID = base + "-" + string(rune('0'+i))
-	}
+	newID := deduplicateID(slugify(newName), m.Profiles)
 
-	var content []byte
-	if data, readErr := os.ReadFile(source.FilePath); readErr == nil { //nolint:gosec
-		content = data
-	} else {
+	content, readErr := os.ReadFile(source.FilePath) //nolint:gosec
+	if readErr != nil || content == nil {
 		content = []byte("{}")
 	}
 
@@ -462,10 +467,7 @@ func (s *Server) handleDuplicateClaudeSettingsProfile(w http.ResponseWriter, r *
 	}
 
 	newProfile := config.ClaudeSettingsProfile{
-		ID:        newID,
-		Name:      newName,
-		FilePath:  newFilePath,
-		IsDefault: false,
+		ID: newID, Name: newName, FilePath: newFilePath, IsDefault: false,
 	}
 	m.Profiles = append(m.Profiles, newProfile)
 	if err := saveProfilesMetadata(m); err != nil {

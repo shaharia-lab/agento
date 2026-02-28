@@ -65,47 +65,59 @@ func LoadMCPRegistry(filePath string) (*MCPRegistry, error) {
 	registry := &MCPRegistry{servers: make(map[string]any)}
 
 	for name, entry := range raw {
-		switch entry.Transport {
-		case "stdio":
-			env, err := interpolateEnvMap(name, entry.Env)
-			if err != nil {
-				return nil, err
-			}
-			registry.servers[name] = claude.McpStdioServer{
-				Type:    "stdio",
-				Command: entry.Command,
-				Args:    entry.Args,
-				Env:     env,
-			}
-
-		case "streamable_http":
-			headers, err := interpolateEnvMap(name, entry.Headers)
-			if err != nil {
-				return nil, err
-			}
-			registry.servers[name] = claude.McpHTTPServer{
-				Type:    "http",
-				URL:     entry.URL,
-				Headers: headers,
-			}
-
-		case "sse":
-			headers, err := interpolateEnvMap(name, entry.Headers)
-			if err != nil {
-				return nil, err
-			}
-			registry.servers[name] = claude.McpSSEServer{
-				Type:    "sse",
-				URL:     entry.URL,
-				Headers: headers,
-			}
-
-		default:
-			return nil, fmt.Errorf("MCP server %q: unknown transport %q (must be stdio, streamable_http, or sse)", name, entry.Transport)
+		sdkCfg, err := convertMCPEntry(name, entry)
+		if err != nil {
+			return nil, err
 		}
+		registry.servers[name] = sdkCfg
 	}
 
 	return registry, nil
+}
+
+// convertMCPEntry converts a raw YAML MCP entry into the appropriate SDK config type.
+func convertMCPEntry(name string, entry rawMCPEntry) (any, error) {
+	switch entry.Transport {
+	case "stdio":
+		env, err := interpolateEnvMap(name, entry.Env)
+		if err != nil {
+			return nil, err
+		}
+		return claude.McpStdioServer{
+			Type:    "stdio",
+			Command: entry.Command,
+			Args:    entry.Args,
+			Env:     env,
+		}, nil
+
+	case "streamable_http":
+		headers, err := interpolateEnvMap(name, entry.Headers)
+		if err != nil {
+			return nil, err
+		}
+		return claude.McpHTTPServer{
+			Type:    "http",
+			URL:     entry.URL,
+			Headers: headers,
+		}, nil
+
+	case "sse":
+		headers, err := interpolateEnvMap(name, entry.Headers)
+		if err != nil {
+			return nil, err
+		}
+		return claude.McpSSEServer{
+			Type:    "sse",
+			URL:     entry.URL,
+			Headers: headers,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf(
+			"MCP server %q: unknown transport %q (must be stdio, streamable_http, or sse)",
+			name, entry.Transport,
+		)
+	}
 }
 
 // interpolateEnvMap applies ${ENV:VAR_NAME} substitution to all values in m.

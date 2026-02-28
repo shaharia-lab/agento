@@ -50,7 +50,8 @@ func NewSessionLogger(logDir string, sessionID string, level slog.Level) (*slog.
 
 // openLogFile opens (or creates) a log file with append semantics.
 func openLogFile(path string) (*os.File, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600) //nolint:gosec // path is constructed from admin-configured log dir
+	//nolint:gosec // path is constructed from admin-configured log dir
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
 	if err != nil {
 		return nil, fmt.Errorf("opening log file %q: %w", path, err)
 	}

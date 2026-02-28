@@ -31,7 +31,9 @@ type ChatService interface {
 	// CreateSession starts a new chat session. agentSlug may be empty for no-agent chat.
 	// workingDir and model are stored with the session and used during message processing.
 	// settingsProfileID optionally links the session to a named Claude settings profile.
-	CreateSession(ctx context.Context, agentSlug, workingDir, model, settingsProfileID string) (*storage.ChatSession, error)
+	CreateSession(
+		ctx context.Context, agentSlug, workingDir, model, settingsProfileID string,
+	) (*storage.ChatSession, error)
 
 	// DeleteSession removes a session and all its messages.
 	DeleteSession(ctx context.Context, id string) error
@@ -40,14 +42,20 @@ type ChatService interface {
 	// a persistent agent session. The caller must consume events from session.Events()
 	// (breaking at each TypeResult), inject follow-up messages via session.Send() as
 	// needed, call session.Close() when done, and then call CommitMessage.
-	BeginMessage(ctx context.Context, sessionID, content string, opts agent.RunOptions) (*claude.Session, *storage.ChatSession, error)
+	BeginMessage(
+		ctx context.Context, sessionID, content string, opts agent.RunOptions,
+	) (*claude.Session, *storage.ChatSession, error)
 
 	// CommitMessage persists the assistant response and updates session metadata.
 	// blocks contains the ordered content blocks (thinking/text/tool_use) captured
 	// during streaming so they can be re-rendered faithfully after a page reload.
 	// usage holds the cumulative token counts for the completed turn(s); they are
 	// added to the session's running totals.
-	CommitMessage(ctx context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, isFirstMessage bool, blocks []storage.MessageBlock, usage agent.UsageStats) error
+	CommitMessage(
+		ctx context.Context, session *storage.ChatSession,
+		assistantText, sdkSessionID string, isFirstMessage bool,
+		blocks []storage.MessageBlock, usage agent.UsageStats,
+	) error
 
 	// UpdateSession persists updated session metadata (e.g. after linking an SDK session ID).
 	UpdateSession(ctx context.Context, session *storage.ChatSession) error
@@ -102,7 +110,9 @@ func (s *chatService) GetSession(_ context.Context, id string) (*storage.ChatSes
 	return session, nil
 }
 
-func (s *chatService) GetSessionWithMessages(_ context.Context, id string) (*storage.ChatSession, []storage.ChatMessage, error) {
+func (s *chatService) GetSessionWithMessages(
+	_ context.Context, id string,
+) (*storage.ChatSession, []storage.ChatMessage, error) {
 	session, msgs, err := s.chatRepo.GetSessionWithMessages(id)
 	if err != nil {
 		return nil, nil, fmt.Errorf("getting session with messages %q: %w", id, err)
@@ -110,7 +120,9 @@ func (s *chatService) GetSessionWithMessages(_ context.Context, id string) (*sto
 	return session, msgs, nil
 }
 
-func (s *chatService) CreateSession(_ context.Context, agentSlug, workingDir, model, settingsProfileID string) (*storage.ChatSession, error) {
+func (s *chatService) CreateSession(
+	_ context.Context, agentSlug, workingDir, model, settingsProfileID string,
+) (*storage.ChatSession, error) {
 	// Validate agent slug if provided.
 	if agentSlug != "" {
 		agentCfg, err := s.agentRepo.Get(agentSlug)
@@ -127,7 +139,11 @@ func (s *chatService) CreateSession(_ context.Context, agentSlug, workingDir, mo
 		return nil, fmt.Errorf("creating session: %w", err)
 	}
 
-	s.logger.Info("chat session created", "session_id", session.ID, "agent_slug", agentSlug, "settings_profile_id", settingsProfileID)
+	s.logger.Info("chat session created",
+		"session_id", session.ID,
+		"agent_slug", agentSlug,
+		"settings_profile_id", settingsProfileID,
+	)
 	return session, nil
 }
 
@@ -139,7 +155,10 @@ func (s *chatService) DeleteSession(_ context.Context, id string) error {
 	return nil
 }
 
-func (s *chatService) BeginMessage(ctx context.Context, sessionID, content string, opts agent.RunOptions) (*claude.Session, *storage.ChatSession, error) {
+func (s *chatService) BeginMessage(
+	ctx context.Context, sessionID, content string,
+	opts agent.RunOptions,
+) (*claude.Session, *storage.ChatSession, error) {
 	session, err := s.chatRepo.GetSession(sessionID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading session: %w", err)
@@ -148,58 +167,27 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 		return nil, nil, &NotFoundError{Resource: "chat", ID: sessionID}
 	}
 
-	// Resolve agent config. For no-agent sessions, synthesize a minimal config
-	// using the session's model (or the default model) so the SDK still has a model to target.
-	var agentCfg *config.AgentConfig
-	if session.AgentSlug != "" {
-		agentCfg, err = s.agentRepo.Get(session.AgentSlug)
-		if err != nil {
-			return nil, nil, fmt.Errorf("loading agent: %w", err)
-		}
-		if agentCfg == nil {
-			return nil, nil, &NotFoundError{Resource: "agent", ID: session.AgentSlug}
-		}
-	} else {
-		// No-agent (direct) chat: use the session's model, falling back to the default.
-		model := session.Model
-		if model == "" {
-			model = s.defaultModel
-		}
-		agentCfg = &config.AgentConfig{
-			Model:    model,
-			Thinking: "adaptive",
-		}
+	agentCfg, err := s.resolveAgentConfig(session)
+	if err != nil {
+		return nil, nil, err
 	}
 
-	// Change working directory if the session has one configured.
 	if session.WorkingDir != "" {
-		if err := os.Chdir(session.WorkingDir); err != nil {
-			return nil, nil, fmt.Errorf("changing working directory: %w", err)
+		if chdirErr := os.Chdir(session.WorkingDir); chdirErr != nil {
+			return nil, nil, fmt.Errorf("changing working directory: %w", chdirErr)
 		}
 	}
 
-	// Persist the user message before starting the stream.
 	userMsg := storage.ChatMessage{
 		Role:      "user",
 		Content:   content,
 		Timestamp: time.Now().UTC(),
 	}
-	if err := s.chatRepo.AppendMessage(sessionID, userMsg); err != nil {
-		return nil, nil, fmt.Errorf("storing user message: %w", err)
+	if appendErr := s.chatRepo.AppendMessage(sessionID, userMsg); appendErr != nil {
+		return nil, nil, fmt.Errorf("storing user message: %w", appendErr)
 	}
 
-	opts.SessionID = session.SDKSession
-	opts.LocalToolsMCP = s.localMCP
-	opts.MCPRegistry = s.mcpRegistry
-	opts.IntegrationRegistry = s.integrationRegistry
-
-	// Resolve the settings file path for the session's profile.
-	settingsFilePath, resolveErr := config.LoadProfileFilePath(session.SettingsProfileID)
-	if resolveErr != nil {
-		s.logger.Warn("failed to resolve settings profile path, using default", "error", resolveErr)
-	} else {
-		opts.SettingsFilePath = settingsFilePath
-	}
+	s.populateRunOptions(&opts, session)
 
 	agentSession, err := agent.StartSession(ctx, agentCfg, content, opts)
 	if err != nil {
@@ -210,7 +198,50 @@ func (s *chatService) BeginMessage(ctx context.Context, sessionID, content strin
 	return agentSession, session, nil
 }
 
-func (s *chatService) CommitMessage(_ context.Context, session *storage.ChatSession, assistantText, sdkSessionID string, _ bool, blocks []storage.MessageBlock, usage agent.UsageStats) error {
+// resolveAgentConfig loads the agent config for the session, or synthesizes a
+// minimal one for no-agent (direct) chat sessions.
+func (s *chatService) resolveAgentConfig(session *storage.ChatSession) (*config.AgentConfig, error) {
+	if session.AgentSlug != "" {
+		agentCfg, err := s.agentRepo.Get(session.AgentSlug)
+		if err != nil {
+			return nil, fmt.Errorf("loading agent: %w", err)
+		}
+		if agentCfg == nil {
+			return nil, &NotFoundError{Resource: "agent", ID: session.AgentSlug}
+		}
+		return agentCfg, nil
+	}
+
+	model := session.Model
+	if model == "" {
+		model = s.defaultModel
+	}
+	return &config.AgentConfig{
+		Model:    model,
+		Thinking: "adaptive",
+	}, nil
+}
+
+// populateRunOptions fills in the run options from service dependencies and session state.
+func (s *chatService) populateRunOptions(opts *agent.RunOptions, session *storage.ChatSession) {
+	opts.SessionID = session.SDKSession
+	opts.LocalToolsMCP = s.localMCP
+	opts.MCPRegistry = s.mcpRegistry
+	opts.IntegrationRegistry = s.integrationRegistry
+
+	settingsFilePath, resolveErr := config.LoadProfileFilePath(session.SettingsProfileID)
+	if resolveErr != nil {
+		s.logger.Warn("failed to resolve settings profile path, using default", "error", resolveErr)
+	} else {
+		opts.SettingsFilePath = settingsFilePath
+	}
+}
+
+func (s *chatService) CommitMessage(
+	_ context.Context, session *storage.ChatSession,
+	assistantText, sdkSessionID string, _ bool,
+	blocks []storage.MessageBlock, usage agent.UsageStats,
+) error {
 	if assistantText != "" {
 		msg := storage.ChatMessage{
 			Role:      "assistant",

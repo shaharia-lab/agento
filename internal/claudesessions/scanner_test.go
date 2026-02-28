@@ -53,7 +53,9 @@ func writeJSONL(t *testing.T, dir, sessionID string, ts time.Time) string {
 		},
 	})
 
-	data := append(userMsg, '\n')
+	var data []byte
+	data = append(data, userMsg...)
+	data = append(data, '\n')
 	data = append(data, assistantMsg...)
 	data = append(data, '\n')
 
@@ -161,8 +163,8 @@ func TestIncrementalScan_DeletedFiles(t *testing.T) {
 	}
 
 	// Delete one file.
-	if err := os.Remove(fp); err != nil {
-		t.Fatalf("remove: %v", err)
+	if removeErr := os.Remove(fp); removeErr != nil {
+		t.Fatalf("remove: %v", removeErr)
 	}
 
 	// Second scan should reflect the deletion.

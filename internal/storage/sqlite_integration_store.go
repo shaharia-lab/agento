@@ -97,12 +97,12 @@ func (s *SQLiteIntegrationStore) Save(cfg *config.IntegrationConfig) error {
 
 	var authJSON *string
 	if cfg.Auth != nil {
-		b, err := json.Marshal(cfg.Auth)
-		if err != nil {
-			return fmt.Errorf("marshaling auth token: %w", err)
+		b, marshalErr := json.Marshal(cfg.Auth)
+		if marshalErr != nil {
+			return fmt.Errorf("marshaling auth token: %w", marshalErr)
 		}
-		s := string(b)
-		authJSON = &s
+		authStr := string(b)
+		authJSON = &authStr
 	}
 
 	servJSON, err := json.Marshal(cfg.Services)
@@ -144,7 +144,10 @@ func (s *SQLiteIntegrationStore) Delete(id string) error {
 	if err != nil {
 		return fmt.Errorf("deleting integration %q: %w", id, err)
 	}
-	n, _ := res.RowsAffected()
+	n, raErr := res.RowsAffected()
+	if raErr != nil {
+		return fmt.Errorf("checking rows affected for integration %q: %w", id, raErr)
+	}
 	if n == 0 {
 		return fmt.Errorf("integration %q not found", id)
 	}

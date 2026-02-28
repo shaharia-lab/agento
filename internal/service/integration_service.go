@@ -88,7 +88,9 @@ func (s *integrationService) Get(_ context.Context, id string) (*config.Integrat
 	return cfg, nil
 }
 
-func (s *integrationService) Create(_ context.Context, cfg *config.IntegrationConfig) (*config.IntegrationConfig, error) {
+func (s *integrationService) Create(
+	_ context.Context, cfg *config.IntegrationConfig,
+) (*config.IntegrationConfig, error) {
 	if cfg.Name == "" {
 		return nil, &ValidationError{Field: "name", Message: "name is required"}
 	}
@@ -120,7 +122,9 @@ func (s *integrationService) Create(_ context.Context, cfg *config.IntegrationCo
 	return cfg, nil
 }
 
-func (s *integrationService) Update(ctx context.Context, id string, cfg *config.IntegrationConfig) (*config.IntegrationConfig, error) {
+func (s *integrationService) Update(
+	ctx context.Context, id string, cfg *config.IntegrationConfig,
+) (*config.IntegrationConfig, error) {
 	existing, err := s.Get(ctx, id)
 	if err != nil {
 		return nil, err
@@ -184,39 +188,7 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 
 	onToken := func(tok *oauth2.Token, tokErr error) {
 		defer cancelCallback()
-
-		s.mu.Lock()
-		defer s.mu.Unlock()
-
-		state.done = true
-		if tokErr != nil {
-			state.err = tokErr
-			s.logger.Warn("OAuth flow failed", "id", id, "error", tokErr)
-			return
-		}
-
-		// Save the token to the integration config.
-		latestCfg, loadErr := s.store.Get(id)
-		if loadErr != nil || latestCfg == nil {
-			state.err = fmt.Errorf("loading integration after OAuth: %w", loadErr)
-			return
-		}
-		latestCfg.Auth = tok
-		latestCfg.UpdatedAt = time.Now().UTC()
-		if saveErr := s.store.Save(latestCfg); saveErr != nil {
-			state.err = fmt.Errorf("saving token: %w", saveErr)
-			return
-		}
-
-		state.authenticated = true
-		s.logger.Info("OAuth completed, starting integration server", "id", id)
-
-		// Start the MCP server for this newly-authenticated integration.
-		go func() {
-			if startErr := s.registry.Reload(s.parentCtx, id); startErr != nil {
-				s.logger.Warn("failed to start integration server after OAuth", "id", id, "error", startErr)
-			}
-		}()
+		s.handleOAuthToken(id, state, tok, tokErr)
 	}
 
 	if err := google.StartCallbackServer(callbackCtx, port, cfg, onToken); err != nil {
@@ -225,6 +197,41 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 	}
 
 	return authURL, nil
+}
+
+func (s *integrationService) handleOAuthToken(id string, state *oauthState, tok *oauth2.Token, tokErr error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	state.done = true
+	if tokErr != nil {
+		state.err = tokErr
+		s.logger.Warn("OAuth flow failed", "id", id, "error", tokErr)
+		return
+	}
+
+	// Save the token to the integration config.
+	latestCfg, loadErr := s.store.Get(id)
+	if loadErr != nil || latestCfg == nil {
+		state.err = fmt.Errorf("loading integration after OAuth: %w", loadErr)
+		return
+	}
+	latestCfg.Auth = tok
+	latestCfg.UpdatedAt = time.Now().UTC()
+	if saveErr := s.store.Save(latestCfg); saveErr != nil {
+		state.err = fmt.Errorf("saving token: %w", saveErr)
+		return
+	}
+
+	state.authenticated = true
+	s.logger.Info("OAuth completed, starting integration server", "id", id)
+
+	// Start the MCP server for this newly-authenticated integration.
+	go func() {
+		if startErr := s.registry.Reload(s.parentCtx, id); startErr != nil {
+			s.logger.Warn("failed to start integration server after OAuth", "id", id, "error", startErr)
+		}
+	}()
 }
 
 func (s *integrationService) GetAuthStatus(_ context.Context, id string) (bool, error) {

@@ -120,7 +120,9 @@ func (r *IntegrationRegistry) AllServerConfigs() map[string]claude.McpHTTPServer
 // specified tools registered. The server runs until ctx is canceled, so callers should
 // pass a session-scoped context for automatic cleanup.
 // This is used by agents that only need a subset of an integration's tools.
-func (r *IntegrationRegistry) StartFilteredServer(ctx context.Context, id string, tools []string) (claude.McpHTTPServer, error) {
+func (r *IntegrationRegistry) StartFilteredServer(
+	ctx context.Context, id string, tools []string,
+) (claude.McpHTTPServer, error) {
 	cfg, err := r.store.Get(id)
 	if err != nil {
 		return claude.McpHTTPServer{}, fmt.Errorf("loading integration %q: %w", id, err)

@@ -89,8 +89,8 @@ func TestSQLiteAgentStore_CRUD(t *testing.T) {
 			MCP:     map[string]config.MCPCap{"server1": {Tools: []string{"tool1"}}},
 		},
 	}
-	if err := store.Save(agent); err != nil {
-		t.Fatalf("save: %v", err)
+	if saveErr := store.Save(agent); saveErr != nil {
+		t.Fatalf("save: %v", saveErr)
 	}
 
 	// Get
@@ -122,8 +122,8 @@ func TestSQLiteAgentStore_CRUD(t *testing.T) {
 
 	// Update (upsert)
 	agent.Description = "Updated description"
-	if err := store.Save(agent); err != nil {
-		t.Fatalf("save update: %v", err)
+	if updateErr := store.Save(agent); updateErr != nil {
+		t.Fatalf("save update: %v", updateErr)
 	}
 	got, _ = store.Get("test-agent")
 	if got.Description != "Updated description" {
@@ -232,11 +232,11 @@ func TestSQLiteChatStore_CRUD(t *testing.T) {
 			{Type: "tool_use", ID: "t1", Name: "current_time", Input: json.RawMessage(`{"tz":"UTC"}`)},
 		},
 	}
-	if err := store.AppendMessage(session.ID, msg1); err != nil {
-		t.Fatalf("append msg1: %v", err)
+	if appendErr := store.AppendMessage(session.ID, msg1); appendErr != nil {
+		t.Fatalf("append msg1: %v", appendErr)
 	}
-	if err := store.AppendMessage(session.ID, msg2); err != nil {
-		t.Fatalf("append msg2: %v", err)
+	if appendErr := store.AppendMessage(session.ID, msg2); appendErr != nil {
+		t.Fatalf("append msg2: %v", appendErr)
 	}
 
 	// GetSessionWithMessages
@@ -353,8 +353,8 @@ func TestSQLiteIntegrationStore_CRUD(t *testing.T) {
 	}
 
 	// Save
-	if err := store.Save(cfg); err != nil {
-		t.Fatalf("save: %v", err)
+	if saveErr := store.Save(cfg); saveErr != nil {
+		t.Fatalf("save: %v", saveErr)
 	}
 
 	// Get
@@ -445,8 +445,8 @@ func TestSQLiteSettingsStore_LoadSave(t *testing.T) {
 	settings.AppearanceDarkMode = true
 	settings.AppearanceFontSize = 14
 	settings.AppearanceFontFamily = "monospace"
-	if err := store.Save(settings); err != nil {
-		t.Fatalf("save: %v", err)
+	if saveErr := store.Save(settings); saveErr != nil {
+		t.Fatalf("save: %v", saveErr)
 	}
 
 	// Load saved

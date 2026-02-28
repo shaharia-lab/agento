@@ -55,7 +55,9 @@ type sendEmailParams struct {
 	Body    string `json:"body" jsonschema:"required,Plain text body of the email"`
 }
 
-func handleSendEmail(ctx context.Context, svc *gmail.Service, params *sendEmailParams) (*mcp.CallToolResult, any, error) {
+func handleSendEmail(
+	ctx context.Context, svc *gmail.Service, params *sendEmailParams,
+) (*mcp.CallToolResult, any, error) {
 	raw := fmt.Sprintf("To: %s\r\nSubject: %s\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n%s",
 		params.To, params.Subject, params.Body)
 
@@ -80,7 +82,9 @@ type readEmailParams struct {
 	MessageID string `json:"message_id" jsonschema:"required,The Gmail message ID to read"`
 }
 
-func handleReadEmail(ctx context.Context, svc *gmail.Service, params *readEmailParams) (*mcp.CallToolResult, any, error) {
+func handleReadEmail(
+	ctx context.Context, svc *gmail.Service, params *readEmailParams,
+) (*mcp.CallToolResult, any, error) {
 	msg, err := svc.Users.Messages.Get("me", params.MessageID).
 		Format("full").
 		Context(ctx).
@@ -135,7 +139,9 @@ type searchEmailParams struct {
 	MaxResults int64  `json:"max_results" jsonschema:"Maximum number of messages to return (default 10, max 50)"`
 }
 
-func handleSearchEmail(ctx context.Context, svc *gmail.Service, params *searchEmailParams) (*mcp.CallToolResult, any, error) {
+func handleSearchEmail(
+	ctx context.Context, svc *gmail.Service, params *searchEmailParams,
+) (*mcp.CallToolResult, any, error) {
 	maxResults := params.MaxResults
 	if maxResults <= 0 || maxResults > 50 {
 		maxResults = 10

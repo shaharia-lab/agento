@@ -45,8 +45,9 @@ func StartLocalMCPServer(ctx context.Context) (*LocalMCPConfig, error) {
 
 	// Register all local tools here.
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "current_time",
-		Description: "Returns the current date and time for a given IANA timezone (e.g. UTC, America/New_York, Asia/Tokyo). Defaults to UTC.",
+		Name: "current_time",
+		Description: "Returns the current date and time for a given IANA timezone " +
+			"(e.g. UTC, America/New_York, Asia/Tokyo). Defaults to UTC.",
 	}, getCurrentTime)
 
 	cfg, err := claude.StartInProcessMCPServer(ctx, LocalMCPServerName, server)

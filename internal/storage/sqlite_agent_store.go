@@ -113,7 +113,10 @@ func (s *SQLiteAgentStore) Delete(slug string) error {
 	if err != nil {
 		return fmt.Errorf("deleting agent %q: %w", slug, err)
 	}
-	n, _ := res.RowsAffected()
+	n, raErr := res.RowsAffected()
+	if raErr != nil {
+		return fmt.Errorf("checking rows affected for agent %q: %w", slug, raErr)
+	}
 	if n == 0 {
 		return fmt.Errorf("agent %q not found", slug)
 	}

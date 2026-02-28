@@ -111,7 +111,11 @@ func (c *Cache) loadAll() ([]ClaudeSessionSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			c.logger.Error("failed to close rows", "error", cerr)
+		}
+	}()
 
 	var sessions []ClaudeSessionSummary
 	for rows.Next() {

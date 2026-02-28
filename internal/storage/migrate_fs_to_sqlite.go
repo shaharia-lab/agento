@@ -31,7 +31,12 @@ func MigrateFromFS(db *sql.DB, dataDir string, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("begin migration transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() {
+		alreadyDone := "sql: transaction has already been committed or rolled back"
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr.Error() != alreadyDone {
+			logger.Error("failed to rollback migration transaction", "error", rbErr)
+		}
+	}()
 
 	if err := migrateAgents(ctx, tx, agentsDir, logger); err != nil {
 		return fmt.Errorf("migrating agents: %w", err)
@@ -95,50 +100,92 @@ func migrateAgents(ctx context.Context, tx *sql.Tx, dir string, logger *slog.Log
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name())) //nolint:gosec
+		inserted, err := migrateOneAgent(ctx, tx, dir, entry.Name(), logger)
 		if err != nil {
-			logger.Warn("skipping agent file", "file", entry.Name(), "error", err)
-			continue
+			return err
 		}
-
-		var cfg config.AgentConfig
-		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			logger.Warn("skipping malformed agent", "file", entry.Name(), "error", err)
-			continue
+		if inserted {
+			count++
 		}
-		if cfg.Slug == "" {
-			cfg.Slug = strings.TrimSuffix(entry.Name(), ".yaml")
-		}
-		if cfg.Model == "" {
-			cfg.Model = "claude-sonnet-4-6"
-		}
-		if cfg.Thinking == "" {
-			cfg.Thinking = "adaptive"
-		}
-
-		capsJSON, err := json.Marshal(cfg.Capabilities)
-		if err != nil {
-			logger.Warn("skipping agent with bad capabilities", "slug", cfg.Slug, "error", err)
-			continue
-		}
-
-		now := time.Now().UTC()
-		_, err = tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO agents
-				(slug, name, description, model, thinking, permission_mode,
-				 system_prompt, capabilities, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			cfg.Slug, cfg.Name, cfg.Description, cfg.Model,
-			cfg.Thinking, cfg.PermissionMode, cfg.SystemPrompt,
-			string(capsJSON), now, now,
-		)
-		if err != nil {
-			return fmt.Errorf("inserting agent %q: %w", cfg.Slug, err)
-		}
-		count++
 	}
 	logger.Info("migrated agents", "count", count)
 	return nil
+}
+
+func migrateOneAgent(ctx context.Context, tx *sql.Tx, dir, fileName string, logger *slog.Logger) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(dir, fileName)) //nolint:gosec
+	if err != nil {
+		logger.Warn("skipping agent file", "file", fileName, "error", err)
+		return false, nil
+	}
+
+	var cfg config.AgentConfig
+	if unmarshalErr := yaml.Unmarshal(data, &cfg); unmarshalErr != nil {
+		logger.Warn("skipping malformed agent", "file", fileName, "error", unmarshalErr)
+		return false, nil
+	}
+
+	applyAgentMigrationDefaults(&cfg, fileName)
+
+	capsJSON, err := json.Marshal(cfg.Capabilities)
+	if err != nil {
+		logger.Warn("skipping agent with bad capabilities", "slug", cfg.Slug, "error", err)
+		return false, nil
+	}
+
+	now := time.Now().UTC()
+	_, err = tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO agents
+			(slug, name, description, model, thinking, permission_mode,
+			 system_prompt, capabilities, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		cfg.Slug, cfg.Name, cfg.Description, cfg.Model,
+		cfg.Thinking, cfg.PermissionMode, cfg.SystemPrompt,
+		string(capsJSON), now, now,
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting agent %q: %w", cfg.Slug, err)
+	}
+	return true, nil
+}
+
+func applyAgentMigrationDefaults(cfg *config.AgentConfig, fileName string) {
+	if cfg.Slug == "" {
+		cfg.Slug = strings.TrimSuffix(fileName, ".yaml")
+	}
+	if cfg.Model == "" {
+		cfg.Model = "claude-sonnet-4-6"
+	}
+	if cfg.Thinking == "" {
+		cfg.Thinking = "adaptive"
+	}
+}
+
+// chatFileRecord is the unified struct for session and message records in JSONL chat files.
+type chatFileRecord struct {
+	Type                     string          `json:"type"`
+	ID                       string          `json:"id"`
+	Title                    string          `json:"title"`
+	AgentSlug                string          `json:"agent_slug"`
+	SDKSession               string          `json:"sdk_session_id"`
+	WorkingDir               string          `json:"working_directory"`
+	Model                    string          `json:"model"`
+	SettingsProfileID        string          `json:"settings_profile_id"`
+	CreatedAt                time.Time       `json:"created_at"`
+	UpdatedAt                time.Time       `json:"updated_at"`
+	TotalInputTokens         int             `json:"total_input_tokens"`
+	TotalOutputTokens        int             `json:"total_output_tokens"`
+	TotalCacheCreationTokens int             `json:"total_cache_creation_tokens"`
+	TotalCacheReadTokens     int             `json:"total_cache_read_tokens"`
+	Role                     string          `json:"role"`
+	Content                  string          `json:"content"`
+	Timestamp                time.Time       `json:"timestamp"`
+	Blocks                   json.RawMessage `json:"blocks"`
+}
+
+type chatMigrationCounts struct {
+	sessions int
+	messages int
 }
 
 func migrateChatSessions(ctx context.Context, tx *sql.Tx, dir string, logger *slog.Logger) error {
@@ -150,98 +197,119 @@ func migrateChatSessions(ctx context.Context, tx *sql.Tx, dir string, logger *sl
 		return err
 	}
 
-	sessionCount := 0
-	messageCount := 0
+	counts := chatMigrationCounts{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
 			continue
 		}
 
-		f, err := os.Open(filepath.Join(dir, entry.Name())) //nolint:gosec
-		if err != nil {
-			logger.Warn("skipping chat file", "file", entry.Name(), "error", err)
+		if err := migrateOneChatFile(ctx, tx, dir, entry.Name(), &counts, logger); err != nil {
+			return err
+		}
+	}
+	logger.Info("migrated chat sessions", "sessions", counts.sessions, "messages", counts.messages)
+	return nil
+}
+
+func migrateOneChatFile(
+	ctx context.Context, tx *sql.Tx,
+	dir, fileName string,
+	counts *chatMigrationCounts, logger *slog.Logger,
+) error {
+	f, err := os.Open(filepath.Join(dir, fileName)) //nolint:gosec
+	if err != nil {
+		logger.Warn("skipping chat file", "file", fileName, "error", err)
+		return nil
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			logger.Warn("failed to close chat file", "file", fileName, "error", cerr)
+		}
+	}()
+
+	records := parseChatRecords(f)
+	if len(records) == 0 {
+		return nil
+	}
+
+	return importChatRecords(ctx, tx, records, counts)
+}
+
+// parseChatRecords reads all valid JSONL records from the chat file.
+// Returns nil if the first record is not a session header.
+func parseChatRecords(f *os.File) []chatFileRecord {
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+
+	var records []chatFileRecord
+	for scanner.Scan() {
+		var rec chatFileRecord
+		if unmarshalErr := json.Unmarshal(scanner.Bytes(), &rec); unmarshalErr != nil {
 			continue
 		}
-
-		scanner := bufio.NewScanner(f)
-		scanner.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
-		first := true
-		var sessionID string
-
-		for scanner.Scan() {
-			var rec struct {
-				Type                     string          `json:"type"`
-				ID                       string          `json:"id"`
-				Title                    string          `json:"title"`
-				AgentSlug                string          `json:"agent_slug"`
-				SDKSession               string          `json:"sdk_session_id"`
-				WorkingDir               string          `json:"working_directory"`
-				Model                    string          `json:"model"`
-				SettingsProfileID        string          `json:"settings_profile_id"`
-				CreatedAt                time.Time       `json:"created_at"`
-				UpdatedAt                time.Time       `json:"updated_at"`
-				TotalInputTokens         int             `json:"total_input_tokens"`
-				TotalOutputTokens        int             `json:"total_output_tokens"`
-				TotalCacheCreationTokens int             `json:"total_cache_creation_tokens"`
-				TotalCacheReadTokens     int             `json:"total_cache_read_tokens"`
-				Role                     string          `json:"role"`
-				Content                  string          `json:"content"`
-				Timestamp                time.Time       `json:"timestamp"`
-				Blocks                   json.RawMessage `json:"blocks"`
-			}
-			if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
-				continue
-			}
-
-			if first {
-				first = false
-				if rec.Type != "session" {
-					break
-				}
-				sessionID = rec.ID
-
-				_, err = tx.ExecContext(ctx, `
-					INSERT OR IGNORE INTO chat_sessions
-						(id, title, agent_slug, sdk_session_id, working_directory, model,
-						 settings_profile_id, total_input_tokens, total_output_tokens,
-						 total_cache_creation_tokens, total_cache_read_tokens,
-						 created_at, updated_at)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-					rec.ID, rec.Title, rec.AgentSlug, rec.SDKSession, rec.WorkingDir,
-					rec.Model, rec.SettingsProfileID,
-					rec.TotalInputTokens, rec.TotalOutputTokens,
-					rec.TotalCacheCreationTokens, rec.TotalCacheReadTokens,
-					rec.CreatedAt, rec.UpdatedAt,
-				)
-				if err != nil {
-					_ = f.Close()
-					return fmt.Errorf("inserting session %q: %w", rec.ID, err)
-				}
-				sessionCount++
-				continue
-			}
-
-			if rec.Type == "message" && sessionID != "" {
-				blocksJSON := "[]"
-				if len(rec.Blocks) > 0 {
-					blocksJSON = string(rec.Blocks)
-				}
-
-				_, err = tx.ExecContext(ctx, `
-					INSERT INTO chat_messages (session_id, role, content, blocks, timestamp)
-					VALUES (?, ?, ?, ?, ?)`,
-					sessionID, rec.Role, rec.Content, blocksJSON, rec.Timestamp,
-				)
-				if err != nil {
-					_ = f.Close()
-					return fmt.Errorf("inserting message for session %q: %w", sessionID, err)
-				}
-				messageCount++
-			}
+		if len(records) == 0 && rec.Type != "session" {
+			return nil
 		}
-		_ = f.Close()
+		records = append(records, rec)
 	}
-	logger.Info("migrated chat sessions", "sessions", sessionCount, "messages", messageCount)
+	return records
+}
+
+// importChatRecords inserts the parsed session and message records into the database.
+func importChatRecords(ctx context.Context, tx *sql.Tx, records []chatFileRecord, counts *chatMigrationCounts) error {
+	header := &records[0]
+	if err := insertChatSession(ctx, tx, header); err != nil {
+		return err
+	}
+	counts.sessions++
+
+	for i := 1; i < len(records); i++ {
+		rec := &records[i]
+		if rec.Type != "message" {
+			continue
+		}
+		if err := insertChatMessage(ctx, tx, header.ID, rec); err != nil {
+			return err
+		}
+		counts.messages++
+	}
+	return nil
+}
+
+func insertChatSession(ctx context.Context, tx *sql.Tx, rec *chatFileRecord) error {
+	_, err := tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO chat_sessions
+			(id, title, agent_slug, sdk_session_id, working_directory, model,
+			 settings_profile_id, total_input_tokens, total_output_tokens,
+			 total_cache_creation_tokens, total_cache_read_tokens,
+			 created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		rec.ID, rec.Title, rec.AgentSlug, rec.SDKSession, rec.WorkingDir,
+		rec.Model, rec.SettingsProfileID,
+		rec.TotalInputTokens, rec.TotalOutputTokens,
+		rec.TotalCacheCreationTokens, rec.TotalCacheReadTokens,
+		rec.CreatedAt, rec.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("inserting session %q: %w", rec.ID, err)
+	}
+	return nil
+}
+
+func insertChatMessage(ctx context.Context, tx *sql.Tx, sessionID string, rec *chatFileRecord) error {
+	blocksJSON := "[]"
+	if len(rec.Blocks) > 0 {
+		blocksJSON = string(rec.Blocks)
+	}
+
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO chat_messages (session_id, role, content, blocks, timestamp)
+		VALUES (?, ?, ?, ?, ?)`,
+		sessionID, rec.Role, rec.Content, blocksJSON, rec.Timestamp,
+	)
+	if err != nil {
+		return fmt.Errorf("inserting message for session %q: %w", sessionID, err)
+	}
 	return nil
 }
 
@@ -260,58 +328,77 @@ func migrateIntegrations(ctx context.Context, tx *sql.Tx, dir string, logger *sl
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name())) //nolint:gosec
+		inserted, err := migrateOneIntegration(ctx, tx, dir, entry.Name(), logger)
 		if err != nil {
-			logger.Warn("skipping integration file", "file", entry.Name(), "error", err)
-			continue
+			return err
 		}
-
-		var cfg config.IntegrationConfig
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			logger.Warn("skipping malformed integration", "file", entry.Name(), "error", err)
-			continue
+		if inserted {
+			count++
 		}
-
-		credJSON, err := json.Marshal(cfg.Credentials)
-		if err != nil {
-			logger.Warn("skipping integration with bad credentials", "id", cfg.ID, "error", err)
-			continue
-		}
-		servJSON, err := json.Marshal(cfg.Services)
-		if err != nil {
-			logger.Warn("skipping integration with bad services", "id", cfg.ID, "error", err)
-			continue
-		}
-
-		var authJSON *string
-		if cfg.Auth != nil {
-			b, err := json.Marshal(cfg.Auth)
-			if err == nil {
-				s := string(b)
-				authJSON = &s
-			}
-		}
-
-		enabled := 0
-		if cfg.Enabled {
-			enabled = 1
-		}
-
-		_, err = tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO integrations
-				(id, name, type, enabled, credentials, auth, services, created_at, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			cfg.ID, cfg.Name, cfg.Type, enabled,
-			string(credJSON), authJSON, string(servJSON),
-			cfg.CreatedAt, cfg.UpdatedAt,
-		)
-		if err != nil {
-			return fmt.Errorf("inserting integration %q: %w", cfg.ID, err)
-		}
-		count++
 	}
 	logger.Info("migrated integrations", "count", count)
 	return nil
+}
+
+func migrateOneIntegration(ctx context.Context, tx *sql.Tx, dir, fileName string, logger *slog.Logger) (bool, error) {
+	data, err := os.ReadFile(filepath.Join(dir, fileName)) //nolint:gosec
+	if err != nil {
+		logger.Warn("skipping integration file", "file", fileName, "error", err)
+		return false, nil
+	}
+
+	var cfg config.IntegrationConfig
+	if unmarshalErr := json.Unmarshal(data, &cfg); unmarshalErr != nil {
+		logger.Warn("skipping malformed integration", "file", fileName, "error", unmarshalErr)
+		return false, nil
+	}
+
+	credJSON, servJSON, authJSON, err := marshalIntegrationFields(&cfg, logger)
+	if err != nil {
+		return false, nil
+	}
+
+	enabled := 0
+	if cfg.Enabled {
+		enabled = 1
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT OR IGNORE INTO integrations
+			(id, name, type, enabled, credentials, auth, services, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		cfg.ID, cfg.Name, cfg.Type, enabled,
+		string(credJSON), authJSON, string(servJSON),
+		cfg.CreatedAt, cfg.UpdatedAt,
+	)
+	if err != nil {
+		return false, fmt.Errorf("inserting integration %q: %w", cfg.ID, err)
+	}
+	return true, nil
+}
+
+func marshalIntegrationFields(cfg *config.IntegrationConfig, logger *slog.Logger) ([]byte, []byte, *string, error) {
+	credJSON, err := json.Marshal(cfg.Credentials)
+	if err != nil {
+		logger.Warn("skipping integration with bad credentials", "id", cfg.ID, "error", err)
+		return nil, nil, nil, err
+	}
+	servJSON, err := json.Marshal(cfg.Services)
+	if err != nil {
+		logger.Warn("skipping integration with bad services", "id", cfg.ID, "error", err)
+		return nil, nil, nil, err
+	}
+
+	var authJSON *string
+	if cfg.Auth != nil {
+		b, marshalErr := json.Marshal(cfg.Auth)
+		if marshalErr == nil {
+			s := string(b)
+			authJSON = &s
+		}
+	}
+
+	return credJSON, servJSON, authJSON, nil
 }
 
 func migrateSettings(ctx context.Context, tx *sql.Tx, settingsFile string, logger *slog.Logger) error {
@@ -324,8 +411,8 @@ func migrateSettings(ctx context.Context, tx *sql.Tx, settingsFile string, logge
 	}
 
 	var settings config.UserSettings
-	if err := json.Unmarshal(data, &settings); err != nil {
-		logger.Warn("skipping malformed settings file", "error", err)
+	if unmarshalErr := json.Unmarshal(data, &settings); unmarshalErr != nil {
+		logger.Warn("skipping malformed settings file", "error", unmarshalErr)
 		return nil
 	}
 
