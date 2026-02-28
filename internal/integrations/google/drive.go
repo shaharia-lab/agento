@@ -54,7 +54,9 @@ type listFilesParams struct {
 	MaxResults int64  `json:"max_results" jsonschema:"Maximum number of files to return (default 10, max 100)"`
 }
 
-func handleListFiles(ctx context.Context, svc *drive.Service, params *listFilesParams) (*mcp.CallToolResult, any, error) {
+func handleListFiles(
+	ctx context.Context, svc *drive.Service, params *listFilesParams,
+) (*mcp.CallToolResult, any, error) {
 	maxResults := params.MaxResults
 	if maxResults <= 0 || maxResults > 100 {
 		maxResults = 10
@@ -99,7 +101,9 @@ type createFileParams struct {
 	MimeType string `json:"mime_type" jsonschema:"MIME type (default: text/plain)"`
 }
 
-func handleCreateFile(ctx context.Context, svc *drive.Service, params *createFileParams) (*mcp.CallToolResult, any, error) {
+func handleCreateFile(
+	ctx context.Context, svc *drive.Service, params *createFileParams,
+) (*mcp.CallToolResult, any, error) {
 	mimeType := params.MimeType
 	if mimeType == "" {
 		mimeType = "text/plain"
@@ -132,7 +136,9 @@ type downloadFileParams struct {
 	FileID string `json:"file_id" jsonschema:"required,The Google Drive file ID to download"`
 }
 
-func handleDownloadFile(ctx context.Context, svc *drive.Service, params *downloadFileParams) (*mcp.CallToolResult, any, error) {
+func handleDownloadFile(
+	ctx context.Context, svc *drive.Service, params *downloadFileParams,
+) (*mcp.CallToolResult, any, error) {
 	resp, err := svc.Files.Get(params.FileID).Context(ctx).Download()
 	if err != nil {
 		return nil, nil, fmt.Errorf("downloading drive file %q: %w", params.FileID, err)

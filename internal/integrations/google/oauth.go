@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"time"
@@ -58,7 +59,9 @@ func Scopes(services map[string]config.ServiceConfig) []string {
 }
 
 // OAuthConfig builds an *oauth2.Config for the given integration credentials, redirect port, and services.
-func OAuthConfig(creds config.GoogleCredentials, redirectPort int, services map[string]config.ServiceConfig) *oauth2.Config {
+func OAuthConfig(
+	creds config.GoogleCredentials, redirectPort int, services map[string]config.ServiceConfig,
+) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     creds.ClientID,
 		ClientSecret: creds.ClientSecret,
@@ -83,43 +86,19 @@ type CallbackResult struct {
 // StartCallbackServer starts a temporary HTTP server on the given port to receive the OAuth2
 // callback from Google. It calls onToken with the exchanged token (or an error) and then stops.
 // The server stops when the callback is received or ctx is canceled.
-func StartCallbackServer(ctx context.Context, port int, cfg *config.IntegrationConfig, onToken func(*oauth2.Token, error)) error {
+func StartCallbackServer(
+	ctx context.Context, port int,
+	cfg *config.IntegrationConfig,
+	onToken func(*oauth2.Token, error),
+) error {
 	oauthCfg := OAuthConfig(cfg.Credentials, port, cfg.Services)
-
-	mux := http.NewServeMux()
 	resultCh := make(chan CallbackResult, 1)
 
-	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			errMsg := r.URL.Query().Get("error")
-			if errMsg == "" {
-				errMsg = "no code in callback"
-			}
-			resultCh <- CallbackResult{Err: fmt.Errorf("oauth callback error: %s", errMsg)}
-			http.Error(w, "Authentication failed: "+errMsg, http.StatusBadRequest)
-			return
-		}
-
-		token, err := oauthCfg.Exchange(r.Context(), code)
-		if err != nil {
-			resultCh <- CallbackResult{Err: fmt.Errorf("exchanging code: %w", err)}
-			http.Error(w, "Failed to exchange token", http.StatusInternalServerError)
-			return
-		}
-
-		resultCh <- CallbackResult{Token: token}
-		w.Header().Set("Content-Type", "text/html")
-		_, _ = fmt.Fprint(w, `<!DOCTYPE html><html><body>
-<h2>Authentication successful!</h2>
-<p>You can close this tab and return to Agento.</p>
-<script>window.close();</script>
-</body></html>`)
-	})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/callback", callbackHandler(oauthCfg, resultCh))
 
 	addr := fmt.Sprintf("localhost:%d", port)
-	lc := &net.ListenConfig{}
-	ln, err := lc.Listen(ctx, "tcp", addr)
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", addr)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", addr, err)
 	}
@@ -131,11 +110,17 @@ func StartCallbackServer(ctx context.Context, port int, cfg *config.IntegrationC
 	}
 
 	go func() {
-		_ = srv.Serve(ln)
+		if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
+			log.Printf("oauth callback server error: %v", serveErr)
+		}
 	}()
 
 	go func() {
-		defer srv.Close() //nolint:errcheck
+		defer func() {
+			if cerr := srv.Close(); cerr != nil {
+				log.Printf("oauth server close error: %v", cerr)
+			}
+		}()
 		select {
 		case result := <-resultCh:
 			onToken(result.Token, result.Err)
@@ -145,6 +130,46 @@ func StartCallbackServer(ctx context.Context, port int, cfg *config.IntegrationC
 	}()
 
 	return nil
+}
+
+const oauthSuccessHTML = `<!DOCTYPE html><html><body>
+<h2>Authentication successful!</h2>
+<p>You can close this tab and return to Agento.</p>
+<script>window.close();</script>
+</body></html>`
+
+func callbackHandler(
+	oauthCfg *oauth2.Config, resultCh chan<- CallbackResult,
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			errMsg := r.URL.Query().Get("error")
+			if errMsg == "" {
+				errMsg = "no code in callback"
+			}
+			resultCh <- CallbackResult{
+				Err: fmt.Errorf("oauth callback error: %s", errMsg),
+			}
+			http.Error(w, "Authentication failed: "+errMsg, http.StatusBadRequest)
+			return
+		}
+
+		token, err := oauthCfg.Exchange(r.Context(), code)
+		if err != nil {
+			resultCh <- CallbackResult{
+				Err: fmt.Errorf("exchanging code: %w", err),
+			}
+			http.Error(w, "Failed to exchange token", http.StatusInternalServerError)
+			return
+		}
+
+		resultCh <- CallbackResult{Token: token}
+		w.Header().Set("Content-Type", "text/html")
+		if _, werr := fmt.Fprint(w, oauthSuccessHTML); werr != nil {
+			return
+		}
+	}
 }
 
 // FreePort finds an available TCP port on localhost.

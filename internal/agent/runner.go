@@ -125,167 +125,189 @@ func Interpolate(template string, vars map[string]string) (string, error) {
 
 // buildSDKOptions constructs the claude SDK options for the given agent config and run options.
 // ctx is used to scope the lifetime of any per-session MCP servers started for integrations.
-func buildSDKOptions(ctx context.Context, agentCfg *config.AgentConfig, opts RunOptions, systemPrompt string) []claude.Option {
+func buildSDKOptions(
+	ctx context.Context, agentCfg *config.AgentConfig,
+	opts RunOptions, systemPrompt string,
+) []claude.Option {
 	sdkOpts := []claude.Option{
 		claude.WithIncludePartialMessages(),
 	}
 
-	// Load the user settings source when a settings file path is configured.
-	// This ensures the claude subprocess reads the selected profile's settings.
-	// Note: WithSettingSources(SettingSourceUser) loads ~/.claude/settings.json;
-	// per-session custom paths will be supported once SDK WithSettings() is available.
+	sdkOpts = appendSettingsOpts(sdkOpts, opts, agentCfg)
+	sdkOpts = appendPermissionOpts(sdkOpts, opts, agentCfg)
+	sdkOpts = appendModelAndPromptOpts(sdkOpts, agentCfg, opts, systemPrompt)
+	sdkOpts = append(sdkOpts, claude.WithThinking(resolveThinkingMode(opts, agentCfg)))
+
+	allowedTools, mcpServers := resolveToolsAndMCP(ctx, agentCfg, opts)
+	sdkOpts = appendToolOpts(sdkOpts, agentCfg, allowedTools, mcpServers)
+
+	if opts.PermissionHandler != nil {
+		handler := wrapPermissionHandler(opts.PermissionHandler, allowedTools)
+		sdkOpts = append(sdkOpts, claude.WithPermissionHandler(handler))
+	}
+
+	return sdkOpts
+}
+
+func appendSettingsOpts(sdkOpts []claude.Option, opts RunOptions, _ *config.AgentConfig) []claude.Option {
 	if opts.SettingsFilePath != "" {
 		sdkOpts = append(sdkOpts, claude.WithSettingSources(claude.SettingSourceUser))
 	}
+	return sdkOpts
+}
 
+func appendPermissionOpts(sdkOpts []claude.Option, opts RunOptions, agentCfg *config.AgentConfig) []claude.Option {
 	if opts.PermissionHandler != nil {
-		// The SDK defaults to bypassPermissions + AllowDangerouslySkipPermissions=true.
-		// WithDefaultPermissions() overrides BOTH so the subprocess sends
-		// can_use_tool control_requests, which our handler can intercept.
-		// Without this, bypassPermissions means can_use_tool is never sent.
-		//
-		// The allowed tools list is computed later in this function and injected
-		// into the handler wrapper via a closure. See wrapPermissionHandler below.
-		sdkOpts = append(sdkOpts, claude.WithDefaultPermissions())
-	} else {
-		// No interactive handler. Use the agent's configured permission mode.
-		// "default" uses Claude Code's built-in permission rules.
-		// Anything else (empty or "bypass") skips all permission checks.
-		if agentCfg != nil && agentCfg.PermissionMode == "default" {
-			sdkOpts = append(sdkOpts, claude.WithDefaultPermissions())
-		} else {
-			sdkOpts = append(sdkOpts,
-				claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
-				claude.WithBypassPermissions(),
-			)
-		}
+		return append(sdkOpts, claude.WithDefaultPermissions())
 	}
+	if agentCfg != nil && agentCfg.PermissionMode == "default" {
+		return append(sdkOpts, claude.WithDefaultPermissions())
+	}
+	return append(sdkOpts,
+		claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
+		claude.WithBypassPermissions(),
+	)
+}
 
-	// Model
+func appendModelAndPromptOpts(
+	sdkOpts []claude.Option, agentCfg *config.AgentConfig,
+	opts RunOptions, systemPrompt string,
+) []claude.Option {
 	if agentCfg != nil && agentCfg.Model != "" {
 		sdkOpts = append(sdkOpts, claude.WithModel(agentCfg.Model))
 	}
-
-	// System prompt
 	if systemPrompt != "" {
 		sdkOpts = append(sdkOpts, claude.WithSystemPrompt(systemPrompt))
 	}
-
-	// Session ID (resume)
 	if opts.SessionID != "" {
 		sdkOpts = append(sdkOpts, claude.WithSessionID(opts.SessionID))
 	}
+	return sdkOpts
+}
 
-	// Thinking mode
-	thinkingMode := claude.ThinkingAdaptive
+func resolveThinkingMode(opts RunOptions, agentCfg *config.AgentConfig) claude.ThinkingMode {
 	if opts.NoThinking {
-		thinkingMode = claude.ThinkingDisabled
-	} else if agentCfg != nil {
-		switch agentCfg.Thinking {
-		case "disabled":
-			thinkingMode = claude.ThinkingDisabled
-		case "enabled":
-			thinkingMode = claude.ThinkingEnabled
-		default:
-			thinkingMode = claude.ThinkingAdaptive
-		}
+		return claude.ThinkingDisabled
 	}
-	sdkOpts = append(sdkOpts, claude.WithThinking(thinkingMode))
+	if agentCfg == nil {
+		return claude.ThinkingAdaptive
+	}
+	switch agentCfg.Thinking {
+	case "disabled":
+		return claude.ThinkingDisabled
+	case "enabled":
+		return claude.ThinkingEnabled
+	default:
+		return claude.ThinkingAdaptive
+	}
+}
 
-	// Allowed tools + MCP servers
+// resolveToolsAndMCP builds the allowed tools list and MCP server map from agent capabilities.
+func resolveToolsAndMCP(ctx context.Context, agentCfg *config.AgentConfig, opts RunOptions) ([]string, map[string]any) {
 	allowedTools := []string{}
 	mcpServers := map[string]any{}
 
-	if agentCfg != nil {
-		caps := agentCfg.Capabilities
+	if agentCfg == nil {
+		return allowedTools, mcpServers
+	}
 
-		// Built-in tools: use the agent's allowlist, or all tools if none specified.
-		if len(caps.BuiltIn) > 0 {
-			allowedTools = append(allowedTools, caps.BuiltIn...)
-		} else if len(caps.Local) == 0 && len(caps.MCP) == 0 {
-			// No explicit capabilities at all — allow everything built-in
-			allowedTools = append(allowedTools, allBuiltInTools...)
+	caps := agentCfg.Capabilities
+	allowedTools = resolveBuiltInTools(caps)
+	allowedTools, mcpServers = resolveLocalTools(allowedTools, mcpServers, caps, opts)
+	allowedTools, mcpServers = resolveExternalMCP(ctx, allowedTools, mcpServers, caps, opts)
+
+	return allowedTools, mcpServers
+}
+
+func resolveBuiltInTools(caps config.AgentCapabilities) []string {
+	if len(caps.BuiltIn) > 0 {
+		return append([]string{}, caps.BuiltIn...)
+	}
+	if len(caps.Local) == 0 && len(caps.MCP) == 0 {
+		return append([]string{}, allBuiltInTools...)
+	}
+	return []string{}
+}
+
+func resolveLocalTools(
+	allowedTools []string, mcpServers map[string]any,
+	caps config.AgentCapabilities, opts RunOptions,
+) ([]string, map[string]any) {
+	if len(caps.Local) > 0 && opts.LocalToolsMCP != nil {
+		mcpServers[tools.LocalMCPServerName] = opts.LocalToolsMCP.ServerCfg
+		allowedTools = append(allowedTools, opts.LocalToolsMCP.AllowedToolNames(caps.Local)...)
+	}
+	return allowedTools, mcpServers
+}
+
+func resolveExternalMCP(
+	ctx context.Context, allowedTools []string,
+	mcpServers map[string]any, caps config.AgentCapabilities,
+	opts RunOptions,
+) ([]string, map[string]any) {
+	for serverName, mcpCap := range caps.MCP {
+		sdkCfg := resolveServerConfig(ctx, serverName, mcpCap.Tools, opts)
+		if sdkCfg == nil {
+			continue
 		}
-
-		// Local tools: add the in-process MCP server and the specific tool names.
-		if len(caps.Local) > 0 && opts.LocalToolsMCP != nil {
-			mcpServers[tools.LocalMCPServerName] = opts.LocalToolsMCP.ServerCfg
-			allowedTools = append(allowedTools, opts.LocalToolsMCP.AllowedToolNames(caps.Local)...)
-		}
-
-		// External MCP servers from capabilities.mcp — checks both MCPRegistry and IntegrationRegistry.
-		if len(caps.MCP) > 0 {
-			for serverName, mcpCap := range caps.MCP {
-				var sdkCfg any
-
-				// Check external MCP registry first.
-				if opts.MCPRegistry != nil {
-					sdkCfg = opts.MCPRegistry.GetSDKConfig(serverName)
-				}
-				// Fall back to integration registry — start a filtered server with
-				// only the tools this agent needs so the model doesn't see extras.
-				if sdkCfg == nil && opts.IntegrationRegistry != nil {
-					if serverCfg, err := opts.IntegrationRegistry.StartFilteredServer(ctx, serverName, mcpCap.Tools); err == nil {
-						sdkCfg = serverCfg
-					}
-				}
-				if sdkCfg == nil {
-					continue
-				}
-
-				mcpServers[serverName] = sdkCfg
-				for _, toolName := range mcpCap.Tools {
-					allowedTools = append(allowedTools, fmt.Sprintf("mcp__%s__%s", serverName, toolName))
-				}
-			}
+		mcpServers[serverName] = sdkCfg
+		for _, toolName := range mcpCap.Tools {
+			allowedTools = append(allowedTools, fmt.Sprintf("mcp__%s__%s", serverName, toolName))
 		}
 	}
-	// For no-agent direct chats, don't set WithAllowedTools or WithStrictMcpConfig
-	// so the user's Anthropic-account MCP servers (claude.ai Gmail, Calendar, etc.)
-	// remain available alongside any built-in tools.
-	//
-	// For agents with explicit capabilities, use WithStrictMcpConfig so only the
-	// MCP servers we pass via --mcp-config are loaded. Without this, cloud servers
-	// from the user's Anthropic account also appear, and the model may pick those
-	// instead of the agent's configured tools — resulting in denied tool calls.
+	return allowedTools, mcpServers
+}
 
+func resolveServerConfig(ctx context.Context, serverName string, toolNames []string, opts RunOptions) any {
+	if opts.MCPRegistry != nil {
+		if cfg := opts.MCPRegistry.GetSDKConfig(serverName); cfg != nil {
+			return cfg
+		}
+	}
+	if opts.IntegrationRegistry != nil {
+		if cfg, err := opts.IntegrationRegistry.StartFilteredServer(ctx, serverName, toolNames); err == nil {
+			return cfg
+		}
+	}
+	return nil
+}
+
+func appendToolOpts(
+	sdkOpts []claude.Option, agentCfg *config.AgentConfig,
+	allowedTools []string, mcpServers map[string]any,
+) []claude.Option {
 	if len(allowedTools) > 0 {
 		sdkOpts = append(sdkOpts, claude.WithAllowedTools(allowedTools...))
 	}
 
-	// Compute disallowed built-in tools: everything the agent did NOT select.
-	// --disallowedTools tells the CLI to hide these tools from the model entirely,
-	// whereas --allowedTools only gates execution.
-	if agentCfg != nil && len(agentCfg.Capabilities.BuiltIn) > 0 {
-		selected := make(map[string]bool, len(agentCfg.Capabilities.BuiltIn))
-		for _, t := range agentCfg.Capabilities.BuiltIn {
-			selected[t] = true
-		}
-		var disallowed []string
-		for _, t := range allBuiltInTools {
-			if !selected[t] {
-				disallowed = append(disallowed, t)
-			}
-		}
-		if len(disallowed) > 0 {
-			sdkOpts = append(sdkOpts, claude.WithDisallowedTools(disallowed...))
-		}
-	}
+	sdkOpts = appendDisallowedTools(sdkOpts, agentCfg)
 
 	if len(mcpServers) > 0 {
 		sdkOpts = append(sdkOpts, claude.WithMcpServers(mcpServers))
 		sdkOpts = append(sdkOpts, claude.WithStrictMcpConfig())
 	}
 
-	// Now that the allowed tools list is finalized, attach the (possibly wrapped)
-	// permission handler. When the agent has an explicit allowlist we wrap the
-	// caller-supplied handler so that any tool call not on the list is denied
-	// at the permission layer — a second defense line after WithAllowedTools.
-	if opts.PermissionHandler != nil {
-		handler := wrapPermissionHandler(opts.PermissionHandler, allowedTools)
-		sdkOpts = append(sdkOpts, claude.WithPermissionHandler(handler))
-	}
+	return sdkOpts
+}
 
+// appendDisallowedTools computes and appends the disallowed built-in tools.
+func appendDisallowedTools(sdkOpts []claude.Option, agentCfg *config.AgentConfig) []claude.Option {
+	if agentCfg == nil || len(agentCfg.Capabilities.BuiltIn) == 0 {
+		return sdkOpts
+	}
+	selected := make(map[string]bool, len(agentCfg.Capabilities.BuiltIn))
+	for _, t := range agentCfg.Capabilities.BuiltIn {
+		selected[t] = true
+	}
+	var disallowed []string
+	for _, t := range allBuiltInTools {
+		if !selected[t] {
+			disallowed = append(disallowed, t)
+		}
+	}
+	if len(disallowed) > 0 {
+		sdkOpts = append(sdkOpts, claude.WithDisallowedTools(disallowed...))
+	}
 	return sdkOpts
 }
 
@@ -319,14 +341,12 @@ func wrapPermissionHandler(inner claude.PermissionHandler, allowedTools []string
 
 // StreamAgent starts a streaming agent invocation and returns the *claude.Stream.
 // The caller is responsible for consuming events from stream.Events().
-func StreamAgent(ctx context.Context, agentCfg *config.AgentConfig, question string, opts RunOptions) (*claude.Stream, error) {
-	systemPrompt := ""
-	if agentCfg != nil {
-		interpolated, err := Interpolate(agentCfg.SystemPrompt, opts.Variables)
-		if err != nil {
-			return nil, err
-		}
-		systemPrompt = interpolated
+func StreamAgent(
+	ctx context.Context, agentCfg *config.AgentConfig, question string, opts RunOptions,
+) (*claude.Stream, error) {
+	systemPrompt, err := resolveSystemPrompt(agentCfg, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	sdkOpts := buildSDKOptions(ctx, agentCfg, opts, systemPrompt)
@@ -337,14 +357,12 @@ func StreamAgent(ctx context.Context, agentCfg *config.AgentConfig, question str
 // The subprocess stays alive across TypeResult events; callers can inject follow-up
 // messages via session.Send() without spawning a new process.
 // The caller must call session.Close() when the conversation is done.
-func StartSession(ctx context.Context, agentCfg *config.AgentConfig, firstMessage string, opts RunOptions) (*claude.Session, error) {
-	systemPrompt := ""
-	if agentCfg != nil {
-		interpolated, err := Interpolate(agentCfg.SystemPrompt, opts.Variables)
-		if err != nil {
-			return nil, err
-		}
-		systemPrompt = interpolated
+func StartSession(
+	ctx context.Context, agentCfg *config.AgentConfig, firstMessage string, opts RunOptions,
+) (*claude.Session, error) {
+	systemPrompt, err := resolveSystemPrompt(agentCfg, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	sdkOpts := buildSDKOptions(ctx, agentCfg, opts, systemPrompt)
@@ -354,7 +372,9 @@ func StartSession(ctx context.Context, agentCfg *config.AgentConfig, firstMessag
 	}
 
 	if err := session.Send(firstMessage); err != nil {
-		_ = session.Close()
+		if cerr := session.Close(); cerr != nil {
+			return nil, fmt.Errorf("sending first message: %w (also failed to close session: %v)", err, cerr)
+		}
 		return nil, fmt.Errorf("sending first message: %w", err)
 	}
 
@@ -362,14 +382,13 @@ func StartSession(ctx context.Context, agentCfg *config.AgentConfig, firstMessag
 }
 
 // RunAgent runs the agent to completion and returns the final AgentResult.
-func RunAgent(ctx context.Context, agentCfg *config.AgentConfig, question string, opts RunOptions) (*AgentResult, error) {
-	systemPrompt := ""
-	if agentCfg != nil {
-		interpolated, err := Interpolate(agentCfg.SystemPrompt, opts.Variables)
-		if err != nil {
-			return nil, err
-		}
-		systemPrompt = interpolated
+func RunAgent(
+	ctx context.Context, agentCfg *config.AgentConfig,
+	question string, opts RunOptions,
+) (*AgentResult, error) {
+	systemPrompt, err := resolveSystemPrompt(agentCfg, opts)
+	if err != nil {
+		return nil, err
 	}
 
 	sdkOpts := buildSDKOptions(ctx, agentCfg, opts, systemPrompt)
@@ -379,52 +398,26 @@ func RunAgent(ctx context.Context, agentCfg *config.AgentConfig, question string
 		return nil, fmt.Errorf("starting agent: %w", err)
 	}
 
+	return collectRunResult(stream)
+}
+
+// resolveSystemPrompt interpolates the agent's system prompt if an agent config is provided.
+func resolveSystemPrompt(agentCfg *config.AgentConfig, opts RunOptions) (string, error) {
+	if agentCfg == nil {
+		return "", nil
+	}
+	return Interpolate(agentCfg.SystemPrompt, opts.Variables)
+}
+
+func collectRunResult(stream *claude.Stream) (*AgentResult, error) {
 	var finalThinking string
 	var result *AgentResult
 	var resultErr error
 
 	for event := range stream.Events() {
-		switch event.Type {
-		case claude.TypeAssistant:
-			if event.Assistant != nil {
-				if t := event.Assistant.Thinking(); t != "" {
-					finalThinking = t
-				}
-			}
-
-		case claude.TypeResult:
-			if event.Result != nil {
-				if event.Result.IsError {
-					msg := event.Result.Result
-					if msg == "" && len(event.Result.Errors) > 0 {
-						msg = strings.Join(event.Result.Errors, "; ")
-					}
-					if msg == "" {
-						msg = fmt.Sprintf("subtype=%s", event.Result.Subtype)
-					}
-					resultErr = fmt.Errorf("agent error: %s", msg)
-				} else {
-					result = &AgentResult{
-						SessionID: event.Result.SessionID,
-						Answer:    event.Result.Result,
-						Thinking:  finalThinking,
-						CostUSD:   event.Result.TotalCostUSD,
-						Usage: UsageStats{
-							InputTokens:              event.Result.Usage.InputTokens,
-							OutputTokens:             event.Result.Usage.OutputTokens,
-							CacheReadInputTokens:     event.Result.Usage.CacheReadInputTokens,
-							CacheCreationInputTokens: event.Result.Usage.CacheCreationInputTokens,
-						},
-					}
-				}
-				// Do NOT return early here. Drain the remaining events so the
-				// subprocess has time to finish writing the session to disk before
-				// the caller's context can be canceled.
-			}
-		}
+		processRunEvent(event, &finalThinking, &result, &resultErr)
 	}
 
-	// Stream channel is now closed — subprocess has fully exited.
 	if resultErr != nil {
 		return nil, resultErr
 	}
@@ -432,4 +425,54 @@ func RunAgent(ctx context.Context, agentCfg *config.AgentConfig, question string
 		return result, nil
 	}
 	return nil, fmt.Errorf("agent finished without returning a result")
+}
+
+// processRunEvent handles a single event during result collection.
+// It updates the thinking, result, and error pointers in place.
+// We do NOT return early on TypeResult — the remaining events must be drained
+// so the subprocess has time to finish writing the session to disk.
+func processRunEvent(event claude.Event, thinking *string, result **AgentResult, resultErr *error) {
+	switch event.Type {
+	case claude.TypeAssistant:
+		if event.Assistant != nil {
+			if t := event.Assistant.Thinking(); t != "" {
+				*thinking = t
+			}
+		}
+	case claude.TypeResult:
+		if event.Result == nil {
+			return
+		}
+		if event.Result.IsError {
+			*resultErr = buildResultError(event.Result)
+		} else {
+			*result = buildAgentResult(event.Result, *thinking)
+		}
+	}
+}
+
+func buildResultError(r *claude.Result) error {
+	msg := r.Result
+	if msg == "" && len(r.Errors) > 0 {
+		msg = strings.Join(r.Errors, "; ")
+	}
+	if msg == "" {
+		msg = fmt.Sprintf("subtype=%s", r.Subtype)
+	}
+	return fmt.Errorf("agent error: %s", msg)
+}
+
+func buildAgentResult(r *claude.Result, thinking string) *AgentResult {
+	return &AgentResult{
+		SessionID: r.SessionID,
+		Answer:    r.Result,
+		Thinking:  thinking,
+		CostUSD:   r.TotalCostUSD,
+		Usage: UsageStats{
+			InputTokens:              r.Usage.InputTokens,
+			OutputTokens:             r.Usage.OutputTokens,
+			CacheReadInputTokens:     r.Usage.CacheReadInputTokens,
+			CacheCreationInputTokens: r.Usage.CacheCreationInputTokens,
+		},
+	}
 }

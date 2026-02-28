@@ -47,7 +47,9 @@ func New(apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger) *S
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
+			return
+		}
 	})
 
 	// API routes
@@ -136,7 +138,13 @@ func (s *Server) requestLogger(next http.Handler) http.Handler {
 func (s *Server) spaHandler() http.HandlerFunc {
 	if s.frontendFS == nil {
 		// Dev mode: proxy everything to Vite on :5173
-		target, _ := url.Parse("http://localhost:5173")
+		target, err := url.Parse("http://localhost:5173")
+		if err != nil {
+			s.logger.Error("failed to parse Vite dev server URL", "error", err)
+			return func(w http.ResponseWriter, _ *http.Request) {
+				http.Error(w, "internal server error", http.StatusInternalServerError)
+			}
+		}
 		proxy := httputil.NewSingleHostReverseProxy(target)
 		return proxy.ServeHTTP
 	}
@@ -157,7 +165,9 @@ func (s *Server) spaHandler() http.HandlerFunc {
 			fileServer.ServeHTTP(w, r2)
 			return
 		}
-		_ = f.Close()
+		if cerr := f.Close(); cerr != nil {
+			s.logger.Error("failed to close file", "path", path, "error", cerr)
+		}
 		fileServer.ServeHTTP(w, r)
 	}
 }

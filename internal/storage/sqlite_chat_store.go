@@ -184,7 +184,10 @@ func (s *SQLiteChatStore) UpdateSession(session *ChatSession) error {
 	if err != nil {
 		return fmt.Errorf("updating session %q: %w", session.ID, err)
 	}
-	n, _ := res.RowsAffected()
+	n, raErr := res.RowsAffected()
+	if raErr != nil {
+		return fmt.Errorf("checking rows affected for session %q: %w", session.ID, raErr)
+	}
 	if n == 0 {
 		return fmt.Errorf("session %q not found", session.ID)
 	}
@@ -198,7 +201,10 @@ func (s *SQLiteChatStore) DeleteSession(id string) error {
 	if err != nil {
 		return fmt.Errorf("deleting session %q: %w", id, err)
 	}
-	n, _ := res.RowsAffected()
+	n, raErr := res.RowsAffected()
+	if raErr != nil {
+		return fmt.Errorf("checking rows affected for session %q: %w", id, raErr)
+	}
 	if n == 0 {
 		return fmt.Errorf("session %q not found", id)
 	}

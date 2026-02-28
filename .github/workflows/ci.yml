@@ -37,6 +37,12 @@ jobs:
       - name: Test
         run: go test -race -coverprofile=coverage.out ./...
 
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
@@ -77,3 +83,28 @@ jobs:
 
       - name: Build
         run: npm run build
+
+  # ── Code Analysis ─────────────────────────────────────────────────────────
+  code-analysis:
+    name: Code Analysis
+    runs-on: ubuntu-latest
+    needs: [backend]
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download coverage
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage
+
+      - name: SonarCloud Scan
+        uses: sonarsource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

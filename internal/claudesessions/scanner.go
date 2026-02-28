@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -149,7 +150,10 @@ func ListProjects() ([]ClaudeProject, error) {
 		if !e.IsDir() {
 			continue
 		}
-		files, _ := os.ReadDir(filepath.Join(projectsDir, e.Name()))
+		files, rdErr := os.ReadDir(filepath.Join(projectsDir, e.Name()))
+		if rdErr != nil {
+			continue
+		}
 		count := 0
 		for _, f := range files {
 			if !f.IsDir() && strings.HasSuffix(f.Name(), ".jsonl") {
@@ -185,29 +189,35 @@ func ScanAllSessions() ([]ClaudeSessionSummary, error) {
 		if !e.IsDir() {
 			continue
 		}
-		projectPath := DecodeProjectPath(e.Name())
-		files, err := os.ReadDir(filepath.Join(projectsDir, e.Name()))
-		if err != nil {
-			continue
-		}
-		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
-				continue
-			}
-			sessionID := strings.TrimSuffix(f.Name(), ".jsonl")
-			filePath := filepath.Join(projectsDir, e.Name(), f.Name())
-			summary, err := readSessionSummary(sessionID, projectPath, filePath)
-			if err != nil || summary == nil {
-				continue
-			}
-			sessions = append(sessions, *summary)
-		}
+		sessions = scanProjectSessions(projectsDir, e.Name(), sessions)
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].LastActivity.After(sessions[j].LastActivity)
 	})
 	return sessions, nil
+}
+
+// scanProjectSessions scans all JSONL files in a single project directory.
+func scanProjectSessions(projectsDir, dirName string, sessions []ClaudeSessionSummary) []ClaudeSessionSummary {
+	projectPath := DecodeProjectPath(dirName)
+	files, err := os.ReadDir(filepath.Join(projectsDir, dirName))
+	if err != nil {
+		return sessions
+	}
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+			continue
+		}
+		sessionID := strings.TrimSuffix(f.Name(), ".jsonl")
+		filePath := filepath.Join(projectsDir, dirName, f.Name())
+		summary, err := readSessionSummary(sessionID, projectPath, filePath)
+		if err != nil || summary == nil {
+			continue
+		}
+		sessions = append(sessions, *summary)
+	}
+	return sessions
 }
 
 // diskFile holds the metadata for a JSONL file found on disk.
@@ -218,6 +228,12 @@ type diskFile struct {
 	mtime       time.Time
 }
 
+// cachedEntry holds a cached session's file path and modification time.
+type cachedEntry struct {
+	filePath string
+	mtime    time.Time
+}
+
 // IncrementalScan walks ~/.claude/projects/, compares files on disk with the
 // SQLite cache, and only re-reads files whose mtime has changed. New files are
 // inserted, modified files are updated, and deleted files are removed from the
@@ -225,77 +241,97 @@ type diskFile struct {
 func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, error) {
 	projectsDir := filepath.Join(ClaudeHome(), "projects")
 
-	// 1. Walk disk and build map of current files keyed by file_path.
-	onDisk := make(map[string]diskFile)
-	entries, err := os.ReadDir(projectsDir)
+	onDisk, err := walkDiskFiles(projectsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// No projects dir — clear cache and return empty.
-			_, _ = db.ExecContext(context.Background(), "DELETE FROM claude_session_cache")
+			if _, execErr := db.ExecContext(context.Background(), "DELETE FROM claude_session_cache"); execErr != nil {
+				logger.Warn("failed to clear session cache", "error", execErr)
+			}
 			updateLastScanned(db)
 			return []ClaudeSessionSummary{}, nil
 		}
 		return nil, err
 	}
 
+	cached, err := loadCachedEntries(db)
+	if err != nil {
+		return nil, err
+	}
+
+	toUpsert, toDelete := diffDiskAndCache(onDisk, cached)
+	applyChanges(db, logger, onDisk, toUpsert, toDelete)
+
+	updateLastScanned(db)
+	return loadAllSessions(db)
+}
+
+func walkDiskFiles(projectsDir string) (map[string]diskFile, error) {
+	entries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return nil, err
+	}
+	onDisk := make(map[string]diskFile)
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		projectPath := DecodeProjectPath(e.Name())
-		files, err := os.ReadDir(filepath.Join(projectsDir, e.Name()))
+		collectProjectDiskFiles(projectsDir, e.Name(), onDisk)
+	}
+	return onDisk, nil
+}
+
+func collectProjectDiskFiles(projectsDir, dirName string, onDisk map[string]diskFile) {
+	projectPath := DecodeProjectPath(dirName)
+	files, err := os.ReadDir(filepath.Join(projectsDir, dirName))
+	if err != nil {
+		return
+	}
+	for _, f := range files {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+			continue
+		}
+		info, err := f.Info()
 		if err != nil {
 			continue
 		}
-		for _, f := range files {
-			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
-				continue
-			}
-			sessionID := strings.TrimSuffix(f.Name(), ".jsonl")
-			fp := filepath.Join(projectsDir, e.Name(), f.Name())
-			info, err := f.Info()
-			if err != nil {
-				continue
-			}
-			onDisk[fp] = diskFile{
-				sessionID:   sessionID,
-				projectPath: projectPath,
-				filePath:    fp,
-				mtime:       info.ModTime().UTC(),
-			}
+		fp := filepath.Join(projectsDir, dirName, f.Name())
+		onDisk[fp] = diskFile{
+			sessionID:   strings.TrimSuffix(f.Name(), ".jsonl"),
+			projectPath: projectPath,
+			filePath:    fp,
+			mtime:       info.ModTime().UTC(),
 		}
 	}
+}
 
-	// 2. Query existing cache entries.
-	type cachedEntry struct {
-		filePath string
-		mtime    time.Time
-	}
+func loadCachedEntries(db *sql.DB) (map[string]cachedEntry, error) {
 	cached := make(map[string]cachedEntry)
-	ctx := context.Background()
-	rows, err := db.QueryContext(ctx, "SELECT file_path, file_mtime FROM claude_session_cache")
+	rows, err := db.QueryContext(context.Background(), "SELECT file_path, file_mtime FROM claude_session_cache")
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			log.Printf("failed to close rows: %v", cerr)
+		}
+	}()
+
 	for rows.Next() {
 		var ce cachedEntry
 		if err := rows.Scan(&ce.filePath, &ce.mtime); err != nil {
-			_ = rows.Close()
 			return nil, err
 		}
 		cached[ce.filePath] = ce
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	_ = rows.Close()
+	return cached, rows.Err()
+}
 
-	// 3. Determine changes.
-	var toUpsert []diskFile
+func diffDiskAndCache(onDisk map[string]diskFile, cached map[string]cachedEntry) ([]string, []string) {
+	var toUpsert []string
 	for fp, df := range onDisk {
 		ce, exists := cached[fp]
 		if !exists || !ce.mtime.Equal(df.mtime) {
-			toUpsert = append(toUpsert, df)
+			toUpsert = append(toUpsert, fp)
 		}
 	}
 
@@ -305,8 +341,10 @@ func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 			toDelete = append(toDelete, fp)
 		}
 	}
+	return toUpsert, toDelete
+}
 
-	// 4. Process changes.
+func applyChanges(db *sql.DB, logger *slog.Logger, onDisk map[string]diskFile, toUpsert, toDelete []string) {
 	if len(toUpsert) > 0 || len(toDelete) > 0 {
 		logger.Info("claude sessions: incremental scan",
 			"new_or_modified", len(toUpsert),
@@ -314,7 +352,8 @@ func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 			"unchanged", len(onDisk)-len(toUpsert))
 	}
 
-	for _, df := range toUpsert {
+	for _, fp := range toUpsert {
+		df := onDisk[fp]
 		summary, err := readSessionSummary(df.sessionID, df.projectPath, df.filePath)
 		if err != nil || summary == nil {
 			continue
@@ -326,17 +365,12 @@ func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 	}
 
 	for _, fp := range toDelete {
-		if _, err := db.ExecContext(context.Background(), "DELETE FROM claude_session_cache WHERE file_path = ?", fp); err != nil {
+		deleteQuery := "DELETE FROM claude_session_cache WHERE file_path = ?"
+		if _, err := db.ExecContext(context.Background(), deleteQuery, fp); err != nil {
 			logger.Warn("claude sessions: failed to delete cache row",
 				"file", fp, "error", err)
 		}
 	}
-
-	// 5. Update metadata.
-	updateLastScanned(db)
-
-	// 6. Return all cached rows.
-	return loadAllSessions(db)
 }
 
 func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
@@ -373,11 +407,13 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 
 func updateLastScanned(db *sql.DB) {
 	ctx := context.Background()
-	_, _ = db.ExecContext(ctx, `
+	if _, err := db.ExecContext(ctx, `
 		INSERT INTO claude_cache_metadata (id, last_scanned_at) VALUES (1, ?)
 		ON CONFLICT(id) DO UPDATE SET last_scanned_at = excluded.last_scanned_at`,
 		time.Now().UTC(),
-	)
+	); err != nil {
+		log.Printf("failed to update last_scanned_at: %v", err)
+	}
 }
 
 func loadAllSessions(db *sql.DB) ([]ClaudeSessionSummary, error) {
@@ -391,7 +427,11 @@ func loadAllSessions(db *sql.DB) ([]ClaudeSessionSummary, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			log.Printf("failed to close rows: %v", cerr)
+		}
+	}()
 
 	var sessions []ClaudeSessionSummary
 	for rows.Next() {
@@ -413,19 +453,63 @@ func loadAllSessions(db *sql.DB) ([]ClaudeSessionSummary, error) {
 	return sessions, rows.Err()
 }
 
+// timeRange tracks the earliest and latest timestamps seen.
+type timeRange struct {
+	start time.Time
+	last  time.Time
+}
+
+func (tr *timeRange) update(ts time.Time) {
+	if ts.IsZero() {
+		return
+	}
+	if tr.start.IsZero() || ts.Before(tr.start) {
+		tr.start = ts
+	}
+	if ts.After(tr.last) {
+		tr.last = ts
+	}
+}
+
+// updateMetadataFromEvent sets CWD and GitBranch from the first event that has them.
+func updateMetadataFromEvent(cwd, gitBranch *string, ev rawEvent) {
+	if *cwd == "" && ev.CWD != "" {
+		*cwd = ev.CWD
+	}
+	if *gitBranch == "" && ev.GitBranch != "" {
+		*gitBranch = ev.GitBranch
+	}
+}
+
+// addAssistantUsage accumulates assistant message usage into a TokenUsage.
+func addAssistantUsage(usage *TokenUsage, msg *rawMessage) {
+	if msg == nil || msg.Usage == nil {
+		return
+	}
+	usage.InputTokens += msg.Usage.InputTokens
+	usage.OutputTokens += msg.Usage.OutputTokens
+	usage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens
+	usage.CacheReadTokens += msg.Usage.CacheReadInputTokens
+}
+
 // readSessionSummary reads a session JSONL file and extracts lightweight metadata.
 func readSessionSummary(sessionID, projectPath, filePath string) (*ClaudeSessionSummary, error) {
 	f, err := os.Open(filePath) //nolint:gosec
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = f.Close() }()
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			log.Printf("failed to close file: %v", cerr)
+		}
+	}()
 
 	summary := &ClaudeSessionSummary{
 		SessionID:   sessionID,
 		ProjectPath: projectPath,
 	}
 
+	var tr timeRange
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
 
@@ -438,60 +522,50 @@ func readSessionSummary(sessionID, projectPath, filePath string) (*ClaudeSession
 			continue
 		}
 
-		ts := ev.Timestamp
-		if !ts.IsZero() {
-			if summary.StartTime.IsZero() || ts.Before(summary.StartTime) {
-				summary.StartTime = ts
-			}
-			if ts.After(summary.LastActivity) {
-				summary.LastActivity = ts
-			}
-		}
-
-		if summary.CWD == "" && ev.CWD != "" {
-			summary.CWD = ev.CWD
-		}
-		if summary.GitBranch == "" && ev.GitBranch != "" {
-			summary.GitBranch = ev.GitBranch
-		}
-
-		switch ev.Type {
-		case "user":
-			if ev.IsSidechain {
-				continue
-			}
-			summary.MessageCount++
-			if summary.Preview == "" && ev.Message != nil {
-				summary.Preview = truncateRunes(extractTextContent(ev.Message.Content), previewMaxRunes)
-			}
-
-		case "assistant":
-			summary.MessageCount++
-			if ev.Message != nil {
-				if summary.Model == "" && ev.Message.Model != "" {
-					summary.Model = ev.Message.Model
-				}
-				if ev.Message.Usage != nil {
-					summary.Usage.InputTokens += ev.Message.Usage.InputTokens
-					summary.Usage.OutputTokens += ev.Message.Usage.OutputTokens
-					summary.Usage.CacheCreationTokens += ev.Message.Usage.CacheCreationInputTokens
-					summary.Usage.CacheReadTokens += ev.Message.Usage.CacheReadInputTokens
-				}
-			}
-		}
+		tr.update(ev.Timestamp)
+		updateMetadataFromEvent(&summary.CWD, &summary.GitBranch, ev)
+		processSummaryEvent(summary, ev)
 	}
+
+	summary.StartTime = tr.start
+	summary.LastActivity = tr.last
 
 	if summary.StartTime.IsZero() {
-		return nil, nil // empty or unreadable file
+		return nil, nil
 	}
 	return summary, sc.Err()
+}
+
+func processSummaryEvent(summary *ClaudeSessionSummary, ev rawEvent) {
+	switch ev.Type {
+	case "user":
+		if ev.IsSidechain {
+			return
+		}
+		summary.MessageCount++
+		if summary.Preview == "" && ev.Message != nil {
+			summary.Preview = truncateRunes(extractTextContent(ev.Message.Content), previewMaxRunes)
+		}
+	case "assistant":
+		summary.MessageCount++
+		if ev.Message != nil && summary.Model == "" && ev.Message.Model != "" {
+			summary.Model = ev.Message.Model
+		}
+		addAssistantUsage(&summary.Usage, ev.Message)
+	}
 }
 
 // GetSessionDetail reads the full session JSONL and builds the complete message list.
 // Returns nil if the session is not found.
 func GetSessionDetail(sessionID string) (*ClaudeSessionDetail, error) {
 	projectsDir := filepath.Join(ClaudeHome(), "projects")
-	entries, _ := os.ReadDir(projectsDir)
+	entries, rdErr := os.ReadDir(projectsDir)
+	if rdErr != nil {
+		if os.IsNotExist(rdErr) {
+			return nil, nil
+		}
+		return nil, rdErr
+	}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -512,7 +586,11 @@ func readSessionDetail(sessionID, projectPath, filePath string) (*ClaudeSessionD
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = f.Close() }()
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			log.Printf("failed to close file: %v", cerr)
+		}
+	}()
 
 	detail := &ClaudeSessionDetail{}
 	detail.SessionID = sessionID
@@ -521,8 +599,9 @@ func readSessionDetail(sessionID, projectPath, filePath string) (*ClaudeSessionD
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
 
+	var tr timeRange
 	var topLevel []ClaudeMessage
-	progressByParentUUID := make(map[string][]ClaudeMessage)
+	progressMap := make(map[string][]ClaudeMessage)
 
 	for sc.Scan() {
 		var ev rawEvent
@@ -532,127 +611,129 @@ func readSessionDetail(sessionID, projectPath, filePath string) (*ClaudeSessionD
 		if ev.Type == "file-history-snapshot" {
 			continue
 		}
-
-		ts := ev.Timestamp
-		if !ts.IsZero() {
-			if detail.StartTime.IsZero() || ts.Before(detail.StartTime) {
-				detail.StartTime = ts
-			}
-			if ts.After(detail.LastActivity) {
-				detail.LastActivity = ts
-			}
-		}
-
-		if detail.CWD == "" && ev.CWD != "" {
-			detail.CWD = ev.CWD
-		}
-		if detail.GitBranch == "" && ev.GitBranch != "" {
-			detail.GitBranch = ev.GitBranch
-		}
-
-		switch ev.Type {
-		case "user":
-			if ev.IsSidechain {
-				continue
-			}
-			content := ""
-			if ev.Message != nil {
-				content = extractTextContent(ev.Message.Content)
-			}
-			msg := ClaudeMessage{
-				UUID:       ev.UUID,
-				ParentUUID: ev.ParentUUID,
-				Type:       "user",
-				Timestamp:  ev.Timestamp,
-				Role:       "user",
-				Content:    content,
-				GitBranch:  ev.GitBranch,
-			}
-			detail.MessageCount++
-			topLevel = append(topLevel, msg)
-
-		case "assistant":
-			msg := ClaudeMessage{
-				UUID:       ev.UUID,
-				ParentUUID: ev.ParentUUID,
-				Type:       "assistant",
-				Timestamp:  ev.Timestamp,
-				Role:       "assistant",
-				GitBranch:  ev.GitBranch,
-			}
-			if ev.Message != nil {
-				if detail.Model == "" && ev.Message.Model != "" {
-					detail.Model = ev.Message.Model
-				}
-				if ev.Message.Usage != nil {
-					u := TokenUsage{
-						InputTokens:         ev.Message.Usage.InputTokens,
-						OutputTokens:        ev.Message.Usage.OutputTokens,
-						CacheCreationTokens: ev.Message.Usage.CacheCreationInputTokens,
-						CacheReadTokens:     ev.Message.Usage.CacheReadInputTokens,
-					}
-					msg.Usage = &u
-					detail.Usage.InputTokens += u.InputTokens
-					detail.Usage.OutputTokens += u.OutputTokens
-					detail.Usage.CacheCreationTokens += u.CacheCreationTokens
-					detail.Usage.CacheReadTokens += u.CacheReadTokens
-				}
-				// Parse and normalize content blocks.
-				var blocks []rawContentBlock
-				if err := json.Unmarshal(ev.Message.Content, &blocks); err == nil {
-					for _, b := range blocks {
-						if nb := normalizeBlock(b); nb.Type != "" {
-							msg.Blocks = append(msg.Blocks, nb)
-						}
-					}
-				}
-			}
-			detail.MessageCount++
-			topLevel = append(topLevel, msg)
-
-		case "progress":
-			// Group progress events under their parent by UUID. We key on
-			// ParentUUID which is the UUID of the assistant message that
-			// spawned this sub-agent call.
-			if ev.ParentUUID == "" {
-				continue
-			}
-			progressByParentUUID[ev.ParentUUID] = append(progressByParentUUID[ev.ParentUUID], ClaudeMessage{
-				UUID:        ev.UUID,
-				ParentUUID:  ev.ParentUUID,
-				Type:        "progress",
-				Timestamp:   ev.Timestamp,
-				IsSidechain: ev.IsSidechain,
-			})
-		}
+		tr.update(ev.Timestamp)
+		updateMetadataFromEvent(&detail.CWD, &detail.GitBranch, ev)
+		topLevel = processDetailEvent(detail, ev, progressMap, topLevel)
 	}
 
-	// Attach collected progress children to their parent top-level messages.
-	for i := range topLevel {
-		if children, ok := progressByParentUUID[topLevel[i].UUID]; ok {
-			topLevel[i].Children = children
-		}
-	}
-
+	detail.StartTime = tr.start
+	detail.LastActivity = tr.last
+	attachProgressChildren(topLevel, progressMap)
 	detail.Messages = topLevel
 	if detail.Messages == nil {
 		detail.Messages = []ClaudeMessage{}
 	}
-
 	detail.Todos = loadTodos(sessionID)
 	if detail.Todos == nil {
 		detail.Todos = []ClaudeTodo{}
 	}
+	detail.Preview = derivePreview(detail.Messages)
+	return detail, sc.Err()
+}
 
-	// Derive preview from first user message.
-	for _, msg := range detail.Messages {
-		if msg.Role == "user" && msg.Content != "" {
-			detail.Preview = truncateRunes(msg.Content, previewMaxRunes)
-			break
+func processDetailEvent(
+	detail *ClaudeSessionDetail, ev rawEvent,
+	progressMap map[string][]ClaudeMessage,
+	topLevel []ClaudeMessage,
+) []ClaudeMessage {
+	switch ev.Type {
+	case "user":
+		return processDetailUserEvent(detail, ev, topLevel)
+	case "assistant":
+		return processDetailAssistantEvent(detail, ev, topLevel)
+	case "progress":
+		processDetailProgressEvent(ev, progressMap)
+	}
+	return topLevel
+}
+
+func processDetailUserEvent(detail *ClaudeSessionDetail, ev rawEvent, topLevel []ClaudeMessage) []ClaudeMessage {
+	if ev.IsSidechain {
+		return topLevel
+	}
+	content := ""
+	if ev.Message != nil {
+		content = extractTextContent(ev.Message.Content)
+	}
+	detail.MessageCount++
+	return append(topLevel, ClaudeMessage{
+		UUID: ev.UUID, ParentUUID: ev.ParentUUID,
+		Type: "user", Timestamp: ev.Timestamp,
+		Role: "user", Content: content, GitBranch: ev.GitBranch,
+	})
+}
+
+func processDetailAssistantEvent(detail *ClaudeSessionDetail, ev rawEvent, topLevel []ClaudeMessage) []ClaudeMessage {
+	msg := ClaudeMessage{
+		UUID: ev.UUID, ParentUUID: ev.ParentUUID,
+		Type: "assistant", Timestamp: ev.Timestamp,
+		Role: "assistant", GitBranch: ev.GitBranch,
+	}
+	if ev.Message != nil {
+		if detail.Model == "" && ev.Message.Model != "" {
+			detail.Model = ev.Message.Model
+		}
+		populateAssistantUsage(&msg, detail, ev.Message)
+		populateAssistantBlocks(&msg, ev.Message)
+	}
+	detail.MessageCount++
+	return append(topLevel, msg)
+}
+
+func populateAssistantUsage(msg *ClaudeMessage, detail *ClaudeSessionDetail, rawMsg *rawMessage) {
+	if rawMsg.Usage == nil {
+		return
+	}
+	u := TokenUsage{
+		InputTokens:         rawMsg.Usage.InputTokens,
+		OutputTokens:        rawMsg.Usage.OutputTokens,
+		CacheCreationTokens: rawMsg.Usage.CacheCreationInputTokens,
+		CacheReadTokens:     rawMsg.Usage.CacheReadInputTokens,
+	}
+	msg.Usage = &u
+	detail.Usage.InputTokens += u.InputTokens
+	detail.Usage.OutputTokens += u.OutputTokens
+	detail.Usage.CacheCreationTokens += u.CacheCreationTokens
+	detail.Usage.CacheReadTokens += u.CacheReadTokens
+}
+
+func populateAssistantBlocks(msg *ClaudeMessage, rawMsg *rawMessage) {
+	var blocks []rawContentBlock
+	if err := json.Unmarshal(rawMsg.Content, &blocks); err != nil {
+		return
+	}
+	for _, b := range blocks {
+		if nb := normalizeBlock(b); nb.Type != "" {
+			msg.Blocks = append(msg.Blocks, nb)
 		}
 	}
+}
 
-	return detail, sc.Err()
+func processDetailProgressEvent(ev rawEvent, progressMap map[string][]ClaudeMessage) {
+	if ev.ParentUUID == "" {
+		return
+	}
+	progressMap[ev.ParentUUID] = append(progressMap[ev.ParentUUID], ClaudeMessage{
+		UUID: ev.UUID, ParentUUID: ev.ParentUUID,
+		Type: "progress", Timestamp: ev.Timestamp, IsSidechain: ev.IsSidechain,
+	})
+}
+
+func attachProgressChildren(topLevel []ClaudeMessage, progressMap map[string][]ClaudeMessage) {
+	for i := range topLevel {
+		if children, ok := progressMap[topLevel[i].UUID]; ok {
+			topLevel[i].Children = children
+		}
+	}
+}
+
+func derivePreview(messages []ClaudeMessage) string {
+	for _, msg := range messages {
+		if msg.Role == "user" && msg.Content != "" {
+			return truncateRunes(msg.Content, previewMaxRunes)
+		}
+	}
+	return ""
 }
 
 // normalizeBlock converts a raw Claude Code content block to Agento's NormalizedBlock format.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"time"
@@ -11,12 +12,15 @@ import (
 	_ "modernc.org/sqlite" // Pure Go SQLite driver.
 )
 
-// migrations holds all schema migrations in order. Each migration is applied
-// exactly once, tracked by the schema_migrations table.
-var migrations = []struct {
+// migration represents a single schema migration step.
+type migration struct {
 	version int
 	sql     string
-}{
+}
+
+// migrations holds all schema migrations in order. Each migration is applied
+// exactly once, tracked by the schema_migrations table.
+var migrations = []migration{
 	{
 		version: 1,
 		sql: `
@@ -143,15 +147,19 @@ func NewSQLiteDB(dbPath string) (*sql.DB, bool, error) {
 		"PRAGMA synchronous=NORMAL",
 	}
 	for _, p := range pragmas {
-		if _, err := db.ExecContext(ctx, p); err != nil {
-			_ = db.Close()
-			return nil, false, fmt.Errorf("setting pragma %q: %w", p, err)
+		if _, pragmaErr := db.ExecContext(ctx, p); pragmaErr != nil {
+			if cerr := db.Close(); cerr != nil {
+				log.Printf("failed to close database after pragma error: %v", cerr)
+			}
+			return nil, false, fmt.Errorf("setting pragma %q: %w", p, pragmaErr)
 		}
 	}
 
 	freshDB, err := runMigrations(ctx, db)
 	if err != nil {
-		_ = db.Close()
+		if cerr := db.Close(); cerr != nil {
+			log.Printf("failed to close database after migration error: %v", cerr)
+		}
 		return nil, false, fmt.Errorf("running migrations: %w", err)
 	}
 
@@ -184,31 +192,42 @@ func runMigrations(ctx context.Context, db *sql.DB) (bool, error) {
 		if m.version == 1 {
 			freshDB = true
 		}
-
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			return false, fmt.Errorf("begin migration %d: %w", m.version, err)
-		}
-
-		if _, err := tx.ExecContext(ctx, m.sql); err != nil {
-			_ = tx.Rollback()
-			return false, fmt.Errorf("migration %d: %w", m.version, err)
-		}
-
-		if _, err := tx.ExecContext(ctx,
-			"INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
-			m.version, time.Now().UTC(),
-		); err != nil {
-			_ = tx.Rollback()
-			return false, fmt.Errorf("recording migration %d: %w", m.version, err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return false, fmt.Errorf("commit migration %d: %w", m.version, err)
+		if err := applyMigration(ctx, db, m); err != nil {
+			return false, err
 		}
 	}
 
 	return freshDB, nil
+}
+
+// applyMigration runs a single schema migration inside a transaction.
+func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %d: %w", m.version, err)
+	}
+
+	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			log.Printf("failed to rollback migration %d: %v", m.version, rbErr)
+		}
+		return fmt.Errorf("migration %d: %w", m.version, err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		"INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+		m.version, time.Now().UTC(),
+	); err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			log.Printf("failed to rollback migration %d: %v", m.version, rbErr)
+		}
+		return fmt.Errorf("recording migration %d: %w", m.version, err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %d: %w", m.version, err)
+	}
+	return nil
 }
 
 func currentVersion(ctx context.Context, db *sql.DB) (int, error) {

@@ -50,7 +50,8 @@ Examples:
 
 	cmd.Flags().StringVar(&agentSlug, "agent", "", "Agent slug to use")
 	cmd.Flags().BoolVar(&noThinking, "no-thinking", false, "Disable extended thinking")
-	cmd.Flags().StringVar(&agentsDir, "agents-dir", "", "Directory containing agent YAML files (overrides AGENTO_DATA_DIR)")
+	cmd.Flags().StringVar(&agentsDir, "agents-dir", "",
+		"Directory containing agent YAML files (overrides AGENTO_DATA_DIR)")
 	cmd.Flags().StringVar(&mcpsFile, "mcps-file", "", "Path to the MCP registry YAML file (overrides AGENTO_DATA_DIR)")
 
 	return cmd
@@ -66,27 +67,9 @@ func runAsk(args []string, agentSlug string, noThinking bool, agentsDir, mcpsFil
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	mcpRegistry, err := config.LoadMCPRegistry(mcpsFile)
+	agentCfg, mcpRegistry, localToolsMCP, err := loadAskDependencies(ctx, agentSlug, agentsDir, mcpsFile)
 	if err != nil {
-		return fmt.Errorf("loading MCP registry: %w", err)
-	}
-
-	agentRegistry, err := config.LoadAgents(agentsDir, mcpRegistry)
-	if err != nil {
-		return fmt.Errorf("loading agents: %w", err)
-	}
-
-	localToolsMCP, err := tools.StartLocalMCPServer(ctx)
-	if err != nil {
-		return fmt.Errorf("starting local tools MCP server: %w", err)
-	}
-
-	var agentCfg *config.AgentConfig
-	if agentSlug != "" {
-		agentCfg = agentRegistry.Get(agentSlug)
-		if agentCfg == nil {
-			return fmt.Errorf("agent %q not found", agentSlug)
-		}
+		return err
 	}
 
 	runOpts := agent.RunOptions{
@@ -101,33 +84,77 @@ func runAsk(args []string, agentSlug string, noThinking bool, agentsDir, mcpsFil
 		return fmt.Errorf("starting agent: %w", err)
 	}
 
-	for event := range stream.Events() {
-		switch event.Type {
-		case claude.TypeStreamEvent:
-			if event.StreamEvent != nil {
-				delta := event.StreamEvent.Event.Delta
-				if delta != nil {
-					if delta.Type == "thinking_delta" && delta.Thinking != "" {
-						fmt.Fprint(os.Stderr, delta.Thinking)
-					} else if delta.Type == "text_delta" && delta.Text != "" {
-						fmt.Print(delta.Text)
-					}
-				}
-			}
-		case claude.TypeResult:
-			if event.Result != nil {
-				fmt.Println()
-				fmt.Fprintf(os.Stderr, "\nsession: %s\ncost: $%.6f | tokens in=%d out=%d\n",
-					event.Result.SessionID,
-					event.Result.TotalCostUSD,
-					event.Result.Usage.InputTokens,
-					event.Result.Usage.OutputTokens,
-				)
-			}
+	consumeAskStream(stream)
+	return nil
+}
+
+func loadAskDependencies(
+	ctx context.Context,
+	agentSlug, agentsDir, mcpsFile string,
+) (*config.AgentConfig, *config.MCPRegistry, *tools.LocalMCPConfig, error) {
+	mcpRegistry, err := config.LoadMCPRegistry(mcpsFile)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading MCP registry: %w", err)
+	}
+
+	agentRegistry, err := config.LoadAgents(agentsDir, mcpRegistry)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("loading agents: %w", err)
+	}
+
+	localToolsMCP, err := tools.StartLocalMCPServer(ctx)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("starting local tools MCP server: %w", err)
+	}
+
+	var agentCfg *config.AgentConfig
+	if agentSlug != "" {
+		agentCfg = agentRegistry.Get(agentSlug)
+		if agentCfg == nil {
+			return nil, nil, nil, fmt.Errorf("agent %q not found", agentSlug)
 		}
 	}
 
-	return nil
+	return agentCfg, mcpRegistry, localToolsMCP, nil
+}
+
+func consumeAskStream(stream *claude.Stream) {
+	for event := range stream.Events() {
+		switch event.Type {
+		case claude.TypeStreamEvent:
+			handleAskStreamEvent(event)
+		case claude.TypeResult:
+			handleAskResult(event)
+		}
+	}
+}
+
+func handleAskStreamEvent(event claude.Event) {
+	if event.StreamEvent == nil {
+		return
+	}
+	delta := event.StreamEvent.Event.Delta
+	if delta == nil {
+		return
+	}
+	if delta.Type == "thinking_delta" && delta.Thinking != "" {
+		fmt.Fprint(os.Stderr, delta.Thinking)
+	} else if delta.Type == "text_delta" && delta.Text != "" {
+		fmt.Print(delta.Text)
+	}
+}
+
+func handleAskResult(event claude.Event) {
+	if event.Result == nil {
+		return
+	}
+	fmt.Println()
+	fmt.Fprintf(os.Stderr, "\nsession: %s\ncost: $%.6f | tokens in=%d out=%d\n",
+		event.Result.SessionID,
+		event.Result.TotalCostUSD,
+		event.Result.Usage.InputTokens,
+		event.Result.Usage.OutputTokens,
+	)
 }
 
 func expandHome(path string) string {

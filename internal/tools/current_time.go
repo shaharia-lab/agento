@@ -14,7 +14,9 @@ type currentTimeParams struct {
 }
 
 // getCurrentTime returns the current time in the requested timezone.
-func getCurrentTime(_ context.Context, _ *mcp.CallToolRequest, params *currentTimeParams) (*mcp.CallToolResult, any, error) {
+func getCurrentTime(
+	_ context.Context, _ *mcp.CallToolRequest, params *currentTimeParams,
+) (*mcp.CallToolResult, any, error) {
 	tz := params.Timezone
 	if tz == "" {
 		tz = "UTC"

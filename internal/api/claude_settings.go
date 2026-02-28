@@ -63,14 +63,14 @@ func (s *Server) handleUpdateClaudeSettings(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Ensure the .claude directory exists.
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+	if mkdirErr := os.MkdirAll(filepath.Dir(path), 0700); mkdirErr != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create .claude directory")
 		return
 	}
 
 	// Pretty-print before writing so the file remains human-readable.
 	var pretty any
-	if err := json.Unmarshal(incoming, &pretty); err != nil {
+	if unmarshalErr := json.Unmarshal(incoming, &pretty); unmarshalErr != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON settings")
 		return
 	}

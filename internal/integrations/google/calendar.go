@@ -47,7 +47,9 @@ type createEventParams struct {
 	Description string `json:"description" jsonschema:"Optional description of the event"`
 }
 
-func handleCreateEvent(ctx context.Context, svc *calendar.Service, params *createEventParams) (*mcp.CallToolResult, any, error) {
+func handleCreateEvent(
+	ctx context.Context, svc *calendar.Service, params *createEventParams,
+) (*mcp.CallToolResult, any, error) {
 	event := &calendar.Event{
 		Summary:     params.Summary,
 		Description: params.Description,
@@ -75,7 +77,9 @@ type viewEventsParams struct {
 	MaxResults int64  `json:"max_results" jsonschema:"Maximum number of events to return (default 10, max 100)"`
 }
 
-func handleViewEvents(ctx context.Context, svc *calendar.Service, params *viewEventsParams) (*mcp.CallToolResult, any, error) {
+func handleViewEvents(
+	ctx context.Context, svc *calendar.Service, params *viewEventsParams,
+) (*mcp.CallToolResult, any, error) {
 	maxResults := params.MaxResults
 	if maxResults <= 0 || maxResults > 100 {
 		maxResults = 10

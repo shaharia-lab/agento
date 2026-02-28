@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"log/slog"
 	"net/http"
 
@@ -25,7 +26,14 @@ type Server struct {
 }
 
 // New creates a new API Server backed by the provided services.
-func New(agentSvc service.AgentService, chatSvc service.ChatService, integrationSvc service.IntegrationService, settingsMgr *config.SettingsManager, logger *slog.Logger, sessionCache *claudesessions.Cache) *Server {
+func New(
+	agentSvc service.AgentService,
+	chatSvc service.ChatService,
+	integrationSvc service.IntegrationService,
+	settingsMgr *config.SettingsManager,
+	logger *slog.Logger,
+	sessionCache *claudesessions.Cache,
+) *Server {
 	return &Server{
 		agentSvc:           agentSvc,
 		chatSvc:            chatSvc,
@@ -105,7 +113,9 @@ func (s *Server) Mount(r chi.Router) {
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("writeJSON: failed to encode response: %v", err)
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {
@@ -113,8 +123,14 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 }
 
 func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, data any) {
-	b, _ := json.Marshal(data)
-	_, _ = fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(b))
+	b, err := json.Marshal(data)
+	if err != nil {
+		log.Printf("sendSSEEvent: failed to marshal data: %v", err)
+		return
+	}
+	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(b)); err != nil {
+		return
+	}
 	if flusher != nil {
 		flusher.Flush()
 	}

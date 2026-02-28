@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"log"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -67,16 +69,8 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Ensure data and log directories exist.
-	for _, dir := range []string{cfg.DataDir, cfg.LogDir()} {
-		if err := os.MkdirAll(dir, 0750); err != nil {
-			return fmt.Errorf("creating directory %s: %w", dir, err)
-		}
-	}
-
-	// Create the default working directory if it doesn't exist.
-	if err := os.MkdirAll(config.DefaultWorkingDir(), 0750); err != nil {
-		return fmt.Errorf("creating default working directory: %w", err)
+	if err := ensureWebDirectories(cfg); err != nil {
+		return err
 	}
 
 	sysLogger, err := logger.NewSystemLogger(cfg.LogDir(), cfg.SlogLevel())
@@ -92,70 +86,16 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 		slog.String("build_date", build.BuildDate),
 	)
 
-	// Open SQLite database.
-	dbPath := filepath.Join(cfg.DataDir, "agento.db")
-	db, freshDB, err := storage.NewSQLiteDB(dbPath)
+	db, sysLoggerCleanup, err := initDatabase(cfg, sysLogger)
 	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
+		return err
 	}
-	defer func() { _ = db.Close() }()
+	defer sysLoggerCleanup()
 
-	// Auto-migrate from filesystem if this is a fresh database and FS data exists.
-	if freshDB && storage.HasFSData(cfg.DataDir) {
-		sysLogger.Info("detected existing filesystem data, migrating to SQLite...")
-		if err := storage.MigrateFromFS(db, cfg.DataDir, sysLogger); err != nil {
-			return fmt.Errorf("migrating filesystem data to SQLite: %w", err)
-		}
-	}
-
-	agentStore := storage.NewSQLiteAgentStore(db)
-
-	// Seed an example agent on first run.
-	existing, err := agentStore.List()
+	srv, err := buildWebServer(ctx, cfg, db, sysLogger)
 	if err != nil {
-		return fmt.Errorf("listing agents: %w", err)
+		return err
 	}
-	if len(existing) == 0 {
-		if err := seedExampleAgent(agentStore); err != nil {
-			sysLogger.Warn("could not seed example agent", "error", err)
-		}
-	}
-
-	mcpRegistry, err := config.LoadMCPRegistry(cfg.MCPsFile())
-	if err != nil {
-		return fmt.Errorf("loading MCP registry: %w", err)
-	}
-
-	localToolsMCP, err := tools.StartLocalMCPServer(ctx)
-	if err != nil {
-		return fmt.Errorf("starting local tools MCP server: %w", err)
-	}
-
-	chatStore := storage.NewSQLiteChatStore(db)
-
-	integrationStore := storage.NewSQLiteIntegrationStore(db)
-	integrationRegistry := integrations.NewRegistry(integrationStore, sysLogger)
-	integrationRegistry.RegisterStarter("google", googleintegration.Start)
-	if err := integrationRegistry.Start(ctx); err != nil {
-		sysLogger.Warn("some integrations failed to start", "error", err)
-	}
-
-	settingsStore := storage.NewSQLiteSettingsStore(db)
-	settingsMgr, err := config.NewSettingsManager(settingsStore, cfg)
-	if err != nil {
-		return fmt.Errorf("initializing settings: %w", err)
-	}
-
-	agentSvc := service.NewAgentService(agentStore, sysLogger)
-	chatSvc := service.NewChatService(chatStore, agentStore, mcpRegistry, localToolsMCP, integrationRegistry, cfg.DefaultModel, sysLogger)
-	integrationSvc := service.NewIntegrationService(integrationStore, integrationRegistry, sysLogger, ctx)
-
-	// Start background scan of ~/.claude/projects so Claude Sessions are available quickly.
-	sessionCache := claudesessions.NewCache(db, sysLogger)
-	sessionCache.StartBackgroundScan()
-
-	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, settingsMgr, sysLogger, sessionCache)
-	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger)
 
 	url := fmt.Sprintf("http://localhost:%d", cfg.Port)
 	sysLogger.Info("server ready", "url", url)
@@ -165,6 +105,95 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	}
 
 	return srv.Run(ctx)
+}
+
+func ensureWebDirectories(cfg *config.AppConfig) error {
+	for _, dir := range []string{cfg.DataDir, cfg.LogDir()} {
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			return fmt.Errorf("creating directory %s: %w", dir, err)
+		}
+	}
+	if err := os.MkdirAll(config.DefaultWorkingDir(), 0750); err != nil {
+		return fmt.Errorf("creating default working directory: %w", err)
+	}
+	return nil
+}
+
+func initDatabase(cfg *config.AppConfig, sysLogger *slog.Logger) (*sql.DB, func(), error) {
+	dbPath := filepath.Join(cfg.DataDir, "agento.db")
+	db, freshDB, err := storage.NewSQLiteDB(dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening database: %w", err)
+	}
+	cleanup := func() {
+		if cerr := db.Close(); cerr != nil {
+			sysLogger.Error("failed to close database", "error", cerr)
+		}
+	}
+
+	if freshDB && storage.HasFSData(cfg.DataDir) {
+		sysLogger.Info("detected existing filesystem data, migrating to SQLite...")
+		if migrateErr := storage.MigrateFromFS(db, cfg.DataDir, sysLogger); migrateErr != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("migrating filesystem data to SQLite: %w", migrateErr)
+		}
+	}
+
+	return db, cleanup, nil
+}
+
+func buildWebServer(
+	ctx context.Context, cfg *config.AppConfig,
+	db *sql.DB, sysLogger *slog.Logger,
+) (*server.Server, error) {
+	agentStore := storage.NewSQLiteAgentStore(db)
+
+	existing, err := agentStore.List()
+	if err != nil {
+		return nil, fmt.Errorf("listing agents: %w", err)
+	}
+	if len(existing) == 0 {
+		if seedErr := seedExampleAgent(agentStore); seedErr != nil {
+			sysLogger.Warn("could not seed example agent", "error", seedErr)
+		}
+	}
+
+	mcpRegistry, err := config.LoadMCPRegistry(cfg.MCPsFile())
+	if err != nil {
+		return nil, fmt.Errorf("loading MCP registry: %w", err)
+	}
+
+	localToolsMCP, err := tools.StartLocalMCPServer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting local tools MCP server: %w", err)
+	}
+
+	chatStore := storage.NewSQLiteChatStore(db)
+	integrationStore := storage.NewSQLiteIntegrationStore(db)
+	integrationRegistry := integrations.NewRegistry(integrationStore, sysLogger)
+	integrationRegistry.RegisterStarter("google", googleintegration.Start)
+	if startErr := integrationRegistry.Start(ctx); startErr != nil {
+		sysLogger.Warn("some integrations failed to start", "error", startErr)
+	}
+
+	settingsStore := storage.NewSQLiteSettingsStore(db)
+	settingsMgr, err := config.NewSettingsManager(settingsStore, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("initializing settings: %w", err)
+	}
+
+	agentSvc := service.NewAgentService(agentStore, sysLogger)
+	chatSvc := service.NewChatService(
+		chatStore, agentStore, mcpRegistry, localToolsMCP,
+		integrationRegistry, cfg.DefaultModel, sysLogger,
+	)
+	integrationSvc := service.NewIntegrationService(integrationStore, integrationRegistry, sysLogger, ctx)
+
+	sessionCache := claudesessions.NewCache(db, sysLogger)
+	sessionCache.StartBackgroundScan()
+
+	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, settingsMgr, sysLogger, sessionCache)
+	return server.New(apiSrv, WebFS, cfg.Port, sysLogger), nil
 }
 
 func seedExampleAgent(store storage.AgentStore) error {
@@ -274,5 +303,7 @@ func openBrowser(url string) {
 	default:
 		c = exec.CommandContext(ctx, "xdg-open", url)
 	}
-	_ = c.Start()
+	if err := c.Start(); err != nil {
+		log.Printf("failed to open browser: %v", err)
+	}
 }

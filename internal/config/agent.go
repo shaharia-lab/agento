@@ -11,12 +11,14 @@ import (
 
 // AgentConfig holds the full configuration for a single agent, as parsed from YAML.
 type AgentConfig struct {
-	Name           string            `yaml:"name"            json:"name"`
-	Slug           string            `yaml:"slug"            json:"slug"`
-	Description    string            `yaml:"description"     json:"description"`
-	Model          string            `yaml:"model"           json:"model"`
-	Thinking       string            `yaml:"thinking"        json:"thinking"`        // "adaptive", "disabled", or "enabled"
-	PermissionMode string            `yaml:"permission_mode" json:"permission_mode"` // "bypass" (default), "default"
+	Name        string `yaml:"name"            json:"name"`
+	Slug        string `yaml:"slug"            json:"slug"`
+	Description string `yaml:"description"     json:"description"`
+	Model       string `yaml:"model"           json:"model"`
+	// Thinking mode: "adaptive", "disabled", or "enabled".
+	Thinking string `yaml:"thinking"        json:"thinking"`
+	// PermissionMode: "bypass" (default) or "default".
+	PermissionMode string            `yaml:"permission_mode" json:"permission_mode"`
 	SystemPrompt   string            `yaml:"system_prompt"   json:"system_prompt"`
 	Capabilities   AgentCapabilities `yaml:"capabilities"    json:"capabilities"`
 }
@@ -68,44 +70,67 @@ func LoadAgents(dir string, mcpRegistry *MCPRegistry) (*AgentRegistry, error) {
 			continue
 		}
 
-		data, err := os.ReadFile(filepath.Join(dir, entry.Name())) //nolint:gosec // path is constructed from admin-configured data dir
+		cfg, err := loadAgentFile(dir, entry.Name())
 		if err != nil {
-			return nil, fmt.Errorf("reading agent file %q: %w", entry.Name(), err)
+			return nil, err
 		}
 
-		var cfg AgentConfig
-		if err := yaml.Unmarshal(data, &cfg); err != nil {
-			return nil, fmt.Errorf("parsing agent file %q: %w", entry.Name(), err)
+		if err := validateAgentMCP(cfg, mcpRegistry); err != nil {
+			return nil, err
 		}
 
-		if cfg.Slug == "" {
-			cfg.Slug = strings.TrimSuffix(entry.Name(), ".yaml")
-		}
-
-		if cfg.Model == "" {
-			cfg.Model = "claude-sonnet-4-6"
-		}
-
-		if cfg.Thinking == "" {
-			cfg.Thinking = "adaptive"
-		}
-
-		if err := validateAgent(&cfg); err != nil {
-			return nil, fmt.Errorf("invalid agent %q: %w", entry.Name(), err)
-		}
-
-		if mcpRegistry != nil {
-			for serverName := range cfg.Capabilities.MCP {
-				if !mcpRegistry.Has(serverName) {
-					return nil, fmt.Errorf("agent %q: references unknown MCP server %q (not in MCP registry)", cfg.Slug, serverName)
-				}
-			}
-		}
-
-		registry.agents[cfg.Slug] = &cfg
+		registry.agents[cfg.Slug] = cfg
 	}
 
 	return registry, nil
+}
+
+// loadAgentFile reads and parses a single agent YAML file, applying defaults.
+func loadAgentFile(dir, fileName string) (*AgentConfig, error) {
+	//nolint:gosec // path is constructed from admin-configured data dir
+	data, err := os.ReadFile(filepath.Join(dir, fileName))
+	if err != nil {
+		return nil, fmt.Errorf("reading agent file %q: %w", fileName, err)
+	}
+
+	var cfg AgentConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parsing agent file %q: %w", fileName, err)
+	}
+
+	applyAgentDefaults(&cfg, fileName)
+
+	if err := validateAgent(&cfg); err != nil {
+		return nil, fmt.Errorf("invalid agent %q: %w", fileName, err)
+	}
+
+	return &cfg, nil
+}
+
+// applyAgentDefaults fills in missing fields with sensible defaults.
+func applyAgentDefaults(cfg *AgentConfig, fileName string) {
+	if cfg.Slug == "" {
+		cfg.Slug = strings.TrimSuffix(fileName, ".yaml")
+	}
+	if cfg.Model == "" {
+		cfg.Model = "claude-sonnet-4-6"
+	}
+	if cfg.Thinking == "" {
+		cfg.Thinking = "adaptive"
+	}
+}
+
+// validateAgentMCP checks that all MCP servers referenced by the agent exist in the registry.
+func validateAgentMCP(cfg *AgentConfig, mcpRegistry *MCPRegistry) error {
+	if mcpRegistry == nil {
+		return nil
+	}
+	for serverName := range cfg.Capabilities.MCP {
+		if !mcpRegistry.Has(serverName) {
+			return fmt.Errorf("agent %q: references unknown MCP server %q (not in MCP registry)", cfg.Slug, serverName)
+		}
+	}
+	return nil
 }
 
 func validateAgent(cfg *AgentConfig) error {
