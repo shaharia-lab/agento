@@ -130,7 +130,7 @@ export default function IntegrationGooglePage() {
               </a>
               . Set the redirect URI to{' '}
               <code className="text-xs bg-zinc-100 dark:bg-zinc-800 px-1 py-0.5 rounded text-zinc-700 dark:text-zinc-300">
-                http://localhost:PORT/callback
+                {window.location.origin}/callback
               </code>
               .
             </p>
