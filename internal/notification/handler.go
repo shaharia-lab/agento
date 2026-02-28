@@ -30,6 +30,19 @@ func NewNotificationHandler(loader SettingsLoader, store storage.NotificationSto
 	return &NotificationHandler{settingsLoader: loader, store: store}
 }
 
+// humanSubject returns a readable email subject for a given event type.
+// For well-known events a friendly description is used; unknown types fall
+// back to the raw event type string.
+func humanSubject(eventType string) string {
+	switch eventType {
+	case "tasks_scheduler.task_execution.finished":
+		return "Scheduled Task Completed Successfully"
+	case "tasks_scheduler.task_execution.failed":
+		return "Scheduled Task Execution Failed"
+	}
+	return eventType
+}
+
 // shouldSendForEvent returns false when the user's preferences explicitly
 // disable notifications for the given event type.
 func shouldSendForEvent(eventType string, settings *NotificationSettings) bool {
@@ -59,7 +72,7 @@ func (h *NotificationHandler) Handle(eventType string, payload map[string]string
 	}
 
 	provider := NewSMTPProvider(settings.Provider)
-	subject := buildSubject(eventType)
+	subject := buildSubject(humanSubject(eventType))
 
 	bodyParts := make([]string, 0, len(payload))
 	for k, v := range payload {

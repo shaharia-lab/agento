@@ -222,6 +222,64 @@ func TestHandle_UnknownEventType_AlwaysSends(t *testing.T) {
 	require.Len(t, store.entries, 1)
 }
 
+// --- human subject tests ---
+
+func TestHandle_ScheduledTaskFinished_SubjectIsReadable(t *testing.T) {
+	store := &stubStore{}
+	loader := func() (*notification.NotificationSettings, error) {
+		return &notification.NotificationSettings{
+			Enabled: true,
+			Provider: notification.SMTPConfig{
+				Host: "localhost", Port: 9999,
+				FromAddr: "from@example.com", ToAddrs: "to@example.com",
+			},
+		}, nil
+	}
+	h := notification.NewNotificationHandler(loader, store)
+	h.Handle("tasks_scheduler.task_execution.finished", map[string]string{"Task Name": "My Task"})
+
+	require.Len(t, store.entries, 1)
+	assert.Contains(t, store.entries[0].Subject, "Scheduled Task Completed Successfully")
+	assert.NotContains(t, store.entries[0].Subject, "tasks_scheduler.task_execution.finished")
+}
+
+func TestHandle_ScheduledTaskFailed_SubjectIsReadable(t *testing.T) {
+	store := &stubStore{}
+	loader := func() (*notification.NotificationSettings, error) {
+		return &notification.NotificationSettings{
+			Enabled: true,
+			Provider: notification.SMTPConfig{
+				Host: "localhost", Port: 9999,
+				FromAddr: "from@example.com", ToAddrs: "to@example.com",
+			},
+		}, nil
+	}
+	h := notification.NewNotificationHandler(loader, store)
+	h.Handle("tasks_scheduler.task_execution.failed", map[string]string{"Error": "timeout"})
+
+	require.Len(t, store.entries, 1)
+	assert.Contains(t, store.entries[0].Subject, "Scheduled Task Execution Failed")
+	assert.NotContains(t, store.entries[0].Subject, "tasks_scheduler.task_execution.failed")
+}
+
+func TestHandle_UnknownEvent_SubjectFallsBackToEventType(t *testing.T) {
+	store := &stubStore{}
+	loader := func() (*notification.NotificationSettings, error) {
+		return &notification.NotificationSettings{
+			Enabled: true,
+			Provider: notification.SMTPConfig{
+				Host: "localhost", Port: 9999,
+				FromAddr: "from@example.com", ToAddrs: "to@example.com",
+			},
+		}, nil
+	}
+	h := notification.NewNotificationHandler(loader, store)
+	h.Handle("some.custom.event", map[string]string{"k": "v"})
+
+	require.Len(t, store.entries, 1)
+	assert.Contains(t, store.entries[0].Subject, "some.custom.event")
+}
+
 // --- preference helper tests ---
 
 func TestScheduledTasksPreferences_Defaults(t *testing.T) {
