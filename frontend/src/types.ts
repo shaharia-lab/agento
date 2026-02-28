@@ -494,9 +494,19 @@ export interface SMTPConfig {
   encryption: 'none' | 'starttls' | 'ssl_tls'
 }
 
+export interface ScheduledTasksPreferences {
+  on_finished?: boolean // undefined/null → default enabled (true)
+  on_failed?: boolean // undefined/null → default enabled (true)
+}
+
+export interface NotificationPreferences {
+  scheduled_tasks?: ScheduledTasksPreferences
+}
+
 export interface NotificationSettings {
   enabled: boolean
   provider: SMTPConfig
+  preferences?: NotificationPreferences
 }
 
 export interface NotificationLogEntry {

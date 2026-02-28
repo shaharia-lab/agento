@@ -233,7 +233,7 @@ func buildAPIServer(
 	taskSvc := service.NewTaskService(taskStore, sysLogger)
 
 	taskScheduler, err := initTaskScheduler(ctx, taskStore, chatStore, agentStore,
-		mcpRegistry, localToolsMCP, integrationRegistry, settingsMgr, sysLogger)
+		mcpRegistry, localToolsMCP, integrationRegistry, settingsMgr, sysLogger, bus)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -295,6 +295,7 @@ func initTaskScheduler(
 	mcpRegistry *config.MCPRegistry, localMCP *tools.LocalMCPConfig,
 	integrationRegistry *integrations.IntegrationRegistry,
 	settingsMgr *config.SettingsManager, sysLogger *slog.Logger,
+	eventPublisher scheduler.EventPublisher,
 ) (*scheduler.Scheduler, error) {
 	taskScheduler, err := scheduler.New(scheduler.Config{
 		TaskStore:           taskStore,
@@ -305,6 +306,7 @@ func initTaskScheduler(
 		IntegrationRegistry: integrationRegistry,
 		SettingsManager:     settingsMgr,
 		Logger:              sysLogger,
+		EventPublisher:      eventPublisher,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating task scheduler: %w", err)

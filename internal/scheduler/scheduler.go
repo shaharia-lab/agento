@@ -18,6 +18,18 @@ import (
 	"github.com/shaharia-lab/agento/internal/tools"
 )
 
+// EventPublisher allows the scheduler to emit events without depending on a
+// concrete event bus implementation.
+type EventPublisher interface {
+	Publish(eventType string, payload map[string]string)
+}
+
+// Event type constants for task lifecycle notifications.
+const (
+	EventTaskFinished = "tasks_scheduler.task_execution.finished"
+	EventTaskFailed   = "tasks_scheduler.task_execution.failed"
+)
+
 // Config holds the scheduler configuration.
 type Config struct {
 	TaskStore           storage.TaskStore
@@ -29,6 +41,8 @@ type Config struct {
 	SettingsManager     *config.SettingsManager
 	Logger              *slog.Logger
 	MaxConcurrency      int
+	// EventPublisher is optional. When set, task lifecycle events are published.
+	EventPublisher EventPublisher
 }
 
 // Scheduler manages scheduled task execution using gocron.

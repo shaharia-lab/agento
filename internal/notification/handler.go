@@ -30,6 +30,19 @@ func NewNotificationHandler(loader SettingsLoader, store storage.NotificationSto
 	return &NotificationHandler{settingsLoader: loader, store: store}
 }
 
+// shouldSendForEvent returns false when the user's preferences explicitly
+// disable notifications for the given event type.
+func shouldSendForEvent(eventType string, settings *NotificationSettings) bool {
+	prefs := settings.Preferences.ScheduledTasks
+	switch eventType {
+	case "tasks_scheduler.task_execution.finished":
+		return prefs.IsOnFinishedEnabled()
+	case "tasks_scheduler.task_execution.failed":
+		return prefs.IsOnFailedEnabled()
+	}
+	return true
+}
+
 // Handle processes an event: loads settings, builds the message, calls the
 // SMTP provider, and logs the outcome.
 func (h *NotificationHandler) Handle(eventType string, payload map[string]string) {
@@ -39,6 +52,9 @@ func (h *NotificationHandler) Handle(eventType string, payload map[string]string
 		return
 	}
 	if !settings.Enabled {
+		return
+	}
+	if !shouldSendForEvent(eventType, settings) {
 		return
 	}
 
