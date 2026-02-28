@@ -86,7 +86,7 @@ export function formatModelName(model: string): string {
     return model
       .replace(/claude-/i, '')
       .replace(/-/g, ' ')
-      .replace(/\b\w/g, c => c.toUpperCase())
+      .replace(/\b\w/g, (c: string) => c.toUpperCase())
   return model
 }
 
@@ -108,13 +108,13 @@ export function KPICard({
   value,
   sub,
   color = 'text-zinc-900 dark:text-zinc-100',
-}: {
+}: Readonly<{
   icon: React.ElementType
   label: string
   value: string
   sub?: string
   color?: string
-}) {
+}>) {
   return (
     <div className="rounded-lg border border-zinc-200 dark:border-zinc-700/50 bg-white dark:bg-zinc-900 p-4">
       <div className="flex items-center gap-2 mb-2">
@@ -127,7 +127,10 @@ export function KPICard({
   )
 }
 
-export function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+export function ChartCard({
+  title,
+  children,
+}: Readonly<{ title: string; children: React.ReactNode }>) {
   return (
     <div className="rounded-lg border border-zinc-200 dark:border-zinc-700/50 bg-white dark:bg-zinc-900 p-4">
       <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-4">{title}</h3>
@@ -146,7 +149,7 @@ export function DateRangePicker({
   projects,
   project,
   onProject,
-}: {
+}: Readonly<{
   preset: DatePreset
   from: string
   to: string
@@ -156,7 +159,7 @@ export function DateRangePicker({
   projects?: string[]
   project?: string
   onProject?: (v: string) => void
-}) {
+}>) {
   return (
     <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
       <div className="flex flex-wrap gap-1">

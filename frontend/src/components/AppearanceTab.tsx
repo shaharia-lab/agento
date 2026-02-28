@@ -143,7 +143,7 @@ export default function AppearanceTab() {
 
       <Button
         className="bg-zinc-900 hover:bg-zinc-800 text-white dark:bg-zinc-100 dark:hover:bg-zinc-200 dark:text-zinc-900 w-full sm:w-auto"
-        onClick={() => void handleSave()}
+        onClick={() => handleSave()}
         disabled={saving}
       >
         {saving ? 'Saving…' : 'Save Appearance Settings'}

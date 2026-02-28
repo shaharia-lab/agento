@@ -52,7 +52,7 @@ func (s *Server) handleGetClaudeSettings(w http.ResponseWriter, _ *http.Request)
 func (s *Server) handleUpdateClaudeSettings(w http.ResponseWriter, r *http.Request) {
 	var incoming json.RawMessage
 	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 

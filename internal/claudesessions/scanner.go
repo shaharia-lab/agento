@@ -15,7 +15,10 @@ import (
 	"unicode/utf8"
 )
 
-const previewMaxRunes = 120
+const (
+	previewMaxRunes = 120
+	jsonlExt        = ".jsonl"
+)
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
 type rawEvent struct {
@@ -156,7 +159,7 @@ func ListProjects() ([]ClaudeProject, error) {
 		}
 		count := 0
 		for _, f := range files {
-			if !f.IsDir() && strings.HasSuffix(f.Name(), ".jsonl") {
+			if !f.IsDir() && strings.HasSuffix(f.Name(), jsonlExt) {
 				count++
 			}
 		}
@@ -206,10 +209,10 @@ func scanProjectSessions(projectsDir, dirName string, sessions []ClaudeSessionSu
 		return sessions
 	}
 	for _, f := range files {
-		if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), jsonlExt) {
 			continue
 		}
-		sessionID := strings.TrimSuffix(f.Name(), ".jsonl")
+		sessionID := strings.TrimSuffix(f.Name(), jsonlExt)
 		filePath := filepath.Join(projectsDir, dirName, f.Name())
 		summary, err := readSessionSummary(sessionID, projectPath, filePath)
 		if err != nil || summary == nil {
@@ -287,7 +290,7 @@ func collectProjectDiskFiles(projectsDir, dirName string, onDisk map[string]disk
 		return
 	}
 	for _, f := range files {
-		if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+		if f.IsDir() || !strings.HasSuffix(f.Name(), jsonlExt) {
 			continue
 		}
 		info, err := f.Info()
@@ -296,7 +299,7 @@ func collectProjectDiskFiles(projectsDir, dirName string, onDisk map[string]disk
 		}
 		fp := filepath.Join(projectsDir, dirName, f.Name())
 		onDisk[fp] = diskFile{
-			sessionID:   strings.TrimSuffix(f.Name(), ".jsonl"),
+			sessionID:   strings.TrimSuffix(f.Name(), jsonlExt),
 			projectPath: projectPath,
 			filePath:    fp,
 			mtime:       info.ModTime().UTC(),
@@ -570,7 +573,7 @@ func GetSessionDetail(sessionID string) (*ClaudeSessionDetail, error) {
 		if !e.IsDir() {
 			continue
 		}
-		filePath := filepath.Join(projectsDir, e.Name(), sessionID+".jsonl")
+		filePath := filepath.Join(projectsDir, e.Name(), sessionID+jsonlExt)
 		if _, err := os.Stat(filePath); err == nil {
 			projectPath := DecodeProjectPath(e.Name())
 			return readSessionDetail(sessionID, projectPath, filePath)

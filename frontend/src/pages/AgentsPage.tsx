@@ -40,7 +40,7 @@ export default function AgentsPage() {
   }
 
   useEffect(() => {
-    void loadAgents()
+    loadAgents()
   }, [])
 
   const handleDelete = async (slug: string) => {
@@ -67,7 +67,7 @@ export default function AgentsPage() {
         <div>
           <h1 className="text-base font-semibold text-zinc-900">Agents</h1>
           <p className="text-xs text-zinc-500 mt-0.5">
-            {agents.length} agent{agents.length !== 1 ? 's' : ''} defined
+            {agents.length} agent{agents.length === 1 ? '' : 's'} defined
           </p>
         </div>
         <Button
@@ -128,11 +128,11 @@ function AgentCard({
   agent,
   onEdit,
   onDelete,
-}: {
+}: Readonly<{
   agent: Agent
   onEdit: () => void
   onDelete: () => void
-}) {
+}>) {
   return (
     <div className="flex flex-col rounded-lg border border-zinc-200 bg-white p-4 hover:border-zinc-300 transition-colors">
       {/* Icon + Name */}

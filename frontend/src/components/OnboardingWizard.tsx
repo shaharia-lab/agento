@@ -163,7 +163,7 @@ export default function OnboardingWizard({
 
               <Button
                 className="bg-zinc-900 hover:bg-zinc-800 text-white w-full"
-                onClick={() => void handleNext()}
+                onClick={() => handleNext()}
                 disabled={dirChecking || !workingDir}
               >
                 {dirChecking ? 'Checking…' : 'Next'}
@@ -218,7 +218,7 @@ export default function OnboardingWizard({
                 </Button>
                 <Button
                   className="flex-1 bg-zinc-900 hover:bg-zinc-800 text-white"
-                  onClick={() => void handleGetStarted()}
+                  onClick={() => handleGetStarted()}
                   disabled={saving || (!modelFromEnv && !model)}
                 >
                   {saving ? 'Saving…' : 'Get Started'}
@@ -242,16 +242,23 @@ export default function OnboardingWizard({
   )
 }
 
-function StepDot({ active, done, label }: { active: boolean; done: boolean; label: string }) {
+function StepDot({
+  active,
+  done,
+  label,
+}: Readonly<{ active: boolean; done: boolean; label: string }>) {
+  let stateClass = 'bg-zinc-100 text-zinc-400'
+  if (active) {
+    stateClass = 'bg-zinc-900 text-white'
+  } else if (done) {
+    stateClass = 'bg-zinc-300 text-zinc-600'
+  }
+
   return (
     <div
       className={[
         'flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold transition-colors',
-        active
-          ? 'bg-zinc-900 text-white'
-          : done
-            ? 'bg-zinc-300 text-zinc-600'
-            : 'bg-zinc-100 text-zinc-400',
+        stateClass,
       ].join(' ')}
     >
       {label}

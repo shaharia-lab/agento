@@ -14,6 +14,11 @@ import (
 	"github.com/shaharia-lab/agento/internal/service"
 )
 
+// Common error message constants used across API handlers.
+const (
+	errInvalidJSONBody = "invalid JSON body"
+)
+
 // Server holds all dependencies for the REST API handlers.
 type Server struct {
 	agentSvc           service.AgentService

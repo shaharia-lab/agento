@@ -77,7 +77,7 @@ type fsMkdirRequest struct {
 func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
 	var req fsMkdirRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 	if req.Path == "" {

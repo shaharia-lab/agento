@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { chatsApi, agentsApi, settingsApi, claudeSettingsProfilesApi } from '@/lib/api'
 import type { ChatSession, Agent, ClaudeSettingsProfile } from '@/types'
@@ -83,7 +83,7 @@ export default function ChatsPage() {
   }, [])
 
   useEffect(() => {
-    void load()
+    load()
   }, [load])
 
   // Auto-open new chat dialog if ?new=1
@@ -115,7 +115,7 @@ export default function ChatsPage() {
 
   // When agent is selected, determine if model should be locked to agent's model.
   const selectedAgentObj = agents.find(a => a.slug === selectedAgent)
-  const agentModelLocked = selectedAgentObj?.model ? true : false
+  const agentModelLocked = !!selectedAgentObj?.model
   const effectiveModel = agentModelLocked ? (selectedAgentObj?.model ?? '') : selectedModel
 
   const createChat = async () => {
@@ -151,7 +151,7 @@ export default function ChatsPage() {
   const handleModalKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
-      void createChat()
+      createChat()
     }
   }
 
@@ -182,6 +182,49 @@ export default function ChatsPage() {
     )
   }
 
+  let chatListContent: ReactNode
+  if (sessions.length === 0) {
+    chatListContent = (
+      <div className="flex flex-col items-center justify-center py-20 text-center">
+        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 mb-4">
+          <MessageSquare className="h-5 w-5 text-zinc-400" />
+        </div>
+        <h2 className="text-sm font-semibold text-zinc-900 mb-1">No chats yet</h2>
+        <p className="text-xs text-zinc-500 mb-4 max-w-xs">
+          Start a conversation — with or without an agent.
+        </p>
+        <Button
+          size="sm"
+          className="gap-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs h-8"
+          onClick={() => setNewChatOpen(true)}
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Start a chat
+        </Button>
+      </div>
+    )
+  } else if (filtered.length === 0) {
+    chatListContent = (
+      <div className="flex flex-col items-center justify-center py-16 text-center">
+        <p className="text-sm text-zinc-400">No conversations match your filters.</p>
+      </div>
+    )
+  } else {
+    chatListContent = (
+      <div className="divide-y divide-zinc-100 dark:divide-zinc-700/50">
+        {filtered.map(session => (
+          <ChatRow
+            key={session.id}
+            session={session}
+            agentName={session.agent_slug ? getAgentName(session.agent_slug) : null}
+            onClick={() => navigate(`/chats/${session.id}`)}
+            onDelete={() => deleteSession(session.id)}
+          />
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -189,7 +232,7 @@ export default function ChatsPage() {
         <div>
           <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Chats</h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            {sessions.length} conversation{sessions.length !== 1 ? 's' : ''}
+            {sessions.length} conversation{sessions.length === 1 ? '' : 's'}
           </p>
         </div>
         <Button
@@ -239,43 +282,7 @@ export default function ChatsPage() {
       )}
 
       {/* Chat list */}
-      <div className="flex-1 overflow-y-auto">
-        {sessions.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 mb-4">
-              <MessageSquare className="h-5 w-5 text-zinc-400" />
-            </div>
-            <h2 className="text-sm font-semibold text-zinc-900 mb-1">No chats yet</h2>
-            <p className="text-xs text-zinc-500 mb-4 max-w-xs">
-              Start a conversation — with or without an agent.
-            </p>
-            <Button
-              size="sm"
-              className="gap-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs h-8"
-              onClick={() => setNewChatOpen(true)}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Start a chat
-            </Button>
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-16 text-center">
-            <p className="text-sm text-zinc-400">No conversations match your filters.</p>
-          </div>
-        ) : (
-          <div className="divide-y divide-zinc-100 dark:divide-zinc-700/50">
-            {filtered.map(session => (
-              <ChatRow
-                key={session.id}
-                session={session}
-                agentName={session.agent_slug ? getAgentName(session.agent_slug) : null}
-                onClick={() => navigate(`/chats/${session.id}`)}
-                onDelete={() => deleteSession(session.id)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      <div className="flex-1 overflow-y-auto">{chatListContent}</div>
 
       {/* New Chat Dialog */}
       <Dialog open={newChatOpen} onOpenChange={handleOpenChange}>
@@ -390,7 +397,7 @@ export default function ChatsPage() {
                 disabled={creating}
               />
               <button
-                onClick={() => void createChat()}
+                onClick={() => createChat()}
                 disabled={!firstMessage.trim() || creating}
                 className="absolute right-2.5 bottom-2.5 h-7 w-7 flex items-center justify-center rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-zinc-900 text-white hover:bg-zinc-700"
               >
@@ -406,7 +413,7 @@ export default function ChatsPage() {
             <Button
               size="sm"
               className="bg-zinc-900 hover:bg-zinc-800 text-white"
-              onClick={() => void createChat()}
+              onClick={() => createChat()}
               disabled={!firstMessage.trim() || creating}
             >
               {creating ? 'Starting…' : 'Start Chat'}
@@ -440,54 +447,57 @@ function ChatRow({
   agentName,
   onClick,
   onDelete,
-}: {
+}: Readonly<{
   session: ChatSession
   agentName: string | null
   onClick: () => void
   onDelete: () => void
-}) {
+}>) {
   const hasTokens = (session.total_input_tokens ?? 0) > 0 || (session.total_output_tokens ?? 0) > 0
 
   return (
-    <div
-      className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors"
-      onClick={onClick}
-    >
-      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0">
-        <MessageSquare className="h-3.5 w-3.5" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">
-          {truncate(session.title, 70)}
-        </p>
-        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-          {agentName ? (
-            <Badge
-              variant="secondary"
-              className="text-xs py-0 h-4 bg-zinc-100 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 border-0 font-normal"
-            >
-              {agentName}
-            </Badge>
-          ) : (
-            <Badge
-              variant="secondary"
-              className="text-xs py-0 h-4 bg-zinc-50 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800 border-0 font-normal"
-            >
-              Direct chat
-            </Badge>
-          )}
-          <span className="text-xs text-zinc-400 dark:text-zinc-500">
-            {formatRelativeTime(session.updated_at)}
-          </span>
-          {hasTokens && (
-            <span className="flex items-center gap-0.5 text-xs text-zinc-400 dark:text-zinc-500">
-              <Zap className="h-2.5 w-2.5" />
-              {formatTokens(session.total_input_tokens)}↑&nbsp;
-              {formatTokens(session.total_output_tokens)}↓
-            </span>
-          )}
+    <div className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors">
+      <button
+        type="button"
+        className="flex items-center gap-3 flex-1 min-w-0 text-left appearance-none bg-transparent border-0 p-0"
+        onClick={onClick}
+      >
+        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0">
+          <MessageSquare className="h-3.5 w-3.5" />
         </div>
-      </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">
+            {truncate(session.title, 70)}
+          </p>
+          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+            {agentName ? (
+              <Badge
+                variant="secondary"
+                className="text-xs py-0 h-4 bg-zinc-100 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 border-0 font-normal"
+              >
+                {agentName}
+              </Badge>
+            ) : (
+              <Badge
+                variant="secondary"
+                className="text-xs py-0 h-4 bg-zinc-50 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800 border-0 font-normal"
+              >
+                Direct chat
+              </Badge>
+            )}
+            <span className="text-xs text-zinc-400 dark:text-zinc-500">
+              {formatRelativeTime(session.updated_at)}
+            </span>
+            {hasTokens && (
+              <span className="flex items-center gap-0.5 text-xs text-zinc-400 dark:text-zinc-500">
+                <Zap className="h-2.5 w-2.5" />
+                {formatTokens(session.total_input_tokens)}↑&nbsp;
+                {formatTokens(session.total_output_tokens)}↓
+              </span>
+            )}
+          </div>
+        </div>
+      </button>
       <AlertDialog>
         <AlertDialogTrigger asChild>
           <button

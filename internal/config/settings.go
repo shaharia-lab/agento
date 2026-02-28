@@ -9,10 +9,15 @@ import (
 
 const defaultModel = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
-// DefaultWorkingDir returns the platform-appropriate default working directory
-// for agent sessions (e.g. /tmp/agento/work on Linux, %TEMP%\agento\work on Windows).
+// DefaultWorkingDir returns the default working directory for agent sessions,
+// located under the user's home directory (~/.agento/work) to avoid using
+// predictable, publicly writable temp paths.
 func DefaultWorkingDir() string {
-	return filepath.Join(os.TempDir(), "agento", "work")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Join(os.TempDir(), "agento", "work")
+	}
+	return filepath.Join(home, ".agento", "work")
 }
 
 // UserSettings holds persisted user preferences.

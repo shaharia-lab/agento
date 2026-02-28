@@ -16,6 +16,14 @@ import (
 	"github.com/shaharia-lab/agento/internal/config"
 )
 
+// Profile-related error message constants.
+const (
+	errInitProfiles     = "failed to initialize profiles"
+	errLoadProfiles     = "failed to load profiles"
+	errSaveProfilesMeta = "failed to save profiles metadata"
+	errProfileNotFound  = "profile not found"
+)
+
 // ClaudeSettingsProfileDetail extends ClaudeSettingsProfile with the settings content.
 type ClaudeSettingsProfileDetail struct {
 	config.ClaudeSettingsProfile
@@ -194,13 +202,13 @@ func buildProfileDetail(profile config.ClaudeSettingsProfile) ClaudeSettingsProf
 func (s *Server) handleListClaudeSettingsProfiles(w http.ResponseWriter, _ *http.Request) {
 	if err := ensureDefaultProfileExists(); err != nil {
 		s.logger.Error("ensure default profile failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to initialize profiles")
+		writeError(w, http.StatusInternalServerError, errInitProfiles)
 		return
 	}
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
 		s.logger.Error("load profiles metadata failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to load profiles")
+		writeError(w, http.StatusInternalServerError, errLoadProfiles)
 		return
 	}
 	profiles := m.Profiles
@@ -220,13 +228,13 @@ func (s *Server) handleCreateClaudeSettingsProfile(w http.ResponseWriter, r *htt
 	}
 
 	if err := ensureDefaultProfileExists(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to initialize profiles")
+		writeError(w, http.StatusInternalServerError, errInitProfiles)
 		return
 	}
 
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load profiles")
+		writeError(w, http.StatusInternalServerError, errLoadProfiles)
 		return
 	}
 
@@ -248,7 +256,7 @@ func (s *Server) handleCreateClaudeSettingsProfile(w http.ResponseWriter, r *htt
 	}
 	m.Profiles = append(m.Profiles, newProfile)
 	if err := saveProfilesMetadata(m); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save profiles metadata")
+		writeError(w, http.StatusInternalServerError, errSaveProfilesMeta)
 		return
 	}
 
@@ -260,13 +268,13 @@ func (s *Server) handleGetClaudeSettingsProfile(w http.ResponseWriter, r *http.R
 
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load profiles")
+		writeError(w, http.StatusInternalServerError, errLoadProfiles)
 		return
 	}
 
 	idx := findProfileIndex(m.Profiles, id)
 	if idx == -1 {
-		writeError(w, http.StatusNotFound, "profile not found")
+		writeError(w, http.StatusNotFound, errProfileNotFound)
 		return
 	}
 
@@ -281,19 +289,19 @@ func (s *Server) handleUpdateClaudeSettingsProfile(w http.ResponseWriter, r *htt
 		Settings json.RawMessage `json:"settings"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load profiles")
+		writeError(w, http.StatusInternalServerError, errLoadProfiles)
 		return
 	}
 
 	idx := findProfileIndex(m.Profiles, id)
 	if idx == -1 {
-		writeError(w, http.StatusNotFound, "profile not found")
+		writeError(w, http.StatusNotFound, errProfileNotFound)
 		return
 	}
 
@@ -312,7 +320,7 @@ func (s *Server) handleUpdateClaudeSettingsProfile(w http.ResponseWriter, r *htt
 	}
 
 	if err := saveProfilesMetadata(m); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save profiles metadata")
+		writeError(w, http.StatusInternalServerError, errSaveProfilesMeta)
 		return
 	}
 
@@ -402,13 +410,13 @@ func (s *Server) handleDeleteClaudeSettingsProfile(w http.ResponseWriter, r *htt
 
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load profiles")
+		writeError(w, http.StatusInternalServerError, errLoadProfiles)
 		return
 	}
 
 	idx := findProfileIndex(m.Profiles, id)
 	if idx == -1 {
-		writeError(w, http.StatusNotFound, "profile not found")
+		writeError(w, http.StatusNotFound, errProfileNotFound)
 		return
 	}
 
@@ -421,7 +429,7 @@ func (s *Server) handleDeleteClaudeSettingsProfile(w http.ResponseWriter, r *htt
 	m.Profiles = append(m.Profiles[:idx], m.Profiles[idx+1:]...)
 
 	if err := saveProfilesMetadata(m); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save profiles metadata")
+		writeError(w, http.StatusInternalServerError, errSaveProfilesMeta)
 		return
 	}
 
@@ -437,13 +445,13 @@ func (s *Server) handleDuplicateClaudeSettingsProfile(w http.ResponseWriter, r *
 
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load profiles")
+		writeError(w, http.StatusInternalServerError, errLoadProfiles)
 		return
 	}
 
 	idx := findProfileIndex(m.Profiles, id)
 	if idx == -1 {
-		writeError(w, http.StatusNotFound, "profile not found")
+		writeError(w, http.StatusNotFound, errProfileNotFound)
 		return
 	}
 	source := &m.Profiles[idx]
@@ -471,7 +479,7 @@ func (s *Server) handleDuplicateClaudeSettingsProfile(w http.ResponseWriter, r *
 	}
 	m.Profiles = append(m.Profiles, newProfile)
 	if err := saveProfilesMetadata(m); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save profiles metadata")
+		writeError(w, http.StatusInternalServerError, errSaveProfilesMeta)
 		return
 	}
 
@@ -482,13 +490,13 @@ func (s *Server) handleSetDefaultClaudeSettingsProfile(w http.ResponseWriter, r 
 	id := chi.URLParam(r, "id")
 
 	if err := ensureDefaultProfileExists(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to initialize profiles")
+		writeError(w, http.StatusInternalServerError, errInitProfiles)
 		return
 	}
 
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load profiles")
+		writeError(w, http.StatusInternalServerError, errLoadProfiles)
 		return
 	}
 
@@ -500,7 +508,7 @@ func (s *Server) handleSetDefaultClaudeSettingsProfile(w http.ResponseWriter, r 
 		m.Profiles[i].IsDefault = (m.Profiles[i].ID == id)
 	}
 	if newDefault == nil {
-		writeError(w, http.StatusNotFound, "profile not found")
+		writeError(w, http.StatusNotFound, errProfileNotFound)
 		return
 	}
 
@@ -511,7 +519,7 @@ func (s *Server) handleSetDefaultClaudeSettingsProfile(w http.ResponseWriter, r 
 	}
 
 	if err := saveProfilesMetadata(m); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save profiles metadata")
+		writeError(w, http.StatusInternalServerError, errSaveProfilesMeta)
 		return
 	}
 

@@ -43,7 +43,7 @@ function todoIcon(status: string) {
 
 // ── Block renderer ────────────────────────────────────────────────────────────
 
-function ThinkingBlock({ text }: { text: string }) {
+function ThinkingBlock({ text }: Readonly<{ text: string }>) {
   const [open, setOpen] = useState(false)
   return (
     <div className="rounded-md border border-purple-200 dark:border-purple-900/50 bg-purple-50 dark:bg-purple-950/20 text-xs overflow-hidden">
@@ -68,7 +68,7 @@ function ThinkingBlock({ text }: { text: string }) {
   )
 }
 
-function ToolUseBlock({ block }: { block: ClaudeNormalizedBlock }) {
+function ToolUseBlock({ block }: Readonly<{ block: ClaudeNormalizedBlock }>) {
   const [open, setOpen] = useState(false)
   const toolName = block.name ?? 'unknown'
   const inputStr = block.input ? JSON.stringify(block.input, null, 2) : ''
@@ -76,7 +76,7 @@ function ToolUseBlock({ block }: { block: ClaudeNormalizedBlock }) {
   // Extract a short summary from the input for common tools.
   let summary = ''
   if (block.input) {
-    const inp = block.input as Record<string, unknown>
+    const inp = block.input
     if (toolName === 'Read' || toolName === 'Write' || toolName === 'Edit') {
       summary = String(inp.file_path ?? inp.filePath ?? '')
     } else if (toolName === 'Bash') {
@@ -120,17 +120,18 @@ function ToolUseBlock({ block }: { block: ClaudeNormalizedBlock }) {
   )
 }
 
-function MessageBlocks({ blocks }: { blocks: ClaudeNormalizedBlock[] }) {
+function MessageBlocks({ blocks }: Readonly<{ blocks: ClaudeNormalizedBlock[] }>) {
   return (
     <div className="flex flex-col gap-2">
       {blocks.map((b, i) => {
+        const blockKey = b.id ?? `${b.type}-${i}`
         if (b.type === 'thinking') {
-          return <ThinkingBlock key={i} text={b.text ?? ''} />
+          return <ThinkingBlock key={`thinking-${blockKey}`} text={b.text ?? ''} />
         }
         if (b.type === 'text') {
           return (
             <p
-              key={i}
+              key={`text-${blockKey}`}
               className="text-sm text-zinc-800 dark:text-zinc-200 whitespace-pre-wrap leading-relaxed"
             >
               {b.text}
@@ -138,7 +139,7 @@ function MessageBlocks({ blocks }: { blocks: ClaudeNormalizedBlock[] }) {
           )
         }
         if (b.type === 'tool_use') {
-          return <ToolUseBlock key={i} block={b} />
+          return <ToolUseBlock key={`tool-${blockKey}`} block={b} />
         }
         return null
       })}
@@ -148,9 +149,9 @@ function MessageBlocks({ blocks }: { blocks: ClaudeNormalizedBlock[] }) {
 
 // ── Progress children ─────────────────────────────────────────────────────────
 
-function ProgressChildren({ children }: { children: ClaudeMessage[] }) {
+function ProgressChildren({ messages }: Readonly<{ messages: ClaudeMessage[] }>) {
   const [open, setOpen] = useState(false)
-  if (!children || children.length === 0) return null
+  if (!messages || messages.length === 0) return null
   return (
     <div className="mt-2">
       <button
@@ -158,11 +159,11 @@ function ProgressChildren({ children }: { children: ClaudeMessage[] }) {
         onClick={() => setOpen(o => !o)}
       >
         {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        {children.length} sub-agent event{children.length !== 1 ? 's' : ''}
+        {messages.length} sub-agent event{messages.length === 1 ? '' : 's'}
       </button>
       {open && (
         <div className="mt-1 pl-3 border-l border-zinc-200 dark:border-zinc-700 flex flex-col gap-0.5">
-          {children.map(c => (
+          {messages.map(c => (
             <div key={c.uuid} className="text-xs text-zinc-400 dark:text-zinc-500 font-mono">
               {new Date(c.timestamp).toLocaleTimeString()}
             </div>
@@ -175,7 +176,7 @@ function ProgressChildren({ children }: { children: ClaudeMessage[] }) {
 
 // ── Message components ────────────────────────────────────────────────────────
 
-function UserMessage({ msg }: { msg: ClaudeMessage }) {
+function UserMessage({ msg }: Readonly<{ msg: ClaudeMessage }>) {
   return (
     <div className="flex gap-3">
       <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 shrink-0 text-xs font-semibold mt-0.5">
@@ -193,7 +194,7 @@ function UserMessage({ msg }: { msg: ClaudeMessage }) {
   )
 }
 
-function AssistantMessage({ msg }: { msg: ClaudeMessage }) {
+function AssistantMessage({ msg }: Readonly<{ msg: ClaudeMessage }>) {
   const hasBlocks = (msg.blocks ?? []).length > 0
   const hasChildren = (msg.children ?? []).length > 0
 
@@ -208,7 +209,7 @@ function AssistantMessage({ msg }: { msg: ClaudeMessage }) {
         ) : (
           <p className="text-sm text-zinc-400 dark:text-zinc-500 italic">No text content</p>
         )}
-        {hasChildren && <ProgressChildren children={msg.children!} />}
+        {hasChildren && <ProgressChildren messages={msg.children!} />}
         <div className="flex items-center gap-3 mt-1">
           <span className="text-xs text-zinc-400 dark:text-zinc-500">
             {formatRelativeTime(msg.timestamp)}
@@ -227,7 +228,7 @@ function AssistantMessage({ msg }: { msg: ClaudeMessage }) {
 
 // ── Todos ─────────────────────────────────────────────────────────────────────
 
-function TodosSection({ todos }: { todos: ClaudeTodo[] }) {
+function TodosSection({ todos }: Readonly<{ todos: ClaudeTodo[] }>) {
   const [open, setOpen] = useState(false)
   if (!todos || todos.length === 0) return null
 
@@ -252,7 +253,10 @@ function TodosSection({ todos }: { todos: ClaudeTodo[] }) {
       {open && (
         <div className="divide-y divide-zinc-100 dark:divide-zinc-700/50">
           {todos.map((todo, i) => (
-            <div key={i} className="flex items-start gap-2 px-4 py-2">
+            <div
+              key={`todo-${todo.content.slice(0, 50)}-${i}`}
+              className="flex items-start gap-2 px-4 py-2"
+            >
               {todoIcon(todo.status)}
               <span
                 className={`text-xs leading-relaxed ${
@@ -294,7 +298,7 @@ export default function ClaudeSessionDetailPage() {
   }, [id])
 
   useEffect(() => {
-    void load()
+    load()
   }, [load])
 
   const handleContinue = async () => {
@@ -384,7 +388,7 @@ export default function ClaudeSessionDetailPage() {
           <Button
             size="sm"
             className="gap-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs h-8 shrink-0"
-            onClick={() => void handleContinue()}
+            onClick={() => handleContinue()}
             disabled={continuing}
           >
             {continuing ? (

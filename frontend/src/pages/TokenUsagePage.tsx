@@ -72,7 +72,7 @@ function formatCost(n: number): string {
 
 // ─── Charts ───────────────────────────────────────────────────────────────────
 
-function TokenTimeSeriesChart({ data }: { data: TimeSeriesPoint[] }) {
+function TokenTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>) {
   const formatted = data.map(d => ({ ...d, date: formatDateLabel(d.date) }))
   return (
     <ChartCard title="Token Usage Over Time">
@@ -133,7 +133,7 @@ function TokenTimeSeriesChart({ data }: { data: TimeSeriesPoint[] }) {
   )
 }
 
-function CacheEfficiencyChart({ data }: { data: CacheEfficiencyPoint[] }) {
+function CacheEfficiencyChart({ data }: Readonly<{ data: CacheEfficiencyPoint[] }>) {
   const formatted = data.map(d => ({ ...d, date: formatDateLabel(d.date) }))
   return (
     <ChartCard title="Cache Hit Rate (%)">
@@ -172,7 +172,7 @@ function CacheEfficiencyChart({ data }: { data: CacheEfficiencyPoint[] }) {
   )
 }
 
-function CostOverTimeChart({ data }: { data: CostPoint[] }) {
+function CostOverTimeChart({ data }: Readonly<{ data: CostPoint[] }>) {
   const formatted = data.map(d => ({ ...d, date: formatDateLabel(d.date) }))
   return (
     <ChartCard title="Estimated Cost Over Time (USD)">
@@ -203,7 +203,7 @@ function CostOverTimeChart({ data }: { data: CostPoint[] }) {
   )
 }
 
-function CostSummaryCards({ cost }: { cost: CostSummary }) {
+function CostSummaryCards({ cost }: Readonly<{ cost: CostSummary }>) {
   const items = [
     { label: 'Input Cost', value: formatCost(cost.input_cost_usd) },
     { label: 'Output Cost', value: formatCost(cost.output_cost_usd) },
@@ -225,7 +225,7 @@ function CostSummaryCards({ cost }: { cost: CostSummary }) {
   )
 }
 
-function ModelPieChart({ data }: { data: ModelStat[] }) {
+function ModelPieChart({ data }: Readonly<{ data: ModelStat[] }>) {
   return (
     <ChartCard title="Token Distribution by Model">
       <ResponsiveContainer width="100%" height={280}>
@@ -242,8 +242,8 @@ function ModelPieChart({ data }: { data: ModelStat[] }) {
             }
             labelLine={true}
           >
-            {data.map((_, i) => (
-              <Cell key={i} fill={MODEL_COLORS[i % MODEL_COLORS.length]} />
+            {data.map((entry, i) => (
+              <Cell key={`model-${entry.model}`} fill={MODEL_COLORS[i % MODEL_COLORS.length]} />
             ))}
           </Pie>
           <Tooltip
@@ -386,7 +386,7 @@ export default function TokenUsagePage() {
   }, [])
 
   useEffect(() => {
-    void load(from, to, project)
+    load(from, to, project)
   }, [load, from, to, project])
 
   const handlePreset = (p: DatePreset) => {
@@ -400,7 +400,7 @@ export default function TokenUsagePage() {
 
   const handleRefresh = () => {
     setRefreshing(true)
-    void load(from, to, project)
+    load(from, to, project)
   }
 
   const summary: AnalyticsSummary = report?.summary ?? {
@@ -422,7 +422,7 @@ export default function TokenUsagePage() {
         <div>
           <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Token Usage</h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            {summary.total_sessions} session{summary.total_sessions !== 1 ? 's' : ''} · {from} →{' '}
+            {summary.total_sessions} session{summary.total_sessions === 1 ? '' : 's'} · {from} →{' '}
             {to}
           </p>
         </div>

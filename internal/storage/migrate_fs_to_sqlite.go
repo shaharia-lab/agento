@@ -17,6 +17,8 @@ import (
 	"github.com/shaharia-lab/agento/internal/config"
 )
 
+const settingsFileName = "settings.json"
+
 // MigrateFromFS reads existing filesystem-based data and imports it into the
 // SQLite database. It runs inside a single transaction for atomicity.
 // The migration is idempotent — it skips records that already exist by primary key.
@@ -24,7 +26,7 @@ func MigrateFromFS(db *sql.DB, dataDir string, logger *slog.Logger) error {
 	agentsDir := filepath.Join(dataDir, "agents")
 	chatsDir := filepath.Join(dataDir, "chats")
 	integrationsDir := filepath.Join(dataDir, "integrations")
-	settingsFile := filepath.Join(dataDir, "settings.json")
+	settingsFile := filepath.Join(dataDir, settingsFileName)
 
 	ctx := context.Background()
 	tx, err := db.BeginTx(ctx, nil)
@@ -79,7 +81,7 @@ func HasFSData(dataDir string) bool {
 		}
 	}
 	// Also check settings.json
-	if _, err := os.Stat(filepath.Join(dataDir, "settings.json")); err == nil {
+	if _, err := os.Stat(filepath.Join(dataDir, settingsFileName)); err == nil {
 		return true
 	}
 	return false
@@ -462,7 +464,7 @@ func cleanupFSData(dataDir string, logger *slog.Logger) {
 		}
 	}
 
-	settingsFile := filepath.Join(dataDir, "settings.json")
+	settingsFile := filepath.Join(dataDir, settingsFileName)
 	if _, err := os.Stat(settingsFile); err == nil {
 		if err := os.Remove(settingsFile); err != nil {
 			logger.Warn("failed to remove legacy settings file", "path", settingsFile, "error", err)
