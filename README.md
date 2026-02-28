@@ -125,7 +125,7 @@ Agents are specialized assistants with a custom system prompt, model, and set of
 5. Select which tools the agent can use.
 6. Click **Save**.
 
-Agents are stored as YAML files in `~/.agento/agents/`. You can also create or edit them directly:
+Agents are stored in the SQLite database at `~/.agento/agento.db`. Legacy YAML files in `~/.agento/agents/` are auto-migrated on first startup. You can also define agents as YAML files:
 
 ```yaml
 name: My Assistant

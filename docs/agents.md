@@ -1,12 +1,12 @@
 # Agents
 
-An agent is a YAML file stored in `~/.agento/agents/`. It defines the model, system prompt, and tools the agent can use.
+An agent defines the model, system prompt, and tools it can use. Agents are stored in the SQLite database at `~/.agento/agento.db`. You can create and manage agents from the UI, or define them as YAML files in `~/.agento/agents/` (auto-migrated to SQLite on first startup).
 
 ---
 
 ## Create an agent
 
-Create a file in `~/.agento/agents/` with a `.yaml` extension. The file name becomes the agent's slug if you don't set one explicitly.
+The recommended way is through the UI (see "Manage agents from the UI" below). You can also create a YAML file in `~/.agento/agents/` — it will be imported into the database on next startup.
 
 **Example: `~/.agento/agents/support.yaml`**
 
