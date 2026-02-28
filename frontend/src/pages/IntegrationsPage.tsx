@@ -27,6 +27,7 @@ const AVAILABLE_PROVIDERS = [
     name: 'Google',
     description: 'Calendar, Gmail & Drive',
     icon: <GoogleIcon size={24} />,
+    path: '/integrations/google',
   },
 ]
 
@@ -71,17 +72,17 @@ export default function IntegrationsPage() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="flex items-center justify-between border-b border-zinc-100 px-4 sm:px-6 py-4 shrink-0">
+      <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 py-4 shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-zinc-900">Integrations</h1>
-          <p className="text-xs text-zinc-500 mt-0.5">
+          <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Integrations</h1>
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
             Connect external services to make them available as tools to your agents
           </p>
         </div>
       </div>
 
       {error && (
-        <div className="mx-6 mt-3 rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
+        <div className="mx-6 mt-3 rounded-md border border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-900/20 px-4 py-2.5 text-sm text-red-700 dark:text-red-400">
           {error}
         </div>
       )}
@@ -116,17 +117,19 @@ export default function IntegrationsPage() {
             {AVAILABLE_PROVIDERS.map(provider => (
               <button
                 key={provider.id}
-                onClick={() => navigate('/integrations/new')}
-                className="flex items-center gap-3 rounded-lg border border-zinc-200 bg-white p-4 text-left hover:border-zinc-300 hover:bg-zinc-50 transition-colors group"
+                onClick={() => navigate(provider.path)}
+                className="flex items-center gap-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 p-4 text-left hover:border-zinc-300 dark:hover:border-zinc-600 hover:bg-zinc-50 dark:hover:bg-zinc-750 transition-colors group cursor-pointer"
               >
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-200 bg-white shrink-0">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shrink-0">
                   {provider.icon}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-zinc-900">{provider.name}</p>
-                  <p className="text-xs text-zinc-500">{provider.description}</p>
+                  <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                    {provider.name}
+                  </p>
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">{provider.description}</p>
                 </div>
-                <Plus className="h-4 w-4 text-zinc-300 group-hover:text-zinc-500 transition-colors shrink-0" />
+                <Plus className="h-4 w-4 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 transition-colors shrink-0" />
               </button>
             ))}
           </div>
@@ -162,14 +165,16 @@ function IntegrationCard({
     .map(([name]) => name)
 
   return (
-    <div className="flex flex-col rounded-lg border border-zinc-200 bg-white p-4 hover:border-zinc-300 transition-colors">
+    <div className="flex flex-col rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 p-4 hover:border-zinc-300 dark:hover:border-zinc-600 transition-colors cursor-default">
       {/* Icon + Name */}
       <div className="flex items-start gap-3 mb-3">
-        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-white border border-zinc-200 shrink-0">
+        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 shrink-0">
           <IntegrationTypeIcon type={integration.type} size={20} />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="font-semibold text-sm text-zinc-900 truncate">{integration.name}</h3>
+          <h3 className="font-semibold text-sm text-zinc-900 dark:text-zinc-100 truncate">
+            {integration.name}
+          </h3>
           <p className="text-xs text-zinc-400 font-mono capitalize">{integration.type}</p>
         </div>
       </div>
@@ -179,7 +184,9 @@ function IntegrationCard({
         {integration.authenticated ? (
           <>
             <CheckCircle className="h-3.5 w-3.5 text-green-500 shrink-0" />
-            <span className="text-xs text-green-600 font-medium">Connected</span>
+            <span className="text-xs text-green-600 dark:text-green-400 font-medium">
+              Connected
+            </span>
           </>
         ) : (
           <>
@@ -195,7 +202,7 @@ function IntegrationCard({
           {enabledServices.map(svc => (
             <span
               key={svc}
-              className="inline-flex items-center gap-1 rounded-md bg-zinc-100 px-2 py-0.5 text-xs text-zinc-600 capitalize"
+              className="inline-flex items-center gap-1 rounded-md bg-zinc-100 dark:bg-zinc-700 px-2 py-0.5 text-xs text-zinc-600 dark:text-zinc-300 capitalize"
             >
               <ServiceIcon service={svc} size={11} />
               {svc}
@@ -205,17 +212,17 @@ function IntegrationCard({
       )}
 
       {/* Actions */}
-      <div className="flex items-center gap-1 pt-2 border-t border-zinc-100 mt-auto">
+      <div className="flex items-center gap-1 pt-2 border-t border-zinc-100 dark:border-zinc-700/50 mt-auto">
         <button
           onClick={onEdit}
-          className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 transition-colors"
+          className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-700 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors cursor-pointer"
         >
           <Pencil className="h-3 w-3" />
           Edit
         </button>
         <AlertDialog>
           <AlertDialogTrigger asChild>
-            <button className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-zinc-400 hover:bg-red-50 hover:text-red-600 transition-colors">
+            <button className="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs text-zinc-400 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-600 dark:hover:text-red-400 transition-colors cursor-pointer">
               <Trash2 className="h-3 w-3" />
               Delete
             </button>
