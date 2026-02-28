@@ -87,19 +87,22 @@ func syncDefaultToSettingsJSON(profile config.ClaudeSettingsProfile) error {
 	return os.WriteFile(settingsPath, data, 0600) //nolint:gosec // path from user home
 }
 
+// safeProfileID is a compiled regex that only allows alphanumeric characters,
+// hyphens, and underscores in profile IDs to prevent path traversal.
+var safeProfileID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
 // resolveProfileFilePath returns the absolute path for a profile file based on its ID.
-// The ID is validated to prevent path traversal attacks.
+// The ID is validated against a strict whitelist to prevent path traversal attacks.
 func resolveProfileFilePath(id string) (string, error) {
+	if !safeProfileID.MatchString(id) {
+		return "", fmt.Errorf("invalid profile id: contains disallowed characters")
+	}
 	dir, err := config.ClaudeSettingsDirPath()
 	if err != nil {
 		return "", err
 	}
-	result := filepath.Join(dir, "settings_"+id+".json")
-	// Ensure the resolved path stays within the expected directory.
-	if !strings.HasPrefix(filepath.Clean(result), filepath.Clean(dir)+string(filepath.Separator)) {
-		return "", fmt.Errorf("invalid profile id: path traversal detected")
-	}
-	return result, nil
+	safeFilename := "settings_" + id + ".json"
+	return filepath.Join(dir, safeFilename), nil
 }
 
 // ensureDefaultProfileExists creates a "Default" profile from the existing

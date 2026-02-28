@@ -91,7 +91,7 @@ func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid path")
 		return
 	}
-	if os.MkdirAll(clean, 0750) != nil {
+	if os.MkdirAll(clean, 0750) != nil { // NOSONAR — desktop app filesystem browser; user path access is intentional
 		writeError(w, http.StatusInternalServerError, "failed to create directory")
 		return
 	}
