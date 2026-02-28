@@ -198,17 +198,10 @@ function SessionRow({
   const hasTokens = totalTokens > 0
 
   return (
-    <div
-      className="flex items-start gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors"
-      role="button"
-      tabIndex={0}
+    <button
+      type="button"
+      className="flex items-start gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors w-full text-left appearance-none bg-transparent border-0"
       onClick={onClick}
-      onKeyDown={e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onClick()
-        }
-      }}
     >
       <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0 mt-0.5">
         <History className="h-3.5 w-3.5" />
@@ -279,6 +272,6 @@ function SessionRow({
         </p>
       </div>
       <ExternalLink className="h-3.5 w-3.5 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-400 dark:group-hover:text-zinc-400 shrink-0 mt-1 transition-colors" />
-    </div>
+    </button>
   )
 }

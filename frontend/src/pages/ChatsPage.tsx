@@ -456,53 +456,48 @@ function ChatRow({
   const hasTokens = (session.total_input_tokens ?? 0) > 0 || (session.total_output_tokens ?? 0) > 0
 
   return (
-    <div
-      className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors"
-      role="button"
-      tabIndex={0}
-      onClick={onClick}
-      onKeyDown={e => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          onClick()
-        }
-      }}
-    >
-      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0">
-        <MessageSquare className="h-3.5 w-3.5" />
-      </div>
-      <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">
-          {truncate(session.title, 70)}
-        </p>
-        <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-          {agentName ? (
-            <Badge
-              variant="secondary"
-              className="text-xs py-0 h-4 bg-zinc-100 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 border-0 font-normal"
-            >
-              {agentName}
-            </Badge>
-          ) : (
-            <Badge
-              variant="secondary"
-              className="text-xs py-0 h-4 bg-zinc-50 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800 border-0 font-normal"
-            >
-              Direct chat
-            </Badge>
-          )}
-          <span className="text-xs text-zinc-400 dark:text-zinc-500">
-            {formatRelativeTime(session.updated_at)}
-          </span>
-          {hasTokens && (
-            <span className="flex items-center gap-0.5 text-xs text-zinc-400 dark:text-zinc-500">
-              <Zap className="h-2.5 w-2.5" />
-              {formatTokens(session.total_input_tokens)}↑&nbsp;
-              {formatTokens(session.total_output_tokens)}↓
-            </span>
-          )}
+    <div className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors">
+      <button
+        type="button"
+        className="flex items-center gap-3 flex-1 min-w-0 text-left appearance-none bg-transparent border-0 p-0"
+        onClick={onClick}
+      >
+        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0">
+          <MessageSquare className="h-3.5 w-3.5" />
         </div>
-      </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate">
+            {truncate(session.title, 70)}
+          </p>
+          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+            {agentName ? (
+              <Badge
+                variant="secondary"
+                className="text-xs py-0 h-4 bg-zinc-100 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 border-0 font-normal"
+              >
+                {agentName}
+              </Badge>
+            ) : (
+              <Badge
+                variant="secondary"
+                className="text-xs py-0 h-4 bg-zinc-50 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 hover:bg-zinc-50 dark:hover:bg-zinc-800 border-0 font-normal"
+              >
+                Direct chat
+              </Badge>
+            )}
+            <span className="text-xs text-zinc-400 dark:text-zinc-500">
+              {formatRelativeTime(session.updated_at)}
+            </span>
+            {hasTokens && (
+              <span className="flex items-center gap-0.5 text-xs text-zinc-400 dark:text-zinc-500">
+                <Zap className="h-2.5 w-2.5" />
+                {formatTokens(session.total_input_tokens)}↑&nbsp;
+                {formatTokens(session.total_output_tokens)}↓
+              </span>
+            )}
+          </div>
+        </div>
+      </button>
       <AlertDialog>
         <AlertDialogTrigger asChild>
           <button

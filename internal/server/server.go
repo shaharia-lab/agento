@@ -85,14 +85,19 @@ func (s *Server) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		// ctx is already canceled; need a fresh context for graceful shutdown.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second) //nolint:govet
-		defer cancel()
 		s.logger.Info("shutting down server")
-		return s.httpServer.Shutdown(shutdownCtx)
+		return s.gracefulShutdown()
 	case err := <-errCh:
 		return err
 	}
+}
+
+// gracefulShutdown shuts down the HTTP server with a 5-second deadline.
+// It creates a fresh context because the caller's context is already canceled.
+func (s *Server) gracefulShutdown() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.httpServer.Shutdown(ctx)
 }
 
 // corsMiddleware returns a CORS middleware configured for the current mode.
