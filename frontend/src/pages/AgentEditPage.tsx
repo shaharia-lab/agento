@@ -41,7 +41,7 @@ export default function AgentEditPage() {
         <h1 className="text-lg font-semibold">Edit Agent</h1>
         <p className="text-sm text-muted-foreground font-mono">{agent.slug}</p>
       </div>
-      <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+      <div className="flex-1 flex flex-col min-h-0 p-4 sm:p-6">
         <AgentForm agent={agent} isEdit />
       </div>
     </div>
