@@ -185,6 +185,10 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 	authURL := google.BuildAuthURL(cfg, port)
 
 	callbackCtx, cancelCallback := context.WithTimeout(s.parentCtx, 10*time.Minute)
+	defer func() {
+		// cancelCallback is a no-op if already called by onToken.
+		cancelCallback()
+	}()
 
 	onToken := func(tok *oauth2.Token, tokErr error) {
 		defer cancelCallback()
@@ -192,7 +196,6 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 	}
 
 	if err := google.StartCallbackServer(callbackCtx, port, cfg, onToken); err != nil {
-		cancelCallback()
 		return "", fmt.Errorf("starting callback server: %w", err)
 	}
 

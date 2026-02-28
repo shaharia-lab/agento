@@ -77,16 +77,17 @@ function ToolUseBlock({ block }: Readonly<{ block: ClaudeNormalizedBlock }>) {
   let summary = ''
   if (block.input) {
     const inp = block.input
+    const str = (v: unknown) => (typeof v === 'string' ? v : '')
     if (toolName === 'Read' || toolName === 'Write' || toolName === 'Edit') {
-      summary = String(inp.file_path ?? inp.filePath ?? '')
+      summary = str(inp.file_path ?? inp.filePath)
     } else if (toolName === 'Bash') {
-      summary = String(inp.command ?? '').slice(0, 60)
+      summary = str(inp.command).slice(0, 60)
     } else if (toolName === 'Glob' || toolName === 'Grep') {
-      summary = String(inp.pattern ?? inp.query ?? '')
+      summary = str(inp.pattern ?? inp.query)
     } else if (toolName === 'WebFetch' || toolName === 'WebSearch') {
-      summary = String(inp.url ?? inp.query ?? '')
+      summary = str(inp.url ?? inp.query)
     } else if (toolName === 'Task') {
-      summary = String(inp.description ?? '').slice(0, 60)
+      summary = str(inp.description).slice(0, 60)
     }
   }
 

@@ -15,7 +15,13 @@ const defaultModel = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
 func DefaultWorkingDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return filepath.Join(os.TempDir(), "agento", "work")
+		// Fall back to a path under the current working directory rather than
+		// os.TempDir() which is predictable and publicly writable.
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			cwd = "."
+		}
+		return filepath.Join(cwd, ".agento", "work")
 	}
 	return filepath.Join(home, ".agento", "work")
 }

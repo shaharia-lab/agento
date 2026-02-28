@@ -12,10 +12,10 @@ import { filesystemApi } from '@/lib/api'
 import type { FSListResponse } from '@/types'
 
 interface FilesystemBrowserModalProps {
-  open: boolean
-  onOpenChange: (open: boolean) => void
-  initialPath?: string
-  onSelect: (path: string) => void
+  readonly open: boolean
+  readonly onOpenChange: (open: boolean) => void
+  readonly initialPath?: string
+  readonly onSelect: (path: string) => void
 }
 
 export default function FilesystemBrowserModal({

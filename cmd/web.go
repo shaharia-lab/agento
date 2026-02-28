@@ -51,7 +51,7 @@ embedded React UI. Open http://localhost:<port> in your browser.`,
 			logFile := filepath.Join(cfg.LogDir(), "system.log")
 			printBanner(build.Version, serverURL, logFile)
 
-			if err := runWeb(cfg, noBrowser); err != nil {
+			if runWeb(cfg, noBrowser) != nil {
 				fmt.Fprintf(os.Stderr, "An error occurred. Please check the logs at: %s\n", logFile)
 				os.Exit(1)
 			}

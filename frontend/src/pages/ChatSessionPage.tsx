@@ -609,12 +609,6 @@ function getToolConfig(name: string): { Icon: LucideIcon; bg: string; color: str
         bg: 'bg-orange-50 dark:bg-orange-950/50',
         color: 'text-orange-600 dark:text-orange-400',
       }
-    case 'Bash':
-      return {
-        Icon: Terminal,
-        bg: 'bg-zinc-100 dark:bg-zinc-800',
-        color: 'text-zinc-500 dark:text-zinc-400',
-      }
     case 'Glob':
     case 'Grep':
       return {
@@ -637,6 +631,7 @@ function getToolConfig(name: string): { Icon: LucideIcon; bg: string; color: str
         bg: 'bg-amber-50 dark:bg-amber-950/50',
         color: 'text-amber-600 dark:text-amber-400',
       }
+    case 'Bash':
     default:
       return {
         Icon: Terminal,

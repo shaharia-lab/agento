@@ -51,7 +51,7 @@ func (s *Server) handleGetClaudeSettings(w http.ResponseWriter, _ *http.Request)
 
 func (s *Server) handleUpdateClaudeSettings(w http.ResponseWriter, r *http.Request) {
 	var incoming json.RawMessage
-	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
+	if json.NewDecoder(r.Body).Decode(&incoming) != nil {
 		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
@@ -63,14 +63,14 @@ func (s *Server) handleUpdateClaudeSettings(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Ensure the .claude directory exists.
-	if mkdirErr := os.MkdirAll(filepath.Dir(path), 0700); mkdirErr != nil {
+	if os.MkdirAll(filepath.Dir(path), 0700) != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create .claude directory")
 		return
 	}
 
 	// Pretty-print before writing so the file remains human-readable.
 	var pretty any
-	if unmarshalErr := json.Unmarshal(incoming, &pretty); unmarshalErr != nil {
+	if json.Unmarshal(incoming, &pretty) != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON settings")
 		return
 	}
@@ -80,7 +80,7 @@ func (s *Server) handleUpdateClaudeSettings(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := os.WriteFile(path, out, 0600); err != nil { //nolint:gosec // path constructed from user home directory
+	if os.WriteFile(path, out, 0600) != nil { //nolint:gosec // path constructed from user home directory
 		writeError(w, http.StatusInternalServerError, "failed to write Claude settings file")
 		return
 	}

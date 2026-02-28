@@ -518,7 +518,7 @@ func readSessionSummary(sessionID, projectPath, filePath string) (*ClaudeSession
 
 	for sc.Scan() {
 		var ev rawEvent
-		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+		if json.Unmarshal(sc.Bytes(), &ev) != nil {
 			continue
 		}
 		if ev.Type == "file-history-snapshot" {
@@ -608,7 +608,7 @@ func readSessionDetail(sessionID, projectPath, filePath string) (*ClaudeSessionD
 
 	for sc.Scan() {
 		var ev rawEvent
-		if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
+		if json.Unmarshal(sc.Bytes(), &ev) != nil {
 			continue
 		}
 		if ev.Type == "file-history-snapshot" {
@@ -702,7 +702,7 @@ func populateAssistantUsage(msg *ClaudeMessage, detail *ClaudeSessionDetail, raw
 
 func populateAssistantBlocks(msg *ClaudeMessage, rawMsg *rawMessage) {
 	var blocks []rawContentBlock
-	if err := json.Unmarshal(rawMsg.Content, &blocks); err != nil {
+	if json.Unmarshal(rawMsg.Content, &blocks) != nil {
 		return
 	}
 	for _, b := range blocks {
@@ -762,12 +762,12 @@ func extractTextContent(raw json.RawMessage) string {
 	}
 	// Try plain string first.
 	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
+	if json.Unmarshal(raw, &s) == nil {
 		return s
 	}
 	// Try array of content blocks; concatenate text blocks.
 	var blocks []rawContentBlock
-	if err := json.Unmarshal(raw, &blocks); err != nil {
+	if json.Unmarshal(raw, &blocks) != nil {
 		return ""
 	}
 	var sb strings.Builder
@@ -791,7 +791,7 @@ func loadTodos(sessionID string) []ClaudeTodo {
 		return nil
 	}
 	var todos []ClaudeTodo
-	if err := json.Unmarshal(data, &todos); err != nil {
+	if json.Unmarshal(data, &todos) != nil {
 		return nil
 	}
 	return todos

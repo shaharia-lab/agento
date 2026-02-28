@@ -19,6 +19,13 @@ const (
 	errInvalidJSONBody = "invalid JSON body"
 )
 
+// Route pattern constants to avoid duplication.
+const (
+	routeAgentBySlug     = "/agents/{slug}"
+	routeIntegrationByID = "/integrations/{id}"
+	routeProfileByID     = "/claude-settings/profiles/{id}"
+)
+
 // Server holds all dependencies for the REST API handlers.
 type Server struct {
 	agentSvc           service.AgentService
@@ -55,9 +62,9 @@ func (s *Server) Mount(r chi.Router) {
 	// Agents CRUD
 	r.Get("/agents", s.handleListAgents)
 	r.Post("/agents", s.handleCreateAgent)
-	r.Get("/agents/{slug}", s.handleGetAgent)
-	r.Put("/agents/{slug}", s.handleUpdateAgent)
-	r.Delete("/agents/{slug}", s.handleDeleteAgent)
+	r.Get(routeAgentBySlug, s.handleGetAgent)
+	r.Put(routeAgentBySlug, s.handleUpdateAgent)
+	r.Delete(routeAgentBySlug, s.handleDeleteAgent)
 
 	// Chat sessions
 	r.Get("/chats", s.handleListChats)
@@ -79,11 +86,11 @@ func (s *Server) Mount(r chi.Router) {
 	// Claude settings profiles
 	r.Get("/claude-settings/profiles", s.handleListClaudeSettingsProfiles)
 	r.Post("/claude-settings/profiles", s.handleCreateClaudeSettingsProfile)
-	r.Get("/claude-settings/profiles/{id}", s.handleGetClaudeSettingsProfile)
-	r.Put("/claude-settings/profiles/{id}", s.handleUpdateClaudeSettingsProfile)
-	r.Delete("/claude-settings/profiles/{id}", s.handleDeleteClaudeSettingsProfile)
-	r.Post("/claude-settings/profiles/{id}/duplicate", s.handleDuplicateClaudeSettingsProfile)
-	r.Put("/claude-settings/profiles/{id}/default", s.handleSetDefaultClaudeSettingsProfile)
+	r.Get(routeProfileByID, s.handleGetClaudeSettingsProfile)
+	r.Put(routeProfileByID, s.handleUpdateClaudeSettingsProfile)
+	r.Delete(routeProfileByID, s.handleDeleteClaudeSettingsProfile)
+	r.Post(routeProfileByID+"/duplicate", s.handleDuplicateClaudeSettingsProfile)
+	r.Put(routeProfileByID+"/default", s.handleSetDefaultClaudeSettingsProfile)
 
 	// Claude Code sessions (read from ~/.claude)
 	r.Get("/claude-sessions", s.handleListClaudeSessions)
@@ -103,11 +110,11 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/integrations/available-tools", s.handleAvailableTools)
 	r.Get("/integrations", s.handleListIntegrations)
 	r.Post("/integrations", s.handleCreateIntegration)
-	r.Get("/integrations/{id}", s.handleGetIntegration)
-	r.Put("/integrations/{id}", s.handleUpdateIntegration)
-	r.Delete("/integrations/{id}", s.handleDeleteIntegration)
-	r.Post("/integrations/{id}/auth/start", s.handleStartOAuth)
-	r.Get("/integrations/{id}/auth/status", s.handleGetAuthStatus)
+	r.Get(routeIntegrationByID, s.handleGetIntegration)
+	r.Put(routeIntegrationByID, s.handleUpdateIntegration)
+	r.Delete(routeIntegrationByID, s.handleDeleteIntegration)
+	r.Post(routeIntegrationByID+"/auth/start", s.handleStartOAuth)
+	r.Get(routeIntegrationByID+"/auth/status", s.handleGetAuthStatus)
 
 	// Build info
 	r.Get("/version", s.handleVersion)

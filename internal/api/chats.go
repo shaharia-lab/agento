@@ -105,7 +105,7 @@ func (s *Server) handleListChats(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 	var req createChatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
@@ -181,7 +181,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var req sendMessageRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
@@ -419,7 +419,7 @@ func (s *Server) handlePendingUserInput(
 
 func appendAssistantBlocks(blocks []storage.MessageBlock, raw json.RawMessage) []storage.MessageBlock {
 	var ae assistantEventRaw
-	if err := json.Unmarshal(raw, &ae); err != nil {
+	if json.Unmarshal(raw, &ae) != nil {
 		return blocks
 	}
 	for _, blk := range ae.Message.Content {
@@ -457,7 +457,7 @@ func (s *Server) handlePermissionResponse(w http.ResponseWriter, r *http.Request
 	var req struct {
 		Allow bool `json:"allow"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
@@ -488,7 +488,7 @@ func extractAskUserQuestionInput(raw json.RawMessage) json.RawMessage {
 			} `json:"content"`
 		} `json:"message"`
 	}
-	if err := json.Unmarshal(raw, &msg); err != nil {
+	if json.Unmarshal(raw, &msg) != nil {
 		return nil
 	}
 	for _, block := range msg.Message.Content {
@@ -505,7 +505,7 @@ func (s *Server) handleProvideInput(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var req provideInputRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}

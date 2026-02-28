@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type fsEntry struct {
@@ -76,7 +77,7 @@ type fsMkdirRequest struct {
 
 func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
 	var req fsMkdirRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
@@ -86,7 +87,11 @@ func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clean := filepath.Clean(req.Path)
-	if err := os.MkdirAll(clean, 0750); err != nil {
+	if !filepath.IsAbs(clean) || strings.Contains(clean, "..") {
+		writeError(w, http.StatusBadRequest, "invalid path")
+		return
+	}
+	if os.MkdirAll(clean, 0750) != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create directory")
 		return
 	}

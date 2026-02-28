@@ -51,8 +51,8 @@ const GOOGLE_SERVICES: Record<string, ServiceInfo> = {
 }
 
 interface GoogleIntegrationEditorProps {
-  services: Record<string, ServiceConfig>
-  onServicesChange: (services: Record<string, ServiceConfig>) => void
+  readonly services: Record<string, ServiceConfig>
+  readonly onServicesChange: (services: Record<string, ServiceConfig>) => void
 }
 
 export default function GoogleIntegrationEditor({
