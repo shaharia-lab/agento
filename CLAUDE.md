@@ -36,9 +36,9 @@ Two terminals are needed in dev mode:
 
 ### Required Environment
 ```bash
-ANTHROPIC_API_KEY=...   # Required
-AGENTS_DIR=./agents     # Optional, default: ./agents
-PORT=3000               # Optional, default: 3000
+ANTHROPIC_API_KEY=...        # Optional (uses Claude Code CLI auth if unset)
+AGENTO_DATA_DIR=~/.agento   # Optional, default: ~/.agento
+PORT=8990                    # Optional, default: 8990
 ```
 
 ## Architecture
@@ -68,9 +68,13 @@ Browser → Vite (dev) / embedded FS (prod) → React SPA
 
 **`internal/agent/runner.go`** — Integration with `github.com/shaharia-lab/claude-agent-sdk-go`. Converts agent config to SDK `RunOptions`, executes sessions, streams results.
 
-**`internal/storage/`** — File-based persistence. `FSChatStore` uses JSONL format per session. `FSAgentStore` reads YAML agent definitions. Both implement interfaces for DI.
+**`internal/storage/`** — SQLite persistence (`~/.agento/agento.db`). `SQLiteAgentStore`, `SQLiteChatStore`, `SQLiteIntegrationStore`, `SQLiteSettingsStore` implement store interfaces. `migrate_fs_to_sqlite.go` handles one-time migration from the legacy filesystem format. Uses `modernc.org/sqlite` (pure Go, no CGo).
 
 **`internal/config/`** — Shared configuration layer. `AppConfig` loads from env. `profiles.go` has shared profile types to prevent import cycles. **Import rule**: `config` ← `service` ← `api` (never reverse).
+
+**`internal/integrations/`** — Integration system. `registry.go` manages server lifecycle (Start/Stop/Reload). `google/` has OAuth flow, in-process MCP servers for Calendar, Gmail, and Drive tools.
+
+**`internal/claudesessions/`** — Scanner and analytics for Claude Code session JSONL files. `scanner.go` parses session data, `analytics.go` computes token usage and cost metrics, `cache.go` caches results in SQLite.
 
 **`internal/tools/`** — Local MCP server running in-process. Register built-in tools here (e.g., `current_time`).
 
@@ -82,7 +86,7 @@ Browser → Vite (dev) / embedded FS (prod) → React SPA
 **`frontend/src/contexts/`** — Theme and appearance state shared across components.
 
 ### Agent Configuration
-Agents are defined as YAML files in `~/.agento/agents/` (or `AGENTS_DIR`). Fields: `name`, `slug`, `model`, `system_prompt`, `thinking`, `capabilities` (built_in/local/mcp tools). Template variables: `{{current_date}}`, `{{current_time}}`.
+Agents are stored in the SQLite database (legacy YAML files in `~/.agento/agents/` are auto-migrated on first startup). Create and edit agents via the UI or API. Fields: `name`, `slug`, `model`, `system_prompt`, `thinking`, `permission_mode`, `capabilities` (built_in/local/mcp/integration tools). Template variables: `{{current_date}}`, `{{current_time}}`.
 
 ### MCP Integration
 External MCP servers defined in `mcps.yaml` (or `MCPS_FILE`). Local in-process tools registered via `internal/tools/registry.go`. Claude settings profiles stored as `~/.claude/settings_<slug>.json` with metadata at `~/.claude/settings_profiles.json`.

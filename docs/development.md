@@ -89,9 +89,11 @@ agento/
 │   ├── build/        # Build-time version variables
 │   ├── config/       # AppConfig, AgentConfig, MCP config
 │   ├── server/       # HTTP server wiring
-│   ├── service/      # Business logic (AgentService, ChatService)
-│   ├── storage/      # File-system persistence
-│   └── tools/        # Local MCP tool server
+│   ├── claudesessions/ # Claude session scanner and analytics
+│   ├── integrations/   # Integration registry + Google MCP servers
+│   ├── service/        # Business logic (AgentService, ChatService)
+│   ├── storage/        # SQLite persistence (~/.agento/agento.db)
+│   └── tools/          # Local MCP tool server
 ├── docs/             # Documentation
 ├── .goreleaser.yaml  # Release configuration
 └── Makefile

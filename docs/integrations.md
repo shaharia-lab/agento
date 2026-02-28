@@ -23,12 +23,11 @@ Enable the APIs your agents will use:
 ### Creating an Integration
 
 1. Open Agento and go to **Integrations** in the sidebar
-2. Click **New Integration**
-3. Select **Google** as the provider
-4. Enter a name, your Client ID, and Client Secret
-5. Enable the services you want (Calendar, Gmail, Drive) and select tools per service
-6. Click **Save** — a Google sign-in window opens
-7. Complete the OAuth flow — you'll see "Connected" when done
+2. Click the **Google** card to start setup
+3. Enter a name, your Client ID, and Client Secret
+4. Enable the services you want (Calendar, Gmail, Drive) and select tools per service
+5. Click **Save** — a Google sign-in window opens
+6. Complete the OAuth flow — you'll see "Connected" when done
 
 ### Available Tools
 
