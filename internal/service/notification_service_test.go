@@ -119,9 +119,11 @@ func TestListLog(t *testing.T) {
 	assert.Len(t, list, 3)
 }
 
-func TestTestNotification_DisabledReturnsError(t *testing.T) {
+func TestTestNotification_WorksWhenDisabled(t *testing.T) {
+	// TestNotification should attempt to send regardless of the enabled flag.
+	// With no SMTP host configured it will fail on dial, not on "not enabled".
 	svc, _ := newTestNotificationService(t)
 	err := svc.TestNotification(context.Background())
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not enabled")
+	assert.NotContains(t, err.Error(), "not enabled")
 }

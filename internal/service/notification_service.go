@@ -96,14 +96,13 @@ func (s *notificationServiceImpl) UpdateSettings(incoming *notification.Notifica
 	return nil
 }
 
-// TestNotification sends a test email using the current settings.
+// TestNotification sends a test email using the current SMTP config regardless
+// of whether notifications are enabled. This lets users verify credentials
+// before committing to enabling notifications.
 func (s *notificationServiceImpl) TestNotification(ctx context.Context) error {
 	ns, err := s.loadNotificationSettings()
 	if err != nil {
 		return err
-	}
-	if !ns.Enabled {
-		return fmt.Errorf("notifications are not enabled")
 	}
 
 	provider := notification.NewSMTPProvider(ns.Provider)
