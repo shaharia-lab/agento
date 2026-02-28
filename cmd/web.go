@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
@@ -22,9 +23,11 @@ import (
 	"github.com/shaharia-lab/agento/internal/build"
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/eventbus"
 	"github.com/shaharia-lab/agento/internal/integrations"
 	googleintegration "github.com/shaharia-lab/agento/internal/integrations/google"
 	"github.com/shaharia-lab/agento/internal/logger"
+	"github.com/shaharia-lab/agento/internal/notification"
 	"github.com/shaharia-lab/agento/internal/server"
 	"github.com/shaharia-lab/agento/internal/service"
 	"github.com/shaharia-lab/agento/internal/storage"
@@ -182,18 +185,91 @@ func buildWebServer(
 		return nil, fmt.Errorf("initializing settings: %w", err)
 	}
 
+	apiSrv, bus := buildAPIServer(ctx, cfg, db, sysLogger,
+		agentStore, chatStore, integrationStore, integrationRegistry,
+		mcpRegistry, localToolsMCP, settingsMgr,
+	)
+	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger)
+
+	// Ensure the event bus is drained cleanly on shutdown.
+	go func() {
+		<-ctx.Done()
+		bus.Close()
+	}()
+
+	return srv, nil
+}
+
+// buildAPIServer wires all services and returns the api.Server and the event bus.
+func buildAPIServer(
+	ctx context.Context,
+	cfg *config.AppConfig,
+	db *sql.DB,
+	sysLogger *slog.Logger,
+	agentStore storage.AgentStore,
+	chatStore storage.ChatStore,
+	integrationStore storage.IntegrationStore,
+	integrationRegistry *integrations.IntegrationRegistry,
+	mcpRegistry *config.MCPRegistry,
+	localToolsMCP *tools.LocalMCPConfig,
+	settingsMgr *config.SettingsManager,
+) (*api.Server, eventbus.EventBus) {
+	notifStore, bus := setupNotifications(db, settingsMgr)
+
 	agentSvc := service.NewAgentService(agentStore, sysLogger)
 	chatSvc := service.NewChatService(
 		chatStore, agentStore, mcpRegistry, localToolsMCP,
 		integrationRegistry, cfg.DefaultModel, sysLogger,
 	)
 	integrationSvc := service.NewIntegrationService(integrationStore, integrationRegistry, sysLogger, ctx)
+	notificationSvc := service.NewNotificationService(settingsMgr, notifStore)
 
 	sessionCache := claudesessions.NewCache(db, sysLogger)
 	sessionCache.StartBackgroundScan()
 
-	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, settingsMgr, sysLogger, sessionCache)
-	return server.New(apiSrv, WebFS, cfg.Port, sysLogger), nil
+	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, notificationSvc, settingsMgr, sysLogger, sessionCache)
+	return apiSrv, bus
+}
+
+// setupNotifications creates the notification store, event bus, and wires the
+// notification handler as a subscriber. The bus is returned so the caller can
+// close it on shutdown.
+func setupNotifications(
+	db *sql.DB,
+	settingsMgr *config.SettingsManager,
+) (storage.NotificationStore, eventbus.EventBus) {
+	workerPoolSize := settingsMgr.Get().EventBusWorkerPoolSize
+	if workerPoolSize <= 0 {
+		workerPoolSize = 3
+	}
+
+	bus := eventbus.New(workerPoolSize)
+	notifStore := storage.NewSQLiteNotificationStore(db)
+	notifHandler := notification.NewNotificationHandler(
+		func() (*notification.NotificationSettings, error) {
+			us := settingsMgr.Get()
+			return loadNotificationSettingsFromJSON(us.NotificationSettings)
+		},
+		notifStore,
+	)
+	bus.Subscribe(func(e eventbus.Event) {
+		notifHandler.Handle(e.Type, e.Payload)
+	})
+	return notifStore, bus
+}
+
+// loadNotificationSettingsFromJSON parses the JSON-encoded notification settings stored
+// in the user_settings row. It is passed as a SettingsLoader to NewNotificationHandler
+// so that configuration changes take effect without a server restart.
+func loadNotificationSettingsFromJSON(raw string) (*notification.NotificationSettings, error) {
+	if raw == "" || raw == "{}" {
+		return &notification.NotificationSettings{}, nil
+	}
+	var ns notification.NotificationSettings
+	if err := json.Unmarshal([]byte(raw), &ns); err != nil {
+		return nil, fmt.Errorf("parsing notification settings: %w", err)
+	}
+	return &ns, nil
 }
 
 func seedExampleAgent(store storage.AgentStore) error {

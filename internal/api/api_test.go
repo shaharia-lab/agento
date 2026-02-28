@@ -25,11 +25,12 @@ import (
 
 // testHarness bundles the mocks and router used by every test.
 type testHarness struct {
-	agentSvc       *svcmocks.MockAgentService
-	chatSvc        *svcmocks.MockChatService
-	integrationSvc *svcmocks.MockIntegrationService
-	settingsStore  *cfgmocks.MockSettingsStore
-	router         chi.Router
+	agentSvc        *svcmocks.MockAgentService
+	chatSvc         *svcmocks.MockChatService
+	integrationSvc  *svcmocks.MockIntegrationService
+	notificationSvc *svcmocks.MockNotificationService
+	settingsStore   *cfgmocks.MockSettingsStore
+	router          chi.Router
 }
 
 func newHarness(t *testing.T) *testHarness {
@@ -38,6 +39,7 @@ func newHarness(t *testing.T) *testHarness {
 	agentSvc := new(svcmocks.MockAgentService)
 	chatSvc := new(svcmocks.MockChatService)
 	integrationSvc := new(svcmocks.MockIntegrationService)
+	notificationSvc := new(svcmocks.MockNotificationService)
 	settingsStore := new(cfgmocks.MockSettingsStore)
 
 	settingsStore.On("Load").Return(config.UserSettings{}, nil)
@@ -46,17 +48,18 @@ func newHarness(t *testing.T) *testHarness {
 	require.NoError(t, err)
 
 	logger := slog.Default()
-	srv := api.New(agentSvc, chatSvc, integrationSvc, mgr, logger, nil)
+	srv := api.New(agentSvc, chatSvc, integrationSvc, notificationSvc, mgr, logger, nil)
 
 	r := chi.NewRouter()
 	srv.Mount(r)
 
 	return &testHarness{
-		agentSvc:       agentSvc,
-		chatSvc:        chatSvc,
-		integrationSvc: integrationSvc,
-		settingsStore:  settingsStore,
-		router:         r,
+		agentSvc:        agentSvc,
+		chatSvc:         chatSvc,
+		integrationSvc:  integrationSvc,
+		notificationSvc: notificationSvc,
+		settingsStore:   settingsStore,
+		router:          r,
 	}
 }
 

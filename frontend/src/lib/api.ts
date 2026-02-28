@@ -21,6 +21,8 @@ import type {
   Integration,
   GoogleCredentials,
   AvailableTool,
+  NotificationSettings,
+  NotificationLogEntry,
 } from '../types'
 
 const BASE = '/api'
@@ -363,6 +365,27 @@ export const integrationsApi = {
     request<{ authenticated: boolean }>(`/integrations/${id}/auth/status`),
 
   availableTools: () => request<AvailableTool[]>('/integrations/available-tools'),
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+export const notificationsApi = {
+  getSettings: () => request<NotificationSettings>('/notifications/settings'),
+
+  updateSettings: (data: NotificationSettings) =>
+    request<NotificationSettings>('/notifications/settings', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  sendTest: () => request<{ status: string }>('/notifications/test', { method: 'POST' }),
+
+  listLog: (limit?: number) => {
+    const params = new URLSearchParams()
+    if (limit) params.set('limit', String(limit))
+    const suffix = params.toString() ? `?${params.toString()}` : ''
+    return request<NotificationLogEntry[]>(`/notifications/log${suffix}`)
+  },
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

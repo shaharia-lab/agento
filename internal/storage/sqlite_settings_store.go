@@ -27,10 +27,12 @@ func (s *SQLiteSettingsStore) Load() (config.UserSettings, error) {
 	ctx := context.Background()
 	err := s.db.QueryRowContext(ctx, `
 		SELECT default_working_dir, default_model, onboarding_complete,
-		       appearance_dark_mode, appearance_font_size, appearance_font_family
+		       appearance_dark_mode, appearance_font_size, appearance_font_family,
+		       notification_settings, event_bus_worker_pool_size
 		FROM user_settings WHERE id = 1`).Scan(
 		&us.DefaultWorkingDir, &us.DefaultModel, &onboarding,
 		&darkMode, &us.AppearanceFontSize, &us.AppearanceFontFamily,
+		&us.NotificationSettings, &us.EventBusWorkerPoolSize,
 	)
 	if err == sql.ErrNoRows {
 		// Return zero-value settings; SettingsManager fills defaults.
@@ -55,21 +57,30 @@ func (s *SQLiteSettingsStore) Save(settings config.UserSettings) error {
 		darkMode = 1
 	}
 
+	notificationSettings := settings.NotificationSettings
+	if notificationSettings == "" {
+		notificationSettings = "{}"
+	}
+
 	ctx := context.Background()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO user_settings
 			(id, default_working_dir, default_model, onboarding_complete,
-			 appearance_dark_mode, appearance_font_size, appearance_font_family)
-		VALUES (1, ?, ?, ?, ?, ?, ?)
+			 appearance_dark_mode, appearance_font_size, appearance_font_family,
+			 notification_settings, event_bus_worker_pool_size)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			default_working_dir = excluded.default_working_dir,
 			default_model = excluded.default_model,
 			onboarding_complete = excluded.onboarding_complete,
 			appearance_dark_mode = excluded.appearance_dark_mode,
 			appearance_font_size = excluded.appearance_font_size,
-			appearance_font_family = excluded.appearance_font_family`,
+			appearance_font_family = excluded.appearance_font_family,
+			notification_settings = excluded.notification_settings,
+			event_bus_worker_pool_size = excluded.event_bus_worker_pool_size`,
 		settings.DefaultWorkingDir, settings.DefaultModel, onboarding,
 		darkMode, settings.AppearanceFontSize, settings.AppearanceFontFamily,
+		notificationSettings, settings.EventBusWorkerPoolSize,
 	)
 	if err != nil {
 		return fmt.Errorf("saving settings: %w", err)

@@ -31,6 +31,7 @@ type Server struct {
 	agentSvc           service.AgentService
 	chatSvc            service.ChatService
 	integrationSvc     service.IntegrationService
+	notificationSvc    service.NotificationService
 	settingsMgr        *config.SettingsManager
 	logger             *slog.Logger
 	liveSessions       *liveSessionStore
@@ -42,6 +43,7 @@ func New(
 	agentSvc service.AgentService,
 	chatSvc service.ChatService,
 	integrationSvc service.IntegrationService,
+	notificationSvc service.NotificationService,
 	settingsMgr *config.SettingsManager,
 	logger *slog.Logger,
 	sessionCache *claudesessions.Cache,
@@ -50,6 +52,7 @@ func New(
 		agentSvc:           agentSvc,
 		chatSvc:            chatSvc,
 		integrationSvc:     integrationSvc,
+		notificationSvc:    notificationSvc,
 		settingsMgr:        settingsMgr,
 		logger:             logger,
 		liveSessions:       newLiveSessionStore(),
@@ -92,21 +95,35 @@ func (s *Server) Mount(r chi.Router) {
 	r.Post(routeProfileByID+"/duplicate", s.handleDuplicateClaudeSettingsProfile)
 	r.Put(routeProfileByID+"/default", s.handleSetDefaultClaudeSettingsProfile)
 
-	// Claude Code sessions (read from ~/.claude)
-	r.Get("/claude-sessions", s.handleListClaudeSessions)
-	r.Get("/claude-sessions/projects", s.handleListClaudeProjects)
-	r.Post("/claude-sessions/refresh", s.handleRefreshClaudeSessionCache)
-	r.Get("/claude-sessions/{id}", s.handleGetClaudeSession)
-	r.Post("/claude-sessions/{id}/continue", s.handleContinueClaudeSession)
-
-	// Claude Code analytics
-	r.Get("/claude-analytics", s.handleGetClaudeAnalytics)
+	// Claude Code sessions and analytics
+	s.mountClaudeSessionRoutes(r)
 
 	// Filesystem browser
 	r.Get("/fs", s.handleFSList)
 	r.Post("/fs/mkdir", s.handleFSMkdir)
 
 	// Integrations
+	s.mountIntegrationRoutes(r)
+
+	// Notifications
+	s.mountNotificationRoutes(r)
+
+	// Build info
+	r.Get("/version", s.handleVersion)
+}
+
+// mountClaudeSessionRoutes registers Claude Code session and analytics routes.
+func (s *Server) mountClaudeSessionRoutes(r chi.Router) {
+	r.Get("/claude-sessions", s.handleListClaudeSessions)
+	r.Get("/claude-sessions/projects", s.handleListClaudeProjects)
+	r.Post("/claude-sessions/refresh", s.handleRefreshClaudeSessionCache)
+	r.Get("/claude-sessions/{id}", s.handleGetClaudeSession)
+	r.Post("/claude-sessions/{id}/continue", s.handleContinueClaudeSession)
+	r.Get("/claude-analytics", s.handleGetClaudeAnalytics)
+}
+
+// mountIntegrationRoutes registers integration-related routes.
+func (s *Server) mountIntegrationRoutes(r chi.Router) {
 	r.Get("/integrations/available-tools", s.handleAvailableTools)
 	r.Get("/integrations", s.handleListIntegrations)
 	r.Post("/integrations", s.handleCreateIntegration)
@@ -115,9 +132,14 @@ func (s *Server) Mount(r chi.Router) {
 	r.Delete(routeIntegrationByID, s.handleDeleteIntegration)
 	r.Post(routeIntegrationByID+"/auth/start", s.handleStartOAuth)
 	r.Get(routeIntegrationByID+"/auth/status", s.handleGetAuthStatus)
+}
 
-	// Build info
-	r.Get("/version", s.handleVersion)
+// mountNotificationRoutes registers the notification-related API routes.
+func (s *Server) mountNotificationRoutes(r chi.Router) {
+	r.Get("/notifications/settings", s.handleGetNotificationSettings)
+	r.Put("/notifications/settings", s.handleUpdateNotificationSettings)
+	r.Post("/notifications/test", s.handleTestNotification)
+	r.Get("/notifications/log", s.handleListNotificationLog)
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
