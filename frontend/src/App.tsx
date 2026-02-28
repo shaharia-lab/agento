@@ -12,7 +12,7 @@ import ClaudeSessionDetailPage from '@/pages/ClaudeSessionDetailPage'
 import TokenUsagePage from '@/pages/TokenUsagePage'
 import GeneralUsagePage from '@/pages/GeneralUsagePage'
 import IntegrationsPage from '@/pages/IntegrationsPage'
-import IntegrationNewPage from '@/pages/IntegrationNewPage'
+import IntegrationGooglePage from '@/pages/IntegrationGooglePage'
 import IntegrationDetailPage from '@/pages/IntegrationDetailPage'
 import OnboardingWizard from '@/components/OnboardingWizard'
 import { AppearanceProvider } from '@/contexts/ThemeContext'
@@ -81,7 +81,7 @@ export default function App() {
             <Route path="analytics/token-usage" element={<TokenUsagePage />} />
             <Route path="analytics/general-usage" element={<GeneralUsagePage />} />
             <Route path="integrations" element={<IntegrationsPage />} />
-            <Route path="integrations/new" element={<IntegrationNewPage />} />
+            <Route path="integrations/google" element={<IntegrationGooglePage />} />
             <Route path="integrations/:id" element={<IntegrationDetailPage />} />
             <Route path="settings" element={<SettingsPage />} />
           </Route>
