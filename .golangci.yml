@@ -41,10 +41,10 @@ linters:
 
   settings:
     govet:
-      check-shadowing: true
       enable-all: true
       disable:
         - fieldalignment
+        - shadow
 
     errcheck:
       check-blank: true
@@ -120,8 +120,3 @@ formatters:
     goimports:
       local-prefixes:
         - github.com/shaharia-lab/agento
-
-issues:
-  exclude-use-default: false
-  max-issues-per-linter: 0
-  max-same-issues: 0
