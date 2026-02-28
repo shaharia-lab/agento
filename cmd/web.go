@@ -67,15 +67,15 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// Ensure data directories exist.
-	for _, dir := range []string{cfg.AgentsDir(), cfg.ChatsDir(), cfg.LogDir()} {
+	// Ensure data and log directories exist.
+	for _, dir := range []string{cfg.DataDir, cfg.LogDir()} {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return fmt.Errorf("creating directory %s: %w", dir, err)
 		}
 	}
 
 	// Create the default working directory if it doesn't exist.
-	if err := os.MkdirAll("/tmp/agento/work", 0750); err != nil {
+	if err := os.MkdirAll(config.DefaultWorkingDir(), 0750); err != nil {
 		return fmt.Errorf("creating default working directory: %w", err)
 	}
 
@@ -92,7 +92,23 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 		slog.String("build_date", build.BuildDate),
 	)
 
-	agentStore := storage.NewFSAgentStore(cfg.AgentsDir())
+	// Open SQLite database.
+	dbPath := filepath.Join(cfg.DataDir, "agento.db")
+	db, freshDB, err := storage.NewSQLiteDB(dbPath)
+	if err != nil {
+		return fmt.Errorf("opening database: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	// Auto-migrate from filesystem if this is a fresh database and FS data exists.
+	if freshDB && storage.HasFSData(cfg.DataDir) {
+		sysLogger.Info("detected existing filesystem data, migrating to SQLite...")
+		if err := storage.MigrateFromFS(db, cfg.DataDir, sysLogger); err != nil {
+			return fmt.Errorf("migrating filesystem data to SQLite: %w", err)
+		}
+	}
+
+	agentStore := storage.NewSQLiteAgentStore(db)
 
 	// Seed an example agent on first run.
 	existing, err := agentStore.List()
@@ -115,20 +131,17 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 		return fmt.Errorf("starting local tools MCP server: %w", err)
 	}
 
-	chatStore := storage.NewFSChatStore(cfg.ChatsDir())
+	chatStore := storage.NewSQLiteChatStore(db)
 
-	// Set up integrations registry.
-	if err := os.MkdirAll(cfg.IntegrationsDir(), 0750); err != nil {
-		return fmt.Errorf("creating integrations directory: %w", err)
-	}
-	integrationStore := storage.NewFSIntegrationStore(cfg.IntegrationsDir())
+	integrationStore := storage.NewSQLiteIntegrationStore(db)
 	integrationRegistry := integrations.NewRegistry(integrationStore, sysLogger)
 	integrationRegistry.RegisterStarter("google", googleintegration.Start)
 	if err := integrationRegistry.Start(ctx); err != nil {
 		sysLogger.Warn("some integrations failed to start", "error", err)
 	}
 
-	settingsMgr, err := config.NewSettingsManager(cfg.DataDir, cfg)
+	settingsStore := storage.NewSQLiteSettingsStore(db)
+	settingsMgr, err := config.NewSettingsManager(settingsStore, cfg)
 	if err != nil {
 		return fmt.Errorf("initializing settings: %w", err)
 	}
@@ -138,7 +151,7 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	integrationSvc := service.NewIntegrationService(integrationStore, integrationRegistry, sysLogger, ctx)
 
 	// Start background scan of ~/.claude/projects so Claude Sessions are available quickly.
-	sessionCache := claudesessions.NewCache(sysLogger)
+	sessionCache := claudesessions.NewCache(db, sysLogger)
 	sessionCache.StartBackgroundScan()
 
 	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, settingsMgr, sysLogger, sessionCache)

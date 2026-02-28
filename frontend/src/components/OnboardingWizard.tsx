@@ -120,7 +120,7 @@ export default function OnboardingWizard({
                       setWorkingDir(e.target.value)
                       setDirWarning(null)
                     }}
-                    placeholder="/tmp/agento/work"
+                    placeholder="Default working directory"
                     className="flex-1 font-mono text-sm"
                   />
                   <Button

@@ -1,84 +1,134 @@
 package claudesessions
 
 import (
+	"context"
+	"database/sql"
 	"log/slog"
 	"sync"
 	"time"
 )
 
-const defaultCacheTTL = 5 * time.Minute
+// CacheTTL is the duration after which the SQLite-backed cache is considered
+// stale and an incremental rescan is triggered.
+const CacheTTL = 1 * time.Hour
 
-// Cache is an in-memory cache of Claude Code session summaries with TTL-based invalidation.
-// It is safe for concurrent use.
+// Cache is a SQLite-backed cache of Claude Code session summaries with
+// TTL-based invalidation and incremental scanning. It is safe for concurrent use.
 type Cache struct {
-	mu        sync.RWMutex
-	sessions  []ClaudeSessionSummary
-	expiresAt time.Time
-	ttl       time.Duration
-	logger    *slog.Logger
+	mu     sync.Mutex
+	db     *sql.DB
+	logger *slog.Logger
 }
 
-// NewCache creates a new Cache with the default TTL.
-func NewCache(logger *slog.Logger) *Cache {
+// NewCache creates a new Cache backed by the given SQLite database.
+func NewCache(db *sql.DB, logger *slog.Logger) *Cache {
 	return &Cache{
-		ttl:    defaultCacheTTL,
+		db:     db,
 		logger: logger,
 	}
 }
 
-// StartBackgroundScan starts the initial scan of ~/.claude/projects/ in a background
-// goroutine so the server starts immediately while the cache is being populated.
+// StartBackgroundScan runs an incremental scan in a background goroutine so
+// the server starts immediately while the cache is being populated.
 func (c *Cache) StartBackgroundScan() {
 	go func() {
 		c.logger.Info("claude sessions: starting background scan")
-		sessions, err := ScanAllSessions()
-		if err != nil {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+
+		if _, err := IncrementalScan(c.db, c.logger); err != nil {
 			c.logger.Warn("claude sessions: background scan failed", "error", err)
 			return
 		}
-		c.mu.Lock()
-		c.sessions = sessions
-		c.expiresAt = time.Now().Add(c.ttl)
-		c.mu.Unlock()
-		c.logger.Info("claude sessions: scan complete", "count", len(sessions))
+		c.logger.Info("claude sessions: background scan complete")
 	}()
 }
 
-// List returns all cached session summaries. If the cache has expired or is empty,
-// a synchronous rescan is performed before returning.
+// List returns all cached session summaries. If the cache has expired,
+// an incremental rescan is performed before returning.
 func (c *Cache) List() []ClaudeSessionSummary {
-	c.mu.RLock()
-	if c.sessions != nil && time.Now().Before(c.expiresAt) {
-		sessions := c.sessions
-		c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.isFresh() {
+		sessions, err := c.loadAll()
+		if err != nil {
+			c.logger.Warn("claude sessions: failed to load from cache", "error", err)
+			return []ClaudeSessionSummary{}
+		}
 		return sessions
 	}
-	c.mu.RUnlock()
 
-	// Cache expired or not yet populated — rescan synchronously.
-	sessions, err := ScanAllSessions()
+	sessions, err := IncrementalScan(c.db, c.logger)
 	if err != nil {
 		c.logger.Warn("claude sessions: refresh scan failed", "error", err)
-		// Return stale data if available rather than an error.
-		c.mu.RLock()
-		stale := c.sessions
-		c.mu.RUnlock()
-		if stale != nil {
+		// Try returning stale data.
+		stale, loadErr := c.loadAll()
+		if loadErr == nil && len(stale) > 0 {
 			return stale
 		}
 		return []ClaudeSessionSummary{}
 	}
-
-	c.mu.Lock()
-	c.sessions = sessions
-	c.expiresAt = time.Now().Add(c.ttl)
-	c.mu.Unlock()
 	return sessions
 }
 
-// Invalidate clears the cache expiry so the next List() call triggers a rescan.
+// Invalidate resets the cache metadata so the next List() call triggers a rescan.
 func (c *Cache) Invalidate() {
 	c.mu.Lock()
-	c.expiresAt = time.Time{}
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+
+	ctx := context.Background()
+	_, err := c.db.ExecContext(ctx,
+		`INSERT INTO claude_cache_metadata (id, last_scanned_at) VALUES (1, ?)
+		 ON CONFLICT(id) DO UPDATE SET last_scanned_at = excluded.last_scanned_at`,
+		time.Time{},
+	)
+	if err != nil {
+		c.logger.Warn("claude sessions: failed to invalidate cache", "error", err)
+	}
+}
+
+// isFresh returns true if the cache was scanned within CacheTTL.
+func (c *Cache) isFresh() bool {
+	ctx := context.Background()
+	var lastScanned time.Time
+	err := c.db.QueryRowContext(ctx, "SELECT last_scanned_at FROM claude_cache_metadata WHERE id = 1").Scan(&lastScanned)
+	if err != nil {
+		return false
+	}
+	return time.Since(lastScanned) < CacheTTL
+}
+
+// loadAll queries all rows from claude_session_cache ordered by last_activity desc.
+func (c *Cache) loadAll() ([]ClaudeSessionSummary, error) {
+	ctx := context.Background()
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT session_id, project_path, preview, start_time, last_activity,
+		       message_count, input_tokens, output_tokens, cache_creation_tokens,
+		       cache_read_tokens, git_branch, model, cwd
+		FROM claude_session_cache
+		ORDER BY last_activity DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var sessions []ClaudeSessionSummary
+	for rows.Next() {
+		var s ClaudeSessionSummary
+		if err := rows.Scan(
+			&s.SessionID, &s.ProjectPath, &s.Preview,
+			&s.StartTime, &s.LastActivity, &s.MessageCount,
+			&s.Usage.InputTokens, &s.Usage.OutputTokens,
+			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
+			&s.GitBranch, &s.Model, &s.CWD,
+		); err != nil {
+			return nil, err
+		}
+		sessions = append(sessions, s)
+	}
+	if sessions == nil {
+		sessions = []ClaudeSessionSummary{}
+	}
+	return sessions, rows.Err()
 }
