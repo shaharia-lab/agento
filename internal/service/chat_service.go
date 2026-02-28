@@ -68,19 +68,18 @@ type chatService struct {
 	mcpRegistry         *config.MCPRegistry
 	localMCP            *tools.LocalMCPConfig
 	integrationRegistry *integrations.IntegrationRegistry
-	defaultModel        string
+	settingsMgr         *config.SettingsManager
 	logger              *slog.Logger
 }
 
 // NewChatService constructs a ChatService backed by the provided repositories.
-// defaultModel is used for no-agent (direct) chat sessions.
 func NewChatService(
 	chatRepo storage.ChatStore,
 	agentRepo storage.AgentStore,
 	mcpRegistry *config.MCPRegistry,
 	localMCP *tools.LocalMCPConfig,
 	integrationRegistry *integrations.IntegrationRegistry,
-	defaultModel string,
+	settingsMgr *config.SettingsManager,
 	logger *slog.Logger,
 ) ChatService {
 	return &chatService{
@@ -89,7 +88,7 @@ func NewChatService(
 		mcpRegistry:         mcpRegistry,
 		localMCP:            localMCP,
 		integrationRegistry: integrationRegistry,
-		defaultModel:        defaultModel,
+		settingsMgr:         settingsMgr,
 		logger:              logger,
 	}
 }
@@ -213,8 +212,8 @@ func (s *chatService) resolveAgentConfig(session *storage.ChatSession) (*config.
 	}
 
 	model := session.Model
-	if model == "" {
-		model = s.defaultModel
+	if model == "" && s.settingsMgr != nil {
+		model = s.settingsMgr.Get().DefaultModel
 	}
 	return &config.AgentConfig{
 		Model:    model,

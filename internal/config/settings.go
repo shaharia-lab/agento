@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-const defaultModel = "eu.anthropic.claude-sonnet-4-5-20250929-v1:0"
+const defaultModel = "sonnet"
 
 // DefaultWorkingDir returns the default working directory for agent sessions,
 // located under the user's home directory (~/.agento/work) to avoid using

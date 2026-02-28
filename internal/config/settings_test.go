@@ -29,7 +29,7 @@ func TestNewSettingsManager(t *testing.T) {
 			cfg:           &config.AppConfig{},
 			wantSettings: func(t *testing.T, s config.UserSettings) {
 				assert.Equal(t, config.DefaultWorkingDir(), s.DefaultWorkingDir)
-				assert.Equal(t, "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", s.DefaultModel)
+				assert.Equal(t, "sonnet", s.DefaultModel)
 			},
 			wantModelEnv: false,
 			wantLocked:   map[string]string{},
@@ -134,7 +134,7 @@ func TestNewSettingsManager(t *testing.T) {
 			cfg:           &config.AppConfig{DefaultModel: "from-config"},
 			wantSettings: func(t *testing.T, s config.UserSettings) {
 				// Model not locked, so store value (default) is used
-				assert.Equal(t, "eu.anthropic.claude-sonnet-4-5-20250929-v1:0", s.DefaultModel)
+				assert.Equal(t, "sonnet", s.DefaultModel)
 			},
 			wantModelEnv: false,
 			wantLocked:   map[string]string{},

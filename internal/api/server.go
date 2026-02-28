@@ -11,6 +11,7 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/scheduler"
 	"github.com/shaharia-lab/agento/internal/service"
 )
 
@@ -24,6 +25,8 @@ const (
 	routeAgentBySlug     = "/agents/{slug}"
 	routeIntegrationByID = "/integrations/{id}"
 	routeProfileByID     = "/claude-settings/profiles/{id}"
+	routeTaskByID        = "/tasks/{id}"
+	routeJobHistoryByID  = "/job-history/{id}"
 )
 
 // Server holds all dependencies for the REST API handlers.
@@ -31,10 +34,12 @@ type Server struct {
 	agentSvc           service.AgentService
 	chatSvc            service.ChatService
 	integrationSvc     service.IntegrationService
+	taskSvc            service.TaskService
 	settingsMgr        *config.SettingsManager
 	logger             *slog.Logger
 	liveSessions       *liveSessionStore
 	claudeSessionCache *claudesessions.Cache
+	scheduler          *scheduler.Scheduler
 }
 
 // New creates a new API Server backed by the provided services.
@@ -42,18 +47,22 @@ func New(
 	agentSvc service.AgentService,
 	chatSvc service.ChatService,
 	integrationSvc service.IntegrationService,
+	taskSvc service.TaskService,
 	settingsMgr *config.SettingsManager,
 	logger *slog.Logger,
 	sessionCache *claudesessions.Cache,
+	sched *scheduler.Scheduler,
 ) *Server {
 	return &Server{
 		agentSvc:           agentSvc,
 		chatSvc:            chatSvc,
 		integrationSvc:     integrationSvc,
+		taskSvc:            taskSvc,
 		settingsMgr:        settingsMgr,
 		logger:             logger,
 		liveSessions:       newLiveSessionStore(),
 		claudeSessionCache: sessionCache,
+		scheduler:          sched,
 	}
 }
 
@@ -102,6 +111,15 @@ func (s *Server) Mount(r chi.Router) {
 	// Claude Code analytics
 	r.Get("/claude-analytics", s.handleGetClaudeAnalytics)
 
+	// Filesystem, integrations, tasks, job history
+	s.mountExtensionRoutes(r)
+
+	// Build info
+	r.Get("/version", s.handleVersion)
+}
+
+// mountExtensionRoutes registers filesystem, integration, task, and job-history routes.
+func (s *Server) mountExtensionRoutes(r chi.Router) {
 	// Filesystem browser
 	r.Get("/fs", s.handleFSList)
 	r.Post("/fs/mkdir", s.handleFSMkdir)
@@ -116,8 +134,17 @@ func (s *Server) Mount(r chi.Router) {
 	r.Post(routeIntegrationByID+"/auth/start", s.handleStartOAuth)
 	r.Get(routeIntegrationByID+"/auth/status", s.handleGetAuthStatus)
 
-	// Build info
-	r.Get("/version", s.handleVersion)
+	// Scheduled tasks
+	r.Get("/tasks", s.handleListTasks)
+	r.Post("/tasks", s.handleCreateTask)
+	r.Get(routeTaskByID, s.handleGetTask)
+	r.Put(routeTaskByID, s.handleUpdateTask)
+	r.Delete(routeTaskByID, s.handleDeleteTask)
+	r.Post(routeTaskByID+"/pause", s.handlePauseTask)
+	r.Post(routeTaskByID+"/resume", s.handleResumeTask)
+	r.Get(routeTaskByID+"/job-history", s.handleListTaskJobHistory)
+	r.Get("/job-history", s.handleListAllJobHistory)
+	r.Get(routeJobHistoryByID, s.handleGetJobHistory)
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
