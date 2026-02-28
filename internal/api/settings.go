@@ -23,7 +23,7 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var incoming config.UserSettings
-	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
+	if json.NewDecoder(r.Body).Decode(&incoming) != nil {
 		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}

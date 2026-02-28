@@ -246,7 +246,7 @@ func parseChatRecords(f *os.File) []chatFileRecord {
 	var records []chatFileRecord
 	for scanner.Scan() {
 		var rec chatFileRecord
-		if unmarshalErr := json.Unmarshal(scanner.Bytes(), &rec); unmarshalErr != nil {
+		if json.Unmarshal(scanner.Bytes(), &rec) != nil {
 			continue
 		}
 		if len(records) == 0 && rec.Type != "session" {

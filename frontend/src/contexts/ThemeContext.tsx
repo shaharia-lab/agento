@@ -79,8 +79,8 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue | null>(null)
 
 interface AppearanceProviderProps {
-  children: ReactNode
-  serverSettings?: Partial<AppearanceSettings>
+  readonly children: ReactNode
+  readonly serverSettings?: Partial<AppearanceSettings>
 }
 
 export function AppearanceProvider({ children, serverSettings }: AppearanceProviderProps) {

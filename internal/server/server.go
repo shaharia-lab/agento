@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -162,6 +163,8 @@ func (s *Server) spaHandler() http.HandlerFunc {
 		if path == "" {
 			path = "index.html"
 		}
+		// Sanitize the path to prevent directory traversal.
+		path = filepath.Clean(path)
 
 		f, err := s.frontendFS.Open(path)
 		if err != nil {

@@ -101,7 +101,7 @@ func (s *SQLiteChatStore) GetSessionWithMessages(id string) (*ChatSession, []Cha
 		}
 		msg.Timestamp = ts
 		if blocksJSON != "" && blocksJSON != "[]" {
-			if err := json.Unmarshal([]byte(blocksJSON), &msg.Blocks); err != nil {
+			if json.Unmarshal([]byte(blocksJSON), &msg.Blocks) != nil {
 				msg.Blocks = nil // non-fatal
 			}
 		}

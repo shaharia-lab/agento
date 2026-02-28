@@ -95,7 +95,7 @@ function TokenTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>) {
           <Tooltip
             formatter={(v: number | undefined, name: string | undefined) => [
               formatTokens(v ?? 0),
-              (name ?? '').replace(/_/g, ' '),
+              (name ?? '').replaceAll('_', ' '),
             ]}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />

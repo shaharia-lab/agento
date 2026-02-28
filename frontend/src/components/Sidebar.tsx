@@ -44,8 +44,8 @@ function AgentoLogo({ size = 28 }: Readonly<{ size?: number }>) {
 }
 
 interface SidebarProps {
-  mobileOpen?: boolean
-  onMobileClose?: () => void
+  readonly mobileOpen?: boolean
+  readonly onMobileClose?: () => void
 }
 
 export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarProps) {

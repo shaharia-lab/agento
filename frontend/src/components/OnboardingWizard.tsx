@@ -14,13 +14,13 @@ import { settingsApi, filesystemApi } from '@/lib/api'
 import { MODELS } from '@/types'
 
 interface OnboardingWizardProps {
-  defaultWorkingDir: string
-  defaultModel: string
+  readonly defaultWorkingDir: string
+  readonly defaultModel: string
   /** True when the model is pre-configured via an environment variable. */
-  modelFromEnv?: boolean
+  readonly modelFromEnv?: boolean
   /** The name of the env var that set the model (e.g. "ANTHROPIC_DEFAULT_SONNET_MODEL"). */
-  modelEnvVar?: string
-  onComplete: () => void
+  readonly modelEnvVar?: string
+  readonly onComplete: () => void
 }
 
 export default function OnboardingWizard({

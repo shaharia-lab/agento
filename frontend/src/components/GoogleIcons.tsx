@@ -2,8 +2,8 @@
 // Paths are the canonical Google brand vectors used across Google's own products.
 
 interface IconProps {
-  className?: string
-  size?: number
+  readonly className?: string
+  readonly size?: number
 }
 
 export function GoogleIcon({ className, size = 16 }: IconProps) {

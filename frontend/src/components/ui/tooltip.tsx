@@ -2,9 +2,9 @@ import * as React from 'react'
 import { cn } from '@/lib/utils'
 
 interface TooltipProps {
-  content: React.ReactNode
-  children: React.ReactElement
-  side?: 'right' | 'left' | 'top' | 'bottom'
+  readonly content: React.ReactNode
+  readonly children: React.ReactElement
+  readonly side?: 'right' | 'left' | 'top' | 'bottom'
 }
 
 export function Tooltip({ content, children, side = 'right' }: TooltipProps) {
@@ -20,8 +20,11 @@ export function Tooltip({ content, children, side = 'right' }: TooltipProps) {
   return (
     <div
       className="relative inline-flex"
+      role="group"
       onMouseEnter={() => setVisible(true)}
       onMouseLeave={() => setVisible(false)}
+      onFocus={() => setVisible(true)}
+      onBlur={() => setVisible(false)}
     >
       {children}
       {visible && (

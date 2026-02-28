@@ -34,7 +34,7 @@ func (s *Server) handleCreateIntegration(w http.ResponseWriter, r *http.Request)
 		Credentials config.GoogleCredentials        `json:"credentials"`
 		Services    map[string]config.ServiceConfig `json:"services"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -77,7 +77,7 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request)
 		Credentials config.GoogleCredentials        `json:"credentials"`
 		Services    map[string]config.ServiceConfig `json:"services"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
