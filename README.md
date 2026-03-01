@@ -1,5 +1,7 @@
 # Agento
 
+<img width="1820" height="1116" alt="carbon (3)" src="https://github.com/user-attachments/assets/1e66f27e-6eb2-49ad-9871-b7a589ec5f1c" />
+
 **Agento** is a local platform for building and interacting with AI agents through a web UI and CLI. It runs on top of the [Claude Code CLI](https://claude.ai/code) already installed on your machine — no separate API key or cloud account needed.
 
 You can define agents with custom system prompts and tools, start multi-turn conversations with them, and manage everything from a browser or directly from your terminal.
