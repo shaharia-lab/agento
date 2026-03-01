@@ -575,6 +575,7 @@ export interface ScheduledTask {
   schedule_config: ScheduleConfig
   stop_after_count: number
   stop_after_time?: string
+  save_output: boolean
   status: TaskStatus
   run_count: number
   last_run_at?: string
@@ -601,6 +602,7 @@ export interface JobHistoryEntry {
   total_output_tokens: number
   total_cache_creation_tokens: number
   total_cache_read_tokens: number
+  response_text: string
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

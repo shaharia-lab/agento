@@ -39,6 +39,7 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
   )
   const [stopAfterCount, setStopAfterCount] = useState(initialData?.stop_after_count ?? 0)
   const [stopAfterTime, setStopAfterTime] = useState(initialData?.stop_after_time ?? '')
+  const [saveOutput, setSaveOutput] = useState(initialData?.save_output ?? false)
 
   useEffect(() => {
     agentsApi
@@ -64,6 +65,7 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
       schedule_config: scheduleConfig,
       stop_after_count: stopAfterCount,
       stop_after_time: stopAfterTime || undefined,
+      save_output: saveOutput,
     }
 
     try {
@@ -379,6 +381,31 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                   onChange={e => setTimeoutMinutes(Number(e.target.value))}
                   className={inputClass}
                 />
+              </div>
+              <div className="flex items-start gap-3 pt-1">
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={saveOutput}
+                  onClick={() => setSaveOutput(v => !v)}
+                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-zinc-400 dark:focus:ring-zinc-500 ${
+                    saveOutput ? 'bg-zinc-900 dark:bg-zinc-100' : 'bg-zinc-200 dark:bg-zinc-700'
+                  }`}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white dark:bg-zinc-900 shadow transition-transform ${
+                      saveOutput ? 'translate-x-4' : 'translate-x-0'
+                    }`}
+                  />
+                </button>
+                <div>
+                  <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                    Save output
+                  </p>
+                  <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-0.5">
+                    Store the AI response in job history
+                  </p>
+                </div>
               </div>
             </section>
           </div>

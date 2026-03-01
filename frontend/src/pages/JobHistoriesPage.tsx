@@ -186,74 +186,89 @@ export default function JobHistoriesPage() {
           if (!open) setSelected(null)
         }}
       >
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-lg max-h-[80vh] flex flex-col overflow-hidden">
           {selected && (
             <>
-              <DialogHeader>
+              <DialogHeader className="shrink-0">
                 <DialogTitle className="flex items-center gap-2">
                   {selected.task_name}
                   <JobStatusBadge status={selected.status} />
                 </DialogTitle>
               </DialogHeader>
 
-              <dl className="grid grid-cols-2 gap-x-4 gap-y-3 mt-2">
-                <DetailRow label="Started">
-                  {new Date(selected.started_at).toLocaleString()}
-                </DetailRow>
-                <DetailRow label="Duration">
-                  {selected.duration_ms > 0 ? formatDuration(selected.duration_ms) : '-'}
-                </DetailRow>
-                {selected.agent_slug && (
-                  <DetailRow label="Agent">
-                    <span className="font-mono">{selected.agent_slug}</span>
+              <div className="overflow-y-auto flex-1 pr-1">
+                <dl className="grid grid-cols-2 gap-x-4 gap-y-3 mt-2">
+                  <DetailRow label="Started">
+                    {new Date(selected.started_at).toLocaleString()}
                   </DetailRow>
-                )}
-                {selected.model && (
-                  <DetailRow label="Model">
-                    <span className="font-mono">{selected.model}</span>
+                  <DetailRow label="Duration">
+                    {selected.duration_ms > 0 ? formatDuration(selected.duration_ms) : '-'}
                   </DetailRow>
-                )}
-                <DetailRow label="Input tokens">
-                  {selected.total_input_tokens.toLocaleString()}
-                </DetailRow>
-                <DetailRow label="Output tokens">
-                  {selected.total_output_tokens.toLocaleString()}
-                </DetailRow>
-                {(selected.total_cache_read_tokens > 0 ||
-                  selected.total_cache_creation_tokens > 0) && (
-                  <>
-                    <DetailRow label="Cache read">
-                      {selected.total_cache_read_tokens.toLocaleString()}
+                  {selected.agent_slug && (
+                    <DetailRow label="Agent">
+                      <span className="font-mono">{selected.agent_slug}</span>
                     </DetailRow>
-                    <DetailRow label="Cache creation">
-                      {selected.total_cache_creation_tokens.toLocaleString()}
+                  )}
+                  {selected.model && (
+                    <DetailRow label="Model">
+                      <span className="font-mono">{selected.model}</span>
                     </DetailRow>
-                  </>
+                  )}
+                  <DetailRow label="Input tokens">
+                    {selected.total_input_tokens.toLocaleString()}
+                  </DetailRow>
+                  <DetailRow label="Output tokens">
+                    {selected.total_output_tokens.toLocaleString()}
+                  </DetailRow>
+                  {(selected.total_cache_read_tokens > 0 ||
+                    selected.total_cache_creation_tokens > 0) && (
+                    <>
+                      <DetailRow label="Cache read">
+                        {selected.total_cache_read_tokens.toLocaleString()}
+                      </DetailRow>
+                      <DetailRow label="Cache creation">
+                        {selected.total_cache_creation_tokens.toLocaleString()}
+                      </DetailRow>
+                    </>
+                  )}
+                </dl>
+
+                {selected.prompt_preview && (
+                  <div className="mt-3">
+                    <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                      Prompt
+                    </p>
+                    <p className="text-sm text-zinc-700 dark:text-zinc-300 bg-zinc-50 dark:bg-zinc-800 rounded-md px-3 py-2 whitespace-pre-wrap break-words">
+                      {selected.prompt_preview}
+                    </p>
+                  </div>
                 )}
-              </dl>
 
-              {selected.prompt_preview && (
-                <div className="mt-3">
-                  <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
-                    Prompt
-                  </p>
-                  <p className="text-sm text-zinc-700 dark:text-zinc-300 bg-zinc-50 dark:bg-zinc-800 rounded-md px-3 py-2 whitespace-pre-wrap break-words">
-                    {selected.prompt_preview}
-                  </p>
-                </div>
-              )}
+                {selected.response_text && (
+                  <div className="mt-3">
+                    <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1">
+                      Output
+                    </p>
+                    <div className="max-h-64 overflow-y-auto rounded-md bg-zinc-50 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700">
+                      <p className="text-sm text-zinc-700 dark:text-zinc-300 px-3 py-2 whitespace-pre-wrap break-words">
+                        {selected.response_text}
+                      </p>
+                    </div>
+                  </div>
+                )}
 
-              {selected.error_message && (
-                <div className="mt-3">
-                  <p className="text-xs font-medium text-red-500 dark:text-red-400 mb-1">Error</p>
-                  <p className="text-sm text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md px-3 py-2 whitespace-pre-wrap break-words">
-                    {selected.error_message}
-                  </p>
-                </div>
-              )}
+                {selected.error_message && (
+                  <div className="mt-3">
+                    <p className="text-xs font-medium text-red-500 dark:text-red-400 mb-1">Error</p>
+                    <p className="text-sm text-red-700 dark:text-red-300 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md px-3 py-2 whitespace-pre-wrap break-words">
+                      {selected.error_message}
+                    </p>
+                  </div>
+                )}
+              </div>
 
               {selected.chat_session_id && (
-                <div className="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800">
+                <div className="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800 shrink-0">
                   <Button
                     size="sm"
                     onClick={() => {

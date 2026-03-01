@@ -95,7 +95,7 @@ func (s *Scheduler) runTask(task *storage.ScheduledTask) {
 		s.logger.Error("failed to resolve agent config",
 			"task_id", task.ID, "error", err)
 		s.finishJobHistory(jh, startedAt, storage.JobStatusFailed,
-			errMsg, agent.UsageStats{})
+			errMsg, agent.UsageStats{}, "")
 		s.updateTaskAfterRun(task, startedAt, "failed")
 		s.publishTaskFailed(task, errMsg)
 		return
@@ -112,15 +112,19 @@ func (s *Scheduler) runTask(task *storage.ScheduledTask) {
 		s.logger.Error("task execution failed",
 			"task_id", task.ID, "error", err)
 		s.finishJobHistory(jh, startedAt, storage.JobStatusFailed,
-			err.Error(), agent.UsageStats{})
+			err.Error(), agent.UsageStats{}, "")
 		s.updateTaskAfterRun(task, startedAt, "failed")
 		s.publishTaskFailed(task, err.Error())
 		return
 	}
 
 	s.saveSessionResults(chatSession, result, prompt, startedAt)
+	responseText := ""
+	if task.SaveOutput {
+		responseText = result.Answer
+	}
 	s.finishJobHistory(
-		jh, startedAt, storage.JobStatusSuccess, "", result.Usage,
+		jh, startedAt, storage.JobStatusSuccess, "", result.Usage, responseText,
 	)
 	s.updateTaskAfterRun(task, startedAt, "success")
 	s.publishTaskFinished(task, jh, chatSession.ID)
@@ -257,12 +261,14 @@ func (s *Scheduler) resolveAgentConfig(task *storage.ScheduledTask) (*config.Age
 func (s *Scheduler) finishJobHistory(
 	jh *storage.JobHistory, startedAt time.Time,
 	status storage.JobStatus, errMsg string, usage agent.UsageStats,
+	responseText string,
 ) {
 	now := time.Now().UTC()
 	jh.Status = status
 	jh.FinishedAt = &now
 	jh.DurationMS = now.Sub(startedAt).Milliseconds()
 	jh.ErrorMessage = errMsg
+	jh.ResponseText = responseText
 	jh.TotalInputTokens = usage.InputTokens
 	jh.TotalOutputTokens = usage.OutputTokens
 	jh.TotalCacheCreationTokens = usage.CacheCreationInputTokens

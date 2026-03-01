@@ -184,6 +184,14 @@ CREATE TABLE notification_log (
 CREATE INDEX idx_notification_log_created ON notification_log(created_at DESC);
 `,
 	},
+	{
+		version: 5,
+		sql:     `ALTER TABLE job_history ADD COLUMN response_text TEXT NOT NULL DEFAULT '';`,
+	},
+	{
+		version: 6,
+		sql:     `ALTER TABLE scheduled_tasks ADD COLUMN save_output INTEGER NOT NULL DEFAULT 0;`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

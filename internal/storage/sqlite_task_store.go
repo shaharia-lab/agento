@@ -26,7 +26,7 @@ func (s *SQLiteTaskStore) ListTasks() ([]*ScheduledTask, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, description, prompt, agent_slug, working_directory, model,
 		       settings_profile_id, timeout_minutes, schedule_type, schedule_config,
-		       stop_after_count, stop_after_time, status, run_count, last_run_at,
+		       stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
 		       last_run_status, next_run_at, created_at, updated_at
 		FROM scheduled_tasks
 		ORDER BY created_at DESC`)
@@ -52,7 +52,7 @@ func (s *SQLiteTaskStore) GetTask(id string) (*ScheduledTask, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, name, description, prompt, agent_slug, working_directory, model,
 		       settings_profile_id, timeout_minutes, schedule_type, schedule_config,
-		       stop_after_count, stop_after_time, status, run_count, last_run_at,
+		       stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
 		       last_run_status, next_run_at, created_at, updated_at
 		FROM scheduled_tasks WHERE id = ?`, id)
 
@@ -65,7 +65,7 @@ func (s *SQLiteTaskStore) GetTask(id string) (*ScheduledTask, error) {
 	err := row.Scan(
 		&t.ID, &t.Name, &t.Description, &t.Prompt, &t.AgentSlug,
 		&t.WorkingDirectory, &t.Model, &t.SettingsProfileID, &t.TimeoutMinutes,
-		&t.ScheduleType, &configJSON, &t.StopAfterCount, &stopAfterTime,
+		&t.ScheduleType, &configJSON, &t.StopAfterCount, &stopAfterTime, &t.SaveOutput,
 		&t.Status, &t.RunCount, &lastRunAt, &t.LastRunStatus, &nextRunAt,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
@@ -110,12 +110,12 @@ func (s *SQLiteTaskStore) CreateTask(task *ScheduledTask) error {
 		INSERT INTO scheduled_tasks
 			(id, name, description, prompt, agent_slug, working_directory, model,
 			 settings_profile_id, timeout_minutes, schedule_type, schedule_config,
-			 stop_after_count, stop_after_time, status, run_count, last_run_at,
+			 stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
 			 last_run_status, next_run_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.Name, task.Description, task.Prompt, task.AgentSlug,
 		task.WorkingDirectory, task.Model, task.SettingsProfileID, task.TimeoutMinutes,
-		task.ScheduleType, configJSON, task.StopAfterCount, task.StopAfterTime,
+		task.ScheduleType, configJSON, task.StopAfterCount, task.StopAfterTime, task.SaveOutput,
 		task.Status, task.RunCount, task.LastRunAt, task.LastRunStatus, task.NextRunAt,
 		task.CreatedAt, task.UpdatedAt,
 	)
@@ -140,14 +140,14 @@ func (s *SQLiteTaskStore) UpdateTask(task *ScheduledTask) error {
 			name = ?, description = ?, prompt = ?, agent_slug = ?,
 			working_directory = ?, model = ?, settings_profile_id = ?,
 			timeout_minutes = ?, schedule_type = ?, schedule_config = ?,
-			stop_after_count = ?, stop_after_time = ?, status = ?,
+			stop_after_count = ?, stop_after_time = ?, save_output = ?, status = ?,
 			run_count = ?, last_run_at = ?, last_run_status = ?,
 			next_run_at = ?, updated_at = ?
 		WHERE id = ?`,
 		task.Name, task.Description, task.Prompt, task.AgentSlug,
 		task.WorkingDirectory, task.Model, task.SettingsProfileID,
 		task.TimeoutMinutes, task.ScheduleType, configJSON,
-		task.StopAfterCount, task.StopAfterTime, task.Status,
+		task.StopAfterCount, task.StopAfterTime, task.SaveOutput, task.Status,
 		task.RunCount, task.LastRunAt, task.LastRunStatus,
 		task.NextRunAt, task.UpdatedAt, task.ID,
 	)
@@ -188,7 +188,7 @@ func (s *SQLiteTaskStore) ListJobHistory(taskID string, limit int) ([]*JobHistor
 		SELECT id, task_id, task_name, agent_slug, status, started_at, finished_at,
 		       duration_ms, chat_session_id, model, prompt_preview, error_message,
 		       total_input_tokens, total_output_tokens,
-		       total_cache_creation_tokens, total_cache_read_tokens
+		       total_cache_creation_tokens, total_cache_read_tokens, response_text
 		FROM job_history
 		WHERE task_id = ?
 		ORDER BY started_at DESC
@@ -207,7 +207,7 @@ func (s *SQLiteTaskStore) ListAllJobHistory(limit, offset int) ([]*JobHistory, e
 		SELECT id, task_id, task_name, agent_slug, status, started_at, finished_at,
 		       duration_ms, chat_session_id, model, prompt_preview, error_message,
 		       total_input_tokens, total_output_tokens,
-		       total_cache_creation_tokens, total_cache_read_tokens
+		       total_cache_creation_tokens, total_cache_read_tokens, response_text
 		FROM job_history
 		ORDER BY started_at DESC
 		LIMIT ? OFFSET ?`, limit, offset)
@@ -225,7 +225,7 @@ func (s *SQLiteTaskStore) GetJobHistory(id string) (*JobHistory, error) {
 		SELECT id, task_id, task_name, agent_slug, status, started_at, finished_at,
 		       duration_ms, chat_session_id, model, prompt_preview, error_message,
 		       total_input_tokens, total_output_tokens,
-		       total_cache_creation_tokens, total_cache_read_tokens
+		       total_cache_creation_tokens, total_cache_read_tokens, response_text
 		FROM job_history WHERE id = ?`, id)
 
 	jh, err := scanJobHistoryRow(row)
@@ -250,13 +250,13 @@ func (s *SQLiteTaskStore) CreateJobHistory(jh *JobHistory) error {
 			(id, task_id, task_name, agent_slug, status, started_at, finished_at,
 			 duration_ms, chat_session_id, model, prompt_preview, error_message,
 			 total_input_tokens, total_output_tokens,
-			 total_cache_creation_tokens, total_cache_read_tokens)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 total_cache_creation_tokens, total_cache_read_tokens, response_text)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		jh.ID, jh.TaskID, jh.TaskName, jh.AgentSlug, jh.Status,
 		jh.StartedAt, jh.FinishedAt, jh.DurationMS, jh.ChatSessionID,
 		jh.Model, jh.PromptPreview, jh.ErrorMessage,
 		jh.TotalInputTokens, jh.TotalOutputTokens,
-		jh.TotalCacheCreationTokens, jh.TotalCacheReadTokens,
+		jh.TotalCacheCreationTokens, jh.TotalCacheReadTokens, jh.ResponseText,
 	)
 	if err != nil {
 		return fmt.Errorf("creating job history: %w", err)
@@ -271,11 +271,13 @@ func (s *SQLiteTaskStore) UpdateJobHistory(jh *JobHistory) error {
 		UPDATE job_history SET
 			status = ?, finished_at = ?, duration_ms = ?, chat_session_id = ?,
 			error_message = ?, total_input_tokens = ?, total_output_tokens = ?,
-			total_cache_creation_tokens = ?, total_cache_read_tokens = ?
+			total_cache_creation_tokens = ?, total_cache_read_tokens = ?,
+			response_text = ?
 		WHERE id = ?`,
 		jh.Status, jh.FinishedAt, jh.DurationMS, jh.ChatSessionID,
 		jh.ErrorMessage, jh.TotalInputTokens, jh.TotalOutputTokens,
-		jh.TotalCacheCreationTokens, jh.TotalCacheReadTokens, jh.ID,
+		jh.TotalCacheCreationTokens, jh.TotalCacheReadTokens,
+		jh.ResponseText, jh.ID,
 	)
 	if err != nil {
 		return fmt.Errorf("updating job history %q: %w", jh.ID, err)
@@ -294,7 +296,7 @@ func scanScheduledTask(rows *sql.Rows) (*ScheduledTask, error) {
 	err := rows.Scan(
 		&t.ID, &t.Name, &t.Description, &t.Prompt, &t.AgentSlug,
 		&t.WorkingDirectory, &t.Model, &t.SettingsProfileID, &t.TimeoutMinutes,
-		&t.ScheduleType, &configJSON, &t.StopAfterCount, &stopAfterTime,
+		&t.ScheduleType, &configJSON, &t.StopAfterCount, &stopAfterTime, &t.SaveOutput,
 		&t.Status, &t.RunCount, &lastRunAt, &t.LastRunStatus, &nextRunAt,
 		&t.CreatedAt, &t.UpdatedAt,
 	)
@@ -329,6 +331,7 @@ func scanJobHistoryRows(rows *sql.Rows) ([]*JobHistory, error) {
 			&jh.Model, &jh.PromptPreview, &jh.ErrorMessage,
 			&jh.TotalInputTokens, &jh.TotalOutputTokens,
 			&jh.TotalCacheCreationTokens, &jh.TotalCacheReadTokens,
+			&jh.ResponseText,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scanning job history: %w", err)
@@ -351,6 +354,7 @@ func scanJobHistoryRow(row *sql.Row) (*JobHistory, error) {
 		&jh.Model, &jh.PromptPreview, &jh.ErrorMessage,
 		&jh.TotalInputTokens, &jh.TotalOutputTokens,
 		&jh.TotalCacheCreationTokens, &jh.TotalCacheReadTokens,
+		&jh.ResponseText,
 	)
 	if err != nil {
 		return nil, err

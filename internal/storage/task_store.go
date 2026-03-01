@@ -62,6 +62,7 @@ type ScheduledTask struct {
 	ScheduleConfig    ScheduleConfig `json:"schedule_config"`
 	StopAfterCount    int            `json:"stop_after_count"`
 	StopAfterTime     *time.Time     `json:"stop_after_time,omitempty"`
+	SaveOutput        bool           `json:"save_output"`
 	Status            TaskStatus     `json:"status"`
 	RunCount          int            `json:"run_count"`
 	LastRunAt         *time.Time     `json:"last_run_at,omitempty"`
@@ -98,6 +99,7 @@ type JobHistory struct {
 	TotalOutputTokens        int        `json:"total_output_tokens"`
 	TotalCacheCreationTokens int        `json:"total_cache_creation_tokens"`
 	TotalCacheReadTokens     int        `json:"total_cache_read_tokens"`
+	ResponseText             string     `json:"response_text"`
 }
 
 // TaskStore defines the persistence interface for scheduled tasks and job history.
