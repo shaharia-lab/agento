@@ -337,14 +337,11 @@ func TestSQLiteIntegrationStore_CRUD(t *testing.T) {
 
 	now := time.Now().UTC()
 	cfg := &config.IntegrationConfig{
-		ID:      "google-1",
-		Name:    "Google Workspace",
-		Type:    "google",
-		Enabled: true,
-		Credentials: config.GoogleCredentials{
-			ClientID:     "client-id",
-			ClientSecret: "client-secret",
-		},
+		ID:          "google-1",
+		Name:        "Google Workspace",
+		Type:        "google",
+		Enabled:     true,
+		Credentials: json.RawMessage(`{"client_id":"client-id","client_secret":"client-secret"}`),
 		Services: map[string]config.ServiceConfig{
 			"calendar": {Enabled: true, Tools: []string{"list_events"}},
 		},
@@ -368,14 +365,18 @@ func TestSQLiteIntegrationStore_CRUD(t *testing.T) {
 	if !got.Enabled {
 		t.Error("expected enabled=true")
 	}
-	if got.Credentials.ClientID != "client-id" {
-		t.Errorf("expected client-id, got %q", got.Credentials.ClientID)
+	var gotCreds config.GoogleCredentials
+	if err := got.ParseCredentials(&gotCreds); err != nil {
+		t.Fatalf("parsing credentials: %v", err)
+	}
+	if gotCreds.ClientID != "client-id" {
+		t.Errorf("expected client-id, got %q", gotCreds.ClientID)
 	}
 	if got.Services["calendar"].Tools[0] != "list_events" {
 		t.Errorf("unexpected tools: %v", got.Services["calendar"].Tools)
 	}
-	if got.Auth != nil {
-		t.Error("expected nil auth for new integration")
+	if got.IsAuthenticated() {
+		t.Error("expected no auth for new integration")
 	}
 
 	// Get not found

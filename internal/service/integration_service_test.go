@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"golang.org/x/oauth2"
 
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/integrations"
@@ -22,16 +22,31 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+// helper to marshal credentials for tests.
+func mustMarshal(v any) json.RawMessage {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
 // helper to build a valid IntegrationConfig with all required fields.
 func validConfig() *config.IntegrationConfig {
-	return &config.IntegrationConfig{
+	cfg := &config.IntegrationConfig{
 		Name: "My Google",
 		Type: "google",
-		Credentials: config.GoogleCredentials{
-			ClientID:     "cid",
-			ClientSecret: "csecret",
-		},
 	}
+	_ = cfg.SetCredentials(config.GoogleCredentials{
+		ClientID:     "cid",
+		ClientSecret: "csecret",
+	})
+	return cfg
+}
+
+// helper to create a json.RawMessage representing an OAuth token.
+func testAuthToken(accessToken string) json.RawMessage {
+	return mustMarshal(map[string]string{"access_token": accessToken})
 }
 
 // ---------------------------------------------------------------------------
@@ -220,29 +235,45 @@ func TestIntegrationService_Create(t *testing.T) {
 			},
 		},
 		{
-			name:     "validation_error_missing_name",
-			input:    &config.IntegrationConfig{Type: "google", Credentials: config.GoogleCredentials{ClientID: "a", ClientSecret: "b"}},
+			name: "validation_error_missing_name",
+			input: func() *config.IntegrationConfig {
+				cfg := &config.IntegrationConfig{Type: "google"}
+				_ = cfg.SetCredentials(config.GoogleCredentials{ClientID: "a", ClientSecret: "b"})
+				return cfg
+			}(),
 			wantErr:  true,
 			errType:  &ValidationError{},
 			errField: "name",
 		},
 		{
-			name:     "validation_error_missing_type",
-			input:    &config.IntegrationConfig{Name: "A", Credentials: config.GoogleCredentials{ClientID: "a", ClientSecret: "b"}},
+			name: "validation_error_missing_type",
+			input: func() *config.IntegrationConfig {
+				cfg := &config.IntegrationConfig{Name: "A"}
+				_ = cfg.SetCredentials(config.GoogleCredentials{ClientID: "a", ClientSecret: "b"})
+				return cfg
+			}(),
 			wantErr:  true,
 			errType:  &ValidationError{},
 			errField: "type",
 		},
 		{
-			name:     "validation_error_missing_client_id",
-			input:    &config.IntegrationConfig{Name: "A", Type: "google", Credentials: config.GoogleCredentials{ClientSecret: "b"}},
+			name: "validation_error_missing_client_id",
+			input: func() *config.IntegrationConfig {
+				cfg := &config.IntegrationConfig{Name: "A", Type: "google"}
+				_ = cfg.SetCredentials(config.GoogleCredentials{ClientSecret: "b"})
+				return cfg
+			}(),
 			wantErr:  true,
 			errType:  &ValidationError{},
 			errField: "credentials.client_id",
 		},
 		{
-			name:     "validation_error_missing_client_secret",
-			input:    &config.IntegrationConfig{Name: "A", Type: "google", Credentials: config.GoogleCredentials{ClientID: "a"}},
+			name: "validation_error_missing_client_secret",
+			input: func() *config.IntegrationConfig {
+				cfg := &config.IntegrationConfig{Name: "A", Type: "google"}
+				_ = cfg.SetCredentials(config.GoogleCredentials{ClientID: "a"})
+				return cfg
+			}(),
 			wantErr:  true,
 			errType:  &ValidationError{},
 			errField: "credentials.client_secret",
@@ -295,7 +326,7 @@ func TestIntegrationService_Create(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegrationService_Update(t *testing.T) {
-	existingToken := &oauth2.Token{AccessToken: "old-token"}
+	existingAuth := testAuthToken("old-token")
 	now := time.Now().UTC()
 
 	tests := []struct {
@@ -310,19 +341,19 @@ func TestIntegrationService_Update(t *testing.T) {
 		{
 			name:  "success_preserves_auth_when_nil",
 			id:    "int-1",
-			input: &config.IntegrationConfig{Name: "Updated", Auth: nil},
+			input: &config.IntegrationConfig{Name: "Updated"},
 			setup: func(m *mocks.MockIntegrationStore) {
 				m.On("Get", "int-1").Return(&config.IntegrationConfig{
 					ID:        "int-1",
 					Name:      "Old",
-					Auth:      existingToken,
+					Auth:      existingAuth,
 					CreatedAt: now,
 				}, nil)
 				m.On("Save", mock.AnythingOfType("*config.IntegrationConfig")).Return(nil)
 			},
 			checkFunc: func(t *testing.T, got *config.IntegrationConfig) {
 				assert.Equal(t, "int-1", got.ID, "should preserve ID")
-				assert.Equal(t, existingToken, got.Auth, "should preserve existing auth token")
+				assert.True(t, got.IsAuthenticated(), "should preserve existing auth token")
 				assert.Equal(t, now, got.CreatedAt, "should preserve CreatedAt")
 				assert.True(t, got.UpdatedAt.After(now.Add(-time.Second)), "should update UpdatedAt")
 			},
@@ -332,19 +363,22 @@ func TestIntegrationService_Update(t *testing.T) {
 			id:   "int-1",
 			input: &config.IntegrationConfig{
 				Name: "Updated",
-				Auth: &oauth2.Token{AccessToken: "new-token"},
+				Auth: testAuthToken("new-token"),
 			},
 			setup: func(m *mocks.MockIntegrationStore) {
 				m.On("Get", "int-1").Return(&config.IntegrationConfig{
 					ID:        "int-1",
 					Name:      "Old",
-					Auth:      existingToken,
+					Auth:      existingAuth,
 					CreatedAt: now,
 				}, nil)
 				m.On("Save", mock.AnythingOfType("*config.IntegrationConfig")).Return(nil)
 			},
 			checkFunc: func(t *testing.T, got *config.IntegrationConfig) {
-				assert.Equal(t, "new-token", got.Auth.AccessToken)
+				assert.True(t, got.IsAuthenticated())
+				var tokMap map[string]string
+				assert.NoError(t, json.Unmarshal(got.Auth, &tokMap))
+				assert.Equal(t, "new-token", tokMap["access_token"])
 			},
 		},
 		{
@@ -528,7 +562,7 @@ func TestIntegrationService_GetAuthStatus(t *testing.T) {
 			setup: func(m *mocks.MockIntegrationStore) {
 				m.On("Get", "int-1").Return(&config.IntegrationConfig{
 					ID:   "int-1",
-					Auth: &oauth2.Token{AccessToken: "tok"},
+					Auth: testAuthToken("tok"),
 				}, nil)
 			},
 			wantAuth: true,
@@ -538,8 +572,7 @@ func TestIntegrationService_GetAuthStatus(t *testing.T) {
 			id:   "int-1",
 			setup: func(m *mocks.MockIntegrationStore) {
 				m.On("Get", "int-1").Return(&config.IntegrationConfig{
-					ID:   "int-1",
-					Auth: nil,
+					ID: "int-1",
 				}, nil)
 			},
 			wantAuth: false,
@@ -617,7 +650,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 						ID:      "g1",
 						Name:    "Google 1",
 						Enabled: true,
-						Auth:    &oauth2.Token{AccessToken: "tok"},
+						Auth:    testAuthToken("tok"),
 						Services: map[string]config.ServiceConfig{
 							"calendar": {Enabled: true, Tools: []string{"list_events", "create_event"}},
 							"gmail":    {Enabled: true, Tools: []string{"send_email"}},
@@ -647,7 +680,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 						ID:      "g1",
 						Name:    "Disabled",
 						Enabled: false,
-						Auth:    &oauth2.Token{AccessToken: "tok"},
+						Auth:    testAuthToken("tok"),
 						Services: map[string]config.ServiceConfig{
 							"calendar": {Enabled: true, Tools: []string{"list_events"}},
 						},
@@ -664,7 +697,6 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 						ID:      "g1",
 						Name:    "No Auth",
 						Enabled: true,
-						Auth:    nil,
 						Services: map[string]config.ServiceConfig{
 							"calendar": {Enabled: true, Tools: []string{"list_events"}},
 						},
@@ -681,7 +713,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 						ID:      "g1",
 						Name:    "G",
 						Enabled: true,
-						Auth:    &oauth2.Token{AccessToken: "tok"},
+						Auth:    testAuthToken("tok"),
 						Services: map[string]config.ServiceConfig{
 							"calendar": {Enabled: false, Tools: []string{"list_events"}},
 							"gmail":    {Enabled: true, Tools: []string{"send_email"}},
@@ -715,21 +747,21 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 				m.On("List").Return([]*config.IntegrationConfig{
 					{
 						ID: "g1", Name: "G1", Enabled: true,
-						Auth: &oauth2.Token{AccessToken: "tok"},
+						Auth: testAuthToken("tok"),
 						Services: map[string]config.ServiceConfig{
 							"calendar": {Enabled: true, Tools: []string{"list_events"}},
 						},
 					},
 					{
 						ID: "g2", Name: "G2", Enabled: false,
-						Auth: &oauth2.Token{AccessToken: "tok"},
+						Auth: testAuthToken("tok"),
 						Services: map[string]config.ServiceConfig{
 							"gmail": {Enabled: true, Tools: []string{"send_email"}},
 						},
 					},
 					{
 						ID: "g3", Name: "G3", Enabled: true,
-						Auth: &oauth2.Token{AccessToken: "tok"},
+						Auth: testAuthToken("tok"),
 						Services: map[string]config.ServiceConfig{
 							"drive": {Enabled: true, Tools: []string{"list_files", "download_file"}},
 						},
@@ -753,7 +785,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 				m.On("List").Return([]*config.IntegrationConfig{
 					{
 						ID: "my-id", Name: "G", Enabled: true,
-						Auth: &oauth2.Token{AccessToken: "tok"},
+						Auth: testAuthToken("tok"),
 						Services: map[string]config.ServiceConfig{
 							"calendar": {Enabled: true, Tools: []string{"list_events"}},
 						},
@@ -786,4 +818,17 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 			store.AssertExpectations(t)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// ValidateTokenAuth
+// ---------------------------------------------------------------------------
+
+func TestIntegrationService_ValidateTokenAuth(t *testing.T) {
+	store := new(mocks.MockIntegrationStore)
+	svc := NewIntegrationService(store, nil, testLogger(), context.Background())
+
+	cfg := &config.IntegrationConfig{ID: "test", Type: "telegram"}
+	err := svc.ValidateTokenAuth(context.Background(), cfg)
+	assert.NoError(t, err)
 }

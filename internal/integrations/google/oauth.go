@@ -72,9 +72,13 @@ func OAuthConfig(
 }
 
 // BuildAuthURL returns the Google OAuth2 authorization URL for the given integration.
-func BuildAuthURL(cfg *config.IntegrationConfig, redirectPort int) string {
-	oauthCfg := OAuthConfig(cfg.Credentials, redirectPort, cfg.Services)
-	return oauthCfg.AuthCodeURL("state", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+func BuildAuthURL(cfg *config.IntegrationConfig, redirectPort int) (string, error) {
+	var creds config.GoogleCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		return "", fmt.Errorf("parsing google credentials: %w", err)
+	}
+	oauthCfg := OAuthConfig(creds, redirectPort, cfg.Services)
+	return oauthCfg.AuthCodeURL("state", oauth2.AccessTypeOffline, oauth2.ApprovalForce), nil
 }
 
 // CallbackResult holds the result of a completed OAuth callback.
@@ -91,7 +95,11 @@ func StartCallbackServer(
 	cfg *config.IntegrationConfig,
 	onToken func(*oauth2.Token, error),
 ) error {
-	oauthCfg := OAuthConfig(cfg.Credentials, port, cfg.Services)
+	var creds config.GoogleCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		return fmt.Errorf("parsing google credentials: %w", err)
+	}
+	oauthCfg := OAuthConfig(creds, port, cfg.Services)
 	resultCh := make(chan CallbackResult, 1)
 
 	mux := http.NewServeMux()
@@ -170,20 +178,6 @@ func callbackHandler(
 			return
 		}
 	}
-}
-
-// FreePort finds an available TCP port on localhost.
-func FreePort() (int, error) {
-	lc := &net.ListenConfig{}
-	ln, err := lc.Listen(context.Background(), "tcp", "localhost:0")
-	if err != nil {
-		return 0, fmt.Errorf("finding free port: %w", err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	if err := ln.Close(); err != nil {
-		return 0, fmt.Errorf("closing probe listener: %w", err)
-	}
-	return port, nil
 }
 
 // TokenFromJSON parses a raw JSON token (for storage/retrieval helpers).

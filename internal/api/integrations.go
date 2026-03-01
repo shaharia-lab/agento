@@ -31,7 +31,7 @@ func (s *Server) handleCreateIntegration(w http.ResponseWriter, r *http.Request)
 		Name        string                          `json:"name"`
 		Type        string                          `json:"type"`
 		Enabled     bool                            `json:"enabled"`
-		Credentials config.GoogleCredentials        `json:"credentials"`
+		Credentials json.RawMessage                 `json:"credentials"`
 		Services    map[string]config.ServiceConfig `json:"services"`
 	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
@@ -74,7 +74,7 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request)
 		Name        string                          `json:"name"`
 		Type        string                          `json:"type"`
 		Enabled     bool                            `json:"enabled"`
-		Credentials config.GoogleCredentials        `json:"credentials"`
+		Credentials json.RawMessage                 `json:"credentials"`
 		Services    map[string]config.ServiceConfig `json:"services"`
 	}
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
@@ -140,6 +140,22 @@ func (s *Server) handleGetAuthStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": authenticated})
 }
 
+// handleValidateAuth validates token-based auth for an integration.
+func (s *Server) handleValidateAuth(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	cfg, err := s.integrationSvc.Get(r.Context(), id)
+	if err != nil {
+		httpErr(w, err)
+		return
+	}
+
+	if valErr := s.integrationSvc.ValidateTokenAuth(r.Context(), cfg); valErr != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "error": valErr.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true})
+}
+
 // scrubIntegration returns a map representation of the integration with secrets removed.
 func scrubIntegration(cfg *config.IntegrationConfig) map[string]any {
 	return map[string]any{
@@ -147,7 +163,7 @@ func scrubIntegration(cfg *config.IntegrationConfig) map[string]any {
 		"name":          cfg.Name,
 		"type":          cfg.Type,
 		"enabled":       cfg.Enabled,
-		"authenticated": cfg.Auth != nil,
+		"authenticated": cfg.IsAuthenticated(),
 		"services":      cfg.Services,
 		"created_at":    cfg.CreatedAt,
 		"updated_at":    cfg.UpdatedAt,

@@ -3,6 +3,7 @@ package google
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
@@ -17,21 +18,51 @@ import (
 // Tools slice, all tools for that service are registered (backward compatibility).
 // The server runs until ctx is canceled.
 func Start(ctx context.Context, cfg *config.IntegrationConfig) (claude.McpHTTPServer, error) {
-	if cfg.Auth == nil {
+	if !cfg.IsAuthenticated() {
 		return claude.McpHTTPServer{}, fmt.Errorf("integration %q has no auth token", cfg.ID)
 	}
 
+	httpClient, err := buildHTTPClient(ctx, cfg)
+	if err != nil {
+		return claude.McpHTTPServer{}, err
+	}
+
+	server := buildMCPServer(cfg, httpClient)
+
+	serverCfg, err := claude.StartInProcessMCPServer(ctx, cfg.ID, server)
+	if err != nil {
+		return claude.McpHTTPServer{}, fmt.Errorf("starting in-process MCP server for %q: %w", cfg.ID, err)
+	}
+
+	return serverCfg, nil
+}
+
+// buildHTTPClient constructs an OAuth2-authenticated HTTP client for the given integration.
+func buildHTTPClient(ctx context.Context, cfg *config.IntegrationConfig) (*http.Client, error) {
+	var creds config.GoogleCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		return nil, fmt.Errorf("parsing google credentials for %q: %w", cfg.ID, err)
+	}
+
+	tok, err := cfg.ParseOAuthToken()
+	if err != nil {
+		return nil, fmt.Errorf("parsing auth token for %q: %w", cfg.ID, err)
+	}
+
 	oauthCfg := &oauth2.Config{
-		ClientID:     cfg.Credentials.ClientID,
-		ClientSecret: cfg.Credentials.ClientSecret,
+		ClientID:     creds.ClientID,
+		ClientSecret: creds.ClientSecret,
 		Endpoint:     googleoauth.Endpoint,
 	}
 
 	// Create a token source that uses the stored token. The oauth2 library handles
 	// refresh automatically when the access token expires.
-	ts := oauthCfg.TokenSource(ctx, cfg.Auth)
-	httpClient := oauth2.NewClient(ctx, ts)
+	ts := oauthCfg.TokenSource(ctx, tok)
+	return oauth2.NewClient(ctx, ts), nil
+}
 
+// buildMCPServer creates the MCP server and registers tools for all enabled services.
+func buildMCPServer(cfg *config.IntegrationConfig, httpClient *http.Client) *mcp.Server {
 	// Build the set of tool names to register from the service configs.
 	allowed := make(map[string]bool)
 	for _, svc := range cfg.Services {
@@ -59,10 +90,5 @@ func Start(ctx context.Context, cfg *config.IntegrationConfig) (claude.McpHTTPSe
 		registerDriveTools(server, httpClient, allowed)
 	}
 
-	serverCfg, err := claude.StartInProcessMCPServer(ctx, cfg.ID, server)
-	if err != nil {
-		return claude.McpHTTPServer{}, fmt.Errorf("starting in-process MCP server for %q: %w", cfg.ID, err)
-	}
-
-	return serverCfg, nil
+	return server
 }

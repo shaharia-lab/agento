@@ -276,7 +276,7 @@ export interface ServiceConfig {
 export interface Integration {
   id: string
   name: string
-  type: 'google'
+  type: 'google' | 'telegram' | 'jira' | 'confluence' | 'slack' | 'github'
   enabled: boolean
   authenticated: boolean
   services: Record<string, ServiceConfig>
@@ -287,6 +287,33 @@ export interface Integration {
 export interface GoogleCredentials {
   client_id: string
   client_secret: string
+}
+
+export interface TelegramCredentials {
+  bot_token: string
+}
+
+export interface AtlassianCredentials {
+  site_url: string
+  email: string
+  api_token: string
+}
+
+export interface SlackCredentials {
+  auth_mode: 'bot_token' | 'oauth'
+  bot_token?: string
+  client_id?: string
+  client_secret?: string
+}
+
+export interface GitHubCredentials {
+  auth_mode: 'pat' | 'oauth' | 'app'
+  personal_access_token?: string
+  client_id?: string
+  client_secret?: string
+  app_id?: string
+  private_key?: string
+  installation_id?: string
 }
 
 export interface AvailableTool {

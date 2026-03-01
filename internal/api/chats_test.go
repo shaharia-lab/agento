@@ -10,7 +10,6 @@ import (
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/oauth2"
 
 	"github.com/shaharia-lab/agento/internal/agent"
 	"github.com/shaharia-lab/agento/internal/config"
@@ -390,18 +389,12 @@ func TestScrubIntegration(t *testing.T) {
 		{
 			name: "authenticated is true when Auth is not nil",
 			cfg: &config.IntegrationConfig{
-				ID:      "int-1",
-				Name:    "My Google",
-				Type:    "google",
-				Enabled: true,
-				Credentials: config.GoogleCredentials{
-					ClientID:     "secret-client-id",
-					ClientSecret: "secret-client-secret",
-				},
-				Auth: &oauth2.Token{
-					AccessToken:  "secret-access-token",
-					RefreshToken: "secret-refresh-token",
-				},
+				ID:          "int-1",
+				Name:        "My Google",
+				Type:        "google",
+				Enabled:     true,
+				Credentials: json.RawMessage(`{"client_id":"secret-client-id","client_secret":"secret-client-secret"}`),
+				Auth:        json.RawMessage(`{"access_token":"secret-access-token","refresh_token":"secret-refresh-token"}`),
 				Services: map[string]config.ServiceConfig{
 					"calendar": {Enabled: true, Tools: []string{"list_events"}},
 				},
@@ -414,18 +407,15 @@ func TestScrubIntegration(t *testing.T) {
 		{
 			name: "authenticated is false when Auth is nil",
 			cfg: &config.IntegrationConfig{
-				ID:      "int-2",
-				Name:    "Unauthenticated",
-				Type:    "google",
-				Enabled: false,
-				Credentials: config.GoogleCredentials{
-					ClientID:     "client-id",
-					ClientSecret: "client-secret",
-				},
-				Auth:      nil,
-				Services:  map[string]config.ServiceConfig{},
-				CreatedAt: now,
-				UpdatedAt: now,
+				ID:          "int-2",
+				Name:        "Unauthenticated",
+				Type:        "google",
+				Enabled:     false,
+				Credentials: json.RawMessage(`{"client_id":"client-id","client_secret":"client-secret"}`),
+				Auth:        nil,
+				Services:    map[string]config.ServiceConfig{},
+				CreatedAt:   now,
+				UpdatedAt:   now,
 			},
 			expectAuth:        false,
 			expectKeysMissing: []string{"credentials", "auth"},

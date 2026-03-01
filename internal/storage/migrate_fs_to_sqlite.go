@@ -380,10 +380,9 @@ func migrateOneIntegration(ctx context.Context, tx *sql.Tx, dir, fileName string
 }
 
 func marshalIntegrationFields(cfg *config.IntegrationConfig, logger *slog.Logger) ([]byte, []byte, *string, error) {
-	credJSON, err := json.Marshal(cfg.Credentials)
-	if err != nil {
-		logger.Warn("skipping integration with bad credentials", "id", cfg.ID, "error", err)
-		return nil, nil, nil, err
+	credJSON := []byte(cfg.Credentials)
+	if len(credJSON) == 0 {
+		credJSON = []byte("{}")
 	}
 	servJSON, err := json.Marshal(cfg.Services)
 	if err != nil {
@@ -392,12 +391,9 @@ func marshalIntegrationFields(cfg *config.IntegrationConfig, logger *slog.Logger
 	}
 
 	var authJSON *string
-	if cfg.Auth != nil {
-		b, marshalErr := json.Marshal(cfg.Auth)
-		if marshalErr == nil {
-			s := string(b)
-			authJSON = &s
-		}
+	if cfg.IsAuthenticated() {
+		s := string(cfg.Auth)
+		authJSON = &s
 	}
 
 	return credJSON, servJSON, authJSON, nil
