@@ -39,12 +39,15 @@ Read these as needed based on your task:
 | CLI Entry | `cmd/` | Cobra commands (web, ask, update), asset embedding |
 | HTTP Server | `internal/server/` | Chi router, middleware, SPA serving, graceful shutdown |
 | API Handlers | `internal/api/` | HTTP handlers, SSE streaming, route mounting |
-| Business Logic | `internal/service/` | ChatService, AgentService, IntegrationService interfaces |
-| Storage | `internal/storage/` | FSChatStore (JSONL), FSAgentStore (YAML), FSIntegrationStore (JSON) |
+| Business Logic | `internal/service/` | ChatService, AgentService, IntegrationService, NotificationService, TaskService, ClaudeSettingsProfileService |
+| Storage | `internal/storage/` | SQLite stores (Agent, Chat, Integration, Settings, Notification, Task) |
 | Agent Runner | `internal/agent/runner.go` | SDK integration, RunOptions, session execution |
 | Configuration | `internal/config/` | AppConfig, profiles, integration config |
 | Built-in Tools | `internal/tools/` | Local MCP server, tool registry |
-| Integrations | `internal/integrations/` | Integration registry, Google MCP (calendar, gmail, drive) |
+| Integrations | `internal/integrations/` | Integration registry, MCP backends (Google, GitHub, Slack, Jira, Confluence, Telegram) |
+| Scheduler | `internal/scheduler/` | Task scheduler and background job executor |
+| Event Bus | `internal/eventbus/` | In-process event bus for decoupled communication |
+| Notifications | `internal/notification/` | Notification system with SMTP email support |
 | Frontend App | `frontend/src/App.tsx` | React Router, page routes |
 | Frontend API | `frontend/src/lib/api.ts` | Typed API client |
 | Frontend Types | `frontend/src/types.ts` | TypeScript types mirroring Go structs |

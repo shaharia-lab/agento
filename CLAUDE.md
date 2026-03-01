@@ -10,7 +10,7 @@ make build          # Build frontend + Go binary (version-injected)
 make build-go       # Build Go binary only
 make dev-backend    # Run Go backend with dev tag (hot reload not included)
 make test           # go test ./...
-make lint           # go vet ./... (golangci-lint via pre-commit)
+make lint           # golangci-lint run ./...
 make tidy           # go mod tidy
 ```
 
@@ -62,21 +62,27 @@ Browser → Vite (dev) / embedded FS (prod) → React SPA
 
 **`internal/server/`** — Chi router setup with middleware (Recoverer, RequestID, request logger). Mounts `/api` routes and serves SPA. Graceful shutdown with 5s timeout.
 
-**`internal/api/`** — HTTP handlers. `Server` struct holds all service dependencies. `Mount()` registers all routes. SSE streaming for live sessions via `livesessions.go`.
+**`internal/api/`** — HTTP handlers. `Server` struct holds all service dependencies. `Mount()` registers all routes. SSE streaming for live sessions via `livesessions.go`. `types.go` defines request/response types shared across handlers.
 
-**`internal/service/`** — Business logic. `ChatService` and `AgentService` interfaces decouple handlers from storage. `errors.go` defines typed errors for HTTP mapping.
+**`internal/service/`** — Business logic. `ChatService`, `AgentService`, `IntegrationService`, `NotificationService`, `TaskService`, and `ClaudeSettingsProfileService` interfaces decouple handlers from storage. `errors.go` defines typed errors for HTTP mapping.
 
 **`internal/agent/runner.go`** — Integration with `github.com/shaharia-lab/claude-agent-sdk-go`. Converts agent config to SDK `RunOptions`, executes sessions, streams results.
 
-**`internal/storage/`** — SQLite persistence (`~/.agento/agento.db`). `SQLiteAgentStore`, `SQLiteChatStore`, `SQLiteIntegrationStore`, `SQLiteSettingsStore` implement store interfaces. `migrate_fs_to_sqlite.go` handles one-time migration from the legacy filesystem format. Uses `modernc.org/sqlite` (pure Go, no CGo).
+**`internal/storage/`** — SQLite persistence (`~/.agento/agento.db`). `SQLiteAgentStore`, `SQLiteChatStore`, `SQLiteIntegrationStore`, `SQLiteSettingsStore`, `SQLiteNotificationStore`, `SQLiteTaskStore` implement store interfaces. `migrate_fs_to_sqlite.go` handles one-time migration from the legacy filesystem format. Uses `modernc.org/sqlite` (pure Go, no CGo).
 
 **`internal/config/`** — Shared configuration layer. `AppConfig` loads from env. `profiles.go` has shared profile types to prevent import cycles. **Import rule**: `config` ← `service` ← `api` (never reverse).
 
-**`internal/integrations/`** — Integration system. `registry.go` manages server lifecycle (Start/Stop/Reload). `google/` has OAuth flow, in-process MCP servers for Calendar, Gmail, and Drive tools.
+**`internal/integrations/`** — Integration system. `registry.go` manages server lifecycle (Start/Stop/Reload). Backends: `google/` (Calendar, Gmail, Drive with OAuth), `github/` (repos, issues, PRs, actions, releases), `slack/` (channels, messages, users), `jira/` (issues, projects, boards), `confluence/` (pages, spaces, search), `telegram/` (messages, chats, media). Each backend runs as an in-process MCP server.
 
 **`internal/claudesessions/`** — Scanner and analytics for Claude Code session JSONL files. `scanner.go` parses session data, `analytics.go` computes token usage and cost metrics, `cache.go` caches results in SQLite.
 
 **`internal/tools/`** — Local MCP server running in-process. Register built-in tools here (e.g., `current_time`).
+
+**`internal/scheduler/`** — Task scheduler with background job execution. `scheduler.go` manages cron-like scheduling, `executor.go` runs jobs and records history.
+
+**`internal/eventbus/`** — In-process event bus for decoupled communication between components (e.g., task completion triggers notifications).
+
+**`internal/notification/`** — Notification system with SMTP email support. `handler.go` processes events, `smtp.go` sends emails, `template.go` renders notification content.
 
 ### Frontend
 
@@ -107,4 +113,4 @@ All review skills use Opus model, run in forked context, and include cross-platf
 
 ## Linting
 
-Go linters active: `errcheck`, `govet`, `staticcheck`, `unused`, `gosec`, `revive`, `bodyclose`, `noctx`. Config in `.golangci.yml`. Pre-commit hooks enforce linting, formatting, and TypeScript checks before every commit.
+Go linters active: `govet`, `errcheck`, `staticcheck`, `ineffassign`, `unused`, `bodyclose`, `noctx`, `unconvert`, `revive`, `misspell`, `nakedret`, `unparam`, `durationcheck`, `gocognit`, `funlen`, `lll`, `gocyclo`, `gocritic`, `makezero`, `prealloc`, `gosec`. Config in `.golangci.yml`. Pre-commit hooks enforce linting, formatting, and TypeScript checks before every commit.
