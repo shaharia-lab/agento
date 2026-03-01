@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/integrations"
 	"github.com/shaharia-lab/agento/internal/integrations/confluence"
 	"github.com/shaharia-lab/agento/internal/integrations/google"
+	"github.com/shaharia-lab/agento/internal/integrations/jira"
 	"github.com/shaharia-lab/agento/internal/integrations/telegram"
 	"github.com/shaharia-lab/agento/internal/storage"
 )
@@ -86,6 +89,8 @@ func validateIntegrationCredentials(cfg *config.IntegrationConfig) error {
 		return validateAtlassianCredentials(cfg)
 	case "telegram":
 		return validateTelegramCredentials(cfg)
+	case "jira":
+		return validateJiraCredentials(cfg)
 	default:
 		if len(cfg.Credentials) == 0 {
 			return &ValidationError{Field: "credentials", Message: "credentials are required"}
@@ -137,6 +142,30 @@ func validateTelegramCredentials(cfg *config.IntegrationConfig) error {
 		return &ValidationError{Field: "credentials.bot_token", Message: "bot_token is required"}
 	}
 	return nil
+}
+
+func validateJiraCredentials(cfg *config.IntegrationConfig) error {
+	var creds config.AtlassianCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		return &ValidationError{Field: "credentials", Message: "invalid jira credentials: " + err.Error()}
+	}
+	if creds.SiteURL == "" {
+		return &ValidationError{Field: "credentials.site_url", Message: "site_url is required"}
+	}
+	u, err := url.Parse(creds.SiteURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return &ValidationError{Field: "credentials.site_url", Message: "site_url must be a valid http or https URL"}
+	}
+	// Normalize: strip trailing slash so URL concatenation is consistent.
+	creds.SiteURL = strings.TrimRight(creds.SiteURL, "/")
+	if creds.Email == "" {
+		return &ValidationError{Field: "credentials.email", Message: "email is required"}
+	}
+	if creds.APIToken == "" {
+		return &ValidationError{Field: "credentials.api_token", Message: "api_token is required"}
+	}
+	// Save normalized credentials back to the config so the stored value is canonical.
+	return cfg.SetCredentials(creds)
 }
 
 func (s *integrationService) List(_ context.Context) ([]*config.IntegrationConfig, error) {
@@ -365,7 +394,7 @@ func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool,
 }
 
 // ValidateTokenAuth validates token-based authentication for an integration.
-// For supported types (e.g. Telegram, Confluence), it calls the service's API to verify the
+// For supported types (e.g. Telegram, Confluence, Jira), it calls the service's API to verify the
 // credentials. On success it marks the integration as authenticated, saves it, and reloads its
 // MCP server.
 func (s *integrationService) ValidateTokenAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
@@ -373,7 +402,9 @@ func (s *integrationService) ValidateTokenAuth(ctx context.Context, cfg *config.
 	case "confluence":
 		return s.validateConfluenceAuth(ctx, cfg)
 	case "telegram":
-		return s.validateTelegramAuth(ctx, cfg)
+		return s.validateTelegramTokenAuth(ctx, cfg)
+	case "jira":
+		return s.validateJiraTokenAuth(ctx, cfg)
 	default:
 		// For other types, validation is not yet implemented. Return nil (unvalidated).
 		return nil
@@ -405,7 +436,7 @@ func (s *integrationService) validateConfluenceAuth(ctx context.Context, cfg *co
 	return nil
 }
 
-func (s *integrationService) validateTelegramAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
+func (s *integrationService) validateTelegramTokenAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
 	if err := validateTelegramCredentials(cfg); err != nil {
 		return err
 	}
@@ -427,6 +458,34 @@ func (s *integrationService) validateTelegramAuth(ctx context.Context, cfg *conf
 	}
 
 	s.logger.Info("telegram bot validated", "id", cfg.ID, "username", username)
+	s.reloadIntegration(cfg.ID)
+	return nil
+}
+
+func (s *integrationService) validateJiraTokenAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
+	// Reuse field validation and normalization (strips trailing slash, validates URL scheme).
+	if err := validateJiraCredentials(cfg); err != nil {
+		return err
+	}
+
+	var creds config.AtlassianCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		// ParseCredentials cannot fail here: validateJiraCredentials already succeeded above.
+		return fmt.Errorf("parsing jira credentials: %w", err)
+	}
+
+	displayName, err := jira.ValidateCredentials(ctx, creds.SiteURL, creds.Email, creds.APIToken)
+	if err != nil {
+		return &ValidationError{Field: "credentials", Message: "invalid jira credentials: " + err.Error()}
+	}
+
+	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"display_name":%q}`, displayName))
+	cfg.UpdatedAt = time.Now().UTC()
+	if saveErr := s.store.Save(cfg); saveErr != nil {
+		return fmt.Errorf("saving validated integration: %w", saveErr)
+	}
+
+	s.logger.Info("jira integration validated", "id", cfg.ID, "display_name", displayName)
 	s.reloadIntegration(cfg.ID)
 	return nil
 }

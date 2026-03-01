@@ -9,6 +9,7 @@ import {
   Plus,
   MessageCircle,
   FileText,
+  GitBranch,
 } from 'lucide-react'
 import { integrationsApi } from '@/lib/api'
 import type { Integration } from '@/types'
@@ -51,6 +52,13 @@ const AVAILABLE_PROVIDERS = [
     description: 'Browse spaces, search, and manage pages',
     icon: <FileText className="h-6 w-6 text-[#0052CC]" />,
     path: '/integrations/confluence',
+  },
+  {
+    id: 'jira',
+    name: 'Jira',
+    description: 'Manage projects, issues & workflows',
+    icon: <GitBranch className="h-6 w-6 text-[#0052CC]" />,
+    path: '/integrations/jira',
   },
 ]
 
@@ -168,6 +176,8 @@ function IntegrationTypeIcon({ type, size }: Readonly<{ type: string; size: numb
     return <MessageCircle style={{ width: size, height: size }} className="text-[#2AABEE]" />
   if (type === 'confluence')
     return <FileText style={{ width: size, height: size }} className="text-[#0052CC]" />
+  if (type === 'jira')
+    return <GitBranch style={{ width: size, height: size }} className="text-[#0052CC]" />
   return <Plug className="h-4 w-4 text-zinc-400" />
 }
 
@@ -177,6 +187,8 @@ function ServiceIcon({ service, size }: Readonly<{ service: string; size: number
   if (service === 'drive') return <GoogleDriveIcon size={size} />
   if (service === 'messaging')
     return <MessageCircle style={{ width: size, height: size }} className="text-[#2AABEE]" />
+  if (service === 'project_management')
+    return <GitBranch style={{ width: size, height: size }} className="text-[#0052CC]" />
   return null
 }
 
