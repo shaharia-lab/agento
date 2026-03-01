@@ -11,6 +11,7 @@ import {
   FileText,
   GitBranch,
   Github,
+  Hash,
 } from 'lucide-react'
 import { integrationsApi } from '@/lib/api'
 import type { Integration } from '@/types'
@@ -67,6 +68,13 @@ const AVAILABLE_PROVIDERS = [
     description: 'Repos, issues, PRs, Actions & releases',
     icon: <Github className="h-6 w-6" />,
     path: '/integrations/github',
+  },
+  {
+    id: 'slack',
+    name: 'Slack',
+    description: 'Send messages, read channels & search',
+    icon: <Hash className="h-6 w-6 text-[#4A154B]" />,
+    path: '/integrations/slack',
   },
 ]
 
@@ -187,6 +195,8 @@ function IntegrationTypeIcon({ type, size }: Readonly<{ type: string; size: numb
   if (type === 'jira')
     return <GitBranch style={{ width: size, height: size }} className="text-[#0052CC]" />
   if (type === 'github') return <Github style={{ width: size, height: size }} />
+  if (type === 'slack')
+    return <Hash style={{ width: size, height: size }} className="text-[#4A154B]" />
   return <Plug className="h-4 w-4 text-zinc-400" />
 }
 
