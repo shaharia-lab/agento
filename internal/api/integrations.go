@@ -156,7 +156,7 @@ func (s *Server) handleValidateAuth(w http.ResponseWriter, r *http.Request) {
 
 	// For types with real validation (e.g. telegram), the token has been verified.
 	// For types without validation, this is a no-op success.
-	validated := cfg.Type == "telegram"
+	validated := cfg.Type == "telegram" || cfg.Type == "jira"
 	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "validated": validated})
 }
 

@@ -1,6 +1,15 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Pencil, Trash2, CheckCircle, XCircle, Plug, Plus, MessageCircle } from 'lucide-react'
+import {
+  Pencil,
+  Trash2,
+  CheckCircle,
+  XCircle,
+  Plug,
+  Plus,
+  MessageCircle,
+  GitBranch,
+} from 'lucide-react'
 import { integrationsApi } from '@/lib/api'
 import type { Integration } from '@/types'
 import {
@@ -35,6 +44,13 @@ const AVAILABLE_PROVIDERS = [
     description: 'Send messages, photos, polls & more',
     icon: <MessageCircle className="h-6 w-6 text-[#2AABEE]" />,
     path: '/integrations/telegram',
+  },
+  {
+    id: 'jira',
+    name: 'Jira',
+    description: 'Manage projects, issues & workflows',
+    icon: <GitBranch className="h-6 w-6 text-[#0052CC]" />,
+    path: '/integrations/jira',
   },
 ]
 
@@ -150,6 +166,8 @@ function IntegrationTypeIcon({ type, size }: Readonly<{ type: string; size: numb
   if (type === 'google') return <GoogleIcon size={size} />
   if (type === 'telegram')
     return <MessageCircle style={{ width: size, height: size }} className="text-[#2AABEE]" />
+  if (type === 'jira')
+    return <GitBranch style={{ width: size, height: size }} className="text-[#0052CC]" />
   return <Plug className="h-4 w-4 text-zinc-400" />
 }
 
@@ -159,6 +177,8 @@ function ServiceIcon({ service, size }: Readonly<{ service: string; size: number
   if (service === 'drive') return <GoogleDriveIcon size={size} />
   if (service === 'messaging')
     return <MessageCircle style={{ width: size, height: size }} className="text-[#2AABEE]" />
+  if (service === 'project_management')
+    return <GitBranch style={{ width: size, height: size }} className="text-[#0052CC]" />
   return null
 }
 
