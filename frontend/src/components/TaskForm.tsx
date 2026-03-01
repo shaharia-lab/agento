@@ -24,8 +24,18 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
   const [agents, setAgents] = useState<Agent[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [advancedOpen, setAdvancedOpen] = useState(false)
-  const [stopConditionsOpen, setStopConditionsOpen] = useState(false)
+  const [advancedOpen, setAdvancedOpen] = useState(
+    isEdit
+      ? Boolean(
+          initialData?.working_directory ||
+          (initialData?.timeout_minutes && initialData.timeout_minutes !== 30) ||
+          initialData?.save_output,
+        )
+      : false,
+  )
+  const [stopConditionsOpen, setStopConditionsOpen] = useState(
+    isEdit ? Boolean(initialData?.stop_after_count || initialData?.stop_after_time) : false,
+  )
 
   const [name, setName] = useState(initialData?.name ?? '')
   const [description, setDescription] = useState(initialData?.description ?? '')

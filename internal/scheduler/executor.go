@@ -284,8 +284,8 @@ func (s *Scheduler) updateTaskAfterRun(task *storage.ScheduledTask, ranAt time.T
 	task.LastRunAt = &ranAt
 	task.LastRunStatus = status
 
-	// Auto-pause one-off tasks after execution.
-	if task.ScheduleType == storage.ScheduleOneOff {
+	// Auto-pause one-time tasks after execution so they don't re-run on restart.
+	if task.ScheduleType == storage.ScheduleOneOff || task.ScheduleType == storage.ScheduleRunImmediately {
 		task.Status = storage.TaskStatusPaused
 		s.UnscheduleTask(task.ID)
 	}

@@ -20,7 +20,7 @@ function formatSchedule(task: ScheduledTask): string {
   const cfg = task.schedule_config
   switch (task.schedule_type) {
     case 'run_immediately':
-      return 'Run immediately'
+      return task.status === 'paused' ? 'Ran once' : 'Run immediately'
     case 'one_off':
       return cfg.run_at ? `Once at ${new Date(cfg.run_at).toLocaleString()}` : 'Only once'
     case 'interval':
