@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -127,13 +129,20 @@ func validateJiraCredentials(cfg *config.IntegrationConfig) error {
 	if creds.SiteURL == "" {
 		return &ValidationError{Field: "credentials.site_url", Message: "site_url is required"}
 	}
+	u, err := url.Parse(creds.SiteURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return &ValidationError{Field: "credentials.site_url", Message: "site_url must be a valid http or https URL"}
+	}
+	// Normalize: strip trailing slash so URL concatenation is consistent.
+	creds.SiteURL = strings.TrimRight(creds.SiteURL, "/")
 	if creds.Email == "" {
 		return &ValidationError{Field: "credentials.email", Message: "email is required"}
 	}
 	if creds.APIToken == "" {
 		return &ValidationError{Field: "credentials.api_token", Message: "api_token is required"}
 	}
-	return nil
+	// Save normalized credentials back to the config so the stored value is canonical.
+	return cfg.SetCredentials(creds)
 }
 
 func (s *integrationService) List(_ context.Context) ([]*config.IntegrationConfig, error) {
@@ -408,12 +417,15 @@ func (s *integrationService) validateTelegramTokenAuth(ctx context.Context, cfg 
 }
 
 func (s *integrationService) validateJiraTokenAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
+	// Reuse field validation and normalization (strips trailing slash, validates URL scheme).
+	if err := validateJiraCredentials(cfg); err != nil {
+		return err
+	}
+
 	var creds config.AtlassianCredentials
 	if err := cfg.ParseCredentials(&creds); err != nil {
-		return &ValidationError{Field: "credentials", Message: "invalid jira credentials: " + err.Error()}
-	}
-	if creds.SiteURL == "" || creds.Email == "" || creds.APIToken == "" {
-		return &ValidationError{Field: "credentials", Message: "site_url, email, and api_token are required"}
+		// ParseCredentials cannot fail here: validateJiraCredentials already succeeded above.
+		return fmt.Errorf("parsing jira credentials: %w", err)
 	}
 
 	displayName, err := jira.ValidateCredentials(ctx, creds.SiteURL, creds.Email, creds.APIToken)

@@ -44,20 +44,28 @@ export default function IntegrationJiraPage() {
     setValidationError(null)
 
     try {
-      // Create the integration first (not yet authenticated).
-      const created = await integrationsApi.create({
+      const payload = {
         name,
         type: 'jira',
         enabled: true,
         credentials: { site_url: siteUrl, email, api_token: apiToken },
         services,
-      })
-      setIntegrationId(created.id)
+      }
+
+      // Create or update the integration depending on whether we already have an id.
+      let id = integrationId
+      if (id) {
+        await integrationsApi.update(id, payload)
+      } else {
+        const created = await integrationsApi.create(payload)
+        id = created.id
+        setIntegrationId(id)
+      }
       setStep(3)
 
       // Now validate the credentials.
       setValidating(true)
-      const result = await integrationsApi.validateAuth(created.id)
+      const result = await integrationsApi.validateAuth(id)
       if (result.valid) {
         setValidated(true)
       } else {
@@ -329,6 +337,15 @@ export default function IntegrationJiraPage() {
                     className="rounded-md border border-zinc-300 dark:border-zinc-600 px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
                   >
                     Back to Integrations
+                  </button>
+                  <button
+                    onClick={() => {
+                      setValidationError(null)
+                      setStep(1)
+                    }}
+                    className="rounded-md border border-zinc-300 dark:border-zinc-600 px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                  >
+                    Edit Credentials
                   </button>
                   <button
                     onClick={handleRetryValidation}

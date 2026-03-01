@@ -35,7 +35,7 @@ func ValidateCredentials(ctx context.Context, siteURL, email, apiToken string) (
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
 	if err != nil {
 		return "", fmt.Errorf("reading Jira response: %w", err)
 	}
