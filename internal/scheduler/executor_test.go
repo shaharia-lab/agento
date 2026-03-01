@@ -256,6 +256,65 @@ func TestEventConstants(t *testing.T) {
 	assert.Equal(t, "tasks_scheduler.task_execution.failed", scheduler.EventTaskFailed)
 }
 
+// TestScheduleTask_RunImmediately verifies that ScheduleTask accepts a
+// run_immediately task without error, exercising buildJobDefinition.
+func TestScheduleTask_RunImmediately(t *testing.T) {
+	task := &storage.ScheduledTask{
+		ID:             "ri-1",
+		Name:           "Immediate Task",
+		Prompt:         "do it now",
+		Status:         storage.TaskStatusActive,
+		ScheduleType:   storage.ScheduleRunImmediately,
+		TimeoutMinutes: 1,
+	}
+	ts := newStubTaskStore(task)
+
+	s, err := scheduler.New(scheduler.Config{
+		TaskStore: ts,
+		ChatStore: &stubChatStore{},
+		Logger:    newTestLogger(),
+	})
+	require.NoError(t, err)
+
+	// ScheduleTask internally calls buildJobDefinition; it must not return an error.
+	err = s.ScheduleTask(task)
+	assert.NoError(t, err)
+}
+
+// TestRunImmediately_AutoPausedAfterExecution verifies that a run_immediately
+// task is paused in the database after it executes, preventing re-execution on
+// server restart.
+func TestRunImmediately_AutoPausedAfterExecution(t *testing.T) {
+	task := &storage.ScheduledTask{
+		ID:             "ri-2",
+		Name:           "Immediate Auto-Pause",
+		Prompt:         "do once",
+		Status:         storage.TaskStatusActive,
+		ScheduleType:   storage.ScheduleRunImmediately,
+		TimeoutMinutes: 1,
+	}
+	ts := newStubTaskStore(task)
+	// Fail session creation so the executor returns early without calling the
+	// real agent SDK, while still calling updateTaskAfterRun.
+	chatStore := &stubChatStore{createErr: errors.New("stub failure")}
+
+	s, err := scheduler.New(scheduler.Config{
+		TaskStore:      ts,
+		ChatStore:      chatStore,
+		Logger:         newTestLogger(),
+		MaxConcurrency: 1,
+	})
+	require.NoError(t, err)
+
+	s.ExportedExecuteTask(task.ID)
+
+	// The task must be paused after execution to prevent re-runs on restart.
+	stored, _ := ts.GetTask(task.ID)
+	require.NotNil(t, stored)
+	assert.Equal(t, storage.TaskStatusPaused, stored.Status,
+		"run_immediately task should be auto-paused after execution")
+}
+
 // TestScheduler_PausedTaskNotExecuted verifies that paused tasks are skipped.
 func TestScheduler_PausedTaskNotExecuted(t *testing.T) {
 	paused := buildTask("paused-01", "Paused Task")

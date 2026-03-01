@@ -1,9 +1,10 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { agentsApi, tasksApi } from '@/lib/api'
+import { agentsApi, tasksApi, filesystemApi } from '@/lib/api'
 import type { Agent, ScheduledTask, ScheduleType, ScheduleConfig } from '@/types'
 import { MODELS } from '@/types'
 import { Button } from '@/components/ui/button'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 
 /** Convert an ISO/UTC string to a `YYYY-MM-DDTHH:MM` value in the user's local timezone. */
 function toLocalDatetimeString(iso: string): string {
@@ -23,6 +24,18 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
   const [agents, setAgents] = useState<Agent[]>([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [advancedOpen, setAdvancedOpen] = useState(
+    isEdit
+      ? Boolean(
+          initialData?.working_directory ||
+          (initialData?.timeout_minutes && initialData.timeout_minutes !== 30) ||
+          initialData?.save_output,
+        )
+      : false,
+  )
+  const [stopConditionsOpen, setStopConditionsOpen] = useState(
+    isEdit ? Boolean(initialData?.stop_after_count || initialData?.stop_after_time) : false,
+  )
 
   const [name, setName] = useState(initialData?.name ?? '')
   const [description, setDescription] = useState(initialData?.description ?? '')
@@ -32,7 +45,7 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
   const [workingDirectory, setWorkingDirectory] = useState(initialData?.working_directory ?? '')
   const [timeoutMinutes, setTimeoutMinutes] = useState(initialData?.timeout_minutes ?? 30)
   const [scheduleType, setScheduleType] = useState<ScheduleType>(
-    initialData?.schedule_type ?? 'one_off',
+    initialData?.schedule_type ?? 'run_immediately',
   )
   const [scheduleConfig, setScheduleConfig] = useState<ScheduleConfig>(
     initialData?.schedule_config ?? {},
@@ -46,7 +59,17 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
       .list()
       .then(setAgents)
       .catch(() => {})
-  }, [])
+
+    // Pre-fill working directory with home dir only when creating a new task.
+    if (!isEdit && !initialData?.working_directory) {
+      filesystemApi
+        .list()
+        .then(res => {
+          if (res.path) setWorkingDirectory(res.path)
+        })
+        .catch(() => {})
+    }
+  }, [isEdit, initialData?.working_directory])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -86,6 +109,8 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
     'w-full rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-3 py-2 text-sm text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-400 dark:focus:ring-zinc-500'
   const inputClass = selectClass
   const labelClass = 'block text-xs font-medium text-zinc-700 dark:text-zinc-300 mb-1'
+  const sectionHeaderClass =
+    'flex items-center gap-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider cursor-pointer select-none hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors'
 
   return (
     <form onSubmit={handleSubmit} className="flex flex-col h-full">
@@ -214,11 +239,18 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                   }}
                   className={selectClass}
                 >
-                  <option value="one_off">One-off</option>
+                  <option value="run_immediately">Run Immediately</option>
+                  <option value="one_off">Only Once</option>
                   <option value="interval">Interval</option>
                   <option value="cron">Cron</option>
                 </select>
               </div>
+
+              {scheduleType === 'run_immediately' && (
+                <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                  The task will start executing right after creation.
+                </p>
+              )}
 
               {scheduleType === 'one_off' && (
                 <div>
@@ -328,85 +360,115 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
               )}
             </section>
 
-            {/* Stop Conditions */}
+            {/* Stop Conditions — collapsible */}
             <section className="space-y-3">
-              <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
+              <button
+                type="button"
+                className={sectionHeaderClass}
+                onClick={() => setStopConditionsOpen(v => !v)}
+                aria-expanded={stopConditionsOpen}
+              >
+                {stopConditionsOpen ? (
+                  <ChevronDown className="h-3.5 w-3.5" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5" />
+                )}
                 Stop Conditions
-              </h3>
-              <div>
-                <label className={labelClass}>Stop after N runs (0 = unlimited)</label>
-                <input
-                  type="number"
-                  min={0}
-                  value={stopAfterCount}
-                  onChange={e => setStopAfterCount(Number(e.target.value))}
-                  className={inputClass}
-                />
-              </div>
-              <div>
-                <label className={labelClass}>Stop after date (optional)</label>
-                <input
-                  type="datetime-local"
-                  value={stopAfterTime ? toLocalDatetimeString(stopAfterTime) : ''}
-                  onChange={e =>
-                    setStopAfterTime(e.target.value ? new Date(e.target.value).toISOString() : '')
-                  }
-                  className={inputClass}
-                />
-              </div>
+              </button>
+              {stopConditionsOpen && (
+                <div className="space-y-3">
+                  <div>
+                    <label className={labelClass}>Stop after N runs (0 = unlimited)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      value={stopAfterCount}
+                      onChange={e => setStopAfterCount(Number(e.target.value))}
+                      className={inputClass}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelClass}>Stop after date (optional)</label>
+                    <input
+                      type="datetime-local"
+                      value={stopAfterTime ? toLocalDatetimeString(stopAfterTime) : ''}
+                      onChange={e =>
+                        setStopAfterTime(
+                          e.target.value ? new Date(e.target.value).toISOString() : '',
+                        )
+                      }
+                      className={inputClass}
+                    />
+                  </div>
+                </div>
+              )}
             </section>
 
-            {/* Advanced */}
+            {/* Advanced — collapsible */}
             <section className="space-y-3">
-              <h3 className="text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider">
+              <button
+                type="button"
+                className={sectionHeaderClass}
+                onClick={() => setAdvancedOpen(v => !v)}
+                aria-expanded={advancedOpen}
+              >
+                {advancedOpen ? (
+                  <ChevronDown className="h-3.5 w-3.5" />
+                ) : (
+                  <ChevronRight className="h-3.5 w-3.5" />
+                )}
                 Advanced
-              </h3>
-              <div>
-                <label className={labelClass}>Working directory</label>
-                <input
-                  type="text"
-                  value={workingDirectory}
-                  onChange={e => setWorkingDirectory(e.target.value)}
-                  placeholder="/path/to/project"
-                  className={inputClass}
-                />
-              </div>
-              <div>
-                <label className={labelClass}>Timeout (minutes, 1-240)</label>
-                <input
-                  type="number"
-                  min={1}
-                  max={240}
-                  value={timeoutMinutes}
-                  onChange={e => setTimeoutMinutes(Number(e.target.value))}
-                  className={inputClass}
-                />
-              </div>
-              <div className="flex items-start gap-3 pt-1">
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={saveOutput}
-                  onClick={() => setSaveOutput(v => !v)}
-                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-zinc-400 dark:focus:ring-zinc-500 ${
-                    saveOutput ? 'bg-zinc-900 dark:bg-zinc-100' : 'bg-zinc-200 dark:bg-zinc-700'
-                  }`}
-                >
-                  <span
-                    className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white dark:bg-zinc-900 shadow transition-transform ${
-                      saveOutput ? 'translate-x-4' : 'translate-x-0'
-                    }`}
-                  />
-                </button>
-                <div>
-                  <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
-                    Save output
-                  </p>
-                  <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-0.5">
-                    Store the AI response in job history
-                  </p>
+              </button>
+              {advancedOpen && (
+                <div className="space-y-3">
+                  <div>
+                    <label className={labelClass}>Working directory</label>
+                    <input
+                      type="text"
+                      value={workingDirectory}
+                      onChange={e => setWorkingDirectory(e.target.value)}
+                      placeholder="/path/to/project"
+                      className={inputClass}
+                    />
+                  </div>
+                  <div>
+                    <label className={labelClass}>Timeout (minutes, 1-240)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={240}
+                      value={timeoutMinutes}
+                      onChange={e => setTimeoutMinutes(Number(e.target.value))}
+                      className={inputClass}
+                    />
+                  </div>
+                  <div className="flex items-start gap-3 pt-1">
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={saveOutput}
+                      onClick={() => setSaveOutput(v => !v)}
+                      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-zinc-400 dark:focus:ring-zinc-500 ${
+                        saveOutput ? 'bg-zinc-900 dark:bg-zinc-100' : 'bg-zinc-200 dark:bg-zinc-700'
+                      }`}
+                    >
+                      <span
+                        className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white dark:bg-zinc-900 shadow transition-transform ${
+                          saveOutput ? 'translate-x-4' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                    <div>
+                      <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                        Save output
+                      </p>
+                      <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-0.5">
+                        Store the AI response in job history
+                      </p>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
             </section>
           </div>
         </div>

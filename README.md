@@ -9,20 +9,23 @@ You can define agents with custom system prompts and tools, start multi-turn con
 ## Features
 
 - **Web UI + CLI** — Access agents from a browser or run one-shot queries from the terminal
-- **Agent builder** — Define agents declaratively with YAML: name, system prompt, model, thinking mode, and tools
+- **Agent builder** — Define agents with custom system prompts, models, thinking modes, and tools via the UI or YAML
 - **Multi-turn conversations** — Resume sessions using session IDs
 - **Extended thinking** — Control Claude's reasoning depth per agent (`adaptive`, `enabled`, `disabled`)
 - **Template variables** — Inject `{{current_date}}`, `{{current_time}}`, and custom values into system prompts
 - **Built-in Claude Code tools** — `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`
 - **External MCP servers** — Connect any MCP-compatible server via `stdio`, `streamable_http`, or `sse`
 - **Real-time streaming** — Responses stream live in the UI via Server-Sent Events
+- **Integrations** — Connect Google (Calendar, Gmail, Drive), GitHub, Slack, Jira, Confluence, and Telegram as agent tools
+- **Task scheduler** — Schedule recurring agent tasks with cron expressions and track job history
+- **Notifications** — Event-driven notification system with SMTP email support
 
 ---
 
 ## Requirements
 
 - [Claude Code CLI](https://claude.ai/code) installed and authenticated on your machine
-- Go 1.24+ and Node.js *(only required when building from source)*
+- Go 1.25+ and Node.js *(only required when building from source)*
 
 No Anthropic API key is required. Agento uses the Claude Code CLI's existing authentication by default. If you prefer to call the Anthropic API directly, you can set `ANTHROPIC_API_KEY` as an optional override.
 
@@ -57,7 +60,7 @@ brew install shaharia-lab/tap/agento
 
 ### Build from source
 
-Requires Go 1.24+ and Node.js.
+Requires Go 1.25+ and Node.js.
 
 ```bash
 git clone https://github.com/shaharia-lab/agento.git

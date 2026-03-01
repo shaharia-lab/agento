@@ -154,6 +154,9 @@ func (s *Scheduler) buildJobDefinition(task *storage.ScheduledTask) (gocron.JobD
 	cfg := task.ScheduleConfig
 
 	switch task.ScheduleType {
+	case storage.ScheduleRunImmediately:
+		return gocron.OneTimeJob(gocron.OneTimeJobStartDateTime(time.Now().Add(2 * time.Second))), nil
+
 	case storage.ScheduleOneOff:
 		runAt, err := time.Parse(time.RFC3339, cfg.RunAt)
 		if err != nil {
