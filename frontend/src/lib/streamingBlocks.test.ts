@@ -165,8 +165,10 @@ describe('streaming block ordering (integration)', () => {
     expect(blocks.map(b => b.type)).toEqual(['thinking', 'text', 'tool_use', 'tool_use', 'text'])
 
     // Verify thinking was accumulated correctly
-    const thinking = blocks[0]
-    expect(thinking.type === 'thinking' && thinking.text).toBe('Let me think... about this.')
+    expect(blocks[0].type).toBe('thinking')
+    if (blocks[0].type === 'thinking') {
+      expect(blocks[0].text).toBe('Let me think... about this.')
+    }
   })
 
   it('preserves order: tool → text → tool → text (no initial text)', () => {

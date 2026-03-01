@@ -127,8 +127,14 @@ export default function ChatSessionPage() {
             },
             onAssistant: event => {
               // Collect completed tool_use blocks in stream order.
-              blocks = applyToolUseBlocks(blocks, event.message.content)
-              setStreamingBlocks([...blocks])
+              // applyToolUseBlocks returns the same reference when no tool
+              // blocks are found — skip the state update to avoid a
+              // needless re-render on every assistant event.
+              const updated = applyToolUseBlocks(blocks, event.message.content)
+              if (updated !== blocks) {
+                blocks = updated
+                setStreamingBlocks(blocks)
+              }
             },
             onStreamEvent: event => {
               const delta = event.event.delta
@@ -181,6 +187,9 @@ export default function ChatSessionPage() {
               })
               const assistantMsg: ChatMessage = {
                 role: 'assistant',
+                // `accumulated` holds the concatenated text deltas for the
+                // plain-text content field. Falls back to event.result when
+                // no text deltas arrived (e.g. tool-only turns).
                 content: accumulated || event.result,
                 timestamp: new Date().toISOString(),
                 blocks: finalBlocks.length > 0 ? finalBlocks : undefined,
