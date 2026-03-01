@@ -159,16 +159,6 @@ func buildWebServer(
 ) (*server.Server, error) {
 	agentStore := storage.NewSQLiteAgentStore(db)
 
-	existing, err := agentStore.List()
-	if err != nil {
-		return nil, fmt.Errorf("listing agents: %w", err)
-	}
-	if len(existing) == 0 {
-		if seedErr := seedExampleAgent(agentStore); seedErr != nil {
-			sysLogger.Warn("could not seed example agent", "error", seedErr)
-		}
-	}
-
 	mcpRegistry, err := config.LoadMCPRegistry(cfg.MCPsFile())
 	if err != nil {
 		return nil, fmt.Errorf("loading MCP registry: %w", err)
@@ -327,23 +317,6 @@ func initTaskScheduler(
 		sysLogger.Warn("failed to start task scheduler", "error", startErr)
 	}
 	return taskScheduler, nil
-}
-
-func seedExampleAgent(store storage.AgentStore) error {
-	agent := &config.AgentConfig{
-		Name:        "Hello World",
-		Slug:        "hello-world",
-		Description: "A friendly assistant to help you get started with Agento.",
-		Model:       "",
-		Thinking:    "adaptive",
-		SystemPrompt: "You are a friendly and helpful assistant. " +
-			"You help users understand and use the Agento AI agents platform. " +
-			"Today is {{current_date}}.",
-		Capabilities: config.AgentCapabilities{
-			BuiltIn: []string{"current_time"},
-		},
-	}
-	return store.Save(agent)
 }
 
 // printBanner writes the startup banner to stdout. It is the only output
