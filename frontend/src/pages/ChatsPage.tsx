@@ -561,7 +561,7 @@ function ChatRow({
   return (
     <div className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors">
       <div
-        onClick={e => {
+        onClick={(e: React.MouseEvent) => {
           e.stopPropagation()
           onCheck()
         }}
@@ -570,7 +570,7 @@ function ChatRow({
           checked={checked}
           onCheckedChange={onCheck}
           aria-label={`Select ${session.title}`}
-          onClick={e => e.stopPropagation()}
+          onClick={(e: React.MouseEvent) => e.stopPropagation()}
         />
       </div>
       <button
@@ -618,7 +618,7 @@ function ChatRow({
         <AlertDialogTrigger asChild>
           <button
             className="opacity-0 group-hover:opacity-100 h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/30 transition-all shrink-0"
-            onClick={e => e.stopPropagation()}
+            onClick={(e: React.MouseEvent) => e.stopPropagation()}
           >
             <Trash2 className="h-3.5 w-3.5" />
           </button>

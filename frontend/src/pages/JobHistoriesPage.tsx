@@ -229,7 +229,7 @@ export default function JobHistoriesPage() {
                         onCheckedChange={() =>
                           toggleCheck(entry.id, { stopPropagation: () => {} } as React.MouseEvent)
                         }
-                        onClick={e => e.stopPropagation()}
+                        onClick={(e: React.MouseEvent) => e.stopPropagation()}
                         aria-label={`Select ${entry.task_name}`}
                       />
                     </td>
