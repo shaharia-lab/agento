@@ -2,7 +2,7 @@
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.25+
 - Node.js 22+
 - npm
 
@@ -90,8 +90,11 @@ agento/
 │   ├── config/       # AppConfig, AgentConfig, MCP config
 │   ├── server/       # HTTP server wiring
 │   ├── claudesessions/ # Claude session scanner and analytics
-│   ├── integrations/   # Integration registry + Google MCP servers
-│   ├── service/        # Business logic (AgentService, ChatService)
+│   ├── eventbus/       # In-process event bus
+│   ├── integrations/   # Integration registry + MCP servers (Google, GitHub, Slack, Jira, Confluence, Telegram)
+│   ├── notification/   # Notification system (SMTP email)
+│   ├── scheduler/      # Task scheduler and job executor
+│   ├── service/        # Business logic (AgentService, ChatService, TaskService, NotificationService, etc.)
 │   ├── storage/        # SQLite persistence (~/.agento/agento.db)
 │   └── tools/          # Local MCP tool server
 ├── docs/             # Documentation
