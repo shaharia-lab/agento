@@ -8,6 +8,13 @@ import (
 	"github.com/shaharia-lab/agento/internal/storage"
 )
 
+// TaskScheduler is the subset of the scheduler that the TaskService needs.
+// Using an interface here prevents an import cycle: service must not import scheduler.
+type TaskScheduler interface {
+	ScheduleTask(task *storage.ScheduledTask) error
+	UnscheduleTask(taskID string)
+}
+
 // TaskService defines the business logic interface for managing scheduled tasks.
 type TaskService interface {
 	ListTasks(ctx context.Context) ([]*storage.ScheduledTask, error)
@@ -23,13 +30,15 @@ type TaskService interface {
 }
 
 type taskService struct {
-	repo   storage.TaskStore
-	logger *slog.Logger
+	repo      storage.TaskStore
+	scheduler TaskScheduler // optional; nil if no scheduler is configured
+	logger    *slog.Logger
 }
 
 // NewTaskService returns a new TaskService backed by the given TaskStore.
-func NewTaskService(repo storage.TaskStore, logger *slog.Logger) TaskService {
-	return &taskService{repo: repo, logger: logger}
+// scheduler may be nil when running without task scheduling (e.g. in tests).
+func NewTaskService(repo storage.TaskStore, scheduler TaskScheduler, logger *slog.Logger) TaskService {
+	return &taskService{repo: repo, scheduler: scheduler, logger: logger}
 }
 
 func (s *taskService) ListTasks(_ context.Context) ([]*storage.ScheduledTask, error) {
@@ -68,6 +77,14 @@ func (s *taskService) CreateTask(_ context.Context, task *storage.ScheduledTask)
 	}
 
 	s.logger.Info("task created", "id", task.ID, "name", task.Name)
+
+	// Schedule the task if a scheduler is configured and the task is active.
+	if s.scheduler != nil && task.Status == storage.TaskStatusActive {
+		if schedErr := s.scheduler.ScheduleTask(task); schedErr != nil {
+			s.logger.Warn("failed to schedule newly created task", "task_id", task.ID, "error", schedErr)
+		}
+	}
+
 	return task, nil
 }
 
@@ -101,6 +118,17 @@ func (s *taskService) UpdateTask(
 	}
 
 	s.logger.Info("task updated", "id", id, "name", task.Name)
+
+	// Reschedule: always unschedule first, then reschedule if still active.
+	if s.scheduler != nil {
+		s.scheduler.UnscheduleTask(id)
+		if task.Status == storage.TaskStatusActive {
+			if schedErr := s.scheduler.ScheduleTask(task); schedErr != nil {
+				s.logger.Warn("failed to reschedule updated task", "task_id", id, "error", schedErr)
+			}
+		}
+	}
+
 	return task, nil
 }
 
@@ -111,6 +139,11 @@ func (s *taskService) DeleteTask(_ context.Context, id string) error {
 	}
 	if existing == nil {
 		return &NotFoundError{Resource: "task", ID: id}
+	}
+
+	// Unschedule before deleting.
+	if s.scheduler != nil {
+		s.scheduler.UnscheduleTask(id)
 	}
 
 	if err := s.repo.DeleteTask(id); err != nil {
@@ -135,6 +168,12 @@ func (s *taskService) PauseTask(_ context.Context, id string) (*storage.Schedule
 	}
 
 	s.logger.Info("task paused", "id", id)
+
+	// Remove from scheduler.
+	if s.scheduler != nil {
+		s.scheduler.UnscheduleTask(id)
+	}
+
 	return task, nil
 }
 
@@ -156,6 +195,14 @@ func (s *taskService) ResumeTask(_ context.Context, id string) (*storage.Schedul
 	}
 
 	s.logger.Info("task resumed", "id", id)
+
+	// Re-add to scheduler.
+	if s.scheduler != nil {
+		if schedErr := s.scheduler.ScheduleTask(task); schedErr != nil {
+			s.logger.Warn("failed to schedule resumed task", "task_id", id, "error", schedErr)
+		}
+	}
+
 	return task, nil
 }
 

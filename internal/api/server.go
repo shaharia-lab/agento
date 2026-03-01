@@ -11,7 +11,6 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
-	"github.com/shaharia-lab/agento/internal/scheduler"
 	"github.com/shaharia-lab/agento/internal/service"
 )
 
@@ -36,11 +35,11 @@ type Server struct {
 	integrationSvc     service.IntegrationService
 	notificationSvc    service.NotificationService
 	taskSvc            service.TaskService
+	profileSvc         service.ClaudeSettingsProfileService
 	settingsMgr        *config.SettingsManager
 	logger             *slog.Logger
 	liveSessions       *liveSessionStore
 	claudeSessionCache *claudesessions.Cache
-	scheduler          *scheduler.Scheduler
 }
 
 // New creates a new API Server backed by the provided services.
@@ -50,10 +49,10 @@ func New(
 	integrationSvc service.IntegrationService,
 	notificationSvc service.NotificationService,
 	taskSvc service.TaskService,
+	profileSvc service.ClaudeSettingsProfileService,
 	settingsMgr *config.SettingsManager,
 	logger *slog.Logger,
 	sessionCache *claudesessions.Cache,
-	sched *scheduler.Scheduler,
 ) *Server {
 	return &Server{
 		agentSvc:           agentSvc,
@@ -61,11 +60,11 @@ func New(
 		integrationSvc:     integrationSvc,
 		notificationSvc:    notificationSvc,
 		taskSvc:            taskSvc,
+		profileSvc:         profileSvc,
 		settingsMgr:        settingsMgr,
 		logger:             logger,
 		liveSessions:       newLiveSessionStore(),
 		claudeSessionCache: sessionCache,
-		scheduler:          sched,
 	}
 }
 

@@ -48,7 +48,7 @@ func newHarness(t *testing.T) *testHarness {
 	require.NoError(t, err)
 
 	logger := slog.Default()
-	srv := api.New(agentSvc, chatSvc, integrationSvc, notificationSvc, nil, mgr, logger, nil, nil)
+	srv := api.New(agentSvc, chatSvc, integrationSvc, notificationSvc, nil, nil, mgr, logger, nil)
 
 	r := chi.NewRouter()
 	srv.Mount(r)
@@ -135,7 +135,7 @@ func TestCreateAgent(t *testing.T) {
 			name:       "validation error",
 			body:       `{"name":"","slug":"my-agent"}`,
 			err:        &service.ValidationError{Field: "name", Message: "name is required"},
-			wantStatus: http.StatusBadRequest,
+			wantStatus: http.StatusUnprocessableEntity,
 		},
 		{
 			name:       "conflict error",
@@ -245,7 +245,7 @@ func TestUpdateAgent(t *testing.T) {
 			slug:       "my-agent",
 			body:       `{"name":""}`,
 			err:        &service.ValidationError{Field: "name", Message: "name is required"},
-			wantStatus: http.StatusBadRequest,
+			wantStatus: http.StatusUnprocessableEntity,
 		},
 	}
 
@@ -599,7 +599,7 @@ func TestCreateIntegration(t *testing.T) {
 			name:       "validation error",
 			body:       `{"name":"","type":"google","credentials":{"client_id":"cid","client_secret":"csec"}}`,
 			err:        &service.ValidationError{Field: "name", Message: "name is required"},
-			wantStatus: http.StatusBadRequest,
+			wantStatus: http.StatusUnprocessableEntity,
 		},
 	}
 
