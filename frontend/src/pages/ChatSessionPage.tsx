@@ -3,11 +3,11 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { chatsApi, sendMessage, provideInput, permissionResponse } from '@/lib/api'
+import { applyThinkingDelta, applyTextDelta, applyToolUseBlocks } from '@/lib/streamingBlocks'
 import type {
   ChatDetail,
   ChatMessage,
   MessageBlock,
-  SDKContentBlock,
   AskUserQuestionItem,
   SDKUserEvent,
 } from '@/types'
@@ -44,10 +44,9 @@ export default function ChatSessionPage() {
 
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
-  const [streamingText, setStreamingText] = useState('')
-  const [thinkingText, setThinkingText] = useState('')
-  const [showThinking, setShowThinking] = useState(false)
-  const [toolCalls, setToolCalls] = useState<SDKContentBlock[]>([])
+  // Unified ordered list of all content blocks (thinking, text, tool_use)
+  // during streaming — preserves the exact chronological order they arrive.
+  const [streamingBlocks, setStreamingBlocks] = useState<MessageBlock[]>([])
   const [systemStatus, setSystemStatus] = useState<string | null>(null)
   // Tool results keyed by tool_use_id — populated from SDK "user" events during streaming.
   const [streamingToolResults, setStreamingToolResults] = useState<
@@ -85,7 +84,7 @@ export default function ChatSessionPage() {
 
   useEffect(() => {
     scrollToBottom()
-  }, [messages, streamingText, scrollToBottom])
+  }, [messages, streamingBlocks, scrollToBottom])
 
   const doSend = useCallback(
     async (content: string) => {
@@ -98,10 +97,7 @@ export default function ChatSessionPage() {
       }
       setMessages(prev => [...prev, userMsg])
       setStreaming(true)
-      setStreamingText('')
-      setThinkingText('')
-      setShowThinking(false)
-      setToolCalls([])
+      setStreamingBlocks([])
       setSystemStatus(null)
       setAwaitingInput(false)
       setPermissionRequest(null)
@@ -131,43 +127,25 @@ export default function ChatSessionPage() {
             },
             onAssistant: event => {
               // Collect completed tool_use blocks in stream order.
-              const toolUseBlocks = event.message.content.filter(
-                b => b.type === 'tool_use' && b.name,
-              )
-              if (toolUseBlocks.length > 0) {
-                const newBlocks: MessageBlock[] = toolUseBlocks.map(b => ({
-                  type: 'tool_use' as const,
-                  id: b.id,
-                  name: b.name!,
-                  input: b.input,
-                }))
-                blocks = [...blocks, ...newBlocks]
-                setToolCalls(prev => [...prev, ...toolUseBlocks])
+              // applyToolUseBlocks returns the same reference when no tool
+              // blocks are found — skip the state update to avoid a
+              // needless re-render on every assistant event.
+              const updated = applyToolUseBlocks(blocks, event.message.content)
+              if (updated !== blocks) {
+                blocks = updated
+                setStreamingBlocks(blocks)
               }
             },
             onStreamEvent: event => {
               const delta = event.event.delta
               if (!delta) return
               if (delta.type === 'thinking_delta' && delta.thinking) {
-                // Append to the last thinking block or start a new one.
-                const last = blocks[blocks.length - 1]
-                if (last?.type === 'thinking') {
-                  last.text += delta.thinking
-                } else {
-                  blocks.push({ type: 'thinking', text: delta.thinking })
-                }
-                setThinkingText(prev => prev + delta.thinking)
-                setShowThinking(true)
+                blocks = applyThinkingDelta(blocks, delta.thinking)
+                setStreamingBlocks([...blocks])
               } else if (delta.type === 'text_delta' && delta.text) {
                 accumulated += delta.text
-                // Append to the last text block or start a new one.
-                const last = blocks[blocks.length - 1]
-                if (last?.type === 'text') {
-                  last.text += delta.text
-                } else {
-                  blocks.push({ type: 'text', text: delta.text })
-                }
-                setStreamingText(accumulated)
+                blocks = applyTextDelta(blocks, delta.text)
+                setStreamingBlocks([...blocks])
               }
             },
             onUserInputRequired: () => {
@@ -194,7 +172,7 @@ export default function ChatSessionPage() {
                     ? event.errors.join('; ')
                     : (event.result ?? 'Unknown error')
                 setError(errMsg)
-                setStreamingText('')
+                setStreamingBlocks([])
                 return
               }
               // Build a rich message with ordered blocks so the render
@@ -209,6 +187,9 @@ export default function ChatSessionPage() {
               })
               const assistantMsg: ChatMessage = {
                 role: 'assistant',
+                // `accumulated` holds the concatenated text deltas for the
+                // plain-text content field. Falls back to event.result when
+                // no text deltas arrived (e.g. tool-only turns).
                 content: accumulated || event.result,
                 timestamp: new Date().toISOString(),
                 blocks: finalBlocks.length > 0 ? finalBlocks : undefined,
@@ -220,10 +201,7 @@ export default function ChatSessionPage() {
               blocks = []
               toolResults = {}
               // Clear streaming UI state — the message now owns the content.
-              setStreamingText('')
-              setThinkingText('')
-              setShowThinking(false)
-              setToolCalls([])
+              setStreamingBlocks([])
               setSystemStatus(null)
               // Do NOT clear awaitingInput here — if user_input_required follows
               // this result event, onUserInputRequired will set it to true.
@@ -245,10 +223,7 @@ export default function ChatSessionPage() {
         }
       } finally {
         setStreaming(false)
-        setStreamingText('')
-        setThinkingText('')
-        setShowThinking(false)
-        setToolCalls([])
+        setStreamingBlocks([])
         setSystemStatus(null)
         setAwaitingInput(false)
         setPermissionRequest(null)
@@ -385,28 +360,45 @@ export default function ChatSessionPage() {
             return <MessageBubble key={msgKey} message={msg} />
           })}
 
-          {/* Streaming: thinking */}
-          {streaming && showThinking && thinkingText && <ThinkingBlock text={thinkingText} />}
-
-          {/* Streaming: tool call cards. AskUserQuestion becomes interactive once
-               the backend signals user_input_required (awaitingInput=true). */}
+          {/* Streaming: render all blocks in arrival order so thinking, text,
+               and tool calls are interleaved correctly. */}
           {streaming &&
-            toolCalls.map((call, i) => (
-              <ToolCallCard
-                key={`stream-tool-${call.id ?? call.name}-${i}`}
-                block={{ type: 'tool_use', id: call.id, name: call.name, input: call.input }}
-                isInteractive={awaitingInput && call.name === 'AskUserQuestion'}
-                toolResult={call.id ? streamingToolResults[call.id] : undefined}
-                onSubmit={
-                  awaitingInput && call.name === 'AskUserQuestion' && id
-                    ? answer => {
-                        setAwaitingInput(false)
-                        provideInput(id, answer)
-                      }
-                    : undefined
-                }
-              />
-            ))}
+            streamingBlocks.map((block, i) => {
+              if (block.type === 'thinking') {
+                return <ThinkingBlock key={`stream-thinking-${i}`} text={block.text} />
+              }
+              if (block.type === 'tool_use') {
+                return (
+                  <ToolCallCard
+                    key={`stream-tool-${block.id ?? block.name}-${i}`}
+                    block={block}
+                    isInteractive={awaitingInput && block.name === 'AskUserQuestion'}
+                    toolResult={block.id ? streamingToolResults[block.id] : undefined}
+                    onSubmit={
+                      awaitingInput && block.name === 'AskUserQuestion' && id
+                        ? answer => {
+                            setAwaitingInput(false)
+                            provideInput(id, answer)
+                          }
+                        : undefined
+                    }
+                  />
+                )
+              }
+              // text block
+              return (
+                <div key={`stream-text-${i}`} className="flex gap-3">
+                  <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shrink-0 mt-0.5 text-xs font-bold">
+                    {agentLabel ? agentLabel[0].toUpperCase() : 'C'}
+                  </div>
+                  <div className="bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-100 dark:border-zinc-700 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
+                    <div className="prose prose-sm max-w-none">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{block.text}</ReactMarkdown>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
 
           {/* Streaming: system status (tool execution in progress) */}
           {streaming && systemStatus && (
@@ -416,37 +408,19 @@ export default function ChatSessionPage() {
             </div>
           )}
 
-          {/* Streaming: assistant response */}
-          {streaming && streamingText && (
-            <div className="flex gap-3">
-              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shrink-0 mt-0.5 text-xs font-bold">
-                {agentLabel ? agentLabel[0].toUpperCase() : 'C'}
+          {/* Typing indicator — only when no content has arrived yet */}
+          {streaming && streamingBlocks.length === 0 && !systemStatus && (
+            <div className="flex gap-3 items-center">
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 shrink-0">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-white" />
               </div>
-              <div className="bg-zinc-50 dark:bg-zinc-800/60 border border-zinc-100 dark:border-zinc-700 rounded-2xl rounded-tl-sm px-4 py-3 text-sm max-w-[90%] sm:max-w-[82%] overflow-x-auto min-w-0">
-                <div className="prose prose-sm max-w-none">
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingText}</ReactMarkdown>
-                </div>
+              <div className="flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:0ms]" />
+                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:150ms]" />
+                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:300ms]" />
               </div>
             </div>
           )}
-
-          {/* Typing indicator — only when no content has arrived yet */}
-          {streaming &&
-            !streamingText &&
-            !thinkingText &&
-            toolCalls.length === 0 &&
-            !systemStatus && (
-              <div className="flex gap-3 items-center">
-                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 shrink-0">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-white" />
-                </div>
-                <div className="flex items-center gap-1">
-                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:0ms]" />
-                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:150ms]" />
-                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:300ms]" />
-                </div>
-              </div>
-            )}
 
           {/* Permission request dialog — shown when agent needs approval to use a tool */}
           {streaming && permissionRequest && id && (
@@ -785,7 +759,7 @@ function ToolCallCard({
   onSubmit,
   toolResult,
 }: Readonly<{
-  block: Pick<SDKContentBlock, 'type' | 'id' | 'name' | 'input'>
+  block: { type: string; id?: string; name?: string; input?: Record<string, unknown> }
   isInteractive?: boolean
   onSubmit?: (answer: string) => void
   toolResult?: Record<string, unknown>

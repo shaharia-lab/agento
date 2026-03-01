@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { fileURLToPath, URL } from 'node:url'
@@ -20,5 +20,8 @@ export default defineConfig({
       '/api': 'http://localhost:8990',
       '/health': 'http://localhost:8990',
     },
+  },
+  test: {
+    include: ['src/**/*.test.ts'],
   },
 })
