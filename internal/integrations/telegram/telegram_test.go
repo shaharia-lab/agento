@@ -8,8 +8,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // setupTestServer creates an httptest.Server and points apiBaseURL at it.
@@ -186,35 +184,6 @@ func TestValidateBotToken(t *testing.T) {
 				cleanup()
 			}
 		})
-	}
-}
-
-func TestHandleListChats_Deduplication(t *testing.T) {
-	handler := func(w http.ResponseWriter, _ *http.Request) {
-		// Return updates with duplicate chat IDs.
-		updates := []map[string]any{
-			{"message": map[string]any{"chat": map[string]any{"id": 100, "type": "private", "first_name": "Alice"}}},
-			{"message": map[string]any{"chat": map[string]any{"id": 100, "type": "private", "first_name": "Alice"}}},
-			{"message": map[string]any{"chat": map[string]any{"id": 200, "type": "group", "title": "Dev Team"}}},
-			{"message": map[string]any{"chat": map[string]any{"id": 200, "type": "group", "title": "Dev Team"}}},
-			{"message": map[string]any{"chat": map[string]any{"id": 300, "type": "private", "first_name": "Bob", "last_name": "Smith"}}},
-		}
-		result, _ := json.Marshal(updates)
-		writeTestJSON(w, telegramResponse{OK: true, Result: result})
-	}
-
-	_, cleanup := setupTestServer(handler)
-	defer cleanup()
-
-	res, _, err := handleListChats(context.Background(), "test-token", &listChatsParams{Limit: 100})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	// Check that the result text mentions 3 unique chats (not 5).
-	text := res.Content[0].(*mcp.TextContent).Text
-	if !containsStr(text, "3 unique chat(s)") {
-		t.Errorf("expected 3 unique chats, got: %s", text)
 	}
 }
 

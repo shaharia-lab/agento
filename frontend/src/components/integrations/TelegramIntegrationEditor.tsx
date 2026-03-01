@@ -19,10 +19,9 @@ const TELEGRAM_SERVICES: Record<string, ServiceInfo> = {
     description: 'Send messages, photos, locations, polls, and manage chats',
     tools: [
       { name: 'send_message', description: 'Send a text message to a chat' },
-      { name: 'read_messages', description: 'Read recent messages via getUpdates' },
+      { name: 'read_messages', description: 'Read recent messages (immediate, no long-polling)' },
       { name: 'get_chat_info', description: 'Get detailed info about a chat' },
       { name: 'send_photo', description: 'Send a photo by URL to a chat' },
-      { name: 'list_chats', description: 'List unique chats from recent updates' },
       { name: 'forward_message', description: 'Forward a message between chats' },
       { name: 'edit_message', description: 'Edit a previously sent message' },
       { name: 'delete_message', description: 'Delete a message from a chat' },

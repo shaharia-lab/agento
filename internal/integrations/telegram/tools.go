@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -134,15 +133,6 @@ func registerReadingTools(server *mcp.Server, botToken string, allowed map[strin
 		})
 	}
 
-	if len(allowed) == 0 || allowed["list_chats"] {
-		mcp.AddTool(server, &mcp.Tool{
-			Name:        "list_chats",
-			Description: "Lists unique chats the bot has received messages from.",
-		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *listChatsParams) (*mcp.CallToolResult, any, error) {
-			return handleListChats(ctx, botToken, params)
-		})
-	}
-
 	if len(allowed) == 0 || allowed["get_chat_members"] {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "get_chat_members",
@@ -223,15 +213,16 @@ func handleSendMessage(
 // read_messages
 
 type readMessagesParams struct {
-	Offset  int `json:"offset" jsonschema:"Identifier of the first update to be returned"`
-	Limit   int `json:"limit" jsonschema:"Max number of updates to retrieve (1-100)"`
-	Timeout int `json:"timeout" jsonschema:"Timeout in seconds for long polling"`
+	Offset int `json:"offset" jsonschema:"Identifier of the first update to be returned"`
+	Limit  int `json:"limit" jsonschema:"Max number of updates to retrieve (1-100)"`
 }
 
 func handleReadMessages(
 	ctx context.Context, token string, params *readMessagesParams,
 ) (*mcp.CallToolResult, any, error) {
-	payload := map[string]any{}
+	payload := map[string]any{
+		"timeout": 0, // always immediate; never long-poll inside a tool call
+	}
 	if params.Offset != 0 {
 		payload["offset"] = params.Offset
 	}
@@ -240,9 +231,6 @@ func handleReadMessages(
 		limit = 100
 	}
 	payload["limit"] = limit
-	if params.Timeout > 0 {
-		payload["timeout"] = params.Timeout
-	}
 
 	tgResp, err := callTelegram(ctx, token, "getUpdates", payload)
 	if err != nil {
@@ -298,75 +286,6 @@ func handleSendPhoto(
 	}
 
 	return textResult(fmt.Sprintf("Photo sent successfully. Response: %s", string(tgResp.Result)))
-}
-
-// list_chats
-
-type listChatsParams struct {
-	Limit int `json:"limit" jsonschema:"Max updates to scan for chats (default 100)"`
-}
-
-func handleListChats(
-	ctx context.Context, token string, params *listChatsParams,
-) (*mcp.CallToolResult, any, error) {
-	limit := params.Limit
-	if limit <= 0 || limit > 100 {
-		limit = 100
-	}
-
-	payload := map[string]any{
-		"limit": limit,
-	}
-
-	tgResp, err := callTelegram(ctx, token, "getUpdates", payload)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	// Parse updates to extract unique chats.
-	var updates []struct {
-		Message *struct {
-			Chat struct {
-				ID    int64  `json:"id"`
-				Type  string `json:"type"`
-				Title string `json:"title"`
-				First string `json:"first_name"`
-				Last  string `json:"last_name"`
-				User  string `json:"username"`
-			} `json:"chat"`
-		} `json:"message"`
-	}
-	if err := json.Unmarshal(tgResp.Result, &updates); err != nil {
-		return textResult(fmt.Sprintf("Raw updates: %s", string(tgResp.Result)))
-	}
-
-	seen := make(map[int64]bool)
-	chatLines := make([]string, 0, len(updates))
-	for _, u := range updates {
-		if u.Message == nil {
-			continue
-		}
-		c := u.Message.Chat
-		if seen[c.ID] {
-			continue
-		}
-		seen[c.ID] = true
-
-		name := c.Title
-		if name == "" {
-			name = strings.TrimSpace(c.First + " " + c.Last)
-		}
-		if name == "" {
-			name = c.User
-		}
-		chatLines = append(chatLines, fmt.Sprintf("- ID: %d, Type: %s, Name: %s", c.ID, c.Type, name))
-	}
-
-	if len(chatLines) == 0 {
-		return textResult("No chats found in recent updates.")
-	}
-
-	return textResult(fmt.Sprintf("Found %d unique chat(s):\n%s", len(chatLines), strings.Join(chatLines, "\n")))
 }
 
 // forward_message
