@@ -16,6 +16,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/integrations"
 	"github.com/shaharia-lab/agento/internal/integrations/confluence"
+	githubintegration "github.com/shaharia-lab/agento/internal/integrations/github"
 	"github.com/shaharia-lab/agento/internal/integrations/google"
 	"github.com/shaharia-lab/agento/internal/integrations/jira"
 	"github.com/shaharia-lab/agento/internal/integrations/telegram"
@@ -91,6 +92,8 @@ func validateIntegrationCredentials(cfg *config.IntegrationConfig) error {
 		return validateTelegramCredentials(cfg)
 	case "jira":
 		return validateJiraCredentials(cfg)
+	case "github":
+		return validateGitHubCredentials(cfg)
 	default:
 		if len(cfg.Credentials) == 0 {
 			return &ValidationError{Field: "credentials", Message: "credentials are required"}
@@ -166,6 +169,20 @@ func validateJiraCredentials(cfg *config.IntegrationConfig) error {
 	}
 	// Save normalized credentials back to the config so the stored value is canonical.
 	return cfg.SetCredentials(creds)
+}
+
+func validateGitHubCredentials(cfg *config.IntegrationConfig) error {
+	var creds config.GitHubCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		return &ValidationError{Field: "credentials", Message: "invalid github credentials: " + err.Error()}
+	}
+	if creds.AuthMode != "pat" {
+		return &ValidationError{Field: "credentials.auth_mode", Message: "only 'pat' auth mode is currently supported"}
+	}
+	if creds.PersonalAccessToken == "" {
+		return &ValidationError{Field: "credentials.personal_access_token", Message: "personal_access_token is required"}
+	}
+	return nil
 }
 
 func (s *integrationService) List(_ context.Context) ([]*config.IntegrationConfig, error) {
@@ -405,6 +422,8 @@ func (s *integrationService) ValidateTokenAuth(ctx context.Context, cfg *config.
 		return s.validateTelegramTokenAuth(ctx, cfg)
 	case "jira":
 		return s.validateJiraTokenAuth(ctx, cfg)
+	case "github":
+		return s.validateGitHubPATAuth(ctx, cfg)
 	default:
 		// For other types, validation is not yet implemented. Return nil (unvalidated).
 		return nil
@@ -486,6 +505,35 @@ func (s *integrationService) validateJiraTokenAuth(ctx context.Context, cfg *con
 	}
 
 	s.logger.Info("jira integration validated", "id", cfg.ID, "display_name", displayName)
+	s.reloadIntegration(cfg.ID)
+	return nil
+}
+
+func (s *integrationService) validateGitHubPATAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
+	if err := validateGitHubCredentials(cfg); err != nil {
+		return err
+	}
+
+	var creds config.GitHubCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		return &ValidationError{Field: "credentials", Message: "invalid github credentials: " + err.Error()}
+	}
+
+	username, err := githubintegration.ValidatePAT(ctx, creds.PersonalAccessToken)
+	if err != nil {
+		return &ValidationError{
+			Field:   "credentials.personal_access_token",
+			Message: "invalid personal access token: " + err.Error(),
+		}
+	}
+
+	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"username":%q}`, username))
+	cfg.UpdatedAt = time.Now().UTC()
+	if saveErr := s.store.Save(cfg); saveErr != nil {
+		return fmt.Errorf("saving validated integration: %w", saveErr)
+	}
+
+	s.logger.Info("github integration validated", "id", cfg.ID, "username", username)
 	s.reloadIntegration(cfg.ID)
 	return nil
 }

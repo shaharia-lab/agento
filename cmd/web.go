@@ -26,6 +26,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/eventbus"
 	"github.com/shaharia-lab/agento/internal/integrations"
 	confluenceintegration "github.com/shaharia-lab/agento/internal/integrations/confluence"
+	githubintegration "github.com/shaharia-lab/agento/internal/integrations/github"
 	googleintegration "github.com/shaharia-lab/agento/internal/integrations/google"
 	jiraintegration "github.com/shaharia-lab/agento/internal/integrations/jira"
 	telegramintegration "github.com/shaharia-lab/agento/internal/integrations/telegram"
@@ -184,6 +185,7 @@ func buildWebServer(
 	integrationRegistry.RegisterStarter("google", googleintegration.Start)
 	integrationRegistry.RegisterStarter("telegram", telegramintegration.Start)
 	integrationRegistry.RegisterStarter("jira", jiraintegration.Start)
+	integrationRegistry.RegisterStarter("github", githubintegration.Start)
 	if startErr := integrationRegistry.Start(ctx); startErr != nil {
 		sysLogger.Warn("some integrations failed to start", "error", startErr)
 	}
