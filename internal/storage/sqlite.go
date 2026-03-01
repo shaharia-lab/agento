@@ -165,6 +165,25 @@ CREATE INDEX idx_job_history_task ON job_history(task_id, started_at DESC);
 CREATE INDEX idx_job_history_started ON job_history(started_at DESC);
 `,
 	},
+	{
+		version: 4,
+		sql: `
+ALTER TABLE user_settings ADD COLUMN notification_settings TEXT NOT NULL DEFAULT '{}';
+ALTER TABLE user_settings ADD COLUMN event_bus_worker_pool_size INTEGER NOT NULL DEFAULT 3;
+
+CREATE TABLE notification_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT    NOT NULL,
+    provider   TEXT    NOT NULL,
+    subject    TEXT    NOT NULL DEFAULT '',
+    status     TEXT    NOT NULL DEFAULT 'sent',
+    error_msg  TEXT    NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL
+);
+
+CREATE INDEX idx_notification_log_created ON notification_log(created_at DESC);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

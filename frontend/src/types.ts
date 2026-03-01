@@ -40,6 +40,8 @@ export interface UserSettings {
   appearance_dark_mode?: boolean
   appearance_font_size?: number
   appearance_font_family?: string
+  notification_settings?: string
+  event_bus_worker_pool_size?: number
 }
 
 export interface SettingsResponse {
@@ -478,6 +480,43 @@ export interface ClaudeTodo {
 export interface ClaudeSessionDetail extends ClaudeSessionSummary {
   messages: ClaudeMessage[]
   todos: ClaudeTodo[]
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+export interface SMTPConfig {
+  host: string
+  port: number
+  username: string
+  password: string
+  from_address: string
+  to_addresses: string
+  encryption: 'none' | 'starttls' | 'ssl_tls'
+}
+
+export interface ScheduledTasksPreferences {
+  on_finished?: boolean // undefined/null → default enabled (true)
+  on_failed?: boolean // undefined/null → default enabled (true)
+}
+
+export interface NotificationPreferences {
+  scheduled_tasks?: ScheduledTasksPreferences
+}
+
+export interface NotificationSettings {
+  enabled: boolean
+  provider: SMTPConfig
+  preferences?: NotificationPreferences
+}
+
+export interface NotificationLogEntry {
+  id: number
+  event_type: string
+  provider: string
+  subject: string
+  status: 'sent' | 'failed'
+  error_msg: string
+  created_at: string
 }
 
 // ── Scheduled Tasks ──────────────────────────────────────────────────────────

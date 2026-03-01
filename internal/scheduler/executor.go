@@ -3,6 +3,7 @@ package scheduler
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/shaharia-lab/agento/internal/agent"
@@ -50,38 +51,53 @@ func (s *Scheduler) shouldAutoPause(task *storage.ScheduledTask) bool {
 	return false
 }
 
+// prepareTaskRun interpolates the prompt and creates the chat session and
+// initial job history record. On any failure it records the failed run,
+// publishes the failed event, and returns a non-nil error.
+func (s *Scheduler) prepareTaskRun(
+	task *storage.ScheduledTask, startedAt time.Time,
+) (prompt string, chatSession *storage.ChatSession, jh *storage.JobHistory, err error) {
+	prompt, err = agent.Interpolate(task.Prompt, nil)
+	if err != nil {
+		errMsg := fmt.Sprintf("prompt interpolation: %v", err)
+		s.logger.Error("failed to interpolate prompt", "task_id", task.ID, "error", err)
+		s.recordFailedRun(task, startedAt, "", errMsg)
+		s.publishTaskFailed(task, errMsg)
+		return "", nil, nil, err
+	}
+
+	chatSession, err = s.createTaskSession(task)
+	if err != nil {
+		errMsg := fmt.Sprintf("create session: %v", err)
+		s.logger.Error("failed to create chat session", "task_id", task.ID, "error", err)
+		s.recordFailedRun(task, startedAt, "", errMsg)
+		s.publishTaskFailed(task, errMsg)
+		return "", nil, nil, err
+	}
+
+	jh = s.createInitialJobHistory(task, startedAt, chatSession.ID, prompt)
+	return prompt, chatSession, jh, nil
+}
+
 // runTask performs the core task execution: prompt interpolation, session
 // creation, agent invocation, and result recording.
 func (s *Scheduler) runTask(task *storage.ScheduledTask) {
 	startedAt := time.Now().UTC()
 
-	prompt, err := agent.Interpolate(task.Prompt, nil)
+	prompt, chatSession, jh, err := s.prepareTaskRun(task, startedAt)
 	if err != nil {
-		s.logger.Error("failed to interpolate prompt",
-			"task_id", task.ID, "error", err)
-		s.recordFailedRun(task, startedAt, "",
-			fmt.Sprintf("prompt interpolation: %v", err))
 		return
 	}
-
-	chatSession, err := s.createTaskSession(task)
-	if err != nil {
-		s.logger.Error("failed to create chat session",
-			"task_id", task.ID, "error", err)
-		s.recordFailedRun(task, startedAt, "",
-			fmt.Sprintf("create session: %v", err))
-		return
-	}
-
-	jh := s.createInitialJobHistory(task, startedAt, chatSession.ID, prompt)
 
 	agentCfg, err := s.resolveAgentConfig(task)
 	if err != nil {
+		errMsg := fmt.Sprintf("resolve agent: %v", err)
 		s.logger.Error("failed to resolve agent config",
 			"task_id", task.ID, "error", err)
 		s.finishJobHistory(jh, startedAt, storage.JobStatusFailed,
-			fmt.Sprintf("resolve agent: %v", err), agent.UsageStats{})
+			errMsg, agent.UsageStats{})
 		s.updateTaskAfterRun(task, startedAt, "failed")
+		s.publishTaskFailed(task, errMsg)
 		return
 	}
 
@@ -98,6 +114,7 @@ func (s *Scheduler) runTask(task *storage.ScheduledTask) {
 		s.finishJobHistory(jh, startedAt, storage.JobStatusFailed,
 			err.Error(), agent.UsageStats{})
 		s.updateTaskAfterRun(task, startedAt, "failed")
+		s.publishTaskFailed(task, err.Error())
 		return
 	}
 
@@ -106,10 +123,11 @@ func (s *Scheduler) runTask(task *storage.ScheduledTask) {
 		jh, startedAt, storage.JobStatusSuccess, "", result.Usage,
 	)
 	s.updateTaskAfterRun(task, startedAt, "success")
+	s.publishTaskFinished(task, jh, chatSession.ID)
 
 	s.logger.Info("task execution completed",
 		"task_id", task.ID, "task_name", task.Name,
-		"session_id", chatSession.ID, "run_count", task.RunCount+1)
+		"session_id", chatSession.ID, "run_count", task.RunCount)
 }
 
 // createTaskSession creates a chat session for the task execution.
@@ -304,4 +322,40 @@ func (s *Scheduler) autoPause(task *storage.ScheduledTask, reason string) {
 		s.logger.Error("failed to auto-pause task", "task_id", task.ID, "error", err)
 	}
 	s.UnscheduleTask(task.ID)
+}
+
+// publishTaskFinished publishes a task-finished event with execution details.
+func (s *Scheduler) publishTaskFinished(
+	task *storage.ScheduledTask, jh *storage.JobHistory, chatSessionID string,
+) {
+	if s.cfg.EventPublisher == nil {
+		return
+	}
+	s.cfg.EventPublisher.Publish(EventTaskFinished, map[string]string{
+		"Task ID":          task.ID,
+		"Task Name":        task.Name,
+		"Task Description": task.Description,
+		"Agent":            task.AgentSlug,
+		"Status":           "Completed successfully",
+		"Duration":         strconv.FormatInt(jh.DurationMS, 10) + " ms",
+		"Run Count":        strconv.Itoa(task.RunCount),
+		"Model":            jh.Model,
+		"Chat Session ID":  chatSessionID,
+	})
+}
+
+// publishTaskFailed publishes a task-failed event with the error details.
+func (s *Scheduler) publishTaskFailed(task *storage.ScheduledTask, errMsg string) {
+	if s.cfg.EventPublisher == nil {
+		return
+	}
+	s.cfg.EventPublisher.Publish(EventTaskFailed, map[string]string{
+		"Task ID":          task.ID,
+		"Task Name":        task.Name,
+		"Task Description": task.Description,
+		"Agent":            task.AgentSlug,
+		"Status":           "Failed",
+		"Error":            errMsg,
+		"Run Count":        strconv.Itoa(task.RunCount),
+	})
 }

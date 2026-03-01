@@ -15,6 +15,7 @@ require (
 	github.com/shaharia-lab/claude-agent-sdk-go v0.2.0
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
+	github.com/wneessen/go-mail v0.7.2
 	golang.org/x/oauth2 v0.35.0
 	google.golang.org/api v0.269.0
 	gopkg.in/yaml.v3 v3.0.1

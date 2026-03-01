@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
@@ -22,9 +23,11 @@ import (
 	"github.com/shaharia-lab/agento/internal/build"
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/eventbus"
 	"github.com/shaharia-lab/agento/internal/integrations"
 	googleintegration "github.com/shaharia-lab/agento/internal/integrations/google"
 	"github.com/shaharia-lab/agento/internal/logger"
+	"github.com/shaharia-lab/agento/internal/notification"
 	"github.com/shaharia-lab/agento/internal/scheduler"
 	"github.com/shaharia-lab/agento/internal/server"
 	"github.com/shaharia-lab/agento/internal/service"
@@ -52,8 +55,9 @@ embedded React UI. Open http://localhost:<port> in your browser.`,
 			logFile := filepath.Join(cfg.LogDir(), "system.log")
 			printBanner(build.Version, serverURL, logFile)
 
-			if runWeb(cfg, noBrowser) != nil {
-				fmt.Fprintf(os.Stderr, "An error occurred. Please check the logs at: %s\n", logFile)
+			if err := runWeb(cfg, noBrowser); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Check logs at: %s\n", logFile)
 				os.Exit(1)
 			}
 			return nil
@@ -95,6 +99,7 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 
 	srv, err := buildWebServer(ctx, cfg, db, sysLogger)
 	if err != nil {
+		sysLogger.Error("startup failed", "error", err)
 		return err
 	}
 
@@ -183,27 +188,105 @@ func buildWebServer(
 		return nil, fmt.Errorf("initializing settings: %w", err)
 	}
 
+	apiSrv, bus, err := buildAPIServer(ctx, db, sysLogger,
+		agentStore, chatStore, integrationStore, integrationRegistry,
+		mcpRegistry, localToolsMCP, settingsMgr,
+	)
+	if err != nil {
+		return nil, err
+	}
+	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger)
+
+	// Ensure the event bus is drained cleanly on shutdown.
+	go func() {
+		<-ctx.Done()
+		bus.Close()
+	}()
+
+	return srv, nil
+}
+
+// buildAPIServer wires all services and returns the api.Server and the event bus.
+func buildAPIServer(
+	ctx context.Context,
+	db *sql.DB,
+	sysLogger *slog.Logger,
+	agentStore storage.AgentStore,
+	chatStore storage.ChatStore,
+	integrationStore storage.IntegrationStore,
+	integrationRegistry *integrations.IntegrationRegistry,
+	mcpRegistry *config.MCPRegistry,
+	localToolsMCP *tools.LocalMCPConfig,
+	settingsMgr *config.SettingsManager,
+) (*api.Server, eventbus.EventBus, error) {
+	notifStore, bus := setupNotifications(db, settingsMgr)
+
 	agentSvc := service.NewAgentService(agentStore, sysLogger)
 	chatSvc := service.NewChatService(
 		chatStore, agentStore, mcpRegistry, localToolsMCP,
 		integrationRegistry, settingsMgr, sysLogger,
 	)
 	integrationSvc := service.NewIntegrationService(integrationStore, integrationRegistry, sysLogger, ctx)
+	notificationSvc := service.NewNotificationService(settingsMgr, notifStore)
 
 	taskStore := storage.NewSQLiteTaskStore(db)
 	taskSvc := service.NewTaskService(taskStore, sysLogger)
 
 	taskScheduler, err := initTaskScheduler(ctx, taskStore, chatStore, agentStore,
-		mcpRegistry, localToolsMCP, integrationRegistry, settingsMgr, sysLogger)
+		mcpRegistry, localToolsMCP, integrationRegistry, settingsMgr, sysLogger, bus)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	sessionCache := claudesessions.NewCache(db, sysLogger)
 	sessionCache.StartBackgroundScan()
 
-	apiSrv := api.New(agentSvc, chatSvc, integrationSvc, taskSvc, settingsMgr, sysLogger, sessionCache, taskScheduler)
-	return server.New(apiSrv, WebFS, cfg.Port, sysLogger), nil
+	apiSrv := api.New(
+		agentSvc, chatSvc, integrationSvc, notificationSvc, taskSvc,
+		settingsMgr, sysLogger, sessionCache, taskScheduler,
+	)
+	return apiSrv, bus, nil
+}
+
+// setupNotifications creates the notification store, event bus, and wires the
+// notification handler as a subscriber. The bus is returned so the caller can
+// close it on shutdown.
+func setupNotifications(
+	db *sql.DB,
+	settingsMgr *config.SettingsManager,
+) (storage.NotificationStore, eventbus.EventBus) {
+	workerPoolSize := settingsMgr.Get().EventBusWorkerPoolSize
+	if workerPoolSize <= 0 {
+		workerPoolSize = 3
+	}
+
+	bus := eventbus.New(workerPoolSize)
+	notifStore := storage.NewSQLiteNotificationStore(db)
+	notifHandler := notification.NewNotificationHandler(
+		func() (*notification.NotificationSettings, error) {
+			us := settingsMgr.Get()
+			return loadNotificationSettingsFromJSON(us.NotificationSettings)
+		},
+		notifStore,
+	)
+	bus.Subscribe(func(e eventbus.Event) {
+		notifHandler.Handle(e.Type, e.Payload)
+	})
+	return notifStore, bus
+}
+
+// loadNotificationSettingsFromJSON parses the JSON-encoded notification settings stored
+// in the user_settings row. It is passed as a SettingsLoader to NewNotificationHandler
+// so that configuration changes take effect without a server restart.
+func loadNotificationSettingsFromJSON(raw string) (*notification.NotificationSettings, error) {
+	if raw == "" || raw == "{}" {
+		return &notification.NotificationSettings{}, nil
+	}
+	var ns notification.NotificationSettings
+	if err := json.Unmarshal([]byte(raw), &ns); err != nil {
+		return nil, fmt.Errorf("parsing notification settings: %w", err)
+	}
+	return &ns, nil
 }
 
 func initTaskScheduler(
@@ -212,6 +295,7 @@ func initTaskScheduler(
 	mcpRegistry *config.MCPRegistry, localMCP *tools.LocalMCPConfig,
 	integrationRegistry *integrations.IntegrationRegistry,
 	settingsMgr *config.SettingsManager, sysLogger *slog.Logger,
+	eventPublisher scheduler.EventPublisher,
 ) (*scheduler.Scheduler, error) {
 	taskScheduler, err := scheduler.New(scheduler.Config{
 		TaskStore:           taskStore,
@@ -222,6 +306,7 @@ func initTaskScheduler(
 		IntegrationRegistry: integrationRegistry,
 		SettingsManager:     settingsMgr,
 		Logger:              sysLogger,
+		EventPublisher:      eventPublisher,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating task scheduler: %w", err)
