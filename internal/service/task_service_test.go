@@ -414,23 +414,22 @@ func TestGetJobHistory_NotFound(t *testing.T) {
 // Validation
 // ---------------------------------------------------------------------------
 
-func TestValidateTask_EmptyScheduleTypeDefaultsToOneOff(t *testing.T) {
+func TestValidateTask_EmptyScheduleTypeDefaultsToRunImmediately(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
 	repo.On("CreateTask", mock.MatchedBy(func(task *storage.ScheduledTask) bool {
-		return task.ScheduleType == storage.ScheduleOneOff
+		return task.ScheduleType == storage.ScheduleRunImmediately
 	})).Return(nil)
 
 	svc := newTestTaskService(repo)
 	task := &storage.ScheduledTask{
-		Name:           "Test",
-		Prompt:         "Do something",
-		ScheduleType:   "", // empty
-		ScheduleConfig: storage.ScheduleConfig{RunAt: "2026-03-01T10:00:00Z"},
+		Name:         "Test",
+		Prompt:       "Do something",
+		ScheduleType: "", // empty — should default to run_immediately
 	}
 	_, err := svc.CreateTask(context.Background(), task)
 
 	require.NoError(t, err)
-	assert.Equal(t, storage.ScheduleOneOff, task.ScheduleType)
+	assert.Equal(t, storage.ScheduleRunImmediately, task.ScheduleType)
 	repo.AssertExpectations(t)
 }
 

@@ -10,9 +10,10 @@ type ScheduleType string
 
 // Schedule type constants for task scheduling.
 const (
-	ScheduleOneOff   ScheduleType = "one_off"
-	ScheduleInterval ScheduleType = "interval"
-	ScheduleCron     ScheduleType = "cron"
+	ScheduleRunImmediately ScheduleType = "run_immediately"
+	ScheduleOneOff         ScheduleType = "one_off"
+	ScheduleInterval       ScheduleType = "interval"
+	ScheduleCron           ScheduleType = "cron"
 )
 
 // TaskStatus defines the lifecycle state of a scheduled task.

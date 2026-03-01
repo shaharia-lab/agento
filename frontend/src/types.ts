@@ -548,7 +548,7 @@ export interface NotificationLogEntry {
 
 // ── Scheduled Tasks ──────────────────────────────────────────────────────────
 
-export type ScheduleType = 'one_off' | 'interval' | 'cron'
+export type ScheduleType = 'run_immediately' | 'one_off' | 'interval' | 'cron'
 export type TaskStatus = 'active' | 'paused'
 export type JobStatus = 'running' | 'success' | 'failed'
 
