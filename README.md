@@ -1,12 +1,14 @@
 # Agento
 
+<img width="1820" height="922" alt="carbon (4)" src="https://github.com/user-attachments/assets/62ce9188-2aeb-4ec3-847c-3b50346d0adb" />
+
 **Agento** is a local platform for building and interacting with AI agents through a web UI and CLI. It runs on top of the [Claude Code CLI](https://claude.ai/code) already installed on your machine — no separate API key or cloud account needed.
 
 You can define agents with custom system prompts and tools, start multi-turn conversations with them, and manage everything from a browser or directly from your terminal.
 
 ---
 
-## Features
+## ✨ Features
 
 - **Web UI + CLI** — Access agents from a browser or run one-shot queries from the terminal
 - **Agent builder** — Define agents with custom system prompts, models, thinking modes, and tools via the UI or YAML
@@ -22,7 +24,13 @@ You can define agents with custom system prompts and tools, start multi-turn con
 
 ---
 
-## Requirements
+## 🎬 Demo
+
+[demo.webm](https://github.com/user-attachments/assets/1fa2b716-cbb8-459e-b2e1-f6c252c086c2)
+
+---
+
+## 📋 Requirements
 
 - [Claude Code CLI](https://claude.ai/code) installed and authenticated on your machine
 - Go 1.25+ and Node.js *(only required when building from source)*
@@ -31,7 +39,7 @@ No Anthropic API key is required. Agento uses the Claude Code CLI's existing aut
 
 ---
 
-## Installation
+## 📦 Installation
 
 ### Download binary
 
@@ -72,7 +80,7 @@ This produces an `agento` binary in the project root.
 
 ---
 
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
 agento web
@@ -92,7 +100,7 @@ agento web --port 3000
 
 ---
 
-## Configuration
+## ⚙️ Configuration
 
 No configuration is required. Agento works out of the box using your local Claude Code setup.
 
@@ -115,7 +123,7 @@ Set `LOG_LEVEL=debug` to include HTTP request logs.
 
 ---
 
-## Agents
+## 🤖 Agents
 
 Agents are specialized assistants with a custom system prompt, model, and set of tools. You create and manage them from the **Agents** page in the UI, then chat with them from the **Chats** page.
 
@@ -166,7 +174,7 @@ capabilities:
 
 ---
 
-## MCP Registry
+## 🔌 MCP Registry
 
 To connect external MCP servers, create `~/.agento/mcps.yaml`:
 
@@ -198,7 +206,7 @@ Use `${ENV:VAR_NAME}` to reference environment variables in the config. Supporte
 
 ---
 
-## CLI Usage
+## 💻 CLI Usage
 
 ### ask
 
@@ -221,12 +229,12 @@ agento update --yes  # skip confirmation
 
 ---
 
-## Development
+## 🛠️ Development
 
 For architecture overview, local development setup, and contribution guidelines, see the [developer documentation](docs/).
 
 ---
 
-## License
+## 📄 License
 
 MIT. Maintained by [Shaharia Lab](https://github.com/shaharia-lab).

@@ -426,7 +426,7 @@ func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool,
 		return nil, err
 	}
 
-	var tools []AvailableTool
+	tools := make([]AvailableTool, 0)
 	for _, cfg := range cfgs {
 		if !cfg.Enabled || !cfg.IsAuthenticated() {
 			continue
