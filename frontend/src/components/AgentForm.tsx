@@ -148,7 +148,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
   useEffect(() => {
     integrationsApi
       .availableTools()
-      .then(setAvailableTools)
+      .then(tools => setAvailableTools(tools ?? []))
       .catch(() => {})
   }, [])
 
