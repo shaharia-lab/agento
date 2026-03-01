@@ -400,20 +400,18 @@ export default function ChatSessionPage() {
           )}
 
           {/* Typing indicator — only when no content has arrived yet */}
-          {streaming &&
-            streamingBlocks.length === 0 &&
-            !systemStatus && (
-              <div className="flex gap-3 items-center">
-                <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 shrink-0">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-white" />
-                </div>
-                <div className="flex items-center gap-1">
-                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:0ms]" />
-                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:150ms]" />
-                  <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:300ms]" />
-                </div>
+          {streaming && streamingBlocks.length === 0 && !systemStatus && (
+            <div className="flex gap-3 items-center">
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 shrink-0">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-white" />
               </div>
-            )}
+              <div className="flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:0ms]" />
+                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:150ms]" />
+                <span className="h-1.5 w-1.5 rounded-full bg-zinc-300 animate-bounce [animation-delay:300ms]" />
+              </div>
+            </div>
+          )}
 
           {/* Permission request dialog — shown when agent needs approval to use a tool */}
           {streaming && permissionRequest && id && (

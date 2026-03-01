@@ -162,13 +162,7 @@ describe('streaming block ordering (integration)', () => {
     // Then more text
     blocks = applyTextDelta(blocks, 'Both files look good.')
 
-    expect(blocks.map(b => b.type)).toEqual([
-      'thinking',
-      'text',
-      'tool_use',
-      'tool_use',
-      'text',
-    ])
+    expect(blocks.map(b => b.type)).toEqual(['thinking', 'text', 'tool_use', 'tool_use', 'text'])
 
     // Verify thinking was accumulated correctly
     const thinking = blocks[0]
@@ -209,9 +203,7 @@ describe('streaming block ordering (integration)', () => {
   it('text deltas after a tool create a new separate text block', () => {
     let blocks: MessageBlock[] = []
     blocks = applyTextDelta(blocks, 'before')
-    blocks = applyToolUseBlocks(blocks, [
-      { type: 'tool_use', id: 't1', name: 'Read', input: {} },
-    ])
+    blocks = applyToolUseBlocks(blocks, [{ type: 'tool_use', id: 't1', name: 'Read', input: {} }])
     blocks = applyTextDelta(blocks, 'after')
 
     // Must be 3 separate blocks, not 2 (text must not merge across a tool_use)
