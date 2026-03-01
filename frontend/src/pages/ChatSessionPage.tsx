@@ -166,7 +166,7 @@ export default function ChatSessionPage() {
                     ? event.errors.join('; ')
                     : (event.result ?? 'Unknown error')
                 setError(errMsg)
-                setStreamingText('')
+                setStreamingBlocks([])
                 return
               }
               // Build a rich message with ordered blocks so the render
