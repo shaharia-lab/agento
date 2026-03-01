@@ -150,7 +150,7 @@ func (s *Server) handleValidateAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if valErr := s.integrationSvc.ValidateTokenAuth(r.Context(), cfg); valErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "validated": true, "error": valErr.Error()})
+		writeJSON(w, http.StatusBadRequest, map[string]any{"valid": false, "validated": true, "error": valErr.Error()})
 		return
 	}
 

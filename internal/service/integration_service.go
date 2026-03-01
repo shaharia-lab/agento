@@ -334,7 +334,7 @@ func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool,
 // ValidateTokenAuth validates token-based authentication for an integration.
 // For supported types (e.g. Telegram), it calls the service's API to verify the token.
 // On success it marks the integration as authenticated, saves it, and reloads its MCP server.
-func (s *integrationService) ValidateTokenAuth(_ context.Context, cfg *config.IntegrationConfig) error {
+func (s *integrationService) ValidateTokenAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
 	switch cfg.Type {
 	case "telegram":
 		var creds config.TelegramCredentials
@@ -345,7 +345,7 @@ func (s *integrationService) ValidateTokenAuth(_ context.Context, cfg *config.In
 			return &ValidationError{Field: "credentials.bot_token", Message: "bot_token is required"}
 		}
 
-		username, err := telegram.ValidateBotToken(creds.BotToken)
+		username, err := telegram.ValidateBotToken(ctx, creds.BotToken)
 		if err != nil {
 			return &ValidationError{Field: "credentials.bot_token", Message: "invalid bot token: " + err.Error()}
 		}

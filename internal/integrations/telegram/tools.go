@@ -12,9 +12,13 @@ import (
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// apiBaseURL is the base URL for the Telegram Bot API.
+// It is a variable so tests can point it at a local httptest server.
+var apiBaseURL = "https://api.telegram.org"
+
 // apiURL builds the full Telegram Bot API endpoint URL.
 func apiURL(token, method string) string {
-	return fmt.Sprintf("https://api.telegram.org/bot%s/%s", token, method)
+	return fmt.Sprintf("%s/bot%s/%s", apiBaseURL, token, method)
 }
 
 // callTelegram makes a POST request to the Telegram Bot API and returns the parsed response.
@@ -32,13 +36,13 @@ func callTelegram(ctx context.Context, token, method string, payload any) (*tele
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := telegramHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling Telegram %s: %w", method, err)
+		return nil, fmt.Errorf("calling Telegram %s: request failed", method)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -528,6 +532,10 @@ type createPollParams struct {
 func handleCreatePoll(
 	ctx context.Context, token string, params *createPollParams,
 ) (*mcp.CallToolResult, any, error) {
+	if len(params.Options) < 2 || len(params.Options) > 10 {
+		return nil, nil, fmt.Errorf("poll requires 2-10 options, got %d", len(params.Options))
+	}
+
 	payload := map[string]any{
 		"chat_id":  params.ChatID,
 		"question": params.Question,

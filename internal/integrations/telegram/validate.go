@@ -1,11 +1,16 @@
 package telegram
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 )
+
+// telegramHTTPClient is used for all outgoing Telegram API requests.
+var telegramHTTPClient = &http.Client{Timeout: 60 * time.Second}
 
 // telegramResponse wraps the standard Telegram Bot API response envelope.
 type telegramResponse struct {
@@ -24,16 +29,19 @@ type botUser struct {
 
 // ValidateBotToken calls the Telegram getMe API to verify a bot token is valid.
 // On success it returns the bot's username.
-func ValidateBotToken(token string) (string, error) {
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/getMe", token)
-
-	resp, err := http.Get(url) //nolint:gosec,noctx // validation-only call with user-provided token
+func ValidateBotToken(ctx context.Context, token string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL(token, "getMe"), nil)
 	if err != nil {
-		return "", fmt.Errorf("calling Telegram getMe: %w", err)
+		return "", fmt.Errorf("creating Telegram getMe request: %w", err)
+	}
+
+	resp, err := telegramHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("calling Telegram getMe: request failed")
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
 	if err != nil {
 		return "", fmt.Errorf("reading Telegram response: %w", err)
 	}

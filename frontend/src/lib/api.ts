@@ -366,7 +366,10 @@ export const integrationsApi = {
     request<{ authenticated: boolean }>(`/integrations/${id}/auth/status`),
 
   validateAuth: (id: string) =>
-    request<{ valid: boolean }>(`/integrations/${id}/auth/validate`, { method: 'POST' }),
+    request<{ valid: boolean; validated?: boolean; error?: string }>(
+      `/integrations/${id}/auth/validate`,
+      { method: 'POST' },
+    ),
 
   availableTools: () => request<AvailableTool[]>('/integrations/available-tools'),
 }
