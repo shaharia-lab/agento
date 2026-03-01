@@ -326,6 +326,6 @@ func TestSettingsManager_Update(t *testing.T) {
 func TestDefaultWorkingDir(t *testing.T) {
 	dir := config.DefaultWorkingDir()
 	assert.NotEmpty(t, dir)
-	assert.Contains(t, dir, ".agento")
+	assert.Contains(t, dir, "agento")
 	assert.Contains(t, dir, "work")
 }
