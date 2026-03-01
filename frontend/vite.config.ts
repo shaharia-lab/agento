@@ -21,4 +21,7 @@ export default defineConfig({
       '/health': 'http://localhost:8990',
     },
   },
+  test: {
+    include: ['src/**/*.test.ts'],
+  },
 })
