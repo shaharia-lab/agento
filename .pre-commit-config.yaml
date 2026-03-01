@@ -47,3 +47,11 @@ repos:
         entry: sh -c 'cd frontend && npm run typecheck'
         files: ^frontend/src/.*\.(ts|tsx)$
         pass_filenames: false
+
+      # ── Frontend — Production build ──────────────────────────────────────────
+      - id: frontend-build
+        name: Frontend build
+        language: node
+        entry: sh -c 'cd frontend && npm run build'
+        files: ^frontend/src/.*\.(ts|tsx|css)$
+        pass_filenames: false
