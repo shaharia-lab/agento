@@ -516,23 +516,28 @@ function MessageBubble({ message }: Readonly<{ message: ChatMessage }>) {
   const [copied, setCopied] = useState(false)
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(message.content).then(() => {
-      setCopied(true)
-      setTimeout(() => setCopied(false), 2000)
-    })
+    navigator.clipboard
+      .writeText(message.content)
+      .then(() => {
+        setCopied(true)
+        setTimeout(() => setCopied(false), 2000)
+      })
+      .catch(() => {
+        // Clipboard write failed (e.g. no permission, document not focused)
+      })
   }
 
   if (isUser) {
     return (
       <div className="flex justify-end group">
-        <div className="relative">
-          <div className="bg-zinc-900 text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm max-w-[85%] sm:max-w-[75%] whitespace-pre-wrap break-words leading-relaxed">
+        <div className="relative max-w-[85%] sm:max-w-[75%]">
+          <div className="bg-zinc-900 text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-sm whitespace-pre-wrap break-words leading-relaxed">
             {message.content}
           </div>
           <button
             onClick={handleCopy}
             title="Copy message"
-            className="absolute -left-8 top-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+            className="absolute -left-8 top-2 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity p-1 rounded text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
           >
             {copied ? (
               <Check className="h-3.5 w-3.5 text-emerald-500" />
@@ -557,7 +562,7 @@ function MessageBubble({ message }: Readonly<{ message: ChatMessage }>) {
         <button
           onClick={handleCopy}
           title="Copy message"
-          className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity p-1 rounded text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
+          className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity p-1 rounded text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300"
         >
           {copied ? (
             <Check className="h-3.5 w-3.5 text-emerald-500" />
