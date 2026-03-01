@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -13,6 +14,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/integrations"
 	"github.com/shaharia-lab/agento/internal/integrations/google"
+	"github.com/shaharia-lab/agento/internal/integrations/telegram"
 	"github.com/shaharia-lab/agento/internal/storage"
 )
 
@@ -74,6 +76,36 @@ func NewIntegrationService(
 	}
 }
 
+// validateIntegrationCredentials performs type-specific credential validation.
+func validateIntegrationCredentials(cfg *config.IntegrationConfig) error {
+	switch cfg.Type {
+	case "google":
+		var creds config.GoogleCredentials
+		if err := cfg.ParseCredentials(&creds); err != nil {
+			return &ValidationError{Field: "credentials", Message: "invalid google credentials: " + err.Error()}
+		}
+		if creds.ClientID == "" {
+			return &ValidationError{Field: "credentials.client_id", Message: "client_id is required"}
+		}
+		if creds.ClientSecret == "" {
+			return &ValidationError{Field: "credentials.client_secret", Message: "client_secret is required"}
+		}
+	case "telegram":
+		var creds config.TelegramCredentials
+		if err := cfg.ParseCredentials(&creds); err != nil {
+			return &ValidationError{Field: "credentials", Message: "invalid telegram credentials: " + err.Error()}
+		}
+		if creds.BotToken == "" {
+			return &ValidationError{Field: "credentials.bot_token", Message: "bot_token is required"}
+		}
+	default:
+		if len(cfg.Credentials) == 0 {
+			return &ValidationError{Field: "credentials", Message: "credentials are required"}
+		}
+	}
+	return nil
+}
+
 func (s *integrationService) List(_ context.Context) ([]*config.IntegrationConfig, error) {
 	return s.store.List()
 }
@@ -99,24 +131,8 @@ func (s *integrationService) Create(
 		return nil, &ValidationError{Field: "type", Message: "type is required"}
 	}
 
-	// Type-dispatched credential validation.
-	switch cfg.Type {
-	case "google":
-		var creds config.GoogleCredentials
-		if err := cfg.ParseCredentials(&creds); err != nil {
-			return nil, &ValidationError{Field: "credentials", Message: "invalid google credentials: " + err.Error()}
-		}
-		if creds.ClientID == "" {
-			return nil, &ValidationError{Field: "credentials.client_id", Message: "client_id is required"}
-		}
-		if creds.ClientSecret == "" {
-			return nil, &ValidationError{Field: "credentials.client_secret", Message: "client_secret is required"}
-		}
-	default:
-		// For other types, just ensure credentials are present.
-		if len(cfg.Credentials) == 0 {
-			return nil, &ValidationError{Field: "credentials", Message: "credentials are required"}
-		}
+	if err := validateIntegrationCredentials(cfg); err != nil {
+		return nil, err
 	}
 
 	if cfg.ID == "" {
@@ -316,9 +332,44 @@ func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool,
 }
 
 // ValidateTokenAuth validates token-based authentication for an integration.
-// TODO: implement per-type validation by calling the integration's API (e.g. Telegram getMe,
-// Jira /rest/api/3/myself, GitHub /user). Until each type is implemented, this returns nil
-// (unvalidated) rather than claiming the token is valid.
-func (s *integrationService) ValidateTokenAuth(_ context.Context, _ *config.IntegrationConfig) error {
-	return nil
+// For supported types (e.g. Telegram), it calls the service's API to verify the token.
+// On success it marks the integration as authenticated, saves it, and reloads its MCP server.
+func (s *integrationService) ValidateTokenAuth(_ context.Context, cfg *config.IntegrationConfig) error {
+	switch cfg.Type {
+	case "telegram":
+		var creds config.TelegramCredentials
+		if err := cfg.ParseCredentials(&creds); err != nil {
+			return &ValidationError{Field: "credentials", Message: "invalid telegram credentials: " + err.Error()}
+		}
+		if creds.BotToken == "" {
+			return &ValidationError{Field: "credentials.bot_token", Message: "bot_token is required"}
+		}
+
+		username, err := telegram.ValidateBotToken(creds.BotToken)
+		if err != nil {
+			return &ValidationError{Field: "credentials.bot_token", Message: "invalid bot token: " + err.Error()}
+		}
+
+		// Mark as authenticated.
+		cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"bot_username":%q}`, username))
+		cfg.UpdatedAt = time.Now().UTC()
+		if saveErr := s.store.Save(cfg); saveErr != nil {
+			return fmt.Errorf("saving validated integration: %w", saveErr)
+		}
+
+		s.logger.Info("telegram bot validated", "id", cfg.ID, "username", username)
+
+		// Start/reload the MCP server for this integration.
+		go func() {
+			if reloadErr := s.registry.Reload(s.parentCtx, cfg.ID); reloadErr != nil {
+				s.logger.Warn("failed to start integration server after validation", "id", cfg.ID, "error", reloadErr)
+			}
+		}()
+
+		return nil
+
+	default:
+		// For other types, validation is not yet implemented. Return nil (unvalidated).
+		return nil
+	}
 }

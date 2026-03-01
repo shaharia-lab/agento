@@ -26,6 +26,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/eventbus"
 	"github.com/shaharia-lab/agento/internal/integrations"
 	googleintegration "github.com/shaharia-lab/agento/internal/integrations/google"
+	telegramintegration "github.com/shaharia-lab/agento/internal/integrations/telegram"
 	"github.com/shaharia-lab/agento/internal/logger"
 	"github.com/shaharia-lab/agento/internal/notification"
 	"github.com/shaharia-lab/agento/internal/scheduler"
@@ -178,6 +179,7 @@ func buildWebServer(
 	integrationStore := storage.NewSQLiteIntegrationStore(db)
 	integrationRegistry := integrations.NewRegistry(integrationStore, sysLogger)
 	integrationRegistry.RegisterStarter("google", googleintegration.Start)
+	integrationRegistry.RegisterStarter("telegram", telegramintegration.Start)
 	if startErr := integrationRegistry.Start(ctx); startErr != nil {
 		sysLogger.Warn("some integrations failed to start", "error", startErr)
 	}

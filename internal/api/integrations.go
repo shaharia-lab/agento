@@ -150,11 +150,14 @@ func (s *Server) handleValidateAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if valErr := s.integrationSvc.ValidateTokenAuth(r.Context(), cfg); valErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "validated": false, "error": valErr.Error()})
+		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "validated": true, "error": valErr.Error()})
 		return
 	}
-	// "validated: false" indicates the validation was not performed (stub), not that it succeeded.
-	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "validated": false})
+
+	// For types with real validation (e.g. telegram), the token has been verified.
+	// For types without validation, this is a no-op success.
+	validated := cfg.Type == "telegram"
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "validated": validated})
 }
 
 // scrubIntegration returns a map representation of the integration with secrets removed.
