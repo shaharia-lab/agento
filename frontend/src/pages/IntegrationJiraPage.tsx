@@ -46,7 +46,7 @@ export default function IntegrationJiraPage() {
     try {
       const payload = {
         name,
-        type: 'jira',
+        type: 'jira' as const,
         enabled: true,
         credentials: { site_url: siteUrl, email, api_token: apiToken },
         services,
