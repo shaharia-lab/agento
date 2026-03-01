@@ -7,15 +7,26 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-const githubAPIBase = "https://api.github.com"
+// githubAPIBase is the root URL for the GitHub REST API.
+// Exposed as a variable so tests can redirect requests to a local server.
+var githubAPIBase = "https://api.github.com"
 
 // ghHTTPClient is used for all outgoing GitHub API requests.
 var ghHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
+// ghNoRedirectClient does not follow redirects — used to capture 302 Location headers.
+var ghNoRedirectClient = &http.Client{
+	Timeout: 15 * time.Second,
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // client holds GitHub API credentials and performs authenticated requests.
 type client struct {
@@ -62,6 +73,7 @@ func (c *client) call(ctx context.Context, method, path string, body any) (json.
 }
 
 // callRaw makes a request to the GitHub REST API and returns raw bytes (for non-JSON responses).
+// The response body is limited to 10MB to accommodate large PR diffs.
 func (c *client) callRaw(ctx context.Context, method, path, accept string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, githubAPIBase+path, nil)
 	if err != nil {
@@ -76,7 +88,8 @@ func (c *client) callRaw(ctx context.Context, method, path, accept string) ([]by
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 2*1024*1024))
+	const maxDiffBytes = 10 * 1024 * 1024 // 10 MB
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxDiffBytes))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -88,34 +101,43 @@ func (c *client) callRaw(ctx context.Context, method, path, accept string) ([]by
 	return respBody, nil
 }
 
+// getRedirectURL makes a request that expects a redirect and returns the Location URL.
+// This is used for endpoints like /actions/runs/{id}/logs that return a 302 to a download URL.
+func (c *client) getRedirectURL(ctx context.Context, path string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPIBase+path, nil)
+	if err != nil {
+		return "", fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := ghNoRedirectClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("calling GitHub GET %s: request failed", path)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
+		loc := resp.Header.Get("Location")
+		if loc == "" {
+			return "", fmt.Errorf("redirect response missing Location header")
+		}
+		return loc, nil
+	}
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512)) //nolint:errcheck
+	return "", fmt.Errorf("github API error: status %d: %s", resp.StatusCode, string(body))
+}
+
 // splitCSV splits a comma-separated string into a slice of trimmed, non-empty strings.
 func splitCSV(s string) []string {
 	var result []string
-	start := 0
-	for i := 0; i < len(s); i++ {
-		if s[i] == ',' {
-			part := trimSpaces(s[start:i])
-			if part != "" {
-				result = append(result, part)
-			}
-			start = i + 1
+	for _, part := range strings.Split(s, ",") {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			result = append(result, trimmed)
 		}
 	}
-	if part := trimSpaces(s[start:]); part != "" {
-		result = append(result, part)
-	}
 	return result
-}
-
-func trimSpaces(s string) string {
-	i, j := 0, len(s)
-	for i < j && s[i] == ' ' {
-		i++
-	}
-	for j > i && s[j-1] == ' ' {
-		j--
-	}
-	return s[i:j]
 }
 
 // textResult is a helper that wraps a string in an MCP CallToolResult.

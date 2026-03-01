@@ -6,11 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 )
-
-// authHTTPClient is used for credential validation requests.
-var authHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 // userResponse represents the result of the GitHub /user API call.
 type userResponse struct {
@@ -27,7 +23,7 @@ func ValidatePAT(ctx context.Context, token string) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-	resp, err := authHTTPClient.Do(req)
+	resp, err := ghHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("calling GitHub /user: request failed")
 	}

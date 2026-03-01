@@ -2,6 +2,7 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -136,7 +137,11 @@ func registerTriggerWorkflow(
 	) (*mcp.CallToolResult, any, error) {
 		body := map[string]any{"ref": p.Ref}
 		if p.Inputs != "" {
-			body["inputs"] = p.Inputs
+			var inputsMap map[string]string
+			if err := json.Unmarshal([]byte(p.Inputs), &inputsMap); err != nil {
+				return nil, nil, fmt.Errorf("parsing workflow inputs (must be a JSON object): %w", err)
+			}
+			body["inputs"] = inputsMap
 		}
 		path := fmt.Sprintf(
 			"/repos/%s/%s/actions/workflows/%s/dispatches",
@@ -189,19 +194,21 @@ func registerGetRunLogs(
 		RunID int64  `json:"run_id" jsonschema:"required,Workflow run ID"`
 	}
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "get_run_logs",
-		Description: "Gets the logs URL for a workflow run.",
+		Name: "get_run_logs",
+		Description: "Gets the download URL for a workflow run's logs. " +
+			"The GitHub API returns a redirect to a time-limited download URL.",
 	}, func(
 		ctx context.Context, _ *mcp.CallToolRequest, p *params,
 	) (*mcp.CallToolResult, any, error) {
 		path := fmt.Sprintf("/repos/%s/%s/actions/runs/%d/logs",
 			url.PathEscape(p.Owner), url.PathEscape(p.Repo), p.RunID)
-		result, err := c.call(ctx, http.MethodGet, path, nil)
+		// GitHub returns a 302 redirect to a temporary download URL for the zip archive.
+		// We follow the redirect and return the final URL so the agent can share it.
+		downloadURL, err := c.getRedirectURL(ctx, path)
 		if err != nil {
-			return textResult(fmt.Sprintf( //nolint:nilerr
-				"Logs URL: %s%s (download with your token)",
-				githubAPIBase, path))
+			return nil, nil, fmt.Errorf("fetching logs URL for run %d: %w", p.RunID, err)
 		}
-		return textResult(fmt.Sprintf("Logs: %s", string(result)))
+		return textResult(fmt.Sprintf(
+			"Logs download URL (time-limited zip archive): %s", downloadURL))
 	})
 }
