@@ -25,6 +25,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/eventbus"
 	"github.com/shaharia-lab/agento/internal/integrations"
+	confluenceintegration "github.com/shaharia-lab/agento/internal/integrations/confluence"
 	googleintegration "github.com/shaharia-lab/agento/internal/integrations/google"
 	telegramintegration "github.com/shaharia-lab/agento/internal/integrations/telegram"
 	"github.com/shaharia-lab/agento/internal/logger"
@@ -178,6 +179,7 @@ func buildWebServer(
 	chatStore := storage.NewSQLiteChatStore(db)
 	integrationStore := storage.NewSQLiteIntegrationStore(db)
 	integrationRegistry := integrations.NewRegistry(integrationStore, sysLogger)
+	integrationRegistry.RegisterStarter("confluence", confluenceintegration.Start)
 	integrationRegistry.RegisterStarter("google", googleintegration.Start)
 	integrationRegistry.RegisterStarter("telegram", telegramintegration.Start)
 	if startErr := integrationRegistry.Start(ctx); startErr != nil {

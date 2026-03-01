@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { ArrowLeft, CheckCircle, XCircle, Loader2, RefreshCw, Trash2, Save } from 'lucide-react'
 import { integrationsApi } from '@/lib/api'
 import type { Integration, ServiceConfig } from '@/types'
+import ConfluenceIntegrationEditor from '@/components/integrations/ConfluenceIntegrationEditor'
 import GoogleIntegrationEditor from '@/components/integrations/GoogleIntegrationEditor'
 import TelegramIntegrationEditor from '@/components/integrations/TelegramIntegrationEditor'
 import {
@@ -259,6 +260,9 @@ export default function IntegrationDetailPage() {
           <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-400 mb-3">
             Services & Tools
           </h2>
+          {integration.type === 'confluence' && (
+            <ConfluenceIntegrationEditor services={services} onServicesChange={setServices} />
+          )}
           {integration.type === 'google' && (
             <GoogleIntegrationEditor services={services} onServicesChange={setServices} />
           )}
