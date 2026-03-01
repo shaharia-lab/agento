@@ -92,8 +92,7 @@ export default function JobHistoriesPage() {
     load(newOffset)
   }
 
-  const toggleCheck = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation()
+  const toggleCheck = (id: string) => {
     setCheckedIds(prev => {
       const next = new Set(prev)
       if (next.has(id)) {
@@ -203,7 +202,7 @@ export default function JobHistoriesPage() {
                   <th className="px-4 py-2.5 w-8">
                     <Checkbox
                       checked={allChecked}
-                      data-state={someChecked ? 'indeterminate' : undefined}
+                      indeterminate={someChecked}
                       onCheckedChange={toggleAll}
                       aria-label="Select all"
                     />
@@ -226,10 +225,7 @@ export default function JobHistoriesPage() {
                     <td className="px-4 py-2.5" onClick={e => e.stopPropagation()}>
                       <Checkbox
                         checked={checkedIds.has(entry.id)}
-                        onCheckedChange={() =>
-                          toggleCheck(entry.id, { stopPropagation: () => {} } as React.MouseEvent)
-                        }
-                        onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                        onCheckedChange={() => toggleCheck(entry.id)}
                         aria-label={`Select ${entry.task_name}`}
                       />
                     </td>

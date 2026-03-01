@@ -180,6 +180,10 @@ func (s *Server) handleBulkDeleteJobHistory(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "ids must not be empty")
 		return
 	}
+	if len(req.IDs) > maxQueryLimit {
+		writeError(w, http.StatusBadRequest, "too many ids (max 500)")
+		return
+	}
 	if err := s.taskSvc.BulkDeleteJobHistory(r.Context(), req.IDs); err != nil {
 		httpErr(w, s.logger, err)
 		return

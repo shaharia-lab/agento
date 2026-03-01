@@ -169,6 +169,10 @@ func (s *Server) handleBulkDeleteChats(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ids must not be empty")
 		return
 	}
+	if len(req.IDs) > maxQueryLimit {
+		writeError(w, http.StatusBadRequest, "too many ids (max 500)")
+		return
+	}
 	if err := s.chatSvc.BulkDeleteSessions(r.Context(), req.IDs); err != nil {
 		s.logger.Error("bulk delete chats failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "failed to delete chats")

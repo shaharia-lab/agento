@@ -264,7 +264,7 @@ export default function ChatsPage() {
         <div className="flex items-center gap-3 px-4 sm:px-6 py-2 border-b border-zinc-100 dark:border-zinc-700/50">
           <Checkbox
             checked={allFilteredChecked}
-            data-state={someFilteredChecked ? 'indeterminate' : undefined}
+            indeterminate={someFilteredChecked}
             onCheckedChange={toggleAllFiltered}
             aria-label="Select all"
           />
