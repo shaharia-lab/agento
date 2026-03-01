@@ -1,6 +1,6 @@
 # Agento
 
-<img width="1820" height="1116" alt="carbon (3)" src="https://github.com/user-attachments/assets/1e66f27e-6eb2-49ad-9871-b7a589ec5f1c" />
+<img width="1820" height="922" alt="carbon (4)" src="https://github.com/user-attachments/assets/62ce9188-2aeb-4ec3-847c-3b50346d0adb" />
 
 **Agento** is a local platform for building and interacting with AI agents through a web UI and CLI. It runs on top of the [Claude Code CLI](https://claude.ai/code) already installed on your machine — no separate API key or cloud account needed.
 
@@ -21,6 +21,12 @@ You can define agents with custom system prompts and tools, start multi-turn con
 - **Integrations** — Connect Google (Calendar, Gmail, Drive), GitHub, Slack, Jira, Confluence, and Telegram as agent tools
 - **Task scheduler** — Schedule recurring agent tasks with cron expressions and track job history
 - **Notifications** — Event-driven notification system with SMTP email support
+
+---
+
+## Demo
+
+[demo.webm](https://github.com/user-attachments/assets/1fa2b716-cbb8-459e-b2e1-f6c252c086c2)
 
 ---
 
