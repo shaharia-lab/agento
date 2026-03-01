@@ -128,8 +128,6 @@ func (s *Server) mountExtensionRoutes(r chi.Router) {
 	// Scheduled tasks and job history
 	s.mountTaskRoutes(r)
 
-	// Build info
-	r.Get("/version", s.handleVersion)
 }
 
 // mountClaudeSessionRoutes registers Claude Code session and analytics routes.

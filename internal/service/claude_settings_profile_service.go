@@ -3,7 +3,6 @@ package service
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -23,8 +22,6 @@ type ClaudeSettingsProfileDetail struct {
 
 // ClaudeSettingsProfileService defines the interface for managing Claude settings profiles.
 type ClaudeSettingsProfileService interface {
-	// EnsureDefault creates a "Default" profile from the existing settings.json if none exist.
-	EnsureDefault() error
 	// ListProfiles returns all profiles (empty slice, not nil, when none exist).
 	ListProfiles() ([]config.ClaudeSettingsProfile, error)
 	// CreateProfile creates a new profile with the given name, seeding content from the current default.
@@ -45,6 +42,9 @@ type ClaudeSettingsProfileService interface {
 // profile IDs to prevent path-traversal attacks.
 var safeProfileID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
+// reConsecutiveDashes matches runs of hyphens for collapsing in slug generation.
+var reConsecutiveDashes = regexp.MustCompile(`-+`)
+
 type claudeSettingsProfileService struct {
 	logger *slog.Logger
 }
@@ -55,10 +55,6 @@ func NewClaudeSettingsProfileService(logger *slog.Logger) ClaudeSettingsProfileS
 }
 
 // ─── public interface ─────────────────────────────────────────────────────────
-
-func (s *claudeSettingsProfileService) EnsureDefault() error {
-	return ensureDefaultProfileExists()
-}
 
 func (s *claudeSettingsProfileService) ListProfiles() ([]config.ClaudeSettingsProfile, error) {
 	if err := ensureDefaultProfileExists(); err != nil {
@@ -121,7 +117,10 @@ func (s *claudeSettingsProfileService) GetProfile(id string) (*ClaudeSettingsPro
 		return nil, &NotFoundError{Resource: "profile", ID: id}
 	}
 
-	detail := buildProfileDetail(m.Profiles[idx])
+	detail, detailErr := buildProfileDetail(m.Profiles[idx])
+	if detailErr != nil {
+		return nil, detailErr
+	}
 	return &detail, nil
 }
 
@@ -140,13 +139,19 @@ func (s *claudeSettingsProfileService) UpdateProfile(
 
 	profile := &m.Profiles[idx]
 
+	// Validate settings JSON before performing any filesystem mutations so that
+	// we do not end up with the file renamed but settings not written.
+	if validErr := validateSettingsJSON(settings); validErr != nil {
+		return nil, validErr
+	}
+
 	if name != nil && *name != "" && *name != profile.Name {
-		if renameErr := renameProfile(profile, *name, id, idx, m.Profiles); renameErr != nil {
+		if renameErr := renameProfile(profile, *name, id, idx, m.Profiles, s.logger); renameErr != nil {
 			return nil, renameErr
 		}
 	}
 
-	if updateErr := s.updateProfileSettings(profile, settings); updateErr != nil {
+	if updateErr := s.writeProfileSettings(profile, settings); updateErr != nil {
 		return nil, updateErr
 	}
 
@@ -154,7 +159,10 @@ func (s *claudeSettingsProfileService) UpdateProfile(
 		return nil, fmt.Errorf("saving profiles metadata: %w", saveErr)
 	}
 
-	detail := buildProfileDetail(*profile)
+	detail, detailErr := buildProfileDetail(*profile)
+	if detailErr != nil {
+		return nil, detailErr
+	}
 	return &detail, nil
 }
 
@@ -174,14 +182,24 @@ func (s *claudeSettingsProfileService) DeleteProfile(id string) error {
 	}
 
 	filePath := m.Profiles[idx].FilePath
+
+	// Validate the stored path is still within the expected directory before removing.
+	dir, dirErr := config.ClaudeSettingsDirPath()
+	if dirErr != nil {
+		return fmt.Errorf("resolving settings dir: %w", dirErr)
+	}
+	if pathErr := validatePathWithinDir(filePath, dir); pathErr != nil {
+		return fmt.Errorf("profile file path is invalid: %w", pathErr)
+	}
+
 	m.Profiles = append(m.Profiles[:idx], m.Profiles[idx+1:]...)
 
 	if saveErr := saveProfilesMetadata(m); saveErr != nil {
 		return fmt.Errorf("saving profiles metadata: %w", saveErr)
 	}
 
-	if rmErr := os.Remove(filePath); rmErr != nil {
-		log.Printf("failed to remove profile file %s: %v", filePath, rmErr)
+	if rmErr := os.Remove(filePath); rmErr != nil { //nolint:gosec // path validated above
+		s.logger.Warn("failed to remove profile file", "path", filePath, "error", rmErr)
 	}
 
 	return nil
@@ -199,10 +217,18 @@ func (s *claudeSettingsProfileService) DuplicateProfile(id string) (*config.Clau
 	}
 	source := &m.Profiles[idx]
 
+	dir, dirErr := config.ClaudeSettingsDirPath()
+	if dirErr != nil {
+		return nil, fmt.Errorf("resolving settings dir: %w", dirErr)
+	}
+	if pathErr := validatePathWithinDir(source.FilePath, dir); pathErr != nil {
+		return nil, fmt.Errorf("source profile file path is invalid: %w", pathErr)
+	}
+
 	newName := "Copy of " + source.Name
 	newID := deduplicateID(slugify(newName), m.Profiles)
 
-	content, readErr := os.ReadFile(source.FilePath) //nolint:gosec
+	content, readErr := os.ReadFile(source.FilePath) //nolint:gosec // path validated above
 	if readErr != nil || content == nil {
 		content = []byte("{}")
 	}
@@ -247,6 +273,14 @@ func (s *claudeSettingsProfileService) SetDefaultProfile(id string) (*config.Cla
 		return nil, &NotFoundError{Resource: "profile", ID: id}
 	}
 
+	dir, dirErr := config.ClaudeSettingsDirPath()
+	if dirErr != nil {
+		return nil, fmt.Errorf("resolving settings dir: %w", dirErr)
+	}
+	if pathErr := validatePathWithinDir(newDefault.FilePath, dir); pathErr != nil {
+		return nil, fmt.Errorf("profile file path is invalid: %w", pathErr)
+	}
+
 	if syncErr := syncDefaultToSettingsJSON(*newDefault); syncErr != nil {
 		return nil, fmt.Errorf("syncing settings.json: %w", syncErr)
 	}
@@ -260,6 +294,20 @@ func (s *claudeSettingsProfileService) SetDefaultProfile(id string) (*config.Cla
 
 // ─── private helpers ─────────────────────────────────────────────────────────
 
+// validatePathWithinDir returns an error if path does not reside inside dir.
+// This prevents path-traversal if a metadata file is tampered with.
+func validatePathWithinDir(path, dir string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolving absolute path: %w", err)
+	}
+	prefix := dir + string(os.PathSeparator)
+	if !strings.HasPrefix(abs, prefix) {
+		return fmt.Errorf("path %q escapes settings directory", abs)
+	}
+	return nil
+}
+
 // slugify converts a profile name into a safe filename slug.
 func slugify(name string) string {
 	s := strings.ToLower(name)
@@ -272,8 +320,7 @@ func slugify(name string) string {
 		}
 		return -1
 	}, s)
-	re := regexp.MustCompile(`-+`)
-	s = re.ReplaceAllString(s, "-")
+	s = reConsecutiveDashes.ReplaceAllString(s, "-")
 	s = strings.Trim(s, "-")
 	if s == "" {
 		s = "profile"
@@ -299,7 +346,7 @@ func saveProfilesMetadata(m config.ProfilesMetadata) error {
 
 // syncDefaultToSettingsJSON copies the default profile's content to ~/.claude/settings.json.
 func syncDefaultToSettingsJSON(profile config.ClaudeSettingsProfile) error {
-	data, err := os.ReadFile(profile.FilePath) //nolint:gosec // known-safe path from metadata
+	data, err := os.ReadFile(profile.FilePath) //nolint:gosec // caller validates FilePath
 	if err != nil {
 		if os.IsNotExist(err) {
 			data = []byte("{}")
@@ -315,6 +362,7 @@ func syncDefaultToSettingsJSON(profile config.ClaudeSettingsProfile) error {
 }
 
 // resolveProfileFilePath returns the absolute path for a profile file based on its ID.
+// The ID is validated against a strict whitelist to prevent path-traversal attacks.
 func resolveProfileFilePath(id string) (string, error) {
 	if !safeProfileID.MatchString(id) {
 		return "", fmt.Errorf("invalid profile id: contains disallowed characters")
@@ -411,24 +459,48 @@ func readDefaultProfileContent(profiles []config.ClaudeSettingsProfile) []byte {
 	return []byte("{}")
 }
 
-// buildProfileDetail creates a ClaudeSettingsProfileDetail from a profile.
-func buildProfileDetail(profile config.ClaudeSettingsProfile) ClaudeSettingsProfileDetail {
+// buildProfileDetail creates a ClaudeSettingsProfileDetail from a profile,
+// validating the stored FilePath is within the expected directory first.
+func buildProfileDetail(profile config.ClaudeSettingsProfile) (ClaudeSettingsProfileDetail, error) {
 	detail := ClaudeSettingsProfileDetail{ClaudeSettingsProfile: profile}
-	if data, err := os.ReadFile(profile.FilePath); err == nil { //nolint:gosec
+
+	dir, err := config.ClaudeSettingsDirPath()
+	if err != nil {
+		return detail, fmt.Errorf("resolving settings dir: %w", err)
+	}
+	if pathErr := validatePathWithinDir(profile.FilePath, dir); pathErr != nil {
+		return detail, fmt.Errorf("profile file path is invalid: %w", pathErr)
+	}
+
+	if data, readErr := os.ReadFile(profile.FilePath); readErr == nil { //nolint:gosec // path validated above
 		if json.Valid(data) {
 			detail.Settings = json.RawMessage(data)
 			detail.Exists = true
 		}
 	}
-	return detail
+	return detail, nil
+}
+
+// validateSettingsJSON validates the settings JSON payload without writing anything.
+// Returns nil if settings is empty/null (a no-op update).
+func validateSettingsJSON(settings json.RawMessage) error {
+	if len(settings) == 0 || string(settings) == "null" {
+		return nil
+	}
+	if !json.Valid(settings) {
+		return &ValidationError{Field: "settings", Message: "settings must be valid JSON"}
+	}
+	return nil
 }
 
 // renameProfile renames a profile, moving the file if the slug changes.
-// Returns a service error (NotFoundError, ConflictError, or a wrapped error).
+// Rename collision returns ConflictError; explicit rejection is intentional
+// (unlike create/duplicate which auto-deduplicate).
 func renameProfile(
 	profile *config.ClaudeSettingsProfile,
 	newName, currentID string, currentIdx int,
 	profiles []config.ClaudeSettingsProfile,
+	logger *slog.Logger,
 ) error {
 	newID := slugify(newName)
 	if newID != currentID {
@@ -437,7 +509,7 @@ func renameProfile(
 				return &ConflictError{Resource: "profile", ID: newID}
 			}
 		}
-		if err := moveProfileFile(profile, newID); err != nil {
+		if err := moveProfileFile(profile, newID, logger); err != nil {
 			return err
 		}
 	}
@@ -446,12 +518,12 @@ func renameProfile(
 }
 
 // moveProfileFile moves the profile file to a new path derived from newID.
-func moveProfileFile(profile *config.ClaudeSettingsProfile, newID string) error {
+func moveProfileFile(profile *config.ClaudeSettingsProfile, newID string, logger *slog.Logger) error {
 	newFilePath, err := resolveProfileFilePath(newID)
 	if err != nil {
 		return fmt.Errorf("resolving new profile path: %w", err)
 	}
-	data, readErr := os.ReadFile(profile.FilePath) //nolint:gosec
+	data, readErr := os.ReadFile(profile.FilePath) //nolint:gosec // caller holds validated path
 	if readErr != nil {
 		// No file to move; just update metadata.
 		profile.ID = newID
@@ -462,25 +534,24 @@ func moveProfileFile(profile *config.ClaudeSettingsProfile, newID string) error 
 		return fmt.Errorf("writing renamed profile file: %w", writeErr)
 	}
 	if rmErr := os.Remove(profile.FilePath); rmErr != nil {
-		log.Printf("failed to remove old profile file: %v", rmErr)
+		logger.Warn("failed to remove old profile file", "path", profile.FilePath, "error", rmErr)
 	}
 	profile.ID = newID
 	profile.FilePath = newFilePath
 	return nil
 }
 
-// updateProfileSettings writes new settings JSON to the profile's file.
-func (s *claudeSettingsProfileService) updateProfileSettings(
+// writeProfileSettings marshals and writes validated settings JSON to the profile file.
+// Callers must call validateSettingsJSON before this function.
+func (s *claudeSettingsProfileService) writeProfileSettings(
 	profile *config.ClaudeSettingsProfile, settings json.RawMessage,
 ) error {
 	if len(settings) == 0 || string(settings) == "null" {
 		return nil
 	}
-	if !json.Valid(settings) {
-		return &ValidationError{Field: "settings", Message: "settings must be valid JSON"}
-	}
 	var pretty any
 	if err := json.Unmarshal(settings, &pretty); err != nil {
+		// Should not happen — validateSettingsJSON ran first.
 		return &ValidationError{Field: "settings", Message: "failed to parse settings JSON"}
 	}
 	out, merr := json.MarshalIndent(pretty, "", "  ")

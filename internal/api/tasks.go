@@ -159,6 +159,10 @@ func (s *Server) handleGetJobHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jh)
 }
 
+// maxQueryLimit is the maximum number of records that may be requested in a
+// single paginated query, preventing resource exhaustion from large limit values.
+const maxQueryLimit = 500
+
 func parseQueryInt(r *http.Request, key string, defaultVal int) int {
 	s := r.URL.Query().Get(key)
 	if s == "" {
@@ -167,6 +171,9 @@ func parseQueryInt(r *http.Request, key string, defaultVal int) int {
 	v, err := strconv.Atoi(s)
 	if err != nil || v < 0 {
 		return defaultVal
+	}
+	if v > maxQueryLimit {
+		return maxQueryLimit
 	}
 	return v
 }

@@ -23,7 +23,9 @@ type AgentRequest struct {
 // ─── Task request types ────────────────────────────────────────────────────────
 
 // CreateTaskRequest is the request body for creating a new scheduled task.
-// It mirrors the storage type but keeps the public API decoupled from storage internals.
+// It mirrors the storage fields but keeps the public API decoupled from storage internals.
+// A separate type from UpdateTaskRequest is kept intentionally: future API versions
+// may require certain fields only at creation time (e.g. immutable schedule type).
 type CreateTaskRequest struct {
 	Name           string                 `json:"name"`
 	Description    string                 `json:"description"`
@@ -37,6 +39,8 @@ type CreateTaskRequest struct {
 }
 
 // UpdateTaskRequest is the request body for updating an existing scheduled task.
+// Kept separate from CreateTaskRequest to allow future divergence (e.g. immutable
+// fields that cannot be changed after creation).
 type UpdateTaskRequest struct {
 	Name           string                 `json:"name"`
 	Description    string                 `json:"description"`
@@ -52,6 +56,8 @@ type UpdateTaskRequest struct {
 // ─── Integration request types ────────────────────────────────────────────────
 
 // CreateIntegrationRequest is the request body for creating a new integration.
+// Kept separate from UpdateIntegrationRequest to allow future divergence (e.g.
+// the integration type is immutable after creation).
 type CreateIntegrationRequest struct {
 	Name        string                          `json:"name"`
 	Type        string                          `json:"type"`

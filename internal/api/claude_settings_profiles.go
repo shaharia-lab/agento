@@ -11,8 +11,7 @@ import (
 func (s *Server) handleListClaudeSettingsProfiles(w http.ResponseWriter, r *http.Request) {
 	profiles, err := s.profileSvc.ListProfiles()
 	if err != nil {
-		s.logger.Error("list profiles failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to list profiles")
+		httpErr(w, s.logger, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, profiles)

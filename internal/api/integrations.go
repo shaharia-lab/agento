@@ -32,7 +32,7 @@ func (s *Server) handleListIntegrations(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleCreateIntegration(w http.ResponseWriter, r *http.Request) {
 	var body CreateIntegrationRequest
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
@@ -69,7 +69,7 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request)
 
 	var body UpdateIntegrationRequest
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
