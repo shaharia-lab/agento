@@ -825,10 +825,23 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestIntegrationService_ValidateTokenAuth(t *testing.T) {
-	store := new(mocks.MockIntegrationStore)
-	svc := NewIntegrationService(store, nil, testLogger(), context.Background())
+	t.Run("telegram with empty credentials returns validation error", func(t *testing.T) {
+		store := new(mocks.MockIntegrationStore)
+		svc := NewIntegrationService(store, nil, testLogger(), context.Background())
 
-	cfg := &config.IntegrationConfig{ID: "test", Type: "telegram"}
-	err := svc.ValidateTokenAuth(context.Background(), cfg)
-	assert.NoError(t, err)
+		cfg := &config.IntegrationConfig{ID: "test", Type: "telegram"}
+		err := svc.ValidateTokenAuth(context.Background(), cfg)
+		assert.Error(t, err)
+		var ve *ValidationError
+		assert.ErrorAs(t, err, &ve)
+	})
+
+	t.Run("unknown type returns nil (unvalidated)", func(t *testing.T) {
+		store := new(mocks.MockIntegrationStore)
+		svc := NewIntegrationService(store, nil, testLogger(), context.Background())
+
+		cfg := &config.IntegrationConfig{ID: "test", Type: "unknown"}
+		err := svc.ValidateTokenAuth(context.Background(), cfg)
+		assert.NoError(t, err)
+	})
 }

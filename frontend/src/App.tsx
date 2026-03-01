@@ -13,6 +13,7 @@ import TokenUsagePage from '@/pages/TokenUsagePage'
 import GeneralUsagePage from '@/pages/GeneralUsagePage'
 import IntegrationsPage from '@/pages/IntegrationsPage'
 import IntegrationGooglePage from '@/pages/IntegrationGooglePage'
+import IntegrationTelegramPage from '@/pages/IntegrationTelegramPage'
 import IntegrationDetailPage from '@/pages/IntegrationDetailPage'
 import TasksPage from '@/pages/TasksPage'
 import TaskCreatePage from '@/pages/TaskCreatePage'
@@ -86,6 +87,7 @@ export default function App() {
             <Route path="analytics/general-usage" element={<GeneralUsagePage />} />
             <Route path="integrations" element={<IntegrationsPage />} />
             <Route path="integrations/google" element={<IntegrationGooglePage />} />
+            <Route path="integrations/telegram" element={<IntegrationTelegramPage />} />
             <Route path="integrations/:id" element={<IntegrationDetailPage />} />
             <Route path="tasks" element={<TasksPage />} />
             <Route path="tasks/new" element={<TaskCreatePage />} />

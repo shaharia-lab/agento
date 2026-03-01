@@ -4,6 +4,7 @@ import { ArrowLeft, CheckCircle, XCircle, Loader2, RefreshCw, Trash2, Save } fro
 import { integrationsApi } from '@/lib/api'
 import type { Integration, ServiceConfig } from '@/types'
 import GoogleIntegrationEditor from '@/components/integrations/GoogleIntegrationEditor'
+import TelegramIntegrationEditor from '@/components/integrations/TelegramIntegrationEditor'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -260,6 +261,9 @@ export default function IntegrationDetailPage() {
           </h2>
           {integration.type === 'google' && (
             <GoogleIntegrationEditor services={services} onServicesChange={setServices} />
+          )}
+          {integration.type === 'telegram' && (
+            <TelegramIntegrationEditor services={services} onServicesChange={setServices} />
           )}
         </div>
 
