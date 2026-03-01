@@ -19,8 +19,10 @@ import { Plus, CalendarClock, Pencil, Trash2, Pause, Play } from 'lucide-react'
 function formatSchedule(task: ScheduledTask): string {
   const cfg = task.schedule_config
   switch (task.schedule_type) {
+    case 'run_immediately':
+      return task.status === 'paused' ? 'Ran once' : 'Run immediately'
     case 'one_off':
-      return cfg.run_at ? `Once at ${new Date(cfg.run_at).toLocaleString()}` : 'One-off'
+      return cfg.run_at ? `Once at ${new Date(cfg.run_at).toLocaleString()}` : 'Only once'
     case 'interval':
       if (cfg.every_minutes) return `Every ${cfg.every_minutes} min`
       if (cfg.every_hours) return `Every ${cfg.every_hours} hr`

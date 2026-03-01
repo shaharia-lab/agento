@@ -254,12 +254,12 @@ func validateTask(task *storage.ScheduledTask) error {
 	}
 
 	switch task.ScheduleType {
-	case storage.ScheduleOneOff, storage.ScheduleInterval, storage.ScheduleCron:
+	case storage.ScheduleRunImmediately, storage.ScheduleOneOff, storage.ScheduleInterval, storage.ScheduleCron:
 		// valid
 	case "":
-		task.ScheduleType = storage.ScheduleOneOff
+		task.ScheduleType = storage.ScheduleRunImmediately
 	default:
-		return &ValidationError{Field: "schedule_type", Message: "must be one_off, interval, or cron"}
+		return &ValidationError{Field: "schedule_type", Message: "must be run_immediately, one_off, interval, or cron"}
 	}
 
 	return validateScheduleConfig(task)
@@ -268,6 +268,9 @@ func validateTask(task *storage.ScheduledTask) error {
 func validateScheduleConfig(task *storage.ScheduledTask) error {
 	cfg := task.ScheduleConfig
 	switch task.ScheduleType {
+	case storage.ScheduleRunImmediately:
+		// No schedule config needed — task runs immediately on creation.
+		return nil
 	case storage.ScheduleOneOff:
 		if cfg.RunAt == "" {
 			return &ValidationError{Field: "schedule_config.run_at", Message: "run_at is required for one_off schedules"}
