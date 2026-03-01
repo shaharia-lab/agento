@@ -32,8 +32,22 @@ Read every documentation and context file:
 - `CLAUDE.md` — primary AI agent context
 - `README.md` — project overview and setup
 - `docs/*.md` — all documentation files
-- `.claude/skills/*/SKILL.md` — skill definitions (check if they reference outdated patterns)
+- `.claude/skills/*/SKILL.md` — skill definitions (see Step 2a for dedicated review)
 - Any other `.md` files in the repo
+
+### Step 2a: Audit and improve Claude skills
+For each skill under `.claude/skills/*/SKILL.md`:
+1. Read the full skill prompt
+2. Cross-reference against recent code changes and merged PRs
+3. Ask for each skill:
+   - Do the instructions reference file paths, patterns, or conventions that no longer exist?
+   - Does the skill miss new architecture, modules, or patterns introduced in recent PRs?
+   - Are the allowed-tools sufficient for what the skill needs to do?
+   - Are step-by-step instructions still accurate (e.g., correct lint commands, file locations)?
+   - Would the skill produce wrong output if run against the current codebase?
+   - Is there a new type of task the skill should handle, given what was added?
+4. If improvements are warranted, make surgical edits — don't rewrite the whole skill
+5. Only add/change content that is directly supported by actual codebase changes
 
 ### Step 3: Cross-reference changes against docs
 For each changed area of the codebase:
@@ -78,8 +92,16 @@ This is the most critical file — AI agents read it on every interaction.
 - [ ] Do cross-references between docs still hold?
 - [ ] API documentation matches current endpoints?
 
+### Claude skills (`.claude/skills/*/SKILL.md`)
+For each skill, check:
+- [ ] File/package paths in instructions still exist in the codebase?
+- [ ] Commands, flags, and build steps are still accurate?
+- [ ] Step-by-step logic matches current architecture and conventions?
+- [ ] `allowed-tools` list covers what the skill actually needs?
+- [ ] New modules, patterns, or endpoints introduced by recent PRs are reflected where relevant?
+- [ ] Any skill scope can be meaningfully expanded given new capabilities in the codebase?
+
 ### Other context files
-- [ ] `.claude/skills/` — do skill instructions reference current patterns?
 - [ ] Any config file comments that reference outdated behavior?
 - [ ] Makefile help text matches actual targets?
 
@@ -109,6 +131,7 @@ After listing all findings, apply the changes using Edit/Write tools.
 | CLAUDE.md | Updated / Current | [what changed] |
 | README.md | Updated / Current | [what changed] |
 | docs/X.md | Updated / Current / Created | [what changed] |
+| .claude/skills/X/SKILL.md | Updated / Current | [what changed] |
 
 ## Rules
 
