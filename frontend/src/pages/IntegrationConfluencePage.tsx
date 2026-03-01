@@ -98,6 +98,17 @@ export default function IntegrationConfluencePage() {
     }
   }
 
+  const handleDeleteAndRestart = async () => {
+    if (integrationId) {
+      try {
+        await integrationsApi.delete(integrationId)
+      } catch {
+        // Ignore delete errors — navigate back regardless so the user can start over.
+      }
+    }
+    navigate('/integrations/confluence')
+  }
+
   const step1Valid =
     name.trim() !== '' && siteURL.trim() !== '' && email.trim() !== '' && apiToken.trim() !== ''
 
@@ -320,13 +331,17 @@ export default function IntegrationConfluencePage() {
                 <h2 className="text-base font-medium text-zinc-900 dark:text-zinc-100 mb-2">
                   Validation failed
                 </h2>
-                <p className="text-sm text-red-600 dark:text-red-400 mb-6">{validationError}</p>
+                <p className="text-sm text-red-600 dark:text-red-400 mb-2">{validationError}</p>
+                <p className="text-xs text-zinc-400 dark:text-zinc-500 mb-6">
+                  The integration was saved but is not yet authenticated. Fix your credentials and
+                  retry, or delete it and start over.
+                </p>
                 <div className="flex justify-center gap-3">
                   <button
-                    onClick={() => navigate('/integrations')}
-                    className="rounded-md border border-zinc-300 dark:border-zinc-600 px-4 py-2 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
+                    onClick={handleDeleteAndRestart}
+                    className="rounded-md border border-red-200 dark:border-red-800/50 px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors cursor-pointer"
                   >
-                    Back to Integrations
+                    Delete &amp; Start Over
                   </button>
                   <button
                     onClick={handleRetryValidation}

@@ -6,14 +6,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// maxResponseBytes is the maximum response body size read from the Confluence API.
+// Keeping it small avoids flooding the LLM context with large payloads.
+const maxResponseBytes = 2 * 1024 * 1024 // 2 MB
+
 // callConfluence makes an authenticated request to the Confluence API and returns the body bytes.
-func callConfluence(ctx context.Context, method, url, email, apiToken string, body io.Reader) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+func callConfluence(ctx context.Context, method, reqURL, email, apiToken string, body io.Reader) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -25,11 +30,11 @@ func callConfluence(ctx context.Context, method, url, email, apiToken string, bo
 
 	resp, err := confluenceHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("calling Confluence API: request failed")
+		return nil, fmt.Errorf("calling confluence API: request failed")
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -131,9 +136,9 @@ func handleListSpaces(
 	if limit <= 0 || limit > 250 {
 		limit = 50
 	}
-	url := fmt.Sprintf("%s/wiki/api/v2/spaces?limit=%d", siteURL, limit)
+	reqURL := fmt.Sprintf("%s/wiki/api/v2/spaces?limit=%d", siteURL, limit)
 
-	body, err := callConfluence(ctx, http.MethodGet, url, email, apiToken, nil)
+	body, err := callConfluence(ctx, http.MethodGet, reqURL, email, apiToken, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -150,9 +155,9 @@ type getSpaceParams struct {
 func handleGetSpace(
 	ctx context.Context, siteURL, email, apiToken string, params *getSpaceParams,
 ) (*mcp.CallToolResult, any, error) {
-	url := fmt.Sprintf("%s/wiki/api/v2/spaces/%s", siteURL, params.SpaceID)
+	reqURL := fmt.Sprintf("%s/wiki/api/v2/spaces/%s", siteURL, url.PathEscape(params.SpaceID))
 
-	body, err := callConfluence(ctx, http.MethodGet, url, email, apiToken, nil)
+	body, err := callConfluence(ctx, http.MethodGet, reqURL, email, apiToken, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -174,9 +179,10 @@ func handleSearchContent(
 	if limit <= 0 || limit > 250 {
 		limit = 25
 	}
-	url := fmt.Sprintf("%s/wiki/api/v2/search?cql=%s&limit=%d", siteURL, params.CQL, limit)
+	reqURL := fmt.Sprintf("%s/wiki/api/v2/search?cql=%s&limit=%d",
+		siteURL, url.QueryEscape(params.CQL), limit)
 
-	body, err := callConfluence(ctx, http.MethodGet, url, email, apiToken, nil)
+	body, err := callConfluence(ctx, http.MethodGet, reqURL, email, apiToken, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -198,9 +204,10 @@ func handleGetPage(
 	if format == "" {
 		format = "storage"
 	}
-	url := fmt.Sprintf("%s/wiki/api/v2/pages/%s?body-format=%s", siteURL, params.PageID, format)
+	reqURL := fmt.Sprintf("%s/wiki/api/v2/pages/%s?body-format=%s",
+		siteURL, url.PathEscape(params.PageID), url.QueryEscape(format))
 
-	body, err := callConfluence(ctx, http.MethodGet, url, email, apiToken, nil)
+	body, err := callConfluence(ctx, http.MethodGet, reqURL, email, apiToken, nil)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -238,8 +245,8 @@ func handleCreatePage(
 		return nil, nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/wiki/api/v2/pages", siteURL)
-	respBody, err := callConfluence(ctx, http.MethodPost, url, email, apiToken, strings.NewReader(string(payloadBytes)))
+	reqURL := siteURL + "/wiki/api/v2/pages"
+	respBody, err := callConfluence(ctx, http.MethodPost, reqURL, email, apiToken, strings.NewReader(string(payloadBytes)))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -277,8 +284,8 @@ func handleUpdatePage(
 		return nil, nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	url := fmt.Sprintf("%s/wiki/api/v2/pages/%s", siteURL, params.PageID)
-	respBody, err := callConfluence(ctx, http.MethodPut, url, email, apiToken, strings.NewReader(string(payloadBytes)))
+	reqURL := fmt.Sprintf("%s/wiki/api/v2/pages/%s", siteURL, url.PathEscape(params.PageID))
+	respBody, err := callConfluence(ctx, http.MethodPut, reqURL, email, apiToken, strings.NewReader(string(payloadBytes)))
 	if err != nil {
 		return nil, nil, err
 	}

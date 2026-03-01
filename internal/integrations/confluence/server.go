@@ -24,7 +24,13 @@ func Start(ctx context.Context, cfg *config.IntegrationConfig) (claude.McpHTTPSe
 		return claude.McpHTTPServer{}, fmt.Errorf("parsing confluence credentials for %q: %w", cfg.ID, err)
 	}
 
-	server := buildMCPServer(cfg, creds.SiteURL, creds.Email, creds.APIToken)
+	// Normalise the site URL (validates HTTPS scheme and strips trailing slash).
+	cleanURL, err := ValidateSiteURL(creds.SiteURL)
+	if err != nil {
+		return claude.McpHTTPServer{}, fmt.Errorf("invalid site URL for %q: %w", cfg.ID, err)
+	}
+
+	server := buildMCPServer(cfg, cleanURL, creds.Email, creds.APIToken)
 
 	serverCfg, err := claude.StartInProcessMCPServer(ctx, cfg.ID, server)
 	if err != nil {

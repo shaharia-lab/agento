@@ -116,6 +116,9 @@ func validateAtlassianCredentials(cfg *config.IntegrationConfig) error {
 	if creds.SiteURL == "" {
 		return &ValidationError{Field: "credentials.site_url", Message: "site_url is required"}
 	}
+	if _, err := confluence.ValidateSiteURL(creds.SiteURL); err != nil {
+		return &ValidationError{Field: "credentials.site_url", Message: err.Error()}
+	}
 	if creds.Email == "" {
 		return &ValidationError{Field: "credentials.email", Message: "email is required"}
 	}
