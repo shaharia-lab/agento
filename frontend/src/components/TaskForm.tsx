@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { agentsApi, tasksApi, filesystemApi } from '@/lib/api'
+import { agentsApi, tasksApi, settingsApi } from '@/lib/api'
 import type { Agent, ScheduledTask, ScheduleType, ScheduleConfig } from '@/types'
 import { MODELS } from '@/types'
 import { Button } from '@/components/ui/button'
@@ -60,12 +60,13 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
       .then(setAgents)
       .catch(() => {})
 
-    // Pre-fill working directory with home dir only when creating a new task.
+    // Pre-fill working directory with the user's saved default when creating a new task.
     if (!isEdit && !initialData?.working_directory) {
-      filesystemApi
-        .list()
+      settingsApi
+        .get()
         .then(res => {
-          if (res.path) setWorkingDirectory(res.path)
+          if (res.settings.default_working_dir)
+            setWorkingDirectory(res.settings.default_working_dir)
         })
         .catch(() => {})
     }

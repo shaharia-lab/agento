@@ -9,21 +9,11 @@ import (
 
 const defaultModel = "sonnet"
 
-// DefaultWorkingDir returns the default working directory for agent sessions,
-// located under the user's home directory (~/.agento/work) to avoid using
-// predictable, publicly writable temp paths.
+// DefaultWorkingDir returns the default working directory for agent sessions.
+// It uses the OS temp directory so it is always resolvable without knowing the
+// user's home directory (e.g. /tmp/agento/work on Linux/macOS).
 func DefaultWorkingDir() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		// Fall back to a path under the current working directory rather than
-		// os.TempDir() which is predictable and publicly writable.
-		cwd, cwdErr := os.Getwd()
-		if cwdErr != nil {
-			cwd = "."
-		}
-		return filepath.Join(cwd, ".agento", "work")
-	}
-	return filepath.Join(home, ".agento", "work")
+	return filepath.Join(os.TempDir(), "agento", "work")
 }
 
 // UserSettings holds persisted user preferences.

@@ -401,11 +401,15 @@ func (s *Server) processAgentEvent(
 		if event.Result == nil {
 			return false
 		}
-		state.sdkSessionID = event.Result.SessionID
 		state.tokens.add(event.Result)
 		if event.Result.IsError {
+			// Clear the stale SDK session ID so the next attempt starts a fresh
+			// session instead of endlessly retrying a session that no longer exists
+			// (e.g. "No conversation found with session ID: ...").
+			state.sdkSessionID = ""
 			return true
 		}
+		state.sdkSessionID = event.Result.SessionID
 		state.assistantText = event.Result.Result
 
 		if state.pendingInput == nil {
