@@ -18,7 +18,7 @@ import (
 
 func newTestTaskService(repo *mocks.MockTaskStore) TaskService {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return NewTaskService(repo, logger)
+	return NewTaskService(repo, nil, logger)
 }
 
 // ---------------------------------------------------------------------------

@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/shaharia-lab/agento/internal/config"
 )
 
 type claudeSettingsResponse struct {
@@ -12,16 +14,8 @@ type claudeSettingsResponse struct {
 	Settings json.RawMessage `json:"settings,omitempty"`
 }
 
-func claudeSettingsPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".claude", "settings.json"), nil
-}
-
 func (s *Server) handleGetClaudeSettings(w http.ResponseWriter, _ *http.Request) {
-	path, err := claudeSettingsPath()
+	path, err := config.ClaudeSettingsJSONPath()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve home directory")
 		return
@@ -56,7 +50,7 @@ func (s *Server) handleUpdateClaudeSettings(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	path, err := claudeSettingsPath()
+	path, err := config.ClaudeSettingsJSONPath()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to resolve home directory")
 		return

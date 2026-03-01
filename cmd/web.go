@@ -240,7 +240,6 @@ func buildAPIServer(
 	notificationSvc := service.NewNotificationService(settingsMgr, notifStore)
 
 	taskStore := storage.NewSQLiteTaskStore(db)
-	taskSvc := service.NewTaskService(taskStore, sysLogger)
 
 	taskScheduler, err := initTaskScheduler(ctx, taskStore, chatStore, agentStore,
 		mcpRegistry, localToolsMCP, integrationRegistry, settingsMgr, sysLogger, bus)
@@ -248,12 +247,15 @@ func buildAPIServer(
 		return nil, nil, err
 	}
 
+	taskSvc := service.NewTaskService(taskStore, taskScheduler, sysLogger)
+	profileSvc := service.NewClaudeSettingsProfileService(sysLogger)
+
 	sessionCache := claudesessions.NewCache(db, sysLogger)
 	sessionCache.StartBackgroundScan()
 
 	apiSrv := api.New(
-		agentSvc, chatSvc, integrationSvc, notificationSvc, taskSvc,
-		settingsMgr, sysLogger, sessionCache, taskScheduler,
+		agentSvc, chatSvc, integrationSvc, notificationSvc, taskSvc, profileSvc,
+		settingsMgr, sysLogger, sessionCache,
 	)
 	return apiSrv, bus, nil
 }
