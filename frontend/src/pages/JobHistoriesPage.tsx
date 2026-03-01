@@ -3,8 +3,19 @@ import { useNavigate } from 'react-router-dom'
 import { jobHistoryApi } from '@/lib/api'
 import type { JobHistoryEntry } from '@/types'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
-import { ClipboardList, ExternalLink } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
+import { ClipboardList, ExternalLink, Trash2 } from 'lucide-react'
 
 function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`
@@ -49,6 +60,11 @@ export default function JobHistoriesPage() {
   const [hasMore, setHasMore] = useState(true)
   const [selected, setSelected] = useState<JobHistoryEntry | null>(null)
 
+  // Selection state
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null)
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
+
   const load = useCallback(async (currentOffset: number) => {
     try {
       setLoading(true)
@@ -76,6 +92,57 @@ export default function JobHistoriesPage() {
     load(newOffset)
   }
 
+  const toggleCheck = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    setCheckedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+      return next
+    })
+  }
+
+  const toggleAll = () => {
+    if (checkedIds.size === entries.length) {
+      setCheckedIds(new Set())
+    } else {
+      setCheckedIds(new Set(entries.map(e => e.id)))
+    }
+  }
+
+  const handleDeleteOne = async (id: string) => {
+    try {
+      await jobHistoryApi.delete(id)
+      setEntries(prev => prev.filter(e => e.id !== id))
+      setCheckedIds(prev => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
+      if (selected?.id === id) setSelected(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete')
+    } finally {
+      setDeleteTargetId(null)
+    }
+  }
+
+  const handleBulkDelete = async () => {
+    const ids = Array.from(checkedIds)
+    try {
+      await jobHistoryApi.bulkDelete(ids)
+      setEntries(prev => prev.filter(e => !checkedIds.has(e.id)))
+      setCheckedIds(new Set())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete')
+    } finally {
+      setBulkDeleteOpen(false)
+    }
+  }
+
   if (loading && entries.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -83,6 +150,9 @@ export default function JobHistoriesPage() {
       </div>
     )
   }
+
+  const allChecked = entries.length > 0 && checkedIds.size === entries.length
+  const someChecked = checkedIds.size > 0 && checkedIds.size < entries.length
 
   return (
     <div className="flex flex-col h-full">
@@ -93,6 +163,17 @@ export default function JobHistoriesPage() {
             {entries.length} entr{entries.length === 1 ? 'y' : 'ies'}
           </p>
         </div>
+        {checkedIds.size > 0 && (
+          <Button
+            variant="destructive"
+            size="sm"
+            className="gap-1.5 text-xs h-8"
+            onClick={() => setBulkDeleteOpen(true)}
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete {checkedIds.size} selected
+          </Button>
+        )}
       </div>
 
       {error && (
@@ -119,11 +200,20 @@ export default function JobHistoriesPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-zinc-100 dark:border-zinc-800 text-xs text-zinc-500 dark:text-zinc-400">
+                  <th className="px-4 py-2.5 w-8">
+                    <Checkbox
+                      checked={allChecked}
+                      data-state={someChecked ? 'indeterminate' : undefined}
+                      onCheckedChange={toggleAll}
+                      aria-label="Select all"
+                    />
+                  </th>
                   <th className="text-left px-4 py-2.5 font-medium">Task</th>
                   <th className="text-left px-4 py-2.5 font-medium">Status</th>
                   <th className="text-left px-4 py-2.5 font-medium">Started</th>
                   <th className="text-left px-4 py-2.5 font-medium">Duration</th>
                   <th className="text-left px-4 py-2.5 font-medium">Tokens</th>
+                  <th className="px-4 py-2.5 w-8" />
                 </tr>
               </thead>
               <tbody>
@@ -133,6 +223,16 @@ export default function JobHistoriesPage() {
                     onClick={() => setSelected(entry)}
                     className="border-b border-zinc-50 dark:border-zinc-800/50 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors cursor-pointer"
                   >
+                    <td className="px-4 py-2.5" onClick={e => e.stopPropagation()}>
+                      <Checkbox
+                        checked={checkedIds.has(entry.id)}
+                        onCheckedChange={() =>
+                          toggleCheck(entry.id, { stopPropagation: () => {} } as React.MouseEvent)
+                        }
+                        onClick={e => e.stopPropagation()}
+                        aria-label={`Select ${entry.task_name}`}
+                      />
+                    </td>
                     <td className="px-4 py-2.5">
                       <div className="font-medium text-zinc-900 dark:text-zinc-100 text-xs">
                         {entry.task_name}
@@ -156,6 +256,18 @@ export default function JobHistoriesPage() {
                       {entry.total_input_tokens + entry.total_output_tokens > 0
                         ? `${(entry.total_input_tokens + entry.total_output_tokens).toLocaleString()}`
                         : '-'}
+                    </td>
+                    <td className="px-4 py-2.5" onClick={e => e.stopPropagation()}>
+                      <button
+                        className="p-1 rounded text-zinc-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"
+                        title="Delete"
+                        onClick={e => {
+                          e.stopPropagation()
+                          setDeleteTargetId(entry.id)
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -267,8 +379,17 @@ export default function JobHistoriesPage() {
                 )}
               </div>
 
-              {selected.chat_session_id && (
-                <div className="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800 shrink-0">
+              <div className="mt-4 pt-3 border-t border-zinc-100 dark:border-zinc-800 shrink-0 flex items-center justify-between">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="gap-1.5 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 text-xs h-8"
+                  onClick={() => setDeleteTargetId(selected.id)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Delete
+                </Button>
+                {selected.chat_session_id && (
                   <Button
                     size="sm"
                     onClick={() => {
@@ -280,12 +401,60 @@ export default function JobHistoriesPage() {
                     <ExternalLink className="h-3.5 w-3.5" />
                     View Chat Session
                   </Button>
-                </div>
-              )}
+                )}
+              </div>
             </>
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Single delete confirmation */}
+      <AlertDialog
+        open={deleteTargetId !== null}
+        onOpenChange={open => {
+          if (!open) setDeleteTargetId(null)
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete job history entry?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently remove this job history record. This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700 text-white"
+              onClick={() => deleteTargetId && handleDeleteOne(deleteTargetId)}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Bulk delete confirmation */}
+      <AlertDialog open={bulkDeleteOpen} onOpenChange={setBulkDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete {checkedIds.size} entries?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently remove the selected job history records. This action cannot be
+              undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700 text-white"
+              onClick={handleBulkDelete}
+            >
+              Delete {checkedIds.size} entries
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

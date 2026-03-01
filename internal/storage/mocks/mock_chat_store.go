@@ -69,3 +69,9 @@ func (m *MockChatStore) DeleteSession(id string) error {
 	args := m.Called(id)
 	return args.Error(0)
 }
+
+//nolint:revive
+func (m *MockChatStore) BulkDeleteSessions(ids []string) error {
+	args := m.Called(ids)
+	return args.Error(0)
+}

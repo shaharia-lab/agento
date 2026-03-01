@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -207,6 +208,27 @@ func (s *SQLiteChatStore) DeleteSession(id string) error {
 	}
 	if n == 0 {
 		return fmt.Errorf("session %q not found", id)
+	}
+	return nil
+}
+
+// BulkDeleteSessions deletes multiple chat sessions (and their messages via CASCADE) by ID.
+func (s *SQLiteChatStore) BulkDeleteSessions(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	ctx := context.Background()
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	//nolint:gosec // placeholders are "?" repeated, not user input
+	query := "DELETE FROM chat_sessions WHERE id IN (" + strings.Join(placeholders, ",") + ")"
+	_, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("bulk deleting sessions: %w", err)
 	}
 	return nil
 }

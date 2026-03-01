@@ -80,6 +80,7 @@ func (s *Server) Mount(r chi.Router) {
 	// Chat sessions
 	r.Get("/chats", s.handleListChats)
 	r.Post("/chats", s.handleCreateChat)
+	r.Delete("/chats", s.handleBulkDeleteChats)
 	r.Get("/chats/{id}", s.handleGetChat)
 	r.Delete("/chats/{id}", s.handleDeleteChat)
 	r.Post("/chats/{id}/messages", s.handleSendMessage)
@@ -172,7 +173,9 @@ func (s *Server) mountTaskRoutes(r chi.Router) {
 	r.Post(routeTaskByID+"/resume", s.handleResumeTask)
 	r.Get(routeTaskByID+"/job-history", s.handleListTaskJobHistory)
 	r.Get("/job-history", s.handleListAllJobHistory)
+	r.Delete("/job-history", s.handleBulkDeleteJobHistory)
 	r.Get(routeJobHistoryByID, s.handleGetJobHistory)
+	r.Delete(routeJobHistoryByID, s.handleDeleteJobHistory)
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────

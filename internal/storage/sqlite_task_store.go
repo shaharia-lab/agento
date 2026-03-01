@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -260,6 +261,44 @@ func (s *SQLiteTaskStore) CreateJobHistory(jh *JobHistory) error {
 	)
 	if err != nil {
 		return fmt.Errorf("creating job history: %w", err)
+	}
+	return nil
+}
+
+// DeleteJobHistory deletes a single job history entry by ID.
+func (s *SQLiteTaskStore) DeleteJobHistory(id string) error {
+	ctx := context.Background()
+	res, err := s.db.ExecContext(ctx, "DELETE FROM job_history WHERE id = ?", id)
+	if err != nil {
+		return fmt.Errorf("deleting job history %q: %w", id, err)
+	}
+	n, rowErr := res.RowsAffected()
+	if rowErr != nil {
+		return fmt.Errorf("checking rows affected for job history %q: %w", id, rowErr)
+	}
+	if n == 0 {
+		return fmt.Errorf("job history %q not found", id)
+	}
+	return nil
+}
+
+// BulkDeleteJobHistory deletes multiple job history entries by their IDs.
+func (s *SQLiteTaskStore) BulkDeleteJobHistory(ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	ctx := context.Background()
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	//nolint:gosec // placeholders are "?" repeated, not user input
+	query := "DELETE FROM job_history WHERE id IN (" + strings.Join(placeholders, ",") + ")"
+	_, err := s.db.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("bulk deleting job history: %w", err)
 	}
 	return nil
 }

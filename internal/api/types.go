@@ -82,6 +82,11 @@ type CreateProfileRequest struct {
 	Name string `json:"name"`
 }
 
+// BulkDeleteRequest is the request body for bulk-delete endpoints.
+type BulkDeleteRequest struct {
+	IDs []string `json:"ids"`
+}
+
 // UpdateProfileRequest is the request body for updating a Claude settings profile.
 type UpdateProfileRequest struct {
 	Name     *string         `json:"name"`

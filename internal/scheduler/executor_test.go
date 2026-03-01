@@ -92,6 +92,8 @@ func (s *stubTaskStore) ListJobHistory(_ string, _ int) ([]*storage.JobHistory, 
 func (s *stubTaskStore) ListAllJobHistory(_, _ int) ([]*storage.JobHistory, error) {
 	return nil, nil
 }
+func (s *stubTaskStore) DeleteJobHistory(_ string) error       { return nil }
+func (s *stubTaskStore) BulkDeleteJobHistory(_ []string) error { return nil }
 
 // --- ChatStore stub ---
 
@@ -113,6 +115,7 @@ func (c *stubChatStore) CreateSession(_, _, _, _ string) (*storage.ChatSession, 
 func (c *stubChatStore) AppendMessage(_ string, _ storage.ChatMessage) error { return nil }
 func (c *stubChatStore) UpdateSession(_ *storage.ChatSession) error          { return nil }
 func (c *stubChatStore) DeleteSession(_ string) error                        { return nil }
+func (c *stubChatStore) BulkDeleteSessions(_ []string) error                 { return nil }
 
 // --- EventPublisher stub ---
 

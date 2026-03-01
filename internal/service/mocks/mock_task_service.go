@@ -99,3 +99,15 @@ func (m *MockTaskService) GetJobHistory(ctx context.Context, id string) (*storag
 	}
 	return args.Get(0).(*storage.JobHistory), args.Error(1)
 }
+
+//nolint:revive
+func (m *MockTaskService) DeleteJobHistory(ctx context.Context, id string) error {
+	args := m.Called(ctx, id)
+	return args.Error(0)
+}
+
+//nolint:revive
+func (m *MockTaskService) BulkDeleteJobHistory(ctx context.Context, ids []string) error {
+	args := m.Called(ctx, ids)
+	return args.Error(0)
+}

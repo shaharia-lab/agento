@@ -6,6 +6,7 @@ import { MODELS } from '@/types'
 import { formatRelativeTime, truncate } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -55,6 +56,10 @@ export default function ChatsPage() {
   const [selectedModel, setSelectedModel] = useState('')
   const [browserOpen, setBrowserOpen] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  // Bulk selection
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set())
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false)
 
   // Filters
   const [search, setSearch] = useState('')
@@ -159,9 +164,50 @@ export default function ChatsPage() {
     try {
       await chatsApi.delete(id)
       setSessions(prev => prev.filter(s => s.id !== id))
+      setCheckedIds(prev => {
+        const next = new Set(prev)
+        next.delete(id)
+        return next
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete')
     }
+  }
+
+  const bulkDeleteSessions = async () => {
+    const ids = Array.from(checkedIds)
+    try {
+      await chatsApi.bulkDelete(ids)
+      setSessions(prev => prev.filter(s => !checkedIds.has(s.id)))
+      setCheckedIds(new Set())
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete')
+    } finally {
+      setBulkDeleteOpen(false)
+    }
+  }
+
+  const toggleCheck = (id: string) => {
+    setCheckedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+
+  const toggleAllFiltered = () => {
+    const filteredIds = filtered.map(s => s.id)
+    const allSelected = filteredIds.every(id => checkedIds.has(id))
+    setCheckedIds(prev => {
+      const next = new Set(prev)
+      if (allSelected) {
+        filteredIds.forEach(id => next.delete(id))
+      } else {
+        filteredIds.forEach(id => next.add(id))
+      }
+      return next
+    })
   }
 
   const getAgentName = (slug: string) => agents.find(a => a.slug === slug)?.name ?? slug
@@ -210,17 +256,33 @@ export default function ChatsPage() {
       </div>
     )
   } else {
+    const allFilteredChecked = filtered.length > 0 && filtered.every(s => checkedIds.has(s.id))
+    const someFilteredChecked = filtered.some(s => checkedIds.has(s.id)) && !allFilteredChecked
     chatListContent = (
-      <div className="divide-y divide-zinc-100 dark:divide-zinc-700/50">
-        {filtered.map(session => (
-          <ChatRow
-            key={session.id}
-            session={session}
-            agentName={session.agent_slug ? getAgentName(session.agent_slug) : null}
-            onClick={() => navigate(`/chats/${session.id}`)}
-            onDelete={() => deleteSession(session.id)}
+      <div>
+        {/* Select-all row */}
+        <div className="flex items-center gap-3 px-4 sm:px-6 py-2 border-b border-zinc-100 dark:border-zinc-700/50">
+          <Checkbox
+            checked={allFilteredChecked}
+            data-state={someFilteredChecked ? 'indeterminate' : undefined}
+            onCheckedChange={toggleAllFiltered}
+            aria-label="Select all"
           />
-        ))}
+          <span className="text-xs text-zinc-400 dark:text-zinc-500">Select all</span>
+        </div>
+        <div className="divide-y divide-zinc-100 dark:divide-zinc-700/50">
+          {filtered.map(session => (
+            <ChatRow
+              key={session.id}
+              session={session}
+              agentName={session.agent_slug ? getAgentName(session.agent_slug) : null}
+              checked={checkedIds.has(session.id)}
+              onCheck={() => toggleCheck(session.id)}
+              onClick={() => navigate(`/chats/${session.id}`)}
+              onDelete={() => deleteSession(session.id)}
+            />
+          ))}
+        </div>
       </div>
     )
   }
@@ -235,14 +297,27 @@ export default function ChatsPage() {
             {sessions.length} conversation{sessions.length === 1 ? '' : 's'}
           </p>
         </div>
-        <Button
-          size="sm"
-          className="gap-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs h-8 cursor-pointer"
-          onClick={() => setNewChatOpen(true)}
-        >
-          <Plus className="h-3.5 w-3.5" />
-          New Chat
-        </Button>
+        <div className="flex items-center gap-2">
+          {checkedIds.size > 0 && (
+            <Button
+              variant="destructive"
+              size="sm"
+              className="gap-1.5 text-xs h-8"
+              onClick={() => setBulkDeleteOpen(true)}
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Delete {checkedIds.size} selected
+            </Button>
+          )}
+          <Button
+            size="sm"
+            className="gap-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs h-8 cursor-pointer"
+            onClick={() => setNewChatOpen(true)}
+          >
+            <Plus className="h-3.5 w-3.5" />
+            New Chat
+          </Button>
+        </div>
       </div>
 
       {/* Filters */}
@@ -431,6 +506,30 @@ export default function ChatsPage() {
         initialPath={workingDir}
         onSelect={path => setWorkingDir(path)}
       />
+
+      {/* Bulk delete confirmation */}
+      <AlertDialog open={bulkDeleteOpen} onOpenChange={setBulkDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete {checkedIds.size} chat{checkedIds.size === 1 ? '' : 's'}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This will permanently delete the selected conversations and all their messages. This
+              action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 text-white hover:bg-red-700"
+              onClick={bulkDeleteSessions}
+            >
+              Delete {checkedIds.size} chat{checkedIds.size === 1 ? '' : 's'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
@@ -445,11 +544,15 @@ function formatTokens(n: number | undefined): string {
 function ChatRow({
   session,
   agentName,
+  checked,
+  onCheck,
   onClick,
   onDelete,
 }: Readonly<{
   session: ChatSession
   agentName: string | null
+  checked: boolean
+  onCheck: () => void
   onClick: () => void
   onDelete: () => void
 }>) {
@@ -457,6 +560,19 @@ function ChatRow({
 
   return (
     <div className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors">
+      <div
+        onClick={e => {
+          e.stopPropagation()
+          onCheck()
+        }}
+      >
+        <Checkbox
+          checked={checked}
+          onCheckedChange={onCheck}
+          aria-label={`Select ${session.title}`}
+          onClick={e => e.stopPropagation()}
+        />
+      </div>
       <button
         type="button"
         className="flex items-center gap-3 flex-1 min-w-0 text-left appearance-none bg-transparent border-0 p-0"

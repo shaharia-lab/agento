@@ -159,6 +159,34 @@ func (s *Server) handleGetJobHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, jh)
 }
 
+// handleDeleteJobHistory deletes a single job history entry.
+func (s *Server) handleDeleteJobHistory(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if err := s.taskSvc.DeleteJobHistory(r.Context(), id); err != nil {
+		httpErr(w, s.logger, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleBulkDeleteJobHistory deletes multiple job history entries.
+func (s *Server) handleBulkDeleteJobHistory(w http.ResponseWriter, r *http.Request) {
+	var req BulkDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeError(w, http.StatusBadRequest, "ids must not be empty")
+		return
+	}
+	if err := s.taskSvc.BulkDeleteJobHistory(r.Context(), req.IDs); err != nil {
+		httpErr(w, s.logger, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // maxQueryLimit is the maximum number of records that may be requested in a
 // single paginated query, preventing resource exhaustion from large limit values.
 const maxQueryLimit = 500

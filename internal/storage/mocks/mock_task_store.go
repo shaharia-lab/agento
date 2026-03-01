@@ -85,3 +85,15 @@ func (m *MockTaskStore) UpdateJobHistory(jh *storage.JobHistory) error {
 	args := m.Called(jh)
 	return args.Error(0)
 }
+
+//nolint:revive
+func (m *MockTaskStore) DeleteJobHistory(id string) error {
+	args := m.Called(id)
+	return args.Error(0)
+}
+
+//nolint:revive
+func (m *MockTaskStore) BulkDeleteJobHistory(ids []string) error {
+	args := m.Called(ids)
+	return args.Error(0)
+}

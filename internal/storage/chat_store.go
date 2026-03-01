@@ -51,4 +51,5 @@ type ChatStore interface {
 	AppendMessage(sessionID string, msg ChatMessage) error
 	UpdateSession(session *ChatSession) error
 	DeleteSession(id string) error
+	BulkDeleteSessions(ids []string) error
 }

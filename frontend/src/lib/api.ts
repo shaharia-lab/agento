@@ -93,6 +93,15 @@ export const chatsApi = {
     fetch(`${BASE}/chats/${id}`, { method: 'DELETE' }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
+
+  bulkDelete: (ids: string[]) =>
+    fetch(`${BASE}/chats`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -437,6 +446,20 @@ export const jobHistoryApi = {
   },
 
   get: (id: string) => request<JobHistoryEntry>(`/job-history/${id}`),
+
+  delete: (id: string) =>
+    fetch(`${BASE}/job-history/${id}`, { method: 'DELETE' }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
+
+  bulkDelete: (ids: string[]) =>
+    fetch(`${BASE}/job-history`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ids }),
+    }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

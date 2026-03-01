@@ -38,6 +38,9 @@ type ChatService interface {
 	// DeleteSession removes a session and all its messages.
 	DeleteSession(ctx context.Context, id string) error
 
+	// BulkDeleteSessions removes multiple sessions and their messages.
+	BulkDeleteSessions(ctx context.Context, ids []string) error
+
 	// BeginMessage stores the user message, resolves the agent config, and starts
 	// a persistent agent session. The caller must consume events from session.Events()
 	// (breaking at each TypeResult), inject follow-up messages via session.Send() as
@@ -151,6 +154,14 @@ func (s *chatService) DeleteSession(_ context.Context, id string) error {
 		return fmt.Errorf("deleting session %q: %w", id, err)
 	}
 	s.logger.Info("chat session deleted", "session_id", id)
+	return nil
+}
+
+func (s *chatService) BulkDeleteSessions(_ context.Context, ids []string) error {
+	if err := s.chatRepo.BulkDeleteSessions(ids); err != nil {
+		return fmt.Errorf("bulk deleting sessions: %w", err)
+	}
+	s.logger.Info("chat sessions bulk deleted", "count", len(ids))
 	return nil
 }
 

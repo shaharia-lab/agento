@@ -159,6 +159,24 @@ func (s *Server) handleDeleteChat(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleBulkDeleteChats(w http.ResponseWriter, r *http.Request) {
+	var req BulkDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeError(w, http.StatusBadRequest, "ids must not be empty")
+		return
+	}
+	if err := s.chatSvc.BulkDeleteSessions(r.Context(), req.IDs); err != nil {
+		s.logger.Error("bulk delete chats failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to delete chats")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // sendMessageChannels groups the channels used to coordinate between the
 // permission handler goroutine and the SSE HTTP handler goroutine.
 type sendMessageChannels struct {

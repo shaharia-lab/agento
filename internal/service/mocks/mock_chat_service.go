@@ -64,6 +64,12 @@ func (m *MockChatService) DeleteSession(ctx context.Context, id string) error {
 }
 
 //nolint:revive
+func (m *MockChatService) BulkDeleteSessions(ctx context.Context, ids []string) error {
+	args := m.Called(ctx, ids)
+	return args.Error(0)
+}
+
+//nolint:revive
 func (m *MockChatService) BeginMessage(ctx context.Context, sessionID, content string, opts agent.RunOptions) (*claude.Session, *storage.ChatSession, error) {
 	args := m.Called(ctx, sessionID, content, opts)
 	var session *claude.Session

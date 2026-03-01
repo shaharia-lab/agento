@@ -27,6 +27,8 @@ type TaskService interface {
 	ListJobHistory(ctx context.Context, taskID string, limit int) ([]*storage.JobHistory, error)
 	ListAllJobHistory(ctx context.Context, limit, offset int) ([]*storage.JobHistory, error)
 	GetJobHistory(ctx context.Context, id string) (*storage.JobHistory, error)
+	DeleteJobHistory(ctx context.Context, id string) error
+	BulkDeleteJobHistory(ctx context.Context, ids []string) error
 }
 
 type taskService struct {
@@ -240,6 +242,29 @@ func (s *taskService) GetJobHistory(_ context.Context, id string) (*storage.JobH
 		return nil, &NotFoundError{Resource: "job_history", ID: id}
 	}
 	return jh, nil
+}
+
+func (s *taskService) DeleteJobHistory(_ context.Context, id string) error {
+	jh, err := s.repo.GetJobHistory(id)
+	if err != nil {
+		return fmt.Errorf("looking up job history: %w", err)
+	}
+	if jh == nil {
+		return &NotFoundError{Resource: "job_history", ID: id}
+	}
+	if err := s.repo.DeleteJobHistory(id); err != nil {
+		return fmt.Errorf("deleting job history %q: %w", id, err)
+	}
+	s.logger.Info("job history deleted", "id", id)
+	return nil
+}
+
+func (s *taskService) BulkDeleteJobHistory(_ context.Context, ids []string) error {
+	if err := s.repo.BulkDeleteJobHistory(ids); err != nil {
+		return fmt.Errorf("bulk deleting job history: %w", err)
+	}
+	s.logger.Info("job history bulk deleted", "count", len(ids))
+	return nil
 }
 
 func validateTask(task *storage.ScheduledTask) error {
