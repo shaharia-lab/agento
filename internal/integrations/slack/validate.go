@@ -44,7 +44,12 @@ func ValidateToken(ctx context.Context, token string) (string, error) {
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	if resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter := resp.Header.Get("Retry-After")
+		return "", fmt.Errorf("slack rate limited, retry after %s seconds", retryAfter)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
 	if err != nil {
 		return "", fmt.Errorf("reading Slack response: %w", err)
 	}

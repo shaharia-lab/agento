@@ -45,6 +45,9 @@ func BuildAuthURL(cfg *config.IntegrationConfig, redirectPort int) (string, erro
 		return "", fmt.Errorf("parsing slack credentials: %w", err)
 	}
 	oauthCfg := OAuthConfig(creds, redirectPort)
+	// Slack V2 OAuth tokens do not expire by default and don't use refresh tokens.
+	// If the Slack app has "Token Rotation" enabled, this flow would need to handle
+	// refresh tokens via the oauth2 library's token source.
 	return oauthCfg.AuthCodeURL("state"), nil
 }
 

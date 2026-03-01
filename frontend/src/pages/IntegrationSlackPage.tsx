@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -41,6 +41,14 @@ export default function IntegrationSlackPage() {
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Abort controller for the OAuth polling loop — cleaned up on unmount.
+  const pollAbortRef = useRef<AbortController | null>(null)
+  useEffect(() => {
+    return () => {
+      pollAbortRef.current?.abort()
+    }
+  }, [])
 
   const isStep1Valid = () => {
     if (!name) return false
@@ -106,9 +114,13 @@ export default function IntegrationSlackPage() {
   }
 
   const pollAuthStatus = async (id: string) => {
+    const controller = new AbortController()
+    pollAbortRef.current = controller
+
     setPollingAuth(true)
     const maxAttempts = 120 // 10 minutes at 5s intervals
     for (let i = 0; i < maxAttempts; i++) {
+      if (controller.signal.aborted) return
       try {
         const status = await integrationsApi.getAuthStatus(id)
         if (status.authenticated) {

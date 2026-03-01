@@ -12,26 +12,15 @@ import (
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// callSlack makes a request to the Slack Web API and returns the raw response body.
-func callSlack(ctx context.Context, token, method string, params url.Values) ([]byte, error) {
-	reqURL := slackAPIBase + "/" + method
-
-	req, err := http.NewRequestWithContext(
-		ctx, http.MethodPost, reqURL, strings.NewReader(params.Encode()),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+// readSlackResponse reads the HTTP response body and checks the Slack API envelope.
+// It handles rate limiting (HTTP 429) by returning an actionable error.
+func readSlackResponse(method string, resp *http.Response) ([]byte, error) {
+	if resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter := resp.Header.Get("Retry-After")
+		return nil, fmt.Errorf("slack rate limited (%s), retry after %s seconds", method, retryAfter)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := slackHTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("calling Slack %s: request failed", method)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 5*1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
 	}
@@ -50,7 +39,29 @@ func callSlack(ctx context.Context, token, method string, params url.Values) ([]
 	return body, nil
 }
 
-// callSlackJSON makes a JSON-body request to the Slack Web API.
+// callSlack makes a form-encoded POST request to the Slack Web API and returns the raw response body.
+func callSlack(ctx context.Context, token, method string, params url.Values) ([]byte, error) {
+	reqURL := slackAPIBase + "/" + method
+
+	req, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, reqURL, strings.NewReader(params.Encode()),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := slackHTTPClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("calling Slack %s: request failed", method)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	return readSlackResponse(method, resp)
+}
+
+// callSlackJSON makes a JSON-body POST request to the Slack Web API.
 func callSlackJSON(ctx context.Context, token, method string, payload any) ([]byte, error) {
 	reqURL := slackAPIBase + "/" + method
 
@@ -74,23 +85,7 @@ func callSlackJSON(ctx context.Context, token, method string, payload any) ([]by
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
-	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
-	}
-
-	var envelope struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(body, &envelope); err != nil {
-		return nil, fmt.Errorf("parsing response: %w", err)
-	}
-	if !envelope.OK {
-		return nil, fmt.Errorf("slack API error (%s): %s", method, envelope.Error)
-	}
-
-	return body, nil
+	return readSlackResponse(method, resp)
 }
 
 // textResult is a helper that wraps a string in an MCP CallToolResult.
@@ -172,8 +167,10 @@ func registerWorkspaceTools(server *mcp.Server, token string, allowed map[string
 
 	if len(allowed) == 0 || allowed["search_messages"] {
 		mcp.AddTool(server, &mcp.Tool{
-			Name:        "search_messages",
-			Description: "Searches messages across the Slack workspace.",
+			Name: "search_messages",
+			Description: "Searches messages across the Slack workspace. " +
+				"Note: requires OAuth authentication (user token). " +
+				"This tool will return an error when used with a bot token.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *searchMessagesParams) (*mcp.CallToolResult, any, error) {
 			return handleSearchMessages(ctx, token, params)
 		})
