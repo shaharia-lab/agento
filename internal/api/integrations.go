@@ -150,10 +150,11 @@ func (s *Server) handleValidateAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if valErr := s.integrationSvc.ValidateTokenAuth(r.Context(), cfg); valErr != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "error": valErr.Error()})
+		writeJSON(w, http.StatusOK, map[string]any{"valid": false, "validated": false, "error": valErr.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"valid": true})
+	// "validated: false" indicates the validation was not performed (stub), not that it succeeded.
+	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "validated": false})
 }
 
 // scrubIntegration returns a map representation of the integration with secrets removed.

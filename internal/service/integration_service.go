@@ -187,6 +187,11 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 		return "", &NotFoundError{Resource: "integration", ID: id}
 	}
 
+	if cfg.Type != "google" {
+		msg := fmt.Sprintf("OAuth flow is not supported for integration type %q", cfg.Type)
+		return "", &ValidationError{Field: "type", Message: msg}
+	}
+
 	port, err := integrations.FreePort()
 	if err != nil {
 		return "", fmt.Errorf("finding free port: %w", err)
@@ -311,7 +316,9 @@ func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool,
 }
 
 // ValidateTokenAuth validates token-based authentication for an integration.
-// For now, this returns nil for token-based integrations (e.g. Telegram, Jira, Confluence).
+// TODO: implement per-type validation by calling the integration's API (e.g. Telegram getMe,
+// Jira /rest/api/3/myself, GitHub /user). Until each type is implemented, this returns nil
+// (unvalidated) rather than claiming the token is valid.
 func (s *integrationService) ValidateTokenAuth(_ context.Context, _ *config.IntegrationConfig) error {
 	return nil
 }

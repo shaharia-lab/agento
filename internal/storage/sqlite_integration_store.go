@@ -83,7 +83,7 @@ func (s *SQLiteIntegrationStore) Save(cfg *config.IntegrationConfig) error {
 	}
 
 	var authJSON *string
-	if len(cfg.Auth) > 0 {
+	if cfg.IsAuthenticated() {
 		authStr := string(cfg.Auth)
 		authJSON = &authStr
 	}
