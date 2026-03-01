@@ -3,6 +3,9 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -334,6 +337,8 @@ func TestSendSSERaw(t *testing.T) {
 }
 
 func TestHttpErr(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
 	tests := []struct {
 		name           string
 		err            error
@@ -345,9 +350,14 @@ func TestHttpErr(t *testing.T) {
 			expectedStatus: http.StatusNotFound,
 		},
 		{
-			name:           "ValidationError maps to 400",
+			name:           "ValidationError maps to 422",
 			err:            &service.ValidationError{Field: "name", Message: "required"},
-			expectedStatus: http.StatusBadRequest,
+			expectedStatus: http.StatusUnprocessableEntity,
+		},
+		{
+			name:           "wrapped ValidationError maps to 422",
+			err:            fmt.Errorf("outer: %w", &service.ValidationError{Field: "name", Message: "required"}),
+			expectedStatus: http.StatusUnprocessableEntity,
 		},
 		{
 			name:           "ConflictError maps to 409",
@@ -355,7 +365,7 @@ func TestHttpErr(t *testing.T) {
 			expectedStatus: http.StatusConflict,
 		},
 		{
-			name:           "generic error maps to 500",
+			name:           "generic error maps to 500 with generic message",
 			err:            errors.New("something went wrong"),
 			expectedStatus: http.StatusInternalServerError,
 		},
@@ -364,7 +374,7 @@ func TestHttpErr(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			httpErr(rec, tt.err)
+			httpErr(rec, logger, tt.err)
 
 			assert.Equal(t, tt.expectedStatus, rec.Code)
 
@@ -373,6 +383,11 @@ func TestHttpErr(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Contains(t, body, "error")
 			assert.NotEmpty(t, body["error"])
+
+			// Generic errors must not expose internal details.
+			if tt.name == "generic error maps to 500 with generic message" {
+				assert.Equal(t, "internal server error", body["error"])
+			}
 		})
 	}
 }

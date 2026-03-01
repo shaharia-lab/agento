@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -14,7 +16,8 @@ import (
 func (s *Server) handleListIntegrations(w http.ResponseWriter, r *http.Request) {
 	integrations, err := s.integrationSvc.List(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.logger.Error("list integrations failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list integrations")
 		return
 	}
 	// Scrub secrets before returning to the client.
@@ -27,15 +30,9 @@ func (s *Server) handleListIntegrations(w http.ResponseWriter, r *http.Request) 
 
 // handleCreateIntegration creates a new integration.
 func (s *Server) handleCreateIntegration(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Name        string                          `json:"name"`
-		Type        string                          `json:"type"`
-		Enabled     bool                            `json:"enabled"`
-		Credentials json.RawMessage                 `json:"credentials"`
-		Services    map[string]config.ServiceConfig `json:"services"`
-	}
+	var body CreateIntegrationRequest
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
@@ -49,7 +46,7 @@ func (s *Server) handleCreateIntegration(w http.ResponseWriter, r *http.Request)
 
 	created, err := s.integrationSvc.Create(r.Context(), cfg)
 	if err != nil {
-		httpErr(w, err)
+		httpErr(w, s.logger, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, scrubIntegration(created))
@@ -60,7 +57,7 @@ func (s *Server) handleGetIntegration(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	cfg, err := s.integrationSvc.Get(r.Context(), id)
 	if err != nil {
-		httpErr(w, err)
+		httpErr(w, s.logger, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, scrubIntegration(cfg))
@@ -70,15 +67,9 @@ func (s *Server) handleGetIntegration(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	var body struct {
-		Name        string                          `json:"name"`
-		Type        string                          `json:"type"`
-		Enabled     bool                            `json:"enabled"`
-		Credentials json.RawMessage                 `json:"credentials"`
-		Services    map[string]config.ServiceConfig `json:"services"`
-	}
+	var body UpdateIntegrationRequest
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
+		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
@@ -92,7 +83,7 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request)
 
 	updated, err := s.integrationSvc.Update(r.Context(), id, cfg)
 	if err != nil {
-		httpErr(w, err)
+		httpErr(w, s.logger, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, scrubIntegration(updated))
@@ -102,7 +93,7 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleDeleteIntegration(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := s.integrationSvc.Delete(r.Context(), id); err != nil {
-		httpErr(w, err)
+		httpErr(w, s.logger, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -112,7 +103,8 @@ func (s *Server) handleDeleteIntegration(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleAvailableTools(w http.ResponseWriter, r *http.Request) {
 	tools, err := s.integrationSvc.AvailableTools(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.logger.Error("list available tools failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list available tools")
 		return
 	}
 	writeJSON(w, http.StatusOK, tools)
@@ -123,7 +115,7 @@ func (s *Server) handleStartOAuth(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	authURL, err := s.integrationSvc.StartOAuth(r.Context(), id)
 	if err != nil {
-		httpErr(w, err)
+		httpErr(w, s.logger, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"auth_url": authURL})
@@ -134,7 +126,7 @@ func (s *Server) handleGetAuthStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	authenticated, err := s.integrationSvc.GetAuthStatus(r.Context(), id)
 	if err != nil {
-		httpErr(w, err)
+		httpErr(w, s.logger, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": authenticated})
@@ -145,7 +137,7 @@ func (s *Server) handleValidateAuth(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	cfg, err := s.integrationSvc.Get(r.Context(), id)
 	if err != nil {
-		httpErr(w, err)
+		httpErr(w, s.logger, err)
 		return
 	}
 
@@ -174,16 +166,23 @@ func scrubIntegration(cfg *config.IntegrationConfig) map[string]any {
 	}
 }
 
-// httpErr maps service errors to HTTP status codes.
-func httpErr(w http.ResponseWriter, err error) {
-	switch e := err.(type) {
-	case *service.NotFoundError:
-		writeError(w, http.StatusNotFound, e.Error())
-	case *service.ValidationError:
-		writeError(w, http.StatusBadRequest, e.Error())
-	case *service.ConflictError:
-		writeError(w, http.StatusConflict, e.Error())
+// httpErr maps service errors to HTTP status codes using errors.As to handle wrapped errors.
+// The default case logs the internal error and returns a generic message to avoid
+// leaking internal details (database errors, filesystem paths) to the client.
+func httpErr(w http.ResponseWriter, logger *slog.Logger, err error) {
+	var nfe *service.NotFoundError
+	var ve *service.ValidationError
+	var ce *service.ConflictError
+
+	switch {
+	case errors.As(err, &nfe):
+		writeError(w, http.StatusNotFound, nfe.Error())
+	case errors.As(err, &ve):
+		writeError(w, http.StatusUnprocessableEntity, ve.Error())
+	case errors.As(err, &ce):
+		writeError(w, http.StatusConflict, ce.Error())
 	default:
-		writeError(w, http.StatusInternalServerError, err.Error())
+		logger.Error("internal server error", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal server error")
 	}
 }

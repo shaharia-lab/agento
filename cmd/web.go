@@ -26,8 +26,10 @@ import (
 	"github.com/shaharia-lab/agento/internal/eventbus"
 	"github.com/shaharia-lab/agento/internal/integrations"
 	confluenceintegration "github.com/shaharia-lab/agento/internal/integrations/confluence"
+	githubintegration "github.com/shaharia-lab/agento/internal/integrations/github"
 	googleintegration "github.com/shaharia-lab/agento/internal/integrations/google"
 	jiraintegration "github.com/shaharia-lab/agento/internal/integrations/jira"
+	slackintegration "github.com/shaharia-lab/agento/internal/integrations/slack"
 	telegramintegration "github.com/shaharia-lab/agento/internal/integrations/telegram"
 	"github.com/shaharia-lab/agento/internal/logger"
 	"github.com/shaharia-lab/agento/internal/notification"
@@ -184,6 +186,8 @@ func buildWebServer(
 	integrationRegistry.RegisterStarter("google", googleintegration.Start)
 	integrationRegistry.RegisterStarter("telegram", telegramintegration.Start)
 	integrationRegistry.RegisterStarter("jira", jiraintegration.Start)
+	integrationRegistry.RegisterStarter("github", githubintegration.Start)
+	integrationRegistry.RegisterStarter("slack", slackintegration.Start)
 	if startErr := integrationRegistry.Start(ctx); startErr != nil {
 		sysLogger.Warn("some integrations failed to start", "error", startErr)
 	}
@@ -236,7 +240,6 @@ func buildAPIServer(
 	notificationSvc := service.NewNotificationService(settingsMgr, notifStore)
 
 	taskStore := storage.NewSQLiteTaskStore(db)
-	taskSvc := service.NewTaskService(taskStore, sysLogger)
 
 	taskScheduler, err := initTaskScheduler(ctx, taskStore, chatStore, agentStore,
 		mcpRegistry, localToolsMCP, integrationRegistry, settingsMgr, sysLogger, bus)
@@ -244,12 +247,15 @@ func buildAPIServer(
 		return nil, nil, err
 	}
 
+	taskSvc := service.NewTaskService(taskStore, taskScheduler, sysLogger)
+	profileSvc := service.NewClaudeSettingsProfileService(sysLogger)
+
 	sessionCache := claudesessions.NewCache(db, sysLogger)
 	sessionCache.StartBackgroundScan()
 
 	apiSrv := api.New(
-		agentSvc, chatSvc, integrationSvc, notificationSvc, taskSvc,
-		settingsMgr, sysLogger, sessionCache, taskScheduler,
+		agentSvc, chatSvc, integrationSvc, notificationSvc, taskSvc, profileSvc,
+		settingsMgr, sysLogger, sessionCache,
 	)
 	return apiSrv, bus, nil
 }

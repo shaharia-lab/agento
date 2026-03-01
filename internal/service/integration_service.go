@@ -16,8 +16,10 @@ import (
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/integrations"
 	"github.com/shaharia-lab/agento/internal/integrations/confluence"
+	githubintegration "github.com/shaharia-lab/agento/internal/integrations/github"
 	"github.com/shaharia-lab/agento/internal/integrations/google"
 	"github.com/shaharia-lab/agento/internal/integrations/jira"
+	slackintegration "github.com/shaharia-lab/agento/internal/integrations/slack"
 	"github.com/shaharia-lab/agento/internal/integrations/telegram"
 	"github.com/shaharia-lab/agento/internal/storage"
 )
@@ -91,6 +93,10 @@ func validateIntegrationCredentials(cfg *config.IntegrationConfig) error {
 		return validateTelegramCredentials(cfg)
 	case "jira":
 		return validateJiraCredentials(cfg)
+	case "github":
+		return validateGitHubCredentials(cfg)
+	case "slack":
+		return validateSlackCredentials(cfg)
 	default:
 		if len(cfg.Credentials) == 0 {
 			return &ValidationError{Field: "credentials", Message: "credentials are required"}
@@ -166,6 +172,43 @@ func validateJiraCredentials(cfg *config.IntegrationConfig) error {
 	}
 	// Save normalized credentials back to the config so the stored value is canonical.
 	return cfg.SetCredentials(creds)
+}
+
+func validateGitHubCredentials(cfg *config.IntegrationConfig) error {
+	var creds config.GitHubCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		return &ValidationError{Field: "credentials", Message: "invalid github credentials: " + err.Error()}
+	}
+	if creds.AuthMode != "pat" {
+		return &ValidationError{Field: "credentials.auth_mode", Message: "only 'pat' auth mode is currently supported"}
+	}
+	if creds.PersonalAccessToken == "" {
+		return &ValidationError{Field: "credentials.personal_access_token", Message: "personal_access_token is required"}
+	}
+	return nil
+}
+
+func validateSlackCredentials(cfg *config.IntegrationConfig) error {
+	var creds config.SlackCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		return &ValidationError{Field: "credentials", Message: "invalid slack credentials: " + err.Error()}
+	}
+	switch creds.AuthMode {
+	case "bot_token":
+		if creds.BotToken == "" {
+			return &ValidationError{Field: "credentials.bot_token", Message: "bot_token is required"}
+		}
+	case "oauth":
+		if creds.ClientID == "" {
+			return &ValidationError{Field: "credentials.client_id", Message: "client_id is required"}
+		}
+		if creds.ClientSecret == "" {
+			return &ValidationError{Field: "credentials.client_secret", Message: "client_secret is required"}
+		}
+	default:
+		return &ValidationError{Field: "credentials.auth_mode", Message: "auth_mode must be 'bot_token' or 'oauth'"}
+	}
+	return nil
 }
 
 func (s *integrationService) List(_ context.Context) ([]*config.IntegrationConfig, error) {
@@ -265,7 +308,7 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 		return "", &NotFoundError{Resource: "integration", ID: id}
 	}
 
-	if cfg.Type != "google" {
+	if cfg.Type != "google" && cfg.Type != "slack" {
 		msg := fmt.Sprintf("OAuth flow is not supported for integration type %q", cfg.Type)
 		return "", &ValidationError{Field: "type", Message: msg}
 	}
@@ -280,10 +323,8 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 	s.oauthFlows[id] = state
 	s.mu.Unlock()
 
-	authURL, buildErr := google.BuildAuthURL(cfg, port)
-	if buildErr != nil {
-		return "", fmt.Errorf("building auth URL: %w", buildErr)
-	}
+	var authURL string
+	var buildErr error
 
 	callbackCtx, cancelCallback := context.WithTimeout(s.parentCtx, 10*time.Minute)
 	defer func() {
@@ -296,8 +337,23 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 		s.handleOAuthToken(id, state, tok, tokErr)
 	}
 
-	if err := google.StartCallbackServer(callbackCtx, port, cfg, onToken); err != nil {
-		return "", fmt.Errorf("starting callback server: %w", err)
+	switch cfg.Type {
+	case "google":
+		authURL, buildErr = google.BuildAuthURL(cfg, port)
+		if buildErr != nil {
+			return "", fmt.Errorf("building auth URL: %w", buildErr)
+		}
+		if err := google.StartCallbackServer(callbackCtx, port, cfg, onToken); err != nil {
+			return "", fmt.Errorf("starting callback server: %w", err)
+		}
+	case "slack":
+		authURL, buildErr = slackintegration.BuildAuthURL(cfg, port)
+		if buildErr != nil {
+			return "", fmt.Errorf("building auth URL: %w", buildErr)
+		}
+		if err := slackintegration.StartCallbackServer(callbackCtx, port, cfg, onToken); err != nil {
+			return "", fmt.Errorf("starting callback server: %w", err)
+		}
 	}
 
 	return authURL, nil
@@ -405,6 +461,10 @@ func (s *integrationService) ValidateTokenAuth(ctx context.Context, cfg *config.
 		return s.validateTelegramTokenAuth(ctx, cfg)
 	case "jira":
 		return s.validateJiraTokenAuth(ctx, cfg)
+	case "github":
+		return s.validateGitHubPATAuth(ctx, cfg)
+	case "slack":
+		return s.validateSlackTokenAuth(ctx, cfg)
 	default:
 		// For other types, validation is not yet implemented. Return nil (unvalidated).
 		return nil
@@ -486,6 +546,61 @@ func (s *integrationService) validateJiraTokenAuth(ctx context.Context, cfg *con
 	}
 
 	s.logger.Info("jira integration validated", "id", cfg.ID, "display_name", displayName)
+	s.reloadIntegration(cfg.ID)
+	return nil
+}
+
+func (s *integrationService) validateGitHubPATAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
+	if err := validateGitHubCredentials(cfg); err != nil {
+		return err
+	}
+
+	var creds config.GitHubCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		return &ValidationError{Field: "credentials", Message: "invalid github credentials: " + err.Error()}
+	}
+
+	username, err := githubintegration.ValidatePAT(ctx, creds.PersonalAccessToken)
+	if err != nil {
+		return &ValidationError{
+			Field:   "credentials.personal_access_token",
+			Message: "invalid personal access token: " + err.Error(),
+		}
+	}
+
+	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"username":%q}`, username))
+	cfg.UpdatedAt = time.Now().UTC()
+	if saveErr := s.store.Save(cfg); saveErr != nil {
+		return fmt.Errorf("saving validated integration: %w", saveErr)
+	}
+
+	s.logger.Info("github integration validated", "id", cfg.ID, "username", username)
+	s.reloadIntegration(cfg.ID)
+	return nil
+}
+
+func (s *integrationService) validateSlackTokenAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
+	if err := validateSlackCredentials(cfg); err != nil {
+		return err
+	}
+
+	var creds config.SlackCredentials
+	if err := cfg.ParseCredentials(&creds); err != nil {
+		return &ValidationError{Field: "credentials", Message: "invalid slack credentials: " + err.Error()}
+	}
+
+	teamName, err := slackintegration.ValidateToken(ctx, creds.BotToken)
+	if err != nil {
+		return &ValidationError{Field: "credentials.bot_token", Message: "invalid bot token: " + err.Error()}
+	}
+
+	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"team_name":%q}`, teamName))
+	cfg.UpdatedAt = time.Now().UTC()
+	if saveErr := s.store.Save(cfg); saveErr != nil {
+		return fmt.Errorf("saving validated integration: %w", saveErr)
+	}
+
+	s.logger.Info("slack integration validated", "id", cfg.ID, "team", teamName)
 	s.reloadIntegration(cfg.ID)
 	return nil
 }
