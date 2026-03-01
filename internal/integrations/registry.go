@@ -54,7 +54,7 @@ func (r *IntegrationRegistry) Start(ctx context.Context) error {
 	}
 
 	for _, cfg := range integrations {
-		if !cfg.Enabled || cfg.Auth == nil {
+		if !cfg.Enabled || !cfg.IsAuthenticated() {
 			continue
 		}
 		if err := r.startOne(ctx, cfg); err != nil {
@@ -80,7 +80,7 @@ func (r *IntegrationRegistry) Reload(ctx context.Context, id string) error {
 	if cfg == nil {
 		return nil // deleted — nothing to start
 	}
-	if !cfg.Enabled || cfg.Auth == nil {
+	if !cfg.Enabled || !cfg.IsAuthenticated() {
 		return nil // disabled or not authenticated
 	}
 	return r.startOne(ctx, cfg)
@@ -130,7 +130,7 @@ func (r *IntegrationRegistry) StartFilteredServer(
 	if cfg == nil {
 		return claude.McpHTTPServer{}, fmt.Errorf("integration %q not found", id)
 	}
-	if !cfg.Enabled || cfg.Auth == nil {
+	if !cfg.Enabled || !cfg.IsAuthenticated() {
 		return claude.McpHTTPServer{}, fmt.Errorf("integration %q is not enabled or not authenticated", id)
 	}
 

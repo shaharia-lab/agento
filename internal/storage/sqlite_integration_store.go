@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"golang.org/x/oauth2"
-
 	"github.com/shaharia-lab/agento/internal/config"
 )
 
@@ -68,15 +66,9 @@ func (s *SQLiteIntegrationStore) Get(id string) (*config.IntegrationConfig, erro
 	}
 
 	cfg.Enabled = enabled != 0
-	if err := json.Unmarshal([]byte(credJSON), &cfg.Credentials); err != nil {
-		return nil, fmt.Errorf("parsing credentials for integration %q: %w", id, err)
-	}
+	cfg.Credentials = json.RawMessage(credJSON)
 	if authJSON.Valid && authJSON.String != "" {
-		var token oauth2.Token
-		if err := json.Unmarshal([]byte(authJSON.String), &token); err != nil {
-			return nil, fmt.Errorf("parsing auth for integration %q: %w", id, err)
-		}
-		cfg.Auth = &token
+		cfg.Auth = json.RawMessage(authJSON.String)
 	}
 	if err := json.Unmarshal([]byte(servJSON), &cfg.Services); err != nil {
 		return nil, fmt.Errorf("parsing services for integration %q: %w", id, err)
@@ -90,18 +82,9 @@ func (s *SQLiteIntegrationStore) Save(cfg *config.IntegrationConfig) error {
 		return fmt.Errorf("integration id is required")
 	}
 
-	credJSON, err := json.Marshal(cfg.Credentials)
-	if err != nil {
-		return fmt.Errorf("marshaling credentials: %w", err)
-	}
-
 	var authJSON *string
-	if cfg.Auth != nil {
-		b, marshalErr := json.Marshal(cfg.Auth)
-		if marshalErr != nil {
-			return fmt.Errorf("marshaling auth token: %w", marshalErr)
-		}
-		authStr := string(b)
+	if cfg.IsAuthenticated() {
+		authStr := string(cfg.Auth)
 		authJSON = &authStr
 	}
 
@@ -128,7 +111,7 @@ func (s *SQLiteIntegrationStore) Save(cfg *config.IntegrationConfig) error {
 			services = excluded.services,
 			updated_at = excluded.updated_at`,
 		cfg.ID, cfg.Name, cfg.Type, enabled,
-		string(credJSON), authJSON, string(servJSON),
+		string(cfg.Credentials), authJSON, string(servJSON),
 		cfg.CreatedAt, cfg.UpdatedAt,
 	)
 	if err != nil {
@@ -169,15 +152,9 @@ func scanIntegration(rows *sql.Rows) (*config.IntegrationConfig, error) {
 	}
 
 	cfg.Enabled = enabled != 0
-	if err := json.Unmarshal([]byte(credJSON), &cfg.Credentials); err != nil {
-		return nil, fmt.Errorf("parsing credentials: %w", err)
-	}
+	cfg.Credentials = json.RawMessage(credJSON)
 	if authJSON.Valid && authJSON.String != "" {
-		var token oauth2.Token
-		if err := json.Unmarshal([]byte(authJSON.String), &token); err != nil {
-			return nil, fmt.Errorf("parsing auth: %w", err)
-		}
-		cfg.Auth = &token
+		cfg.Auth = json.RawMessage(authJSON.String)
 	}
 	if err := json.Unmarshal([]byte(servJSON), &cfg.Services); err != nil {
 		return nil, fmt.Errorf("parsing services: %w", err)

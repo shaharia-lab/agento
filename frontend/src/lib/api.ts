@@ -19,7 +19,6 @@ import type {
   ClaudeSessionDetail,
   AnalyticsReport,
   Integration,
-  GoogleCredentials,
   AvailableTool,
   NotificationSettings,
   NotificationLogEntry,
@@ -349,10 +348,10 @@ export const integrationsApi = {
 
   get: (id: string) => request<Integration>(`/integrations/${id}`),
 
-  create: (data: Partial<Integration> & { credentials: GoogleCredentials }) =>
+  create: (data: Partial<Integration> & { credentials: Record<string, unknown> }) =>
     request<Integration>('/integrations', { method: 'POST', body: JSON.stringify(data) }),
 
-  update: (id: string, data: Partial<Integration> & { credentials?: GoogleCredentials }) =>
+  update: (id: string, data: Partial<Integration> & { credentials?: Record<string, unknown> }) =>
     request<Integration>(`/integrations/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
   delete: (id: string) =>
@@ -365,6 +364,9 @@ export const integrationsApi = {
 
   getAuthStatus: (id: string) =>
     request<{ authenticated: boolean }>(`/integrations/${id}/auth/status`),
+
+  validateAuth: (id: string) =>
+    request<{ valid: boolean }>(`/integrations/${id}/auth/validate`, { method: 'POST' }),
 
   availableTools: () => request<AvailableTool[]>('/integrations/available-tools'),
 }

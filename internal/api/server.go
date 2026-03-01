@@ -153,6 +153,7 @@ func (s *Server) mountIntegrationRoutes(r chi.Router) {
 	r.Delete(routeIntegrationByID, s.handleDeleteIntegration)
 	r.Post(routeIntegrationByID+"/auth/start", s.handleStartOAuth)
 	r.Get(routeIntegrationByID+"/auth/status", s.handleGetAuthStatus)
+	r.Post(routeIntegrationByID+"/auth/validate", s.handleValidateAuth)
 }
 
 // mountNotificationRoutes registers the notification-related API routes.

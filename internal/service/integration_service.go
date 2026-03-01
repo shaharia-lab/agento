@@ -35,6 +35,7 @@ type IntegrationService interface {
 	StartOAuth(ctx context.Context, id string) (authURL string, err error)
 	GetAuthStatus(ctx context.Context, id string) (authenticated bool, err error)
 	AvailableTools(ctx context.Context) ([]AvailableTool, error)
+	ValidateTokenAuth(ctx context.Context, cfg *config.IntegrationConfig) error
 }
 
 // oauthState tracks an in-progress OAuth flow.
@@ -97,11 +98,25 @@ func (s *integrationService) Create(
 	if cfg.Type == "" {
 		return nil, &ValidationError{Field: "type", Message: "type is required"}
 	}
-	if cfg.Credentials.ClientID == "" {
-		return nil, &ValidationError{Field: "credentials.client_id", Message: "client_id is required"}
-	}
-	if cfg.Credentials.ClientSecret == "" {
-		return nil, &ValidationError{Field: "credentials.client_secret", Message: "client_secret is required"}
+
+	// Type-dispatched credential validation.
+	switch cfg.Type {
+	case "google":
+		var creds config.GoogleCredentials
+		if err := cfg.ParseCredentials(&creds); err != nil {
+			return nil, &ValidationError{Field: "credentials", Message: "invalid google credentials: " + err.Error()}
+		}
+		if creds.ClientID == "" {
+			return nil, &ValidationError{Field: "credentials.client_id", Message: "client_id is required"}
+		}
+		if creds.ClientSecret == "" {
+			return nil, &ValidationError{Field: "credentials.client_secret", Message: "client_secret is required"}
+		}
+	default:
+		// For other types, just ensure credentials are present.
+		if len(cfg.Credentials) == 0 {
+			return nil, &ValidationError{Field: "credentials", Message: "credentials are required"}
+		}
 	}
 
 	if cfg.ID == "" {
@@ -134,7 +149,7 @@ func (s *integrationService) Update(
 	cfg.CreatedAt = existing.CreatedAt
 	cfg.UpdatedAt = time.Now().UTC()
 	// Preserve existing auth token unless the caller provides a new one.
-	if cfg.Auth == nil {
+	if !cfg.IsAuthenticated() {
 		cfg.Auth = existing.Auth
 	}
 
@@ -172,7 +187,12 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 		return "", &NotFoundError{Resource: "integration", ID: id}
 	}
 
-	port, err := google.FreePort()
+	if cfg.Type != "google" {
+		msg := fmt.Sprintf("OAuth flow is not supported for integration type %q", cfg.Type)
+		return "", &ValidationError{Field: "type", Message: msg}
+	}
+
+	port, err := integrations.FreePort()
 	if err != nil {
 		return "", fmt.Errorf("finding free port: %w", err)
 	}
@@ -182,7 +202,10 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 	s.oauthFlows[id] = state
 	s.mu.Unlock()
 
-	authURL := google.BuildAuthURL(cfg, port)
+	authURL, buildErr := google.BuildAuthURL(cfg, port)
+	if buildErr != nil {
+		return "", fmt.Errorf("building auth URL: %w", buildErr)
+	}
 
 	callbackCtx, cancelCallback := context.WithTimeout(s.parentCtx, 10*time.Minute)
 	defer func() {
@@ -219,7 +242,10 @@ func (s *integrationService) handleOAuthToken(id string, state *oauthState, tok 
 		state.err = fmt.Errorf("loading integration after OAuth: %w", loadErr)
 		return
 	}
-	latestCfg.Auth = tok
+	if setErr := latestCfg.SetOAuthToken(tok); setErr != nil {
+		state.err = fmt.Errorf("setting oauth token: %w", setErr)
+		return
+	}
 	latestCfg.UpdatedAt = time.Now().UTC()
 	if saveErr := s.store.Save(latestCfg); saveErr != nil {
 		state.err = fmt.Errorf("saving token: %w", saveErr)
@@ -257,7 +283,7 @@ func (s *integrationService) GetAuthStatus(_ context.Context, id string) (bool, 
 	if cfg == nil {
 		return false, &NotFoundError{Resource: "integration", ID: id}
 	}
-	return cfg.Auth != nil, nil
+	return cfg.IsAuthenticated(), nil
 }
 
 func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool, error) {
@@ -268,7 +294,7 @@ func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool,
 
 	var tools []AvailableTool
 	for _, cfg := range cfgs {
-		if !cfg.Enabled || cfg.Auth == nil {
+		if !cfg.Enabled || !cfg.IsAuthenticated() {
 			continue
 		}
 		for svcName, svc := range cfg.Services {
@@ -287,4 +313,12 @@ func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool,
 		}
 	}
 	return tools, nil
+}
+
+// ValidateTokenAuth validates token-based authentication for an integration.
+// TODO: implement per-type validation by calling the integration's API (e.g. Telegram getMe,
+// Jira /rest/api/3/myself, GitHub /user). Until each type is implemented, this returns nil
+// (unvalidated) rather than claiming the token is valid.
+func (s *integrationService) ValidateTokenAuth(_ context.Context, _ *config.IntegrationConfig) error {
+	return nil
 }

@@ -76,3 +76,9 @@ func (m *MockIntegrationService) AvailableTools(ctx context.Context) ([]service.
 	}
 	return args.Get(0).([]service.AvailableTool), args.Error(1)
 }
+
+//nolint:revive
+func (m *MockIntegrationService) ValidateTokenAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
+	args := m.Called(ctx, cfg)
+	return args.Error(0)
+}
