@@ -31,6 +31,8 @@ type TaskService interface {
 	BulkDeleteJobHistory(ctx context.Context, ids []string) error
 }
 
+const errFmtLookingUpTask = "looking up task: %w"
+
 type taskService struct {
 	repo      storage.TaskStore
 	scheduler TaskScheduler // optional; nil if no scheduler is configured
@@ -95,7 +97,7 @@ func (s *taskService) UpdateTask(
 ) (*storage.ScheduledTask, error) {
 	existing, err := s.repo.GetTask(id)
 	if err != nil {
-		return nil, fmt.Errorf("looking up task: %w", err)
+		return nil, fmt.Errorf(errFmtLookingUpTask, err)
 	}
 	if existing == nil {
 		return nil, &NotFoundError{Resource: "task", ID: id}
@@ -137,7 +139,7 @@ func (s *taskService) UpdateTask(
 func (s *taskService) DeleteTask(_ context.Context, id string) error {
 	existing, err := s.repo.GetTask(id)
 	if err != nil {
-		return fmt.Errorf("looking up task: %w", err)
+		return fmt.Errorf(errFmtLookingUpTask, err)
 	}
 	if existing == nil {
 		return &NotFoundError{Resource: "task", ID: id}
@@ -158,7 +160,7 @@ func (s *taskService) DeleteTask(_ context.Context, id string) error {
 func (s *taskService) PauseTask(_ context.Context, id string) (*storage.ScheduledTask, error) {
 	task, err := s.repo.GetTask(id)
 	if err != nil {
-		return nil, fmt.Errorf("looking up task: %w", err)
+		return nil, fmt.Errorf(errFmtLookingUpTask, err)
 	}
 	if task == nil {
 		return nil, &NotFoundError{Resource: "task", ID: id}
@@ -182,7 +184,7 @@ func (s *taskService) PauseTask(_ context.Context, id string) (*storage.Schedule
 func (s *taskService) ResumeTask(_ context.Context, id string) (*storage.ScheduledTask, error) {
 	task, err := s.repo.GetTask(id)
 	if err != nil {
-		return nil, fmt.Errorf("looking up task: %w", err)
+		return nil, fmt.Errorf(errFmtLookingUpTask, err)
 	}
 	if task == nil {
 		return nil, &NotFoundError{Resource: "task", ID: id}
