@@ -51,10 +51,11 @@ type RunOptions struct {
 	// (Future: use WithSettings(filePath) once SDK v0.2.1 is available.)
 	SettingsFilePath string
 
-	// WorkingDir is the project directory for the agent session. When set, it
-	// is passed to the SDK via WithCWD so the Claude CLI subprocess uses it as
-	// the project root. This enables discovery of project-level skills from
-	// .claude/skills/ and loading of project CLAUDE.md files.
+	// WorkingDir is the project directory for the agent session. When set,
+	// SettingSourceProject is included in the SDK setting sources so the
+	// Claude CLI discovers project-level skills from .claude/skills/ and
+	// loads project CLAUDE.md files. The actual working directory is set
+	// via os.Chdir in the calling code (chat_service.go, executor.go).
 	WorkingDir string
 }
 
