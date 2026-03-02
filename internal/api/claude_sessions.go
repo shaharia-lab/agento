@@ -42,7 +42,7 @@ func (s *Server) handleListClaudeSessions(w http.ResponseWriter, r *http.Request
 	if sessions == nil {
 		sessions = []claudesessions.ClaudeSessionSummary{}
 	}
-	writeJSON(w, http.StatusOK, sessions)
+	s.writeJSON(w, http.StatusOK, sessions)
 }
 
 // handleListClaudeProjects returns all distinct project directories containing sessions.
@@ -50,13 +50,13 @@ func (s *Server) handleListClaudeProjects(w http.ResponseWriter, r *http.Request
 	projects, err := claudesessions.ListProjects()
 	if err != nil {
 		s.logger.Error("list claude projects failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to list projects")
+		s.writeError(w, http.StatusInternalServerError, "failed to list projects")
 		return
 	}
 	if projects == nil {
 		projects = []claudesessions.ClaudeProject{}
 	}
-	writeJSON(w, http.StatusOK, projects)
+	s.writeJSON(w, http.StatusOK, projects)
 }
 
 // handleGetClaudeSession returns the full detail of a single Claude Code session
@@ -66,14 +66,14 @@ func (s *Server) handleGetClaudeSession(w http.ResponseWriter, r *http.Request) 
 	detail, err := claudesessions.GetSessionDetail(id)
 	if err != nil {
 		s.logger.Error("get claude session failed", "session_id", id, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to get session")
+		s.writeError(w, http.StatusInternalServerError, "failed to get session")
 		return
 	}
 	if detail == nil {
-		writeError(w, http.StatusNotFound, "session not found")
+		s.writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, detail)
+	s.writeJSON(w, http.StatusOK, detail)
 }
 
 // handleRefreshClaudeSessionCache invalidates the in-memory session cache.
@@ -94,11 +94,11 @@ func (s *Server) handleContinueClaudeSession(w http.ResponseWriter, r *http.Requ
 	detail, err := claudesessions.GetSessionDetail(id)
 	if err != nil {
 		s.logger.Error("continue claude session: lookup failed", "session_id", id, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to look up session")
+		s.writeError(w, http.StatusInternalServerError, "failed to look up session")
 		return
 	}
 	if detail == nil {
-		writeError(w, http.StatusNotFound, "session not found")
+		s.writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
@@ -106,7 +106,7 @@ func (s *Server) handleContinueClaudeSession(w http.ResponseWriter, r *http.Requ
 	chatSession, err := s.chatSvc.CreateSession(r.Context(), "", detail.CWD, detail.Model, "")
 	if err != nil {
 		s.logger.Error("continue claude session: create chat failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to create chat session")
+		s.writeError(w, http.StatusInternalServerError, "failed to create chat session")
 		return
 	}
 
@@ -115,11 +115,11 @@ func (s *Server) handleContinueClaudeSession(w http.ResponseWriter, r *http.Requ
 	chatSession.SDKSession = id
 	if err := s.chatSvc.UpdateSession(r.Context(), chatSession); err != nil {
 		s.logger.Error("continue claude session: update session failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to link session")
+		s.writeError(w, http.StatusInternalServerError, "failed to link session")
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]string{
+	s.writeJSON(w, http.StatusCreated, map[string]string{
 		"chat_id": chatSession.ID,
 	})
 }

@@ -13,16 +13,16 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 	agents, err := s.agentSvc.List(r.Context())
 	if err != nil {
 		s.logger.Error("list agents failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to list agents")
+		s.writeError(w, http.StatusInternalServerError, "failed to list agents")
 		return
 	}
-	writeJSON(w, http.StatusOK, agents)
+	s.writeJSON(w, http.StatusOK, agents)
 }
 
 func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	var req AgentRequest
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
@@ -38,24 +38,24 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 
 	created, err := s.agentSvc.Create(r.Context(), agent)
 	if err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, created)
+	s.writeJSON(w, http.StatusCreated, created)
 }
 
 func (s *Server) handleGetAgent(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	agent, err := s.agentSvc.Get(r.Context(), slug)
 	if err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
 	if agent == nil {
-		writeError(w, http.StatusNotFound, "agent not found")
+		s.writeError(w, http.StatusNotFound, "agent not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, agent)
+	s.writeJSON(w, http.StatusOK, agent)
 }
 
 func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +63,7 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 	var req AgentRequest
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
@@ -79,16 +79,16 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 	updated, err := s.agentSvc.Update(r.Context(), slug, agent)
 	if err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, updated)
+	s.writeJSON(w, http.StatusOK, updated)
 }
 
 func (s *Server) handleDeleteAgent(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
 	if err := s.agentSvc.Delete(r.Context(), slug); err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

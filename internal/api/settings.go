@@ -14,7 +14,7 @@ type settingsResponse struct {
 }
 
 func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, settingsResponse{
+	s.writeJSON(w, http.StatusOK, settingsResponse{
 		Settings:     s.settingsMgr.Get(),
 		Locked:       s.settingsMgr.Locked(),
 		ModelFromEnv: s.settingsMgr.ModelFromEnv(),
@@ -24,16 +24,16 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var incoming config.UserSettings
 	if json.NewDecoder(r.Body).Decode(&incoming) != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
 	if err := s.settingsMgr.Update(incoming); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, settingsResponse{
+	s.writeJSON(w, http.StatusOK, settingsResponse{
 		Settings:     s.settingsMgr.Get(),
 		Locked:       s.settingsMgr.Locked(),
 		ModelFromEnv: s.settingsMgr.ModelFromEnv(),

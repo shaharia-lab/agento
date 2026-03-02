@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -250,13 +249,13 @@ func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 			if _, execErr := db.ExecContext(context.Background(), "DELETE FROM claude_session_cache"); execErr != nil {
 				logger.Warn("failed to clear session cache", "error", execErr)
 			}
-			updateLastScanned(db)
+			updateLastScanned(db, logger)
 			return []ClaudeSessionSummary{}, nil
 		}
 		return nil, err
 	}
 
-	cached, err := loadCachedEntries(db)
+	cached, err := loadCachedEntries(db, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -264,8 +263,8 @@ func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 	toUpsert, toDelete := diffDiskAndCache(onDisk, cached)
 	applyChanges(db, logger, onDisk, toUpsert, toDelete)
 
-	updateLastScanned(db)
-	return loadAllSessions(db)
+	updateLastScanned(db, logger)
+	return loadAllSessions(db, logger)
 }
 
 func walkDiskFiles(projectsDir string) (map[string]diskFile, error) {
@@ -307,7 +306,7 @@ func collectProjectDiskFiles(projectsDir, dirName string, onDisk map[string]disk
 	}
 }
 
-func loadCachedEntries(db *sql.DB) (map[string]cachedEntry, error) {
+func loadCachedEntries(db *sql.DB, logger *slog.Logger) (map[string]cachedEntry, error) {
 	cached := make(map[string]cachedEntry)
 	rows, err := db.QueryContext(context.Background(), "SELECT file_path, file_mtime FROM claude_session_cache")
 	if err != nil {
@@ -315,7 +314,7 @@ func loadCachedEntries(db *sql.DB) (map[string]cachedEntry, error) {
 	}
 	defer func() {
 		if cerr := rows.Close(); cerr != nil {
-			log.Printf("failed to close rows: %v", cerr)
+			logger.Warn("failed to close rows", "error", cerr)
 		}
 	}()
 
@@ -408,18 +407,18 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 	return err
 }
 
-func updateLastScanned(db *sql.DB) {
+func updateLastScanned(db *sql.DB, logger *slog.Logger) {
 	ctx := context.Background()
 	if _, err := db.ExecContext(ctx, `
 		INSERT INTO claude_cache_metadata (id, last_scanned_at) VALUES (1, ?)
 		ON CONFLICT(id) DO UPDATE SET last_scanned_at = excluded.last_scanned_at`,
 		time.Now().UTC(),
 	); err != nil {
-		log.Printf("failed to update last_scanned_at: %v", err)
+		logger.Warn("failed to update last_scanned_at", "error", err)
 	}
 }
 
-func loadAllSessions(db *sql.DB) ([]ClaudeSessionSummary, error) {
+func loadAllSessions(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, error) {
 	ctx := context.Background()
 	rows, err := db.QueryContext(ctx, `
 		SELECT session_id, project_path, preview, start_time, last_activity,
@@ -432,7 +431,7 @@ func loadAllSessions(db *sql.DB) ([]ClaudeSessionSummary, error) {
 	}
 	defer func() {
 		if cerr := rows.Close(); cerr != nil {
-			log.Printf("failed to close rows: %v", cerr)
+			logger.Warn("failed to close rows", "error", cerr)
 		}
 	}()
 
@@ -503,7 +502,7 @@ func readSessionSummary(sessionID, projectPath, filePath string) (*ClaudeSession
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil {
-			log.Printf("failed to close file: %v", cerr)
+			slog.Default().Warn("failed to close file", "error", cerr)
 		}
 	}()
 
@@ -591,7 +590,7 @@ func readSessionDetail(sessionID, projectPath, filePath string) (*ClaudeSessionD
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil {
-			log.Printf("failed to close file: %v", cerr)
+			slog.Default().Warn("failed to close file", "error", cerr)
 		}
 	}()
 

@@ -97,16 +97,16 @@ func (s *Server) handleListChats(w http.ResponseWriter, r *http.Request) {
 	sessions, err := s.chatSvc.ListSessions(r.Context())
 	if err != nil {
 		s.logger.Error("list chats failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to list chats")
+		s.writeError(w, http.StatusInternalServerError, "failed to list chats")
 		return
 	}
-	writeJSON(w, http.StatusOK, sessions)
+	s.writeJSON(w, http.StatusOK, sessions)
 }
 
 func (s *Server) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 	var req createChatRequest
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
@@ -116,14 +116,14 @@ func (s *Server) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var nfe *service.NotFoundError
 		if errors.As(err, &nfe) {
-			writeError(w, http.StatusNotFound, nfe.Error())
+			s.writeError(w, http.StatusNotFound, nfe.Error())
 			return
 		}
 		s.logger.Error("create chat failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to create chat")
+		s.writeError(w, http.StatusInternalServerError, "failed to create chat")
 		return
 	}
-	writeJSON(w, http.StatusCreated, session)
+	s.writeJSON(w, http.StatusCreated, session)
 }
 
 func (s *Server) handleGetChat(w http.ResponseWriter, r *http.Request) {
@@ -131,14 +131,14 @@ func (s *Server) handleGetChat(w http.ResponseWriter, r *http.Request) {
 	session, messages, err := s.chatSvc.GetSessionWithMessages(r.Context(), id)
 	if err != nil {
 		s.logger.Error("get chat failed", "session_id", id, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to get chat")
+		s.writeError(w, http.StatusInternalServerError, "failed to get chat")
 		return
 	}
 	if session == nil {
-		writeError(w, http.StatusNotFound, "chat not found")
+		s.writeError(w, http.StatusNotFound, "chat not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	s.writeJSON(w, http.StatusOK, map[string]any{
 		"session":  session,
 		"messages": messages,
 	})
@@ -149,11 +149,11 @@ func (s *Server) handleDeleteChat(w http.ResponseWriter, r *http.Request) {
 	if err := s.chatSvc.DeleteSession(r.Context(), id); err != nil {
 		var nfe *service.NotFoundError
 		if errors.As(err, &nfe) {
-			writeError(w, http.StatusNotFound, nfe.Error())
+			s.writeError(w, http.StatusNotFound, nfe.Error())
 			return
 		}
 		s.logger.Error("delete chat failed", "session_id", id, "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to delete chat")
+		s.writeError(w, http.StatusInternalServerError, "failed to delete chat")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -162,20 +162,20 @@ func (s *Server) handleDeleteChat(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBulkDeleteChats(w http.ResponseWriter, r *http.Request) {
 	var req BulkDeleteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 	if len(req.IDs) == 0 {
-		writeError(w, http.StatusBadRequest, "ids must not be empty")
+		s.writeError(w, http.StatusBadRequest, "ids must not be empty")
 		return
 	}
 	if len(req.IDs) > maxQueryLimit {
-		writeError(w, http.StatusBadRequest, "too many ids (max 500)")
+		s.writeError(w, http.StatusBadRequest, "too many ids (max 500)")
 		return
 	}
 	if err := s.chatSvc.BulkDeleteSessions(r.Context(), req.IDs); err != nil {
 		s.logger.Error("bulk delete chats failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to delete chats")
+		s.writeError(w, http.StatusInternalServerError, "failed to delete chats")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -204,11 +204,11 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	var req sendMessageRequest
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 	if req.Content == "" {
-		writeError(w, http.StatusBadRequest, "content is required")
+		s.writeError(w, http.StatusBadRequest, "content is required")
 		return
 	}
 
@@ -272,7 +272,7 @@ func (s *Server) prepareSSEResponse(
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		sendSSEEvent(w, nil, "error", map[string]string{
+		s.sendSSEEvent(w, nil, "error", map[string]string{
 			"error": "streaming not supported",
 		})
 		if cerr := agentSession.Close(); cerr != nil {
@@ -343,11 +343,11 @@ func (s *Server) handleToolPermission(
 func (s *Server) handleBeginMessageError(w http.ResponseWriter, id string, err error) {
 	var nfe *service.NotFoundError
 	if errors.As(err, &nfe) {
-		writeError(w, http.StatusNotFound, nfe.Error())
+		s.writeError(w, http.StatusNotFound, nfe.Error())
 		return
 	}
 	s.logger.Error("begin message failed", "session_id", id, "error", err)
-	writeError(w, http.StatusInternalServerError, "failed to start message")
+	s.writeError(w, http.StatusInternalServerError, "failed to start message")
 }
 
 func (s *Server) consumeAgentEvents(
@@ -373,10 +373,10 @@ func (s *Server) consumeAgentEvents(
 
 		case qInput := <-chs.questionCh:
 			state.pendingInput = nil
-			sendSSEEvent(w, flusher, "user_input_required", map[string]any{"input": qInput})
+			s.sendSSEEvent(w, flusher, "user_input_required", map[string]any{"input": qInput})
 
 		case pr := <-chs.permissionReqCh:
-			sendSSEEvent(w, flusher, "permission_request", pr)
+			s.sendSSEEvent(w, flusher, "permission_request", pr)
 
 		case <-r.Context().Done():
 			return state
@@ -426,7 +426,7 @@ func (s *Server) handlePendingUserInput(
 	state *streamState,
 ) bool {
 	s.logger.Info("sending user_input_required, waiting for answer", "session_id", id)
-	sendSSEEvent(w, flusher, "user_input_required", map[string]any{"input": state.pendingInput})
+	s.sendSSEEvent(w, flusher, "user_input_required", map[string]any{"input": state.pendingInput})
 	state.pendingInput = nil
 
 	select {
@@ -484,13 +484,13 @@ func (s *Server) handlePermissionResponse(w http.ResponseWriter, r *http.Request
 		Allow bool `json:"allow"`
 	}
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
 	ls, ok := s.liveSessions.get(id)
 	if !ok {
-		writeError(w, http.StatusConflict, "no active session for this chat")
+		s.writeError(w, http.StatusConflict, "no active session for this chat")
 		return
 	}
 
@@ -498,7 +498,7 @@ func (s *Server) handlePermissionResponse(w http.ResponseWriter, r *http.Request
 	case ls.permissionRespCh <- req.Allow:
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		writeError(w, http.StatusConflict, "session is not currently awaiting a permission response")
+		s.writeError(w, http.StatusConflict, "session is not currently awaiting a permission response")
 	}
 }
 
@@ -532,17 +532,17 @@ func (s *Server) handleProvideInput(w http.ResponseWriter, r *http.Request) {
 
 	var req provideInputRequest
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 	if req.Answer == "" {
-		writeError(w, http.StatusBadRequest, "answer is required")
+		s.writeError(w, http.StatusBadRequest, "answer is required")
 		return
 	}
 
 	ls, ok := s.liveSessions.get(id)
 	if !ok {
-		writeError(w, http.StatusConflict, "no active session awaiting input for this chat")
+		s.writeError(w, http.StatusConflict, "no active session awaiting input for this chat")
 		return
 	}
 
@@ -550,6 +550,6 @@ func (s *Server) handleProvideInput(w http.ResponseWriter, r *http.Request) {
 	case ls.inputCh <- req.Answer:
 		w.WriteHeader(http.StatusNoContent)
 	default:
-		writeError(w, http.StatusConflict, "session is not currently awaiting input")
+		s.writeError(w, http.StatusConflict, "session is not currently awaiting input")
 	}
 }

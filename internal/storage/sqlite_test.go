@@ -15,7 +15,7 @@ import (
 
 func newTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, _, err := NewSQLiteDB(":memory:")
+	db, _, err := NewSQLiteDB(":memory:", slog.Default())
 	if err != nil {
 		t.Fatalf("opening test database: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestNewSQLiteDB_MigrationVersion(t *testing.T) {
 }
 
 func TestNewSQLiteDB_FreshDBFlag(t *testing.T) {
-	db, fresh, err := NewSQLiteDB(":memory:")
+	db, fresh, err := NewSQLiteDB(":memory:", slog.Default())
 	if err != nil {
 		t.Fatalf("opening database: %v", err)
 	}

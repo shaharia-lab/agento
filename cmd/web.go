@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -112,7 +111,7 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	sysLogger.Info("server ready", "url", url)
 
 	if !noBrowser {
-		go openBrowser(url)
+		go openBrowser(url, sysLogger)
 	}
 
 	return srv.Run(ctx)
@@ -132,7 +131,7 @@ func ensureWebDirectories(cfg *config.AppConfig) error {
 
 func initDatabase(cfg *config.AppConfig, sysLogger *slog.Logger) (*sql.DB, func(), error) {
 	dbPath := filepath.Join(cfg.DataDir, "agento.db")
-	db, freshDB, err := storage.NewSQLiteDB(dbPath)
+	db, freshDB, err := storage.NewSQLiteDB(dbPath, sysLogger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening database: %w", err)
 	}
@@ -219,7 +218,7 @@ func buildAPIServer(
 	localToolsMCP *tools.LocalMCPConfig,
 	settingsMgr *config.SettingsManager,
 ) (*api.Server, eventbus.EventBus, error) {
-	notifStore, bus := setupNotifications(db, settingsMgr)
+	notifStore, bus := setupNotifications(db, settingsMgr, sysLogger)
 
 	agentSvc := service.NewAgentService(agentStore, sysLogger)
 	chatSvc := service.NewChatService(
@@ -256,13 +255,14 @@ func buildAPIServer(
 func setupNotifications(
 	db *sql.DB,
 	settingsMgr *config.SettingsManager,
+	logger *slog.Logger,
 ) (storage.NotificationStore, eventbus.EventBus) {
 	workerPoolSize := settingsMgr.Get().EventBusWorkerPoolSize
 	if workerPoolSize <= 0 {
 		workerPoolSize = 3
 	}
 
-	bus := eventbus.New(workerPoolSize)
+	bus := eventbus.New(workerPoolSize, logger)
 	notifStore := storage.NewSQLiteNotificationStore(db)
 	notifHandler := notification.NewNotificationHandler(
 		func() (*notification.NotificationSettings, error) {
@@ -270,6 +270,7 @@ func setupNotifications(
 			return loadNotificationSettingsFromJSON(us.NotificationSettings)
 		},
 		notifStore,
+		logger,
 	)
 	bus.Subscribe(func(e eventbus.Event) {
 		notifHandler.Handle(e.Type, e.Payload)
@@ -397,7 +398,7 @@ func printPlainBanner(version, serverURL, logFile string) {
 	fmt.Println()
 }
 
-func openBrowser(url string) {
+func openBrowser(url string, logger *slog.Logger) {
 	time.Sleep(600 * time.Millisecond)
 	ctx := context.Background()
 	var c *exec.Cmd
@@ -410,6 +411,6 @@ func openBrowser(url string) {
 		c = exec.CommandContext(ctx, "xdg-open", url)
 	}
 	if err := c.Start(); err != nil {
-		log.Printf("failed to open browser: %v", err)
+		logger.Warn("failed to open browser", "error", err)
 	}
 }

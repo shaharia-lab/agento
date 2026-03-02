@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 )
 
 func TestSQLiteNotificationStore(t *testing.T) {
-	db, _, err := storage.NewSQLiteDB(":memory:")
+	db, _, err := storage.NewSQLiteDB(":memory:", slog.Default())
 	require.NoError(t, err)
 	defer db.Close()
 

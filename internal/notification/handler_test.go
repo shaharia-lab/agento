@@ -3,6 +3,7 @@ package notification_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,7 +39,7 @@ func TestHandle_NotificationsDisabled(t *testing.T) {
 	loader := func() (*notification.NotificationSettings, error) {
 		return &notification.NotificationSettings{Enabled: false}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	h.Handle("test.event", map[string]string{"foo": "bar"})
 
 	// Nothing should be logged when notifications are disabled.
@@ -50,7 +51,7 @@ func TestHandle_LoaderError(t *testing.T) {
 	loader := func() (*notification.NotificationSettings, error) {
 		return nil, errors.New("load failure")
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	// Should not panic; just log.
 	h.Handle("test.event", map[string]string{})
 	assert.Empty(t, store.entries)
@@ -71,7 +72,7 @@ func TestHandle_LogStoreError(t *testing.T) {
 			},
 		}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	// Should not panic even though both Send and LogNotification fail.
 	h.Handle("test.event", map[string]string{"key": "val"})
 }
@@ -106,7 +107,7 @@ func TestHandle_ScheduledTaskFinished_DefaultEnabled(t *testing.T) {
 			// Preferences.ScheduledTasks.OnFinished is nil → default enabled
 		}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	h.Handle("tasks_scheduler.task_execution.finished", map[string]string{
 		"Task Name": "My Task",
 	})
@@ -131,7 +132,7 @@ func TestHandle_ScheduledTaskFinished_ExplicitlyDisabled(t *testing.T) {
 			},
 		}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	h.Handle("tasks_scheduler.task_execution.finished", map[string]string{
 		"Task Name": "My Task",
 	})
@@ -152,7 +153,7 @@ func TestHandle_ScheduledTaskFailed_DefaultEnabled(t *testing.T) {
 			},
 		}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	h.Handle("tasks_scheduler.task_execution.failed", map[string]string{
 		"Task Name": "My Task",
 		"Error":     "timeout exceeded",
@@ -177,7 +178,7 @@ func TestHandle_ScheduledTaskFailed_ExplicitlyDisabled(t *testing.T) {
 			},
 		}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	h.Handle("tasks_scheduler.task_execution.failed", map[string]string{
 		"Task Name": "My Task",
 	})
@@ -200,7 +201,7 @@ func TestHandle_ScheduledTaskFinished_ExplicitlyEnabled(t *testing.T) {
 			},
 		}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	h.Handle("tasks_scheduler.task_execution.finished", map[string]string{"k": "v"})
 	require.Len(t, store.entries, 1)
 }
@@ -217,7 +218,7 @@ func TestHandle_UnknownEventType_AlwaysSends(t *testing.T) {
 			},
 		}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	h.Handle("some.other.event", map[string]string{"foo": "bar"})
 	require.Len(t, store.entries, 1)
 }
@@ -235,7 +236,7 @@ func TestHandle_ScheduledTaskFinished_SubjectIsReadable(t *testing.T) {
 			},
 		}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	h.Handle("tasks_scheduler.task_execution.finished", map[string]string{"Task Name": "My Task"})
 
 	require.Len(t, store.entries, 1)
@@ -254,7 +255,7 @@ func TestHandle_ScheduledTaskFailed_SubjectIsReadable(t *testing.T) {
 			},
 		}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	h.Handle("tasks_scheduler.task_execution.failed", map[string]string{"Error": "timeout"})
 
 	require.Len(t, store.entries, 1)
@@ -273,7 +274,7 @@ func TestHandle_UnknownEvent_SubjectFallsBackToEventType(t *testing.T) {
 			},
 		}, nil
 	}
-	h := notification.NewNotificationHandler(loader, store)
+	h := notification.NewNotificationHandler(loader, store, slog.Default())
 	h.Handle("some.custom.event", map[string]string{"k": "v"})
 
 	require.Len(t, store.entries, 1)
