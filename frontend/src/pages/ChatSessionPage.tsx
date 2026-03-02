@@ -2,7 +2,7 @@ import { Fragment, useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { chatsApi, sendMessage, provideInput, permissionResponse } from '@/lib/api'
+import { chatsApi, sendMessage, provideInput, permissionResponse, stopSession } from '@/lib/api'
 import { applyThinkingDelta, applyTextDelta, applyToolUseBlocks } from '@/lib/streamingBlocks'
 import type {
   ChatDetail,
@@ -10,6 +10,11 @@ import type {
   MessageBlock,
   AskUserQuestionItem,
   SDKUserEvent,
+  SDKToolProgressEvent,
+  SDKToolUseSummaryEvent,
+  SDKTaskStartedEvent,
+  SDKTaskProgressEvent,
+  SDKTaskNotificationEvent,
 } from '@/types'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -54,6 +59,16 @@ export default function ChatSessionPage() {
   const [streamingToolResults, setStreamingToolResults] = useState<
     Record<string, Record<string, unknown>>
   >({})
+  // Tool progress keyed by tool_use_id — populated from SDK "tool_progress" events.
+  const [toolProgress, setToolProgress] = useState<
+    Record<string, { progress?: number; message?: string }>
+  >({})
+  // Tool summaries keyed by tool_use_id — populated from SDK "tool_use_summary" events.
+  const [toolSummaries, setToolSummaries] = useState<Record<string, string>>({})
+  // Background task events accumulated during streaming.
+  const [taskEvents, setTaskEvents] = useState<
+    Array<{ type: string; taskId?: string; status?: string; message?: string }>
+  >([])
   // awaitingInput is set when the backend sends user_input_required — the SSE
   // stream stays open and the AskUserQuestion card becomes interactive.
   const [awaitingInput, setAwaitingInput] = useState(false)
@@ -104,6 +119,9 @@ export default function ChatSessionPage() {
       setAwaitingInput(false)
       setPermissionRequest(null)
       setStreamingToolResults({})
+      setToolProgress({})
+      setToolSummaries({})
+      setTaskEvents([])
       setError(null)
 
       abortRef.current = new AbortController()
@@ -166,6 +184,52 @@ export default function ChatSessionPage() {
                 toolResults[toolUseId] = result
                 setStreamingToolResults(prev => ({ ...prev, [toolUseId]: result }))
               }
+            },
+            onToolProgress: (event: SDKToolProgressEvent) => {
+              if (event.tool_use_id) {
+                setToolProgress(prev => ({
+                  ...prev,
+                  [event.tool_use_id]: { progress: event.progress, message: event.message },
+                }))
+              }
+            },
+            onToolUseSummary: (event: SDKToolUseSummaryEvent) => {
+              if (event.tool_use_id && event.summary) {
+                setToolSummaries(prev => ({ ...prev, [event.tool_use_id!]: event.summary! }))
+              }
+            },
+            onTaskStarted: (event: SDKTaskStartedEvent) => {
+              setTaskEvents(prev => [
+                ...prev,
+                {
+                  type: 'started',
+                  taskId: event.task_id,
+                  status: event.status,
+                  message: event.message,
+                },
+              ])
+            },
+            onTaskProgress: (event: SDKTaskProgressEvent) => {
+              setTaskEvents(prev => [
+                ...prev,
+                {
+                  type: 'progress',
+                  taskId: event.task_id,
+                  status: event.status,
+                  message: event.message,
+                },
+              ])
+            },
+            onTaskNotification: (event: SDKTaskNotificationEvent) => {
+              setTaskEvents(prev => [
+                ...prev,
+                {
+                  type: 'notification',
+                  taskId: event.task_id,
+                  status: event.status,
+                  message: event.message,
+                },
+              ])
             },
             onResult: event => {
               if (event.is_error) {
@@ -230,6 +294,9 @@ export default function ChatSessionPage() {
         setAwaitingInput(false)
         setPermissionRequest(null)
         setStreamingToolResults({})
+        setToolProgress({})
+        setToolSummaries({})
+        setTaskEvents([])
       }
     },
     [id, streaming, detail],
@@ -376,6 +443,8 @@ export default function ChatSessionPage() {
                     block={block}
                     isInteractive={awaitingInput && block.name === 'AskUserQuestion'}
                     toolResult={block.id ? streamingToolResults[block.id] : undefined}
+                    progress={block.id ? toolProgress[block.id] : undefined}
+                    summary={block.id ? toolSummaries[block.id] : undefined}
                     onSubmit={
                       awaitingInput && block.name === 'AskUserQuestion' && id
                         ? answer => {
@@ -401,6 +470,34 @@ export default function ChatSessionPage() {
                 </div>
               )
             })}
+
+          {/* Streaming: background task events */}
+          {streaming && taskEvents.length > 0 && (
+            <div className="ml-10 space-y-1">
+              {taskEvents.map((te, i) => (
+                <div
+                  key={`task-event-${i}`}
+                  className="flex items-center gap-2 text-xs text-zinc-400 dark:text-zinc-500"
+                >
+                  <span
+                    className={cn(
+                      'h-1.5 w-1.5 rounded-full shrink-0',
+                      te.type === 'started'
+                        ? 'bg-blue-400'
+                        : te.type === 'progress'
+                          ? 'bg-amber-400'
+                          : 'bg-emerald-400',
+                    )}
+                  />
+                  <span className="font-mono">
+                    {te.taskId ? `[${te.taskId.slice(0, 8)}]` : '[task]'}
+                  </span>
+                  {te.status && <span className="font-semibold">{te.status}</span>}
+                  {te.message && <span className="truncate">{te.message}</span>}
+                </div>
+              ))}
+            </div>
+          )}
 
           {/* Streaming: system status (tool execution in progress) */}
           {streaming && systemStatus && (
@@ -460,7 +557,16 @@ export default function ChatSessionPage() {
           />
           {streaming ? (
             <button
-              onClick={() => abortRef.current?.abort()}
+              onClick={() => {
+                // Gracefully stop the agent session before aborting the HTTP connection.
+                if (id) {
+                  stopSession(id).catch(() => {
+                    // Fallback: if the stop request fails, abort the connection directly.
+                  })
+                }
+                // Give the subprocess a brief moment to handle SIGINT, then abort.
+                setTimeout(() => abortRef.current?.abort(), 300)
+              }}
               title="Stop generation"
               className="flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors bg-zinc-900 text-white hover:bg-zinc-700"
             >
@@ -797,11 +903,15 @@ function ToolCallCard({
   isInteractive,
   onSubmit,
   toolResult,
+  progress,
+  summary: toolSummary,
 }: Readonly<{
   block: { type: string; id?: string; name?: string; input?: Record<string, unknown> }
   isInteractive?: boolean
   onSubmit?: (answer: string) => void
   toolResult?: Record<string, unknown>
+  progress?: { progress?: number; message?: string }
+  summary?: string
 }>) {
   const [expanded, setExpanded] = useState(false)
   const name = block.name ?? 'unknown'
@@ -813,11 +923,16 @@ function ToolCallCard({
     )
   }
 
-  const summary = toolCallSummary(name, block.input)
+  // Use SDK-provided summary when available, fall back to manual summary.
+  const manualSummary = toolCallSummary(name, block.input)
+  const displayText = toolSummary || manualSummary
   const { Icon, bg, color } = getToolConfig(name)
   // For file-based tools show just the basename in the header; tooltip shows full path.
   const isFileTool = name === 'Read' || name === 'Write' || name === 'Edit'
-  const displaySummary = isFileTool && summary ? (summary.split('/').pop() ?? summary) : summary
+  const displaySummary =
+    isFileTool && !toolSummary && displayText
+      ? (displayText.split('/').pop() ?? displayText)
+      : displayText
 
   return (
     <div className="flex gap-3">
@@ -840,7 +955,7 @@ function ToolCallCard({
           {displaySummary && (
             <span
               className="font-mono text-zinc-400 dark:text-zinc-500 truncate min-w-0"
-              title={summary}
+              title={displayText}
             >
               {displaySummary}
             </span>
@@ -852,6 +967,24 @@ function ToolCallCard({
             />
           )}
         </button>
+        {/* Tool progress bar */}
+        {progress && !toolResult && (
+          <div className="mb-1 space-y-0.5">
+            {progress.message && (
+              <div className="text-[10px] text-zinc-400 dark:text-zinc-500 truncate">
+                {progress.message}
+              </div>
+            )}
+            {progress.progress != null && progress.progress > 0 && (
+              <div className="h-1 w-full rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-blue-400 dark:bg-blue-500 transition-all duration-300"
+                  style={{ width: `${Math.min(progress.progress * 100, 100)}%` }}
+                />
+              </div>
+            )}
+          </div>
+        )}
         {expanded && <ToolCallDetail name={name} input={block.input} toolResult={toolResult} />}
       </div>
     </div>

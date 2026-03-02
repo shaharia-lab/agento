@@ -10,6 +10,11 @@ import type {
   SDKStreamEventMessage,
   SDKResultEvent,
   SDKUserEvent,
+  SDKToolProgressEvent,
+  SDKToolUseSummaryEvent,
+  SDKTaskStartedEvent,
+  SDKTaskProgressEvent,
+  SDKTaskNotificationEvent,
   ClaudeSettingsResponse,
   ClaudeCodeSettings,
   ClaudeSettingsProfile,
@@ -247,6 +252,16 @@ export interface StreamCallbacks {
    * Use this to render rich tool output (e.g. file content for Read, diff for Edit).
    */
   onToolResult?: (event: SDKUserEvent) => void
+  /** Emitted during tool execution with incremental progress (progress float and message). */
+  onToolProgress?: (event: SDKToolProgressEvent) => void
+  /** Emitted when a tool finishes with a summary of what it did. */
+  onToolUseSummary?: (event: SDKToolUseSummaryEvent) => void
+  /** Emitted when a background task starts. */
+  onTaskStarted?: (event: SDKTaskStartedEvent) => void
+  /** Emitted during background task execution with progress updates. */
+  onTaskProgress?: (event: SDKTaskProgressEvent) => void
+  /** Emitted for task-related notifications. */
+  onTaskNotification?: (event: SDKTaskNotificationEvent) => void
 }
 
 export async function sendMessage(
@@ -308,6 +323,21 @@ export async function sendMessage(
             case 'user':
               callbacks.onToolResult?.(data as SDKUserEvent)
               break
+            case 'tool_progress':
+              callbacks.onToolProgress?.(data as SDKToolProgressEvent)
+              break
+            case 'tool_use_summary':
+              callbacks.onToolUseSummary?.(data as SDKToolUseSummaryEvent)
+              break
+            case 'task_started':
+              callbacks.onTaskStarted?.(data as SDKTaskStartedEvent)
+              break
+            case 'task_progress':
+              callbacks.onTaskProgress?.(data as SDKTaskProgressEvent)
+              break
+            case 'task_notification':
+              callbacks.onTaskNotification?.(data as SDKTaskNotificationEvent)
+              break
           }
         } catch {
           // ignore parse errors
@@ -327,6 +357,22 @@ export async function permissionResponse(chatId: string, allow: boolean): Promis
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ allow }),
+  })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(body.error || `HTTP ${res.status}`)
+  }
+}
+
+/**
+ * Gracefully stops the active agent session for a chat.
+ * Sends SIGINT to the subprocess, giving it a chance to finish and write the session.
+ * The SSE stream will end shortly after this call.
+ */
+export async function stopSession(chatId: string): Promise<void> {
+  const res = await fetch(`${BASE}/chats/${chatId}/stop`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))

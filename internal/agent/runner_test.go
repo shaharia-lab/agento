@@ -27,6 +27,7 @@ func TestAppendSettingsOpts(t *testing.T) {
 		settingsFilePath string
 		workingDir       string
 		wantSources      []claude.SettingSource
+		wantSettings     string
 		wantCWD          string
 	}{
 		{
@@ -34,13 +35,15 @@ func TestAppendSettingsOpts(t *testing.T) {
 			settingsFilePath: "",
 			workingDir:       "",
 			wantSources:      nil,
+			wantSettings:     "",
 			wantCWD:          "",
 		},
 		{
-			name:             "with settings file, no working dir — user source only",
+			name:             "with settings file, no working dir — WithSettings used",
 			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
 			workingDir:       "",
-			wantSources:      []claude.SettingSource{claude.SettingSourceUser},
+			wantSources:      nil,
+			wantSettings:     "/home/user/.claude/settings_myprofile.json",
 			wantCWD:          "",
 		},
 		{
@@ -48,13 +51,15 @@ func TestAppendSettingsOpts(t *testing.T) {
 			settingsFilePath: "",
 			workingDir:       anyDir,
 			wantSources:      []claude.SettingSource{claude.SettingSourceProject},
+			wantSettings:     "",
 			wantCWD:          anyDir,
 		},
 		{
-			name:             "both settings file and working dir — both sources and CWD",
+			name:             "both settings file and working dir — project source + WithSettings",
 			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
 			workingDir:       anyDir,
-			wantSources:      []claude.SettingSource{claude.SettingSourceProject, claude.SettingSourceUser},
+			wantSources:      []claude.SettingSource{claude.SettingSourceProject},
+			wantSettings:     "/home/user/.claude/settings_myprofile.json",
 			wantCWD:          anyDir,
 		},
 	}
@@ -76,6 +81,9 @@ func TestAppendSettingsOpts(t *testing.T) {
 				if o.SettingSources[i] != want {
 					t.Errorf("SettingSources[%d] = %q, want %q", i, o.SettingSources[i], want)
 				}
+			}
+			if o.Settings != tc.wantSettings {
+				t.Errorf("Settings = %q, want %q", o.Settings, tc.wantSettings)
 			}
 			if o.CWD != tc.wantCWD {
 				t.Errorf("CWD = %q, want %q", o.CWD, tc.wantCWD)
@@ -100,20 +108,16 @@ func TestBuildSDKOptions_WorkingDirWithSettingsProfile(t *testing.T) {
 	o := applyOpts(sdkOpts)
 
 	hasProject := false
-	hasUser := false
 	for _, s := range o.SettingSources {
 		if s == claude.SettingSourceProject {
 			hasProject = true
-		}
-		if s == claude.SettingSourceUser {
-			hasUser = true
 		}
 	}
 	if !hasProject {
 		t.Error("SettingSources missing SettingSourceProject when working dir is set")
 	}
-	if !hasUser {
-		t.Error("SettingSources missing SettingSourceUser when settings file is set")
+	if o.Settings != "/home/user/.claude/settings_default.json" {
+		t.Errorf("Settings = %q, want settings file path", o.Settings)
 	}
 
 	if o.CWD != workDir {

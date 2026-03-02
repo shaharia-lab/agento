@@ -17,7 +17,7 @@ type AgentConfig struct {
 	Model       string `yaml:"model"           json:"model"`
 	// Thinking mode: "adaptive", "disabled", or "enabled".
 	Thinking string `yaml:"thinking"        json:"thinking"`
-	// PermissionMode: "bypass" (default) or "default".
+	// PermissionMode: "bypass" (default), "default", "plan", or "dontAsk".
 	PermissionMode string            `yaml:"permission_mode" json:"permission_mode"`
 	SystemPrompt   string            `yaml:"system_prompt"   json:"system_prompt"`
 	Capabilities   AgentCapabilities `yaml:"capabilities"    json:"capabilities"`
@@ -145,10 +145,10 @@ func validateAgent(cfg *AgentConfig) error {
 	}
 
 	switch cfg.PermissionMode {
-	case "", "bypass", "default":
+	case "", "bypass", "default", "plan", "dontAsk":
 		// valid
 	default:
-		return fmt.Errorf("invalid permission_mode %q: must be bypass or default", cfg.PermissionMode)
+		return fmt.Errorf("invalid permission_mode %q: must be bypass, default, plan, or dontAsk", cfg.PermissionMode)
 	}
 
 	return nil

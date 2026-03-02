@@ -11,7 +11,7 @@ export interface Agent {
   model: string
   thinking: 'adaptive' | 'enabled' | 'disabled'
   /** Controls tool permission behaviour. Empty string means "bypass" (default). */
-  permission_mode: 'bypass' | 'default' | ''
+  permission_mode: 'bypass' | 'default' | 'plan' | 'dontAsk' | ''
   system_prompt: string
   capabilities: AgentCapabilities
 }
@@ -196,6 +196,7 @@ export interface SDKUsage {
   output_tokens: number
   cache_read_input_tokens: number
   cache_creation_input_tokens: number
+  web_search_requests?: number
 }
 
 /** A single hunk in a structured patch (from Edit tool result). */
@@ -249,6 +250,17 @@ export interface SDKUserEvent {
   uuid: string
 }
 
+/** Per-model token and cost breakdown. */
+export interface SDKModelUsage {
+  input_tokens: number
+  output_tokens: number
+  cache_read_input_tokens: number
+  cache_creation_input_tokens: number
+  cost_usd: number
+  context_window?: number
+  max_output_tokens?: number
+}
+
 /** Terminal event emitted when the agent finishes (success or error). */
 export interface SDKResultEvent {
   type: 'result'
@@ -264,6 +276,54 @@ export interface SDKResultEvent {
   uuid: string
   errors?: string[]
   stop_reason?: string | null
+  /** Per-model token and cost breakdowns keyed by model ID. */
+  model_usages?: Record<string, SDKModelUsage>
+  /** Tool calls that were denied during the run. */
+  permission_denials?: string[]
+  /** Parsed structured output when OutputFormat was requested. */
+  structured_output?: unknown
+}
+
+// ── SDK v0.3.0 event types ────────────────────────────────────────────────────
+
+/** Emitted during tool execution with incremental progress updates. */
+export interface SDKToolProgressEvent {
+  type: 'tool_progress'
+  tool_use_id: string
+  progress?: number
+  message?: string
+}
+
+/** Emitted when a tool finishes, carrying a summary of what the tool did. */
+export interface SDKToolUseSummaryEvent {
+  type: 'tool_use_summary'
+  tool_use_id?: string
+  summary?: string
+  [key: string]: unknown
+}
+
+/** Emitted when a background task starts. */
+export interface SDKTaskStartedEvent {
+  type: 'task_started'
+  task_id?: string
+  status?: string
+  message?: string
+}
+
+/** Emitted during background task execution with progress updates. */
+export interface SDKTaskProgressEvent {
+  type: 'task_progress'
+  task_id?: string
+  status?: string
+  message?: string
+}
+
+/** Emitted for task-related notifications. */
+export interface SDKTaskNotificationEvent {
+  type: 'task_notification'
+  task_id?: string
+  status?: string
+  message?: string
 }
 
 // ── Integrations ──────────────────────────────────────────────────────────────

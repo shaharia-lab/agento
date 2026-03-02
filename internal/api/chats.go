@@ -502,6 +502,26 @@ func (s *Server) handlePermissionResponse(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// handleStopSession gracefully stops the active agent session for a chat.
+// It attempts to interrupt the subprocess first, then closes the session.
+func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	ls, ok := s.liveSessions.get(id)
+	if !ok {
+		writeError(w, http.StatusConflict, "no active session for this chat")
+		return
+	}
+
+	// Interrupt sends SIGINT to the subprocess, giving it a chance to
+	// finish the current operation and write the session to disk.
+	if err := ls.session.Interrupt(); err != nil {
+		s.logger.Warn("interrupt session failed, closing forcefully", "session_id", id, "error", err)
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // extractAskUserQuestionInput parses a raw assistant event and returns the
 // input JSON of the first AskUserQuestion tool_use content block, or nil.
 func extractAskUserQuestionInput(raw json.RawMessage) json.RawMessage {

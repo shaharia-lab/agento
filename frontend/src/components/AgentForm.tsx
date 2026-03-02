@@ -343,11 +343,19 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
             <SelectContent>
               <SelectItem value="default">Default — respect Claude Code settings</SelectItem>
               <SelectItem value="bypass">Bypass — auto-approve all tool calls</SelectItem>
+              <SelectItem value="plan">
+                Plan — plan actions without executing state-changing tools
+              </SelectItem>
+              <SelectItem value="dontAsk">
+                Don&apos;t Ask — silently deny unapproved tool calls
+              </SelectItem>
             </SelectContent>
           </Select>
           <p className="text-xs text-muted-foreground">
             <strong>Default</strong> respects your Claude Code permission rules.{' '}
-            <strong>Bypass</strong> skips all permission checks and auto-approves every tool call.
+            <strong>Bypass</strong> skips all permission checks and auto-approves every tool call.{' '}
+            <strong>Plan</strong> enables planning mode without executing state-changing tools.{' '}
+            <strong>Don&apos;t Ask</strong> silently denies any tool call not already pre-approved.
           </p>
         </div>
       </CollapsibleSection>

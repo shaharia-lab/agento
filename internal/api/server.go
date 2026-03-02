@@ -86,6 +86,7 @@ func (s *Server) Mount(r chi.Router) {
 	r.Post("/chats/{id}/messages", s.handleSendMessage)
 	r.Post("/chats/{id}/input", s.handleProvideInput)
 	r.Post("/chats/{id}/permission", s.handlePermissionResponse)
+	r.Post("/chats/{id}/stop", s.handleStopSession)
 
 	// Agento settings
 	r.Get("/settings", s.handleGetSettings)

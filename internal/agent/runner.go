@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -46,9 +47,8 @@ type RunOptions struct {
 	PermissionHandler claude.PermissionHandler
 
 	// SettingsFilePath is the absolute path to the Claude settings JSON file
-	// for this session. When set, the user settings source is loaded via
-	// WithSettingSources so the subprocess picks up the profile's configuration.
-	// (Future: use WithSettings(filePath) once SDK v0.2.1 is available.)
+	// for this session. When set, it is passed to the subprocess via
+	// WithSettings so it loads the profile's configuration directly.
 	SettingsFilePath string
 
 	// WorkingDir is the project directory for the agent session. When set,
@@ -63,11 +63,13 @@ type RunOptions struct {
 //
 //nolint:revive // AgentResult is intentionally named with the package prefix for call-site clarity.
 type AgentResult struct {
-	SessionID string
-	Answer    string
-	Thinking  string
-	CostUSD   float64
-	Usage     UsageStats
+	SessionID         string
+	Answer            string
+	Thinking          string
+	CostUSD           float64
+	Usage             UsageStats
+	ModelUsages       map[string]claude.ModelUsage
+	PermissionDenials []string
 }
 
 // UsageStats holds token usage information.
@@ -76,6 +78,7 @@ type UsageStats struct {
 	OutputTokens             int
 	CacheReadInputTokens     int
 	CacheCreationInputTokens int
+	WebSearchRequests        int
 }
 
 // MissingVariableError is returned when a required template variable is absent.
@@ -144,6 +147,10 @@ func buildSDKOptions(
 	sdkOpts = appendPermissionOpts(sdkOpts, opts, agentCfg)
 	sdkOpts = appendModelAndPromptOpts(sdkOpts, agentCfg, opts, systemPrompt)
 	sdkOpts = append(sdkOpts, claude.WithThinking(resolveThinkingMode(opts, agentCfg)))
+	sdkOpts = append(sdkOpts, claude.WithStderr(func(line string) {
+		// Forward claude subprocess stderr to the server log for diagnostics.
+		slog.Debug("claude subprocess stderr", "line", line)
+	}))
 
 	allowedTools, mcpServers := resolveToolsAndMCP(ctx, agentCfg, opts)
 	sdkOpts = appendToolOpts(sdkOpts, agentCfg, allowedTools, mcpServers)
@@ -162,7 +169,10 @@ func appendSettingsOpts(sdkOpts []claude.Option, opts RunOptions, _ *config.Agen
 		sdkOpts = append(sdkOpts, claude.WithSettingSources(claude.SettingSourceProject))
 	}
 	if opts.SettingsFilePath != "" {
-		sdkOpts = append(sdkOpts, claude.WithSettingSources(claude.SettingSourceUser))
+		// WithSettings passes the file path directly to the subprocess via
+		// --settings, replacing the older WithSettingSources(SettingSourceUser)
+		// approach which required the file to be in a well-known location.
+		sdkOpts = append(sdkOpts, claude.WithSettings(opts.SettingsFilePath))
 	}
 
 	return sdkOpts
@@ -172,13 +182,26 @@ func appendPermissionOpts(sdkOpts []claude.Option, opts RunOptions, agentCfg *co
 	if opts.PermissionHandler != nil {
 		return append(sdkOpts, claude.WithDefaultPermissions())
 	}
-	if agentCfg != nil && agentCfg.PermissionMode == "default" {
-		return append(sdkOpts, claude.WithDefaultPermissions())
+
+	mode := ""
+	if agentCfg != nil {
+		mode = agentCfg.PermissionMode
 	}
-	return append(sdkOpts,
-		claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
-		claude.WithBypassPermissions(),
-	)
+
+	switch mode {
+	case "default":
+		return append(sdkOpts, claude.WithDefaultPermissions())
+	case "plan":
+		return append(sdkOpts, claude.WithPermissionMode(claude.PermissionModePlan))
+	case "dontAsk":
+		return append(sdkOpts, claude.WithPermissionMode(claude.PermissionModeDontAsk))
+	default:
+		// "bypass" or empty — auto-approve all tool calls.
+		return append(sdkOpts,
+			claude.WithPermissionMode(claude.PermissionModeBypassPermissions),
+			claude.WithBypassPermissions(),
+		)
+	}
 }
 
 func appendModelAndPromptOpts(
@@ -485,6 +508,9 @@ func buildAgentResult(r *claude.Result, thinking string) *AgentResult {
 			OutputTokens:             r.Usage.OutputTokens,
 			CacheReadInputTokens:     r.Usage.CacheReadInputTokens,
 			CacheCreationInputTokens: r.Usage.CacheCreationInputTokens,
+			WebSearchRequests:        r.Usage.WebSearchRequests,
 		},
+		ModelUsages:       r.ModelUsages,
+		PermissionDenials: r.PermissionDenials,
 	}
 }
