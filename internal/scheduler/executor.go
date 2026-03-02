@@ -3,7 +3,6 @@ package scheduler
 import (
 	"context"
 	"fmt"
-	"os"
 	"strconv"
 	"time"
 
@@ -74,18 +73,6 @@ func (s *Scheduler) prepareTaskRun(
 		s.recordFailedRun(task, startedAt, "", errMsg)
 		s.publishTaskFailed(task, errMsg)
 		return "", nil, nil, err
-	}
-
-	// TODO: os.Chdir is process-global and unsafe for concurrent tasks.
-	// Replace with claude.WithCWD once the installed CLI supports --cwd.
-	if task.WorkingDirectory != "" {
-		if chdirErr := os.Chdir(task.WorkingDirectory); chdirErr != nil {
-			errMsg := fmt.Sprintf("chdir %q: %v", task.WorkingDirectory, chdirErr)
-			s.logger.Error("failed to change working directory", "task_id", task.ID, "error", chdirErr)
-			s.recordFailedRun(task, startedAt, chatSession.ID, errMsg)
-			s.publishTaskFailed(task, errMsg)
-			return "", nil, nil, chdirErr
-		}
 	}
 
 	jh = s.createInitialJobHistory(task, startedAt, chatSession.ID, prompt)

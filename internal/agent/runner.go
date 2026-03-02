@@ -52,10 +52,10 @@ type RunOptions struct {
 	SettingsFilePath string
 
 	// WorkingDir is the project directory for the agent session. When set,
-	// SettingSourceProject is included in the SDK setting sources so the
-	// Claude CLI discovers project-level skills from .claude/skills/ and
-	// loads project CLAUDE.md files. The actual working directory is set
-	// via os.Chdir in the calling code (chat_service.go, executor.go).
+	// it is passed to the SDK via WithCWD (which sets exec.Cmd.Dir on the
+	// subprocess) and SettingSourceProject is included so the Claude CLI
+	// discovers project-level skills from .claude/skills/ and loads
+	// project CLAUDE.md files.
 	WorkingDir string
 }
 
@@ -157,15 +157,12 @@ func buildSDKOptions(
 }
 
 func appendSettingsOpts(sdkOpts []claude.Option, opts RunOptions, _ *config.AgentConfig) []claude.Option {
-	var sources []claude.SettingSource
 	if opts.WorkingDir != "" {
-		sources = append(sources, claude.SettingSourceProject)
+		sdkOpts = append(sdkOpts, claude.WithCWD(opts.WorkingDir))
+		sdkOpts = append(sdkOpts, claude.WithSettingSources(claude.SettingSourceProject))
 	}
 	if opts.SettingsFilePath != "" {
-		sources = append(sources, claude.SettingSourceUser)
-	}
-	if len(sources) > 0 {
-		sdkOpts = append(sdkOpts, claude.WithSettingSources(sources...))
+		sdkOpts = append(sdkOpts, claude.WithSettingSources(claude.SettingSourceUser))
 	}
 
 	return sdkOpts

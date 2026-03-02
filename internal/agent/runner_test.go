@@ -27,30 +27,35 @@ func TestAppendSettingsOpts(t *testing.T) {
 		settingsFilePath string
 		workingDir       string
 		wantSources      []claude.SettingSource
+		wantCWD          string
 	}{
 		{
 			name:             "no settings file, no working dir — isolation mode",
 			settingsFilePath: "",
 			workingDir:       "",
 			wantSources:      nil,
+			wantCWD:          "",
 		},
 		{
 			name:             "with settings file, no working dir — user source only",
 			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
 			workingDir:       "",
 			wantSources:      []claude.SettingSource{claude.SettingSourceUser},
+			wantCWD:          "",
 		},
 		{
-			name:             "working dir set — project source included",
+			name:             "working dir set — project source and CWD",
 			settingsFilePath: "",
 			workingDir:       anyDir,
 			wantSources:      []claude.SettingSource{claude.SettingSourceProject},
+			wantCWD:          anyDir,
 		},
 		{
-			name:             "both settings file and working dir — both sources",
+			name:             "both settings file and working dir — both sources and CWD",
 			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
 			workingDir:       anyDir,
 			wantSources:      []claude.SettingSource{claude.SettingSourceProject, claude.SettingSourceUser},
+			wantCWD:          anyDir,
 		},
 	}
 
@@ -71,6 +76,9 @@ func TestAppendSettingsOpts(t *testing.T) {
 				if o.SettingSources[i] != want {
 					t.Errorf("SettingSources[%d] = %q, want %q", i, o.SettingSources[i], want)
 				}
+			}
+			if o.CWD != tc.wantCWD {
+				t.Errorf("CWD = %q, want %q", o.CWD, tc.wantCWD)
 			}
 		})
 	}
@@ -108,6 +116,9 @@ func TestBuildSDKOptions_WorkingDirWithSettingsProfile(t *testing.T) {
 		t.Error("SettingSources missing SettingSourceUser when settings file is set")
 	}
 
+	if o.CWD != workDir {
+		t.Errorf("CWD = %q, want %q", o.CWD, workDir)
+	}
 	if o.Model != "claude-sonnet-4-6" {
 		t.Errorf("Model = %q, want %q", o.Model, "claude-sonnet-4-6")
 	}
@@ -155,6 +166,9 @@ func TestBuildSDKOptions_NoCWDWhenWorkingDirEmpty(t *testing.T) {
 
 	if len(o.SettingSources) != 0 {
 		t.Errorf("SettingSources = %v, want empty (isolation mode)", o.SettingSources)
+	}
+	if o.CWD != "" {
+		t.Errorf("CWD = %q, want empty when no working dir", o.CWD)
 	}
 }
 

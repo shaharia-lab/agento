@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
@@ -180,14 +179,6 @@ func (s *chatService) BeginMessage(
 	agentCfg, err := s.resolveAgentConfig(session)
 	if err != nil {
 		return nil, nil, err
-	}
-
-	// TODO: os.Chdir is process-global and unsafe for concurrent sessions.
-	// Replace with claude.WithCWD once the installed CLI supports --cwd.
-	if session.WorkingDir != "" {
-		if chdirErr := os.Chdir(session.WorkingDir); chdirErr != nil {
-			return nil, nil, fmt.Errorf("changing working directory: %w", chdirErr)
-		}
 	}
 
 	userMsg := storage.ChatMessage{
