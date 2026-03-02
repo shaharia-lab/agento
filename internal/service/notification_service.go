@@ -15,8 +15,6 @@ import (
 const maskedFieldSentinel = "***"
 
 // NotificationService manages notification settings and log access.
-//
-//go:generate mockery --name=NotificationService
 type NotificationService interface {
 	// GetSettings returns the current notification settings. The SMTP password is masked.
 	GetSettings() (*notification.NotificationSettings, error)

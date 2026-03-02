@@ -16,8 +16,6 @@ type TaskScheduler interface {
 }
 
 // TaskService defines the business logic interface for managing scheduled tasks.
-//
-//go:generate mockery --name=TaskService
 type TaskService interface {
 	ListTasks(ctx context.Context) ([]*storage.ScheduledTask, error)
 	GetTask(ctx context.Context, id string) (*storage.ScheduledTask, error)

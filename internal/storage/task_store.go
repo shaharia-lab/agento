@@ -104,8 +104,6 @@ type JobHistory struct {
 }
 
 // TaskStore defines the persistence interface for scheduled tasks and job history.
-//
-//go:generate mockery --name=TaskStore
 type TaskStore interface {
 	ListTasks() ([]*ScheduledTask, error)
 	GetTask(id string) (*ScheduledTask, error)
