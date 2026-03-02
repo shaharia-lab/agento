@@ -12,6 +12,7 @@ make dev-backend    # Run Go backend with dev tag (hot reload not included)
 make test           # go test ./...
 make lint           # golangci-lint run ./...
 make tidy           # go mod tidy
+make generate       # Regenerate all mocks via mockery (reads .mockery.yaml)
 ```
 
 Run a single Go test:

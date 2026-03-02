@@ -3,12 +3,16 @@ dir: "{{.InterfaceDir}}/mocks"
 outpkg: "mocks"
 mockname: "Mock{{.InterfaceName}}"
 filename: "mock_{{.InterfaceName | snakecase}}.go"
+disable-version-string: true
+resolve-type-alias: false
+issue-845-fix: true
 packages:
   github.com/shaharia-lab/agento/internal/storage:
     interfaces:
       AgentStore:
       ChatStore:
       IntegrationStore:
+      TaskStore:
   github.com/shaharia-lab/agento/internal/config:
     interfaces:
       SettingsStore:
@@ -17,3 +21,5 @@ packages:
       AgentService:
       ChatService:
       IntegrationService:
+      NotificationService:
+      TaskService:
