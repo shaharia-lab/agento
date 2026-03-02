@@ -506,7 +506,9 @@ func (s *Server) handlePermissionResponse(w http.ResponseWriter, r *http.Request
 }
 
 // handleStopSession gracefully stops the active agent session for a chat.
-// It attempts to interrupt the subprocess first, then closes the session.
+// It sends SIGINT to the subprocess, giving it a chance to finish cleanly.
+// The deferred cleanup in handleSendMessage is responsible for the final
+// session.Close() call, so we do not call Close() here to avoid a double-close.
 func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -518,11 +520,10 @@ func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
 
 	// Interrupt sends SIGINT to the subprocess, giving it a chance to
 	// finish the current operation and write the session to disk.
+	// The SSE handler's deferred cleanup will call Close() once the
+	// event loop exits, so we do not call Close() here.
 	if err := ls.session.Interrupt(); err != nil {
-		s.logger.Warn("interrupt session failed, closing forcefully", "session_id", id, "error", err)
-		if closeErr := ls.session.Close(); closeErr != nil {
-			s.logger.Warn("force close session failed", "session_id", id, "error", closeErr)
-		}
+		s.logger.Warn("interrupt session failed", "session_id", id, "error", err)
 	}
 
 	w.WriteHeader(http.StatusNoContent)

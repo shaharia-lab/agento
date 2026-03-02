@@ -179,6 +179,11 @@ func appendSettingsOpts(sdkOpts []claude.Option, opts RunOptions, _ *config.Agen
 }
 
 func appendPermissionOpts(sdkOpts []claude.Option, opts RunOptions, agentCfg *config.AgentConfig) []claude.Option {
+	// When the web UI provides an interactive permission handler (e.g. for
+	// approve/deny prompts), we use WithDefaultPermissions so the handler
+	// receives each tool call. This takes precedence over the agent's
+	// configured permission_mode, which means "plan" and "dontAsk" agents
+	// will still behave as "default" when used through the chat UI.
 	if opts.PermissionHandler != nil {
 		return append(sdkOpts, claude.WithDefaultPermissions())
 	}

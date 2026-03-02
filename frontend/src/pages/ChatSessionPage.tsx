@@ -199,37 +199,46 @@ export default function ChatSessionPage() {
               }
             },
             onTaskStarted: (event: SDKTaskStartedEvent) => {
-              setTaskEvents(prev => [
-                ...prev,
-                {
-                  type: 'started',
-                  taskId: event.task_id,
-                  status: event.status,
-                  message: event.message,
-                },
-              ])
+              setTaskEvents(prev => {
+                const next = [
+                  ...prev,
+                  {
+                    type: 'started',
+                    taskId: event.task_id,
+                    status: event.status,
+                    message: event.message,
+                  },
+                ]
+                return next.length > 100 ? next.slice(-100) : next
+              })
             },
             onTaskProgress: (event: SDKTaskProgressEvent) => {
-              setTaskEvents(prev => [
-                ...prev,
-                {
-                  type: 'progress',
-                  taskId: event.task_id,
-                  status: event.status,
-                  message: event.message,
-                },
-              ])
+              setTaskEvents(prev => {
+                const next = [
+                  ...prev,
+                  {
+                    type: 'progress',
+                    taskId: event.task_id,
+                    status: event.status,
+                    message: event.message,
+                  },
+                ]
+                return next.length > 100 ? next.slice(-100) : next
+              })
             },
             onTaskNotification: (event: SDKTaskNotificationEvent) => {
-              setTaskEvents(prev => [
-                ...prev,
-                {
-                  type: 'notification',
-                  taskId: event.task_id,
-                  status: event.status,
-                  message: event.message,
-                },
-              ])
+              setTaskEvents(prev => {
+                const next = [
+                  ...prev,
+                  {
+                    type: 'notification',
+                    taskId: event.task_id,
+                    status: event.status,
+                    message: event.message,
+                  },
+                ]
+                return next.length > 100 ? next.slice(-100) : next
+              })
             },
             onResult: event => {
               if (event.is_error) {
