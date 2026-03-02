@@ -514,7 +514,7 @@ func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
 
 	ls, ok := s.liveSessions.get(id)
 	if !ok {
-		writeError(w, http.StatusConflict, "no active session for this chat")
+		s.writeError(w, http.StatusConflict, "no active session for this chat")
 		return
 	}
 
