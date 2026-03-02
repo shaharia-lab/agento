@@ -895,9 +895,17 @@ function ToolCallDetail({
   input: Record<string, unknown> | undefined
   toolResult: Record<string, unknown> | undefined
 }>) {
-  if (name === 'Write') return renderWriteDetail(input)
   if (name === 'Read') return renderReadDetail(toolResult)
-  if (name === 'Edit') return renderEditDetail(input, toolResult)
+
+  // Write and Edit have their own renderers but may return null (e.g. missing
+  // content/patch), in which case fall through to the raw JSON default.
+  const toolDetail =
+    name === 'Write'
+      ? renderWriteDetail(input)
+      : name === 'Edit'
+        ? renderEditDetail(input, toolResult)
+        : null
+  if (toolDetail !== null) return toolDetail
 
   // Default: raw JSON
   if (input !== undefined) {
