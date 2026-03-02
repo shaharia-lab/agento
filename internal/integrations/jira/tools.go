@@ -108,7 +108,7 @@ func registerProjectTools(server *mcp.Server, c *client, allowed map[string]bool
 			Name:        "list_projects",
 			Description: "Lists all accessible Jira projects.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, _ *struct{}) (*mcp.CallToolResult, any, error) {
-			result, err := c.call(ctx, http.MethodGet, "/rest/api/3/project", nil)
+			result, err := c.call(ctx, http.MethodGet, jiraAPIProject, nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -121,7 +121,7 @@ func registerProjectTools(server *mcp.Server, c *client, allowed map[string]bool
 			Name:        "get_project",
 			Description: "Gets details of a specific Jira project by key.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *getProjectParams) (*mcp.CallToolResult, any, error) {
-			result, err := c.call(ctx, http.MethodGet, "/rest/api/3/project/"+url.PathEscape(params.Key), nil)
+			result, err := c.call(ctx, http.MethodGet, jiraAPIProject+"/"+url.PathEscape(params.Key), nil)
 			if err != nil {
 				return nil, nil, err
 			}
