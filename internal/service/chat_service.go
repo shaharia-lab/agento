@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
@@ -182,12 +181,6 @@ func (s *chatService) BeginMessage(
 		return nil, nil, err
 	}
 
-	if session.WorkingDir != "" {
-		if chdirErr := os.Chdir(session.WorkingDir); chdirErr != nil {
-			return nil, nil, fmt.Errorf("changing working directory: %w", chdirErr)
-		}
-	}
-
 	userMsg := storage.ChatMessage{
 		Role:      "user",
 		Content:   content,
@@ -238,6 +231,7 @@ func (s *chatService) populateRunOptions(opts *agent.RunOptions, session *storag
 	opts.LocalToolsMCP = s.localMCP
 	opts.MCPRegistry = s.mcpRegistry
 	opts.IntegrationRegistry = s.integrationRegistry
+	opts.WorkingDir = session.WorkingDir
 
 	settingsFilePath, resolveErr := config.LoadProfileFilePath(session.SettingsProfileID)
 	if resolveErr != nil {
