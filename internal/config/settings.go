@@ -13,7 +13,7 @@ const defaultModel = "sonnet"
 // It uses the OS temp directory so it is always resolvable without knowing the
 // user's home directory (e.g. /tmp/agento/work on Linux/macOS).
 func DefaultWorkingDir() string {
-	return filepath.Join(os.TempDir(), "agento", "work")
+	return filepath.Join(os.TempDir(), "agento", "work") // NOSONAR - intentional temp dir for agent working directory
 }
 
 // UserSettings holds persisted user preferences.

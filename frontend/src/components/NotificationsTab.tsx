@@ -37,10 +37,10 @@ function prefValue(v: boolean | undefined): boolean {
 }
 
 interface ToggleProps {
-  checked: boolean
-  onChange: (v: boolean) => void
-  label: string
-  description?: string
+  readonly checked: boolean
+  readonly onChange: (v: boolean) => void
+  readonly label: string
+  readonly description?: string
 }
 
 function PreferenceToggle({ checked, onChange, label, description }: ToggleProps) {

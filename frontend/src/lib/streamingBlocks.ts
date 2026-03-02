@@ -1,5 +1,10 @@
 import type { MessageBlock, SDKContentBlock } from '@/types'
 
+let _blockKeyCounter = 0
+function nextBlockKey(): string {
+  return `k${++_blockKeyCounter}`
+}
+
 /**
  * Applies a thinking delta to the block list.
  * If the last block is a thinking block, appends to it; otherwise creates a new one.
@@ -11,7 +16,7 @@ export function applyThinkingDelta(blocks: MessageBlock[], thinking: string): Me
   if (last?.type === 'thinking') {
     result[result.length - 1] = { ...last, text: last.text + thinking }
   } else {
-    result.push({ type: 'thinking', text: thinking })
+    result.push({ type: 'thinking', text: thinking, _key: nextBlockKey() })
   }
   return result
 }
@@ -27,7 +32,7 @@ export function applyTextDelta(blocks: MessageBlock[], text: string): MessageBlo
   if (last?.type === 'text') {
     result[result.length - 1] = { ...last, text: last.text + text }
   } else {
-    result.push({ type: 'text', text })
+    result.push({ type: 'text', text, _key: nextBlockKey() })
   }
   return result
 }

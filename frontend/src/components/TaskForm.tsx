@@ -9,7 +9,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 /** Convert an ISO/UTC string to a `YYYY-MM-DDTHH:MM` value in the user's local timezone. */
 function toLocalDatetimeString(iso: string): string {
   const d = new Date(iso)
-  if (isNaN(d.getTime())) return ''
+  if (Number.isNaN(d.getTime())) return ''
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
@@ -113,6 +113,9 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
   const sectionHeaderClass =
     'flex items-center gap-1.5 text-xs font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-wider cursor-pointer select-none hover:text-zinc-700 dark:hover:text-zinc-200 transition-colors'
 
+  let buttonLabel = isEdit ? 'Update Task' : 'Create Task'
+  if (saving) buttonLabel = 'Saving…'
+
   return (
     <form onSubmit={handleSubmit} className="flex flex-col h-full">
       <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-800 px-4 sm:px-6 py-4 shrink-0">
@@ -137,7 +140,7 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
             disabled={saving}
             className="gap-1.5 bg-zinc-900 hover:bg-zinc-800 dark:bg-zinc-100 dark:hover:bg-zinc-200 dark:text-zinc-900 text-white text-xs h-8"
           >
-            {saving ? 'Saving…' : isEdit ? 'Update Task' : 'Create Task'}
+            {buttonLabel}
           </Button>
         </div>
       </div>

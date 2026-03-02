@@ -443,12 +443,13 @@ export default function ChatSessionPage() {
           {streaming &&
             streamingBlocks.map((block, i) => {
               if (block.type === 'thinking') {
-                return <ThinkingBlock key={`stream-thinking-${i}`} text={block.text} />
+                const thinkKey = block._key ?? String(i)
+                return <ThinkingBlock key={`stream-thinking-${thinkKey}`} text={block.text} />
               }
               if (block.type === 'tool_use') {
                 return (
                   <ToolCallCard
-                    key={`stream-tool-${block.id ?? block.name}-${i}`}
+                    key={`stream-tool-${block.id ?? block.name}`}
                     block={block}
                     isInteractive={awaitingInput && block.name === 'AskUserQuestion'}
                     toolResult={block.id ? streamingToolResults[block.id] : undefined}
@@ -466,8 +467,9 @@ export default function ChatSessionPage() {
                 )
               }
               // text block
+              const textKey = block._key ?? String(i)
               return (
-                <div key={`stream-text-${i}`} className="flex gap-3">
+                <div key={`stream-text-${textKey}`} className="flex gap-3">
                   <div className="flex h-7 w-7 items-center justify-center rounded-full bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 shrink-0 mt-0.5 text-xs font-bold">
                     {agentLabel ? agentLabel[0].toUpperCase() : 'C'}
                   </div>
@@ -483,28 +485,27 @@ export default function ChatSessionPage() {
           {/* Streaming: background task events */}
           {streaming && taskEvents.length > 0 && (
             <div className="ml-10 space-y-1">
-              {taskEvents.map((te, i) => (
-                <div
-                  key={`task-event-${i}`}
-                  className="flex items-center gap-2 text-xs text-zinc-400 dark:text-zinc-500"
-                >
-                  <span
-                    className={cn(
-                      'h-1.5 w-1.5 rounded-full shrink-0',
-                      te.type === 'started'
-                        ? 'bg-blue-400'
-                        : te.type === 'progress'
-                          ? 'bg-amber-400'
-                          : 'bg-emerald-400',
-                    )}
-                  />
-                  <span className="font-mono">
-                    {te.taskId ? `[${te.taskId.slice(0, 8)}]` : '[task]'}
-                  </span>
-                  {te.status && <span className="font-semibold">{te.status}</span>}
-                  {te.message && <span className="truncate">{te.message}</span>}
-                </div>
-              ))}
+              {taskEvents.map(te => {
+                const dotColors: Record<string, string> = {
+                  started: 'bg-blue-400',
+                  progress: 'bg-amber-400',
+                }
+                const dotColorClass = dotColors[te.type] ?? 'bg-emerald-400'
+                const taskEventKey = `task-event-${te.taskId ?? ''}-${te.type}-${te.status ?? ''}`
+                return (
+                  <div
+                    key={taskEventKey}
+                    className="flex items-center gap-2 text-xs text-zinc-400 dark:text-zinc-500"
+                  >
+                    <span className={cn('h-1.5 w-1.5 rounded-full shrink-0', dotColorClass)} />
+                    <span className="font-mono">
+                      {te.taskId ? `[${te.taskId.slice(0, 8)}]` : '[task]'}
+                    </span>
+                    {te.status && <span className="font-semibold">{te.status}</span>}
+                    {te.message && <span className="truncate">{te.message}</span>}
+                  </div>
+                )
+              })}
             </div>
           )}
 

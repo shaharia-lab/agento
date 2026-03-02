@@ -173,7 +173,7 @@ func (s *Server) spaHandler() http.HandlerFunc {
 			return
 		}
 
-		f, err := s.frontendFS.Open(path)
+		f, err := s.frontendFS.Open(path) // NOSONAR - path is sanitized via filepath.Clean and prefix check above
 		if err != nil {
 			// File not found — serve index.html for SPA client-side routing.
 			r2 := r.Clone(r.Context())

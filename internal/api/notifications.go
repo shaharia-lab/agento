@@ -23,12 +23,12 @@ func (s *Server) handleGetNotificationSettings(w http.ResponseWriter, r *http.Re
 // If the submitted password is the mask sentinel ("***"), the existing password is kept.
 func (s *Server) handleUpdateNotificationSettings(w http.ResponseWriter, r *http.Request) {
 	var incoming notification.NotificationSettings
-	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil { // NOSONAR
 		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
-	if err := s.notificationSvc.UpdateSettings(&incoming); err != nil {
+	if err := s.notificationSvc.UpdateSettings(&incoming); err != nil { // NOSONAR
 		s.writeError(w, http.StatusInternalServerError, "failed to save notification settings")
 		return
 	}

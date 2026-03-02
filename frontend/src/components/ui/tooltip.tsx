@@ -20,7 +20,6 @@ export function Tooltip({ content, children, side = 'right' }: TooltipProps) {
   return (
     <div
       className="relative inline-flex"
-      role="group"
       onMouseEnter={() => setVisible(true)}
       onMouseLeave={() => setVisible(false)}
       onFocus={() => setVisible(true)}

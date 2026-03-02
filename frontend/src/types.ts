@@ -74,8 +74,8 @@ export interface FSListResponse {
  * so thinking → text → tool_use or tool_use → text are both represented correctly.
  */
 export type MessageBlock =
-  | { type: 'thinking'; text: string }
-  | { type: 'text'; text: string }
+  | { type: 'thinking'; text: string; _key?: string }
+  | { type: 'text'; text: string; _key?: string }
   | {
       type: 'tool_use'
       id?: string

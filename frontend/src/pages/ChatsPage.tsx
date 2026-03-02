@@ -560,19 +560,12 @@ function ChatRow({
 
   return (
     <div className="flex items-center gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors">
-      <div
-        onClick={(e: React.MouseEvent) => {
-          e.stopPropagation()
-          onCheck()
-        }}
-      >
-        <Checkbox
-          checked={checked}
-          onCheckedChange={onCheck}
-          aria-label={`Select ${session.title}`}
-          onClick={(e: React.MouseEvent) => e.stopPropagation()}
-        />
-      </div>
+      <Checkbox
+        checked={checked}
+        onCheckedChange={onCheck}
+        aria-label={`Select ${session.title}`}
+        onClick={(e: React.MouseEvent) => e.stopPropagation()}
+      />
       <button
         type="button"
         className="flex items-center gap-3 flex-1 min-w-0 text-left appearance-none bg-transparent border-0 p-0"

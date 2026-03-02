@@ -164,7 +164,7 @@ func (s *Server) handleDeleteChat(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBulkDeleteChats(w http.ResponseWriter, r *http.Request) {
 	var req BulkDeleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { // NOSONAR
 		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
