@@ -202,6 +202,19 @@ type streamState struct {
 	pendingInput  json.RawMessage
 }
 
+// eventProcessor captures the shared context for processing agent events during
+// a single SSE stream. It replaces the long parameter lists of consumeAgentEvents,
+// processAgentEvent, and handlePendingUserInput.
+type eventProcessor struct {
+	server       *Server
+	r            *http.Request
+	id           string
+	agentSession *claude.Session
+	flusher      http.Flusher
+	w            http.ResponseWriter
+	chs          sendMessageChannels
+}
+
 func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
@@ -247,7 +260,16 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		close(chs.questionCh)
 	}()
 
-	state := s.consumeAgentEvents(r, id, agentSession, flusher, w, chs)
+	ep := &eventProcessor{
+		server:       s,
+		r:            r,
+		id:           id,
+		agentSession: agentSession,
+		flusher:      flusher,
+		w:            w,
+		chs:          chs,
+	}
+	state := ep.consumeAgentEvents()
 
 	if isFirstMessage {
 		chatSession.Title = truncateTitle(req.Content, 60)
@@ -353,12 +375,9 @@ func (s *Server) handleBeginMessageError(w http.ResponseWriter, id string, err e
 	s.writeError(w, http.StatusInternalServerError, "failed to start message")
 }
 
-func (s *Server) consumeAgentEvents(
-	r *http.Request, id string, agentSession *claude.Session,
-	flusher http.Flusher, w http.ResponseWriter, chs sendMessageChannels,
-) streamState {
+func (ep *eventProcessor) consumeAgentEvents() streamState {
 	var state streamState
-	eventsCh := agentSession.Events()
+	eventsCh := ep.agentSession.Events()
 
 	for {
 		select {
@@ -367,37 +386,32 @@ func (s *Server) consumeAgentEvents(
 				return state
 			}
 			if len(event.Raw) > 0 {
-				sendSSERaw(w, flusher, string(event.Type), event.Raw)
+				sendSSERaw(ep.w, ep.flusher, string(event.Type), event.Raw)
 			}
-			done := s.processAgentEvent(r, id, event, agentSession, flusher, w, chs, &state)
-			if done {
+			if ep.processAgentEvent(event, &state) {
 				return state
 			}
 
-		case qInput := <-chs.questionCh:
+		case qInput := <-ep.chs.questionCh:
 			state.pendingInput = nil
-			s.sendSSEEvent(w, flusher, "user_input_required", map[string]any{"input": qInput})
+			ep.server.sendSSEEvent(ep.w, ep.flusher, "user_input_required", map[string]any{"input": qInput})
 
-		case pr := <-chs.permissionReqCh:
-			s.sendSSEEvent(w, flusher, "permission_request", pr)
+		case pr := <-ep.chs.permissionReqCh:
+			ep.server.sendSSEEvent(ep.w, ep.flusher, "permission_request", pr)
 
-		case <-r.Context().Done():
+		case <-ep.r.Context().Done():
 			return state
 		}
 	}
 }
 
-func (s *Server) processAgentEvent(
-	r *http.Request, id string, event claude.Event,
-	agentSession *claude.Session, flusher http.Flusher, w http.ResponseWriter,
-	chs sendMessageChannels, state *streamState,
-) bool {
+func (ep *eventProcessor) processAgentEvent(event claude.Event, state *streamState) bool {
 	switch event.Type {
 	case claude.TypeAssistant:
 		state.blocks = appendAssistantBlocks(state.blocks, event.Raw)
 		if input := extractAskUserQuestionInput(event.Raw); input != nil {
 			state.pendingInput = input
-			s.logger.Info("AskUserQuestion detected in stream", "session_id", id)
+			ep.server.logger.Info("AskUserQuestion detected in stream", "session_id", ep.id)
 		}
 
 	case claude.TypeResult:
@@ -418,30 +432,26 @@ func (s *Server) processAgentEvent(
 		if state.pendingInput == nil {
 			return true // final result
 		}
-		return s.handlePendingUserInput(r, id, agentSession, flusher, w, chs, state)
+		return ep.handlePendingUserInput(state)
 	}
 	return false
 }
 
-func (s *Server) handlePendingUserInput(
-	r *http.Request, id string, agentSession *claude.Session,
-	flusher http.Flusher, w http.ResponseWriter, chs sendMessageChannels,
-	state *streamState,
-) bool {
-	s.logger.Info("sending user_input_required, waiting for answer", "session_id", id)
-	s.sendSSEEvent(w, flusher, "user_input_required", map[string]any{"input": state.pendingInput})
+func (ep *eventProcessor) handlePendingUserInput(state *streamState) bool {
+	ep.server.logger.Info("sending user_input_required, waiting for answer", "session_id", ep.id)
+	ep.server.sendSSEEvent(ep.w, ep.flusher, "user_input_required", map[string]any{"input": state.pendingInput})
 	state.pendingInput = nil
 
 	select {
-	case answer := <-chs.inputCh:
-		s.logger.Info("received user answer, resuming session", "session_id", id)
-		if err := agentSession.Send(answer); err != nil {
-			s.logger.Error("inject answer failed", "session_id", id, "error", err)
+	case answer := <-ep.chs.inputCh:
+		ep.server.logger.Info("received user answer, resuming session", "session_id", ep.id)
+		if err := ep.agentSession.Send(answer); err != nil {
+			ep.server.logger.Error("inject answer failed", "session_id", ep.id, "error", err)
 			return true
 		}
 		state.assistantText = ""
 		return false // continue event loop
-	case <-r.Context().Done():
+	case <-ep.r.Context().Done():
 		return true
 	}
 }
