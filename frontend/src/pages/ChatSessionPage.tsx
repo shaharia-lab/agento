@@ -558,14 +558,16 @@ export default function ChatSessionPage() {
           {streaming ? (
             <button
               onClick={() => {
-                // Gracefully stop the agent session before aborting the HTTP connection.
+                // Gracefully stop the agent session, then abort the SSE connection.
                 if (id) {
-                  stopSession(id).catch(() => {
-                    // Fallback: if the stop request fails, abort the connection directly.
-                  })
+                  stopSession(id)
+                    .catch(() => {
+                      // Fallback: if the stop request fails, abort the connection directly.
+                    })
+                    .finally(() => abortRef.current?.abort())
+                } else {
+                  abortRef.current?.abort()
                 }
-                // Give the subprocess a brief moment to handle SIGINT, then abort.
-                setTimeout(() => abortRef.current?.abort(), 300)
               }}
               title="Stop generation"
               className="flex h-9 w-9 items-center justify-center rounded-md shrink-0 self-end transition-colors bg-zinc-900 text-white hover:bg-zinc-700"

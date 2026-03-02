@@ -20,6 +20,7 @@ type tokenAccumulator struct {
 	OutputTokens             int
 	CacheCreationInputTokens int
 	CacheReadInputTokens     int
+	WebSearchRequests        int
 }
 
 func (t *tokenAccumulator) add(r *claude.Result) {
@@ -30,6 +31,7 @@ func (t *tokenAccumulator) add(r *claude.Result) {
 	t.OutputTokens += r.Usage.OutputTokens
 	t.CacheCreationInputTokens += r.Usage.CacheCreationInputTokens
 	t.CacheReadInputTokens += r.Usage.CacheReadInputTokens
+	t.WebSearchRequests += r.Usage.WebSearchRequests
 }
 
 func (t *tokenAccumulator) toUsageStats() agent.UsageStats {
@@ -38,6 +40,7 @@ func (t *tokenAccumulator) toUsageStats() agent.UsageStats {
 		OutputTokens:             t.OutputTokens,
 		CacheCreationInputTokens: t.CacheCreationInputTokens,
 		CacheReadInputTokens:     t.CacheReadInputTokens,
+		WebSearchRequests:        t.WebSearchRequests,
 	}
 }
 
@@ -517,6 +520,9 @@ func (s *Server) handleStopSession(w http.ResponseWriter, r *http.Request) {
 	// finish the current operation and write the session to disk.
 	if err := ls.session.Interrupt(); err != nil {
 		s.logger.Warn("interrupt session failed, closing forcefully", "session_id", id, "error", err)
+		if closeErr := ls.session.Close(); closeErr != nil {
+			s.logger.Warn("force close session failed", "session_id", id, "error", closeErr)
+		}
 	}
 
 	w.WriteHeader(http.StatusNoContent)

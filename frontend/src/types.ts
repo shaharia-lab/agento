@@ -299,7 +299,6 @@ export interface SDKToolUseSummaryEvent {
   type: 'tool_use_summary'
   tool_use_id?: string
   summary?: string
-  [key: string]: unknown
 }
 
 /** Emitted when a background task starts. */
