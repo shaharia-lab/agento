@@ -84,9 +84,9 @@ export function formatModelName(model: string): string {
   const lower = model.toLowerCase()
   if (lower.includes('opus') || lower.includes('sonnet') || lower.includes('haiku'))
     return model
-      .replace(/claude-/i, '') // regex needed for case-insensitive match
+      .replaceAll(/claude-/gi, '') // regex needed for case-insensitive match
       .replaceAll('-', ' ')
-      .replace(/\b\w/g, (c: string) => c.toUpperCase())
+      .replaceAll(/\b\w/g, (c: string) => c.toUpperCase())
   return model
 }
 

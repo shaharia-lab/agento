@@ -16,13 +16,21 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Plus, CalendarClock, Pencil, Trash2, Pause, Play } from 'lucide-react'
 
+function formatDaySuffix(days: number): string {
+  return days > 1 ? 's' : ''
+}
+
+function formatAtTime(atTime: string | undefined): string {
+  return atTime ? ' at ' + atTime : ''
+}
+
 function formatInterval(cfg: ScheduleConfig): string {
-  if (cfg.every_minutes) return `Every ${cfg.every_minutes} min`
-  if (cfg.every_hours) return `Every ${cfg.every_hours} hr`
+  if (cfg.every_minutes) return 'Every ' + String(cfg.every_minutes) + ' min'
+  if (cfg.every_hours) return 'Every ' + String(cfg.every_hours) + ' hr'
   if (cfg.every_days) {
-    const plural = cfg.every_days > 1 ? 's' : ''
-    const time = cfg.at_time ? ` at ${cfg.at_time}` : ''
-    return `Every ${cfg.every_days} day${plural}${time}`
+    const plural = formatDaySuffix(cfg.every_days)
+    const time = formatAtTime(cfg.at_time)
+    return 'Every ' + String(cfg.every_days) + ' day' + plural + time
   }
   return 'Interval'
 }

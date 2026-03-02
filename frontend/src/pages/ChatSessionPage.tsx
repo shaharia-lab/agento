@@ -771,36 +771,36 @@ function getToolConfig(name: string): { Icon: LucideIcon; bg: string; color: str
   }
 }
 
+function asStr(v: unknown): string {
+  return typeof v === 'string' ? v : ''
+}
+
+/** Map of tool name to a function that extracts a summary from the input fields. */
+const TOOL_SUMMARY_EXTRACTORS: Record<string, (input: Record<string, unknown>) => string> = {
+  Bash: input => asStr(input.description) || asStr(input.command),
+  Read: input => asStr(input.file_path),
+  Write: input => asStr(input.file_path),
+  Edit: input => asStr(input.file_path),
+  Glob: input => asStr(input.pattern),
+  Grep: input => [asStr(input.pattern), asStr(input.path)].filter(Boolean).join(' in '),
+  WebFetch: input => asStr(input.url),
+  WebSearch: input => asStr(input.query),
+  Task: input => asStr(input.description) || asStr(input.subagent_type),
+}
+
+function firstStringValue(input: Record<string, unknown>): string {
+  for (const v of Object.values(input)) {
+    const s = asStr(v)
+    if (s) return s
+  }
+  return ''
+}
+
 /** Returns a short one-line summary for a tool call based on its input fields. */
 function toolCallSummary(name: string, input: Record<string, unknown> | undefined): string {
   if (!input) return ''
-  const str = (v: unknown) => (typeof v === 'string' ? v : '')
-  switch (name) {
-    case 'Bash':
-      return str(input.description) || str(input.command)
-    case 'Read':
-    case 'Write':
-    case 'Edit':
-      return str(input.file_path)
-    case 'Glob':
-      return str(input.pattern)
-    case 'Grep':
-      return [str(input.pattern), str(input.path)].filter(Boolean).join(' in ')
-    case 'WebFetch':
-      return str(input.url)
-    case 'WebSearch':
-      return str(input.query)
-    case 'Task':
-      return str(input.description) || str(input.subagent_type)
-    default: {
-      // Generic fallback: first string value found
-      for (const v of Object.values(input)) {
-        const s = str(v)
-        if (s) return s
-      }
-      return ''
-    }
-  }
+  const extractor = TOOL_SUMMARY_EXTRACTORS[name]
+  return extractor ? extractor(input) : firstStringValue(input)
 }
 
 const CODE_PRE_CLS =
@@ -830,57 +830,61 @@ function patchLineColor(line: string): string {
   return 'bg-zinc-50 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500'
 }
 
+const DIFF_CLS =
+  'rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto'
+
+function renderStructuredPatch(patch: Array<{ lines: string[] }>): React.ReactNode {
+  return (
+    <div className={DIFF_CLS}>
+      {patch.flatMap((hunk, hi) =>
+        hunk.lines.map((line, li) => (
+          <div
+            key={`${hi}-${li}`}
+            className={cn('px-3 py-0.5 leading-5 whitespace-pre', patchLineColor(line))}
+          >
+            {line}
+          </div>
+        )),
+      )}
+    </div>
+  )
+}
+
+function renderSimpleDiff(oldStr: string, newStr: string): React.ReactNode {
+  return (
+    <div className={DIFF_CLS}>
+      {oldStr.split('\n').map((line, i) => (
+        <div
+          key={`old-${i}-${line.slice(0, 40)}`}
+          className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400"
+        >
+          -{line}
+        </div>
+      ))}
+      {newStr.split('\n').map((line, i) => (
+        <div
+          key={`new-${i}-${line.slice(0, 40)}`}
+          className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400"
+        >
+          +{line}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function renderEditDetail(
   input: Record<string, unknown> | undefined,
   toolResult: Record<string, unknown> | undefined,
 ): React.ReactNode {
   const editResult = toolResult as { structuredPatch?: Array<{ lines: string[] }> } | undefined
   const patch = editResult?.structuredPatch
-  const DIFF_CLS =
-    'rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto'
 
-  if (patch && patch.length > 0) {
-    return (
-      <div className={DIFF_CLS}>
-        {patch.flatMap((hunk, hi) =>
-          hunk.lines.map((line, li) => (
-            <div
-              key={`${hi}-${li}`}
-              className={cn('px-3 py-0.5 leading-5 whitespace-pre', patchLineColor(line))}
-            >
-              {line}
-            </div>
-          )),
-        )}
-      </div>
-    )
-  }
+  if (patch && patch.length > 0) return renderStructuredPatch(patch)
 
-  // Fallback: synthesize a simple diff from input old/new strings
   const oldStr = typeof input?.old_string === 'string' ? input.old_string : ''
   const newStr = typeof input?.new_string === 'string' ? input.new_string : ''
-  if (oldStr || newStr) {
-    return (
-      <div className={DIFF_CLS}>
-        {oldStr.split('\n').map((line, i) => (
-          <div
-            key={`old-${i}-${line.slice(0, 40)}`}
-            className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400"
-          >
-            -{line}
-          </div>
-        ))}
-        {newStr.split('\n').map((line, i) => (
-          <div
-            key={`new-${i}-${line.slice(0, 40)}`}
-            className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400"
-          >
-            +{line}
-          </div>
-        ))}
-      </div>
-    )
-  }
+  if (oldStr || newStr) return renderSimpleDiff(oldStr, newStr)
 
   return null
 }

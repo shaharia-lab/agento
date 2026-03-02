@@ -305,6 +305,47 @@ function dispatchSseEvent(eventType: string, data: unknown, callbacks: StreamCal
   }
 }
 
+interface SseParserState {
+  buffer: string
+  currentEvent: string
+}
+
+function parseSseLine(line: string, state: SseParserState, callbacks: StreamCallbacks): void {
+  if (line.startsWith('event: ')) {
+    state.currentEvent = line.slice(7).trim()
+    return
+  }
+  if (!line.startsWith('data: ')) return
+  try {
+    const data = JSON.parse(line.slice(6))
+    dispatchSseEvent(state.currentEvent, data, callbacks)
+  } catch {
+    // ignore parse errors
+  }
+  state.currentEvent = ''
+}
+
+async function readSseStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  callbacks: StreamCallbacks,
+): Promise<void> {
+  const decoder = new TextDecoder()
+  const state: SseParserState = { buffer: '', currentEvent: '' }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    state.buffer += decoder.decode(value, { stream: true })
+    const lines = state.buffer.split('\n')
+    state.buffer = lines.pop() ?? ''
+
+    for (const line of lines) {
+      parseSseLine(line, state, callbacks)
+    }
+  }
+}
+
 export async function sendMessage(
   chatId: string,
   content: string,
@@ -323,33 +364,7 @@ export async function sendMessage(
     throw new Error(body.error || `HTTP ${res.status}`)
   }
 
-  const reader = res.body!.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let currentEvent = ''
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-
-    for (const line of lines) {
-      if (line.startsWith('event: ')) {
-        currentEvent = line.slice(7).trim()
-      } else if (line.startsWith('data: ')) {
-        try {
-          const data = JSON.parse(line.slice(6))
-          dispatchSseEvent(currentEvent, data, callbacks)
-        } catch {
-          // ignore parse errors
-        }
-        currentEvent = ''
-      }
-    }
-  }
+  await readSseStream(res.body!.getReader(), callbacks)
 }
 
 /**
