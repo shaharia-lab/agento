@@ -1,4 +1,4 @@
-.PHONY: build build-frontend build-go dev-frontend dev-backend run-serve run-ask tidy lint test clean
+.PHONY: build build-frontend build-go dev-frontend dev-backend run-serve run-ask tidy lint test generate clean
 
 BINARY := agento
 
@@ -32,6 +32,10 @@ run-serve: build
 
 run-ask: build
 	./$(BINARY) ask $(ARGS)
+
+# ── Code generation ───────────────────────────────────────────────────────────
+generate:
+	go generate ./...
 
 # ── Code quality ──────────────────────────────────────────────────────────────
 tidy:

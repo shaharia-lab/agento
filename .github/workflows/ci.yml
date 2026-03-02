@@ -28,6 +28,14 @@ jobs:
       - name: Download modules
         run: go mod download
 
+      - name: Install mockery
+        run: GOTOOLCHAIN=go1.25.0 go install github.com/vektra/mockery/v2@latest
+
+      - name: Verify generated mocks are up to date
+        run: |
+          mockery
+          git diff --exit-code -- '*.go' || (echo "Generated mocks are out of date. Run 'make generate' and commit the result." && exit 1)
+
       - name: Build
         run: go build ./...
 
