@@ -192,6 +192,24 @@ CREATE INDEX idx_notification_log_created ON notification_log(created_at DESC);
 		version: 6,
 		sql:     `ALTER TABLE scheduled_tasks ADD COLUMN save_output INTEGER NOT NULL DEFAULT 0;`,
 	},
+	{
+		version: 7,
+		sql: `
+CREATE TABLE conversation_mappings (
+    id            TEXT PRIMARY KEY,
+    session_id    TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+    platform_type TEXT NOT NULL,
+    platform_id   TEXT NOT NULL,
+    channel_id    TEXT NOT NULL,
+    agent_slug    TEXT NOT NULL DEFAULT '',
+    created_at    DATETIME NOT NULL,
+    updated_at    DATETIME NOT NULL,
+    UNIQUE(platform_type, platform_id, channel_id)
+);
+CREATE INDEX idx_conversation_mappings_session ON conversation_mappings(session_id);
+CREATE INDEX idx_conversation_mappings_platform ON conversation_mappings(platform_type, platform_id);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

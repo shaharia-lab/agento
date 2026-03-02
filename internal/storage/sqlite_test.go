@@ -26,7 +26,7 @@ func newTestDB(t *testing.T) *sql.DB {
 func TestNewSQLiteDB_CreatesTables(t *testing.T) {
 	db := newTestDB(t)
 
-	tables := []string{"agents", "chat_sessions", "chat_messages", "integrations", "user_settings", "schema_migrations", "claude_session_cache", "claude_cache_metadata", "notification_log", "scheduled_tasks", "job_history"}
+	tables := []string{"agents", "chat_sessions", "chat_messages", "integrations", "user_settings", "schema_migrations", "claude_session_cache", "claude_cache_metadata", "notification_log", "scheduled_tasks", "job_history", "conversation_mappings"}
 	for _, table := range tables {
 		var name string
 		err := db.QueryRowContext(context.Background(), "SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name)
@@ -44,8 +44,8 @@ func TestNewSQLiteDB_MigrationVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("querying version: %v", err)
 	}
-	if version != 6 {
-		t.Errorf("expected version 6, got %d", version)
+	if version != 7 {
+		t.Errorf("expected version 7, got %d", version)
 	}
 }
 

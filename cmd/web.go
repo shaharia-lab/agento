@@ -31,6 +31,8 @@ import (
 	slackintegration "github.com/shaharia-lab/agento/internal/integrations/slack"
 	telegramintegration "github.com/shaharia-lab/agento/internal/integrations/telegram"
 	"github.com/shaharia-lab/agento/internal/logger"
+	"github.com/shaharia-lab/agento/internal/messaging"
+	telegrammessaging "github.com/shaharia-lab/agento/internal/messaging/telegram"
 	"github.com/shaharia-lab/agento/internal/notification"
 	"github.com/shaharia-lab/agento/internal/scheduler"
 	"github.com/shaharia-lab/agento/internal/server"
@@ -247,7 +249,56 @@ func buildAPIServer(
 		agentSvc, chatSvc, integrationSvc, notificationSvc, taskSvc, profileSvc,
 		settingsMgr, sysLogger, sessionCache,
 	)
+
+	// Wire up the bidirectional messaging system.
+	mappingStore := storage.NewSQLiteConversationMappingStore(db)
+	dispatcher := messaging.NewDispatcher(chatSvc, mappingStore, sysLogger)
+	msgManager := messaging.NewManager(dispatcher, sysLogger)
+	msgManager.RegisterFactory("telegram", telegrammessaging.NewFactory(sysLogger))
+	apiSrv.SetMessagingManager(msgManager)
+
+	// Start messaging adapters for enabled integrations that support bidirectional chat.
+	startMessagingAdapters(ctx, integrationStore, msgManager, sysLogger)
+
 	return apiSrv, bus, nil
+}
+
+// startMessagingAdapters scans existing integrations and starts messaging
+// platform adapters for those that support bidirectional messaging.
+func startMessagingAdapters(
+	ctx context.Context,
+	store storage.IntegrationStore,
+	mgr *messaging.Manager,
+	logger *slog.Logger,
+) {
+	cfgs, err := store.List()
+	if err != nil {
+		logger.Warn("failed to list integrations for messaging adapters", "error", err)
+		return
+	}
+
+	for _, cfg := range cfgs {
+		if !cfg.Enabled || !cfg.IsAuthenticated() {
+			continue
+		}
+		// Only start messaging adapters for platforms that support bidirectional chat.
+		switch cfg.Type {
+		case "telegram":
+			var creds config.TelegramCredentials
+			if parseErr := cfg.ParseCredentials(&creds); parseErr != nil {
+				logger.Warn("failed to parse telegram credentials for messaging", "id", cfg.ID, "error", parseErr)
+				continue
+			}
+			if startErr := mgr.StartPlatform(ctx, "telegram", cfg.ID, map[string]string{
+				"bot_token": creds.BotToken,
+			}); startErr != nil {
+				logger.Warn("failed to start telegram messaging adapter", "id", cfg.ID, "error", startErr)
+			}
+		// Future platforms (slack, etc.) will be added here.
+		default:
+			continue
+		}
+	}
 }
 
 // setupNotifications creates the notification store, event bus, and wires the

@@ -10,6 +10,7 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/messaging"
 	"github.com/shaharia-lab/agento/internal/service"
 )
 
@@ -41,6 +42,7 @@ type Server struct {
 	logger             *slog.Logger
 	liveSessions       *liveSessionStore
 	claudeSessionCache *claudesessions.Cache
+	messagingManager   *messaging.Manager
 }
 
 // New creates a new API Server backed by the provided services.
@@ -111,6 +113,9 @@ func (s *Server) Mount(r chi.Router) {
 
 	// Filesystem, integrations, tasks, job history
 	s.mountExtensionRoutes(r)
+
+	// Bidirectional messaging webhooks (Telegram, Slack, …)
+	s.mountWebhookRoutes(r)
 
 	// Build info
 	r.Get("/version", s.handleVersion)
