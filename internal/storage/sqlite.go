@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -198,7 +198,7 @@ CREATE INDEX idx_notification_log_created ON notification_log(created_at DESC);
 // pragmas for WAL mode and foreign keys, and runs any pending schema
 // migrations. Returns true as the second value if the database was newly
 // created (i.e. no tables existed before this call).
-func NewSQLiteDB(dbPath string) (*sql.DB, bool, error) {
+func NewSQLiteDB(dbPath string, logger *slog.Logger) (*sql.DB, bool, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0750); err != nil {
 		return nil, false, fmt.Errorf("creating database directory: %w", err)
 	}
@@ -226,16 +226,16 @@ func NewSQLiteDB(dbPath string) (*sql.DB, bool, error) {
 	for _, p := range pragmas {
 		if _, pragmaErr := db.ExecContext(ctx, p); pragmaErr != nil {
 			if cerr := db.Close(); cerr != nil {
-				log.Printf("failed to close database after pragma error: %v", cerr)
+				logger.Warn("failed to close database after pragma error", "error", cerr)
 			}
 			return nil, false, fmt.Errorf("setting pragma %q: %w", p, pragmaErr)
 		}
 	}
 
-	freshDB, err := runMigrations(ctx, db)
+	freshDB, err := runMigrations(ctx, db, logger)
 	if err != nil {
 		if cerr := db.Close(); cerr != nil {
-			log.Printf("failed to close database after migration error: %v", cerr)
+			logger.Warn("failed to close database after migration error", "error", cerr)
 		}
 		return nil, false, fmt.Errorf("running migrations: %w", err)
 	}
@@ -246,7 +246,7 @@ func NewSQLiteDB(dbPath string) (*sql.DB, bool, error) {
 // runMigrations ensures the schema_migrations table exists and applies any
 // pending migrations. Returns true if migration version 1 was applied during
 // this call (indicating a fresh database).
-func runMigrations(ctx context.Context, db *sql.DB) (bool, error) {
+func runMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) (bool, error) {
 	// Ensure the migrations tracking table exists.
 	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    INTEGER PRIMARY KEY,
@@ -269,7 +269,7 @@ func runMigrations(ctx context.Context, db *sql.DB) (bool, error) {
 		if m.version == 1 {
 			freshDB = true
 		}
-		if err := applyMigration(ctx, db, m); err != nil {
+		if err := applyMigration(ctx, db, m, logger); err != nil {
 			return false, err
 		}
 	}
@@ -278,7 +278,7 @@ func runMigrations(ctx context.Context, db *sql.DB) (bool, error) {
 }
 
 // applyMigration runs a single schema migration inside a transaction.
-func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
+func applyMigration(ctx context.Context, db *sql.DB, m migration, logger *slog.Logger) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin migration %d: %w", m.version, err)
@@ -286,7 +286,7 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 
 	if _, err := tx.ExecContext(ctx, m.sql); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
-			log.Printf("failed to rollback migration %d: %v", m.version, rbErr)
+			logger.Warn("failed to rollback migration", "version", m.version, "error", rbErr)
 		}
 		return fmt.Errorf("migration %d: %w", m.version, err)
 	}
@@ -296,7 +296,7 @@ func applyMigration(ctx context.Context, db *sql.DB, m migration) error {
 		m.version, time.Now().UTC(),
 	); err != nil {
 		if rbErr := tx.Rollback(); rbErr != nil {
-			log.Printf("failed to rollback migration %d: %v", m.version, rbErr)
+			logger.Warn("failed to rollback migration", "version", m.version, "error", rbErr)
 		}
 		return fmt.Errorf("recording migration %d: %w", m.version, err)
 	}

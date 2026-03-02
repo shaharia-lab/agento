@@ -15,7 +15,7 @@ import (
 func setupTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db, _, err := storage.NewSQLiteDB(dbPath)
+	db, _, err := storage.NewSQLiteDB(dbPath, slog.Default())
 	if err != nil {
 		t.Fatalf("failed to create test db: %v", err)
 	}

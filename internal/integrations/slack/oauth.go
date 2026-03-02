@@ -3,7 +3,7 @@ package slack
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -64,6 +64,7 @@ func StartCallbackServer(
 	ctx context.Context, port int,
 	cfg *config.IntegrationConfig,
 	onToken func(*oauth2.Token, error),
+	logger *slog.Logger,
 ) error {
 	var creds config.SlackCredentials
 	if err := cfg.ParseCredentials(&creds); err != nil {
@@ -89,14 +90,14 @@ func StartCallbackServer(
 
 	go func() {
 		if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
-			log.Printf("slack oauth callback server error: %v", serveErr)
+			logger.Error("slack oauth callback server error", "error", serveErr)
 		}
 	}()
 
 	go func() {
 		defer func() {
 			if cerr := srv.Close(); cerr != nil {
-				log.Printf("slack oauth server close error: %v", cerr)
+				logger.Warn("slack oauth server close error", "error", cerr)
 			}
 		}()
 		select {

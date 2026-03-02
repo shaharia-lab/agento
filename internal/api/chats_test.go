@@ -371,10 +371,11 @@ func TestHttpErr(t *testing.T) {
 		},
 	}
 
+	srv := &Server{logger: logger}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			httpErr(rec, logger, tt.err)
+			srv.httpErr(rec, tt.err)
 
 			assert.Equal(t, tt.expectedStatus, rec.Code)
 

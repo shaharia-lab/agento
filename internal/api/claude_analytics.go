@@ -42,7 +42,7 @@ func (s *Server) handleGetClaudeAnalytics(w http.ResponseWriter, r *http.Request
 
 	sessions := s.claudeSessionCache.List()
 	report := claudesessions.AggregateAnalytics(sessions, params)
-	writeJSON(w, http.StatusOK, report)
+	s.writeJSON(w, http.StatusOK, report)
 }
 
 // parseAnalyticsDate tries RFC3339 first, then YYYY-MM-DD.

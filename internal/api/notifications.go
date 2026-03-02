@@ -13,10 +13,10 @@ import (
 func (s *Server) handleGetNotificationSettings(w http.ResponseWriter, r *http.Request) {
 	settings, err := s.notificationSvc.GetSettings()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load notification settings")
+		s.writeError(w, http.StatusInternalServerError, "failed to load notification settings")
 		return
 	}
-	writeJSON(w, http.StatusOK, settings)
+	s.writeJSON(w, http.StatusOK, settings)
 }
 
 // handleUpdateNotificationSettings persists new notification settings.
@@ -24,31 +24,31 @@ func (s *Server) handleGetNotificationSettings(w http.ResponseWriter, r *http.Re
 func (s *Server) handleUpdateNotificationSettings(w http.ResponseWriter, r *http.Request) {
 	var incoming notification.NotificationSettings
 	if err := json.NewDecoder(r.Body).Decode(&incoming); err != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
 	if err := s.notificationSvc.UpdateSettings(&incoming); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to save notification settings")
+		s.writeError(w, http.StatusInternalServerError, "failed to save notification settings")
 		return
 	}
 
 	// Return the saved settings (with masked password).
 	settings, err := s.notificationSvc.GetSettings()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to reload notification settings")
+		s.writeError(w, http.StatusInternalServerError, "failed to reload notification settings")
 		return
 	}
-	writeJSON(w, http.StatusOK, settings)
+	s.writeJSON(w, http.StatusOK, settings)
 }
 
 // handleTestNotification sends a test email using the current notification settings.
 func (s *Server) handleTestNotification(w http.ResponseWriter, r *http.Request) {
 	if err := s.notificationSvc.TestNotification(r.Context()); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // handleListNotificationLog returns recent notification delivery log entries.
@@ -63,8 +63,8 @@ func (s *Server) handleListNotificationLog(w http.ResponseWriter, r *http.Reques
 
 	entries, err := s.notificationSvc.ListLog(r.Context(), limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to list notification log")
+		s.writeError(w, http.StatusInternalServerError, "failed to list notification log")
 		return
 	}
-	writeJSON(w, http.StatusOK, entries)
+	s.writeJSON(w, http.StatusOK, entries)
 }

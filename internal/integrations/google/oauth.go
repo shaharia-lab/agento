@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"time"
@@ -94,6 +94,7 @@ func StartCallbackServer(
 	ctx context.Context, port int,
 	cfg *config.IntegrationConfig,
 	onToken func(*oauth2.Token, error),
+	logger *slog.Logger,
 ) error {
 	var creds config.GoogleCredentials
 	if err := cfg.ParseCredentials(&creds); err != nil {
@@ -119,14 +120,14 @@ func StartCallbackServer(
 
 	go func() {
 		if serveErr := srv.Serve(ln); serveErr != nil && serveErr != http.ErrServerClosed {
-			log.Printf("oauth callback server error: %v", serveErr)
+			logger.Error("oauth callback server error", "error", serveErr)
 		}
 	}()
 
 	go func() {
 		defer func() {
 			if cerr := srv.Close(); cerr != nil {
-				log.Printf("oauth server close error: %v", cerr)
+				logger.Warn("oauth server close error", "error", cerr)
 			}
 		}()
 		select {

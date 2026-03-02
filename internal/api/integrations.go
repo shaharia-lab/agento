@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -17,7 +16,7 @@ func (s *Server) handleListIntegrations(w http.ResponseWriter, r *http.Request) 
 	integrations, err := s.integrationSvc.List(r.Context())
 	if err != nil {
 		s.logger.Error("list integrations failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to list integrations")
+		s.writeError(w, http.StatusInternalServerError, "failed to list integrations")
 		return
 	}
 	// Scrub secrets before returning to the client.
@@ -25,14 +24,14 @@ func (s *Server) handleListIntegrations(w http.ResponseWriter, r *http.Request) 
 	for _, cfg := range integrations {
 		scrubbed = append(scrubbed, scrubIntegration(cfg))
 	}
-	writeJSON(w, http.StatusOK, scrubbed)
+	s.writeJSON(w, http.StatusOK, scrubbed)
 }
 
 // handleCreateIntegration creates a new integration.
 func (s *Server) handleCreateIntegration(w http.ResponseWriter, r *http.Request) {
 	var body CreateIntegrationRequest
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
@@ -46,10 +45,10 @@ func (s *Server) handleCreateIntegration(w http.ResponseWriter, r *http.Request)
 
 	created, err := s.integrationSvc.Create(r.Context(), cfg)
 	if err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, scrubIntegration(created))
+	s.writeJSON(w, http.StatusCreated, scrubIntegration(created))
 }
 
 // handleGetIntegration returns a single integration by id (credentials scrubbed).
@@ -57,10 +56,10 @@ func (s *Server) handleGetIntegration(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	cfg, err := s.integrationSvc.Get(r.Context(), id)
 	if err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, scrubIntegration(cfg))
+	s.writeJSON(w, http.StatusOK, scrubIntegration(cfg))
 }
 
 // handleUpdateIntegration updates an integration and triggers an MCP server reload.
@@ -69,7 +68,7 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request)
 
 	var body UpdateIntegrationRequest
 	if json.NewDecoder(r.Body).Decode(&body) != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 
@@ -83,17 +82,17 @@ func (s *Server) handleUpdateIntegration(w http.ResponseWriter, r *http.Request)
 
 	updated, err := s.integrationSvc.Update(r.Context(), id, cfg)
 	if err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, scrubIntegration(updated))
+	s.writeJSON(w, http.StatusOK, scrubIntegration(updated))
 }
 
 // handleDeleteIntegration removes an integration and stops its MCP server.
 func (s *Server) handleDeleteIntegration(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	if err := s.integrationSvc.Delete(r.Context(), id); err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -104,10 +103,10 @@ func (s *Server) handleAvailableTools(w http.ResponseWriter, r *http.Request) {
 	tools, err := s.integrationSvc.AvailableTools(r.Context())
 	if err != nil {
 		s.logger.Error("list available tools failed", "error", err)
-		writeError(w, http.StatusInternalServerError, "failed to list available tools")
+		s.writeError(w, http.StatusInternalServerError, "failed to list available tools")
 		return
 	}
-	writeJSON(w, http.StatusOK, tools)
+	s.writeJSON(w, http.StatusOK, tools)
 }
 
 // handleStartOAuth begins the OAuth2 flow for an integration and returns the auth URL.
@@ -115,10 +114,10 @@ func (s *Server) handleStartOAuth(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	authURL, err := s.integrationSvc.StartOAuth(r.Context(), id)
 	if err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"auth_url": authURL})
+	s.writeJSON(w, http.StatusOK, map[string]string{"auth_url": authURL})
 }
 
 // handleGetAuthStatus polls whether the OAuth flow for an integration has completed.
@@ -126,10 +125,10 @@ func (s *Server) handleGetAuthStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	authenticated, err := s.integrationSvc.GetAuthStatus(r.Context(), id)
 	if err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"authenticated": authenticated})
+	s.writeJSON(w, http.StatusOK, map[string]bool{"authenticated": authenticated})
 }
 
 // handleValidateAuth validates token-based auth for an integration.
@@ -137,19 +136,19 @@ func (s *Server) handleValidateAuth(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	cfg, err := s.integrationSvc.Get(r.Context(), id)
 	if err != nil {
-		httpErr(w, s.logger, err)
+		s.httpErr(w, err)
 		return
 	}
 
 	if valErr := s.integrationSvc.ValidateTokenAuth(r.Context(), cfg); valErr != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"valid": false, "validated": true, "error": valErr.Error()})
+		s.writeJSON(w, http.StatusBadRequest, map[string]any{"valid": false, "validated": true, "error": valErr.Error()})
 		return
 	}
 
 	// For types with real validation (e.g. telegram, confluence, jira), the credentials have been verified.
 	// For types without validation, this is a no-op success.
 	validated := cfg.Type == "telegram" || cfg.Type == "confluence" || cfg.Type == "jira"
-	writeJSON(w, http.StatusOK, map[string]any{"valid": true, "validated": validated})
+	s.writeJSON(w, http.StatusOK, map[string]any{"valid": true, "validated": validated})
 }
 
 // scrubIntegration returns a map representation of the integration with secrets removed.
@@ -169,20 +168,20 @@ func scrubIntegration(cfg *config.IntegrationConfig) map[string]any {
 // httpErr maps service errors to HTTP status codes using errors.As to handle wrapped errors.
 // The default case logs the internal error and returns a generic message to avoid
 // leaking internal details (database errors, filesystem paths) to the client.
-func httpErr(w http.ResponseWriter, logger *slog.Logger, err error) {
+func (s *Server) httpErr(w http.ResponseWriter, err error) {
 	var nfe *service.NotFoundError
 	var ve *service.ValidationError
 	var ce *service.ConflictError
 
 	switch {
 	case errors.As(err, &nfe):
-		writeError(w, http.StatusNotFound, nfe.Error())
+		s.writeError(w, http.StatusNotFound, nfe.Error())
 	case errors.As(err, &ve):
-		writeError(w, http.StatusUnprocessableEntity, ve.Error())
+		s.writeError(w, http.StatusUnprocessableEntity, ve.Error())
 	case errors.As(err, &ce):
-		writeError(w, http.StatusConflict, ce.Error())
+		s.writeError(w, http.StatusConflict, ce.Error())
 	default:
-		logger.Error("internal server error", "error", err)
-		writeError(w, http.StatusInternalServerError, "internal server error")
+		s.logger.Error("internal server error", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "internal server error")
 	}
 }

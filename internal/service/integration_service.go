@@ -343,7 +343,7 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 		if buildErr != nil {
 			return "", fmt.Errorf("building auth URL: %w", buildErr)
 		}
-		if err := google.StartCallbackServer(callbackCtx, port, cfg, onToken); err != nil {
+		if err := google.StartCallbackServer(callbackCtx, port, cfg, onToken, s.logger); err != nil {
 			return "", fmt.Errorf("starting callback server: %w", err)
 		}
 	case "slack":
@@ -351,7 +351,7 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 		if buildErr != nil {
 			return "", fmt.Errorf("building auth URL: %w", buildErr)
 		}
-		if err := slackintegration.StartCallbackServer(callbackCtx, port, cfg, onToken); err != nil {
+		if err := slackintegration.StartCallbackServer(callbackCtx, port, cfg, onToken, s.logger); err != nil {
 			return "", fmt.Errorf("starting callback server: %w", err)
 		}
 	}

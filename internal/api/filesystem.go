@@ -27,7 +27,7 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 	if rawPath == "" || rawPath == "~" {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "could not determine home directory")
+			s.writeError(w, http.StatusInternalServerError, "could not determine home directory")
 			return
 		}
 		rawPath = home
@@ -39,10 +39,10 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 	entries, err := os.ReadDir(clean)
 	if err != nil {
 		if os.IsNotExist(err) {
-			writeError(w, http.StatusNotFound, "path not found")
+			s.writeError(w, http.StatusNotFound, "path not found")
 			return
 		}
-		writeError(w, http.StatusBadRequest, "cannot read directory")
+		s.writeError(w, http.StatusBadRequest, "cannot read directory")
 		return
 	}
 
@@ -64,7 +64,7 @@ func (s *Server) handleFSList(w http.ResponseWriter, r *http.Request) {
 		parent = clean // at filesystem root
 	}
 
-	writeJSON(w, http.StatusOK, fsListResponse{
+	s.writeJSON(w, http.StatusOK, fsListResponse{
 		Path:    clean,
 		Parent:  parent,
 		Entries: result,
@@ -78,23 +78,23 @@ type fsMkdirRequest struct {
 func (s *Server) handleFSMkdir(w http.ResponseWriter, r *http.Request) {
 	var req fsMkdirRequest
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
-		writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
 	if req.Path == "" {
-		writeError(w, http.StatusBadRequest, "path is required")
+		s.writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
 
 	clean := filepath.Clean(req.Path)
 	if !filepath.IsAbs(clean) || strings.Contains(clean, "..") {
-		writeError(w, http.StatusBadRequest, "invalid path")
+		s.writeError(w, http.StatusBadRequest, "invalid path")
 		return
 	}
 	if os.MkdirAll(clean, 0750) != nil { // NOSONAR — desktop app filesystem browser; user path access is intentional
-		writeError(w, http.StatusInternalServerError, "failed to create directory")
+		s.writeError(w, http.StatusInternalServerError, "failed to create directory")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"path": clean})
+	s.writeJSON(w, http.StatusOK, map[string]string{"path": clean})
 }

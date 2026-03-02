@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"net/http"
 
@@ -181,22 +180,22 @@ func (s *Server) mountTaskRoutes(r chi.Router) {
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
+func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("writeJSON: failed to encode response: %v", err)
+		s.logger.Error("writeJSON: failed to encode response", "error", err)
 	}
 }
 
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+func (s *Server) writeError(w http.ResponseWriter, status int, msg string) {
+	s.writeJSON(w, status, map[string]string{"error": msg})
 }
 
-func sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, data any) {
+func (s *Server) sendSSEEvent(w http.ResponseWriter, flusher http.Flusher, event string, data any) {
 	b, err := json.Marshal(data)
 	if err != nil {
-		log.Printf("sendSSEEvent: failed to marshal data: %v", err)
+		s.logger.Error("sendSSEEvent: failed to marshal data", "error", err)
 		return
 	}
 	if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(b)); err != nil {

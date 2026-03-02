@@ -1,6 +1,7 @@
 package eventbus_test
 
 import (
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -13,7 +14,7 @@ import (
 )
 
 func TestPublishAndReceive(t *testing.T) {
-	bus := eventbus.New(2)
+	bus := eventbus.New(2, slog.Default())
 	defer bus.Close()
 
 	var received []eventbus.Event
@@ -39,7 +40,7 @@ func TestPublishAndReceive(t *testing.T) {
 }
 
 func TestMultipleListeners(t *testing.T) {
-	bus := eventbus.New(2)
+	bus := eventbus.New(2, slog.Default())
 	defer bus.Close()
 
 	var count int32
@@ -57,7 +58,7 @@ func TestMultipleListeners(t *testing.T) {
 }
 
 func TestListenerPanicDoesNotCrash(t *testing.T) {
-	bus := eventbus.New(1)
+	bus := eventbus.New(1, slog.Default())
 	defer bus.Close()
 
 	var goodCalled int32
@@ -77,7 +78,7 @@ func TestListenerPanicDoesNotCrash(t *testing.T) {
 }
 
 func TestClose(t *testing.T) {
-	bus := eventbus.New(2)
+	bus := eventbus.New(2, slog.Default())
 
 	var count int32
 	bus.Subscribe(func(_ eventbus.Event) {
@@ -96,7 +97,7 @@ func TestClose(t *testing.T) {
 
 func TestDefaultWorkers(t *testing.T) {
 	// workers <= 0 should use default without panicking.
-	bus := eventbus.New(0)
+	bus := eventbus.New(0, slog.Default())
 	require.NotNil(t, bus)
 	bus.Close()
 }

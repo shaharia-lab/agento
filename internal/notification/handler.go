@@ -3,7 +3,7 @@ package notification
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -23,11 +23,14 @@ type SettingsLoader func() (*NotificationSettings, error)
 type NotificationHandler struct {
 	settingsLoader SettingsLoader
 	store          storage.NotificationStore
+	logger         *slog.Logger
 }
 
 // NewNotificationHandler creates a new NotificationHandler.
-func NewNotificationHandler(loader SettingsLoader, store storage.NotificationStore) *NotificationHandler {
-	return &NotificationHandler{settingsLoader: loader, store: store}
+func NewNotificationHandler(
+	loader SettingsLoader, store storage.NotificationStore, logger *slog.Logger,
+) *NotificationHandler {
+	return &NotificationHandler{settingsLoader: loader, store: store, logger: logger}
 }
 
 // humanSubject returns a readable email subject for a given event type.
@@ -61,7 +64,7 @@ func shouldSendForEvent(eventType string, settings *NotificationSettings) bool {
 func (h *NotificationHandler) Handle(eventType string, payload map[string]string) {
 	settings, err := h.settingsLoader()
 	if err != nil {
-		log.Printf("notification: failed to load settings: %v", err)
+		h.logger.Error("notification: failed to load settings", "error", err)
 		return
 	}
 	if !settings.Enabled {
@@ -95,10 +98,10 @@ func (h *NotificationHandler) Handle(eventType string, payload map[string]string
 	if sendErr != nil {
 		entry.Status = "failed"
 		entry.ErrorMsg = sendErr.Error()
-		log.Printf("notification: failed to send for event %q: %v", eventType, sendErr)
+		h.logger.Error("notification: failed to send", "event", eventType, "error", sendErr)
 	}
 
 	if logErr := h.store.LogNotification(context.Background(), entry); logErr != nil {
-		log.Printf("notification: failed to log delivery for event %q: %v", eventType, logErr)
+		h.logger.Error("notification: failed to log delivery", "event", eventType, "error", logErr)
 	}
 }

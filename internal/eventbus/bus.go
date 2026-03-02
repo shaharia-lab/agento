@@ -3,7 +3,7 @@
 package eventbus
 
 import (
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 )
@@ -35,17 +35,19 @@ type inMemoryBus struct {
 	mu        sync.RWMutex
 	wg        sync.WaitGroup
 	workers   int
+	logger    *slog.Logger
 }
 
 // New creates a new in-memory EventBus with the specified number of worker goroutines.
 // If workers is <= 0, defaultWorkers (3) is used.
-func New(workers int) EventBus {
+func New(workers int, logger *slog.Logger) EventBus {
 	if workers <= 0 {
 		workers = defaultWorkers
 	}
 	b := &inMemoryBus{
 		ch:      make(chan Event, defaultBufferSize),
 		workers: workers,
+		logger:  logger,
 	}
 	b.startWorkers()
 	return b
@@ -77,7 +79,7 @@ func (b *inMemoryBus) dispatch(e Event) {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("eventbus: listener panicked for event %q: %v", e.Type, r)
+					b.logger.Error("eventbus: listener panicked", "event", e.Type, "panic", r)
 				}
 			}()
 			l(e)
@@ -97,7 +99,7 @@ func (b *inMemoryBus) Publish(eventType string, payload map[string]string) {
 	case b.ch <- e:
 		// enqueued successfully
 	default:
-		log.Printf("eventbus: buffer full, dropping event %q", eventType)
+		b.logger.Warn("eventbus: buffer full, dropping event", "event", eventType)
 	}
 }
 

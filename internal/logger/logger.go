@@ -9,25 +9,40 @@ package logger
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
-// NewSystemLogger creates a JSON slog.Logger that writes to <logDir>/system.log.
-// The directory is created if it does not exist.
-func NewSystemLogger(logDir string, level slog.Level) (*slog.Logger, error) {
+// NewSystemLogger creates a JSON slog.Logger that writes to <logDir>/system.log
+// with automatic log rotation. Logs are also written to stderr for developer
+// visibility. The directory is created if it does not exist.
+// The returned cleanup function closes the underlying log file and should be
+// called on shutdown (e.g. via defer).
+func NewSystemLogger(logDir string, level slog.Level) (*slog.Logger, func(), error) {
 	if err := os.MkdirAll(logDir, 0750); err != nil {
-		return nil, fmt.Errorf("creating log directory %q: %w", logDir, err)
+		return nil, nil, fmt.Errorf("creating log directory %q: %w", logDir, err)
 	}
 
-	f, err := openLogFile(filepath.Join(logDir, "system.log"))
-	if err != nil {
-		return nil, err
+	rotatingFile := &lumberjack.Logger{
+		Filename:   filepath.Join(logDir, "system.log"),
+		MaxSize:    50, // megabytes
+		MaxBackups: 3,
+		MaxAge:     30, // days
+		Compress:   true,
 	}
 
-	handler := slog.NewJSONHandler(f, &slog.HandlerOptions{Level: level})
-	return slog.New(handler), nil
+	w := io.MultiWriter(rotatingFile, os.Stderr)
+	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})
+	cleanup := func() {
+		if err := rotatingFile.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "closing log file: %v\n", err)
+		}
+	}
+	return slog.New(handler), cleanup, nil
 }
 
 // NewSessionLogger creates a JSON slog.Logger that writes to
