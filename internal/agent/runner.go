@@ -50,6 +50,13 @@ type RunOptions struct {
 	// WithSettingSources so the subprocess picks up the profile's configuration.
 	// (Future: use WithSettings(filePath) once SDK v0.2.1 is available.)
 	SettingsFilePath string
+
+	// WorkingDir is the project directory for the agent session. When set,
+	// it is passed to the SDK via WithCWD (which sets exec.Cmd.Dir on the
+	// subprocess) and SettingSourceProject is included so the Claude CLI
+	// discovers project-level skills from .claude/skills/ and loads
+	// project CLAUDE.md files.
+	WorkingDir string
 }
 
 // AgentResult is the final result of an agent invocation.
@@ -150,9 +157,14 @@ func buildSDKOptions(
 }
 
 func appendSettingsOpts(sdkOpts []claude.Option, opts RunOptions, _ *config.AgentConfig) []claude.Option {
+	if opts.WorkingDir != "" {
+		sdkOpts = append(sdkOpts, claude.WithCWD(opts.WorkingDir))
+		sdkOpts = append(sdkOpts, claude.WithSettingSources(claude.SettingSourceProject))
+	}
 	if opts.SettingsFilePath != "" {
 		sdkOpts = append(sdkOpts, claude.WithSettingSources(claude.SettingSourceUser))
 	}
+
 	return sdkOpts
 }
 

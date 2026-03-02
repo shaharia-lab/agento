@@ -12,7 +12,7 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	github.com/modelcontextprotocol/go-sdk v1.3.1
 	github.com/muesli/termenv v0.16.0
-	github.com/shaharia-lab/claude-agent-sdk-go v0.2.0
+	github.com/shaharia-lab/claude-agent-sdk-go v0.3.0
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	github.com/wneessen/go-mail v0.7.2

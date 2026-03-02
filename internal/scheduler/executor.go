@@ -185,6 +185,7 @@ func (s *Scheduler) buildRunOptions(task *storage.ScheduledTask) agent.RunOption
 		LocalToolsMCP:       s.cfg.LocalMCP,
 		MCPRegistry:         s.cfg.MCPRegistry,
 		IntegrationRegistry: s.cfg.IntegrationRegistry,
+		WorkingDir:          task.WorkingDirectory,
 	}
 
 	if task.SettingsProfileID != "" {
