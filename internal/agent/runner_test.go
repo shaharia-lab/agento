@@ -40,49 +40,42 @@ func TestAppendSettingsOpts(t *testing.T) {
 		settingsFilePath string
 		workingDir       string
 		wantSources      []claude.SettingSource
-		wantCWD          string
 	}{
 		{
 			name:             "no settings file, no working dir — isolation mode",
 			settingsFilePath: "",
 			workingDir:       "",
 			wantSources:      nil,
-			wantCWD:          "",
 		},
 		{
 			name:             "with settings file, no working dir — user source only",
 			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
 			workingDir:       "",
 			wantSources:      []claude.SettingSource{claude.SettingSourceUser},
-			wantCWD:          "",
 		},
 		{
-			name:             "no settings file, plain working dir — CWD only, no sources",
+			name:             "no settings file, plain working dir — no sources",
 			settingsFilePath: "",
 			workingDir:       plainDir,
 			wantSources:      nil,
-			wantCWD:          plainDir,
 		},
 		{
 			name:             "no settings file, project working dir — project source",
 			settingsFilePath: "",
 			workingDir:       projectDir,
 			wantSources:      []claude.SettingSource{claude.SettingSourceProject},
-			wantCWD:          projectDir,
 		},
 		{
 			name:             "with settings file and project working dir — both sources",
 			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
 			workingDir:       projectDir,
 			wantSources:      []claude.SettingSource{claude.SettingSourceProject, claude.SettingSourceUser},
-			wantCWD:          projectDir,
 		},
 		{
 			name:             "with settings file and plain working dir — user source only",
 			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
 			workingDir:       plainDir,
 			wantSources:      []claude.SettingSource{claude.SettingSourceUser},
-			wantCWD:          plainDir,
 		},
 	}
 
@@ -104,10 +97,6 @@ func TestAppendSettingsOpts(t *testing.T) {
 					t.Errorf("SettingSources[%d] = %q, want %q", i, o.SettingSources[i], want)
 				}
 			}
-
-			if o.CWD != tc.wantCWD {
-				t.Errorf("CWD = %q, want %q", o.CWD, tc.wantCWD)
-			}
 		})
 	}
 }
@@ -126,10 +115,6 @@ func TestBuildSDKOptions_ProjectDirWithSettingsProfile(t *testing.T) {
 
 	sdkOpts := buildSDKOptions(context.Background(), agentCfg, opts, "You are helpful.")
 	o := applyOpts(sdkOpts)
-
-	if o.CWD != projectDir {
-		t.Errorf("CWD = %q, want %q", o.CWD, projectDir)
-	}
 
 	hasProject := false
 	hasUser := false
@@ -170,10 +155,6 @@ func TestBuildSDKOptions_PlainDirNoSettingsProfile(t *testing.T) {
 	sdkOpts := buildSDKOptions(context.Background(), agentCfg, opts, "")
 	o := applyOpts(sdkOpts)
 
-	if o.CWD != plainDir {
-		t.Errorf("CWD = %q, want %q", o.CWD, plainDir)
-	}
-
 	// No .claude/ in the dir, so project source should NOT be included.
 	for _, s := range o.SettingSources {
 		if s == claude.SettingSourceProject {
@@ -192,9 +173,6 @@ func TestBuildSDKOptions_NoCWDWhenWorkingDirEmpty(t *testing.T) {
 	sdkOpts := buildSDKOptions(context.Background(), agentCfg, opts, "")
 	o := applyOpts(sdkOpts)
 
-	if o.CWD != "" {
-		t.Errorf("CWD = %q, want empty string", o.CWD)
-	}
 	if len(o.SettingSources) != 0 {
 		t.Errorf("SettingSources = %v, want empty (isolation mode)", o.SettingSources)
 	}
@@ -216,9 +194,6 @@ func TestBuildSDKOptions_SessionIDResume(t *testing.T) {
 
 	if o.SessionID != "sess-abc-123" {
 		t.Errorf("SessionID = %q, want %q", o.SessionID, "sess-abc-123")
-	}
-	if o.CWD != projectDir {
-		t.Errorf("CWD = %q, want %q", o.CWD, projectDir)
 	}
 }
 

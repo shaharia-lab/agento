@@ -169,9 +169,6 @@ func appendSettingsOpts(sdkOpts []claude.Option, opts RunOptions, _ *config.Agen
 		sdkOpts = append(sdkOpts, claude.WithSettingSources(sources...))
 	}
 
-	if opts.WorkingDir != "" {
-		sdkOpts = append(sdkOpts, claude.WithCWD(opts.WorkingDir))
-	}
 	return sdkOpts
 }
 
