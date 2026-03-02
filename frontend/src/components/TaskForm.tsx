@@ -153,8 +153,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
           {/* Left: Prompt */}
           <div className="space-y-4">
             <div>
-              <label className={labelClass}>Prompt</label>
+              <label htmlFor="task-prompt" className={labelClass}>
+                Prompt
+              </label>
               <textarea
+                id="task-prompt"
                 value={prompt}
                 onChange={e => setPrompt(e.target.value)}
                 rows={16}
@@ -173,8 +176,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                 Basic
               </h3>
               <div>
-                <label className={labelClass}>Name</label>
+                <label htmlFor="task-name" className={labelClass}>
+                  Name
+                </label>
                 <input
+                  id="task-name"
                   type="text"
                   value={name}
                   onChange={e => setName(e.target.value)}
@@ -184,8 +190,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                 />
               </div>
               <div>
-                <label className={labelClass}>Description</label>
+                <label htmlFor="task-description" className={labelClass}>
+                  Description
+                </label>
                 <input
+                  id="task-description"
                   type="text"
                   value={description}
                   onChange={e => setDescription(e.target.value)}
@@ -194,8 +203,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                 />
               </div>
               <div>
-                <label className={labelClass}>Agent (optional)</label>
+                <label htmlFor="task-agent" className={labelClass}>
+                  Agent (optional)
+                </label>
                 <select
+                  id="task-agent"
                   value={agentSlug}
                   onChange={e => setAgentSlug(e.target.value)}
                   className={selectClass}
@@ -209,8 +221,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                 </select>
               </div>
               <div>
-                <label className={labelClass}>Model (optional)</label>
+                <label htmlFor="task-model" className={labelClass}>
+                  Model (optional)
+                </label>
                 <select
+                  id="task-model"
                   value={model}
                   onChange={e => setModel(e.target.value)}
                   className={selectClass}
@@ -231,8 +246,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                 Schedule
               </h3>
               <div>
-                <label className={labelClass}>Type</label>
+                <label htmlFor="task-schedule-type" className={labelClass}>
+                  Type
+                </label>
                 <select
+                  id="task-schedule-type"
                   value={scheduleType}
                   onChange={e => {
                     setScheduleType(e.target.value as ScheduleType)
@@ -255,8 +273,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
 
               {scheduleType === 'one_off' && (
                 <div>
-                  <label className={labelClass}>Run at</label>
+                  <label htmlFor="task-run-at" className={labelClass}>
+                    Run at
+                  </label>
                   <input
+                    id="task-run-at"
                     type="datetime-local"
                     value={
                       scheduleConfig.run_at ? toLocalDatetimeString(scheduleConfig.run_at) : ''
@@ -277,8 +298,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                 <div className="space-y-2">
                   <div className="grid grid-cols-3 gap-2">
                     <div>
-                      <label className={labelClass}>Minutes</label>
+                      <label htmlFor="task-interval-minutes" className={labelClass}>
+                        Minutes
+                      </label>
                       <input
+                        id="task-interval-minutes"
                         type="number"
                         min={0}
                         value={scheduleConfig.every_minutes ?? ''}
@@ -293,8 +317,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                       />
                     </div>
                     <div>
-                      <label className={labelClass}>Hours</label>
+                      <label htmlFor="task-interval-hours" className={labelClass}>
+                        Hours
+                      </label>
                       <input
+                        id="task-interval-hours"
                         type="number"
                         min={0}
                         value={scheduleConfig.every_hours ?? ''}
@@ -309,8 +336,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                       />
                     </div>
                     <div>
-                      <label className={labelClass}>Days</label>
+                      <label htmlFor="task-interval-days" className={labelClass}>
+                        Days
+                      </label>
                       <input
+                        id="task-interval-days"
                         type="number"
                         min={0}
                         value={scheduleConfig.every_days ?? ''}
@@ -327,8 +357,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                   </div>
                   {(scheduleConfig.every_days ?? 0) > 0 && (
                     <div>
-                      <label className={labelClass}>At time (HH:MM)</label>
+                      <label htmlFor="task-at-time" className={labelClass}>
+                        At time (HH:MM)
+                      </label>
                       <input
+                        id="task-at-time"
                         type="time"
                         value={scheduleConfig.at_time ?? ''}
                         onChange={e =>
@@ -343,8 +376,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
 
               {scheduleType === 'cron' && (
                 <div>
-                  <label className={labelClass}>Cron expression</label>
+                  <label htmlFor="task-cron-expression" className={labelClass}>
+                    Cron expression
+                  </label>
                   <input
+                    id="task-cron-expression"
                     type="text"
                     value={scheduleConfig.expression ?? ''}
                     onChange={e =>
@@ -379,8 +415,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
               {stopConditionsOpen && (
                 <div className="space-y-3">
                   <div>
-                    <label className={labelClass}>Stop after N runs (0 = unlimited)</label>
+                    <label htmlFor="task-stop-after-count" className={labelClass}>
+                      Stop after N runs (0 = unlimited)
+                    </label>
                     <input
+                      id="task-stop-after-count"
                       type="number"
                       min={0}
                       value={stopAfterCount}
@@ -389,8 +428,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                     />
                   </div>
                   <div>
-                    <label className={labelClass}>Stop after date (optional)</label>
+                    <label htmlFor="task-stop-after-time" className={labelClass}>
+                      Stop after date (optional)
+                    </label>
                     <input
+                      id="task-stop-after-time"
                       type="datetime-local"
                       value={stopAfterTime ? toLocalDatetimeString(stopAfterTime) : ''}
                       onChange={e =>
@@ -423,8 +465,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
               {advancedOpen && (
                 <div className="space-y-3">
                   <div>
-                    <label className={labelClass}>Working directory</label>
+                    <label htmlFor="task-working-directory" className={labelClass}>
+                      Working directory
+                    </label>
                     <input
+                      id="task-working-directory"
                       type="text"
                       value={workingDirectory}
                       onChange={e => setWorkingDirectory(e.target.value)}
@@ -433,8 +478,11 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                     />
                   </div>
                   <div>
-                    <label className={labelClass}>Timeout (minutes, 1-240)</label>
+                    <label htmlFor="task-timeout" className={labelClass}>
+                      Timeout (minutes, 1-240)
+                    </label>
                     <input
+                      id="task-timeout"
                       type="number"
                       min={1}
                       max={240}
