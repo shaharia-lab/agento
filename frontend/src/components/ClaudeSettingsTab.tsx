@@ -210,6 +210,516 @@ function strVal(v: string | undefined): string {
   return v ?? ''
 }
 
+// ─── buildSettings helpers (module-level to keep component complexity low) ────
+
+interface StringFieldsState {
+  model: string
+  language: string
+  effortLevel: string
+  autoUpdatesChannel: string
+  outputStyle: string
+  cleanupPeriodDays: string
+  plansDirectory: string
+  apiKeyHelper: string
+  teammateMode: string
+}
+
+function applyStringFields(settings: ClaudeCodeSettings, s: StringFieldsState): void {
+  if (s.model) settings.model = s.model
+  if (s.language) settings.language = s.language
+  if (s.effortLevel) settings.effortLevel = s.effortLevel as 'low' | 'medium' | 'high'
+  if (s.autoUpdatesChannel)
+    settings.autoUpdatesChannel = s.autoUpdatesChannel as 'stable' | 'latest'
+  if (s.outputStyle) settings.outputStyle = s.outputStyle
+  if (s.cleanupPeriodDays !== '') {
+    const n = Number.parseInt(s.cleanupPeriodDays, 10)
+    if (!Number.isNaN(n)) settings.cleanupPeriodDays = n
+  }
+  if (s.plansDirectory) settings.plansDirectory = s.plansDirectory
+  if (s.apiKeyHelper) settings.apiKeyHelper = s.apiKeyHelper
+  if (s.teammateMode) settings.teammateMode = s.teammateMode as 'auto' | 'in-process' | 'tmux'
+}
+
+interface BooleanFieldsState {
+  fastMode: boolean | undefined
+  showTurnDuration: boolean | undefined
+  spinnerTipsEnabled: boolean | undefined
+  terminalProgressBarEnabled: boolean | undefined
+  prefersReducedMotion: boolean | undefined
+  alwaysThinkingEnabled: boolean | undefined
+  respectGitignore: boolean | undefined
+  skipWebFetchPreflight: boolean | undefined
+  disableAllHooks: boolean | undefined
+  enableAllProjectMcpServers: boolean | undefined
+  allowManagedHooksOnly: boolean | undefined
+  allowManagedPermissionRulesOnly: boolean | undefined
+  allowManagedMcpServersOnly: boolean | undefined
+}
+
+function applyBooleanFields(settings: ClaudeCodeSettings, b: BooleanFieldsState): void {
+  if (b.fastMode !== undefined) settings.fastMode = b.fastMode
+  if (b.showTurnDuration !== undefined) settings.showTurnDuration = b.showTurnDuration
+  if (b.spinnerTipsEnabled !== undefined) settings.spinnerTipsEnabled = b.spinnerTipsEnabled
+  if (b.terminalProgressBarEnabled !== undefined)
+    settings.terminalProgressBarEnabled = b.terminalProgressBarEnabled
+  if (b.prefersReducedMotion !== undefined) settings.prefersReducedMotion = b.prefersReducedMotion
+  if (b.alwaysThinkingEnabled !== undefined)
+    settings.alwaysThinkingEnabled = b.alwaysThinkingEnabled
+  if (b.respectGitignore !== undefined) settings.respectGitignore = b.respectGitignore
+  if (b.skipWebFetchPreflight !== undefined)
+    settings.skipWebFetchPreflight = b.skipWebFetchPreflight
+  if (b.disableAllHooks !== undefined) settings.disableAllHooks = b.disableAllHooks
+  if (b.enableAllProjectMcpServers !== undefined)
+    settings.enableAllProjectMcpServers = b.enableAllProjectMcpServers
+  if (b.allowManagedHooksOnly !== undefined)
+    settings.allowManagedHooksOnly = b.allowManagedHooksOnly
+  if (b.allowManagedPermissionRulesOnly !== undefined)
+    settings.allowManagedPermissionRulesOnly = b.allowManagedPermissionRulesOnly
+  if (b.allowManagedMcpServersOnly !== undefined)
+    settings.allowManagedMcpServersOnly = b.allowManagedMcpServersOnly
+}
+
+interface ParsedJsonFields {
+  permissions: unknown
+  hooks: unknown
+  env: unknown
+  sandbox: unknown
+  attribution: unknown
+  errors: Record<string, string>
+}
+
+function parseAllJsonFields(raw: {
+  permissionsJson: string
+  hooksJson: string
+  envJson: string
+  sandboxJson: string
+  attributionJson: string
+}): ParsedJsonFields {
+  const errors: Record<string, string> = {}
+  const { value: permissions, error: permErr } = parseJsonField(raw.permissionsJson)
+  if (permErr) errors.permissions = permErr
+  const { value: hooks, error: hooksErr } = parseJsonField(raw.hooksJson)
+  if (hooksErr) errors.hooks = hooksErr
+  const { value: env, error: envErr } = parseJsonField(raw.envJson)
+  if (envErr) errors.env = envErr
+  const { value: sandbox, error: sandboxErr } = parseJsonField(raw.sandboxJson)
+  if (sandboxErr) errors.sandbox = sandboxErr
+  const { value: attribution, error: attrErr } = parseJsonField(raw.attributionJson)
+  if (attrErr) errors.attribution = attrErr
+  return { permissions, hooks, env, sandbox, attribution, errors }
+}
+
+function applyParsedJsonFields(
+  settings: ClaudeCodeSettings,
+  parsed: Omit<ParsedJsonFields, 'errors'>,
+): void {
+  if (parsed.permissions !== undefined)
+    settings.permissions = parsed.permissions as ClaudeCodeSettings['permissions']
+  if (parsed.hooks !== undefined) settings.hooks = parsed.hooks as Record<string, unknown>
+  if (parsed.env !== undefined) settings.env = parsed.env as Record<string, string>
+  if (parsed.sandbox !== undefined) settings.sandbox = parsed.sandbox as Record<string, unknown>
+  if (parsed.attribution !== undefined)
+    settings.attribution = parsed.attribution as ClaudeCodeSettings['attribution']
+}
+
+// ─── Settings form sections (extracted to reduce render complexity) ────────────
+
+interface ModelLanguageSectionProps {
+  model: string
+  setModel: (v: string) => void
+  language: string
+  setLanguage: (v: string) => void
+  effortLevel: EffortLevel
+  setEffortLevel: (v: EffortLevel) => void
+  autoUpdatesChannel: UpdatesChannel
+  setAutoUpdatesChannel: (v: UpdatesChannel) => void
+  outputStyle: string
+  setOutputStyle: (v: string) => void
+  apiKeyHelper: string
+  setApiKeyHelper: (v: string) => void
+}
+
+function ModelLanguageSection(props: Readonly<ModelLanguageSectionProps>) {
+  return (
+    <section className="flex flex-col gap-0">
+      <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
+        Model &amp; Language
+      </h3>
+      <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
+        <FieldRow label="Model" description="Override the default Claude model">
+          <Input
+            value={props.model}
+            onChange={e => props.setModel(e.target.value)}
+            className="w-44 font-mono text-sm"
+            placeholder="claude-sonnet-4-6"
+          />
+        </FieldRow>
+        <FieldRow label="Language" description="Preferred response language">
+          <Input
+            value={props.language}
+            onChange={e => props.setLanguage(e.target.value)}
+            className="w-32 text-sm"
+            placeholder="en"
+          />
+        </FieldRow>
+        <FieldRow label="Effort Level" description="Opus 4.6 reasoning effort">
+          <Select
+            value={props.effortLevel}
+            onValueChange={v => props.setEffortLevel(v as EffortLevel)}
+          >
+            <SelectTrigger className="w-32">
+              <SelectValue placeholder="Default" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="low">Low</SelectItem>
+              <SelectItem value="medium">Medium</SelectItem>
+              <SelectItem value="high">High</SelectItem>
+            </SelectContent>
+          </Select>
+        </FieldRow>
+        <FieldRow label="Auto-Updates" description="Release channel for updates">
+          <Select
+            value={props.autoUpdatesChannel}
+            onValueChange={v => props.setAutoUpdatesChannel(v as UpdatesChannel)}
+          >
+            <SelectTrigger className="w-32">
+              <SelectValue placeholder="Default" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="stable">Stable</SelectItem>
+              <SelectItem value="latest">Latest</SelectItem>
+            </SelectContent>
+          </Select>
+        </FieldRow>
+        <FieldRow label="Output Style" description="Response output style">
+          <Input
+            value={props.outputStyle}
+            onChange={e => props.setOutputStyle(e.target.value)}
+            className="w-32 text-sm"
+          />
+        </FieldRow>
+        <FieldRow label="API Key Helper" description="Path to auth helper script">
+          <Input
+            value={props.apiKeyHelper}
+            onChange={e => props.setApiKeyHelper(e.target.value)}
+            className="w-44 font-mono text-sm"
+            placeholder="/path/to/script"
+          />
+        </FieldRow>
+      </div>
+    </section>
+  )
+}
+
+interface BehaviourSectionProps {
+  cleanupPeriodDays: string
+  setCleanupPeriodDays: (v: string) => void
+  plansDirectory: string
+  setPlansDirectory: (v: string) => void
+  respectGitignore: boolean | undefined
+  setRespectGitignore: (v: boolean) => void
+  skipWebFetchPreflight: boolean | undefined
+  setSkipWebFetchPreflight: (v: boolean) => void
+  disableAllHooks: boolean | undefined
+  setDisableAllHooks: (v: boolean) => void
+}
+
+function BehaviourSection(props: Readonly<BehaviourSectionProps>) {
+  return (
+    <section className="flex flex-col gap-0">
+      <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
+        Behaviour
+      </h3>
+      <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
+        <FieldRow label="Cleanup Period (days)" description="Days to retain chat transcripts">
+          <Input
+            type="number"
+            value={props.cleanupPeriodDays}
+            onChange={e => props.setCleanupPeriodDays(e.target.value)}
+            className="w-20 text-sm"
+            placeholder="30"
+            min={1}
+          />
+        </FieldRow>
+        <FieldRow label="Plans Directory" description="Custom plan file storage">
+          <Input
+            value={props.plansDirectory}
+            onChange={e => props.setPlansDirectory(e.target.value)}
+            className="w-44 font-mono text-sm"
+            placeholder="/path/to/plans"
+          />
+        </FieldRow>
+        <FieldRow label="Respect .gitignore" description="@ file picker respects .gitignore">
+          <Toggle checked={props.respectGitignore ?? true} onChange={props.setRespectGitignore} />
+        </FieldRow>
+        <FieldRow label="Skip WebFetch Preflight" description="Skip WebFetch blocklist check">
+          <Toggle
+            checked={props.skipWebFetchPreflight ?? false}
+            onChange={props.setSkipWebFetchPreflight}
+          />
+        </FieldRow>
+        <FieldRow label="Disable All Hooks" description="Disable all hooks execution">
+          <Toggle checked={props.disableAllHooks ?? false} onChange={props.setDisableAllHooks} />
+        </FieldRow>
+      </div>
+    </section>
+  )
+}
+
+interface UiDisplaySectionProps {
+  fastMode: boolean | undefined
+  setFastMode: (v: boolean) => void
+  showTurnDuration: boolean | undefined
+  setShowTurnDuration: (v: boolean) => void
+  spinnerTipsEnabled: boolean | undefined
+  setSpinnerTipsEnabled: (v: boolean) => void
+  terminalProgressBarEnabled: boolean | undefined
+  setTerminalProgressBarEnabled: (v: boolean) => void
+  prefersReducedMotion: boolean | undefined
+  setPrefersReducedMotion: (v: boolean) => void
+  alwaysThinkingEnabled: boolean | undefined
+  setAlwaysThinkingEnabled: (v: boolean) => void
+  teammateMode: TeammateModeOption
+  setTeammateMode: (v: TeammateModeOption) => void
+}
+
+function UiDisplaySection(props: Readonly<UiDisplaySectionProps>) {
+  return (
+    <section className="flex flex-col gap-0">
+      <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
+        UI &amp; Display
+      </h3>
+      <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
+        <FieldRow label="Fast Mode" description="Enable Opus 4.6 fast mode">
+          <Toggle checked={props.fastMode ?? false} onChange={props.setFastMode} />
+        </FieldRow>
+        <FieldRow label="Show Turn Duration" description="Display response duration">
+          <Toggle checked={props.showTurnDuration ?? false} onChange={props.setShowTurnDuration} />
+        </FieldRow>
+        <FieldRow label="Spinner Tips" description="Show tips during work">
+          <Toggle
+            checked={props.spinnerTipsEnabled ?? false}
+            onChange={props.setSpinnerTipsEnabled}
+          />
+        </FieldRow>
+        <FieldRow label="Terminal Progress Bar" description="Enable progress bar">
+          <Toggle
+            checked={props.terminalProgressBarEnabled ?? false}
+            onChange={props.setTerminalProgressBarEnabled}
+          />
+        </FieldRow>
+        <FieldRow label="Reduced Motion" description="Reduce UI animations">
+          <Toggle
+            checked={props.prefersReducedMotion ?? false}
+            onChange={props.setPrefersReducedMotion}
+          />
+        </FieldRow>
+        <FieldRow label="Always Thinking" description="Extended thinking by default">
+          <Toggle
+            checked={props.alwaysThinkingEnabled ?? false}
+            onChange={props.setAlwaysThinkingEnabled}
+          />
+        </FieldRow>
+        <FieldRow label="Teammate Mode" description="Agent team display mode">
+          <Select
+            value={props.teammateMode}
+            onValueChange={v => props.setTeammateMode(v as TeammateModeOption)}
+          >
+            <SelectTrigger className="w-32">
+              <SelectValue placeholder="Default" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">Auto</SelectItem>
+              <SelectItem value="in-process">In-Process</SelectItem>
+              <SelectItem value="tmux">Tmux</SelectItem>
+            </SelectContent>
+          </Select>
+        </FieldRow>
+      </div>
+    </section>
+  )
+}
+
+interface PermissionsMcpSectionProps {
+  enableAllProjectMcpServers: boolean | undefined
+  setEnableAllProjectMcpServers: (v: boolean) => void
+  allowManagedHooksOnly: boolean | undefined
+  setAllowManagedHooksOnly: (v: boolean) => void
+  allowManagedPermissionRulesOnly: boolean | undefined
+  setAllowManagedPermissionRulesOnly: (v: boolean) => void
+  allowManagedMcpServersOnly: boolean | undefined
+  setAllowManagedMcpServersOnly: (v: boolean) => void
+}
+
+function PermissionsMcpSection(props: Readonly<PermissionsMcpSectionProps>) {
+  return (
+    <section className="flex flex-col gap-0">
+      <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
+        Permissions &amp; MCP
+      </h3>
+      <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
+        <FieldRow
+          label="Enable All Project MCPs"
+          description="Auto-approve all project MCP servers"
+        >
+          <Toggle
+            checked={props.enableAllProjectMcpServers ?? false}
+            onChange={props.setEnableAllProjectMcpServers}
+          />
+        </FieldRow>
+        <FieldRow label="Managed Hooks Only" description="Only load managed/SDK hooks">
+          <Toggle
+            checked={props.allowManagedHooksOnly ?? false}
+            onChange={props.setAllowManagedHooksOnly}
+          />
+        </FieldRow>
+        <FieldRow
+          label="Managed Permission Rules"
+          description="Only managed permission rules apply"
+        >
+          <Toggle
+            checked={props.allowManagedPermissionRulesOnly ?? false}
+            onChange={props.setAllowManagedPermissionRulesOnly}
+          />
+        </FieldRow>
+        <FieldRow label="Managed MCP Servers Only" description="Only managed MCP servers respected">
+          <Toggle
+            checked={props.allowManagedMcpServersOnly ?? false}
+            onChange={props.setAllowManagedMcpServersOnly}
+          />
+        </FieldRow>
+      </div>
+    </section>
+  )
+}
+
+type SettingsFormGridProps = ModelLanguageSectionProps &
+  BehaviourSectionProps &
+  UiDisplaySectionProps &
+  PermissionsMcpSectionProps
+
+function SettingsFormGrid(props: Readonly<SettingsFormGridProps>) {
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="flex flex-col gap-4">
+        <ModelLanguageSection
+          model={props.model}
+          setModel={props.setModel}
+          language={props.language}
+          setLanguage={props.setLanguage}
+          effortLevel={props.effortLevel}
+          setEffortLevel={props.setEffortLevel}
+          autoUpdatesChannel={props.autoUpdatesChannel}
+          setAutoUpdatesChannel={props.setAutoUpdatesChannel}
+          outputStyle={props.outputStyle}
+          setOutputStyle={props.setOutputStyle}
+          apiKeyHelper={props.apiKeyHelper}
+          setApiKeyHelper={props.setApiKeyHelper}
+        />
+        <BehaviourSection
+          cleanupPeriodDays={props.cleanupPeriodDays}
+          setCleanupPeriodDays={props.setCleanupPeriodDays}
+          plansDirectory={props.plansDirectory}
+          setPlansDirectory={props.setPlansDirectory}
+          respectGitignore={props.respectGitignore}
+          setRespectGitignore={props.setRespectGitignore}
+          skipWebFetchPreflight={props.skipWebFetchPreflight}
+          setSkipWebFetchPreflight={props.setSkipWebFetchPreflight}
+          disableAllHooks={props.disableAllHooks}
+          setDisableAllHooks={props.setDisableAllHooks}
+        />
+      </div>
+      <div className="flex flex-col gap-4">
+        <UiDisplaySection
+          fastMode={props.fastMode}
+          setFastMode={props.setFastMode}
+          showTurnDuration={props.showTurnDuration}
+          setShowTurnDuration={props.setShowTurnDuration}
+          spinnerTipsEnabled={props.spinnerTipsEnabled}
+          setSpinnerTipsEnabled={props.setSpinnerTipsEnabled}
+          terminalProgressBarEnabled={props.terminalProgressBarEnabled}
+          setTerminalProgressBarEnabled={props.setTerminalProgressBarEnabled}
+          prefersReducedMotion={props.prefersReducedMotion}
+          setPrefersReducedMotion={props.setPrefersReducedMotion}
+          alwaysThinkingEnabled={props.alwaysThinkingEnabled}
+          setAlwaysThinkingEnabled={props.setAlwaysThinkingEnabled}
+          teammateMode={props.teammateMode}
+          setTeammateMode={props.setTeammateMode}
+        />
+        <PermissionsMcpSection
+          enableAllProjectMcpServers={props.enableAllProjectMcpServers}
+          setEnableAllProjectMcpServers={props.setEnableAllProjectMcpServers}
+          allowManagedHooksOnly={props.allowManagedHooksOnly}
+          setAllowManagedHooksOnly={props.setAllowManagedHooksOnly}
+          allowManagedPermissionRulesOnly={props.allowManagedPermissionRulesOnly}
+          setAllowManagedPermissionRulesOnly={props.setAllowManagedPermissionRulesOnly}
+          allowManagedMcpServersOnly={props.allowManagedMcpServersOnly}
+          setAllowManagedMcpServersOnly={props.setAllowManagedMcpServersOnly}
+        />
+      </div>
+    </div>
+  )
+}
+
+interface AdvancedJsonSectionProps {
+  permissionsJson: string
+  setPermissionsJson: (v: string) => void
+  hooksJson: string
+  setHooksJson: (v: string) => void
+  envJson: string
+  setEnvJson: (v: string) => void
+  sandboxJson: string
+  setSandboxJson: (v: string) => void
+  attributionJson: string
+  setAttributionJson: (v: string) => void
+  jsonErrors: Record<string, string>
+}
+
+function AdvancedJsonSection(props: Readonly<AdvancedJsonSectionProps>) {
+  return (
+    <section className="flex flex-col gap-2">
+      <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide">Advanced</h3>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+        <CollapsibleSection
+          title="Permissions"
+          description="Allow / deny / ask rules"
+          value={props.permissionsJson}
+          onChange={props.setPermissionsJson}
+          error={props.jsonErrors.permissions}
+        />
+        <CollapsibleSection
+          title="Hooks"
+          description="Tool execution event commands"
+          value={props.hooksJson}
+          onChange={props.setHooksJson}
+          error={props.jsonErrors.hooks}
+        />
+        <CollapsibleSection
+          title="Environment (env)"
+          description="Extra environment variables"
+          value={props.envJson}
+          onChange={props.setEnvJson}
+          error={props.jsonErrors.env}
+        />
+        <CollapsibleSection
+          title="Sandbox"
+          description="Sandboxed bash configuration"
+          value={props.sandboxJson}
+          onChange={props.setSandboxJson}
+          error={props.jsonErrors.sandbox}
+        />
+        <CollapsibleSection
+          title="Attribution"
+          description="Git commit / PR attribution"
+          value={props.attributionJson}
+          onChange={props.setAttributionJson}
+          error={props.jsonErrors.attribution}
+        />
+      </div>
+    </section>
+  )
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function ClaudeSettingsTab() {
@@ -406,69 +916,48 @@ export default function ClaudeSettingsTab() {
   // ─── Build the full settings object from current form state ─────────────────
 
   const buildSettings = (): { settings: ClaudeCodeSettings; errors: Record<string, string> } => {
-    const errors: Record<string, string> = {}
+    const { errors, ...parsedJson } = parseAllJsonFields({
+      permissionsJson,
+      hooksJson,
+      envJson,
+      sandboxJson,
+      attributionJson,
+    })
 
-    const { value: permissions, error: permErr } = parseJsonField(permissionsJson)
-    if (permErr) errors.permissions = permErr
+    const settings: ClaudeCodeSettings = { ...extraKeysRef.current }
 
-    const { value: hooks, error: hooksErr } = parseJsonField(hooksJson)
-    if (hooksErr) errors.hooks = hooksErr
-
-    const { value: env, error: envErr } = parseJsonField(envJson)
-    if (envErr) errors.env = envErr
-
-    const { value: sandbox, error: sandboxErr } = parseJsonField(sandboxJson)
-    if (sandboxErr) errors.sandbox = sandboxErr
-
-    const { value: attribution, error: attrErr } = parseJsonField(attributionJson)
-    if (attrErr) errors.attribution = attrErr
-
-    const settings: ClaudeCodeSettings = {
-      ...extraKeysRef.current,
-    }
-
-    // Only include fields that have a non-empty/non-default value.
-    if (model) settings.model = model
-    if (language) settings.language = language
-    if (effortLevel) settings.effortLevel = effortLevel as 'low' | 'medium' | 'high'
-    if (autoUpdatesChannel) settings.autoUpdatesChannel = autoUpdatesChannel as 'stable' | 'latest'
-    if (outputStyle) settings.outputStyle = outputStyle
-    if (cleanupPeriodDays !== '') {
-      const n = Number.parseInt(cleanupPeriodDays, 10)
-      if (!Number.isNaN(n)) settings.cleanupPeriodDays = n
-    }
-    if (plansDirectory) settings.plansDirectory = plansDirectory
-    if (apiKeyHelper) settings.apiKeyHelper = apiKeyHelper
+    applyStringFields(settings, {
+      model,
+      language,
+      effortLevel,
+      autoUpdatesChannel,
+      outputStyle,
+      cleanupPeriodDays,
+      plansDirectory,
+      apiKeyHelper,
+      teammateMode,
+    })
 
     // Only write booleans that were explicitly set (not undefined).
     // This preserves round-trip fidelity: explicit false values survive, and
     // untouched fields are never injected into the file.
-    if (fastMode !== undefined) settings.fastMode = fastMode
-    if (showTurnDuration !== undefined) settings.showTurnDuration = showTurnDuration
-    if (spinnerTipsEnabled !== undefined) settings.spinnerTipsEnabled = spinnerTipsEnabled
-    if (terminalProgressBarEnabled !== undefined)
-      settings.terminalProgressBarEnabled = terminalProgressBarEnabled
-    if (prefersReducedMotion !== undefined) settings.prefersReducedMotion = prefersReducedMotion
-    if (alwaysThinkingEnabled !== undefined) settings.alwaysThinkingEnabled = alwaysThinkingEnabled
-    if (respectGitignore !== undefined) settings.respectGitignore = respectGitignore
-    if (skipWebFetchPreflight !== undefined) settings.skipWebFetchPreflight = skipWebFetchPreflight
-    if (disableAllHooks !== undefined) settings.disableAllHooks = disableAllHooks
-    if (enableAllProjectMcpServers !== undefined)
-      settings.enableAllProjectMcpServers = enableAllProjectMcpServers
-    if (allowManagedHooksOnly !== undefined) settings.allowManagedHooksOnly = allowManagedHooksOnly
-    if (allowManagedPermissionRulesOnly !== undefined)
-      settings.allowManagedPermissionRulesOnly = allowManagedPermissionRulesOnly
-    if (allowManagedMcpServersOnly !== undefined)
-      settings.allowManagedMcpServersOnly = allowManagedMcpServersOnly
-    if (teammateMode) settings.teammateMode = teammateMode as 'auto' | 'in-process' | 'tmux'
+    applyBooleanFields(settings, {
+      fastMode,
+      showTurnDuration,
+      spinnerTipsEnabled,
+      terminalProgressBarEnabled,
+      prefersReducedMotion,
+      alwaysThinkingEnabled,
+      respectGitignore,
+      skipWebFetchPreflight,
+      disableAllHooks,
+      enableAllProjectMcpServers,
+      allowManagedHooksOnly,
+      allowManagedPermissionRulesOnly,
+      allowManagedMcpServersOnly,
+    })
 
-    if (permissions !== undefined)
-      settings.permissions = permissions as ClaudeCodeSettings['permissions']
-    if (hooks !== undefined) settings.hooks = hooks as Record<string, unknown>
-    if (env !== undefined) settings.env = env as Record<string, string>
-    if (sandbox !== undefined) settings.sandbox = sandbox as Record<string, unknown>
-    if (attribution !== undefined)
-      settings.attribution = attribution as ClaudeCodeSettings['attribution']
+    applyParsedJsonFields(settings, parsedJson)
 
     return { settings, errors }
   }
@@ -729,274 +1218,67 @@ export default function ClaudeSettingsTab() {
 
       {exists && (
         <>
-          {/* ── Two-column grid (single column on small screens) ────────── */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {/* ── Left column ─────────────────────────────────────────── */}
-            <div className="flex flex-col gap-4">
-              {/* Model & Language */}
-              <section className="flex flex-col gap-0">
-                <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
-                  Model &amp; Language
-                </h3>
-                <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
-                  <FieldRow label="Model" description="Override the default Claude model">
-                    <Input
-                      value={model}
-                      onChange={e => setModel(e.target.value)}
-                      className="w-44 font-mono text-sm"
-                      placeholder="claude-sonnet-4-6"
-                    />
-                  </FieldRow>
-                  <FieldRow label="Language" description="Preferred response language">
-                    <Input
-                      value={language}
-                      onChange={e => setLanguage(e.target.value)}
-                      className="w-32 text-sm"
-                      placeholder="en"
-                    />
-                  </FieldRow>
-                  <FieldRow label="Effort Level" description="Opus 4.6 reasoning effort">
-                    <Select
-                      value={effortLevel}
-                      onValueChange={v => setEffortLevel(v as EffortLevel)}
-                    >
-                      <SelectTrigger className="w-32">
-                        <SelectValue placeholder="Default" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="low">Low</SelectItem>
-                        <SelectItem value="medium">Medium</SelectItem>
-                        <SelectItem value="high">High</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </FieldRow>
-                  <FieldRow label="Auto-Updates" description="Release channel for updates">
-                    <Select
-                      value={autoUpdatesChannel}
-                      onValueChange={v => setAutoUpdatesChannel(v as UpdatesChannel)}
-                    >
-                      <SelectTrigger className="w-32">
-                        <SelectValue placeholder="Default" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="stable">Stable</SelectItem>
-                        <SelectItem value="latest">Latest</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </FieldRow>
-                  <FieldRow label="Output Style" description="Response output style">
-                    <Input
-                      value={outputStyle}
-                      onChange={e => setOutputStyle(e.target.value)}
-                      className="w-32 text-sm"
-                    />
-                  </FieldRow>
-                  <FieldRow label="API Key Helper" description="Path to auth helper script">
-                    <Input
-                      value={apiKeyHelper}
-                      onChange={e => setApiKeyHelper(e.target.value)}
-                      className="w-44 font-mono text-sm"
-                      placeholder="/path/to/script"
-                    />
-                  </FieldRow>
-                </div>
-              </section>
+          <SettingsFormGrid
+            model={model}
+            setModel={setModel}
+            language={language}
+            setLanguage={setLanguage}
+            effortLevel={effortLevel}
+            setEffortLevel={setEffortLevel}
+            autoUpdatesChannel={autoUpdatesChannel}
+            setAutoUpdatesChannel={setAutoUpdatesChannel}
+            outputStyle={outputStyle}
+            setOutputStyle={setOutputStyle}
+            apiKeyHelper={apiKeyHelper}
+            setApiKeyHelper={setApiKeyHelper}
+            cleanupPeriodDays={cleanupPeriodDays}
+            setCleanupPeriodDays={setCleanupPeriodDays}
+            plansDirectory={plansDirectory}
+            setPlansDirectory={setPlansDirectory}
+            respectGitignore={respectGitignore}
+            setRespectGitignore={setRespectGitignore}
+            skipWebFetchPreflight={skipWebFetchPreflight}
+            setSkipWebFetchPreflight={setSkipWebFetchPreflight}
+            disableAllHooks={disableAllHooks}
+            setDisableAllHooks={setDisableAllHooks}
+            fastMode={fastMode}
+            setFastMode={setFastMode}
+            showTurnDuration={showTurnDuration}
+            setShowTurnDuration={setShowTurnDuration}
+            spinnerTipsEnabled={spinnerTipsEnabled}
+            setSpinnerTipsEnabled={setSpinnerTipsEnabled}
+            terminalProgressBarEnabled={terminalProgressBarEnabled}
+            setTerminalProgressBarEnabled={setTerminalProgressBarEnabled}
+            prefersReducedMotion={prefersReducedMotion}
+            setPrefersReducedMotion={setPrefersReducedMotion}
+            alwaysThinkingEnabled={alwaysThinkingEnabled}
+            setAlwaysThinkingEnabled={setAlwaysThinkingEnabled}
+            teammateMode={teammateMode}
+            setTeammateMode={setTeammateMode}
+            enableAllProjectMcpServers={enableAllProjectMcpServers}
+            setEnableAllProjectMcpServers={setEnableAllProjectMcpServers}
+            allowManagedHooksOnly={allowManagedHooksOnly}
+            setAllowManagedHooksOnly={setAllowManagedHooksOnly}
+            allowManagedPermissionRulesOnly={allowManagedPermissionRulesOnly}
+            setAllowManagedPermissionRulesOnly={setAllowManagedPermissionRulesOnly}
+            allowManagedMcpServersOnly={allowManagedMcpServersOnly}
+            setAllowManagedMcpServersOnly={setAllowManagedMcpServersOnly}
+          />
 
-              {/* Behaviour */}
-              <section className="flex flex-col gap-0">
-                <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
-                  Behaviour
-                </h3>
-                <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
-                  <FieldRow
-                    label="Cleanup Period (days)"
-                    description="Days to retain chat transcripts"
-                  >
-                    <Input
-                      type="number"
-                      value={cleanupPeriodDays}
-                      onChange={e => setCleanupPeriodDays(e.target.value)}
-                      className="w-20 text-sm"
-                      placeholder="30"
-                      min={1}
-                    />
-                  </FieldRow>
-                  <FieldRow label="Plans Directory" description="Custom plan file storage">
-                    <Input
-                      value={plansDirectory}
-                      onChange={e => setPlansDirectory(e.target.value)}
-                      className="w-44 font-mono text-sm"
-                      placeholder="/path/to/plans"
-                    />
-                  </FieldRow>
-                  <FieldRow
-                    label="Respect .gitignore"
-                    description="@ file picker respects .gitignore"
-                  >
-                    {/* Claude Code default is true, so undefined renders as checked */}
-                    <Toggle checked={respectGitignore ?? true} onChange={setRespectGitignore} />
-                  </FieldRow>
-                  <FieldRow
-                    label="Skip WebFetch Preflight"
-                    description="Skip WebFetch blocklist check"
-                  >
-                    <Toggle
-                      checked={skipWebFetchPreflight ?? false}
-                      onChange={setSkipWebFetchPreflight}
-                    />
-                  </FieldRow>
-                  <FieldRow label="Disable All Hooks" description="Disable all hooks execution">
-                    <Toggle checked={disableAllHooks ?? false} onChange={setDisableAllHooks} />
-                  </FieldRow>
-                </div>
-              </section>
-            </div>
+          <AdvancedJsonSection
+            permissionsJson={permissionsJson}
+            setPermissionsJson={setPermissionsJson}
+            hooksJson={hooksJson}
+            setHooksJson={setHooksJson}
+            envJson={envJson}
+            setEnvJson={setEnvJson}
+            sandboxJson={sandboxJson}
+            setSandboxJson={setSandboxJson}
+            attributionJson={attributionJson}
+            setAttributionJson={setAttributionJson}
+            jsonErrors={jsonErrors}
+          />
 
-            {/* ── Right column ────────────────────────────────────────── */}
-            <div className="flex flex-col gap-4">
-              {/* UI & Display */}
-              <section className="flex flex-col gap-0">
-                <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
-                  UI &amp; Display
-                </h3>
-                <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
-                  <FieldRow label="Fast Mode" description="Enable Opus 4.6 fast mode">
-                    <Toggle checked={fastMode ?? false} onChange={setFastMode} />
-                  </FieldRow>
-                  <FieldRow label="Show Turn Duration" description="Display response duration">
-                    <Toggle checked={showTurnDuration ?? false} onChange={setShowTurnDuration} />
-                  </FieldRow>
-                  <FieldRow label="Spinner Tips" description="Show tips during work">
-                    <Toggle
-                      checked={spinnerTipsEnabled ?? false}
-                      onChange={setSpinnerTipsEnabled}
-                    />
-                  </FieldRow>
-                  <FieldRow label="Terminal Progress Bar" description="Enable progress bar">
-                    <Toggle
-                      checked={terminalProgressBarEnabled ?? false}
-                      onChange={setTerminalProgressBarEnabled}
-                    />
-                  </FieldRow>
-                  <FieldRow label="Reduced Motion" description="Reduce UI animations">
-                    <Toggle
-                      checked={prefersReducedMotion ?? false}
-                      onChange={setPrefersReducedMotion}
-                    />
-                  </FieldRow>
-                  <FieldRow label="Always Thinking" description="Extended thinking by default">
-                    <Toggle
-                      checked={alwaysThinkingEnabled ?? false}
-                      onChange={setAlwaysThinkingEnabled}
-                    />
-                  </FieldRow>
-                  <FieldRow label="Teammate Mode" description="Agent team display mode">
-                    <Select
-                      value={teammateMode}
-                      onValueChange={v => setTeammateMode(v as TeammateModeOption)}
-                    >
-                      <SelectTrigger className="w-32">
-                        <SelectValue placeholder="Default" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="auto">Auto</SelectItem>
-                        <SelectItem value="in-process">In-Process</SelectItem>
-                        <SelectItem value="tmux">Tmux</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </FieldRow>
-                </div>
-              </section>
-
-              {/* Permissions & MCP */}
-              <section className="flex flex-col gap-0">
-                <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide mb-2">
-                  Permissions &amp; MCP
-                </h3>
-                <div className="border border-zinc-200 rounded-md px-4 divide-y divide-zinc-100">
-                  <FieldRow
-                    label="Enable All Project MCPs"
-                    description="Auto-approve all project MCP servers"
-                  >
-                    <Toggle
-                      checked={enableAllProjectMcpServers ?? false}
-                      onChange={setEnableAllProjectMcpServers}
-                    />
-                  </FieldRow>
-                  <FieldRow label="Managed Hooks Only" description="Only load managed/SDK hooks">
-                    <Toggle
-                      checked={allowManagedHooksOnly ?? false}
-                      onChange={setAllowManagedHooksOnly}
-                    />
-                  </FieldRow>
-                  <FieldRow
-                    label="Managed Permission Rules"
-                    description="Only managed permission rules apply"
-                  >
-                    <Toggle
-                      checked={allowManagedPermissionRulesOnly ?? false}
-                      onChange={setAllowManagedPermissionRulesOnly}
-                    />
-                  </FieldRow>
-                  <FieldRow
-                    label="Managed MCP Servers Only"
-                    description="Only managed MCP servers respected"
-                  >
-                    <Toggle
-                      checked={allowManagedMcpServersOnly ?? false}
-                      onChange={setAllowManagedMcpServersOnly}
-                    />
-                  </FieldRow>
-                </div>
-              </section>
-            </div>
-          </div>
-
-          {/* ── Advanced — full width ─────────────────────────────────────── */}
-          <section className="flex flex-col gap-2">
-            <h3 className="text-xs font-semibold text-zinc-500 uppercase tracking-wide">
-              Advanced
-            </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-              <CollapsibleSection
-                title="Permissions"
-                description="Allow / deny / ask rules"
-                value={permissionsJson}
-                onChange={setPermissionsJson}
-                error={jsonErrors.permissions}
-              />
-              <CollapsibleSection
-                title="Hooks"
-                description="Tool execution event commands"
-                value={hooksJson}
-                onChange={setHooksJson}
-                error={jsonErrors.hooks}
-              />
-              <CollapsibleSection
-                title="Environment (env)"
-                description="Extra environment variables"
-                value={envJson}
-                onChange={setEnvJson}
-                error={jsonErrors.env}
-              />
-              <CollapsibleSection
-                title="Sandbox"
-                description="Sandboxed bash configuration"
-                value={sandboxJson}
-                onChange={setSandboxJson}
-                error={jsonErrors.sandbox}
-              />
-              <CollapsibleSection
-                title="Attribution"
-                description="Git commit / PR attribution"
-                value={attributionJson}
-                onChange={setAttributionJson}
-                error={jsonErrors.attribution}
-              />
-            </div>
-          </section>
-
-          {/* ── JSON Preview — full width ─────────────────────────────────── */}
           <JsonPreview json={previewJson} />
 
           {globalError && (

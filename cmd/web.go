@@ -188,10 +188,17 @@ func buildWebServer(
 		return nil, fmt.Errorf("initializing settings: %w", err)
 	}
 
-	apiSrv, bus, err := buildAPIServer(ctx, db, sysLogger,
-		agentStore, chatStore, integrationStore, integrationRegistry,
-		mcpRegistry, localToolsMCP, settingsMgr,
-	)
+	apiSrv, bus, err := buildAPIServer(ctx, appDeps{
+		db:                  db,
+		logger:              sysLogger,
+		agentStore:          agentStore,
+		chatStore:           chatStore,
+		integrationStore:    integrationStore,
+		integrationRegistry: integrationRegistry,
+		mcpRegistry:         mcpRegistry,
+		localToolsMCP:       localToolsMCP,
+		settingsMgr:         settingsMgr,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -206,47 +213,57 @@ func buildWebServer(
 	return srv, nil
 }
 
+// appDeps bundles the stores, registries, and configuration needed to wire up
+// the API server and task scheduler. It replaces the long parameter lists of
+// buildAPIServer and initTaskScheduler.
+type appDeps struct {
+	db                  *sql.DB
+	logger              *slog.Logger
+	agentStore          storage.AgentStore
+	chatStore           storage.ChatStore
+	integrationStore    storage.IntegrationStore
+	integrationRegistry *integrations.IntegrationRegistry
+	mcpRegistry         *config.MCPRegistry
+	localToolsMCP       *tools.LocalMCPConfig
+	settingsMgr         *config.SettingsManager
+}
+
 // buildAPIServer wires all services and returns the api.Server and the event bus.
-func buildAPIServer(
-	ctx context.Context,
-	db *sql.DB,
-	sysLogger *slog.Logger,
-	agentStore storage.AgentStore,
-	chatStore storage.ChatStore,
-	integrationStore storage.IntegrationStore,
-	integrationRegistry *integrations.IntegrationRegistry,
-	mcpRegistry *config.MCPRegistry,
-	localToolsMCP *tools.LocalMCPConfig,
-	settingsMgr *config.SettingsManager,
-) (*api.Server, eventbus.EventBus, error) {
-	notifStore, bus := setupNotifications(db, settingsMgr, sysLogger)
+func buildAPIServer(ctx context.Context, deps appDeps) (*api.Server, eventbus.EventBus, error) {
+	notifStore, bus := setupNotifications(deps.db, deps.settingsMgr, deps.logger)
 
-	agentSvc := service.NewAgentService(agentStore, sysLogger)
+	agentSvc := service.NewAgentService(deps.agentStore, deps.logger)
 	chatSvc := service.NewChatService(
-		chatStore, agentStore, mcpRegistry, localToolsMCP,
-		integrationRegistry, settingsMgr, sysLogger,
+		deps.chatStore, deps.agentStore, deps.mcpRegistry, deps.localToolsMCP,
+		deps.integrationRegistry, deps.settingsMgr, deps.logger,
 	)
-	integrationSvc := service.NewIntegrationService(integrationStore, integrationRegistry, sysLogger, ctx)
-	notificationSvc := service.NewNotificationService(settingsMgr, notifStore)
+	integrationSvc := service.NewIntegrationService(deps.integrationStore, deps.integrationRegistry, deps.logger, ctx)
+	notificationSvc := service.NewNotificationService(deps.settingsMgr, notifStore)
 
-	taskStore := storage.NewSQLiteTaskStore(db)
+	taskStore := storage.NewSQLiteTaskStore(deps.db)
 
-	taskScheduler, err := initTaskScheduler(ctx, taskStore, chatStore, agentStore,
-		mcpRegistry, localToolsMCP, integrationRegistry, settingsMgr, sysLogger, bus)
+	taskScheduler, err := initTaskScheduler(ctx, deps, taskStore, bus)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	taskSvc := service.NewTaskService(taskStore, taskScheduler, sysLogger)
-	profileSvc := service.NewClaudeSettingsProfileService(sysLogger)
+	taskSvc := service.NewTaskService(taskStore, taskScheduler, deps.logger)
+	profileSvc := service.NewClaudeSettingsProfileService(deps.logger)
 
-	sessionCache := claudesessions.NewCache(db, sysLogger)
+	sessionCache := claudesessions.NewCache(deps.db, deps.logger)
 	sessionCache.StartBackgroundScan()
 
-	apiSrv := api.New(
-		agentSvc, chatSvc, integrationSvc, notificationSvc, taskSvc, profileSvc,
-		settingsMgr, sysLogger, sessionCache,
-	)
+	apiSrv := api.New(api.ServerConfig{
+		AgentSvc:        agentSvc,
+		ChatSvc:         chatSvc,
+		IntegrationSvc:  integrationSvc,
+		NotificationSvc: notificationSvc,
+		TaskSvc:         taskSvc,
+		ProfileSvc:      profileSvc,
+		SettingsMgr:     deps.settingsMgr,
+		Logger:          deps.logger,
+		SessionCache:    sessionCache,
+	})
 	return apiSrv, bus, nil
 }
 
@@ -294,29 +311,25 @@ func loadNotificationSettingsFromJSON(raw string) (*notification.NotificationSet
 }
 
 func initTaskScheduler(
-	ctx context.Context,
-	taskStore storage.TaskStore, chatStore storage.ChatStore, agentStore storage.AgentStore,
-	mcpRegistry *config.MCPRegistry, localMCP *tools.LocalMCPConfig,
-	integrationRegistry *integrations.IntegrationRegistry,
-	settingsMgr *config.SettingsManager, sysLogger *slog.Logger,
+	ctx context.Context, deps appDeps, taskStore storage.TaskStore,
 	eventPublisher scheduler.EventPublisher,
 ) (*scheduler.Scheduler, error) {
 	taskScheduler, err := scheduler.New(scheduler.Config{
 		TaskStore:           taskStore,
-		ChatStore:           chatStore,
-		AgentStore:          agentStore,
-		MCPRegistry:         mcpRegistry,
-		LocalMCP:            localMCP,
-		IntegrationRegistry: integrationRegistry,
-		SettingsManager:     settingsMgr,
-		Logger:              sysLogger,
+		ChatStore:           deps.chatStore,
+		AgentStore:          deps.agentStore,
+		MCPRegistry:         deps.mcpRegistry,
+		LocalMCP:            deps.localToolsMCP,
+		IntegrationRegistry: deps.integrationRegistry,
+		SettingsManager:     deps.settingsMgr,
+		Logger:              deps.logger,
 		EventPublisher:      eventPublisher,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("creating task scheduler: %w", err)
 	}
 	if startErr := taskScheduler.Start(ctx); startErr != nil {
-		sysLogger.Warn("failed to start task scheduler", "error", startErr)
+		deps.logger.Warn("failed to start task scheduler", "error", startErr)
 	}
 	return taskScheduler, nil
 }

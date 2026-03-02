@@ -264,6 +264,88 @@ export interface StreamCallbacks {
   onTaskNotification?: (event: SDKTaskNotificationEvent) => void
 }
 
+function dispatchSseEvent(eventType: string, data: unknown, callbacks: StreamCallbacks): void {
+  switch (eventType) {
+    case 'system':
+      callbacks.onSystem?.(data as SDKSystemEvent)
+      break
+    case 'assistant':
+      callbacks.onAssistant?.(data as SDKAssistantEvent)
+      break
+    case 'stream_event':
+      callbacks.onStreamEvent?.(data as SDKStreamEventMessage)
+      break
+    case 'result':
+      callbacks.onResult?.(data as SDKResultEvent)
+      break
+    case 'user_input_required':
+      callbacks.onUserInputRequired?.(data as { input: Record<string, unknown> })
+      break
+    case 'permission_request':
+      callbacks.onPermissionRequest?.(data as { tool_name: string; input: unknown })
+      break
+    case 'user':
+      callbacks.onToolResult?.(data as SDKUserEvent)
+      break
+    case 'tool_progress':
+      callbacks.onToolProgress?.(data as SDKToolProgressEvent)
+      break
+    case 'tool_use_summary':
+      callbacks.onToolUseSummary?.(data as SDKToolUseSummaryEvent)
+      break
+    case 'task_started':
+      callbacks.onTaskStarted?.(data as SDKTaskStartedEvent)
+      break
+    case 'task_progress':
+      callbacks.onTaskProgress?.(data as SDKTaskProgressEvent)
+      break
+    case 'task_notification':
+      callbacks.onTaskNotification?.(data as SDKTaskNotificationEvent)
+      break
+  }
+}
+
+interface SseParserState {
+  buffer: string
+  currentEvent: string
+}
+
+function parseSseLine(line: string, state: SseParserState, callbacks: StreamCallbacks): void {
+  if (line.startsWith('event: ')) {
+    state.currentEvent = line.slice(7).trim()
+    return
+  }
+  if (!line.startsWith('data: ')) return
+  try {
+    const data = JSON.parse(line.slice(6))
+    dispatchSseEvent(state.currentEvent, data, callbacks)
+  } catch {
+    // ignore parse errors
+  }
+  state.currentEvent = ''
+}
+
+async function readSseStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  callbacks: StreamCallbacks,
+): Promise<void> {
+  const decoder = new TextDecoder()
+  const state: SseParserState = { buffer: '', currentEvent: '' }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+
+    state.buffer += decoder.decode(value, { stream: true })
+    const lines = state.buffer.split('\n')
+    state.buffer = lines.pop() ?? ''
+
+    for (const line of lines) {
+      parseSseLine(line, state, callbacks)
+    }
+  }
+}
+
 export async function sendMessage(
   chatId: string,
   content: string,
@@ -282,70 +364,7 @@ export async function sendMessage(
     throw new Error(body.error || `HTTP ${res.status}`)
   }
 
-  const reader = res.body!.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  let currentEvent = ''
-
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-
-    buffer += decoder.decode(value, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() ?? ''
-
-    for (const line of lines) {
-      if (line.startsWith('event: ')) {
-        currentEvent = line.slice(7).trim()
-      } else if (line.startsWith('data: ')) {
-        try {
-          const data = JSON.parse(line.slice(6))
-          switch (currentEvent) {
-            case 'system':
-              callbacks.onSystem?.(data as SDKSystemEvent)
-              break
-            case 'assistant':
-              callbacks.onAssistant?.(data as SDKAssistantEvent)
-              break
-            case 'stream_event':
-              callbacks.onStreamEvent?.(data as SDKStreamEventMessage)
-              break
-            case 'result':
-              callbacks.onResult?.(data as SDKResultEvent)
-              break
-            case 'user_input_required':
-              callbacks.onUserInputRequired?.(data as { input: Record<string, unknown> })
-              break
-            case 'permission_request':
-              callbacks.onPermissionRequest?.(data as { tool_name: string; input: unknown })
-              break
-            case 'user':
-              callbacks.onToolResult?.(data as SDKUserEvent)
-              break
-            case 'tool_progress':
-              callbacks.onToolProgress?.(data as SDKToolProgressEvent)
-              break
-            case 'tool_use_summary':
-              callbacks.onToolUseSummary?.(data as SDKToolUseSummaryEvent)
-              break
-            case 'task_started':
-              callbacks.onTaskStarted?.(data as SDKTaskStartedEvent)
-              break
-            case 'task_progress':
-              callbacks.onTaskProgress?.(data as SDKTaskProgressEvent)
-              break
-            case 'task_notification':
-              callbacks.onTaskNotification?.(data as SDKTaskNotificationEvent)
-              break
-          }
-        } catch {
-          // ignore parse errors
-        }
-        currentEvent = ''
-      }
-    }
-  }
+  await readSseStream(res.body!.getReader(), callbacks)
 }
 
 /**

@@ -29,6 +29,19 @@ const (
 	routeJobHistoryByID  = routeJobHistoryBase + "/{id}"
 )
 
+// ServerConfig bundles all dependencies needed to construct an API Server.
+type ServerConfig struct {
+	AgentSvc        service.AgentService
+	ChatSvc         service.ChatService
+	IntegrationSvc  service.IntegrationService
+	NotificationSvc service.NotificationService
+	TaskSvc         service.TaskService
+	ProfileSvc      service.ClaudeSettingsProfileService
+	SettingsMgr     *config.SettingsManager
+	Logger          *slog.Logger
+	SessionCache    *claudesessions.Cache
+}
+
 // Server holds all dependencies for the REST API handlers.
 type Server struct {
 	agentSvc           service.AgentService
@@ -44,28 +57,21 @@ type Server struct {
 }
 
 // New creates a new API Server backed by the provided services.
-func New(
-	agentSvc service.AgentService,
-	chatSvc service.ChatService,
-	integrationSvc service.IntegrationService,
-	notificationSvc service.NotificationService,
-	taskSvc service.TaskService,
-	profileSvc service.ClaudeSettingsProfileService,
-	settingsMgr *config.SettingsManager,
-	logger *slog.Logger,
-	sessionCache *claudesessions.Cache,
-) *Server {
+func New(cfg ServerConfig) *Server {
+	if cfg.Logger == nil {
+		cfg.Logger = slog.Default()
+	}
 	return &Server{
-		agentSvc:           agentSvc,
-		chatSvc:            chatSvc,
-		integrationSvc:     integrationSvc,
-		notificationSvc:    notificationSvc,
-		taskSvc:            taskSvc,
-		profileSvc:         profileSvc,
-		settingsMgr:        settingsMgr,
-		logger:             logger,
+		agentSvc:           cfg.AgentSvc,
+		chatSvc:            cfg.ChatSvc,
+		integrationSvc:     cfg.IntegrationSvc,
+		notificationSvc:    cfg.NotificationSvc,
+		taskSvc:            cfg.TaskSvc,
+		profileSvc:         cfg.ProfileSvc,
+		settingsMgr:        cfg.SettingsMgr,
+		logger:             cfg.Logger,
 		liveSessions:       newLiveSessionStore(),
-		claudeSessionCache: sessionCache,
+		claudeSessionCache: cfg.SessionCache,
 	}
 }
 

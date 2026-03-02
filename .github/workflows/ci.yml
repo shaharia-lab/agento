@@ -28,6 +28,18 @@ jobs:
       - name: Download modules
         run: go mod download
 
+      - name: Install mockery
+        # GOTOOLCHAIN override is required because mockery's go.mod declares go 1.24
+        # but this project requires go 1.25; without the override go install would
+        # download and use the go 1.24 toolchain, producing a binary that cannot
+        # analyse go 1.25 modules.
+        run: GOTOOLCHAIN=go1.25.0 go install github.com/vektra/mockery/v2@v2.53.6
+
+      - name: Verify generated mocks are up to date
+        run: |
+          mockery
+          git diff --exit-code -- '*.go' || (echo "Generated mocks are out of date. Run 'make generate' and commit the result." && exit 1)
+
       - name: Build
         run: go build ./...
 
