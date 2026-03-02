@@ -447,9 +447,10 @@ export default function ChatSessionPage() {
                 return <ThinkingBlock key={`stream-thinking-${thinkKey}`} text={block.text} />
               }
               if (block.type === 'tool_use') {
+                const toolKey = block.id ?? `${block.name}-${i}`
                 return (
                   <ToolCallCard
-                    key={`stream-tool-${block.id ?? block.name}`}
+                    key={`stream-tool-${toolKey}`}
                     block={block}
                     isInteractive={awaitingInput && block.name === 'AskUserQuestion'}
                     toolResult={block.id ? streamingToolResults[block.id] : undefined}
@@ -485,13 +486,13 @@ export default function ChatSessionPage() {
           {/* Streaming: background task events */}
           {streaming && taskEvents.length > 0 && (
             <div className="ml-10 space-y-1">
-              {taskEvents.map(te => {
+              {taskEvents.map((te, i) => {
                 const dotColors: Record<string, string> = {
                   started: 'bg-blue-400',
                   progress: 'bg-amber-400',
                 }
                 const dotColorClass = dotColors[te.type] ?? 'bg-emerald-400'
-                const taskEventKey = `task-event-${te.taskId ?? ''}-${te.type}-${te.status ?? ''}`
+                const taskEventKey = `task-event-${te.taskId ?? ''}-${te.type}-${te.status ?? ''}-${i}`
                 return (
                   <div
                     key={taskEventKey}
