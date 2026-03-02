@@ -803,6 +803,88 @@ function toolCallSummary(name: string, input: Record<string, unknown> | undefine
   }
 }
 
+const CODE_PRE_CLS =
+  'rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64'
+
+function renderWriteDetail(input: Record<string, unknown> | undefined): React.ReactNode {
+  const content = typeof input?.content === 'string' ? input.content : null
+  if (content === null) return null
+  return <pre className={CODE_PRE_CLS}>{content}</pre>
+}
+
+function renderReadDetail(toolResult: Record<string, unknown> | undefined): React.ReactNode {
+  const fileResult = toolResult as { type?: string; file?: { content?: string } } | undefined
+  const content = fileResult?.file?.content
+  if (content !== undefined) return <pre className={CODE_PRE_CLS}>{content}</pre>
+  return (
+    <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-400 dark:text-zinc-500 italic">
+      File content not available
+    </div>
+  )
+}
+
+function patchLineColor(line: string): string {
+  if (line.startsWith('-')) return 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400'
+  if (line.startsWith('+'))
+    return 'bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400'
+  return 'bg-zinc-50 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500'
+}
+
+function renderEditDetail(
+  input: Record<string, unknown> | undefined,
+  toolResult: Record<string, unknown> | undefined,
+): React.ReactNode {
+  const editResult = toolResult as { structuredPatch?: Array<{ lines: string[] }> } | undefined
+  const patch = editResult?.structuredPatch
+  const DIFF_CLS =
+    'rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto'
+
+  if (patch && patch.length > 0) {
+    return (
+      <div className={DIFF_CLS}>
+        {patch.flatMap((hunk, hi) =>
+          hunk.lines.map((line, li) => (
+            <div
+              key={`${hi}-${li}`}
+              className={cn('px-3 py-0.5 leading-5 whitespace-pre', patchLineColor(line))}
+            >
+              {line}
+            </div>
+          )),
+        )}
+      </div>
+    )
+  }
+
+  // Fallback: synthesize a simple diff from input old/new strings
+  const oldStr = typeof input?.old_string === 'string' ? input.old_string : ''
+  const newStr = typeof input?.new_string === 'string' ? input.new_string : ''
+  if (oldStr || newStr) {
+    return (
+      <div className={DIFF_CLS}>
+        {oldStr.split('\n').map((line, i) => (
+          <div
+            key={`old-${i}-${line.slice(0, 40)}`}
+            className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400"
+          >
+            -{line}
+          </div>
+        ))}
+        {newStr.split('\n').map((line, i) => (
+          <div
+            key={`new-${i}-${line.slice(0, 40)}`}
+            className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400"
+          >
+            +{line}
+          </div>
+        ))}
+      </div>
+    )
+  }
+
+  return null
+}
+
 /** Renders the expanded detail panel for a tool call based on the tool name. */
 function ToolCallDetail({
   name,
@@ -813,89 +895,9 @@ function ToolCallDetail({
   input: Record<string, unknown> | undefined
   toolResult: Record<string, unknown> | undefined
 }>) {
-  if (name === 'Write') {
-    const content = typeof input?.content === 'string' ? input.content : null
-    if (content !== null) {
-      return (
-        <pre className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64">
-          {content}
-        </pre>
-      )
-    }
-  }
-
-  if (name === 'Read') {
-    const fileResult = toolResult as { type?: string; file?: { content?: string } } | undefined
-    const content = fileResult?.file?.content
-    if (content !== undefined) {
-      return (
-        <pre className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-700 dark:text-zinc-300 font-mono whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-64">
-          {content}
-        </pre>
-      )
-    }
-    return (
-      <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-800/60 px-3 py-2 text-xs text-zinc-400 dark:text-zinc-500 italic">
-        File content not available
-      </div>
-    )
-  }
-
-  if (name === 'Edit') {
-    const editResult = toolResult as { structuredPatch?: Array<{ lines: string[] }> } | undefined
-    const patch = editResult?.structuredPatch
-
-    if (patch && patch.length > 0) {
-      return (
-        <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
-          {patch.flatMap((hunk, hi) =>
-            hunk.lines.map((line, li) => {
-              let lineColor = 'bg-zinc-50 dark:bg-zinc-800/60 text-zinc-400 dark:text-zinc-500'
-              if (line.startsWith('-')) {
-                lineColor = 'bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400'
-              } else if (line.startsWith('+')) {
-                lineColor = 'bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400'
-              }
-              return (
-                <div
-                  key={`${hi}-${li}`}
-                  className={cn('px-3 py-0.5 leading-5 whitespace-pre', lineColor)}
-                >
-                  {line}
-                </div>
-              )
-            }),
-          )}
-        </div>
-      )
-    }
-
-    // Fallback: synthesize a simple diff from input old/new strings
-    const oldStr = typeof input?.old_string === 'string' ? input.old_string : ''
-    const newStr = typeof input?.new_string === 'string' ? input.new_string : ''
-    if (oldStr || newStr) {
-      return (
-        <div className="rounded-lg border border-zinc-100 dark:border-zinc-700 overflow-hidden text-xs font-mono max-h-64 overflow-y-auto">
-          {oldStr.split('\n').map((line, i) => (
-            <div
-              key={`old-${i}-${line.slice(0, 40)}`}
-              className="px-3 py-0.5 leading-5 whitespace-pre bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-400"
-            >
-              -{line}
-            </div>
-          ))}
-          {newStr.split('\n').map((line, i) => (
-            <div
-              key={`new-${i}-${line.slice(0, 40)}`}
-              className="px-3 py-0.5 leading-5 whitespace-pre bg-green-50 dark:bg-green-950/40 text-green-700 dark:text-green-400"
-            >
-              +{line}
-            </div>
-          ))}
-        </div>
-      )
-    }
-  }
+  if (name === 'Write') return renderWriteDetail(input)
+  if (name === 'Read') return renderReadDetail(toolResult)
+  if (name === 'Edit') return renderEditDetail(input, toolResult)
 
   // Default: raw JSON
   if (input !== undefined) {

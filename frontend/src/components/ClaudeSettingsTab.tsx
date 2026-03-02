@@ -210,6 +210,118 @@ function strVal(v: string | undefined): string {
   return v ?? ''
 }
 
+// ─── buildSettings helpers (module-level to keep component complexity low) ────
+
+interface StringFieldsState {
+  model: string
+  language: string
+  effortLevel: string
+  autoUpdatesChannel: string
+  outputStyle: string
+  cleanupPeriodDays: string
+  plansDirectory: string
+  apiKeyHelper: string
+  teammateMode: string
+}
+
+function applyStringFields(settings: ClaudeCodeSettings, s: StringFieldsState): void {
+  if (s.model) settings.model = s.model
+  if (s.language) settings.language = s.language
+  if (s.effortLevel) settings.effortLevel = s.effortLevel as 'low' | 'medium' | 'high'
+  if (s.autoUpdatesChannel)
+    settings.autoUpdatesChannel = s.autoUpdatesChannel as 'stable' | 'latest'
+  if (s.outputStyle) settings.outputStyle = s.outputStyle
+  if (s.cleanupPeriodDays !== '') {
+    const n = Number.parseInt(s.cleanupPeriodDays, 10)
+    if (!Number.isNaN(n)) settings.cleanupPeriodDays = n
+  }
+  if (s.plansDirectory) settings.plansDirectory = s.plansDirectory
+  if (s.apiKeyHelper) settings.apiKeyHelper = s.apiKeyHelper
+  if (s.teammateMode) settings.teammateMode = s.teammateMode as 'auto' | 'in-process' | 'tmux'
+}
+
+interface BooleanFieldsState {
+  fastMode: boolean | undefined
+  showTurnDuration: boolean | undefined
+  spinnerTipsEnabled: boolean | undefined
+  terminalProgressBarEnabled: boolean | undefined
+  prefersReducedMotion: boolean | undefined
+  alwaysThinkingEnabled: boolean | undefined
+  respectGitignore: boolean | undefined
+  skipWebFetchPreflight: boolean | undefined
+  disableAllHooks: boolean | undefined
+  enableAllProjectMcpServers: boolean | undefined
+  allowManagedHooksOnly: boolean | undefined
+  allowManagedPermissionRulesOnly: boolean | undefined
+  allowManagedMcpServersOnly: boolean | undefined
+}
+
+function applyBooleanFields(settings: ClaudeCodeSettings, b: BooleanFieldsState): void {
+  if (b.fastMode !== undefined) settings.fastMode = b.fastMode
+  if (b.showTurnDuration !== undefined) settings.showTurnDuration = b.showTurnDuration
+  if (b.spinnerTipsEnabled !== undefined) settings.spinnerTipsEnabled = b.spinnerTipsEnabled
+  if (b.terminalProgressBarEnabled !== undefined)
+    settings.terminalProgressBarEnabled = b.terminalProgressBarEnabled
+  if (b.prefersReducedMotion !== undefined) settings.prefersReducedMotion = b.prefersReducedMotion
+  if (b.alwaysThinkingEnabled !== undefined)
+    settings.alwaysThinkingEnabled = b.alwaysThinkingEnabled
+  if (b.respectGitignore !== undefined) settings.respectGitignore = b.respectGitignore
+  if (b.skipWebFetchPreflight !== undefined)
+    settings.skipWebFetchPreflight = b.skipWebFetchPreflight
+  if (b.disableAllHooks !== undefined) settings.disableAllHooks = b.disableAllHooks
+  if (b.enableAllProjectMcpServers !== undefined)
+    settings.enableAllProjectMcpServers = b.enableAllProjectMcpServers
+  if (b.allowManagedHooksOnly !== undefined)
+    settings.allowManagedHooksOnly = b.allowManagedHooksOnly
+  if (b.allowManagedPermissionRulesOnly !== undefined)
+    settings.allowManagedPermissionRulesOnly = b.allowManagedPermissionRulesOnly
+  if (b.allowManagedMcpServersOnly !== undefined)
+    settings.allowManagedMcpServersOnly = b.allowManagedMcpServersOnly
+}
+
+interface ParsedJsonFields {
+  permissions: unknown
+  hooks: unknown
+  env: unknown
+  sandbox: unknown
+  attribution: unknown
+  errors: Record<string, string>
+}
+
+function parseAllJsonFields(raw: {
+  permissionsJson: string
+  hooksJson: string
+  envJson: string
+  sandboxJson: string
+  attributionJson: string
+}): ParsedJsonFields {
+  const errors: Record<string, string> = {}
+  const { value: permissions, error: permErr } = parseJsonField(raw.permissionsJson)
+  if (permErr) errors.permissions = permErr
+  const { value: hooks, error: hooksErr } = parseJsonField(raw.hooksJson)
+  if (hooksErr) errors.hooks = hooksErr
+  const { value: env, error: envErr } = parseJsonField(raw.envJson)
+  if (envErr) errors.env = envErr
+  const { value: sandbox, error: sandboxErr } = parseJsonField(raw.sandboxJson)
+  if (sandboxErr) errors.sandbox = sandboxErr
+  const { value: attribution, error: attrErr } = parseJsonField(raw.attributionJson)
+  if (attrErr) errors.attribution = attrErr
+  return { permissions, hooks, env, sandbox, attribution, errors }
+}
+
+function applyParsedJsonFields(
+  settings: ClaudeCodeSettings,
+  parsed: Omit<ParsedJsonFields, 'errors'>,
+): void {
+  if (parsed.permissions !== undefined)
+    settings.permissions = parsed.permissions as ClaudeCodeSettings['permissions']
+  if (parsed.hooks !== undefined) settings.hooks = parsed.hooks as Record<string, unknown>
+  if (parsed.env !== undefined) settings.env = parsed.env as Record<string, string>
+  if (parsed.sandbox !== undefined) settings.sandbox = parsed.sandbox as Record<string, unknown>
+  if (parsed.attribution !== undefined)
+    settings.attribution = parsed.attribution as ClaudeCodeSettings['attribution']
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 
 export default function ClaudeSettingsTab() {
@@ -406,69 +518,48 @@ export default function ClaudeSettingsTab() {
   // ─── Build the full settings object from current form state ─────────────────
 
   const buildSettings = (): { settings: ClaudeCodeSettings; errors: Record<string, string> } => {
-    const errors: Record<string, string> = {}
+    const { errors, ...parsedJson } = parseAllJsonFields({
+      permissionsJson,
+      hooksJson,
+      envJson,
+      sandboxJson,
+      attributionJson,
+    })
 
-    const { value: permissions, error: permErr } = parseJsonField(permissionsJson)
-    if (permErr) errors.permissions = permErr
+    const settings: ClaudeCodeSettings = { ...extraKeysRef.current }
 
-    const { value: hooks, error: hooksErr } = parseJsonField(hooksJson)
-    if (hooksErr) errors.hooks = hooksErr
-
-    const { value: env, error: envErr } = parseJsonField(envJson)
-    if (envErr) errors.env = envErr
-
-    const { value: sandbox, error: sandboxErr } = parseJsonField(sandboxJson)
-    if (sandboxErr) errors.sandbox = sandboxErr
-
-    const { value: attribution, error: attrErr } = parseJsonField(attributionJson)
-    if (attrErr) errors.attribution = attrErr
-
-    const settings: ClaudeCodeSettings = {
-      ...extraKeysRef.current,
-    }
-
-    // Only include fields that have a non-empty/non-default value.
-    if (model) settings.model = model
-    if (language) settings.language = language
-    if (effortLevel) settings.effortLevel = effortLevel as 'low' | 'medium' | 'high'
-    if (autoUpdatesChannel) settings.autoUpdatesChannel = autoUpdatesChannel as 'stable' | 'latest'
-    if (outputStyle) settings.outputStyle = outputStyle
-    if (cleanupPeriodDays !== '') {
-      const n = Number.parseInt(cleanupPeriodDays, 10)
-      if (!Number.isNaN(n)) settings.cleanupPeriodDays = n
-    }
-    if (plansDirectory) settings.plansDirectory = plansDirectory
-    if (apiKeyHelper) settings.apiKeyHelper = apiKeyHelper
+    applyStringFields(settings, {
+      model,
+      language,
+      effortLevel,
+      autoUpdatesChannel,
+      outputStyle,
+      cleanupPeriodDays,
+      plansDirectory,
+      apiKeyHelper,
+      teammateMode,
+    })
 
     // Only write booleans that were explicitly set (not undefined).
     // This preserves round-trip fidelity: explicit false values survive, and
     // untouched fields are never injected into the file.
-    if (fastMode !== undefined) settings.fastMode = fastMode
-    if (showTurnDuration !== undefined) settings.showTurnDuration = showTurnDuration
-    if (spinnerTipsEnabled !== undefined) settings.spinnerTipsEnabled = spinnerTipsEnabled
-    if (terminalProgressBarEnabled !== undefined)
-      settings.terminalProgressBarEnabled = terminalProgressBarEnabled
-    if (prefersReducedMotion !== undefined) settings.prefersReducedMotion = prefersReducedMotion
-    if (alwaysThinkingEnabled !== undefined) settings.alwaysThinkingEnabled = alwaysThinkingEnabled
-    if (respectGitignore !== undefined) settings.respectGitignore = respectGitignore
-    if (skipWebFetchPreflight !== undefined) settings.skipWebFetchPreflight = skipWebFetchPreflight
-    if (disableAllHooks !== undefined) settings.disableAllHooks = disableAllHooks
-    if (enableAllProjectMcpServers !== undefined)
-      settings.enableAllProjectMcpServers = enableAllProjectMcpServers
-    if (allowManagedHooksOnly !== undefined) settings.allowManagedHooksOnly = allowManagedHooksOnly
-    if (allowManagedPermissionRulesOnly !== undefined)
-      settings.allowManagedPermissionRulesOnly = allowManagedPermissionRulesOnly
-    if (allowManagedMcpServersOnly !== undefined)
-      settings.allowManagedMcpServersOnly = allowManagedMcpServersOnly
-    if (teammateMode) settings.teammateMode = teammateMode as 'auto' | 'in-process' | 'tmux'
+    applyBooleanFields(settings, {
+      fastMode,
+      showTurnDuration,
+      spinnerTipsEnabled,
+      terminalProgressBarEnabled,
+      prefersReducedMotion,
+      alwaysThinkingEnabled,
+      respectGitignore,
+      skipWebFetchPreflight,
+      disableAllHooks,
+      enableAllProjectMcpServers,
+      allowManagedHooksOnly,
+      allowManagedPermissionRulesOnly,
+      allowManagedMcpServersOnly,
+    })
 
-    if (permissions !== undefined)
-      settings.permissions = permissions as ClaudeCodeSettings['permissions']
-    if (hooks !== undefined) settings.hooks = hooks as Record<string, unknown>
-    if (env !== undefined) settings.env = env as Record<string, string>
-    if (sandbox !== undefined) settings.sandbox = sandbox as Record<string, unknown>
-    if (attribution !== undefined)
-      settings.attribution = attribution as ClaudeCodeSettings['attribution']
+    applyParsedJsonFields(settings, parsedJson)
 
     return { settings, errors }
   }

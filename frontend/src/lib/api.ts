@@ -264,6 +264,47 @@ export interface StreamCallbacks {
   onTaskNotification?: (event: SDKTaskNotificationEvent) => void
 }
 
+function dispatchSseEvent(eventType: string, data: unknown, callbacks: StreamCallbacks): void {
+  switch (eventType) {
+    case 'system':
+      callbacks.onSystem?.(data as SDKSystemEvent)
+      break
+    case 'assistant':
+      callbacks.onAssistant?.(data as SDKAssistantEvent)
+      break
+    case 'stream_event':
+      callbacks.onStreamEvent?.(data as SDKStreamEventMessage)
+      break
+    case 'result':
+      callbacks.onResult?.(data as SDKResultEvent)
+      break
+    case 'user_input_required':
+      callbacks.onUserInputRequired?.(data as { input: Record<string, unknown> })
+      break
+    case 'permission_request':
+      callbacks.onPermissionRequest?.(data as { tool_name: string; input: unknown })
+      break
+    case 'user':
+      callbacks.onToolResult?.(data as SDKUserEvent)
+      break
+    case 'tool_progress':
+      callbacks.onToolProgress?.(data as SDKToolProgressEvent)
+      break
+    case 'tool_use_summary':
+      callbacks.onToolUseSummary?.(data as SDKToolUseSummaryEvent)
+      break
+    case 'task_started':
+      callbacks.onTaskStarted?.(data as SDKTaskStartedEvent)
+      break
+    case 'task_progress':
+      callbacks.onTaskProgress?.(data as SDKTaskProgressEvent)
+      break
+    case 'task_notification':
+      callbacks.onTaskNotification?.(data as SDKTaskNotificationEvent)
+      break
+  }
+}
+
 export async function sendMessage(
   chatId: string,
   content: string,
@@ -301,44 +342,7 @@ export async function sendMessage(
       } else if (line.startsWith('data: ')) {
         try {
           const data = JSON.parse(line.slice(6))
-          switch (currentEvent) {
-            case 'system':
-              callbacks.onSystem?.(data as SDKSystemEvent)
-              break
-            case 'assistant':
-              callbacks.onAssistant?.(data as SDKAssistantEvent)
-              break
-            case 'stream_event':
-              callbacks.onStreamEvent?.(data as SDKStreamEventMessage)
-              break
-            case 'result':
-              callbacks.onResult?.(data as SDKResultEvent)
-              break
-            case 'user_input_required':
-              callbacks.onUserInputRequired?.(data as { input: Record<string, unknown> })
-              break
-            case 'permission_request':
-              callbacks.onPermissionRequest?.(data as { tool_name: string; input: unknown })
-              break
-            case 'user':
-              callbacks.onToolResult?.(data as SDKUserEvent)
-              break
-            case 'tool_progress':
-              callbacks.onToolProgress?.(data as SDKToolProgressEvent)
-              break
-            case 'tool_use_summary':
-              callbacks.onToolUseSummary?.(data as SDKToolUseSummaryEvent)
-              break
-            case 'task_started':
-              callbacks.onTaskStarted?.(data as SDKTaskStartedEvent)
-              break
-            case 'task_progress':
-              callbacks.onTaskProgress?.(data as SDKTaskProgressEvent)
-              break
-            case 'task_notification':
-              callbacks.onTaskNotification?.(data as SDKTaskNotificationEvent)
-              break
-          }
+          dispatchSseEvent(currentEvent, data, callbacks)
         } catch {
           // ignore parse errors
         }
