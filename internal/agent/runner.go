@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -156,16 +158,28 @@ func buildSDKOptions(
 }
 
 func appendSettingsOpts(sdkOpts []claude.Option, opts RunOptions, _ *config.AgentConfig) []claude.Option {
-	sources := []claude.SettingSource{claude.SettingSourceProject}
+	var sources []claude.SettingSource
+	if opts.WorkingDir != "" && isProjectDir(opts.WorkingDir) {
+		sources = append(sources, claude.SettingSourceProject)
+	}
 	if opts.SettingsFilePath != "" {
 		sources = append(sources, claude.SettingSourceUser)
 	}
-	sdkOpts = append(sdkOpts, claude.WithSettingSources(sources...))
+	if len(sources) > 0 {
+		sdkOpts = append(sdkOpts, claude.WithSettingSources(sources...))
+	}
 
 	if opts.WorkingDir != "" {
 		sdkOpts = append(sdkOpts, claude.WithCWD(opts.WorkingDir))
 	}
 	return sdkOpts
+}
+
+// isProjectDir returns true when dir contains a .claude/ subdirectory,
+// indicating it is a Claude Code project with potential skills or settings.
+func isProjectDir(dir string) bool {
+	info, err := os.Stat(filepath.Join(dir, ".claude"))
+	return err == nil && info.IsDir()
 }
 
 func appendPermissionOpts(sdkOpts []claude.Option, opts RunOptions, agentCfg *config.AgentConfig) []claude.Option {

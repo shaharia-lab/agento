@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
@@ -19,7 +21,20 @@ func applyOpts(opts []claude.Option) claude.Options {
 	return o
 }
 
-func TestAppendSettingsOpts_ProjectSourceAlwaysIncluded(t *testing.T) {
+// makeProjectDir creates a temp directory with a .claude/ subdirectory inside.
+func makeProjectDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestAppendSettingsOpts(t *testing.T) {
+	projectDir := makeProjectDir(t)
+	plainDir := t.TempDir() // no .claude/ inside
+
 	tests := []struct {
 		name             string
 		settingsFilePath string
@@ -28,32 +43,46 @@ func TestAppendSettingsOpts_ProjectSourceAlwaysIncluded(t *testing.T) {
 		wantCWD          string
 	}{
 		{
-			name:             "no settings file, no working dir",
+			name:             "no settings file, no working dir — isolation mode",
 			settingsFilePath: "",
 			workingDir:       "",
-			wantSources:      []claude.SettingSource{claude.SettingSourceProject},
+			wantSources:      nil,
 			wantCWD:          "",
 		},
 		{
-			name:             "with settings file, no working dir",
+			name:             "with settings file, no working dir — user source only",
 			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
 			workingDir:       "",
-			wantSources:      []claude.SettingSource{claude.SettingSourceProject, claude.SettingSourceUser},
+			wantSources:      []claude.SettingSource{claude.SettingSourceUser},
 			wantCWD:          "",
 		},
 		{
-			name:             "no settings file, with working dir",
+			name:             "no settings file, plain working dir — CWD only, no sources",
 			settingsFilePath: "",
-			workingDir:       "/home/user/myproject",
-			wantSources:      []claude.SettingSource{claude.SettingSourceProject},
-			wantCWD:          "/home/user/myproject",
+			workingDir:       plainDir,
+			wantSources:      nil,
+			wantCWD:          plainDir,
 		},
 		{
-			name:             "with settings file and working dir",
+			name:             "no settings file, project working dir — project source",
+			settingsFilePath: "",
+			workingDir:       projectDir,
+			wantSources:      []claude.SettingSource{claude.SettingSourceProject},
+			wantCWD:          projectDir,
+		},
+		{
+			name:             "with settings file and project working dir — both sources",
 			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
-			workingDir:       "/home/user/myproject",
+			workingDir:       projectDir,
 			wantSources:      []claude.SettingSource{claude.SettingSourceProject, claude.SettingSourceUser},
-			wantCWD:          "/home/user/myproject",
+			wantCWD:          projectDir,
+		},
+		{
+			name:             "with settings file and plain working dir — user source only",
+			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
+			workingDir:       plainDir,
+			wantSources:      []claude.SettingSource{claude.SettingSourceUser},
+			wantCWD:          plainDir,
 		},
 	}
 
@@ -67,7 +96,8 @@ func TestAppendSettingsOpts_ProjectSourceAlwaysIncluded(t *testing.T) {
 			o := applyOpts(sdkOpts)
 
 			if len(o.SettingSources) != len(tc.wantSources) {
-				t.Fatalf("SettingSources length = %d, want %d", len(o.SettingSources), len(tc.wantSources))
+				t.Fatalf("SettingSources length = %d, want %d; got %v",
+					len(o.SettingSources), len(tc.wantSources), o.SettingSources)
 			}
 			for i, want := range tc.wantSources {
 				if o.SettingSources[i] != want {
@@ -82,21 +112,23 @@ func TestAppendSettingsOpts_ProjectSourceAlwaysIncluded(t *testing.T) {
 	}
 }
 
-func TestBuildSDKOptions_IncludesCWDAndSettingSources(t *testing.T) {
+func TestBuildSDKOptions_ProjectDirWithSettingsProfile(t *testing.T) {
+	projectDir := makeProjectDir(t)
+
 	agentCfg := &config.AgentConfig{
 		Model:    "claude-sonnet-4-6",
 		Thinking: "adaptive",
 	}
 	opts := RunOptions{
-		WorkingDir:       "/home/user/myproject",
+		WorkingDir:       projectDir,
 		SettingsFilePath: "/home/user/.claude/settings_default.json",
 	}
 
 	sdkOpts := buildSDKOptions(context.Background(), agentCfg, opts, "You are helpful.")
 	o := applyOpts(sdkOpts)
 
-	if o.CWD != "/home/user/myproject" {
-		t.Errorf("CWD = %q, want %q", o.CWD, "/home/user/myproject")
+	if o.CWD != projectDir {
+		t.Errorf("CWD = %q, want %q", o.CWD, projectDir)
 	}
 
 	hasProject := false
@@ -110,10 +142,10 @@ func TestBuildSDKOptions_IncludesCWDAndSettingSources(t *testing.T) {
 		}
 	}
 	if !hasProject {
-		t.Error("SettingSources missing SettingSourceProject")
+		t.Error("SettingSources missing SettingSourceProject for project dir")
 	}
 	if !hasUser {
-		t.Error("SettingSources missing SettingSourceUser")
+		t.Error("SettingSources missing SettingSourceUser when settings file is set")
 	}
 
 	if o.Model != "claude-sonnet-4-6" {
@@ -121,6 +153,32 @@ func TestBuildSDKOptions_IncludesCWDAndSettingSources(t *testing.T) {
 	}
 	if o.SystemPrompt != "You are helpful." {
 		t.Errorf("SystemPrompt = %q, want %q", o.SystemPrompt, "You are helpful.")
+	}
+}
+
+func TestBuildSDKOptions_PlainDirNoSettingsProfile(t *testing.T) {
+	plainDir := t.TempDir()
+
+	agentCfg := &config.AgentConfig{
+		Model:    "claude-sonnet-4-6",
+		Thinking: "disabled",
+	}
+	opts := RunOptions{
+		WorkingDir: plainDir,
+	}
+
+	sdkOpts := buildSDKOptions(context.Background(), agentCfg, opts, "")
+	o := applyOpts(sdkOpts)
+
+	if o.CWD != plainDir {
+		t.Errorf("CWD = %q, want %q", o.CWD, plainDir)
+	}
+
+	// No .claude/ in the dir, so project source should NOT be included.
+	for _, s := range o.SettingSources {
+		if s == claude.SettingSourceProject {
+			t.Error("SettingSources should NOT include SettingSourceProject for plain dir")
+		}
 	}
 }
 
@@ -137,26 +195,20 @@ func TestBuildSDKOptions_NoCWDWhenWorkingDirEmpty(t *testing.T) {
 	if o.CWD != "" {
 		t.Errorf("CWD = %q, want empty string", o.CWD)
 	}
-
-	// Should still have project source even with no settings file.
-	hasProject := false
-	for _, s := range o.SettingSources {
-		if s == claude.SettingSourceProject {
-			hasProject = true
-		}
-	}
-	if !hasProject {
-		t.Error("SettingSources should always include SettingSourceProject")
+	if len(o.SettingSources) != 0 {
+		t.Errorf("SettingSources = %v, want empty (isolation mode)", o.SettingSources)
 	}
 }
 
 func TestBuildSDKOptions_SessionIDResume(t *testing.T) {
+	projectDir := makeProjectDir(t)
+
 	agentCfg := &config.AgentConfig{
 		Model: "claude-sonnet-4-6",
 	}
 	opts := RunOptions{
 		SessionID:  "sess-abc-123",
-		WorkingDir: "/tmp/project",
+		WorkingDir: projectDir,
 	}
 
 	sdkOpts := buildSDKOptions(context.Background(), agentCfg, opts, "")
@@ -165,8 +217,23 @@ func TestBuildSDKOptions_SessionIDResume(t *testing.T) {
 	if o.SessionID != "sess-abc-123" {
 		t.Errorf("SessionID = %q, want %q", o.SessionID, "sess-abc-123")
 	}
-	if o.CWD != "/tmp/project" {
-		t.Errorf("CWD = %q, want %q", o.CWD, "/tmp/project")
+	if o.CWD != projectDir {
+		t.Errorf("CWD = %q, want %q", o.CWD, projectDir)
+	}
+}
+
+func TestIsProjectDir(t *testing.T) {
+	projectDir := makeProjectDir(t)
+	plainDir := t.TempDir()
+
+	if !isProjectDir(projectDir) {
+		t.Errorf("isProjectDir(%q) = false, want true", projectDir)
+	}
+	if isProjectDir(plainDir) {
+		t.Errorf("isProjectDir(%q) = true, want false", plainDir)
+	}
+	if isProjectDir("/nonexistent/path") {
+		t.Error("isProjectDir for nonexistent path should return false")
 	}
 }
 
