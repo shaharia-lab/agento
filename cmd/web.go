@@ -82,10 +82,11 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 		return err
 	}
 
-	sysLogger, err := logger.NewSystemLogger(cfg.LogDir(), cfg.SlogLevel())
+	sysLogger, logCleanup, err := logger.NewSystemLogger(cfg.LogDir(), cfg.SlogLevel())
 	if err != nil {
 		return fmt.Errorf("initializing logger: %w", err)
 	}
+	defer logCleanup()
 
 	sysLogger.Info("agento starting",
 		slog.Int("port", cfg.Port),
@@ -95,11 +96,11 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 		slog.String("build_date", build.BuildDate),
 	)
 
-	db, sysLoggerCleanup, err := initDatabase(cfg, sysLogger)
+	db, dbCleanup, err := initDatabase(cfg, sysLogger)
 	if err != nil {
 		return err
 	}
-	defer sysLoggerCleanup()
+	defer dbCleanup()
 
 	srv, err := buildWebServer(ctx, cfg, db, sysLogger)
 	if err != nil {

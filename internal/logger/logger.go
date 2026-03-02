@@ -20,9 +20,11 @@ import (
 // NewSystemLogger creates a JSON slog.Logger that writes to <logDir>/system.log
 // with automatic log rotation. Logs are also written to stderr for developer
 // visibility. The directory is created if it does not exist.
-func NewSystemLogger(logDir string, level slog.Level) (*slog.Logger, error) {
+// The returned cleanup function closes the underlying log file and should be
+// called on shutdown (e.g. via defer).
+func NewSystemLogger(logDir string, level slog.Level) (*slog.Logger, func(), error) {
 	if err := os.MkdirAll(logDir, 0750); err != nil {
-		return nil, fmt.Errorf("creating log directory %q: %w", logDir, err)
+		return nil, nil, fmt.Errorf("creating log directory %q: %w", logDir, err)
 	}
 
 	rotatingFile := &lumberjack.Logger{
@@ -35,7 +37,12 @@ func NewSystemLogger(logDir string, level slog.Level) (*slog.Logger, error) {
 
 	w := io.MultiWriter(rotatingFile, os.Stderr)
 	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})
-	return slog.New(handler), nil
+	cleanup := func() {
+		if err := rotatingFile.Close(); err != nil {
+			fmt.Fprintf(os.Stderr, "closing log file: %v\n", err)
+		}
+	}
+	return slog.New(handler), cleanup, nil
 }
 
 // NewSessionLogger creates a JSON slog.Logger that writes to

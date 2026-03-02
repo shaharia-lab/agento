@@ -176,7 +176,7 @@ func ListProjects() ([]ClaudeProject, error) {
 
 // ScanAllSessions scans all project directories and returns summaries for all sessions.
 // Sessions are sorted by last activity, most recent first.
-func ScanAllSessions() ([]ClaudeSessionSummary, error) {
+func ScanAllSessions(logger *slog.Logger) ([]ClaudeSessionSummary, error) {
 	projectsDir := filepath.Join(ClaudeHome(), "projects")
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
@@ -191,7 +191,7 @@ func ScanAllSessions() ([]ClaudeSessionSummary, error) {
 		if !e.IsDir() {
 			continue
 		}
-		sessions = scanProjectSessions(projectsDir, e.Name(), sessions)
+		sessions = scanProjectSessions(projectsDir, e.Name(), sessions, logger)
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
@@ -201,7 +201,9 @@ func ScanAllSessions() ([]ClaudeSessionSummary, error) {
 }
 
 // scanProjectSessions scans all JSONL files in a single project directory.
-func scanProjectSessions(projectsDir, dirName string, sessions []ClaudeSessionSummary) []ClaudeSessionSummary {
+func scanProjectSessions(
+	projectsDir, dirName string, sessions []ClaudeSessionSummary, logger *slog.Logger,
+) []ClaudeSessionSummary {
 	projectPath := DecodeProjectPath(dirName)
 	files, err := os.ReadDir(filepath.Join(projectsDir, dirName))
 	if err != nil {
@@ -213,7 +215,7 @@ func scanProjectSessions(projectsDir, dirName string, sessions []ClaudeSessionSu
 		}
 		sessionID := strings.TrimSuffix(f.Name(), jsonlExt)
 		filePath := filepath.Join(projectsDir, dirName, f.Name())
-		summary, err := readSessionSummary(sessionID, projectPath, filePath)
+		summary, err := readSessionSummary(sessionID, projectPath, filePath, logger)
 		if err != nil || summary == nil {
 			continue
 		}
@@ -356,7 +358,7 @@ func applyChanges(db *sql.DB, logger *slog.Logger, onDisk map[string]diskFile, t
 
 	for _, fp := range toUpsert {
 		df := onDisk[fp]
-		summary, err := readSessionSummary(df.sessionID, df.projectPath, df.filePath)
+		summary, err := readSessionSummary(df.sessionID, df.projectPath, df.filePath, logger)
 		if err != nil || summary == nil {
 			continue
 		}
@@ -495,14 +497,14 @@ func addAssistantUsage(usage *TokenUsage, msg *rawMessage) {
 }
 
 // readSessionSummary reads a session JSONL file and extracts lightweight metadata.
-func readSessionSummary(sessionID, projectPath, filePath string) (*ClaudeSessionSummary, error) {
+func readSessionSummary(sessionID, projectPath, filePath string, logger *slog.Logger) (*ClaudeSessionSummary, error) {
 	f, err := os.Open(filePath) //nolint:gosec
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil {
-			slog.Default().Warn("failed to close file", "error", cerr)
+			logger.Warn("failed to close file", "file", filePath, "error", cerr)
 		}
 	}()
 
@@ -559,7 +561,7 @@ func processSummaryEvent(summary *ClaudeSessionSummary, ev rawEvent) {
 
 // GetSessionDetail reads the full session JSONL and builds the complete message list.
 // Returns nil if the session is not found.
-func GetSessionDetail(sessionID string) (*ClaudeSessionDetail, error) {
+func GetSessionDetail(sessionID string, logger *slog.Logger) (*ClaudeSessionDetail, error) {
 	projectsDir := filepath.Join(ClaudeHome(), "projects")
 	entries, rdErr := os.ReadDir(projectsDir)
 	if rdErr != nil {
@@ -575,7 +577,7 @@ func GetSessionDetail(sessionID string) (*ClaudeSessionDetail, error) {
 		filePath := filepath.Join(projectsDir, e.Name(), sessionID+jsonlExt)
 		if _, err := os.Stat(filePath); err == nil {
 			projectPath := DecodeProjectPath(e.Name())
-			return readSessionDetail(sessionID, projectPath, filePath)
+			return readSessionDetail(sessionID, projectPath, filePath, logger)
 		}
 	}
 	return nil, nil
@@ -583,14 +585,14 @@ func GetSessionDetail(sessionID string) (*ClaudeSessionDetail, error) {
 
 // readSessionDetail reads a session JSONL file and builds the full detail including
 // message tree with progress events nested under their parent assistant turns.
-func readSessionDetail(sessionID, projectPath, filePath string) (*ClaudeSessionDetail, error) {
+func readSessionDetail(sessionID, projectPath, filePath string, logger *slog.Logger) (*ClaudeSessionDetail, error) {
 	f, err := os.Open(filePath) //nolint:gosec
 	if err != nil {
 		return nil, err
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil {
-			slog.Default().Warn("failed to close file", "error", cerr)
+			logger.Warn("failed to close file", "file", filePath, "error", cerr)
 		}
 	}()
 

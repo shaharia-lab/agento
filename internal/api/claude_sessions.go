@@ -63,7 +63,7 @@ func (s *Server) handleListClaudeProjects(w http.ResponseWriter, r *http.Request
 // including all messages, token usage, and todos.
 func (s *Server) handleGetClaudeSession(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	detail, err := claudesessions.GetSessionDetail(id)
+	detail, err := claudesessions.GetSessionDetail(id, s.logger)
 	if err != nil {
 		s.logger.Error("get claude session failed", "session_id", id, "error", err)
 		s.writeError(w, http.StatusInternalServerError, "failed to get session")
@@ -91,7 +91,7 @@ func (s *Server) handleContinueClaudeSession(w http.ResponseWriter, r *http.Requ
 	id := chi.URLParam(r, "id")
 
 	// Look up the session to get its working directory and model.
-	detail, err := claudesessions.GetSessionDetail(id)
+	detail, err := claudesessions.GetSessionDetail(id, s.logger)
 	if err != nil {
 		s.logger.Error("continue claude session: lookup failed", "session_id", id, "error", err)
 		s.writeError(w, http.StatusInternalServerError, "failed to look up session")
