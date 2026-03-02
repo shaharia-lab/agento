@@ -20,11 +20,13 @@ const (
 
 // Route pattern constants to avoid duplication.
 const (
+	routeChatsBase       = "/chats"
 	routeAgentBySlug     = "/agents/{slug}"
 	routeIntegrationByID = "/integrations/{id}"
 	routeProfileByID     = "/claude-settings/profiles/{id}"
 	routeTaskByID        = "/tasks/{id}"
-	routeJobHistoryByID  = "/job-history/{id}"
+	routeJobHistoryBase  = "/job-history"
+	routeJobHistoryByID  = routeJobHistoryBase + "/{id}"
 )
 
 // Server holds all dependencies for the REST API handlers.
@@ -77,9 +79,9 @@ func (s *Server) Mount(r chi.Router) {
 	r.Delete(routeAgentBySlug, s.handleDeleteAgent)
 
 	// Chat sessions
-	r.Get("/chats", s.handleListChats)
-	r.Post("/chats", s.handleCreateChat)
-	r.Delete("/chats", s.handleBulkDeleteChats)
+	r.Get(routeChatsBase, s.handleListChats)
+	r.Post(routeChatsBase, s.handleCreateChat)
+	r.Delete(routeChatsBase, s.handleBulkDeleteChats)
 	r.Get("/chats/{id}", s.handleGetChat)
 	r.Delete("/chats/{id}", s.handleDeleteChat)
 	r.Post("/chats/{id}/messages", s.handleSendMessage)
@@ -171,9 +173,9 @@ func (s *Server) mountTaskRoutes(r chi.Router) {
 	r.Delete(routeTaskByID, s.handleDeleteTask)
 	r.Post(routeTaskByID+"/pause", s.handlePauseTask)
 	r.Post(routeTaskByID+"/resume", s.handleResumeTask)
-	r.Get(routeTaskByID+"/job-history", s.handleListTaskJobHistory)
-	r.Get("/job-history", s.handleListAllJobHistory)
-	r.Delete("/job-history", s.handleBulkDeleteJobHistory)
+	r.Get(routeTaskByID+routeJobHistoryBase, s.handleListTaskJobHistory)
+	r.Get(routeJobHistoryBase, s.handleListAllJobHistory)
+	r.Delete(routeJobHistoryBase, s.handleBulkDeleteJobHistory)
 	r.Get(routeJobHistoryByID, s.handleGetJobHistory)
 	r.Delete(routeJobHistoryByID, s.handleDeleteJobHistory)
 }

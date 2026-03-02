@@ -12,6 +12,12 @@ import (
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// Jira REST API path constants.
+const (
+	jiraAPIIssue   = "/rest/api/3/issue/"
+	jiraAPIProject = "/rest/api/3/project"
+)
+
 // client holds Jira API credentials and performs authenticated requests.
 type client struct {
 	siteURL  string
@@ -102,7 +108,7 @@ func registerProjectTools(server *mcp.Server, c *client, allowed map[string]bool
 			Name:        "list_projects",
 			Description: "Lists all accessible Jira projects.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, _ *struct{}) (*mcp.CallToolResult, any, error) {
-			result, err := c.call(ctx, http.MethodGet, "/rest/api/3/project", nil)
+			result, err := c.call(ctx, http.MethodGet, jiraAPIProject, nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -115,7 +121,7 @@ func registerProjectTools(server *mcp.Server, c *client, allowed map[string]bool
 			Name:        "get_project",
 			Description: "Gets details of a specific Jira project by key.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *getProjectParams) (*mcp.CallToolResult, any, error) {
-			result, err := c.call(ctx, http.MethodGet, "/rest/api/3/project/"+url.PathEscape(params.Key), nil)
+			result, err := c.call(ctx, http.MethodGet, jiraAPIProject+"/"+url.PathEscape(params.Key), nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -148,7 +154,7 @@ func registerIssueReadTools(server *mcp.Server, c *client, allowed map[string]bo
 			Name:        "get_issue",
 			Description: "Gets details of a specific Jira issue by key (e.g. PROJ-123).",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *getIssueParams) (*mcp.CallToolResult, any, error) {
-			result, err := c.call(ctx, http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(params.Key), nil)
+			result, err := c.call(ctx, http.MethodGet, jiraAPIIssue+url.PathEscape(params.Key), nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -184,7 +190,7 @@ func registerIssueMutationTools(server *mcp.Server, c *client, allowed map[strin
 			body := map[string]any{"body": docBody(params.Comment)}
 			result, err := c.call(
 				ctx, http.MethodPost,
-				"/rest/api/3/issue/"+url.PathEscape(params.Key)+"/comment", body,
+				jiraAPIIssue+url.PathEscape(params.Key)+"/comment", body,
 			)
 			if err != nil {
 				return nil, nil, err
@@ -200,7 +206,7 @@ func registerTransitionTools(server *mcp.Server, c *client, allowed map[string]b
 			Name:        "list_transitions",
 			Description: "Lists available status transitions for a Jira issue.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, p *listTransitionsParams) (*mcp.CallToolResult, any, error) {
-			result, err := c.call(ctx, http.MethodGet, "/rest/api/3/issue/"+url.PathEscape(p.Key)+"/transitions", nil)
+			result, err := c.call(ctx, http.MethodGet, jiraAPIIssue+url.PathEscape(p.Key)+"/transitions", nil)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -214,7 +220,7 @@ func registerTransitionTools(server *mcp.Server, c *client, allowed map[string]b
 			Description: "Transitions a Jira issue to a new status.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, p *transitionIssueParams) (*mcp.CallToolResult, any, error) {
 			body := map[string]any{"transition": map[string]string{"id": p.TransitionID}}
-			_, err := c.call(ctx, http.MethodPost, "/rest/api/3/issue/"+url.PathEscape(p.Key)+"/transitions", body)
+			_, err := c.call(ctx, http.MethodPost, jiraAPIIssue+url.PathEscape(p.Key)+"/transitions", body)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -287,7 +293,7 @@ func handleUpdateIssue(ctx context.Context, c *client, params *updateIssueParams
 
 	_, err := c.call(
 		ctx, http.MethodPut,
-		"/rest/api/3/issue/"+url.PathEscape(params.Key), map[string]any{"fields": fields},
+		jiraAPIIssue+url.PathEscape(params.Key), map[string]any{"fields": fields},
 	)
 	if err != nil {
 		return nil, nil, err
