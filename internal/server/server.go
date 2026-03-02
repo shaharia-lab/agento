@@ -165,6 +165,13 @@ func (s *Server) spaHandler() http.HandlerFunc {
 		}
 		// Sanitize the path to prevent directory traversal.
 		path = filepath.Clean(path)
+		if strings.HasPrefix(path, "..") {
+			// Path attempts to escape the embedded filesystem root — serve index.html.
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = "/"
+			fileServer.ServeHTTP(w, r2)
+			return
+		}
 
 		f, err := s.frontendFS.Open(path)
 		if err != nil {

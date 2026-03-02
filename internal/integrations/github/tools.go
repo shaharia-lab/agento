@@ -17,6 +17,13 @@ import (
 // Exposed as a variable so tests can redirect requests to a local server.
 var githubAPIBase = "https://api.github.com"
 
+// Shared string constants to avoid duplicate literals.
+const (
+	errFmtCreatingRequest = "creating request: %w"
+	bearerPrefix          = "Bearer "
+	errFmtGitHubAPIError  = "github API error: status %d: %s"
+)
+
 // ghHTTPClient is used for all outgoing GitHub API requests.
 var ghHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
@@ -46,9 +53,9 @@ func (c *client) call(ctx context.Context, method, path string, body any) (json.
 
 	req, err := http.NewRequestWithContext(ctx, method, githubAPIBase+path, reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, fmt.Errorf(errFmtCreatingRequest, err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", bearerPrefix+c.token)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -66,7 +73,7 @@ func (c *client) call(ctx context.Context, method, path string, body any) (json.
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("github API error: status %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf(errFmtGitHubAPIError, resp.StatusCode, string(respBody))
 	}
 
 	return respBody, nil
@@ -77,9 +84,9 @@ func (c *client) call(ctx context.Context, method, path string, body any) (json.
 func (c *client) callRaw(ctx context.Context, method, path, accept string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, method, githubAPIBase+path, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, fmt.Errorf(errFmtCreatingRequest, err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", bearerPrefix+c.token)
 	req.Header.Set("Accept", accept)
 
 	resp, err := ghHTTPClient.Do(req)
@@ -95,7 +102,7 @@ func (c *client) callRaw(ctx context.Context, method, path, accept string) ([]by
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("github API error: status %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf(errFmtGitHubAPIError, resp.StatusCode, string(respBody))
 	}
 
 	return respBody, nil
@@ -106,9 +113,9 @@ func (c *client) callRaw(ctx context.Context, method, path, accept string) ([]by
 func (c *client) getRedirectURL(ctx context.Context, path string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, githubAPIBase+path, nil)
 	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
+		return "", fmt.Errorf(errFmtCreatingRequest, err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("Authorization", bearerPrefix+c.token)
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := ghNoRedirectClient.Do(req)
@@ -126,7 +133,7 @@ func (c *client) getRedirectURL(ctx context.Context, path string) (string, error
 	}
 
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512)) //nolint:errcheck
-	return "", fmt.Errorf("github API error: status %d: %s", resp.StatusCode, string(body))
+	return "", fmt.Errorf(errFmtGitHubAPIError, resp.StatusCode, string(body))
 }
 
 // splitCSV splits a comma-separated string into a slice of trimmed, non-empty strings.

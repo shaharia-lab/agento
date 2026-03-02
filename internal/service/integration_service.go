@@ -46,6 +46,13 @@ type IntegrationService interface {
 	ValidateTokenAuth(ctx context.Context, cfg *config.IntegrationConfig) error
 }
 
+// Shared field name constants used in validation errors.
+const (
+	fieldCredentialsBotToken   = "credentials.bot_token"
+	fieldCredentialsSiteURL    = "credentials.site_url"
+	errFmtSavingValidatedInteg = "saving validated integration: %w"
+)
+
 // oauthState tracks an in-progress OAuth flow.
 type oauthState struct {
 	authenticated bool
@@ -125,10 +132,10 @@ func validateAtlassianCredentials(cfg *config.IntegrationConfig) error {
 		return &ValidationError{Field: "credentials", Message: "invalid confluence credentials: " + err.Error()}
 	}
 	if creds.SiteURL == "" {
-		return &ValidationError{Field: "credentials.site_url", Message: "site_url is required"}
+		return &ValidationError{Field: fieldCredentialsSiteURL, Message: "site_url is required"}
 	}
 	if _, err := confluence.ValidateSiteURL(creds.SiteURL); err != nil {
-		return &ValidationError{Field: "credentials.site_url", Message: err.Error()}
+		return &ValidationError{Field: fieldCredentialsSiteURL, Message: err.Error()}
 	}
 	if creds.Email == "" {
 		return &ValidationError{Field: "credentials.email", Message: "email is required"}
@@ -145,7 +152,7 @@ func validateTelegramCredentials(cfg *config.IntegrationConfig) error {
 		return &ValidationError{Field: "credentials", Message: "invalid telegram credentials: " + err.Error()}
 	}
 	if creds.BotToken == "" {
-		return &ValidationError{Field: "credentials.bot_token", Message: "bot_token is required"}
+		return &ValidationError{Field: fieldCredentialsBotToken, Message: "bot_token is required"}
 	}
 	return nil
 }
@@ -156,11 +163,11 @@ func validateJiraCredentials(cfg *config.IntegrationConfig) error {
 		return &ValidationError{Field: "credentials", Message: "invalid jira credentials: " + err.Error()}
 	}
 	if creds.SiteURL == "" {
-		return &ValidationError{Field: "credentials.site_url", Message: "site_url is required"}
+		return &ValidationError{Field: fieldCredentialsSiteURL, Message: "site_url is required"}
 	}
 	u, err := url.Parse(creds.SiteURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return &ValidationError{Field: "credentials.site_url", Message: "site_url must be a valid http or https URL"}
+		return &ValidationError{Field: fieldCredentialsSiteURL, Message: "site_url must be a valid http or https URL"}
 	}
 	// Normalize: strip trailing slash so URL concatenation is consistent.
 	creds.SiteURL = strings.TrimRight(creds.SiteURL, "/")
@@ -196,7 +203,7 @@ func validateSlackCredentials(cfg *config.IntegrationConfig) error {
 	switch creds.AuthMode {
 	case "bot_token":
 		if creds.BotToken == "" {
-			return &ValidationError{Field: "credentials.bot_token", Message: "bot_token is required"}
+			return &ValidationError{Field: fieldCredentialsBotToken, Message: "bot_token is required"}
 		}
 	case "oauth":
 		if creds.ClientID == "" {
@@ -327,10 +334,8 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 	var buildErr error
 
 	callbackCtx, cancelCallback := context.WithTimeout(s.parentCtx, 10*time.Minute)
-	defer func() {
-		// cancelCallback is a no-op if already called by onToken.
-		cancelCallback()
-	}()
+	// cancelCallback is idempotent — safe to call multiple times (e.g. also called by onToken).
+	defer cancelCallback()
 
 	onToken := func(tok *oauth2.Token, tokErr error) {
 		defer cancelCallback()
@@ -488,7 +493,7 @@ func (s *integrationService) validateConfluenceAuth(ctx context.Context, cfg *co
 	cfg.Auth = json.RawMessage(`{"validated":true}`)
 	cfg.UpdatedAt = time.Now().UTC()
 	if saveErr := s.store.Save(cfg); saveErr != nil {
-		return fmt.Errorf("saving validated integration: %w", saveErr)
+		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
 	s.logger.Info("confluence credentials validated", "id", cfg.ID)
@@ -508,13 +513,13 @@ func (s *integrationService) validateTelegramTokenAuth(ctx context.Context, cfg 
 
 	username, err := telegram.ValidateBotToken(ctx, creds.BotToken)
 	if err != nil {
-		return &ValidationError{Field: "credentials.bot_token", Message: "invalid bot token: " + err.Error()}
+		return &ValidationError{Field: fieldCredentialsBotToken, Message: "invalid bot token: " + err.Error()}
 	}
 
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"bot_username":%q}`, username))
 	cfg.UpdatedAt = time.Now().UTC()
 	if saveErr := s.store.Save(cfg); saveErr != nil {
-		return fmt.Errorf("saving validated integration: %w", saveErr)
+		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
 	s.logger.Info("telegram bot validated", "id", cfg.ID, "username", username)
@@ -542,7 +547,7 @@ func (s *integrationService) validateJiraTokenAuth(ctx context.Context, cfg *con
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"display_name":%q}`, displayName))
 	cfg.UpdatedAt = time.Now().UTC()
 	if saveErr := s.store.Save(cfg); saveErr != nil {
-		return fmt.Errorf("saving validated integration: %w", saveErr)
+		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
 	s.logger.Info("jira integration validated", "id", cfg.ID, "display_name", displayName)
@@ -571,7 +576,7 @@ func (s *integrationService) validateGitHubPATAuth(ctx context.Context, cfg *con
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"username":%q}`, username))
 	cfg.UpdatedAt = time.Now().UTC()
 	if saveErr := s.store.Save(cfg); saveErr != nil {
-		return fmt.Errorf("saving validated integration: %w", saveErr)
+		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
 	s.logger.Info("github integration validated", "id", cfg.ID, "username", username)
@@ -591,13 +596,13 @@ func (s *integrationService) validateSlackTokenAuth(ctx context.Context, cfg *co
 
 	teamName, err := slackintegration.ValidateToken(ctx, creds.BotToken)
 	if err != nil {
-		return &ValidationError{Field: "credentials.bot_token", Message: "invalid bot token: " + err.Error()}
+		return &ValidationError{Field: fieldCredentialsBotToken, Message: "invalid bot token: " + err.Error()}
 	}
 
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"team_name":%q}`, teamName))
 	cfg.UpdatedAt = time.Now().UTC()
 	if saveErr := s.store.Save(cfg); saveErr != nil {
-		return fmt.Errorf("saving validated integration: %w", saveErr)
+		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
 	s.logger.Info("slack integration validated", "id", cfg.ID, "team", teamName)

@@ -10,7 +10,9 @@ import (
 	"github.com/shaharia-lab/agento/internal/storage"
 )
 
-const maskedPassword = "***"
+// maskedFieldSentinel is returned in place of sensitive credential values.
+// When this value is received back, the existing stored value is preserved unchanged.
+const maskedFieldSentinel = "***"
 
 // NotificationService manages notification settings and log access.
 type NotificationService interface {
@@ -66,7 +68,7 @@ func (s *notificationServiceImpl) GetSettings() (*notification.NotificationSetti
 	}
 	// Mask the password before returning.
 	if ns.Provider.Password != "" {
-		ns.Provider.Password = maskedPassword
+		ns.Provider.Password = maskedFieldSentinel
 	}
 	return ns, nil
 }
@@ -75,7 +77,7 @@ func (s *notificationServiceImpl) GetSettings() (*notification.NotificationSetti
 // mask sentinel, the previously stored password is preserved.
 func (s *notificationServiceImpl) UpdateSettings(incoming *notification.NotificationSettings) error {
 	// If password is masked, reload the existing password.
-	if incoming.Provider.Password == maskedPassword {
+	if incoming.Provider.Password == maskedFieldSentinel {
 		existing, err := s.loadNotificationSettings()
 		if err != nil {
 			return fmt.Errorf("loading existing settings: %w", err)

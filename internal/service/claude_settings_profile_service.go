@@ -38,6 +38,15 @@ type ClaudeSettingsProfileService interface {
 	SetDefaultProfile(id string) (*config.ClaudeSettingsProfile, error)
 }
 
+// Error message format strings reused across multiple operations.
+const (
+	errFmtInitializingProfiles   = "initializing profiles: %w"
+	errFmtLoadingProfiles        = "loading profiles: %w"
+	errFmtSavingProfilesMetadata = "saving profiles metadata: %w"
+	errFmtResolvingSettingsDir   = "resolving settings dir: %w"
+	errFmtProfileFilePathInvalid = "profile file path is invalid: %w"
+)
+
 // safeProfileID only allows alphanumeric characters, hyphens, and underscores in
 // profile IDs to prevent path-traversal attacks.
 var safeProfileID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
@@ -58,11 +67,11 @@ func NewClaudeSettingsProfileService(logger *slog.Logger) ClaudeSettingsProfileS
 
 func (s *claudeSettingsProfileService) ListProfiles() ([]config.ClaudeSettingsProfile, error) {
 	if err := ensureDefaultProfileExists(); err != nil {
-		return nil, fmt.Errorf("initializing profiles: %w", err)
+		return nil, fmt.Errorf(errFmtInitializingProfiles, err)
 	}
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		return nil, fmt.Errorf("loading profiles: %w", err)
+		return nil, fmt.Errorf(errFmtLoadingProfiles, err)
 	}
 	if m.Profiles == nil {
 		return []config.ClaudeSettingsProfile{}, nil
@@ -76,12 +85,12 @@ func (s *claudeSettingsProfileService) CreateProfile(name string) (*config.Claud
 	}
 
 	if err := ensureDefaultProfileExists(); err != nil {
-		return nil, fmt.Errorf("initializing profiles: %w", err)
+		return nil, fmt.Errorf(errFmtInitializingProfiles, err)
 	}
 
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		return nil, fmt.Errorf("loading profiles: %w", err)
+		return nil, fmt.Errorf(errFmtLoadingProfiles, err)
 	}
 
 	id := deduplicateID(slugify(name), m.Profiles)
@@ -100,7 +109,7 @@ func (s *claudeSettingsProfileService) CreateProfile(name string) (*config.Claud
 	}
 	m.Profiles = append(m.Profiles, newProfile)
 	if saveErr := saveProfilesMetadata(m); saveErr != nil {
-		return nil, fmt.Errorf("saving profiles metadata: %w", saveErr)
+		return nil, fmt.Errorf(errFmtSavingProfilesMetadata, saveErr)
 	}
 
 	return &newProfile, nil
@@ -109,7 +118,7 @@ func (s *claudeSettingsProfileService) CreateProfile(name string) (*config.Claud
 func (s *claudeSettingsProfileService) GetProfile(id string) (*ClaudeSettingsProfileDetail, error) {
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		return nil, fmt.Errorf("loading profiles: %w", err)
+		return nil, fmt.Errorf(errFmtLoadingProfiles, err)
 	}
 
 	idx := findProfileIndex(m.Profiles, id)
@@ -129,7 +138,7 @@ func (s *claudeSettingsProfileService) UpdateProfile(
 ) (*ClaudeSettingsProfileDetail, error) {
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		return nil, fmt.Errorf("loading profiles: %w", err)
+		return nil, fmt.Errorf(errFmtLoadingProfiles, err)
 	}
 
 	idx := findProfileIndex(m.Profiles, id)
@@ -156,7 +165,7 @@ func (s *claudeSettingsProfileService) UpdateProfile(
 	}
 
 	if saveErr := saveProfilesMetadata(m); saveErr != nil {
-		return nil, fmt.Errorf("saving profiles metadata: %w", saveErr)
+		return nil, fmt.Errorf(errFmtSavingProfilesMetadata, saveErr)
 	}
 
 	detail, detailErr := buildProfileDetail(*profile)
@@ -169,7 +178,7 @@ func (s *claudeSettingsProfileService) UpdateProfile(
 func (s *claudeSettingsProfileService) DeleteProfile(id string) error {
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		return fmt.Errorf("loading profiles: %w", err)
+		return fmt.Errorf(errFmtLoadingProfiles, err)
 	}
 
 	idx := findProfileIndex(m.Profiles, id)
@@ -186,16 +195,16 @@ func (s *claudeSettingsProfileService) DeleteProfile(id string) error {
 	// Validate the stored path is still within the expected directory before removing.
 	dir, dirErr := config.ClaudeSettingsDirPath()
 	if dirErr != nil {
-		return fmt.Errorf("resolving settings dir: %w", dirErr)
+		return fmt.Errorf(errFmtResolvingSettingsDir, dirErr)
 	}
 	if pathErr := validatePathWithinDir(filePath, dir); pathErr != nil {
-		return fmt.Errorf("profile file path is invalid: %w", pathErr)
+		return fmt.Errorf(errFmtProfileFilePathInvalid, pathErr)
 	}
 
 	m.Profiles = append(m.Profiles[:idx], m.Profiles[idx+1:]...)
 
 	if saveErr := saveProfilesMetadata(m); saveErr != nil {
-		return fmt.Errorf("saving profiles metadata: %w", saveErr)
+		return fmt.Errorf(errFmtSavingProfilesMetadata, saveErr)
 	}
 
 	if rmErr := os.Remove(filePath); rmErr != nil { //nolint:gosec // path validated above
@@ -208,7 +217,7 @@ func (s *claudeSettingsProfileService) DeleteProfile(id string) error {
 func (s *claudeSettingsProfileService) DuplicateProfile(id string) (*config.ClaudeSettingsProfile, error) {
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		return nil, fmt.Errorf("loading profiles: %w", err)
+		return nil, fmt.Errorf(errFmtLoadingProfiles, err)
 	}
 
 	idx := findProfileIndex(m.Profiles, id)
@@ -219,7 +228,7 @@ func (s *claudeSettingsProfileService) DuplicateProfile(id string) (*config.Clau
 
 	dir, dirErr := config.ClaudeSettingsDirPath()
 	if dirErr != nil {
-		return nil, fmt.Errorf("resolving settings dir: %w", dirErr)
+		return nil, fmt.Errorf(errFmtResolvingSettingsDir, dirErr)
 	}
 	if pathErr := validatePathWithinDir(source.FilePath, dir); pathErr != nil {
 		return nil, fmt.Errorf("source profile file path is invalid: %w", pathErr)
@@ -246,7 +255,7 @@ func (s *claudeSettingsProfileService) DuplicateProfile(id string) (*config.Clau
 	}
 	m.Profiles = append(m.Profiles, newProfile)
 	if saveErr := saveProfilesMetadata(m); saveErr != nil {
-		return nil, fmt.Errorf("saving profiles metadata: %w", saveErr)
+		return nil, fmt.Errorf(errFmtSavingProfilesMetadata, saveErr)
 	}
 
 	return &newProfile, nil
@@ -254,12 +263,12 @@ func (s *claudeSettingsProfileService) DuplicateProfile(id string) (*config.Clau
 
 func (s *claudeSettingsProfileService) SetDefaultProfile(id string) (*config.ClaudeSettingsProfile, error) {
 	if err := ensureDefaultProfileExists(); err != nil {
-		return nil, fmt.Errorf("initializing profiles: %w", err)
+		return nil, fmt.Errorf(errFmtInitializingProfiles, err)
 	}
 
 	m, err := config.LoadProfilesMetadata()
 	if err != nil {
-		return nil, fmt.Errorf("loading profiles: %w", err)
+		return nil, fmt.Errorf(errFmtLoadingProfiles, err)
 	}
 
 	var newDefault *config.ClaudeSettingsProfile
@@ -275,10 +284,10 @@ func (s *claudeSettingsProfileService) SetDefaultProfile(id string) (*config.Cla
 
 	dir, dirErr := config.ClaudeSettingsDirPath()
 	if dirErr != nil {
-		return nil, fmt.Errorf("resolving settings dir: %w", dirErr)
+		return nil, fmt.Errorf(errFmtResolvingSettingsDir, dirErr)
 	}
 	if pathErr := validatePathWithinDir(newDefault.FilePath, dir); pathErr != nil {
-		return nil, fmt.Errorf("profile file path is invalid: %w", pathErr)
+		return nil, fmt.Errorf(errFmtProfileFilePathInvalid, pathErr)
 	}
 
 	if syncErr := syncDefaultToSettingsJSON(*newDefault); syncErr != nil {
@@ -286,7 +295,7 @@ func (s *claudeSettingsProfileService) SetDefaultProfile(id string) (*config.Cla
 	}
 
 	if saveErr := saveProfilesMetadata(m); saveErr != nil {
-		return nil, fmt.Errorf("saving profiles metadata: %w", saveErr)
+		return nil, fmt.Errorf(errFmtSavingProfilesMetadata, saveErr)
 	}
 
 	return newDefault, nil
@@ -466,10 +475,10 @@ func buildProfileDetail(profile config.ClaudeSettingsProfile) (ClaudeSettingsPro
 
 	dir, err := config.ClaudeSettingsDirPath()
 	if err != nil {
-		return detail, fmt.Errorf("resolving settings dir: %w", err)
+		return detail, fmt.Errorf(errFmtResolvingSettingsDir, err)
 	}
 	if pathErr := validatePathWithinDir(profile.FilePath, dir); pathErr != nil {
-		return detail, fmt.Errorf("profile file path is invalid: %w", pathErr)
+		return detail, fmt.Errorf(errFmtProfileFilePathInvalid, pathErr)
 	}
 
 	if data, readErr := os.ReadFile(profile.FilePath); readErr == nil { //nolint:gosec // path validated above
