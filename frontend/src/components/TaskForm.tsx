@@ -496,6 +496,7 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                       type="button"
                       role="switch"
                       aria-checked={saveOutput}
+                      aria-labelledby="task-save-output-label"
                       onClick={() => setSaveOutput(v => !v)}
                       className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none focus:ring-2 focus:ring-zinc-400 dark:focus:ring-zinc-500 ${
                         saveOutput ? 'bg-zinc-900 dark:bg-zinc-100' : 'bg-zinc-200 dark:bg-zinc-700'
@@ -508,7 +509,10 @@ export default function TaskForm({ initialData, isEdit }: TaskFormProps) {
                       />
                     </button>
                     <div>
-                      <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                      <p
+                        id="task-save-output-label"
+                        className="text-xs font-medium text-zinc-700 dark:text-zinc-300"
+                      >
                         Save output
                       </p>
                       <p className="text-xs text-zinc-400 dark:text-zinc-500 mt-0.5">
