@@ -213,12 +213,12 @@ func validateSlackCredentials(cfg *config.IntegrationConfig) error {
 	return nil
 }
 
-func (s *integrationService) List(_ context.Context) ([]*config.IntegrationConfig, error) {
-	return s.store.List()
+func (s *integrationService) List(ctx context.Context) ([]*config.IntegrationConfig, error) {
+	return s.store.List(ctx)
 }
 
-func (s *integrationService) Get(_ context.Context, id string) (*config.IntegrationConfig, error) {
-	cfg, err := s.store.Get(id)
+func (s *integrationService) Get(ctx context.Context, id string) (*config.IntegrationConfig, error) {
+	cfg, err := s.store.Get(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -229,7 +229,7 @@ func (s *integrationService) Get(_ context.Context, id string) (*config.Integrat
 }
 
 func (s *integrationService) Create(
-	_ context.Context, cfg *config.IntegrationConfig,
+	ctx context.Context, cfg *config.IntegrationConfig,
 ) (*config.IntegrationConfig, error) {
 	if cfg.Name == "" {
 		return nil, &ValidationError{Field: "name", Message: "name is required"}
@@ -253,7 +253,7 @@ func (s *integrationService) Create(
 		cfg.Services = make(map[string]config.ServiceConfig)
 	}
 
-	if err := s.store.Save(cfg); err != nil {
+	if err := s.store.Save(ctx, cfg); err != nil {
 		return nil, fmt.Errorf("saving integration: %w", err)
 	}
 	s.logger.Info("integration created", "id", cfg.ID, "name", cfg.Name)
@@ -276,7 +276,7 @@ func (s *integrationService) Update(
 		cfg.Auth = existing.Auth
 	}
 
-	if err := s.store.Save(cfg); err != nil {
+	if err := s.store.Save(ctx, cfg); err != nil {
 		return nil, fmt.Errorf("saving integration: %w", err)
 	}
 
@@ -295,7 +295,7 @@ func (s *integrationService) Delete(ctx context.Context, id string) error {
 		return err
 	}
 	s.registry.Stop(id)
-	if err := s.store.Delete(id); err != nil {
+	if err := s.store.Delete(ctx, id); err != nil {
 		return fmt.Errorf("deleting integration: %w", err)
 	}
 	s.logger.Info("integration deleted", "id", id)
@@ -303,7 +303,7 @@ func (s *integrationService) Delete(ctx context.Context, id string) error {
 }
 
 func (s *integrationService) StartOAuth(ctx context.Context, id string) (string, error) {
-	cfg, err := s.store.Get(id)
+	cfg, err := s.store.Get(ctx, id)
 	if err != nil {
 		return "", err
 	}
@@ -383,7 +383,8 @@ func (s *integrationService) handleOAuthToken(id string, state *oauthState, tok 
 	}
 
 	// Save the token to the integration config.
-	latestCfg, loadErr := s.store.Get(id)
+	bgCtx := context.Background()
+	latestCfg, loadErr := s.store.Get(bgCtx, id)
 	if loadErr != nil || latestCfg == nil {
 		state.err = fmt.Errorf("loading integration after OAuth: %w", loadErr)
 		return
@@ -393,7 +394,7 @@ func (s *integrationService) handleOAuthToken(id string, state *oauthState, tok 
 		return
 	}
 	latestCfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(latestCfg); saveErr != nil {
+	if saveErr := s.store.Save(bgCtx, latestCfg); saveErr != nil {
 		state.err = fmt.Errorf("saving token: %w", saveErr)
 		return
 	}
@@ -409,7 +410,7 @@ func (s *integrationService) handleOAuthToken(id string, state *oauthState, tok 
 	}()
 }
 
-func (s *integrationService) GetAuthStatus(_ context.Context, id string) (bool, error) {
+func (s *integrationService) GetAuthStatus(ctx context.Context, id string) (bool, error) {
 	s.mu.Lock()
 	state, ok := s.oauthFlows[id]
 	s.mu.Unlock()
@@ -422,7 +423,7 @@ func (s *integrationService) GetAuthStatus(_ context.Context, id string) (bool, 
 	}
 
 	// No active flow — check stored token.
-	cfg, err := s.store.Get(id)
+	cfg, err := s.store.Get(ctx, id)
 	if err != nil {
 		return false, err
 	}
@@ -432,8 +433,8 @@ func (s *integrationService) GetAuthStatus(_ context.Context, id string) (bool, 
 	return cfg.IsAuthenticated(), nil
 }
 
-func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool, error) {
-	cfgs, err := s.store.List()
+func (s *integrationService) AvailableTools(ctx context.Context) ([]AvailableTool, error) {
+	cfgs, err := s.store.List(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -499,7 +500,7 @@ func (s *integrationService) validateConfluenceAuth(ctx context.Context, cfg *co
 
 	cfg.Auth = json.RawMessage(`{"validated":true}`)
 	cfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(cfg); saveErr != nil {
+	if saveErr := s.store.Save(ctx, cfg); saveErr != nil {
 		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
@@ -525,7 +526,7 @@ func (s *integrationService) validateTelegramTokenAuth(ctx context.Context, cfg 
 
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"bot_username":%q}`, username))
 	cfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(cfg); saveErr != nil {
+	if saveErr := s.store.Save(ctx, cfg); saveErr != nil {
 		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
@@ -553,7 +554,7 @@ func (s *integrationService) validateJiraTokenAuth(ctx context.Context, cfg *con
 
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"display_name":%q}`, displayName))
 	cfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(cfg); saveErr != nil {
+	if saveErr := s.store.Save(ctx, cfg); saveErr != nil {
 		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
@@ -582,7 +583,7 @@ func (s *integrationService) validateGitHubPATAuth(ctx context.Context, cfg *con
 
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"username":%q}`, username))
 	cfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(cfg); saveErr != nil {
+	if saveErr := s.store.Save(ctx, cfg); saveErr != nil {
 		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
@@ -608,7 +609,7 @@ func (s *integrationService) validateSlackTokenAuth(ctx context.Context, cfg *co
 
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"team_name":%q}`, teamName))
 	cfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(cfg); saveErr != nil {
+	if saveErr := s.store.Save(ctx, cfg); saveErr != nil {
 		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 

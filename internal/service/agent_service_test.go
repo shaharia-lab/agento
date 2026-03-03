@@ -57,7 +57,7 @@ func TestAgentService_List(t *testing.T) {
 		{
 			name: "returns agents successfully",
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("List").Return([]*config.AgentConfig{
+				m.On("List", mock.Anything).Return([]*config.AgentConfig{
 					{Name: "Agent A", Slug: "agent-a"},
 					{Name: "Agent B", Slug: "agent-b"},
 				}, nil)
@@ -70,14 +70,14 @@ func TestAgentService_List(t *testing.T) {
 		{
 			name: "returns empty list",
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("List").Return([]*config.AgentConfig{}, nil)
+				m.On("List", mock.Anything).Return([]*config.AgentConfig{}, nil)
 			},
 			wantAgents: []*config.AgentConfig{},
 		},
 		{
 			name: "wraps repo error",
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("List").Return(nil, errors.New("db connection failed"))
+				m.On("List", mock.Anything).Return(nil, errors.New("db connection failed"))
 			},
 			wantErr:     true,
 			errContains: "listing agents",
@@ -118,7 +118,7 @@ func TestAgentService_Get(t *testing.T) {
 			name: "returns agent successfully",
 			slug: "my-agent",
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "my-agent").Return(&config.AgentConfig{
+				m.On("Get", mock.Anything, "my-agent").Return(&config.AgentConfig{
 					Name: "My Agent", Slug: "my-agent", Model: "claude-sonnet-4-6",
 				}, nil)
 			},
@@ -130,7 +130,7 @@ func TestAgentService_Get(t *testing.T) {
 			name: "returns nil when not found",
 			slug: "nonexistent",
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "nonexistent").Return(nil, nil)
+				m.On("Get", mock.Anything, "nonexistent").Return(nil, nil)
 			},
 			wantAgent: nil,
 		},
@@ -138,7 +138,7 @@ func TestAgentService_Get(t *testing.T) {
 			name: "wraps repo error",
 			slug: "bad-agent",
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "bad-agent").Return(nil, errors.New("read error"))
+				m.On("Get", mock.Anything, "bad-agent").Return(nil, errors.New("read error"))
 			},
 			wantErr:     true,
 			errContains: "getting agent",
@@ -181,8 +181,8 @@ func TestAgentService_Create(t *testing.T) {
 				Name: "My New Agent",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "my-new-agent").Return(nil, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(nil)
+				m.On("Get", mock.Anything, "my-new-agent").Return(nil, nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(nil)
 			},
 			wantAgent: &config.AgentConfig{
 				Name:     "My New Agent",
@@ -198,8 +198,8 @@ func TestAgentService_Create(t *testing.T) {
 				Slug: "custom-slug",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "custom-slug").Return(nil, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(nil)
+				m.On("Get", mock.Anything, "custom-slug").Return(nil, nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(nil)
 			},
 			wantAgent: &config.AgentConfig{
 				Name:     "My Agent",
@@ -216,8 +216,8 @@ func TestAgentService_Create(t *testing.T) {
 				Thinking: "enabled",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "full-agent").Return(nil, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(nil)
+				m.On("Get", mock.Anything, "full-agent").Return(nil, nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(nil)
 			},
 			wantAgent: &config.AgentConfig{
 				Name:     "Full Agent",
@@ -233,8 +233,8 @@ func TestAgentService_Create(t *testing.T) {
 				PermissionMode: "bypass",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "bypass-agent").Return(nil, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(nil)
+				m.On("Get", mock.Anything, "bypass-agent").Return(nil, nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(nil)
 			},
 			wantAgent: &config.AgentConfig{
 				Name:           "Bypass Agent",
@@ -251,8 +251,8 @@ func TestAgentService_Create(t *testing.T) {
 				PermissionMode: "default",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "default-agent").Return(nil, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(nil)
+				m.On("Get", mock.Anything, "default-agent").Return(nil, nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(nil)
 			},
 			wantAgent: &config.AgentConfig{
 				Name:           "Default Agent",
@@ -349,7 +349,7 @@ func TestAgentService_Create(t *testing.T) {
 				Name: "Existing Agent",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "existing-agent").Return(&config.AgentConfig{
+				m.On("Get", mock.Anything, "existing-agent").Return(&config.AgentConfig{
 					Name: "Existing Agent", Slug: "existing-agent",
 				}, nil)
 			},
@@ -362,7 +362,7 @@ func TestAgentService_Create(t *testing.T) {
 				Name: "Agent",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "agent").Return(nil, errors.New("db error"))
+				m.On("Get", mock.Anything, "agent").Return(nil, errors.New("db error"))
 			},
 			wantErr:     true,
 			errContains: "checking slug uniqueness",
@@ -373,8 +373,8 @@ func TestAgentService_Create(t *testing.T) {
 				Name: "Save Fail Agent",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "save-fail-agent").Return(nil, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(errors.New("write error"))
+				m.On("Get", mock.Anything, "save-fail-agent").Return(nil, nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(errors.New("write error"))
 			},
 			wantErr:     true,
 			errContains: "saving agent",
@@ -425,10 +425,10 @@ func TestAgentService_Update(t *testing.T) {
 				Name: "Updated Agent",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "my-agent").Return(&config.AgentConfig{
+				m.On("Get", mock.Anything, "my-agent").Return(&config.AgentConfig{
 					Name: "My Agent", Slug: "my-agent", Model: "claude-sonnet-4-6",
 				}, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(nil)
 			},
 			wantAgent: &config.AgentConfig{
 				Name:     "Updated Agent",
@@ -445,10 +445,10 @@ func TestAgentService_Update(t *testing.T) {
 				Slug: "different-slug",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "original-slug").Return(&config.AgentConfig{
+				m.On("Get", mock.Anything, "original-slug").Return(&config.AgentConfig{
 					Name: "Agent", Slug: "original-slug",
 				}, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(nil)
 			},
 			wantAgent: &config.AgentConfig{
 				Name:     "Agent",
@@ -466,10 +466,10 @@ func TestAgentService_Update(t *testing.T) {
 				Thinking: "disabled",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "my-agent").Return(&config.AgentConfig{
+				m.On("Get", mock.Anything, "my-agent").Return(&config.AgentConfig{
 					Name: "Agent", Slug: "my-agent",
 				}, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(nil)
 			},
 			wantAgent: &config.AgentConfig{
 				Name:     "Agent",
@@ -486,10 +486,10 @@ func TestAgentService_Update(t *testing.T) {
 				PermissionMode: "bypass",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "my-agent").Return(&config.AgentConfig{
+				m.On("Get", mock.Anything, "my-agent").Return(&config.AgentConfig{
 					Name: "Agent", Slug: "my-agent",
 				}, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(nil)
 			},
 			wantAgent: &config.AgentConfig{
 				Name:           "Agent",
@@ -506,7 +506,7 @@ func TestAgentService_Update(t *testing.T) {
 				Name: "Agent",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "nonexistent").Return(nil, nil)
+				m.On("Get", mock.Anything, "nonexistent").Return(nil, nil)
 			},
 			wantErr: true,
 			errType: &NotFoundError{},
@@ -518,7 +518,7 @@ func TestAgentService_Update(t *testing.T) {
 				Name: "Agent",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "my-agent").Return(nil, errors.New("db error"))
+				m.On("Get", mock.Anything, "my-agent").Return(nil, errors.New("db error"))
 			},
 			wantErr:     true,
 			errContains: "looking up agent",
@@ -530,7 +530,7 @@ func TestAgentService_Update(t *testing.T) {
 				Name: "",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "my-agent").Return(&config.AgentConfig{
+				m.On("Get", mock.Anything, "my-agent").Return(&config.AgentConfig{
 					Name: "Agent", Slug: "my-agent",
 				}, nil)
 			},
@@ -545,7 +545,7 @@ func TestAgentService_Update(t *testing.T) {
 				PermissionMode: "admin",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "my-agent").Return(&config.AgentConfig{
+				m.On("Get", mock.Anything, "my-agent").Return(&config.AgentConfig{
 					Name: "Agent", Slug: "my-agent",
 				}, nil)
 			},
@@ -559,10 +559,10 @@ func TestAgentService_Update(t *testing.T) {
 				Name: "Agent",
 			},
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Get", "my-agent").Return(&config.AgentConfig{
+				m.On("Get", mock.Anything, "my-agent").Return(&config.AgentConfig{
 					Name: "Agent", Slug: "my-agent",
 				}, nil)
-				m.On("Save", mock.AnythingOfType("*config.AgentConfig")).Return(errors.New("write error"))
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.AgentConfig")).Return(errors.New("write error"))
 			},
 			wantErr:     true,
 			errContains: "saving agent",
@@ -607,14 +607,14 @@ func TestAgentService_Delete(t *testing.T) {
 			name: "deletes successfully",
 			slug: "my-agent",
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Delete", "my-agent").Return(nil)
+				m.On("Delete", mock.Anything, "my-agent").Return(nil)
 			},
 		},
 		{
 			name: "wraps repo error",
 			slug: "bad-agent",
 			setupMock: func(m *mocks.MockAgentStore) {
-				m.On("Delete", "bad-agent").Return(errors.New("delete failed"))
+				m.On("Delete", mock.Anything, "bad-agent").Return(errors.New("delete failed"))
 			},
 			wantErr:     true,
 			errContains: "deleting agent",

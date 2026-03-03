@@ -22,8 +22,7 @@ func NewSQLiteChatStore(db *sql.DB) *SQLiteChatStore {
 }
 
 // ListSessions returns all chat sessions ordered by most recently updated.
-func (s *SQLiteChatStore) ListSessions() ([]*ChatSession, error) {
-	ctx := context.Background()
+func (s *SQLiteChatStore) ListSessions(ctx context.Context) ([]*ChatSession, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
 		       settings_profile_id, total_input_tokens, total_output_tokens,
@@ -48,8 +47,7 @@ func (s *SQLiteChatStore) ListSessions() ([]*ChatSession, error) {
 }
 
 // GetSession returns session metadata for the given ID, or nil if not found.
-func (s *SQLiteChatStore) GetSession(id string) (*ChatSession, error) {
-	ctx := context.Background()
+func (s *SQLiteChatStore) GetSession(ctx context.Context, id string) (*ChatSession, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
 		       settings_profile_id, total_input_tokens, total_output_tokens,
@@ -75,13 +73,12 @@ func (s *SQLiteChatStore) GetSession(id string) (*ChatSession, error) {
 }
 
 // GetSessionWithMessages returns the session and its full message history.
-func (s *SQLiteChatStore) GetSessionWithMessages(id string) (*ChatSession, []ChatMessage, error) {
-	cs, err := s.GetSession(id)
+func (s *SQLiteChatStore) GetSessionWithMessages(ctx context.Context, id string) (*ChatSession, []ChatMessage, error) {
+	cs, err := s.GetSession(ctx, id)
 	if err != nil || cs == nil {
 		return cs, nil, err
 	}
 
-	ctx := context.Background()
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT role, content, blocks, timestamp
 		FROM chat_messages
@@ -112,7 +109,9 @@ func (s *SQLiteChatStore) GetSessionWithMessages(id string) (*ChatSession, []Cha
 }
 
 // CreateSession creates a new chat session.
-func (s *SQLiteChatStore) CreateSession(agentSlug, workingDir, model, settingsProfileID string) (*ChatSession, error) {
+func (s *SQLiteChatStore) CreateSession(
+	ctx context.Context, agentSlug, workingDir, model, settingsProfileID string,
+) (*ChatSession, error) {
 	id := newSQLiteUUID()
 	now := time.Now().UTC()
 	cs := &ChatSession{
@@ -126,7 +125,6 @@ func (s *SQLiteChatStore) CreateSession(agentSlug, workingDir, model, settingsPr
 		UpdatedAt:         now,
 	}
 
-	ctx := context.Background()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO chat_sessions
 			(id, title, agent_slug, sdk_session_id, working_directory, model,
@@ -143,7 +141,7 @@ func (s *SQLiteChatStore) CreateSession(agentSlug, workingDir, model, settingsPr
 }
 
 // AppendMessage appends a message to the given session.
-func (s *SQLiteChatStore) AppendMessage(sessionID string, msg ChatMessage) error {
+func (s *SQLiteChatStore) AppendMessage(ctx context.Context, sessionID string, msg ChatMessage) error {
 	blocksJSON := "[]"
 	if len(msg.Blocks) > 0 {
 		b, err := json.Marshal(msg.Blocks)
@@ -153,7 +151,6 @@ func (s *SQLiteChatStore) AppendMessage(sessionID string, msg ChatMessage) error
 		blocksJSON = string(b)
 	}
 
-	ctx := context.Background()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO chat_messages (session_id, role, content, blocks, timestamp)
 		VALUES (?, ?, ?, ?, ?)`,
@@ -166,8 +163,7 @@ func (s *SQLiteChatStore) AppendMessage(sessionID string, msg ChatMessage) error
 }
 
 // UpdateSession updates a session's metadata.
-func (s *SQLiteChatStore) UpdateSession(session *ChatSession) error {
-	ctx := context.Background()
+func (s *SQLiteChatStore) UpdateSession(ctx context.Context, session *ChatSession) error {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE chat_sessions SET
 			title = ?, agent_slug = ?, sdk_session_id = ?, working_directory = ?,
@@ -196,8 +192,7 @@ func (s *SQLiteChatStore) UpdateSession(session *ChatSession) error {
 }
 
 // DeleteSession deletes a session and its messages (via CASCADE).
-func (s *SQLiteChatStore) DeleteSession(id string) error {
-	ctx := context.Background()
+func (s *SQLiteChatStore) DeleteSession(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, "DELETE FROM chat_sessions WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("deleting session %q: %w", id, err)
@@ -213,11 +208,10 @@ func (s *SQLiteChatStore) DeleteSession(id string) error {
 }
 
 // BulkDeleteSessions deletes multiple chat sessions (and their messages via CASCADE) by ID.
-func (s *SQLiteChatStore) BulkDeleteSessions(ids []string) error {
+func (s *SQLiteChatStore) BulkDeleteSessions(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	ctx := context.Background()
 	placeholders := make([]string, len(ids))
 	args := make([]any, len(ids))
 	for i, id := range ids {

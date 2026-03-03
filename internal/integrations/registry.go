@@ -48,7 +48,7 @@ func (r *IntegrationRegistry) RegisterStarter(integrationType string, starter Se
 
 // Start launches in-process MCP servers for all enabled integrations that have a valid auth token.
 func (r *IntegrationRegistry) Start(ctx context.Context) error {
-	integrations, err := r.store.List()
+	integrations, err := r.store.List(ctx)
 	if err != nil {
 		return fmt.Errorf("listing integrations: %w", err)
 	}
@@ -73,7 +73,7 @@ func (r *IntegrationRegistry) Start(ctx context.Context) error {
 func (r *IntegrationRegistry) Reload(ctx context.Context, id string) error {
 	r.Stop(id)
 
-	cfg, err := r.store.Get(id)
+	cfg, err := r.store.Get(ctx, id)
 	if err != nil {
 		return fmt.Errorf("loading integration %q: %w", id, err)
 	}
@@ -123,7 +123,7 @@ func (r *IntegrationRegistry) AllServerConfigs() map[string]claude.McpHTTPServer
 func (r *IntegrationRegistry) StartFilteredServer(
 	ctx context.Context, id string, tools []string,
 ) (claude.McpHTTPServer, error) {
-	cfg, err := r.store.Get(id)
+	cfg, err := r.store.Get(ctx, id)
 	if err != nil {
 		return claude.McpHTTPServer{}, fmt.Errorf("loading integration %q: %w", id, err)
 	}

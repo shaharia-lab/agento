@@ -38,13 +38,13 @@ func newStubTaskStore(tasks ...*storage.ScheduledTask) *stubTaskStore {
 	return s
 }
 
-func (s *stubTaskStore) GetTask(id string) (*storage.ScheduledTask, error) {
+func (s *stubTaskStore) GetTask(_ context.Context, id string) (*storage.ScheduledTask, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.tasks[id], nil
 }
 
-func (s *stubTaskStore) ListTasks() ([]*storage.ScheduledTask, error) {
+func (s *stubTaskStore) ListTasks(_ context.Context) ([]*storage.ScheduledTask, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]*storage.ScheduledTask, 0, len(s.tasks))
@@ -54,25 +54,25 @@ func (s *stubTaskStore) ListTasks() ([]*storage.ScheduledTask, error) {
 	return out, nil
 }
 
-func (s *stubTaskStore) CreateTask(_ *storage.ScheduledTask) error { return nil }
+func (s *stubTaskStore) CreateTask(_ context.Context, _ *storage.ScheduledTask) error { return nil }
 
-func (s *stubTaskStore) UpdateTask(task *storage.ScheduledTask) error {
+func (s *stubTaskStore) UpdateTask(_ context.Context, task *storage.ScheduledTask) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tasks[task.ID] = task
 	return nil
 }
 
-func (s *stubTaskStore) DeleteTask(_ string) error { return nil }
+func (s *stubTaskStore) DeleteTask(_ context.Context, _ string) error { return nil }
 
-func (s *stubTaskStore) CreateJobHistory(jh *storage.JobHistory) error {
+func (s *stubTaskStore) CreateJobHistory(_ context.Context, jh *storage.JobHistory) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.history = append(s.history, jh)
 	return nil
 }
 
-func (s *stubTaskStore) UpdateJobHistory(jh *storage.JobHistory) error {
+func (s *stubTaskStore) UpdateJobHistory(_ context.Context, jh *storage.JobHistory) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for i, h := range s.history {
@@ -85,15 +85,17 @@ func (s *stubTaskStore) UpdateJobHistory(jh *storage.JobHistory) error {
 	return nil
 }
 
-func (s *stubTaskStore) GetJobHistory(_ string) (*storage.JobHistory, error) { return nil, nil }
-func (s *stubTaskStore) ListJobHistory(_ string, _ int) ([]*storage.JobHistory, error) {
+func (s *stubTaskStore) GetJobHistory(_ context.Context, _ string) (*storage.JobHistory, error) {
 	return nil, nil
 }
-func (s *stubTaskStore) ListAllJobHistory(_, _ int) ([]*storage.JobHistory, error) {
+func (s *stubTaskStore) ListJobHistory(_ context.Context, _ string, _ int) ([]*storage.JobHistory, error) {
 	return nil, nil
 }
-func (s *stubTaskStore) DeleteJobHistory(_ string) error       { return nil }
-func (s *stubTaskStore) BulkDeleteJobHistory(_ []string) error { return nil }
+func (s *stubTaskStore) ListAllJobHistory(_ context.Context, _, _ int) ([]*storage.JobHistory, error) {
+	return nil, nil
+}
+func (s *stubTaskStore) DeleteJobHistory(_ context.Context, _ string) error       { return nil }
+func (s *stubTaskStore) BulkDeleteJobHistory(_ context.Context, _ []string) error { return nil }
 
 // --- ChatStore stub ---
 
@@ -101,21 +103,27 @@ type stubChatStore struct {
 	createErr error
 }
 
-func (c *stubChatStore) ListSessions() ([]*storage.ChatSession, error)     { return nil, nil }
-func (c *stubChatStore) GetSession(_ string) (*storage.ChatSession, error) { return nil, nil }
-func (c *stubChatStore) GetSessionWithMessages(_ string) (*storage.ChatSession, []storage.ChatMessage, error) {
+func (c *stubChatStore) ListSessions(_ context.Context) ([]*storage.ChatSession, error) {
+	return nil, nil
+}
+func (c *stubChatStore) GetSession(_ context.Context, _ string) (*storage.ChatSession, error) {
+	return nil, nil
+}
+func (c *stubChatStore) GetSessionWithMessages(_ context.Context, _ string) (*storage.ChatSession, []storage.ChatMessage, error) {
 	return nil, nil, nil
 }
-func (c *stubChatStore) CreateSession(_, _, _, _ string) (*storage.ChatSession, error) {
+func (c *stubChatStore) CreateSession(_ context.Context, _, _, _, _ string) (*storage.ChatSession, error) {
 	if c.createErr != nil {
 		return nil, c.createErr
 	}
 	return &storage.ChatSession{ID: "session-123"}, nil
 }
-func (c *stubChatStore) AppendMessage(_ string, _ storage.ChatMessage) error { return nil }
-func (c *stubChatStore) UpdateSession(_ *storage.ChatSession) error          { return nil }
-func (c *stubChatStore) DeleteSession(_ string) error                        { return nil }
-func (c *stubChatStore) BulkDeleteSessions(_ []string) error                 { return nil }
+func (c *stubChatStore) AppendMessage(_ context.Context, _ string, _ storage.ChatMessage) error {
+	return nil
+}
+func (c *stubChatStore) UpdateSession(_ context.Context, _ *storage.ChatSession) error { return nil }
+func (c *stubChatStore) DeleteSession(_ context.Context, _ string) error               { return nil }
+func (c *stubChatStore) BulkDeleteSessions(_ context.Context, _ []string) error        { return nil }
 
 // --- EventPublisher stub ---
 
@@ -309,7 +317,7 @@ func TestRunImmediately_AutoPausedAfterExecution(t *testing.T) {
 	s.ExportedExecuteTask(task.ID)
 
 	// The task must be paused after execution to prevent re-runs on restart.
-	stored, _ := ts.GetTask(task.ID)
+	stored, _ := ts.GetTask(context.Background(), task.ID)
 	require.NotNil(t, stored)
 	assert.Equal(t, storage.TaskStatusPaused, stored.Status,
 		"run_immediately task should be auto-paused after execution")

@@ -3,6 +3,8 @@
 package mocks
 
 import (
+	context "context"
+
 	storage "github.com/shaharia-lab/agento/internal/storage"
 	mock "github.com/stretchr/testify/mock"
 )
@@ -20,17 +22,17 @@ func (_m *MockChatStore) EXPECT() *MockChatStore_Expecter {
 	return &MockChatStore_Expecter{mock: &_m.Mock}
 }
 
-// AppendMessage provides a mock function with given fields: sessionID, msg
-func (_m *MockChatStore) AppendMessage(sessionID string, msg storage.ChatMessage) error {
-	ret := _m.Called(sessionID, msg)
+// AppendMessage provides a mock function with given fields: ctx, sessionID, msg
+func (_m *MockChatStore) AppendMessage(ctx context.Context, sessionID string, msg storage.ChatMessage) error {
+	ret := _m.Called(ctx, sessionID, msg)
 
 	if len(ret) == 0 {
 		panic("no return value specified for AppendMessage")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(string, storage.ChatMessage) error); ok {
-		r0 = rf(sessionID, msg)
+	if rf, ok := ret.Get(0).(func(context.Context, string, storage.ChatMessage) error); ok {
+		r0 = rf(ctx, sessionID, msg)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -44,15 +46,16 @@ type MockChatStore_AppendMessage_Call struct {
 }
 
 // AppendMessage is a helper method to define mock.On call
+//   - ctx context.Context
 //   - sessionID string
 //   - msg storage.ChatMessage
-func (_e *MockChatStore_Expecter) AppendMessage(sessionID interface{}, msg interface{}) *MockChatStore_AppendMessage_Call {
-	return &MockChatStore_AppendMessage_Call{Call: _e.mock.On("AppendMessage", sessionID, msg)}
+func (_e *MockChatStore_Expecter) AppendMessage(ctx interface{}, sessionID interface{}, msg interface{}) *MockChatStore_AppendMessage_Call {
+	return &MockChatStore_AppendMessage_Call{Call: _e.mock.On("AppendMessage", ctx, sessionID, msg)}
 }
 
-func (_c *MockChatStore_AppendMessage_Call) Run(run func(sessionID string, msg storage.ChatMessage)) *MockChatStore_AppendMessage_Call {
+func (_c *MockChatStore_AppendMessage_Call) Run(run func(ctx context.Context, sessionID string, msg storage.ChatMessage)) *MockChatStore_AppendMessage_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string), args[1].(storage.ChatMessage))
+		run(args[0].(context.Context), args[1].(string), args[2].(storage.ChatMessage))
 	})
 	return _c
 }
@@ -62,22 +65,22 @@ func (_c *MockChatStore_AppendMessage_Call) Return(_a0 error) *MockChatStore_App
 	return _c
 }
 
-func (_c *MockChatStore_AppendMessage_Call) RunAndReturn(run func(string, storage.ChatMessage) error) *MockChatStore_AppendMessage_Call {
+func (_c *MockChatStore_AppendMessage_Call) RunAndReturn(run func(context.Context, string, storage.ChatMessage) error) *MockChatStore_AppendMessage_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// BulkDeleteSessions provides a mock function with given fields: ids
-func (_m *MockChatStore) BulkDeleteSessions(ids []string) error {
-	ret := _m.Called(ids)
+// BulkDeleteSessions provides a mock function with given fields: ctx, ids
+func (_m *MockChatStore) BulkDeleteSessions(ctx context.Context, ids []string) error {
+	ret := _m.Called(ctx, ids)
 
 	if len(ret) == 0 {
 		panic("no return value specified for BulkDeleteSessions")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func([]string) error); ok {
-		r0 = rf(ids)
+	if rf, ok := ret.Get(0).(func(context.Context, []string) error); ok {
+		r0 = rf(ctx, ids)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -91,14 +94,15 @@ type MockChatStore_BulkDeleteSessions_Call struct {
 }
 
 // BulkDeleteSessions is a helper method to define mock.On call
+//   - ctx context.Context
 //   - ids []string
-func (_e *MockChatStore_Expecter) BulkDeleteSessions(ids interface{}) *MockChatStore_BulkDeleteSessions_Call {
-	return &MockChatStore_BulkDeleteSessions_Call{Call: _e.mock.On("BulkDeleteSessions", ids)}
+func (_e *MockChatStore_Expecter) BulkDeleteSessions(ctx interface{}, ids interface{}) *MockChatStore_BulkDeleteSessions_Call {
+	return &MockChatStore_BulkDeleteSessions_Call{Call: _e.mock.On("BulkDeleteSessions", ctx, ids)}
 }
 
-func (_c *MockChatStore_BulkDeleteSessions_Call) Run(run func(ids []string)) *MockChatStore_BulkDeleteSessions_Call {
+func (_c *MockChatStore_BulkDeleteSessions_Call) Run(run func(ctx context.Context, ids []string)) *MockChatStore_BulkDeleteSessions_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].([]string))
+		run(args[0].(context.Context), args[1].([]string))
 	})
 	return _c
 }
@@ -108,14 +112,14 @@ func (_c *MockChatStore_BulkDeleteSessions_Call) Return(_a0 error) *MockChatStor
 	return _c
 }
 
-func (_c *MockChatStore_BulkDeleteSessions_Call) RunAndReturn(run func([]string) error) *MockChatStore_BulkDeleteSessions_Call {
+func (_c *MockChatStore_BulkDeleteSessions_Call) RunAndReturn(run func(context.Context, []string) error) *MockChatStore_BulkDeleteSessions_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// CreateSession provides a mock function with given fields: agentSlug, workingDir, model, settingsProfileID
-func (_m *MockChatStore) CreateSession(agentSlug string, workingDir string, model string, settingsProfileID string) (*storage.ChatSession, error) {
-	ret := _m.Called(agentSlug, workingDir, model, settingsProfileID)
+// CreateSession provides a mock function with given fields: ctx, agentSlug, workingDir, model, settingsProfileID
+func (_m *MockChatStore) CreateSession(ctx context.Context, agentSlug string, workingDir string, model string, settingsProfileID string) (*storage.ChatSession, error) {
+	ret := _m.Called(ctx, agentSlug, workingDir, model, settingsProfileID)
 
 	if len(ret) == 0 {
 		panic("no return value specified for CreateSession")
@@ -123,19 +127,19 @@ func (_m *MockChatStore) CreateSession(agentSlug string, workingDir string, mode
 
 	var r0 *storage.ChatSession
 	var r1 error
-	if rf, ok := ret.Get(0).(func(string, string, string, string) (*storage.ChatSession, error)); ok {
-		return rf(agentSlug, workingDir, model, settingsProfileID)
+	if rf, ok := ret.Get(0).(func(context.Context, string, string, string, string) (*storage.ChatSession, error)); ok {
+		return rf(ctx, agentSlug, workingDir, model, settingsProfileID)
 	}
-	if rf, ok := ret.Get(0).(func(string, string, string, string) *storage.ChatSession); ok {
-		r0 = rf(agentSlug, workingDir, model, settingsProfileID)
+	if rf, ok := ret.Get(0).(func(context.Context, string, string, string, string) *storage.ChatSession); ok {
+		r0 = rf(ctx, agentSlug, workingDir, model, settingsProfileID)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*storage.ChatSession)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(string, string, string, string) error); ok {
-		r1 = rf(agentSlug, workingDir, model, settingsProfileID)
+	if rf, ok := ret.Get(1).(func(context.Context, string, string, string, string) error); ok {
+		r1 = rf(ctx, agentSlug, workingDir, model, settingsProfileID)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -149,17 +153,18 @@ type MockChatStore_CreateSession_Call struct {
 }
 
 // CreateSession is a helper method to define mock.On call
+//   - ctx context.Context
 //   - agentSlug string
 //   - workingDir string
 //   - model string
 //   - settingsProfileID string
-func (_e *MockChatStore_Expecter) CreateSession(agentSlug interface{}, workingDir interface{}, model interface{}, settingsProfileID interface{}) *MockChatStore_CreateSession_Call {
-	return &MockChatStore_CreateSession_Call{Call: _e.mock.On("CreateSession", agentSlug, workingDir, model, settingsProfileID)}
+func (_e *MockChatStore_Expecter) CreateSession(ctx interface{}, agentSlug interface{}, workingDir interface{}, model interface{}, settingsProfileID interface{}) *MockChatStore_CreateSession_Call {
+	return &MockChatStore_CreateSession_Call{Call: _e.mock.On("CreateSession", ctx, agentSlug, workingDir, model, settingsProfileID)}
 }
 
-func (_c *MockChatStore_CreateSession_Call) Run(run func(agentSlug string, workingDir string, model string, settingsProfileID string)) *MockChatStore_CreateSession_Call {
+func (_c *MockChatStore_CreateSession_Call) Run(run func(ctx context.Context, agentSlug string, workingDir string, model string, settingsProfileID string)) *MockChatStore_CreateSession_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string), args[1].(string), args[2].(string), args[3].(string))
+		run(args[0].(context.Context), args[1].(string), args[2].(string), args[3].(string), args[4].(string))
 	})
 	return _c
 }
@@ -169,22 +174,22 @@ func (_c *MockChatStore_CreateSession_Call) Return(_a0 *storage.ChatSession, _a1
 	return _c
 }
 
-func (_c *MockChatStore_CreateSession_Call) RunAndReturn(run func(string, string, string, string) (*storage.ChatSession, error)) *MockChatStore_CreateSession_Call {
+func (_c *MockChatStore_CreateSession_Call) RunAndReturn(run func(context.Context, string, string, string, string) (*storage.ChatSession, error)) *MockChatStore_CreateSession_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// DeleteSession provides a mock function with given fields: id
-func (_m *MockChatStore) DeleteSession(id string) error {
-	ret := _m.Called(id)
+// DeleteSession provides a mock function with given fields: ctx, id
+func (_m *MockChatStore) DeleteSession(ctx context.Context, id string) error {
+	ret := _m.Called(ctx, id)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DeleteSession")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(string) error); ok {
-		r0 = rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = rf(ctx, id)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -198,14 +203,15 @@ type MockChatStore_DeleteSession_Call struct {
 }
 
 // DeleteSession is a helper method to define mock.On call
+//   - ctx context.Context
 //   - id string
-func (_e *MockChatStore_Expecter) DeleteSession(id interface{}) *MockChatStore_DeleteSession_Call {
-	return &MockChatStore_DeleteSession_Call{Call: _e.mock.On("DeleteSession", id)}
+func (_e *MockChatStore_Expecter) DeleteSession(ctx interface{}, id interface{}) *MockChatStore_DeleteSession_Call {
+	return &MockChatStore_DeleteSession_Call{Call: _e.mock.On("DeleteSession", ctx, id)}
 }
 
-func (_c *MockChatStore_DeleteSession_Call) Run(run func(id string)) *MockChatStore_DeleteSession_Call {
+func (_c *MockChatStore_DeleteSession_Call) Run(run func(ctx context.Context, id string)) *MockChatStore_DeleteSession_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -215,14 +221,14 @@ func (_c *MockChatStore_DeleteSession_Call) Return(_a0 error) *MockChatStore_Del
 	return _c
 }
 
-func (_c *MockChatStore_DeleteSession_Call) RunAndReturn(run func(string) error) *MockChatStore_DeleteSession_Call {
+func (_c *MockChatStore_DeleteSession_Call) RunAndReturn(run func(context.Context, string) error) *MockChatStore_DeleteSession_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// GetSession provides a mock function with given fields: id
-func (_m *MockChatStore) GetSession(id string) (*storage.ChatSession, error) {
-	ret := _m.Called(id)
+// GetSession provides a mock function with given fields: ctx, id
+func (_m *MockChatStore) GetSession(ctx context.Context, id string) (*storage.ChatSession, error) {
+	ret := _m.Called(ctx, id)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetSession")
@@ -230,19 +236,19 @@ func (_m *MockChatStore) GetSession(id string) (*storage.ChatSession, error) {
 
 	var r0 *storage.ChatSession
 	var r1 error
-	if rf, ok := ret.Get(0).(func(string) (*storage.ChatSession, error)); ok {
-		return rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) (*storage.ChatSession, error)); ok {
+		return rf(ctx, id)
 	}
-	if rf, ok := ret.Get(0).(func(string) *storage.ChatSession); ok {
-		r0 = rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) *storage.ChatSession); ok {
+		r0 = rf(ctx, id)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*storage.ChatSession)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(string) error); ok {
-		r1 = rf(id)
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, id)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -256,14 +262,15 @@ type MockChatStore_GetSession_Call struct {
 }
 
 // GetSession is a helper method to define mock.On call
+//   - ctx context.Context
 //   - id string
-func (_e *MockChatStore_Expecter) GetSession(id interface{}) *MockChatStore_GetSession_Call {
-	return &MockChatStore_GetSession_Call{Call: _e.mock.On("GetSession", id)}
+func (_e *MockChatStore_Expecter) GetSession(ctx interface{}, id interface{}) *MockChatStore_GetSession_Call {
+	return &MockChatStore_GetSession_Call{Call: _e.mock.On("GetSession", ctx, id)}
 }
 
-func (_c *MockChatStore_GetSession_Call) Run(run func(id string)) *MockChatStore_GetSession_Call {
+func (_c *MockChatStore_GetSession_Call) Run(run func(ctx context.Context, id string)) *MockChatStore_GetSession_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -273,14 +280,14 @@ func (_c *MockChatStore_GetSession_Call) Return(_a0 *storage.ChatSession, _a1 er
 	return _c
 }
 
-func (_c *MockChatStore_GetSession_Call) RunAndReturn(run func(string) (*storage.ChatSession, error)) *MockChatStore_GetSession_Call {
+func (_c *MockChatStore_GetSession_Call) RunAndReturn(run func(context.Context, string) (*storage.ChatSession, error)) *MockChatStore_GetSession_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// GetSessionWithMessages provides a mock function with given fields: id
-func (_m *MockChatStore) GetSessionWithMessages(id string) (*storage.ChatSession, []storage.ChatMessage, error) {
-	ret := _m.Called(id)
+// GetSessionWithMessages provides a mock function with given fields: ctx, id
+func (_m *MockChatStore) GetSessionWithMessages(ctx context.Context, id string) (*storage.ChatSession, []storage.ChatMessage, error) {
+	ret := _m.Called(ctx, id)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetSessionWithMessages")
@@ -289,27 +296,27 @@ func (_m *MockChatStore) GetSessionWithMessages(id string) (*storage.ChatSession
 	var r0 *storage.ChatSession
 	var r1 []storage.ChatMessage
 	var r2 error
-	if rf, ok := ret.Get(0).(func(string) (*storage.ChatSession, []storage.ChatMessage, error)); ok {
-		return rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) (*storage.ChatSession, []storage.ChatMessage, error)); ok {
+		return rf(ctx, id)
 	}
-	if rf, ok := ret.Get(0).(func(string) *storage.ChatSession); ok {
-		r0 = rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) *storage.ChatSession); ok {
+		r0 = rf(ctx, id)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*storage.ChatSession)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(string) []storage.ChatMessage); ok {
-		r1 = rf(id)
+	if rf, ok := ret.Get(1).(func(context.Context, string) []storage.ChatMessage); ok {
+		r1 = rf(ctx, id)
 	} else {
 		if ret.Get(1) != nil {
 			r1 = ret.Get(1).([]storage.ChatMessage)
 		}
 	}
 
-	if rf, ok := ret.Get(2).(func(string) error); ok {
-		r2 = rf(id)
+	if rf, ok := ret.Get(2).(func(context.Context, string) error); ok {
+		r2 = rf(ctx, id)
 	} else {
 		r2 = ret.Error(2)
 	}
@@ -323,14 +330,15 @@ type MockChatStore_GetSessionWithMessages_Call struct {
 }
 
 // GetSessionWithMessages is a helper method to define mock.On call
+//   - ctx context.Context
 //   - id string
-func (_e *MockChatStore_Expecter) GetSessionWithMessages(id interface{}) *MockChatStore_GetSessionWithMessages_Call {
-	return &MockChatStore_GetSessionWithMessages_Call{Call: _e.mock.On("GetSessionWithMessages", id)}
+func (_e *MockChatStore_Expecter) GetSessionWithMessages(ctx interface{}, id interface{}) *MockChatStore_GetSessionWithMessages_Call {
+	return &MockChatStore_GetSessionWithMessages_Call{Call: _e.mock.On("GetSessionWithMessages", ctx, id)}
 }
 
-func (_c *MockChatStore_GetSessionWithMessages_Call) Run(run func(id string)) *MockChatStore_GetSessionWithMessages_Call {
+func (_c *MockChatStore_GetSessionWithMessages_Call) Run(run func(ctx context.Context, id string)) *MockChatStore_GetSessionWithMessages_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -340,14 +348,14 @@ func (_c *MockChatStore_GetSessionWithMessages_Call) Return(_a0 *storage.ChatSes
 	return _c
 }
 
-func (_c *MockChatStore_GetSessionWithMessages_Call) RunAndReturn(run func(string) (*storage.ChatSession, []storage.ChatMessage, error)) *MockChatStore_GetSessionWithMessages_Call {
+func (_c *MockChatStore_GetSessionWithMessages_Call) RunAndReturn(run func(context.Context, string) (*storage.ChatSession, []storage.ChatMessage, error)) *MockChatStore_GetSessionWithMessages_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// ListSessions provides a mock function with no fields
-func (_m *MockChatStore) ListSessions() ([]*storage.ChatSession, error) {
-	ret := _m.Called()
+// ListSessions provides a mock function with given fields: ctx
+func (_m *MockChatStore) ListSessions(ctx context.Context) ([]*storage.ChatSession, error) {
+	ret := _m.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for ListSessions")
@@ -355,19 +363,19 @@ func (_m *MockChatStore) ListSessions() ([]*storage.ChatSession, error) {
 
 	var r0 []*storage.ChatSession
 	var r1 error
-	if rf, ok := ret.Get(0).(func() ([]*storage.ChatSession, error)); ok {
-		return rf()
+	if rf, ok := ret.Get(0).(func(context.Context) ([]*storage.ChatSession, error)); ok {
+		return rf(ctx)
 	}
-	if rf, ok := ret.Get(0).(func() []*storage.ChatSession); ok {
-		r0 = rf()
+	if rf, ok := ret.Get(0).(func(context.Context) []*storage.ChatSession); ok {
+		r0 = rf(ctx)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]*storage.ChatSession)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func() error); ok {
-		r1 = rf()
+	if rf, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = rf(ctx)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -381,13 +389,14 @@ type MockChatStore_ListSessions_Call struct {
 }
 
 // ListSessions is a helper method to define mock.On call
-func (_e *MockChatStore_Expecter) ListSessions() *MockChatStore_ListSessions_Call {
-	return &MockChatStore_ListSessions_Call{Call: _e.mock.On("ListSessions")}
+//   - ctx context.Context
+func (_e *MockChatStore_Expecter) ListSessions(ctx interface{}) *MockChatStore_ListSessions_Call {
+	return &MockChatStore_ListSessions_Call{Call: _e.mock.On("ListSessions", ctx)}
 }
 
-func (_c *MockChatStore_ListSessions_Call) Run(run func()) *MockChatStore_ListSessions_Call {
+func (_c *MockChatStore_ListSessions_Call) Run(run func(ctx context.Context)) *MockChatStore_ListSessions_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		run(args[0].(context.Context))
 	})
 	return _c
 }
@@ -397,22 +406,22 @@ func (_c *MockChatStore_ListSessions_Call) Return(_a0 []*storage.ChatSession, _a
 	return _c
 }
 
-func (_c *MockChatStore_ListSessions_Call) RunAndReturn(run func() ([]*storage.ChatSession, error)) *MockChatStore_ListSessions_Call {
+func (_c *MockChatStore_ListSessions_Call) RunAndReturn(run func(context.Context) ([]*storage.ChatSession, error)) *MockChatStore_ListSessions_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// UpdateSession provides a mock function with given fields: session
-func (_m *MockChatStore) UpdateSession(session *storage.ChatSession) error {
-	ret := _m.Called(session)
+// UpdateSession provides a mock function with given fields: ctx, session
+func (_m *MockChatStore) UpdateSession(ctx context.Context, session *storage.ChatSession) error {
+	ret := _m.Called(ctx, session)
 
 	if len(ret) == 0 {
 		panic("no return value specified for UpdateSession")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(*storage.ChatSession) error); ok {
-		r0 = rf(session)
+	if rf, ok := ret.Get(0).(func(context.Context, *storage.ChatSession) error); ok {
+		r0 = rf(ctx, session)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -426,14 +435,15 @@ type MockChatStore_UpdateSession_Call struct {
 }
 
 // UpdateSession is a helper method to define mock.On call
+//   - ctx context.Context
 //   - session *storage.ChatSession
-func (_e *MockChatStore_Expecter) UpdateSession(session interface{}) *MockChatStore_UpdateSession_Call {
-	return &MockChatStore_UpdateSession_Call{Call: _e.mock.On("UpdateSession", session)}
+func (_e *MockChatStore_Expecter) UpdateSession(ctx interface{}, session interface{}) *MockChatStore_UpdateSession_Call {
+	return &MockChatStore_UpdateSession_Call{Call: _e.mock.On("UpdateSession", ctx, session)}
 }
 
-func (_c *MockChatStore_UpdateSession_Call) Run(run func(session *storage.ChatSession)) *MockChatStore_UpdateSession_Call {
+func (_c *MockChatStore_UpdateSession_Call) Run(run func(ctx context.Context, session *storage.ChatSession)) *MockChatStore_UpdateSession_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(*storage.ChatSession))
+		run(args[0].(context.Context), args[1].(*storage.ChatSession))
 	})
 	return _c
 }
@@ -443,7 +453,7 @@ func (_c *MockChatStore_UpdateSession_Call) Return(_a0 error) *MockChatStore_Upd
 	return _c
 }
 
-func (_c *MockChatStore_UpdateSession_Call) RunAndReturn(run func(*storage.ChatSession) error) *MockChatStore_UpdateSession_Call {
+func (_c *MockChatStore_UpdateSession_Call) RunAndReturn(run func(context.Context, *storage.ChatSession) error) *MockChatStore_UpdateSession_Call {
 	_c.Call.Return(run)
 	return _c
 }

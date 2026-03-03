@@ -22,8 +22,7 @@ func NewSQLiteTaskStore(db *sql.DB) *SQLiteTaskStore {
 }
 
 // ListTasks returns all scheduled tasks ordered by creation time descending.
-func (s *SQLiteTaskStore) ListTasks() ([]*ScheduledTask, error) {
-	ctx := context.Background()
+func (s *SQLiteTaskStore) ListTasks(ctx context.Context) ([]*ScheduledTask, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, description, prompt, agent_slug, working_directory, model,
 		       settings_profile_id, timeout_minutes, schedule_type, schedule_config,
@@ -48,8 +47,7 @@ func (s *SQLiteTaskStore) ListTasks() ([]*ScheduledTask, error) {
 }
 
 // GetTask returns a scheduled task by ID, or nil if not found.
-func (s *SQLiteTaskStore) GetTask(id string) (*ScheduledTask, error) {
-	ctx := context.Background()
+func (s *SQLiteTaskStore) GetTask(ctx context.Context, id string) (*ScheduledTask, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, name, description, prompt, agent_slug, working_directory, model,
 		       settings_profile_id, timeout_minutes, schedule_type, schedule_config,
@@ -93,7 +91,7 @@ func (s *SQLiteTaskStore) GetTask(id string) (*ScheduledTask, error) {
 }
 
 // CreateTask inserts a new scheduled task.
-func (s *SQLiteTaskStore) CreateTask(task *ScheduledTask) error {
+func (s *SQLiteTaskStore) CreateTask(ctx context.Context, task *ScheduledTask) error {
 	if task.ID == "" {
 		task.ID = uuid.New().String()
 	}
@@ -106,7 +104,6 @@ func (s *SQLiteTaskStore) CreateTask(task *ScheduledTask) error {
 		return fmt.Errorf("marshaling schedule config: %w", err)
 	}
 
-	ctx := context.Background()
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO scheduled_tasks
 			(id, name, description, prompt, agent_slug, working_directory, model,
@@ -127,7 +124,7 @@ func (s *SQLiteTaskStore) CreateTask(task *ScheduledTask) error {
 }
 
 // UpdateTask updates an existing scheduled task.
-func (s *SQLiteTaskStore) UpdateTask(task *ScheduledTask) error {
+func (s *SQLiteTaskStore) UpdateTask(ctx context.Context, task *ScheduledTask) error {
 	task.UpdatedAt = time.Now().UTC()
 
 	configJSON, err := task.MarshalScheduleConfig()
@@ -135,7 +132,6 @@ func (s *SQLiteTaskStore) UpdateTask(task *ScheduledTask) error {
 		return fmt.Errorf("marshaling schedule config: %w", err)
 	}
 
-	ctx := context.Background()
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE scheduled_tasks SET
 			name = ?, description = ?, prompt = ?, agent_slug = ?,
@@ -166,8 +162,7 @@ func (s *SQLiteTaskStore) UpdateTask(task *ScheduledTask) error {
 }
 
 // DeleteTask deletes a scheduled task and its job history (via CASCADE).
-func (s *SQLiteTaskStore) DeleteTask(id string) error {
-	ctx := context.Background()
+func (s *SQLiteTaskStore) DeleteTask(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, "DELETE FROM scheduled_tasks WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("deleting task %q: %w", id, err)
@@ -183,8 +178,7 @@ func (s *SQLiteTaskStore) DeleteTask(id string) error {
 }
 
 // ListJobHistory returns job history entries for a specific task.
-func (s *SQLiteTaskStore) ListJobHistory(taskID string, limit int) ([]*JobHistory, error) {
-	ctx := context.Background()
+func (s *SQLiteTaskStore) ListJobHistory(ctx context.Context, taskID string, limit int) ([]*JobHistory, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, task_id, task_name, agent_slug, status, started_at, finished_at,
 		       duration_ms, chat_session_id, model, prompt_preview, error_message,
@@ -202,8 +196,7 @@ func (s *SQLiteTaskStore) ListJobHistory(taskID string, limit int) ([]*JobHistor
 }
 
 // ListAllJobHistory returns all job history entries with pagination.
-func (s *SQLiteTaskStore) ListAllJobHistory(limit, offset int) ([]*JobHistory, error) {
-	ctx := context.Background()
+func (s *SQLiteTaskStore) ListAllJobHistory(ctx context.Context, limit, offset int) ([]*JobHistory, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, task_id, task_name, agent_slug, status, started_at, finished_at,
 		       duration_ms, chat_session_id, model, prompt_preview, error_message,
@@ -220,8 +213,7 @@ func (s *SQLiteTaskStore) ListAllJobHistory(limit, offset int) ([]*JobHistory, e
 }
 
 // GetJobHistory returns a single job history entry by ID, or nil if not found.
-func (s *SQLiteTaskStore) GetJobHistory(id string) (*JobHistory, error) {
-	ctx := context.Background()
+func (s *SQLiteTaskStore) GetJobHistory(ctx context.Context, id string) (*JobHistory, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, task_id, task_name, agent_slug, status, started_at, finished_at,
 		       duration_ms, chat_session_id, model, prompt_preview, error_message,
@@ -240,12 +232,11 @@ func (s *SQLiteTaskStore) GetJobHistory(id string) (*JobHistory, error) {
 }
 
 // CreateJobHistory inserts a new job history record.
-func (s *SQLiteTaskStore) CreateJobHistory(jh *JobHistory) error {
+func (s *SQLiteTaskStore) CreateJobHistory(ctx context.Context, jh *JobHistory) error {
 	if jh.ID == "" {
 		jh.ID = uuid.New().String()
 	}
 
-	ctx := context.Background()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO job_history
 			(id, task_id, task_name, agent_slug, status, started_at, finished_at,
@@ -266,8 +257,7 @@ func (s *SQLiteTaskStore) CreateJobHistory(jh *JobHistory) error {
 }
 
 // DeleteJobHistory deletes a single job history entry by ID.
-func (s *SQLiteTaskStore) DeleteJobHistory(id string) error {
-	ctx := context.Background()
+func (s *SQLiteTaskStore) DeleteJobHistory(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, "DELETE FROM job_history WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("deleting job history %q: %w", id, err)
@@ -283,11 +273,10 @@ func (s *SQLiteTaskStore) DeleteJobHistory(id string) error {
 }
 
 // BulkDeleteJobHistory deletes multiple job history entries by their IDs.
-func (s *SQLiteTaskStore) BulkDeleteJobHistory(ids []string) error {
+func (s *SQLiteTaskStore) BulkDeleteJobHistory(ctx context.Context, ids []string) error {
 	if len(ids) == 0 {
 		return nil
 	}
-	ctx := context.Background()
 	placeholders := make([]string, len(ids))
 	args := make([]any, len(ids))
 	for i, id := range ids {
@@ -304,8 +293,7 @@ func (s *SQLiteTaskStore) BulkDeleteJobHistory(ids []string) error {
 }
 
 // UpdateJobHistory updates an existing job history record.
-func (s *SQLiteTaskStore) UpdateJobHistory(jh *JobHistory) error {
-	ctx := context.Background()
+func (s *SQLiteTaskStore) UpdateJobHistory(ctx context.Context, jh *JobHistory) error {
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE job_history SET
 			status = ?, finished_at = ?, duration_ms = ?, chat_session_id = ?,

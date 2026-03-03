@@ -77,8 +77,8 @@ func New(cfg Config) (*Scheduler, error) {
 }
 
 // Start loads active tasks from the database, schedules them, and starts the gocron scheduler.
-func (s *Scheduler) Start(_ context.Context) error {
-	tasks, err := s.cfg.TaskStore.ListTasks()
+func (s *Scheduler) Start(ctx context.Context) error {
+	tasks, err := s.cfg.TaskStore.ListTasks(ctx)
 	if err != nil {
 		return fmt.Errorf("loading tasks: %w", err)
 	}

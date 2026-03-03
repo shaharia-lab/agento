@@ -36,6 +36,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/server"
 	"github.com/shaharia-lab/agento/internal/service"
 	"github.com/shaharia-lab/agento/internal/storage"
+	"github.com/shaharia-lab/agento/internal/telemetry"
 	"github.com/shaharia-lab/agento/internal/tools"
 )
 
@@ -81,6 +82,19 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	if err := ensureWebDirectories(cfg); err != nil {
 		return err
 	}
+
+	// Initialize OpenTelemetry (no-op providers for Phase 1 — no exporters connected).
+	otelProviders, err := telemetry.InitNoOp(ctx)
+	if err != nil {
+		return fmt.Errorf("initializing telemetry: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if shutdownErr := otelProviders.Shutdown(shutdownCtx); shutdownErr != nil {
+			fmt.Fprintf(os.Stderr, "telemetry shutdown error: %v\n", shutdownErr)
+		}
+	}()
 
 	sysLogger, logCleanup, err := logger.NewSystemLogger(cfg.LogDir(), cfg.SlogLevel())
 	if err != nil {

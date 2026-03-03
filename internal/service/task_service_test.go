@@ -32,7 +32,7 @@ func TestListTasks(t *testing.T) {
 	}
 
 	repo := new(mocks.MockTaskStore)
-	repo.On("ListTasks").Return(tasks, nil)
+	repo.On("ListTasks", mock.Anything).Return(tasks, nil)
 
 	svc := newTestTaskService(repo)
 	result, err := svc.ListTasks(context.Background())
@@ -44,7 +44,7 @@ func TestListTasks(t *testing.T) {
 
 func TestListTasks_Error(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("ListTasks").Return(nil, errors.New("db error"))
+	repo.On("ListTasks", mock.Anything).Return(nil, errors.New("db error"))
 
 	svc := newTestTaskService(repo)
 	_, err := svc.ListTasks(context.Background())
@@ -62,7 +62,7 @@ func TestGetTask(t *testing.T) {
 	task := &storage.ScheduledTask{ID: "t1", Name: "Task 1"}
 
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "t1").Return(task, nil)
+	repo.On("GetTask", mock.Anything, "t1").Return(task, nil)
 
 	svc := newTestTaskService(repo)
 	result, err := svc.GetTask(context.Background(), "t1")
@@ -74,7 +74,7 @@ func TestGetTask(t *testing.T) {
 
 func TestGetTask_NotFound(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "missing").Return(nil, nil)
+	repo.On("GetTask", mock.Anything, "missing").Return(nil, nil)
 
 	svc := newTestTaskService(repo)
 	_, err := svc.GetTask(context.Background(), "missing")
@@ -91,7 +91,7 @@ func TestGetTask_NotFound(t *testing.T) {
 
 func TestCreateTask(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("CreateTask", mock.AnythingOfType("*storage.ScheduledTask")).Return(nil)
+	repo.On("CreateTask", mock.Anything, mock.AnythingOfType("*storage.ScheduledTask")).Return(nil)
 
 	svc := newTestTaskService(repo)
 	task := &storage.ScheduledTask{
@@ -190,8 +190,8 @@ func TestUpdateTask(t *testing.T) {
 	}
 
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "t1").Return(existing, nil)
-	repo.On("UpdateTask", mock.MatchedBy(func(t *storage.ScheduledTask) bool {
+	repo.On("GetTask", mock.Anything, "t1").Return(existing, nil)
+	repo.On("UpdateTask", mock.Anything, mock.MatchedBy(func(t *storage.ScheduledTask) bool {
 		// Preserves run metadata from existing task
 		return t.RunCount == 5 && t.LastRunStatus == "success" && t.CreatedAt.Equal(now)
 	})).Return(nil)
@@ -215,7 +215,7 @@ func TestUpdateTask(t *testing.T) {
 
 func TestUpdateTask_NotFound(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "missing").Return(nil, nil)
+	repo.On("GetTask", mock.Anything, "missing").Return(nil, nil)
 
 	svc := newTestTaskService(repo)
 	_, err := svc.UpdateTask(context.Background(), "missing", &storage.ScheduledTask{Name: "x", Prompt: "p"})
@@ -232,8 +232,8 @@ func TestUpdateTask_NotFound(t *testing.T) {
 
 func TestDeleteTask(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "t1").Return(&storage.ScheduledTask{ID: "t1"}, nil)
-	repo.On("DeleteTask", "t1").Return(nil)
+	repo.On("GetTask", mock.Anything, "t1").Return(&storage.ScheduledTask{ID: "t1"}, nil)
+	repo.On("DeleteTask", mock.Anything, "t1").Return(nil)
 
 	svc := newTestTaskService(repo)
 	err := svc.DeleteTask(context.Background(), "t1")
@@ -244,7 +244,7 @@ func TestDeleteTask(t *testing.T) {
 
 func TestDeleteTask_NotFound(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "missing").Return(nil, nil)
+	repo.On("GetTask", mock.Anything, "missing").Return(nil, nil)
 
 	svc := newTestTaskService(repo)
 	err := svc.DeleteTask(context.Background(), "missing")
@@ -261,8 +261,8 @@ func TestDeleteTask_NotFound(t *testing.T) {
 
 func TestPauseTask(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "t1").Return(&storage.ScheduledTask{ID: "t1", Status: storage.TaskStatusActive}, nil)
-	repo.On("UpdateTask", mock.MatchedBy(func(task *storage.ScheduledTask) bool {
+	repo.On("GetTask", mock.Anything, "t1").Return(&storage.ScheduledTask{ID: "t1", Status: storage.TaskStatusActive}, nil)
+	repo.On("UpdateTask", mock.Anything, mock.MatchedBy(func(task *storage.ScheduledTask) bool {
 		return task.Status == storage.TaskStatusPaused
 	})).Return(nil)
 
@@ -276,7 +276,7 @@ func TestPauseTask(t *testing.T) {
 
 func TestPauseTask_NotFound(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "missing").Return(nil, nil)
+	repo.On("GetTask", mock.Anything, "missing").Return(nil, nil)
 
 	svc := newTestTaskService(repo)
 	_, err := svc.PauseTask(context.Background(), "missing")
@@ -293,14 +293,14 @@ func TestPauseTask_NotFound(t *testing.T) {
 func TestResumeTask(t *testing.T) {
 	now := time.Now().UTC()
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "t1").Return(&storage.ScheduledTask{
+	repo.On("GetTask", mock.Anything, "t1").Return(&storage.ScheduledTask{
 		ID:            "t1",
 		Status:        storage.TaskStatusPaused,
 		RunCount:      3,
 		LastRunAt:     &now,
 		LastRunStatus: "failed",
 	}, nil)
-	repo.On("UpdateTask", mock.MatchedBy(func(task *storage.ScheduledTask) bool {
+	repo.On("UpdateTask", mock.Anything, mock.MatchedBy(func(task *storage.ScheduledTask) bool {
 		return task.Status == storage.TaskStatusActive &&
 			task.RunCount == 0 &&
 			task.LastRunAt == nil &&
@@ -320,7 +320,7 @@ func TestResumeTask(t *testing.T) {
 
 func TestResumeTask_NotFound(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "missing").Return(nil, nil)
+	repo.On("GetTask", mock.Anything, "missing").Return(nil, nil)
 
 	svc := newTestTaskService(repo)
 	_, err := svc.ResumeTask(context.Background(), "missing")
@@ -332,11 +332,11 @@ func TestResumeTask_NotFound(t *testing.T) {
 
 func TestResumeTask_StoreError(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetTask", "t1").Return(&storage.ScheduledTask{
+	repo.On("GetTask", mock.Anything, "t1").Return(&storage.ScheduledTask{
 		ID:     "t1",
 		Status: storage.TaskStatusPaused,
 	}, nil)
-	repo.On("UpdateTask", mock.Anything).Return(errors.New("db write error"))
+	repo.On("UpdateTask", mock.Anything, mock.Anything).Return(errors.New("db write error"))
 
 	svc := newTestTaskService(repo)
 	_, err := svc.ResumeTask(context.Background(), "t1")
@@ -356,7 +356,7 @@ func TestListJobHistory(t *testing.T) {
 	}
 
 	repo := new(mocks.MockTaskStore)
-	repo.On("ListJobHistory", "t1", 50).Return(history, nil)
+	repo.On("ListJobHistory", mock.Anything, "t1", 50).Return(history, nil)
 
 	svc := newTestTaskService(repo)
 	result, err := svc.ListJobHistory(context.Background(), "t1", 0)
@@ -370,7 +370,7 @@ func TestListAllJobHistory(t *testing.T) {
 	history := []*storage.JobHistory{{ID: "j1"}, {ID: "j2"}}
 
 	repo := new(mocks.MockTaskStore)
-	repo.On("ListAllJobHistory", 50, 0).Return(history, nil)
+	repo.On("ListAllJobHistory", mock.Anything, 50, 0).Return(history, nil)
 
 	svc := newTestTaskService(repo)
 	result, err := svc.ListAllJobHistory(context.Background(), 0, -1)
@@ -388,7 +388,7 @@ func TestGetJobHistory(t *testing.T) {
 	jh := &storage.JobHistory{ID: "j1", TaskName: "Test"}
 
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetJobHistory", "j1").Return(jh, nil)
+	repo.On("GetJobHistory", mock.Anything, "j1").Return(jh, nil)
 
 	svc := newTestTaskService(repo)
 	result, err := svc.GetJobHistory(context.Background(), "j1")
@@ -400,7 +400,7 @@ func TestGetJobHistory(t *testing.T) {
 
 func TestGetJobHistory_NotFound(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("GetJobHistory", "missing").Return(nil, nil)
+	repo.On("GetJobHistory", mock.Anything, "missing").Return(nil, nil)
 
 	svc := newTestTaskService(repo)
 	_, err := svc.GetJobHistory(context.Background(), "missing")
@@ -416,7 +416,7 @@ func TestGetJobHistory_NotFound(t *testing.T) {
 
 func TestValidateTask_EmptyScheduleTypeDefaultsToRunImmediately(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("CreateTask", mock.MatchedBy(func(task *storage.ScheduledTask) bool {
+	repo.On("CreateTask", mock.Anything, mock.MatchedBy(func(task *storage.ScheduledTask) bool {
 		return task.ScheduleType == storage.ScheduleRunImmediately
 	})).Return(nil)
 
@@ -435,7 +435,7 @@ func TestValidateTask_EmptyScheduleTypeDefaultsToRunImmediately(t *testing.T) {
 
 func TestCreateTask_ValidIntervalSchedule(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("CreateTask", mock.Anything).Return(nil)
+	repo.On("CreateTask", mock.Anything, mock.Anything).Return(nil)
 
 	svc := newTestTaskService(repo)
 	task := &storage.ScheduledTask{
@@ -452,7 +452,7 @@ func TestCreateTask_ValidIntervalSchedule(t *testing.T) {
 
 func TestCreateTask_ValidCronSchedule(t *testing.T) {
 	repo := new(mocks.MockTaskStore)
-	repo.On("CreateTask", mock.Anything).Return(nil)
+	repo.On("CreateTask", mock.Anything, mock.Anything).Return(nil)
 
 	svc := newTestTaskService(repo)
 	task := &storage.ScheduledTask{

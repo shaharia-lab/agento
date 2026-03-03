@@ -9,6 +9,10 @@ import (
 	"time"
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/integrations"
@@ -426,8 +430,24 @@ func RunAgent(
 	ctx context.Context, agentCfg *config.AgentConfig,
 	question string, opts RunOptions,
 ) (*AgentResult, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "agent.run")
+	defer span.End()
+
+	start := time.Now()
+
+	model := ""
+	if agentCfg != nil {
+		model = agentCfg.Model
+		span.SetAttributes(
+			attribute.String("agent.model", agentCfg.Model),
+			attribute.String("agent.slug", agentCfg.Slug),
+		)
+	}
+
 	systemPrompt, err := resolveSystemPrompt(agentCfg, opts)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
@@ -435,10 +455,53 @@ func RunAgent(
 
 	stream, err := claude.Query(ctx, question, sdkOpts...)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("starting agent: %w", err)
 	}
 
-	return collectRunResult(stream)
+	result, err := collectRunResult(stream)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
+	}
+
+	durationSec := time.Since(start).Seconds()
+	recordAgentMetrics(ctx, model, durationSec, result)
+
+	span.SetAttributes(
+		attribute.Int("agent.input_tokens", result.Usage.InputTokens),
+		attribute.Int("agent.output_tokens", result.Usage.OutputTokens),
+		attribute.Float64("agent.duration_sec", durationSec),
+	)
+
+	return result, nil
+}
+
+// recordAgentMetrics records token usage and run duration into the global meter.
+func recordAgentMetrics(ctx context.Context, model string, durationSec float64, result *AgentResult) {
+	m := otel.GetMeterProvider().Meter("agento")
+	modelAttr := metric.WithAttributes(attribute.String("model", model))
+
+	if c, err := m.Int64Counter("agento.agent.runs.total"); err == nil {
+		c.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("model", model),
+			attribute.String("status", "success"),
+		))
+	}
+
+	if h, err := m.Float64Histogram("agento.agent.run.duration", metric.WithUnit("s")); err == nil {
+		h.Record(ctx, durationSec, modelAttr)
+	}
+
+	if c, err := m.Int64Counter("agento.agent.input_tokens.total"); err == nil {
+		c.Add(ctx, int64(result.Usage.InputTokens), modelAttr) //nolint:gosec
+	}
+
+	if c, err := m.Int64Counter("agento.agent.output_tokens.total"); err == nil {
+		c.Add(ctx, int64(result.Usage.OutputTokens), modelAttr) //nolint:gosec
+	}
 }
 
 // resolveSystemPrompt interpolates the agent's system prompt if an agent config is provided.

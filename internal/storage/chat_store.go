@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 )
@@ -44,12 +45,12 @@ type ChatMessage struct {
 
 // ChatStore defines the interface for chat session persistence.
 type ChatStore interface {
-	ListSessions() ([]*ChatSession, error)
-	GetSession(id string) (*ChatSession, error)
-	GetSessionWithMessages(id string) (*ChatSession, []ChatMessage, error)
-	CreateSession(agentSlug, workingDir, model, settingsProfileID string) (*ChatSession, error)
-	AppendMessage(sessionID string, msg ChatMessage) error
-	UpdateSession(session *ChatSession) error
-	DeleteSession(id string) error
-	BulkDeleteSessions(ids []string) error
+	ListSessions(ctx context.Context) ([]*ChatSession, error)
+	GetSession(ctx context.Context, id string) (*ChatSession, error)
+	GetSessionWithMessages(ctx context.Context, id string) (*ChatSession, []ChatMessage, error)
+	CreateSession(ctx context.Context, agentSlug, workingDir, model, settingsProfileID string) (*ChatSession, error)
+	AppendMessage(ctx context.Context, sessionID string, msg ChatMessage) error
+	UpdateSession(ctx context.Context, session *ChatSession) error
+	DeleteSession(ctx context.Context, id string) error
+	BulkDeleteSessions(ctx context.Context, ids []string) error
 }
