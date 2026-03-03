@@ -38,21 +38,9 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 
 // handleUpdateCheck reports whether a newer release is available on GitHub.
 // Results are cached for 1 hour.
-// TODO: remove ?force=true support before merging — for testing the banner only.
 func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	current := build.Version
 	currentTrimmed := strings.TrimPrefix(current, "v")
-
-	// TODO: remove before merging — simulates an available update for UI testing.
-	if r.URL.Query().Get("force") == "true" {
-		s.writeJSON(w, http.StatusOK, map[string]interface{}{
-			"current_version":  current,
-			"update_available": true,
-			"latest_version":   "v99.99.99",
-			"release_url":      "https://github.com/shaharia-lab/agento/releases",
-		})
-		return
-	}
 
 	// Dev/unknown builds cannot be compared to releases.
 	if currentTrimmed == "dev" || currentTrimmed == "unknown" {
