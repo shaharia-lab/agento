@@ -29,6 +29,7 @@ import type {
   NotificationLogEntry,
   ScheduledTask,
   JobHistoryEntry,
+  UpdateCheckResponse,
 } from '../types'
 
 const BASE = '/api'
@@ -525,6 +526,14 @@ export const jobHistoryApi = {
     }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
+}
+
+// ── Version / update check ────────────────────────────────────────────────────
+
+export const versionApi = {
+  /** Check whether a newer release is available. Pass force=true to simulate an update (dev testing). */
+  checkUpdate: (force?: boolean) =>
+    request<UpdateCheckResponse>(`/version/update-check${force ? '?force=true' : ''}`),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

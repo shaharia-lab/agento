@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Outlet } from 'react-router-dom'
 import { Menu } from 'lucide-react'
 import Sidebar from './Sidebar'
+import UpdateBanner from './UpdateBanner'
 
 function AgentoLogo() {
   return (
@@ -30,6 +31,8 @@ export default function Layout() {
       <Sidebar mobileOpen={mobileOpen} onMobileClose={() => setMobileOpen(false)} />
 
       <div className="flex flex-1 flex-col overflow-hidden">
+        <UpdateBanner />
+
         {/* Mobile top bar */}
         <header className="flex items-center gap-3 border-b border-zinc-200 dark:border-zinc-700/50 px-4 h-14 shrink-0 md:hidden">
           <button

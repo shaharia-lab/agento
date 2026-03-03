@@ -664,6 +664,15 @@ export interface JobHistoryEntry {
   response_text: string
 }
 
+// ── Version / update check ────────────────────────────────────────────────────
+
+export interface UpdateCheckResponse {
+  current_version: string
+  update_available: boolean
+  latest_version: string
+  release_url: string
+}
+
 // ── Analytics ─────────────────────────────────────────────────────────────────
 
 export interface AnalyticsSummary {
