@@ -96,6 +96,7 @@ func registerProviders(
 	otel.SetTracerProvider(tp)
 	otel.SetMeterProvider(mp)
 	global.SetLoggerProvider(lp)
+	otel.SetErrorHandler(newRateLimitedErrorHandler())
 
 	instr, err := NewInstruments()
 	if err != nil {

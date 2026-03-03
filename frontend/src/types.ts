@@ -691,6 +691,11 @@ export interface MonitoringResponse {
   env_locked: boolean
 }
 
+export interface MonitoringTestResult {
+  ok: boolean
+  error?: string
+}
+
 // ── Analytics ─────────────────────────────────────────────────────────────────
 
 export interface AnalyticsSummary {

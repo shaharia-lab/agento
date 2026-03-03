@@ -1,10 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"time"
+
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/shaharia-lab/agento/internal/telemetry"
 )
@@ -100,5 +106,63 @@ func (s *Server) putMonitoring(w http.ResponseWriter, r *http.Request) {
 		Settings:  monitoringConfigToDTO(updated),
 		Locked:    s.monitoringMgr.LockedFields(),
 		EnvLocked: s.monitoringMgr.IsEnvLocked(),
+	})
+}
+
+// MonitoringTestResult is the response for POST /api/monitoring/test.
+type MonitoringTestResult struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// testMonitoring handles POST /api/monitoring/test.
+// It dials the OTLP gRPC endpoint from the request body and reports whether
+// the connection can be established. HTTP 200 is always returned; the "ok"
+// field in the body indicates success or failure.
+func (s *Server) testMonitoring(w http.ResponseWriter, r *http.Request) {
+	var dto MonitoringConfigDTO
+	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		return
+	}
+
+	if dto.OTLPEndpoint == "" {
+		s.writeJSON(w, http.StatusOK, MonitoringTestResult{
+			OK:    false,
+			Error: "OTLP endpoint is not configured",
+		})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+
+	var creds credentials.TransportCredentials
+	if dto.OTLPInsecure {
+		creds = insecure.NewCredentials()
+	} else {
+		creds = credentials.NewTLS(nil)
+	}
+
+	//nolint:staticcheck // grpc.Dial is deprecated but replacement requires additional setup
+	conn, err := grpc.Dial(dto.OTLPEndpoint, grpc.WithTransportCredentials(creds))
+	if err != nil {
+		s.writeJSON(w, http.StatusOK, MonitoringTestResult{OK: false, Error: err.Error()})
+		return
+	}
+	defer conn.Close() //nolint:errcheck
+
+	conn.Connect()
+	conn.WaitForStateChange(ctx, connectivity.Idle)
+
+	state := conn.GetState()
+	if state == connectivity.Ready || state == connectivity.Connecting {
+		s.writeJSON(w, http.StatusOK, MonitoringTestResult{OK: true})
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, MonitoringTestResult{
+		OK:    false,
+		Error: "could not reach OTLP endpoint (state: " + state.String() + ")",
 	})
 }

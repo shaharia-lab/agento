@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Lock, Plus, Trash2 } from 'lucide-react'
+import { CheckCircle2, Loader2, Lock, Plus, Trash2, XCircle } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -11,7 +11,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { monitoringApi } from '@/lib/api'
-import type { MonitoringConfig, MonitoringResponse } from '@/types'
+import type { MonitoringConfig, MonitoringResponse, MonitoringTestResult } from '@/types'
 
 const defaultConfig: MonitoringConfig = {
   enabled: false,
@@ -75,6 +75,8 @@ export default function MonitoringTab() {
   const [headerEntries, setHeaderEntries] = useState<HeaderEntry[]>([])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<MonitoringTestResult | null>(null)
   const [toast, setToast] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -117,6 +119,23 @@ export default function MonitoringTab() {
       setError(err instanceof Error ? err.message : 'Failed to save settings')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const handleTest = async () => {
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const payload: MonitoringConfig = {
+        ...cfg,
+        otlp_headers: entriesToHeaders(headerEntries),
+      }
+      const result = await monitoringApi.test(payload)
+      setTestResult(result)
+    } catch {
+      setTestResult({ ok: false, error: 'Request failed' })
+    } finally {
+      setTesting(false)
     }
   }
 
@@ -304,7 +323,10 @@ export default function MonitoringTab() {
               </Label>
               <Input
                 value={cfg.otlp_endpoint}
-                onChange={e => setCfg(prev => ({ ...prev, otlp_endpoint: e.target.value }))}
+                onChange={e => {
+                  setCfg(prev => ({ ...prev, otlp_endpoint: e.target.value }))
+                  setTestResult(null)
+                }}
                 disabled={envLocked}
                 placeholder="localhost:4317"
                 className="font-mono text-sm"
@@ -313,6 +335,35 @@ export default function MonitoringTab() {
                 gRPC endpoint of the OTLP collector (host:port).
               </p>
               {'otlp_endpoint' in locked && <LockedBadge envVar={locked['otlp_endpoint']} />}
+              <div className="flex items-center gap-3 mt-1">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleTest}
+                  disabled={testing || !cfg.otlp_endpoint}
+                  className="h-7 text-xs px-3"
+                >
+                  {testing ? <Loader2 className="h-3 w-3 animate-spin mr-1.5" /> : null}
+                  {testing ? 'Testing…' : 'Test connection'}
+                </Button>
+                {testResult !== null && (
+                  <span
+                    className={`flex items-center gap-1.5 text-xs ${
+                      testResult.ok
+                        ? 'text-green-600 dark:text-green-400'
+                        : 'text-red-600 dark:text-red-400'
+                    }`}
+                  >
+                    {testResult.ok ? (
+                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                    ) : (
+                      <XCircle className="h-3.5 w-3.5 shrink-0" />
+                    )}
+                    {testResult.ok ? 'Connected' : (testResult.error ?? 'Unreachable')}
+                  </span>
+                )}
+              </div>
             </div>
 
             {/* Insecure toggle */}

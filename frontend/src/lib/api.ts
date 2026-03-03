@@ -32,6 +32,7 @@ import type {
   UpdateCheckResponse,
   MonitoringConfig,
   MonitoringResponse,
+  MonitoringTestResult,
 } from '../types'
 
 const BASE = '/api'
@@ -544,6 +545,12 @@ export const monitoringApi = {
   update: (cfg: MonitoringConfig): Promise<MonitoringResponse> =>
     request<MonitoringResponse>('/monitoring', {
       method: 'PUT',
+      body: JSON.stringify(cfg),
+    }),
+
+  test: (cfg: MonitoringConfig): Promise<MonitoringTestResult> =>
+    request<MonitoringTestResult>('/monitoring/test', {
+      method: 'POST',
       body: JSON.stringify(cfg),
     }),
 }

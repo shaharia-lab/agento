@@ -130,6 +130,7 @@ func (s *Server) Mount(r chi.Router) {
 	// Monitoring / OTel configuration
 	r.Get("/monitoring", s.getMonitoring)
 	r.Put("/monitoring", s.putMonitoring)
+	r.Post("/monitoring/test", s.testMonitoring)
 }
 
 // mountExtensionRoutes registers filesystem, integration, task, and job-history routes.
