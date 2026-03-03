@@ -1,6 +1,8 @@
 package telemetry
 
 import (
+	"sync/atomic"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
 )
@@ -8,15 +10,16 @@ import (
 const meterName = "agento"
 
 // globalInstruments holds the singleton metric instruments created at startup.
-var globalInstruments *Instruments //nolint:gochecknoglobals
+// atomic.Pointer gives safe concurrent access between init and hot-path readers.
+var globalInstruments atomic.Pointer[Instruments] //nolint:gochecknoglobals
 
 // setGlobalInstruments stores instr as the process-wide instruments.
-// Called once from InitNoOp after the global MeterProvider is registered.
-func setGlobalInstruments(instr *Instruments) { globalInstruments = instr }
+// Called once from Init after the global MeterProvider is registered.
+func setGlobalInstruments(instr *Instruments) { globalInstruments.Store(instr) }
 
 // GetGlobalInstruments returns the instruments created at startup.
-// Returns nil if InitNoOp has not been called yet.
-func GetGlobalInstruments() *Instruments { return globalInstruments }
+// Returns nil if Init has not been called yet.
+func GetGlobalInstruments() *Instruments { return globalInstruments.Load() }
 
 // Instruments holds all OTel metric instruments for Agento.
 type Instruments struct {

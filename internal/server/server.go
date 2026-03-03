@@ -16,27 +16,34 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/shaharia-lab/agento/internal/api"
+	"github.com/shaharia-lab/agento/internal/telemetry"
 )
 
 // Server is the HTTP server for the agents platform.
 type Server struct {
-	apiServer  *api.Server
-	frontendFS fs.FS // nil in dev mode
-	port       int
-	logger     *slog.Logger
-	httpServer *http.Server
+	apiServer     *api.Server
+	frontendFS    fs.FS // nil in dev mode
+	port          int
+	logger        *slog.Logger
+	httpServer    *http.Server
+	monitoringCfg telemetry.MonitoringConfig
 }
 
 // New creates a new Server. Pass frontendFS=nil to proxy to Vite dev server on port 5173.
-func New(apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger) *Server {
+func New(
+	apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger,
+	monitoringCfg telemetry.MonitoringConfig,
+) *Server {
 	s := &Server{
-		apiServer:  apiSrv,
-		frontendFS: frontendFS,
-		port:       port,
-		logger:     logger,
+		apiServer:     apiSrv,
+		frontendFS:    frontendFS,
+		port:          port,
+		logger:        logger,
+		monitoringCfg: monitoringCfg,
 	}
 
 	r := chi.NewRouter()
@@ -53,6 +60,9 @@ func New(apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger) *S
 			return
 		}
 	})
+
+	// Metrics endpoint: serves Prometheus metrics when enabled, 503 otherwise.
+	r.Get("/metrics", s.metricsHandler())
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
@@ -123,6 +133,23 @@ func (s *Server) corsMiddleware() func(http.Handler) http.Handler {
 		AllowCredentials: false,
 		MaxAge:           300,
 	})
+}
+
+// metricsHandler returns an http.HandlerFunc that serves Prometheus metrics when the
+// Prometheus exporter is configured, or a 503 JSON error otherwise.
+func (s *Server) metricsHandler() http.HandlerFunc {
+	if s.monitoringCfg.MetricsExporter == telemetry.MetricsExporterPrometheus {
+		return promhttp.Handler().ServeHTTP
+	}
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if _, err := w.Write([]byte(
+			`{"error":"metrics endpoint is disabled; set OTEL_METRICS_EXPORTER=prometheus to enable"}`,
+		)); err != nil {
+			return
+		}
+	}
 }
 
 // requestLogger is a chi middleware that logs each incoming request.

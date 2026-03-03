@@ -21,3 +21,15 @@ func TestInitNoOp(t *testing.T) {
 
 	require.NoError(t, p.Shutdown(context.Background()))
 }
+
+func TestInit_Prometheus(t *testing.T) {
+	cfg := telemetry.DefaultMonitoringConfig()
+	cfg.Enabled = true
+	cfg.MetricsExporter = telemetry.MetricsExporterPrometheus
+
+	p, err := telemetry.Init(context.Background(), cfg)
+	require.NoError(t, err)
+	require.NotNil(t, p)
+	require.NotNil(t, p.Instruments)
+	require.NoError(t, p.Shutdown(context.Background()))
+}
