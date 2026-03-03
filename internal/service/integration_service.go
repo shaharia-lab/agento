@@ -68,9 +68,6 @@ type integrationService struct {
 
 	mu         sync.Mutex
 	oauthFlows map[string]*oauthState // integration id → state
-
-	// parentCtx is used to derive child contexts for callback servers.
-	parentCtx context.Context //nolint:containedctx
 }
 
 // NewIntegrationService returns a new IntegrationService.
@@ -78,14 +75,12 @@ func NewIntegrationService(
 	store storage.IntegrationStore,
 	registry *integrations.IntegrationRegistry,
 	logger *slog.Logger,
-	parentCtx context.Context,
 ) IntegrationService {
 	return &integrationService{
 		store:      store,
 		registry:   registry,
 		logger:     logger,
 		oauthFlows: make(map[string]*oauthState),
-		parentCtx:  parentCtx,
 	}
 }
 
@@ -285,8 +280,9 @@ func (s *integrationService) Update(
 		return nil, fmt.Errorf("saving integration: %w", err)
 	}
 
-	// Reload the in-process MCP server with the new config.
-	if reloadErr := s.registry.Reload(ctx, id); reloadErr != nil {
+	// Reload the in-process MCP server with the new config. Use context.Background()
+	// so the reload is not canceled if the HTTP client disconnects before it completes.
+	if reloadErr := s.registry.Reload(context.Background(), id); reloadErr != nil {
 		s.logger.Warn("failed to reload integration server after update", "id", id, "error", reloadErr)
 	}
 
@@ -306,7 +302,7 @@ func (s *integrationService) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *integrationService) StartOAuth(_ context.Context, id string) (string, error) {
+func (s *integrationService) StartOAuth(ctx context.Context, id string) (string, error) {
 	cfg, err := s.store.Get(id)
 	if err != nil {
 		return "", err
@@ -333,7 +329,9 @@ func (s *integrationService) StartOAuth(_ context.Context, id string) (string, e
 	var authURL string
 	var buildErr error
 
-	callbackCtx, cancelCallback := context.WithTimeout(s.parentCtx, 10*time.Minute)
+	// Detach from the request context so the callback server outlives the HTTP request,
+	// then apply a 10-minute deadline for the OAuth flow.
+	callbackCtx, cancelCallback := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
 	// cancelCallback is idempotent — safe to call multiple times (e.g. also called by onToken).
 	defer cancelCallback()
 
@@ -396,7 +394,7 @@ func (s *integrationService) handleOAuthToken(id string, state *oauthState, tok 
 
 	// Start the MCP server for this newly-authenticated integration.
 	go func() {
-		if startErr := s.registry.Reload(s.parentCtx, id); startErr != nil {
+		if startErr := s.registry.Reload(context.Background(), id); startErr != nil {
 			s.logger.Warn("failed to start integration server after OAuth", "id", id, "error", startErr)
 		}
 	}()
@@ -613,7 +611,7 @@ func (s *integrationService) validateSlackTokenAuth(ctx context.Context, cfg *co
 // reloadIntegration starts or reloads the MCP server for an integration in the background.
 func (s *integrationService) reloadIntegration(id string) {
 	go func() {
-		if reloadErr := s.registry.Reload(s.parentCtx, id); reloadErr != nil {
+		if reloadErr := s.registry.Reload(context.Background(), id); reloadErr != nil {
 			s.logger.Warn("failed to start integration server after validation", "id", id, "error", reloadErr)
 		}
 	}()
