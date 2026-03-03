@@ -49,7 +49,7 @@ func (s *Server) handleUpdateClaudeSettingsProfile(w http.ResponseWriter, r *htt
 	id := chi.URLParam(r, "id")
 
 	var req UpdateProfileRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { // NOSONAR
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}

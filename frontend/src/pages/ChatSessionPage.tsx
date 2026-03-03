@@ -905,12 +905,12 @@ function ToolCallDetail({
 
   // Write and Edit have their own renderers but may return null (e.g. missing
   // content/patch), in which case fall through to the raw JSON default.
-  const toolDetail =
-    name === 'Write'
-      ? renderWriteDetail(input)
-      : name === 'Edit'
-        ? renderEditDetail(input, toolResult)
-        : null
+  let toolDetail = null
+  if (name === 'Write') {
+    toolDetail = renderWriteDetail(input)
+  } else if (name === 'Edit') {
+    toolDetail = renderEditDetail(input, toolResult)
+  }
   if (toolDetail !== null) return toolDetail
 
   // Default: raw JSON

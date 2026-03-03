@@ -280,9 +280,9 @@ func (s *integrationService) Update(
 		return nil, fmt.Errorf("saving integration: %w", err)
 	}
 
-	// Reload the in-process MCP server with the new config. Use context.Background()
-	// so the reload is not canceled if the HTTP client disconnects before it completes.
-	if reloadErr := s.registry.Reload(context.Background(), id); reloadErr != nil {
+	// Reload the in-process MCP server with the new config. Use WithoutCancel so
+	// the reload is not canceled if the HTTP client disconnects before it completes.
+	if reloadErr := s.registry.Reload(context.WithoutCancel(ctx), id); reloadErr != nil {
 		s.logger.Warn("failed to reload integration server after update", "id", id, "error", reloadErr)
 	}
 
