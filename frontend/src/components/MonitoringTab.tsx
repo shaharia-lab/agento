@@ -24,12 +24,18 @@ const defaultConfig: MonitoringConfig = {
 }
 
 interface HeaderEntry {
+  id: string
   key: string
   value: string
 }
 
+let headerIdCounter = 0
+function nextHeaderId(): string {
+  return `hdr-${++headerIdCounter}`
+}
+
 function headersToEntries(headers: Record<string, string>): HeaderEntry[] {
-  return Object.entries(headers).map(([key, value]) => ({ key, value }))
+  return Object.entries(headers).map(([key, value]) => ({ id: nextHeaderId(), key, value }))
 }
 
 function entriesToHeaders(entries: HeaderEntry[]): Record<string, string> {
@@ -140,7 +146,7 @@ export default function MonitoringTab() {
   }
 
   const addHeader = () => {
-    setHeaderEntries(prev => [...prev, { key: '', value: '' }])
+    setHeaderEntries(prev => [...prev, { id: nextHeaderId(), key: '', value: '' }])
   }
 
   const removeHeader = (index: number) => {
@@ -393,7 +399,7 @@ export default function MonitoringTab() {
                 Key-value pairs sent with every OTLP request (e.g. authentication tokens).
               </p>
               {headerEntries.map((entry, i) => (
-                <div key={i} className="flex gap-2 items-center">
+                <div key={entry.id} className="flex gap-2 items-center">
                   <Input
                     value={entry.key}
                     onChange={e => updateHeader(i, 'key', e.target.value)}

@@ -23,6 +23,8 @@ import (
 	"github.com/shaharia-lab/agento/internal/telemetry"
 )
 
+const contentTypeJSON = "application/json"
+
 // Server is the HTTP server for the agents platform.
 type Server struct {
 	apiServer     *api.Server
@@ -54,7 +56,7 @@ func New(
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", contentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
 			return
@@ -145,7 +147,7 @@ func (s *Server) metricsHandler() http.HandlerFunc {
 			promHandler.ServeHTTP(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", contentTypeJSON)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		if _, err := w.Write([]byte(
 			`{"error":"metrics endpoint is disabled; set OTEL_METRICS_EXPORTER=prometheus to enable"}`,

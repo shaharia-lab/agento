@@ -40,6 +40,10 @@ import (
 	"github.com/shaharia-lab/agento/internal/tools"
 )
 
+// noopCleanup is a no-op cleanup function returned on early-exit error paths
+// where no resources have been acquired yet.
+var noopCleanup = func() {} //nolint:gochecknoglobals
+
 // NewWebCmd returns the "web" subcommand that starts the HTTP server.
 func NewWebCmd(cfg *config.AppConfig) *cobra.Command {
 	var port int
@@ -134,7 +138,7 @@ func initObservability(
 	otelCfg := telemetry.ConfigFromEnv()
 	otelProviders, err := telemetry.Init(ctx, otelCfg)
 	if err != nil {
-		return otelCfg, nil, nil, func() {}, fmt.Errorf("initializing telemetry: %w", err)
+		return otelCfg, nil, nil, noopCleanup, fmt.Errorf("initializing telemetry: %w", err)
 	}
 
 	sysLogger, logCleanup, err := logger.NewSystemLogger(cfg.LogDir(), cfg.SlogLevel())
@@ -146,7 +150,7 @@ func initObservability(
 		if shutdownErr := otelProviders.Shutdown(shutdownCtx); shutdownErr != nil {
 			slog.Default().Error("telemetry shutdown during logger init failure", "error", shutdownErr)
 		}
-		return otelCfg, nil, nil, func() {}, fmt.Errorf("initializing logger: %w", err)
+		return otelCfg, nil, nil, noopCleanup, fmt.Errorf("initializing logger: %w", err)
 	}
 
 	logTelemetryMode(sysLogger, otelCfg)

@@ -111,10 +111,8 @@ func (s *Server) putMonitoring(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cfg := dtoToMonitoringConfig(dto)
-	if err := s.monitoringMgr.Update(r.Context(), cfg); err != nil {
-		var envLocked *telemetry.EnvLockedError
-		if errors.As(err, &envLocked) {
+	if err := s.monitoringMgr.Update(r.Context(), dtoToMonitoringConfig(dto)); err != nil {
+		if errors.As(err, new(*telemetry.EnvLockedError)) {
 			s.writeError(w, http.StatusConflict, err.Error())
 			return
 		}
