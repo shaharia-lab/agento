@@ -54,6 +54,7 @@ Visit [http://localhost:8990](http://localhost:8990) in your browser.
 | — | `AGENTO_DATA_DIR` | `~/.agento` | Directory where agents, chats, and logs are stored |
 | — | `AGENTO_DEFAULT_MODEL` | Claude Sonnet | Claude model used for direct (no-agent) chat |
 | — | `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
+| — | `AGENTO_WORKING_DIR` | `/tmp/agento/work` | Default working directory for agent sessions |
 | — | `ANTHROPIC_API_KEY` | — | Anthropic API key (optional if already stored by the Claude CLI) |
 
 **Example: run on a different port**

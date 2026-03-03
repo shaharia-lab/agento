@@ -29,6 +29,7 @@ You can define agents with custom system prompts and tools, start multi-turn con
 - **Integrations** — Connect Google (Calendar, Gmail, Drive), GitHub, Slack, Jira, Confluence, and Telegram as agent tools
 - **Task scheduler** — Schedule recurring agent tasks with cron expressions and track job history
 - **Notifications** — Event-driven notification system with SMTP email support
+- **Auto-update check** — Banner notification when a newer release is available, with one-command update
 
 ---
 

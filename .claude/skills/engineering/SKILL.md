@@ -42,6 +42,8 @@ Read these as needed based on your task:
 | Business Logic | `internal/service/` | ChatService, AgentService, IntegrationService, NotificationService, TaskService, ClaudeSettingsProfileService |
 | Storage | `internal/storage/` | SQLite stores (Agent, Chat, Integration, Settings, Notification, Task) |
 | Agent Runner | `internal/agent/runner.go` | SDK integration, RunOptions, session execution |
+| Logging | `internal/logger/` | Structured slog loggers (system + per-session), log rotation |
+| Build Info | `internal/build/` | Build-time version variables (Version, CommitSHA, BuildDate) |
 | Configuration | `internal/config/` | AppConfig, profiles, integration config |
 | Built-in Tools | `internal/tools/` | Local MCP server, tool registry |
 | Integrations | `internal/integrations/` | Integration registry, MCP backends (Google, GitHub, Slack, Jira, Confluence, Telegram) |

@@ -85,6 +85,10 @@ Browser → Vite (dev) / embedded FS (prod) → React SPA
 
 **`internal/notification/`** — Notification system with SMTP email support. `handler.go` processes events, `smtp.go` sends emails, `template.go` renders notification content.
 
+**`internal/logger/`** — Structured `slog` loggers for system-wide and per-session logging. `NewSystemLogger` writes JSON to a rotating log file via `lumberjack` (50MB, 3 backups, 30 days, compressed). `NewSessionLogger` writes per-session logs to `<logDir>/sessions/<id>.log`.
+
+**`internal/build/`** — Build-time version variables injected via `-ldflags` (Version, CommitSHA, BuildDate).
+
 ### Frontend
 
 **`frontend/src/lib/api.ts`** — Typed API client for all backend endpoints.
@@ -93,7 +97,7 @@ Browser → Vite (dev) / embedded FS (prod) → React SPA
 **`frontend/src/contexts/`** — Theme and appearance state shared across components.
 
 ### Agent Configuration
-Agents are stored in the SQLite database (legacy YAML files in `~/.agento/agents/` are auto-migrated on first startup). Create and edit agents via the UI or API. Fields: `name`, `slug`, `model`, `system_prompt`, `thinking`, `permission_mode`, `capabilities` (built_in/local/mcp/integration tools). Template variables: `{{current_date}}`, `{{current_time}}`.
+Agents are stored in the SQLite database (legacy YAML files in `~/.agento/agents/` are auto-migrated on first startup). Create and edit agents via the UI or API. Fields: `name`, `slug`, `model`, `system_prompt`, `thinking`, `permission_mode`, `capabilities` (built_in/local/mcp/integration tools). Permission modes: `bypass` (default), `default`, `plan`, `dontAsk`. Template variables: `{{current_date}}`, `{{current_time}}`.
 
 ### MCP Integration
 External MCP servers defined in `mcps.yaml` (or `MCPS_FILE`). Local in-process tools registered via `internal/tools/registry.go`. Claude settings profiles stored as `~/.claude/settings_<slug>.json` with metadata at `~/.claude/settings_profiles.json`.

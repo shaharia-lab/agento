@@ -38,6 +38,7 @@ After saving the file, restart Agento or use the UI to reload agents.
 | `description` | No | Short description shown in the UI |
 | `model` | No | Claude model ID. Defaults to `claude-sonnet-4-6` |
 | `thinking` | No | `adaptive` (default), `enabled`, or `disabled` |
+| `permission_mode` | No | `bypass` (default), `default`, `plan`, or `dontAsk` |
 | `system_prompt` | No | Instructions sent to the model before every conversation |
 | `capabilities` | No | Tools the agent can use (see below) |
 

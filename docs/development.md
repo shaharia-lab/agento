@@ -85,9 +85,11 @@ agento/
 ├── cmd/              # Cobra commands (web, ask, update)
 ├── frontend/         # React + TypeScript UI
 ├── internal/
+│   ├── agent/        # SDK integration, RunOptions, session execution
 │   ├── api/          # HTTP handlers
 │   ├── build/        # Build-time version variables
 │   ├── config/       # AppConfig, AgentConfig, MCP config
+│   ├── logger/       # Structured slog loggers (system + per-session), log rotation
 │   ├── server/       # HTTP server wiring
 │   ├── claudesessions/ # Claude session scanner and analytics
 │   ├── eventbus/       # In-process event bus
