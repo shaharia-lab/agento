@@ -140,10 +140,15 @@ export default function UpdateBanner() {
   const [forceShow, setForceShow] = useState(false)
 
   useEffect(() => {
-    versionApi
-      .checkUpdate()
-      .then(setInfo)
-      .catch(() => undefined)
+    const check = () =>
+      versionApi
+        .checkUpdate()
+        .then(setInfo)
+        .catch(() => undefined)
+
+    check()
+    const timer = setInterval(check, 60 * 60 * 1000) // re-check every hour
+    return () => clearInterval(timer)
   }, [])
 
   const show = !dismissed && (forceShow || info?.update_available === true)
