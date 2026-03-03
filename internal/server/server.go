@@ -30,20 +30,20 @@ type Server struct {
 	port          int
 	logger        *slog.Logger
 	httpServer    *http.Server
-	monitoringCfg telemetry.MonitoringConfig
+	monitoringMgr *telemetry.MonitoringManager
 }
 
 // New creates a new Server. Pass frontendFS=nil to proxy to Vite dev server on port 5173.
 func New(
 	apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger,
-	monitoringCfg telemetry.MonitoringConfig,
+	monitoringMgr *telemetry.MonitoringManager,
 ) *Server {
 	s := &Server{
 		apiServer:     apiSrv,
 		frontendFS:    frontendFS,
 		port:          port,
 		logger:        logger,
-		monitoringCfg: monitoringCfg,
+		monitoringMgr: monitoringMgr,
 	}
 
 	r := chi.NewRouter()
@@ -135,13 +135,16 @@ func (s *Server) corsMiddleware() func(http.Handler) http.Handler {
 	})
 }
 
-// metricsHandler returns an http.HandlerFunc that serves Prometheus metrics when the
-// Prometheus exporter is configured, or a 503 JSON error otherwise.
+// metricsHandler returns an http.HandlerFunc that dynamically checks the current
+// monitoring configuration on each request. This ensures hot-reloaded config
+// (e.g. enabling Prometheus after startup) is reflected without a server restart.
 func (s *Server) metricsHandler() http.HandlerFunc {
-	if s.monitoringCfg.MetricsExporter == telemetry.MetricsExporterPrometheus {
-		return promhttp.Handler().ServeHTTP
-	}
-	return func(w http.ResponseWriter, _ *http.Request) {
+	promHandler := promhttp.Handler()
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.monitoringMgr.Get().MetricsExporter == telemetry.MetricsExporterPrometheus {
+			promHandler.ServeHTTP(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		if _, err := w.Write([]byte(

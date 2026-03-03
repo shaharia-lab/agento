@@ -11,6 +11,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/service"
+	"github.com/shaharia-lab/agento/internal/telemetry"
 )
 
 // Common error message constants used across API handlers.
@@ -40,6 +41,7 @@ type ServerConfig struct {
 	SettingsMgr     *config.SettingsManager
 	Logger          *slog.Logger
 	SessionCache    *claudesessions.Cache
+	MonitoringMgr   *telemetry.MonitoringManager
 }
 
 // Server holds all dependencies for the REST API handlers.
@@ -55,6 +57,7 @@ type Server struct {
 	liveSessions       *liveSessionStore
 	claudeSessionCache *claudesessions.Cache
 	updateCache        updateCheckCache
+	monitoringMgr      *telemetry.MonitoringManager
 }
 
 // New creates a new API Server backed by the provided services.
@@ -73,6 +76,7 @@ func New(cfg ServerConfig) *Server {
 		logger:             cfg.Logger,
 		liveSessions:       newLiveSessionStore(),
 		claudeSessionCache: cfg.SessionCache,
+		monitoringMgr:      cfg.MonitoringMgr,
 	}
 }
 
@@ -122,6 +126,10 @@ func (s *Server) Mount(r chi.Router) {
 	// Build info and update check
 	r.Get("/version", s.handleVersion)
 	r.Get("/version/update-check", s.handleUpdateCheck)
+
+	// Monitoring / OTel configuration
+	r.Get("/monitoring", s.getMonitoring)
+	r.Put("/monitoring", s.putMonitoring)
 }
 
 // mountExtensionRoutes registers filesystem, integration, task, and job-history routes.

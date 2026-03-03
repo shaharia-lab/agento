@@ -30,6 +30,8 @@ import type {
   ScheduledTask,
   JobHistoryEntry,
   UpdateCheckResponse,
+  MonitoringConfig,
+  MonitoringResponse,
 } from '../types'
 
 const BASE = '/api'
@@ -532,6 +534,18 @@ export const jobHistoryApi = {
 
 export const versionApi = {
   checkUpdate: () => request<UpdateCheckResponse>('/version/update-check'),
+}
+
+// ── Monitoring / OTel ─────────────────────────────────────────────────────────
+
+export const monitoringApi = {
+  get: (): Promise<MonitoringResponse> => request<MonitoringResponse>('/monitoring'),
+
+  update: (cfg: MonitoringConfig): Promise<MonitoringResponse> =>
+    request<MonitoringResponse>('/monitoring', {
+      method: 'PUT',
+      body: JSON.stringify(cfg),
+    }),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
