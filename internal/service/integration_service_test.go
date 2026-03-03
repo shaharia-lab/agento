@@ -92,7 +92,7 @@ func TestIntegrationService_List(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := new(mocks.MockIntegrationStore)
 			tc.setup(store)
-			svc := NewIntegrationService(store, nil, testLogger(), context.Background())
+			svc := NewIntegrationService(store, nil, testLogger())
 
 			got, err := svc.List(context.Background())
 			if tc.wantErr {
@@ -153,7 +153,7 @@ func TestIntegrationService_Get(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := new(mocks.MockIntegrationStore)
 			tc.setup(store)
-			svc := NewIntegrationService(store, nil, testLogger(), context.Background())
+			svc := NewIntegrationService(store, nil, testLogger())
 
 			got, err := svc.Get(context.Background(), tc.id)
 			if tc.wantErr {
@@ -294,7 +294,7 @@ func TestIntegrationService_Create(t *testing.T) {
 			if tc.setup != nil {
 				tc.setup(store)
 			}
-			svc := NewIntegrationService(store, nil, testLogger(), context.Background())
+			svc := NewIntegrationService(store, nil, testLogger())
 
 			got, err := svc.Create(context.Background(), tc.input)
 			if tc.wantErr {
@@ -422,7 +422,7 @@ func TestIntegrationService_Update(t *testing.T) {
 
 			// Use a real registry so that Reload is callable (it just reads from store).
 			registry := integrations.NewRegistry(store, testLogger())
-			svc := NewIntegrationService(store, registry, testLogger(), context.Background())
+			svc := NewIntegrationService(store, registry, testLogger())
 
 			got, err := svc.Update(context.Background(), tc.id, tc.input)
 			if tc.wantErr {
@@ -499,7 +499,7 @@ func TestIntegrationService_Delete(t *testing.T) {
 			tc.setup(store)
 
 			registry := integrations.NewRegistry(store, testLogger())
-			svc := NewIntegrationService(store, registry, testLogger(), context.Background())
+			svc := NewIntegrationService(store, registry, testLogger())
 
 			err := svc.Delete(context.Background(), tc.id)
 			if tc.wantErr {
@@ -603,7 +603,7 @@ func TestIntegrationService_GetAuthStatus(t *testing.T) {
 				tc.setup(store)
 			}
 
-			svc := NewIntegrationService(store, nil, testLogger(), context.Background())
+			svc := NewIntegrationService(store, nil, testLogger())
 
 			// Inject oauthFlows state if provided.
 			if tc.oauthFlows != nil {
@@ -803,7 +803,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := new(mocks.MockIntegrationStore)
 			tc.setup(store)
-			svc := NewIntegrationService(store, nil, testLogger(), context.Background())
+			svc := NewIntegrationService(store, nil, testLogger())
 
 			tools, err := svc.AvailableTools(context.Background())
 			if tc.wantErr {
@@ -827,7 +827,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 func TestIntegrationService_ValidateTokenAuth(t *testing.T) {
 	t.Run("telegram with empty credentials returns validation error", func(t *testing.T) {
 		store := new(mocks.MockIntegrationStore)
-		svc := NewIntegrationService(store, nil, testLogger(), context.Background())
+		svc := NewIntegrationService(store, nil, testLogger())
 
 		cfg := &config.IntegrationConfig{ID: "test", Type: "telegram"}
 		err := svc.ValidateTokenAuth(context.Background(), cfg)
@@ -838,7 +838,7 @@ func TestIntegrationService_ValidateTokenAuth(t *testing.T) {
 
 	t.Run("unknown type returns nil (unvalidated)", func(t *testing.T) {
 		store := new(mocks.MockIntegrationStore)
-		svc := NewIntegrationService(store, nil, testLogger(), context.Background())
+		svc := NewIntegrationService(store, nil, testLogger())
 
 		cfg := &config.IntegrationConfig{ID: "test", Type: "unknown"}
 		err := svc.ValidateTokenAuth(context.Background(), cfg)
