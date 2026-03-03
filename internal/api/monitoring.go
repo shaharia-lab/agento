@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -33,6 +34,21 @@ type MonitoringResponse struct {
 	Settings  MonitoringConfigDTO `json:"settings"`
 	Locked    map[string]string   `json:"locked"`
 	EnvLocked bool                `json:"env_locked"`
+}
+
+// validateMonitoringDTO rejects unknown exporter values before they are persisted.
+func validateMonitoringDTO(dto MonitoringConfigDTO) error {
+	switch telemetry.MetricsExporter(dto.MetricsExporter) {
+	case telemetry.MetricsExporterOTLP, telemetry.MetricsExporterPrometheus, telemetry.MetricsExporterNone, "":
+	default:
+		return fmt.Errorf("invalid metrics_exporter: %q", dto.MetricsExporter)
+	}
+	switch telemetry.LogsExporter(dto.LogsExporter) {
+	case telemetry.LogsExporterOTLP, telemetry.LogsExporterNone, "":
+	default:
+		return fmt.Errorf("invalid logs_exporter: %q", dto.LogsExporter)
+	}
+	return nil
 }
 
 func monitoringConfigToDTO(cfg telemetry.MonitoringConfig) MonitoringConfigDTO {
@@ -87,6 +103,11 @@ func (s *Server) putMonitoring(w http.ResponseWriter, r *http.Request) {
 	var dto MonitoringConfigDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
 		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		return
+	}
+
+	if err := validateMonitoringDTO(dto); err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

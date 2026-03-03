@@ -110,7 +110,7 @@ func (m *MonitoringManager) Load() error {
 	}
 
 	cfg := storeToConfig(stored)
-	if err := m.reload(context.Background(), cfg); err != nil {
+	if err := m.reload(cfg); err != nil {
 		return fmt.Errorf("applying persisted monitoring config: %w", err)
 	}
 	m.current = cfg
@@ -154,18 +154,18 @@ func (m *MonitoringManager) LockedFields() map[string]string {
 
 // Update persists cfg and hot-reloads the OTel providers.
 // Returns an EnvLockedError when OTEL_* env vars are set.
-func (m *MonitoringManager) Update(ctx context.Context, cfg MonitoringConfig) error {
-	if m.IsEnvLocked() {
-		return &EnvLockedError{}
-	}
-
+func (m *MonitoringManager) Update(_ context.Context, cfg MonitoringConfig) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	if m.isEnvLockedUnsafe() {
+		return &EnvLockedError{}
+	}
 
 	if err := m.persist(cfg); err != nil {
 		return err
 	}
-	if err := m.reload(ctx, cfg); err != nil {
+	if err := m.reload(cfg); err != nil {
 		return err
 	}
 	m.current = cfg
@@ -184,7 +184,7 @@ func (m *MonitoringManager) Shutdown(ctx context.Context) error {
 
 // reload tears down existing providers and starts new ones from cfg.
 // Caller must hold m.mu write lock.
-func (m *MonitoringManager) reload(_ context.Context, cfg MonitoringConfig) error {
+func (m *MonitoringManager) reload(cfg MonitoringConfig) error {
 	if m.providers != nil {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

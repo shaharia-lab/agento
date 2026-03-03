@@ -30,13 +30,22 @@ func (h *rateLimitedErrorHandler) Handle(err error) {
 	key := err.Error()
 
 	h.mu.Lock()
-	last, seen := h.lastSeen[key]
 	now := time.Now()
+	last, seen := h.lastSeen[key]
 	if seen && now.Sub(last) < errorSuppressDuration {
 		h.mu.Unlock()
 		return
 	}
 	h.lastSeen[key] = now
+
+	// Evict entries older than 2× the suppression window to bound memory usage.
+	if len(h.lastSeen) > 100 {
+		for k, v := range h.lastSeen {
+			if now.Sub(v) > 2*errorSuppressDuration {
+				delete(h.lastSeen, k)
+			}
+		}
+	}
 	h.mu.Unlock()
 
 	slog.Warn("otel export error", "error", err)
