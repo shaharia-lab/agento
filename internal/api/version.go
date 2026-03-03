@@ -72,15 +72,31 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 
 // cachedUpdateCheck returns a cached result or fetches the latest release from GitHub.
 // The cache TTL is 1 hour; it is keyed by time only since the running binary version
-// does not change between requests.
+// does not change between requests. The network call is made outside the lock so
+// concurrent requests do not queue behind a slow GitHub response.
 func (s *Server) cachedUpdateCheck(ctx context.Context, currentTrimmed string) (*updateCheckResult, error) {
 	s.updateCache.mu.Lock()
-	defer s.updateCache.mu.Unlock()
-
 	if s.updateCache.result != nil && time.Since(s.updateCache.fetchedAt) < updateCheckTTL {
-		return s.updateCache.result, nil
+		r := s.updateCache.result
+		s.updateCache.mu.Unlock()
+		return r, nil
+	}
+	s.updateCache.mu.Unlock()
+
+	result, err := s.fetchLatestRelease(ctx, currentTrimmed)
+	if err != nil {
+		return nil, err
 	}
 
+	s.updateCache.mu.Lock()
+	s.updateCache.result = result
+	s.updateCache.fetchedAt = time.Now()
+	s.updateCache.mu.Unlock()
+	return result, nil
+}
+
+// fetchLatestRelease queries GitHub for the latest release and compares it to currentTrimmed.
+func (s *Server) fetchLatestRelease(ctx context.Context, currentTrimmed string) (*updateCheckResult, error) {
 	updater, err := selfupdate.NewUpdater(selfupdate.Config{})
 	if err != nil {
 		return nil, fmt.Errorf("creating updater: %w", err)
@@ -97,8 +113,5 @@ func (s *Server) cachedUpdateCheck(ctx context.Context, currentTrimmed string) (
 		result.LatestVersion = release.Version()
 		result.ReleaseURL = fmt.Sprintf("https://github.com/shaharia-lab/agento/releases/tag/v%s", release.Version())
 	}
-
-	s.updateCache.result = result
-	s.updateCache.fetchedAt = time.Now()
 	return result, nil
 }
