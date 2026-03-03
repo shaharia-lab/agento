@@ -23,7 +23,7 @@ func (s *Server) handleListTasks(w http.ResponseWriter, r *http.Request) {
 // handleCreateTask creates a new scheduled task and schedules it if active.
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	var req CreateTaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { // NOSONAR
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
@@ -64,7 +64,7 @@ func (s *Server) handleGetTask(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateTask(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	var req UpdateTaskRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { // NOSONAR
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
@@ -172,7 +172,7 @@ func (s *Server) handleDeleteJobHistory(w http.ResponseWriter, r *http.Request) 
 // handleBulkDeleteJobHistory deletes multiple job history entries.
 func (s *Server) handleBulkDeleteJobHistory(w http.ResponseWriter, r *http.Request) {
 	var req BulkDeleteRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { // NOSONAR
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}

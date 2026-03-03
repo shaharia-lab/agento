@@ -559,7 +559,7 @@ func (s *claudeSettingsProfileService) writeProfileSettings(
 		return nil
 	}
 	var pretty any
-	if err := json.Unmarshal(settings, &pretty); err != nil { // NOSONAR
+	if json.Unmarshal(settings, &pretty) != nil {
 		// Should not happen — validateSettingsJSON ran first.
 		return &ValidationError{Field: "settings", Message: "failed to parse settings JSON"}
 	}

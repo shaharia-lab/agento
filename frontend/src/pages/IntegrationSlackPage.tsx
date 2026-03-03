@@ -240,14 +240,11 @@ export default function IntegrationSlackPage() {
                 />
               </div>
 
-              <div>
-                <span
-                  id="slack-auth-method-label"
-                  className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2"
-                >
+              <fieldset className="border-0 p-0 m-0 min-w-0">
+                <legend className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-2">
                   Authentication method
-                </span>
-                <div className="flex gap-3" role="group" aria-labelledby="slack-auth-method-label">
+                </legend>
+                <div className="flex gap-3">
                   <button
                     onClick={() => setAuthMode('bot_token')}
                     className={`flex-1 rounded-md border px-3 py-2.5 text-sm text-left transition-colors cursor-pointer ${
@@ -275,7 +272,7 @@ export default function IntegrationSlackPage() {
                     </p>
                   </button>
                 </div>
-              </div>
+              </fieldset>
 
               {authMode === 'bot_token' && (
                 <div>
