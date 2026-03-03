@@ -109,7 +109,11 @@ func (m *MonitoringManager) Load() error {
 		return fmt.Errorf("parsing monitoring config: %w", err)
 	}
 
-	m.current = storeToConfig(stored)
+	cfg := storeToConfig(stored)
+	if err := m.reload(context.Background(), cfg); err != nil {
+		return fmt.Errorf("applying persisted monitoring config: %w", err)
+	}
+	m.current = cfg
 	return nil
 }
 
@@ -180,7 +184,7 @@ func (m *MonitoringManager) Shutdown(ctx context.Context) error {
 
 // reload tears down existing providers and starts new ones from cfg.
 // Caller must hold m.mu write lock.
-func (m *MonitoringManager) reload(ctx context.Context, cfg MonitoringConfig) error {
+func (m *MonitoringManager) reload(_ context.Context, cfg MonitoringConfig) error {
 	if m.providers != nil {
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -190,7 +194,7 @@ func (m *MonitoringManager) reload(ctx context.Context, cfg MonitoringConfig) er
 		}
 	}
 
-	p, err := Init(ctx, cfg)
+	p, err := Init(context.Background(), cfg)
 	if err != nil {
 		return fmt.Errorf("re-initializing telemetry providers: %w", err)
 	}

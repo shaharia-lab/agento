@@ -195,11 +195,22 @@ func buildOTLPMeterProvider(
 		interval = 60 * time.Second
 	}
 
+	// Use explicit-bucket histograms for OTLP export. The Go SDK sends
+	// exponential (native) histograms by default since v1.24, but many
+	// Prometheus-compatible backends (including grafana/otel-lgtm) require
+	// --enable-feature=native-histograms to store them. Explicit buckets are
+	// universally compatible.
+	explicitBuckets := sdkmetric.NewView(
+		sdkmetric.Instrument{Kind: sdkmetric.InstrumentKindHistogram},
+		sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{}},
+	)
+
 	return sdkmetric.NewMeterProvider(
 		sdkmetric.WithResource(res),
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp,
 			sdkmetric.WithInterval(interval),
 		)),
+		sdkmetric.WithView(explicitBuckets),
 	), nil
 }
 
