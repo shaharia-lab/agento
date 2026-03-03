@@ -1,5 +1,15 @@
 # Agento
 
+[![Bugs](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=bugs)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+[![Code Smells](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=code_smells)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=coverage)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+[![Lines of Code](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=ncloc)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+[![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+[![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+[![Technical Debt](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=sqale_index)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+[![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+
 <img width="1820" height="922" alt="carbon (4)" src="https://github.com/user-attachments/assets/62ce9188-2aeb-4ec3-847c-3b50346d0adb" />
 
 **Agento** is a local platform for building and interacting with AI agents through a web UI and CLI. It runs on top of the [Claude Code CLI](https://claude.ai/code) already installed on your machine — no separate API key or cloud account needed.
