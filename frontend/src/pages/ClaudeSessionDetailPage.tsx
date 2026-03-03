@@ -60,7 +60,7 @@ function ThinkingBlock({ text }: Readonly<{ text: string }>) {
         <span>Thinking</span>
       </button>
       {open && (
-        <pre className="px-3 pb-2 text-purple-800 dark:text-purple-300 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed border-t border-purple-200 dark:border-purple-900/50">
+        <pre className="px-3 pb-2 text-purple-800 dark:text-purple-300 whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed border-t border-purple-200 dark:border-purple-900/50">
           {text}
         </pre>
       )}
@@ -104,7 +104,7 @@ function ToolUseBlock({ block }: Readonly<{ block: ClaudeNormalizedBlock }>) {
         )}
         <Badge
           variant="secondary"
-          className="text-[10px] py-0 h-3.5 bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 border-0 font-mono px-1"
+          className="text-[12px] py-0 h-4 bg-zinc-200 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 border-0 font-mono px-1"
         >
           {toolName}
         </Badge>
@@ -113,7 +113,7 @@ function ToolUseBlock({ block }: Readonly<{ block: ClaudeNormalizedBlock }>) {
         )}
       </button>
       {open && inputStr && (
-        <pre className="px-3 pb-2 text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed border-t border-zinc-200 dark:border-zinc-700">
+        <pre className="px-3 pb-2 text-zinc-600 dark:text-zinc-400 whitespace-pre-wrap break-words font-mono text-[12px] leading-relaxed border-t border-zinc-200 dark:border-zinc-700">
           {inputStr}
         </pre>
       )}

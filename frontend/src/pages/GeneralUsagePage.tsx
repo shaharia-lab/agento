@@ -133,7 +133,7 @@ function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
             {Array.from({ length: 24 }, (_, h) => (
               <div
                 key={`hour-${h}`}
-                className="flex-1 text-center text-[9px] text-zinc-400 dark:text-zinc-500"
+                className="flex-1 text-center text-[11px] text-zinc-400 dark:text-zinc-500"
               >
                 {h % 3 === 0 ? h : ''}
               </div>
@@ -142,7 +142,7 @@ function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
           {/* Rows */}
           {DAY_NAMES.map((day, dow) => (
             <div key={`day-${day}`} className="flex items-center mb-0.5">
-              <span className="w-8 text-[10px] text-zinc-400 dark:text-zinc-500 shrink-0">
+              <span className="w-8 text-[12px] text-zinc-400 dark:text-zinc-500 shrink-0">
                 {day}
               </span>
               {Array.from({ length: 24 }, (_, h) => {
@@ -174,7 +174,7 @@ function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
           ))}
           {/* Legend */}
           <div className="flex items-center gap-1 mt-2 ml-8">
-            <span className="text-[10px] text-zinc-400 dark:text-zinc-500 mr-1">Less</span>
+            <span className="text-[12px] text-zinc-400 dark:text-zinc-500 mr-1">Less</span>
             {[
               'bg-zinc-100 dark:bg-zinc-800',
               'bg-indigo-200 dark:bg-indigo-900/60',
@@ -184,7 +184,7 @@ function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
             ].map(cls => (
               <div key={cls} className={`w-3 h-3 rounded-[2px] ${cls}`} />
             ))}
-            <span className="text-[10px] text-zinc-400 dark:text-zinc-500 ml-1">More</span>
+            <span className="text-[12px] text-zinc-400 dark:text-zinc-500 ml-1">More</span>
           </div>
         </div>
       </div>
@@ -300,9 +300,7 @@ export default function GeneralUsagePage() {
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 py-4 shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
-            General Usage
-          </h1>
+          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">General Usage</h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
             {summary.total_sessions} session{summary.total_sessions === 1 ? '' : 's'} · {from} →{' '}
             {to}

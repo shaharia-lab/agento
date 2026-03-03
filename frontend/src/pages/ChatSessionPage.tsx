@@ -998,7 +998,7 @@ function ToolCallCard({
         {progress && !toolResult && (
           <div className="mb-1 space-y-0.5">
             {progress.message && (
-              <div className="text-[10px] text-zinc-400 dark:text-zinc-500 truncate">
+              <div className="text-[12px] text-zinc-400 dark:text-zinc-500 truncate">
                 {progress.message}
               </div>
             )}
@@ -1064,14 +1064,14 @@ function PermissionRequestCard({
                 The agent wants to use <code className="font-mono font-semibold">{toolName}</code>
               </p>
               {inputSummary && (
-                <p className="text-[11px] text-amber-600 dark:text-amber-500 mt-1 font-mono truncate">
+                <p className="text-[12px] text-amber-600 dark:text-amber-500 mt-1 font-mono truncate">
                   {inputSummary}
                 </p>
               )}
             </div>
           </div>
           {decided ? (
-            <p className="text-[11px] text-amber-600 dark:text-amber-500">
+            <p className="text-[12px] text-amber-600 dark:text-amber-500">
               {decision ? 'Allowed' : 'Denied'}
             </p>
           ) : (
@@ -1168,7 +1168,7 @@ function AskUserQuestionCard({
               className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800/60 p-3"
             >
               {q.header && (
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-1">
+                <div className="text-[12px] font-semibold uppercase tracking-wider text-zinc-400 dark:text-zinc-500 mb-1">
                   {q.header}
                 </div>
               )}
@@ -1235,7 +1235,7 @@ function AskUserQuestionCard({
                 />
               )}
               {q.multiSelect && !submitted && (
-                <div className="mt-2 text-[10px] text-zinc-400 dark:text-zinc-500">
+                <div className="mt-2 text-[12px] text-zinc-400 dark:text-zinc-500">
                   Multiple selections allowed
                 </div>
               )}
@@ -1258,7 +1258,7 @@ function AskUserQuestionCard({
           </button>
         )}
         {submitted && (
-          <div className="text-[10px] text-zinc-400 dark:text-zinc-500">Answers sent</div>
+          <div className="text-[12px] text-zinc-400 dark:text-zinc-500">Answers sent</div>
         )}
       </div>
     </div>

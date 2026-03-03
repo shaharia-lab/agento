@@ -64,7 +64,7 @@ export default function AgentsPage() {
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-100 px-4 sm:px-6 py-4 shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-zinc-900">Agents</h1>
+          <h1 className="text-xl font-semibold text-zinc-900">Agents</h1>
           <p className="text-xs text-zinc-500 mt-0.5">
             {agents.length} agent{agents.length === 1 ? '' : 's'} defined
           </p>
@@ -92,7 +92,7 @@ export default function AgentsPage() {
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 mb-4">
               <Bot className="h-5 w-5 text-zinc-400" />
             </div>
-            <h2 className="text-sm font-semibold text-zinc-900 mb-1">No agents yet</h2>
+            <h2 className="text-lg font-semibold text-zinc-900 mb-1">No agents yet</h2>
             <p className="text-xs text-zinc-500 mb-4 max-w-xs">
               Create your first agent to start chatting. Agents are powered by Claude and can be
               customized with tools and system prompts.
@@ -140,7 +140,7 @@ function AgentCard({
           <Bot className="h-4 w-4" />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="font-semibold text-sm text-zinc-900 truncate">{agent.name}</h3>
+          <h3 className="font-semibold text-base text-zinc-900 truncate">{agent.name}</h3>
           <p className="text-xs text-zinc-400 font-mono">{agent.slug}</p>
         </div>
       </div>

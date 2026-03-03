@@ -235,7 +235,7 @@ export default function ChatsPage() {
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 mb-4">
           <MessageSquare className="h-5 w-5 text-zinc-400" />
         </div>
-        <h2 className="text-sm font-semibold text-zinc-900 mb-1">No chats yet</h2>
+        <h2 className="text-lg font-semibold text-zinc-900 mb-1">No chats yet</h2>
         <p className="text-xs text-zinc-500 mb-4 max-w-xs">
           Start a conversation — with or without an agent.
         </p>
@@ -292,7 +292,7 @@ export default function ChatsPage() {
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 py-4 shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Chats</h1>
+          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Chats</h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
             {sessions.length} conversation{sessions.length === 1 ? '' : 's'}
           </p>

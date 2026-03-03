@@ -121,7 +121,7 @@ export default function IntegrationsPage() {
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 py-4 shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Integrations</h1>
+          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Integrations</h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
             Connect external services to make them available as tools to your agents
           </p>
@@ -232,7 +232,7 @@ function IntegrationCard({
           <IntegrationTypeIcon type={integration.type} size={20} />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="font-semibold text-sm text-zinc-900 dark:text-zinc-100 truncate">
+          <h3 className="font-semibold text-base text-zinc-900 dark:text-zinc-100 truncate">
             {integration.name}
           </h3>
           <p className="text-xs text-zinc-400 font-mono capitalize">{integration.type}</p>

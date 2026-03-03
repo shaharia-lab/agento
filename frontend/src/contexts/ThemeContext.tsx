@@ -11,7 +11,7 @@ const STORAGE_KEY = 'agento-appearance'
 
 const DEFAULTS: AppearanceSettings = {
   darkMode: false,
-  fontSize: 15,
+  fontSize: 16,
   fontFamily: 'system',
 }
 

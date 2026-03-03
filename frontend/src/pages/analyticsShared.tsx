@@ -133,7 +133,7 @@ export function ChartCard({
 }: Readonly<{ title: string; children: React.ReactNode }>) {
   return (
     <div className="rounded-lg border border-zinc-200 dark:border-zinc-700/50 bg-white dark:bg-zinc-900 p-4">
-      <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-4">{title}</h3>
+      <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100 mb-4">{title}</h3>
       {children}
     </div>
   )

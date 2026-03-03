@@ -104,7 +104,7 @@ export default function IntegrationTelegramPage() {
           Integrations
         </button>
         <span className="text-zinc-300 dark:text-zinc-600">/</span>
-        <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">
           Telegram Integration
         </h1>
       </div>

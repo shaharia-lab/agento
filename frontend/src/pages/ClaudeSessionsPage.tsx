@@ -96,7 +96,7 @@ export default function ClaudeSessionsPage() {
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 mb-4">
           <History className="h-5 w-5 text-zinc-400" />
         </div>
-        <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
+        <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
           No Claude sessions found
         </h2>
         <p className="text-xs text-zinc-500 mb-4 max-w-xs">
@@ -129,7 +129,7 @@ export default function ClaudeSessionsPage() {
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 py-4 shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">
             Claude Sessions
           </h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">

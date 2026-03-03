@@ -298,7 +298,7 @@ function PricingDisclaimer() {
             before relying on these numbers. Model tier is detected from the model name; unknown
             models fall back to Sonnet pricing.
           </p>
-          <table className="w-full text-[11px] text-amber-800 dark:text-amber-300 border-collapse">
+          <table className="w-full text-[12px] text-amber-800 dark:text-amber-300 border-collapse">
             <thead>
               <tr className="border-b border-amber-200 dark:border-amber-700/50">
                 <th className="text-left font-medium pb-1 pr-4">Model</th>
@@ -420,7 +420,7 @@ export default function TokenUsagePage() {
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 py-4 shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Token Usage</h1>
+          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Token Usage</h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
             {summary.total_sessions} session{summary.total_sessions === 1 ? '' : 's'} · {from} →{' '}
             {to}
@@ -520,7 +520,7 @@ export default function TokenUsagePage() {
 
             {/* Cost estimation section */}
             <div className="rounded-lg border border-zinc-200 dark:border-zinc-700/50 bg-white dark:bg-zinc-900 p-4">
-              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-3">
+              <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100 mb-3">
                 Estimated Cost (USD)
               </h3>
               <PricingDisclaimer />

@@ -90,7 +90,7 @@ export default function SettingsPage() {
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 py-4 shrink-0">
-        <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Settings</h1>
+        <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Settings</h1>
       </div>
 
       <div className="flex flex-1 overflow-hidden">
@@ -152,7 +152,7 @@ export default function SettingsPage() {
         <div className="flex-1 overflow-y-auto px-6 py-6">
           {activeTab === 'general' && (
             <>
-              <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-6">
+              <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100 mb-6">
                 General Settings
               </h2>
 

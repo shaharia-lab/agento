@@ -157,7 +157,7 @@ export default function JobHistoriesPage() {
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-800 px-4 sm:px-6 py-4 shrink-0">
         <div>
-          <h1 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">Job History</h1>
+          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Job History</h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
             {entries.length} entr{entries.length === 1 ? 'y' : 'ies'}
           </p>
@@ -187,7 +187,7 @@ export default function JobHistoriesPage() {
             <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 mb-4">
               <ClipboardList className="h-5 w-5 text-zinc-400 dark:text-zinc-500" />
             </div>
-            <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
+            <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
               No job history
             </h2>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 max-w-xs">
