@@ -15,11 +15,12 @@ import (
 	"github.com/shaharia-lab/agento/internal/build"
 )
 
-// Providers holds the OTel SDK providers.
+// Providers holds the OTel SDK providers and pre-built metric instruments.
 type Providers struct {
 	TracerProvider *trace.TracerProvider
 	MeterProvider  *metric.MeterProvider
 	LoggerProvider *log.LoggerProvider
+	Instruments    *Instruments
 }
 
 // InitNoOp sets up no-op (SDK with no exporters) providers and registers them
@@ -37,7 +38,9 @@ func InitNoOp(ctx context.Context) (*Providers, error) {
 	}
 
 	tp := trace.NewTracerProvider(
-		trace.WithSampler(trace.AlwaysSample()),
+		// NeverSample keeps spans free (non-recording) while no exporter is wired.
+		// Phase 2 will switch to AlwaysSample() when real exporters are connected.
+		trace.WithSampler(trace.NeverSample()),
 		trace.WithResource(res),
 	)
 	mp := metric.NewMeterProvider(metric.WithResource(res))
@@ -47,10 +50,17 @@ func InitNoOp(ctx context.Context) (*Providers, error) {
 	otel.SetMeterProvider(mp)
 	global.SetLoggerProvider(lp)
 
+	instr, err := NewInstruments()
+	if err != nil {
+		return nil, fmt.Errorf("creating metric instruments: %w", err)
+	}
+	setGlobalInstruments(instr)
+
 	return &Providers{
 		TracerProvider: tp,
 		MeterProvider:  mp,
 		LoggerProvider: lp,
+		Instruments:    instr,
 	}, nil
 }
 

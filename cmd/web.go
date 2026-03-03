@@ -88,19 +88,21 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	if err != nil {
 		return fmt.Errorf("initializing telemetry: %w", err)
 	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if shutdownErr := otelProviders.Shutdown(shutdownCtx); shutdownErr != nil {
-			fmt.Fprintf(os.Stderr, "telemetry shutdown error: %v\n", shutdownErr)
-		}
-	}()
 
 	sysLogger, logCleanup, err := logger.NewSystemLogger(cfg.LogDir(), cfg.SlogLevel())
 	if err != nil {
 		return fmt.Errorf("initializing logger: %w", err)
 	}
 	defer logCleanup()
+
+	// Deferred after sysLogger so the structured logger is available at shutdown.
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if shutdownErr := otelProviders.Shutdown(shutdownCtx); shutdownErr != nil {
+			sysLogger.Error("telemetry shutdown error", "error", shutdownErr)
+		}
+	}()
 
 	sysLogger.Info("agento starting",
 		slog.Int("port", cfg.Port),

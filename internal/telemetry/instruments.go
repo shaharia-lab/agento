@@ -7,6 +7,17 @@ import (
 
 const meterName = "agento"
 
+// globalInstruments holds the singleton metric instruments created at startup.
+var globalInstruments *Instruments //nolint:gochecknoglobals
+
+// setGlobalInstruments stores instr as the process-wide instruments.
+// Called once from InitNoOp after the global MeterProvider is registered.
+func setGlobalInstruments(instr *Instruments) { globalInstruments = instr }
+
+// GetGlobalInstruments returns the instruments created at startup.
+// Returns nil if InitNoOp has not been called yet.
+func GetGlobalInstruments() *Instruments { return globalInstruments }
+
 // Instruments holds all OTel metric instruments for Agento.
 type Instruments struct {
 	HTTPRequestsTotal   metric.Int64Counter

@@ -16,6 +16,7 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/integrations"
+	"github.com/shaharia-lab/agento/internal/telemetry"
 	"github.com/shaharia-lab/agento/internal/tools"
 )
 
@@ -479,8 +480,31 @@ func RunAgent(
 	return result, nil
 }
 
-// recordAgentMetrics records token usage and run duration into the global meter.
+// recordAgentMetrics records token usage and run duration using the pre-built
+// global instruments. If the instruments are not yet initialized (e.g. in tests
+// that skip telemetry setup) the function is a no-op.
 func recordAgentMetrics(ctx context.Context, model string, durationSec float64, result *AgentResult) {
+	instr := telemetry.GetGlobalInstruments()
+	if instr == nil {
+		// Fall back to creating instruments inline when telemetry was not
+		// bootstrapped (e.g. in unit tests).
+		recordAgentMetricsFallback(ctx, model, durationSec, result)
+		return
+	}
+
+	modelAttr := metric.WithAttributes(attribute.String("model", model))
+	instr.AgentRunsTotal.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("model", model),
+		attribute.String("status", "success"),
+	))
+	instr.AgentRunDuration.Record(ctx, durationSec, modelAttr)
+	instr.AgentInputTokens.Add(ctx, int64(result.Usage.InputTokens), modelAttr)   //nolint:gosec
+	instr.AgentOutputTokens.Add(ctx, int64(result.Usage.OutputTokens), modelAttr) //nolint:gosec
+}
+
+// recordAgentMetricsFallback creates instruments lazily when the global
+// instruments have not been initialized. This path is only taken in tests.
+func recordAgentMetricsFallback(ctx context.Context, model string, durationSec float64, result *AgentResult) {
 	m := otel.GetMeterProvider().Meter("agento")
 	modelAttr := metric.WithAttributes(attribute.String("model", model))
 
@@ -490,15 +514,12 @@ func recordAgentMetrics(ctx context.Context, model string, durationSec float64, 
 			attribute.String("status", "success"),
 		))
 	}
-
 	if h, err := m.Float64Histogram("agento.agent.run.duration", metric.WithUnit("s")); err == nil {
 		h.Record(ctx, durationSec, modelAttr)
 	}
-
 	if c, err := m.Int64Counter("agento.agent.input_tokens.total"); err == nil {
 		c.Add(ctx, int64(result.Usage.InputTokens), modelAttr) //nolint:gosec
 	}
-
 	if c, err := m.Int64Counter("agento.agent.output_tokens.total"); err == nil {
 		c.Add(ctx, int64(result.Usage.OutputTokens), modelAttr) //nolint:gosec
 	}
