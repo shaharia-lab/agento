@@ -331,9 +331,14 @@ func (s *integrationService) StartOAuth(ctx context.Context, id string) (string,
 
 	// Detach from the request context so the callback server outlives the HTTP request,
 	// then apply a 10-minute deadline for the OAuth flow.
+	//
+	// IMPORTANT: Do NOT defer cancelCallback() here. The HTTP handler that calls
+	// StartOAuth returns immediately after receiving the auth URL, which would trigger
+	// the defer and cancel callbackCtx — killing the callback server before the user
+	// has a chance to complete the OAuth redirect. Instead, cancelCallback is called
+	// by onToken (guaranteed to be invoked by the callback server on success, error,
+	// or timeout) and also on the early-error paths below.
 	callbackCtx, cancelCallback := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
-	// cancelCallback is idempotent — safe to call multiple times (e.g. also called by onToken).
-	defer cancelCallback()
 
 	onToken := func(tok *oauth2.Token, tokErr error) {
 		defer cancelCallback()
@@ -344,17 +349,21 @@ func (s *integrationService) StartOAuth(ctx context.Context, id string) (string,
 	case "google":
 		authURL, buildErr = google.BuildAuthURL(cfg, port)
 		if buildErr != nil {
+			cancelCallback()
 			return "", fmt.Errorf("building auth URL: %w", buildErr)
 		}
 		if err := google.StartCallbackServer(callbackCtx, port, cfg, onToken, s.logger); err != nil {
+			cancelCallback()
 			return "", fmt.Errorf("starting callback server: %w", err)
 		}
 	case "slack":
 		authURL, buildErr = slackintegration.BuildAuthURL(cfg, port)
 		if buildErr != nil {
+			cancelCallback()
 			return "", fmt.Errorf("building auth URL: %w", buildErr)
 		}
 		if err := slackintegration.StartCallbackServer(callbackCtx, port, cfg, onToken, s.logger); err != nil {
+			cancelCallback()
 			return "", fmt.Errorf("starting callback server: %w", err)
 		}
 	}

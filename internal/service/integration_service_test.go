@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/integrations"
@@ -822,6 +823,106 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 
 // ---------------------------------------------------------------------------
 // ValidateTokenAuth
+// ---------------------------------------------------------------------------
+// StartOAuth
+// ---------------------------------------------------------------------------
+
+func TestIntegrationService_StartOAuth_NotFound(t *testing.T) {
+	store := new(mocks.MockIntegrationStore)
+	store.On("Get", "no-exist").Return(nil, nil)
+	svc := NewIntegrationService(store, nil, testLogger())
+
+	_, err := svc.StartOAuth(context.Background(), "no-exist")
+	assert.Error(t, err)
+	assert.IsType(t, &NotFoundError{}, err)
+	store.AssertExpectations(t)
+}
+
+func TestIntegrationService_StartOAuth_StoreError(t *testing.T) {
+	store := new(mocks.MockIntegrationStore)
+	store.On("Get", "int-1").Return(nil, errors.New("db error"))
+	svc := NewIntegrationService(store, nil, testLogger())
+
+	_, err := svc.StartOAuth(context.Background(), "int-1")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "db error")
+	store.AssertExpectations(t)
+}
+
+func TestIntegrationService_StartOAuth_UnsupportedType(t *testing.T) {
+	store := new(mocks.MockIntegrationStore)
+	store.On("Get", "int-1").Return(&config.IntegrationConfig{
+		ID:   "int-1",
+		Type: "telegram",
+	}, nil)
+	svc := NewIntegrationService(store, nil, testLogger())
+
+	_, err := svc.StartOAuth(context.Background(), "int-1")
+	assert.Error(t, err)
+	var ve *ValidationError
+	assert.ErrorAs(t, err, &ve)
+	assert.Equal(t, "type", ve.Field)
+	store.AssertExpectations(t)
+}
+
+func TestIntegrationService_StartOAuth_GoogleReturnsAuthURL(t *testing.T) {
+	store := new(mocks.MockIntegrationStore)
+	cfg := &config.IntegrationConfig{
+		ID:   "int-google",
+		Type: "google",
+		Services: map[string]config.ServiceConfig{
+			"calendar": {Enabled: true},
+		},
+	}
+	_ = cfg.SetCredentials(config.GoogleCredentials{ClientID: "cid", ClientSecret: "csecret"})
+	store.On("Get", "int-google").Return(cfg, nil)
+
+	registry := integrations.NewRegistry(store, testLogger())
+	svc := NewIntegrationService(store, registry, testLogger())
+
+	authURL, err := svc.StartOAuth(context.Background(), "int-google")
+	assert.NoError(t, err)
+	assert.Contains(t, authURL, "accounts.google.com")
+	assert.Contains(t, authURL, "client_id=cid")
+	store.AssertExpectations(t)
+}
+
+// TestIntegrationService_StartOAuth_CallbackContextNotCanceledImmediately is a
+// regression test for the bug where defer cancelCallback() in StartOAuth was
+// canceling callbackCtx as soon as the function returned with the auth URL —
+// before the user had a chance to complete the OAuth redirect. This caused the
+// callback server to shut down immediately and all subsequent GetAuthStatus calls
+// to return "context canceled".
+func TestIntegrationService_StartOAuth_CallbackContextNotCanceledImmediately(t *testing.T) {
+	store := new(mocks.MockIntegrationStore)
+	cfg := &config.IntegrationConfig{
+		ID:   "int-google",
+		Type: "google",
+		Services: map[string]config.ServiceConfig{
+			"calendar": {Enabled: true},
+		},
+	}
+	_ = cfg.SetCredentials(config.GoogleCredentials{ClientID: "cid", ClientSecret: "csecret"})
+	store.On("Get", "int-google").Return(cfg, nil)
+
+	registry := integrations.NewRegistry(store, testLogger())
+	svc := NewIntegrationService(store, registry, testLogger())
+
+	_, err := svc.StartOAuth(context.Background(), "int-google")
+	require.NoError(t, err)
+
+	// Wait long enough for any background goroutine to fire if the context was
+	// incorrectly canceled inside StartOAuth (the broken defer scenario).
+	time.Sleep(100 * time.Millisecond)
+
+	// GetAuthStatus must NOT return an error: if the context was canceled before
+	// the user completed the OAuth flow, state.err would be set to context.Canceled
+	// and this call would return (false, context.Canceled).
+	auth, statusErr := svc.GetAuthStatus(context.Background(), "int-google")
+	assert.NoError(t, statusErr, "callback context must not be canceled immediately after StartOAuth returns")
+	assert.False(t, auth, "should not be authenticated yet — no callback received")
+}
+
 // ---------------------------------------------------------------------------
 
 func TestIntegrationService_ValidateTokenAuth(t *testing.T) {
