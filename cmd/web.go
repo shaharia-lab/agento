@@ -110,7 +110,7 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	}
 	defer dbCleanup()
 
-	srv, err := buildWebServer(ctx, cfg, db, sysLogger, otelCfg)
+	srv, err := buildWebServer(ctx, cfg, db, sysLogger, otelCfg, otelProviders)
 	if err != nil {
 		sysLogger.Error("startup failed", "error", err)
 		return err
@@ -204,7 +204,8 @@ func initDatabase(cfg *config.AppConfig, sysLogger *slog.Logger) (*sql.DB, func(
 
 func buildWebServer(
 	ctx context.Context, cfg *config.AppConfig,
-	db *sql.DB, sysLogger *slog.Logger, otelCfg telemetry.MonitoringConfig,
+	db *sql.DB, sysLogger *slog.Logger,
+	otelCfg telemetry.MonitoringConfig, otelProviders *telemetry.Providers,
 ) (*server.Server, error) {
 	agentStore := storage.NewSQLiteAgentStore(db)
 
@@ -237,6 +238,8 @@ func buildWebServer(
 		return nil, fmt.Errorf("initializing settings: %w", err)
 	}
 
+	monitoringMgr := initMonitoringManager(cfg.DataDir, otelProviders, otelCfg, sysLogger)
+
 	apiSrv, bus, err := buildAPIServer(ctx, appDeps{
 		db:                  db,
 		logger:              sysLogger,
@@ -247,6 +250,7 @@ func buildWebServer(
 		mcpRegistry:         mcpRegistry,
 		localToolsMCP:       localToolsMCP,
 		settingsMgr:         settingsMgr,
+		monitoringMgr:       monitoringMgr,
 	})
 	if err != nil {
 		return nil, err
@@ -262,6 +266,19 @@ func buildWebServer(
 	return srv, nil
 }
 
+// initMonitoringManager creates a MonitoringManager, loads any persisted config from
+// disk, and logs a warning on load failure (non-fatal).
+func initMonitoringManager(
+	dataDir string, providers *telemetry.Providers,
+	envCfg telemetry.MonitoringConfig, logger *slog.Logger,
+) *telemetry.MonitoringManager {
+	mgr := telemetry.NewMonitoringManager(dataDir, providers, envCfg)
+	if err := mgr.Load(); err != nil {
+		logger.Warn("failed to load persisted monitoring config", "error", err)
+	}
+	return mgr
+}
+
 // appDeps bundles the stores, registries, and configuration needed to wire up
 // the API server and task scheduler. It replaces the long parameter lists of
 // buildAPIServer and initTaskScheduler.
@@ -275,6 +292,7 @@ type appDeps struct {
 	mcpRegistry         *config.MCPRegistry
 	localToolsMCP       *tools.LocalMCPConfig
 	settingsMgr         *config.SettingsManager
+	monitoringMgr       *telemetry.MonitoringManager
 }
 
 // buildAPIServer wires all services and returns the api.Server and the event bus.
@@ -312,6 +330,7 @@ func buildAPIServer(ctx context.Context, deps appDeps) (*api.Server, eventbus.Ev
 		SettingsMgr:     deps.settingsMgr,
 		Logger:          deps.logger,
 		SessionCache:    sessionCache,
+		MonitoringMgr:   deps.monitoringMgr,
 	})
 	return apiSrv, bus, nil
 }

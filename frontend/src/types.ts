@@ -673,6 +673,24 @@ export interface UpdateCheckResponse {
   release_url: string
 }
 
+// ── Monitoring / OTel ─────────────────────────────────────────────────────────
+
+export interface MonitoringConfig {
+  enabled: boolean
+  metrics_exporter: 'otlp' | 'prometheus' | 'none'
+  logs_exporter: 'otlp' | 'none'
+  otlp_endpoint: string
+  otlp_headers: Record<string, string>
+  otlp_insecure: boolean
+  metric_export_interval_ms: number
+}
+
+export interface MonitoringResponse {
+  settings: MonitoringConfig
+  locked: Record<string, string>
+  env_locked: boolean
+}
+
 // ── Analytics ─────────────────────────────────────────────────────────────────
 
 export interface AnalyticsSummary {
