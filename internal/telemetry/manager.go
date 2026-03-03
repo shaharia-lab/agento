@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -184,7 +185,9 @@ func (m *MonitoringManager) reload(ctx context.Context, cfg MonitoringConfig) er
 		shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		// Best-effort: start fresh providers even if old shutdown fails.
-		_ = m.providers.Shutdown(shutCtx) //nolint:errcheck
+		if err := m.providers.Shutdown(shutCtx); err != nil {
+			slog.Warn("failed to shutdown old telemetry providers during reload", "error", err)
+		}
 	}
 
 	p, err := Init(ctx, cfg)

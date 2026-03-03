@@ -88,13 +88,6 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 		return err
 	}
 	defer logCleanup()
-	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if shutdownErr := otelProviders.Shutdown(shutdownCtx); shutdownErr != nil {
-			sysLogger.Error("telemetry shutdown error", "error", shutdownErr)
-		}
-	}()
 
 	sysLogger.Info("agento starting",
 		slog.Int("port", cfg.Port),
@@ -110,11 +103,18 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	}
 	defer dbCleanup()
 
-	srv, err := buildWebServer(ctx, cfg, db, sysLogger, otelCfg, otelProviders)
+	srv, monitoringMgr, err := buildWebServer(ctx, cfg, db, sysLogger, otelCfg, otelProviders)
 	if err != nil {
 		sysLogger.Error("startup failed", "error", err)
 		return err
 	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if shutdownErr := monitoringMgr.Shutdown(shutdownCtx); shutdownErr != nil {
+			sysLogger.Error("telemetry shutdown error", "error", shutdownErr)
+		}
+	}()
 
 	url := fmt.Sprintf("http://localhost:%d", cfg.Port)
 	sysLogger.Info("server ready", "url", url)
@@ -206,17 +206,17 @@ func buildWebServer(
 	ctx context.Context, cfg *config.AppConfig,
 	db *sql.DB, sysLogger *slog.Logger,
 	otelCfg telemetry.MonitoringConfig, otelProviders *telemetry.Providers,
-) (*server.Server, error) {
+) (*server.Server, *telemetry.MonitoringManager, error) {
 	agentStore := storage.NewSQLiteAgentStore(db)
 
 	mcpRegistry, err := config.LoadMCPRegistry(cfg.MCPsFile())
 	if err != nil {
-		return nil, fmt.Errorf("loading MCP registry: %w", err)
+		return nil, nil, fmt.Errorf("loading MCP registry: %w", err)
 	}
 
 	localToolsMCP, err := tools.StartLocalMCPServer(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("starting local tools MCP server: %w", err)
+		return nil, nil, fmt.Errorf("starting local tools MCP server: %w", err)
 	}
 
 	chatStore := storage.NewSQLiteChatStore(db)
@@ -235,7 +235,7 @@ func buildWebServer(
 	settingsStore := storage.NewSQLiteSettingsStore(db)
 	settingsMgr, err := config.NewSettingsManager(settingsStore, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("initializing settings: %w", err)
+		return nil, nil, fmt.Errorf("initializing settings: %w", err)
 	}
 
 	monitoringMgr := initMonitoringManager(cfg.DataDir, otelProviders, otelCfg, sysLogger)
@@ -253,9 +253,9 @@ func buildWebServer(
 		monitoringMgr:       monitoringMgr,
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger, otelCfg)
+	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr)
 
 	// Ensure the event bus is drained cleanly on shutdown.
 	go func() {
@@ -263,7 +263,7 @@ func buildWebServer(
 		bus.Close()
 	}()
 
-	return srv, nil
+	return srv, monitoringMgr, nil
 }
 
 // initMonitoringManager creates a MonitoringManager, loads any persisted config from
