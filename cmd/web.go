@@ -83,22 +83,14 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 		return err
 	}
 
-	// Initialize OpenTelemetry (no-op providers for Phase 1 — no exporters connected).
-	otelProviders, err := telemetry.InitNoOp(ctx)
+	otelCfg, otelProviders, sysLogger, logCleanup, err := initObservability(ctx, cfg)
 	if err != nil {
-		return fmt.Errorf("initializing telemetry: %w", err)
-	}
-
-	sysLogger, logCleanup, err := logger.NewSystemLogger(cfg.LogDir(), cfg.SlogLevel())
-	if err != nil {
-		return fmt.Errorf("initializing logger: %w", err)
+		return err
 	}
 	defer logCleanup()
-
-	// Deferred after sysLogger so the structured logger is available at shutdown.
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
 		if shutdownErr := otelProviders.Shutdown(shutdownCtx); shutdownErr != nil {
 			sysLogger.Error("telemetry shutdown error", "error", shutdownErr)
 		}
@@ -118,7 +110,7 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	}
 	defer dbCleanup()
 
-	srv, err := buildWebServer(ctx, cfg, db, sysLogger)
+	srv, err := buildWebServer(ctx, cfg, db, sysLogger, otelCfg)
 	if err != nil {
 		sysLogger.Error("startup failed", "error", err)
 		return err
@@ -132,6 +124,40 @@ func runWeb(cfg *config.AppConfig, noBrowser bool) error {
 	}
 
 	return srv.Run(ctx)
+}
+
+// initObservability initializes OpenTelemetry and the structured logger, then logs the
+// telemetry mode. It returns the monitoring config, providers, logger, and a cleanup func.
+func initObservability(
+	ctx context.Context, cfg *config.AppConfig,
+) (telemetry.MonitoringConfig, *telemetry.Providers, *slog.Logger, func(), error) {
+	otelCfg := telemetry.ConfigFromEnv()
+	otelProviders, err := telemetry.Init(ctx, otelCfg)
+	if err != nil {
+		return otelCfg, nil, nil, func() {}, fmt.Errorf("initializing telemetry: %w", err)
+	}
+
+	sysLogger, logCleanup, err := logger.NewSystemLogger(cfg.LogDir(), cfg.SlogLevel())
+	if err != nil {
+		return otelCfg, nil, nil, func() {}, fmt.Errorf("initializing logger: %w", err)
+	}
+
+	logTelemetryMode(sysLogger, otelCfg)
+
+	return otelCfg, otelProviders, sysLogger, logCleanup, nil
+}
+
+// logTelemetryMode logs whether telemetry is enabled or disabled with the configured exporters.
+func logTelemetryMode(logger *slog.Logger, cfg telemetry.MonitoringConfig) {
+	if cfg.Enabled {
+		logger.Info("telemetry enabled",
+			"metrics_exporter", string(cfg.MetricsExporter),
+			"logs_exporter", string(cfg.LogsExporter),
+			"otlp_endpoint", cfg.OTLPEndpoint,
+		)
+		return
+	}
+	logger.Info("telemetry disabled (set OTEL_METRICS_EXPORTER or OTEL_EXPORTER_OTLP_ENDPOINT to enable)")
 }
 
 func ensureWebDirectories(cfg *config.AppConfig) error {
@@ -171,7 +197,7 @@ func initDatabase(cfg *config.AppConfig, sysLogger *slog.Logger) (*sql.DB, func(
 
 func buildWebServer(
 	ctx context.Context, cfg *config.AppConfig,
-	db *sql.DB, sysLogger *slog.Logger,
+	db *sql.DB, sysLogger *slog.Logger, otelCfg telemetry.MonitoringConfig,
 ) (*server.Server, error) {
 	agentStore := storage.NewSQLiteAgentStore(db)
 
@@ -218,7 +244,7 @@ func buildWebServer(
 	if err != nil {
 		return nil, err
 	}
-	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger)
+	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger, otelCfg)
 
 	// Ensure the event bus is drained cleanly on shutdown.
 	go func() {
