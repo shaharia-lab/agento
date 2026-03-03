@@ -237,7 +237,7 @@ func buildAPIServer(ctx context.Context, deps appDeps) (*api.Server, eventbus.Ev
 		deps.chatStore, deps.agentStore, deps.mcpRegistry, deps.localToolsMCP,
 		deps.integrationRegistry, deps.settingsMgr, deps.logger,
 	)
-	integrationSvc := service.NewIntegrationService(deps.integrationStore, deps.integrationRegistry, deps.logger, ctx)
+	integrationSvc := service.NewIntegrationService(deps.integrationStore, deps.integrationRegistry, deps.logger)
 	notificationSvc := service.NewNotificationService(deps.settingsMgr, notifStore)
 
 	taskStore := storage.NewSQLiteTaskStore(deps.db)
