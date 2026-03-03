@@ -9,7 +9,6 @@ package logger
 
 import (
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -18,8 +17,7 @@ import (
 )
 
 // NewSystemLogger creates a JSON slog.Logger that writes to <logDir>/system.log
-// with automatic log rotation. Logs are also written to stderr for developer
-// visibility. The directory is created if it does not exist.
+// with automatic log rotation. The directory is created if it does not exist.
 // The returned cleanup function closes the underlying log file and should be
 // called on shutdown (e.g. via defer).
 func NewSystemLogger(logDir string, level slog.Level) (*slog.Logger, func(), error) {
@@ -35,8 +33,7 @@ func NewSystemLogger(logDir string, level slog.Level) (*slog.Logger, func(), err
 		Compress:   true,
 	}
 
-	w := io.MultiWriter(rotatingFile, os.Stderr)
-	handler := slog.NewJSONHandler(w, &slog.HandlerOptions{Level: level})
+	handler := slog.NewJSONHandler(rotatingFile, &slog.HandlerOptions{Level: level})
 	cleanup := func() {
 		if err := rotatingFile.Close(); err != nil {
 			fmt.Fprintf(os.Stderr, "closing log file: %v\n", err)
