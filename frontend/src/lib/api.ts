@@ -531,9 +531,7 @@ export const jobHistoryApi = {
 // ── Version / update check ────────────────────────────────────────────────────
 
 export const versionApi = {
-  /** Check whether a newer release is available. Pass force=true to simulate an update (dev testing). */
-  checkUpdate: (force?: boolean) =>
-    request<UpdateCheckResponse>(`/version/update-check${force ? '?force=true' : ''}`),
+  checkUpdate: () => request<UpdateCheckResponse>('/version/update-check'),
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

@@ -886,6 +886,34 @@ func TestVersion(t *testing.T) {
 	assert.Contains(t, result, "build_date")
 }
 
+func TestUpdateCheck_DevBuild(t *testing.T) {
+	// The build package variables are "dev" / "unknown" by default in tests,
+	// so the handler should return update_available: false without hitting GitHub.
+	h := newHarness(t)
+	w := h.do(httptest.NewRequest(http.MethodGet, "/version/update-check", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+	assert.Equal(t, false, result["update_available"])
+	assert.Equal(t, "", result["latest_version"])
+	assert.Equal(t, "", result["release_url"])
+}
+
+func TestUpdateCheck_ResponseShape(t *testing.T) {
+	h := newHarness(t)
+	w := h.do(httptest.NewRequest(http.MethodGet, "/version/update-check", nil))
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+
+	var result map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+	assert.Contains(t, result, "current_version")
+	assert.Contains(t, result, "update_available")
+	assert.Contains(t, result, "latest_version")
+	assert.Contains(t, result, "release_url")
+}
+
 // ---------- Response content-type verification ----------
 
 func TestResponseContentType(t *testing.T) {

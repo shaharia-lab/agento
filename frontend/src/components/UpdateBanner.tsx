@@ -3,6 +3,8 @@ import { X, ArrowUpCircle, Terminal, Download, RotateCcw } from 'lucide-react'
 import { versionApi } from '@/lib/api'
 import type { UpdateCheckResponse } from '@/types'
 
+const DISMISS_STORAGE_KEY = 'agento-update-dismissed-version'
+
 interface HowToUpdateModalProps {
   latestVersion: string
   releaseUrl: string
@@ -10,7 +12,6 @@ interface HowToUpdateModalProps {
 }
 
 function HowToUpdateModal({ latestVersion, releaseUrl, onClose }: HowToUpdateModalProps) {
-  // Close on Escape
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
@@ -26,19 +27,27 @@ function HowToUpdateModal({ latestVersion, releaseUrl, onClose }: HowToUpdateMod
         if (e.target === e.currentTarget) onClose()
       }}
     >
-      <div className="relative w-full max-w-lg rounded-xl bg-white dark:bg-zinc-900 shadow-2xl border border-zinc-200 dark:border-zinc-700 overflow-hidden">
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="update-modal-title"
+        className="relative w-full max-w-lg rounded-xl bg-white dark:bg-zinc-900 shadow-2xl border border-zinc-200 dark:border-zinc-700 overflow-hidden"
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-700">
           <div className="flex items-center gap-2.5">
             <ArrowUpCircle className="h-5 w-5 text-amber-500" />
-            <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+            <h2
+              id="update-modal-title"
+              className="text-base font-semibold text-zinc-900 dark:text-zinc-100"
+            >
               How to update Agento
             </h2>
           </div>
           <button
             onClick={onClose}
             aria-label="Close"
-            className="h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
+            className="h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors cursor-pointer"
           >
             <X className="h-4 w-4" />
           </button>
@@ -131,8 +140,17 @@ function HowToUpdateModal({ latestVersion, releaseUrl, onClose }: HowToUpdateMod
 
 export default function UpdateBanner() {
   const [info, setInfo] = useState<UpdateCheckResponse | null>(null)
-  const [dismissed, setDismissed] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
+  // Track which version the user dismissed (keyed by version string so a new
+  // release automatically re-shows the banner). Initialised from localStorage
+  // on mount so it survives navigation and page refreshes.
+  const [dismissedVersion, setDismissedVersion] = useState<string>(() => {
+    try {
+      return localStorage.getItem(DISMISS_STORAGE_KEY) ?? ''
+    } catch {
+      return ''
+    }
+  })
 
   useEffect(() => {
     const check = () =>
@@ -146,7 +164,17 @@ export default function UpdateBanner() {
     return () => clearInterval(timer)
   }, [])
 
-  const show = !dismissed && info?.update_available === true
+  const handleDismiss = () => {
+    const version = info?.latest_version ?? ''
+    try {
+      localStorage.setItem(DISMISS_STORAGE_KEY, version)
+    } catch {
+      // ignore localStorage errors (e.g. private browsing restrictions)
+    }
+    setDismissedVersion(version)
+  }
+
+  const show = info?.update_available === true && dismissedVersion !== info.latest_version
 
   if (!show) return null
 
@@ -184,9 +212,9 @@ export default function UpdateBanner() {
           )}
         </span>
         <button
-          onClick={() => setDismissed(true)}
+          onClick={handleDismiss}
           aria-label="Dismiss update notification"
-          className="shrink-0 h-6 w-6 flex items-center justify-center rounded hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors"
+          className="shrink-0 h-6 w-6 flex items-center justify-center rounded hover:bg-amber-100 dark:hover:bg-amber-900/50 transition-colors cursor-pointer"
         >
           <X className="h-3.5 w-3.5" />
         </button>

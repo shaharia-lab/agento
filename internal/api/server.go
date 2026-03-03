@@ -54,6 +54,7 @@ type Server struct {
 	logger             *slog.Logger
 	liveSessions       *liveSessionStore
 	claudeSessionCache *claudesessions.Cache
+	updateCache        updateCheckCache
 }
 
 // New creates a new API Server backed by the provided services.
