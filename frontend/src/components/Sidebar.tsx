@@ -185,7 +185,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
         {/* Tasks section */}
         <div className="mt-4">
           {(!collapsed || isMobile) && (
-            <p className="px-3 mb-1 text-[11px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 select-none">
+            <p className="px-3 mb-1 text-[12px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 select-none">
               Tasks
             </p>
           )}
@@ -236,7 +236,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
         <div className="mt-4">
           {/* Section label — hidden when collapsed */}
           {(!collapsed || isMobile) && (
-            <p className="px-3 mb-1 text-[11px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 select-none">
+            <p className="px-3 mb-1 text-[12px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 select-none">
               Claude Usage
             </p>
           )}
@@ -287,7 +287,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
         {/* Analytics section */}
         <div className="mt-4">
           {(!collapsed || isMobile) && (
-            <p className="px-3 mb-1 text-[11px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 select-none">
+            <p className="px-3 mb-1 text-[12px] font-semibold uppercase tracking-widest text-zinc-400 dark:text-zinc-500 select-none">
               Analytics
             </p>
           )}
