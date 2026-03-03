@@ -3,6 +3,8 @@
 package mocks
 
 import (
+	context "context"
+
 	storage "github.com/shaharia-lab/agento/internal/storage"
 	mock "github.com/stretchr/testify/mock"
 )
@@ -20,17 +22,17 @@ func (_m *MockTaskStore) EXPECT() *MockTaskStore_Expecter {
 	return &MockTaskStore_Expecter{mock: &_m.Mock}
 }
 
-// BulkDeleteJobHistory provides a mock function with given fields: ids
-func (_m *MockTaskStore) BulkDeleteJobHistory(ids []string) error {
-	ret := _m.Called(ids)
+// BulkDeleteJobHistory provides a mock function with given fields: ctx, ids
+func (_m *MockTaskStore) BulkDeleteJobHistory(ctx context.Context, ids []string) error {
+	ret := _m.Called(ctx, ids)
 
 	if len(ret) == 0 {
 		panic("no return value specified for BulkDeleteJobHistory")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func([]string) error); ok {
-		r0 = rf(ids)
+	if rf, ok := ret.Get(0).(func(context.Context, []string) error); ok {
+		r0 = rf(ctx, ids)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -44,14 +46,15 @@ type MockTaskStore_BulkDeleteJobHistory_Call struct {
 }
 
 // BulkDeleteJobHistory is a helper method to define mock.On call
+//   - ctx context.Context
 //   - ids []string
-func (_e *MockTaskStore_Expecter) BulkDeleteJobHistory(ids interface{}) *MockTaskStore_BulkDeleteJobHistory_Call {
-	return &MockTaskStore_BulkDeleteJobHistory_Call{Call: _e.mock.On("BulkDeleteJobHistory", ids)}
+func (_e *MockTaskStore_Expecter) BulkDeleteJobHistory(ctx interface{}, ids interface{}) *MockTaskStore_BulkDeleteJobHistory_Call {
+	return &MockTaskStore_BulkDeleteJobHistory_Call{Call: _e.mock.On("BulkDeleteJobHistory", ctx, ids)}
 }
 
-func (_c *MockTaskStore_BulkDeleteJobHistory_Call) Run(run func(ids []string)) *MockTaskStore_BulkDeleteJobHistory_Call {
+func (_c *MockTaskStore_BulkDeleteJobHistory_Call) Run(run func(ctx context.Context, ids []string)) *MockTaskStore_BulkDeleteJobHistory_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].([]string))
+		run(args[0].(context.Context), args[1].([]string))
 	})
 	return _c
 }
@@ -61,22 +64,22 @@ func (_c *MockTaskStore_BulkDeleteJobHistory_Call) Return(_a0 error) *MockTaskSt
 	return _c
 }
 
-func (_c *MockTaskStore_BulkDeleteJobHistory_Call) RunAndReturn(run func([]string) error) *MockTaskStore_BulkDeleteJobHistory_Call {
+func (_c *MockTaskStore_BulkDeleteJobHistory_Call) RunAndReturn(run func(context.Context, []string) error) *MockTaskStore_BulkDeleteJobHistory_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// CreateJobHistory provides a mock function with given fields: jh
-func (_m *MockTaskStore) CreateJobHistory(jh *storage.JobHistory) error {
-	ret := _m.Called(jh)
+// CreateJobHistory provides a mock function with given fields: ctx, jh
+func (_m *MockTaskStore) CreateJobHistory(ctx context.Context, jh *storage.JobHistory) error {
+	ret := _m.Called(ctx, jh)
 
 	if len(ret) == 0 {
 		panic("no return value specified for CreateJobHistory")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(*storage.JobHistory) error); ok {
-		r0 = rf(jh)
+	if rf, ok := ret.Get(0).(func(context.Context, *storage.JobHistory) error); ok {
+		r0 = rf(ctx, jh)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -90,14 +93,15 @@ type MockTaskStore_CreateJobHistory_Call struct {
 }
 
 // CreateJobHistory is a helper method to define mock.On call
+//   - ctx context.Context
 //   - jh *storage.JobHistory
-func (_e *MockTaskStore_Expecter) CreateJobHistory(jh interface{}) *MockTaskStore_CreateJobHistory_Call {
-	return &MockTaskStore_CreateJobHistory_Call{Call: _e.mock.On("CreateJobHistory", jh)}
+func (_e *MockTaskStore_Expecter) CreateJobHistory(ctx interface{}, jh interface{}) *MockTaskStore_CreateJobHistory_Call {
+	return &MockTaskStore_CreateJobHistory_Call{Call: _e.mock.On("CreateJobHistory", ctx, jh)}
 }
 
-func (_c *MockTaskStore_CreateJobHistory_Call) Run(run func(jh *storage.JobHistory)) *MockTaskStore_CreateJobHistory_Call {
+func (_c *MockTaskStore_CreateJobHistory_Call) Run(run func(ctx context.Context, jh *storage.JobHistory)) *MockTaskStore_CreateJobHistory_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(*storage.JobHistory))
+		run(args[0].(context.Context), args[1].(*storage.JobHistory))
 	})
 	return _c
 }
@@ -107,22 +111,22 @@ func (_c *MockTaskStore_CreateJobHistory_Call) Return(_a0 error) *MockTaskStore_
 	return _c
 }
 
-func (_c *MockTaskStore_CreateJobHistory_Call) RunAndReturn(run func(*storage.JobHistory) error) *MockTaskStore_CreateJobHistory_Call {
+func (_c *MockTaskStore_CreateJobHistory_Call) RunAndReturn(run func(context.Context, *storage.JobHistory) error) *MockTaskStore_CreateJobHistory_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// CreateTask provides a mock function with given fields: task
-func (_m *MockTaskStore) CreateTask(task *storage.ScheduledTask) error {
-	ret := _m.Called(task)
+// CreateTask provides a mock function with given fields: ctx, task
+func (_m *MockTaskStore) CreateTask(ctx context.Context, task *storage.ScheduledTask) error {
+	ret := _m.Called(ctx, task)
 
 	if len(ret) == 0 {
 		panic("no return value specified for CreateTask")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(*storage.ScheduledTask) error); ok {
-		r0 = rf(task)
+	if rf, ok := ret.Get(0).(func(context.Context, *storage.ScheduledTask) error); ok {
+		r0 = rf(ctx, task)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -136,14 +140,15 @@ type MockTaskStore_CreateTask_Call struct {
 }
 
 // CreateTask is a helper method to define mock.On call
+//   - ctx context.Context
 //   - task *storage.ScheduledTask
-func (_e *MockTaskStore_Expecter) CreateTask(task interface{}) *MockTaskStore_CreateTask_Call {
-	return &MockTaskStore_CreateTask_Call{Call: _e.mock.On("CreateTask", task)}
+func (_e *MockTaskStore_Expecter) CreateTask(ctx interface{}, task interface{}) *MockTaskStore_CreateTask_Call {
+	return &MockTaskStore_CreateTask_Call{Call: _e.mock.On("CreateTask", ctx, task)}
 }
 
-func (_c *MockTaskStore_CreateTask_Call) Run(run func(task *storage.ScheduledTask)) *MockTaskStore_CreateTask_Call {
+func (_c *MockTaskStore_CreateTask_Call) Run(run func(ctx context.Context, task *storage.ScheduledTask)) *MockTaskStore_CreateTask_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(*storage.ScheduledTask))
+		run(args[0].(context.Context), args[1].(*storage.ScheduledTask))
 	})
 	return _c
 }
@@ -153,22 +158,22 @@ func (_c *MockTaskStore_CreateTask_Call) Return(_a0 error) *MockTaskStore_Create
 	return _c
 }
 
-func (_c *MockTaskStore_CreateTask_Call) RunAndReturn(run func(*storage.ScheduledTask) error) *MockTaskStore_CreateTask_Call {
+func (_c *MockTaskStore_CreateTask_Call) RunAndReturn(run func(context.Context, *storage.ScheduledTask) error) *MockTaskStore_CreateTask_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// DeleteJobHistory provides a mock function with given fields: id
-func (_m *MockTaskStore) DeleteJobHistory(id string) error {
-	ret := _m.Called(id)
+// DeleteJobHistory provides a mock function with given fields: ctx, id
+func (_m *MockTaskStore) DeleteJobHistory(ctx context.Context, id string) error {
+	ret := _m.Called(ctx, id)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DeleteJobHistory")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(string) error); ok {
-		r0 = rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = rf(ctx, id)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -182,14 +187,15 @@ type MockTaskStore_DeleteJobHistory_Call struct {
 }
 
 // DeleteJobHistory is a helper method to define mock.On call
+//   - ctx context.Context
 //   - id string
-func (_e *MockTaskStore_Expecter) DeleteJobHistory(id interface{}) *MockTaskStore_DeleteJobHistory_Call {
-	return &MockTaskStore_DeleteJobHistory_Call{Call: _e.mock.On("DeleteJobHistory", id)}
+func (_e *MockTaskStore_Expecter) DeleteJobHistory(ctx interface{}, id interface{}) *MockTaskStore_DeleteJobHistory_Call {
+	return &MockTaskStore_DeleteJobHistory_Call{Call: _e.mock.On("DeleteJobHistory", ctx, id)}
 }
 
-func (_c *MockTaskStore_DeleteJobHistory_Call) Run(run func(id string)) *MockTaskStore_DeleteJobHistory_Call {
+func (_c *MockTaskStore_DeleteJobHistory_Call) Run(run func(ctx context.Context, id string)) *MockTaskStore_DeleteJobHistory_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -199,22 +205,22 @@ func (_c *MockTaskStore_DeleteJobHistory_Call) Return(_a0 error) *MockTaskStore_
 	return _c
 }
 
-func (_c *MockTaskStore_DeleteJobHistory_Call) RunAndReturn(run func(string) error) *MockTaskStore_DeleteJobHistory_Call {
+func (_c *MockTaskStore_DeleteJobHistory_Call) RunAndReturn(run func(context.Context, string) error) *MockTaskStore_DeleteJobHistory_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// DeleteTask provides a mock function with given fields: id
-func (_m *MockTaskStore) DeleteTask(id string) error {
-	ret := _m.Called(id)
+// DeleteTask provides a mock function with given fields: ctx, id
+func (_m *MockTaskStore) DeleteTask(ctx context.Context, id string) error {
+	ret := _m.Called(ctx, id)
 
 	if len(ret) == 0 {
 		panic("no return value specified for DeleteTask")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(string) error); ok {
-		r0 = rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = rf(ctx, id)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -228,14 +234,15 @@ type MockTaskStore_DeleteTask_Call struct {
 }
 
 // DeleteTask is a helper method to define mock.On call
+//   - ctx context.Context
 //   - id string
-func (_e *MockTaskStore_Expecter) DeleteTask(id interface{}) *MockTaskStore_DeleteTask_Call {
-	return &MockTaskStore_DeleteTask_Call{Call: _e.mock.On("DeleteTask", id)}
+func (_e *MockTaskStore_Expecter) DeleteTask(ctx interface{}, id interface{}) *MockTaskStore_DeleteTask_Call {
+	return &MockTaskStore_DeleteTask_Call{Call: _e.mock.On("DeleteTask", ctx, id)}
 }
 
-func (_c *MockTaskStore_DeleteTask_Call) Run(run func(id string)) *MockTaskStore_DeleteTask_Call {
+func (_c *MockTaskStore_DeleteTask_Call) Run(run func(ctx context.Context, id string)) *MockTaskStore_DeleteTask_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -245,14 +252,14 @@ func (_c *MockTaskStore_DeleteTask_Call) Return(_a0 error) *MockTaskStore_Delete
 	return _c
 }
 
-func (_c *MockTaskStore_DeleteTask_Call) RunAndReturn(run func(string) error) *MockTaskStore_DeleteTask_Call {
+func (_c *MockTaskStore_DeleteTask_Call) RunAndReturn(run func(context.Context, string) error) *MockTaskStore_DeleteTask_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// GetJobHistory provides a mock function with given fields: id
-func (_m *MockTaskStore) GetJobHistory(id string) (*storage.JobHistory, error) {
-	ret := _m.Called(id)
+// GetJobHistory provides a mock function with given fields: ctx, id
+func (_m *MockTaskStore) GetJobHistory(ctx context.Context, id string) (*storage.JobHistory, error) {
+	ret := _m.Called(ctx, id)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetJobHistory")
@@ -260,19 +267,19 @@ func (_m *MockTaskStore) GetJobHistory(id string) (*storage.JobHistory, error) {
 
 	var r0 *storage.JobHistory
 	var r1 error
-	if rf, ok := ret.Get(0).(func(string) (*storage.JobHistory, error)); ok {
-		return rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) (*storage.JobHistory, error)); ok {
+		return rf(ctx, id)
 	}
-	if rf, ok := ret.Get(0).(func(string) *storage.JobHistory); ok {
-		r0 = rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) *storage.JobHistory); ok {
+		r0 = rf(ctx, id)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*storage.JobHistory)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(string) error); ok {
-		r1 = rf(id)
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, id)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -286,14 +293,15 @@ type MockTaskStore_GetJobHistory_Call struct {
 }
 
 // GetJobHistory is a helper method to define mock.On call
+//   - ctx context.Context
 //   - id string
-func (_e *MockTaskStore_Expecter) GetJobHistory(id interface{}) *MockTaskStore_GetJobHistory_Call {
-	return &MockTaskStore_GetJobHistory_Call{Call: _e.mock.On("GetJobHistory", id)}
+func (_e *MockTaskStore_Expecter) GetJobHistory(ctx interface{}, id interface{}) *MockTaskStore_GetJobHistory_Call {
+	return &MockTaskStore_GetJobHistory_Call{Call: _e.mock.On("GetJobHistory", ctx, id)}
 }
 
-func (_c *MockTaskStore_GetJobHistory_Call) Run(run func(id string)) *MockTaskStore_GetJobHistory_Call {
+func (_c *MockTaskStore_GetJobHistory_Call) Run(run func(ctx context.Context, id string)) *MockTaskStore_GetJobHistory_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -303,14 +311,14 @@ func (_c *MockTaskStore_GetJobHistory_Call) Return(_a0 *storage.JobHistory, _a1 
 	return _c
 }
 
-func (_c *MockTaskStore_GetJobHistory_Call) RunAndReturn(run func(string) (*storage.JobHistory, error)) *MockTaskStore_GetJobHistory_Call {
+func (_c *MockTaskStore_GetJobHistory_Call) RunAndReturn(run func(context.Context, string) (*storage.JobHistory, error)) *MockTaskStore_GetJobHistory_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// GetTask provides a mock function with given fields: id
-func (_m *MockTaskStore) GetTask(id string) (*storage.ScheduledTask, error) {
-	ret := _m.Called(id)
+// GetTask provides a mock function with given fields: ctx, id
+func (_m *MockTaskStore) GetTask(ctx context.Context, id string) (*storage.ScheduledTask, error) {
+	ret := _m.Called(ctx, id)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetTask")
@@ -318,19 +326,19 @@ func (_m *MockTaskStore) GetTask(id string) (*storage.ScheduledTask, error) {
 
 	var r0 *storage.ScheduledTask
 	var r1 error
-	if rf, ok := ret.Get(0).(func(string) (*storage.ScheduledTask, error)); ok {
-		return rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) (*storage.ScheduledTask, error)); ok {
+		return rf(ctx, id)
 	}
-	if rf, ok := ret.Get(0).(func(string) *storage.ScheduledTask); ok {
-		r0 = rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) *storage.ScheduledTask); ok {
+		r0 = rf(ctx, id)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*storage.ScheduledTask)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(string) error); ok {
-		r1 = rf(id)
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, id)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -344,14 +352,15 @@ type MockTaskStore_GetTask_Call struct {
 }
 
 // GetTask is a helper method to define mock.On call
+//   - ctx context.Context
 //   - id string
-func (_e *MockTaskStore_Expecter) GetTask(id interface{}) *MockTaskStore_GetTask_Call {
-	return &MockTaskStore_GetTask_Call{Call: _e.mock.On("GetTask", id)}
+func (_e *MockTaskStore_Expecter) GetTask(ctx interface{}, id interface{}) *MockTaskStore_GetTask_Call {
+	return &MockTaskStore_GetTask_Call{Call: _e.mock.On("GetTask", ctx, id)}
 }
 
-func (_c *MockTaskStore_GetTask_Call) Run(run func(id string)) *MockTaskStore_GetTask_Call {
+func (_c *MockTaskStore_GetTask_Call) Run(run func(ctx context.Context, id string)) *MockTaskStore_GetTask_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -361,14 +370,14 @@ func (_c *MockTaskStore_GetTask_Call) Return(_a0 *storage.ScheduledTask, _a1 err
 	return _c
 }
 
-func (_c *MockTaskStore_GetTask_Call) RunAndReturn(run func(string) (*storage.ScheduledTask, error)) *MockTaskStore_GetTask_Call {
+func (_c *MockTaskStore_GetTask_Call) RunAndReturn(run func(context.Context, string) (*storage.ScheduledTask, error)) *MockTaskStore_GetTask_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// ListAllJobHistory provides a mock function with given fields: limit, offset
-func (_m *MockTaskStore) ListAllJobHistory(limit int, offset int) ([]*storage.JobHistory, error) {
-	ret := _m.Called(limit, offset)
+// ListAllJobHistory provides a mock function with given fields: ctx, limit, offset
+func (_m *MockTaskStore) ListAllJobHistory(ctx context.Context, limit int, offset int) ([]*storage.JobHistory, error) {
+	ret := _m.Called(ctx, limit, offset)
 
 	if len(ret) == 0 {
 		panic("no return value specified for ListAllJobHistory")
@@ -376,19 +385,19 @@ func (_m *MockTaskStore) ListAllJobHistory(limit int, offset int) ([]*storage.Jo
 
 	var r0 []*storage.JobHistory
 	var r1 error
-	if rf, ok := ret.Get(0).(func(int, int) ([]*storage.JobHistory, error)); ok {
-		return rf(limit, offset)
+	if rf, ok := ret.Get(0).(func(context.Context, int, int) ([]*storage.JobHistory, error)); ok {
+		return rf(ctx, limit, offset)
 	}
-	if rf, ok := ret.Get(0).(func(int, int) []*storage.JobHistory); ok {
-		r0 = rf(limit, offset)
+	if rf, ok := ret.Get(0).(func(context.Context, int, int) []*storage.JobHistory); ok {
+		r0 = rf(ctx, limit, offset)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]*storage.JobHistory)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(int, int) error); ok {
-		r1 = rf(limit, offset)
+	if rf, ok := ret.Get(1).(func(context.Context, int, int) error); ok {
+		r1 = rf(ctx, limit, offset)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -402,15 +411,16 @@ type MockTaskStore_ListAllJobHistory_Call struct {
 }
 
 // ListAllJobHistory is a helper method to define mock.On call
+//   - ctx context.Context
 //   - limit int
 //   - offset int
-func (_e *MockTaskStore_Expecter) ListAllJobHistory(limit interface{}, offset interface{}) *MockTaskStore_ListAllJobHistory_Call {
-	return &MockTaskStore_ListAllJobHistory_Call{Call: _e.mock.On("ListAllJobHistory", limit, offset)}
+func (_e *MockTaskStore_Expecter) ListAllJobHistory(ctx interface{}, limit interface{}, offset interface{}) *MockTaskStore_ListAllJobHistory_Call {
+	return &MockTaskStore_ListAllJobHistory_Call{Call: _e.mock.On("ListAllJobHistory", ctx, limit, offset)}
 }
 
-func (_c *MockTaskStore_ListAllJobHistory_Call) Run(run func(limit int, offset int)) *MockTaskStore_ListAllJobHistory_Call {
+func (_c *MockTaskStore_ListAllJobHistory_Call) Run(run func(ctx context.Context, limit int, offset int)) *MockTaskStore_ListAllJobHistory_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(int), args[1].(int))
+		run(args[0].(context.Context), args[1].(int), args[2].(int))
 	})
 	return _c
 }
@@ -420,14 +430,14 @@ func (_c *MockTaskStore_ListAllJobHistory_Call) Return(_a0 []*storage.JobHistory
 	return _c
 }
 
-func (_c *MockTaskStore_ListAllJobHistory_Call) RunAndReturn(run func(int, int) ([]*storage.JobHistory, error)) *MockTaskStore_ListAllJobHistory_Call {
+func (_c *MockTaskStore_ListAllJobHistory_Call) RunAndReturn(run func(context.Context, int, int) ([]*storage.JobHistory, error)) *MockTaskStore_ListAllJobHistory_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// ListJobHistory provides a mock function with given fields: taskID, limit
-func (_m *MockTaskStore) ListJobHistory(taskID string, limit int) ([]*storage.JobHistory, error) {
-	ret := _m.Called(taskID, limit)
+// ListJobHistory provides a mock function with given fields: ctx, taskID, limit
+func (_m *MockTaskStore) ListJobHistory(ctx context.Context, taskID string, limit int) ([]*storage.JobHistory, error) {
+	ret := _m.Called(ctx, taskID, limit)
 
 	if len(ret) == 0 {
 		panic("no return value specified for ListJobHistory")
@@ -435,19 +445,19 @@ func (_m *MockTaskStore) ListJobHistory(taskID string, limit int) ([]*storage.Jo
 
 	var r0 []*storage.JobHistory
 	var r1 error
-	if rf, ok := ret.Get(0).(func(string, int) ([]*storage.JobHistory, error)); ok {
-		return rf(taskID, limit)
+	if rf, ok := ret.Get(0).(func(context.Context, string, int) ([]*storage.JobHistory, error)); ok {
+		return rf(ctx, taskID, limit)
 	}
-	if rf, ok := ret.Get(0).(func(string, int) []*storage.JobHistory); ok {
-		r0 = rf(taskID, limit)
+	if rf, ok := ret.Get(0).(func(context.Context, string, int) []*storage.JobHistory); ok {
+		r0 = rf(ctx, taskID, limit)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]*storage.JobHistory)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(string, int) error); ok {
-		r1 = rf(taskID, limit)
+	if rf, ok := ret.Get(1).(func(context.Context, string, int) error); ok {
+		r1 = rf(ctx, taskID, limit)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -461,15 +471,16 @@ type MockTaskStore_ListJobHistory_Call struct {
 }
 
 // ListJobHistory is a helper method to define mock.On call
+//   - ctx context.Context
 //   - taskID string
 //   - limit int
-func (_e *MockTaskStore_Expecter) ListJobHistory(taskID interface{}, limit interface{}) *MockTaskStore_ListJobHistory_Call {
-	return &MockTaskStore_ListJobHistory_Call{Call: _e.mock.On("ListJobHistory", taskID, limit)}
+func (_e *MockTaskStore_Expecter) ListJobHistory(ctx interface{}, taskID interface{}, limit interface{}) *MockTaskStore_ListJobHistory_Call {
+	return &MockTaskStore_ListJobHistory_Call{Call: _e.mock.On("ListJobHistory", ctx, taskID, limit)}
 }
 
-func (_c *MockTaskStore_ListJobHistory_Call) Run(run func(taskID string, limit int)) *MockTaskStore_ListJobHistory_Call {
+func (_c *MockTaskStore_ListJobHistory_Call) Run(run func(ctx context.Context, taskID string, limit int)) *MockTaskStore_ListJobHistory_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string), args[1].(int))
+		run(args[0].(context.Context), args[1].(string), args[2].(int))
 	})
 	return _c
 }
@@ -479,14 +490,14 @@ func (_c *MockTaskStore_ListJobHistory_Call) Return(_a0 []*storage.JobHistory, _
 	return _c
 }
 
-func (_c *MockTaskStore_ListJobHistory_Call) RunAndReturn(run func(string, int) ([]*storage.JobHistory, error)) *MockTaskStore_ListJobHistory_Call {
+func (_c *MockTaskStore_ListJobHistory_Call) RunAndReturn(run func(context.Context, string, int) ([]*storage.JobHistory, error)) *MockTaskStore_ListJobHistory_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// ListTasks provides a mock function with no fields
-func (_m *MockTaskStore) ListTasks() ([]*storage.ScheduledTask, error) {
-	ret := _m.Called()
+// ListTasks provides a mock function with given fields: ctx
+func (_m *MockTaskStore) ListTasks(ctx context.Context) ([]*storage.ScheduledTask, error) {
+	ret := _m.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for ListTasks")
@@ -494,19 +505,19 @@ func (_m *MockTaskStore) ListTasks() ([]*storage.ScheduledTask, error) {
 
 	var r0 []*storage.ScheduledTask
 	var r1 error
-	if rf, ok := ret.Get(0).(func() ([]*storage.ScheduledTask, error)); ok {
-		return rf()
+	if rf, ok := ret.Get(0).(func(context.Context) ([]*storage.ScheduledTask, error)); ok {
+		return rf(ctx)
 	}
-	if rf, ok := ret.Get(0).(func() []*storage.ScheduledTask); ok {
-		r0 = rf()
+	if rf, ok := ret.Get(0).(func(context.Context) []*storage.ScheduledTask); ok {
+		r0 = rf(ctx)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]*storage.ScheduledTask)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func() error); ok {
-		r1 = rf()
+	if rf, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = rf(ctx)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -520,13 +531,14 @@ type MockTaskStore_ListTasks_Call struct {
 }
 
 // ListTasks is a helper method to define mock.On call
-func (_e *MockTaskStore_Expecter) ListTasks() *MockTaskStore_ListTasks_Call {
-	return &MockTaskStore_ListTasks_Call{Call: _e.mock.On("ListTasks")}
+//   - ctx context.Context
+func (_e *MockTaskStore_Expecter) ListTasks(ctx interface{}) *MockTaskStore_ListTasks_Call {
+	return &MockTaskStore_ListTasks_Call{Call: _e.mock.On("ListTasks", ctx)}
 }
 
-func (_c *MockTaskStore_ListTasks_Call) Run(run func()) *MockTaskStore_ListTasks_Call {
+func (_c *MockTaskStore_ListTasks_Call) Run(run func(ctx context.Context)) *MockTaskStore_ListTasks_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		run(args[0].(context.Context))
 	})
 	return _c
 }
@@ -536,22 +548,22 @@ func (_c *MockTaskStore_ListTasks_Call) Return(_a0 []*storage.ScheduledTask, _a1
 	return _c
 }
 
-func (_c *MockTaskStore_ListTasks_Call) RunAndReturn(run func() ([]*storage.ScheduledTask, error)) *MockTaskStore_ListTasks_Call {
+func (_c *MockTaskStore_ListTasks_Call) RunAndReturn(run func(context.Context) ([]*storage.ScheduledTask, error)) *MockTaskStore_ListTasks_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// UpdateJobHistory provides a mock function with given fields: jh
-func (_m *MockTaskStore) UpdateJobHistory(jh *storage.JobHistory) error {
-	ret := _m.Called(jh)
+// UpdateJobHistory provides a mock function with given fields: ctx, jh
+func (_m *MockTaskStore) UpdateJobHistory(ctx context.Context, jh *storage.JobHistory) error {
+	ret := _m.Called(ctx, jh)
 
 	if len(ret) == 0 {
 		panic("no return value specified for UpdateJobHistory")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(*storage.JobHistory) error); ok {
-		r0 = rf(jh)
+	if rf, ok := ret.Get(0).(func(context.Context, *storage.JobHistory) error); ok {
+		r0 = rf(ctx, jh)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -565,14 +577,15 @@ type MockTaskStore_UpdateJobHistory_Call struct {
 }
 
 // UpdateJobHistory is a helper method to define mock.On call
+//   - ctx context.Context
 //   - jh *storage.JobHistory
-func (_e *MockTaskStore_Expecter) UpdateJobHistory(jh interface{}) *MockTaskStore_UpdateJobHistory_Call {
-	return &MockTaskStore_UpdateJobHistory_Call{Call: _e.mock.On("UpdateJobHistory", jh)}
+func (_e *MockTaskStore_Expecter) UpdateJobHistory(ctx interface{}, jh interface{}) *MockTaskStore_UpdateJobHistory_Call {
+	return &MockTaskStore_UpdateJobHistory_Call{Call: _e.mock.On("UpdateJobHistory", ctx, jh)}
 }
 
-func (_c *MockTaskStore_UpdateJobHistory_Call) Run(run func(jh *storage.JobHistory)) *MockTaskStore_UpdateJobHistory_Call {
+func (_c *MockTaskStore_UpdateJobHistory_Call) Run(run func(ctx context.Context, jh *storage.JobHistory)) *MockTaskStore_UpdateJobHistory_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(*storage.JobHistory))
+		run(args[0].(context.Context), args[1].(*storage.JobHistory))
 	})
 	return _c
 }
@@ -582,22 +595,22 @@ func (_c *MockTaskStore_UpdateJobHistory_Call) Return(_a0 error) *MockTaskStore_
 	return _c
 }
 
-func (_c *MockTaskStore_UpdateJobHistory_Call) RunAndReturn(run func(*storage.JobHistory) error) *MockTaskStore_UpdateJobHistory_Call {
+func (_c *MockTaskStore_UpdateJobHistory_Call) RunAndReturn(run func(context.Context, *storage.JobHistory) error) *MockTaskStore_UpdateJobHistory_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// UpdateTask provides a mock function with given fields: task
-func (_m *MockTaskStore) UpdateTask(task *storage.ScheduledTask) error {
-	ret := _m.Called(task)
+// UpdateTask provides a mock function with given fields: ctx, task
+func (_m *MockTaskStore) UpdateTask(ctx context.Context, task *storage.ScheduledTask) error {
+	ret := _m.Called(ctx, task)
 
 	if len(ret) == 0 {
 		panic("no return value specified for UpdateTask")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(*storage.ScheduledTask) error); ok {
-		r0 = rf(task)
+	if rf, ok := ret.Get(0).(func(context.Context, *storage.ScheduledTask) error); ok {
+		r0 = rf(ctx, task)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -611,14 +624,15 @@ type MockTaskStore_UpdateTask_Call struct {
 }
 
 // UpdateTask is a helper method to define mock.On call
+//   - ctx context.Context
 //   - task *storage.ScheduledTask
-func (_e *MockTaskStore_Expecter) UpdateTask(task interface{}) *MockTaskStore_UpdateTask_Call {
-	return &MockTaskStore_UpdateTask_Call{Call: _e.mock.On("UpdateTask", task)}
+func (_e *MockTaskStore_Expecter) UpdateTask(ctx interface{}, task interface{}) *MockTaskStore_UpdateTask_Call {
+	return &MockTaskStore_UpdateTask_Call{Call: _e.mock.On("UpdateTask", ctx, task)}
 }
 
-func (_c *MockTaskStore_UpdateTask_Call) Run(run func(task *storage.ScheduledTask)) *MockTaskStore_UpdateTask_Call {
+func (_c *MockTaskStore_UpdateTask_Call) Run(run func(ctx context.Context, task *storage.ScheduledTask)) *MockTaskStore_UpdateTask_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(*storage.ScheduledTask))
+		run(args[0].(context.Context), args[1].(*storage.ScheduledTask))
 	})
 	return _c
 }
@@ -628,7 +642,7 @@ func (_c *MockTaskStore_UpdateTask_Call) Return(_a0 error) *MockTaskStore_Update
 	return _c
 }
 
-func (_c *MockTaskStore_UpdateTask_Call) RunAndReturn(run func(*storage.ScheduledTask) error) *MockTaskStore_UpdateTask_Call {
+func (_c *MockTaskStore_UpdateTask_Call) RunAndReturn(run func(context.Context, *storage.ScheduledTask) error) *MockTaskStore_UpdateTask_Call {
 	_c.Call.Return(run)
 	return _c
 }

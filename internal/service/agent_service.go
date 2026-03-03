@@ -10,6 +10,9 @@ import (
 	"regexp"
 	"strings"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/storage"
 )
@@ -45,23 +48,36 @@ func NewAgentService(repo storage.AgentStore, logger *slog.Logger) AgentService 
 	return &agentService{repo: repo, logger: logger}
 }
 
-func (s *agentService) List(_ context.Context) ([]*config.AgentConfig, error) {
-	agents, err := s.repo.List()
+func (s *agentService) List(ctx context.Context) ([]*config.AgentConfig, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "agent.list")
+	defer span.End()
+
+	agents, err := s.repo.List(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("listing agents: %w", err)
 	}
 	return agents, nil
 }
 
-func (s *agentService) Get(_ context.Context, slug string) (*config.AgentConfig, error) {
-	agent, err := s.repo.Get(slug)
+func (s *agentService) Get(ctx context.Context, slug string) (*config.AgentConfig, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "agent.get")
+	defer span.End()
+
+	agent, err := s.repo.Get(ctx, slug)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("getting agent %q: %w", slug, err)
 	}
 	return agent, nil
 }
 
-func (s *agentService) Create(_ context.Context, agent *config.AgentConfig) (*config.AgentConfig, error) {
+func (s *agentService) Create(ctx context.Context, agent *config.AgentConfig) (*config.AgentConfig, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "agent.create")
+	defer span.End()
+
 	if agent.Name == "" {
 		return nil, &ValidationError{Field: "name", Message: "name is required"}
 	}
@@ -87,15 +103,19 @@ func (s *agentService) Create(_ context.Context, agent *config.AgentConfig) (*co
 		return nil, &ValidationError{Field: "permission_mode", Message: "must be bypass or default"}
 	}
 
-	existing, err := s.repo.Get(agent.Slug)
+	existing, err := s.repo.Get(ctx, agent.Slug)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("checking slug uniqueness: %w", err)
 	}
 	if existing != nil {
 		return nil, &ConflictError{Resource: "agent", ID: agent.Slug}
 	}
 
-	if err := s.repo.Save(agent); err != nil {
+	if err := s.repo.Save(ctx, agent); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("saving agent: %w", err)
 	}
 
@@ -103,9 +123,16 @@ func (s *agentService) Create(_ context.Context, agent *config.AgentConfig) (*co
 	return agent, nil
 }
 
-func (s *agentService) Update(_ context.Context, slug string, agent *config.AgentConfig) (*config.AgentConfig, error) {
-	existing, err := s.repo.Get(slug)
+func (s *agentService) Update(
+	ctx context.Context, slug string, agent *config.AgentConfig,
+) (*config.AgentConfig, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "agent.update")
+	defer span.End()
+
+	existing, err := s.repo.Get(ctx, slug)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("looking up agent: %w", err)
 	}
 	if existing == nil {
@@ -131,7 +158,9 @@ func (s *agentService) Update(_ context.Context, slug string, agent *config.Agen
 		agent.Thinking = "adaptive"
 	}
 
-	if err := s.repo.Save(agent); err != nil {
+	if err := s.repo.Save(ctx, agent); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("saving agent: %w", err)
 	}
 
@@ -139,8 +168,13 @@ func (s *agentService) Update(_ context.Context, slug string, agent *config.Agen
 	return agent, nil
 }
 
-func (s *agentService) Delete(_ context.Context, slug string) error {
-	if err := s.repo.Delete(slug); err != nil {
+func (s *agentService) Delete(ctx context.Context, slug string) error {
+	ctx, span := otel.Tracer("agento").Start(ctx, "agent.delete")
+	defer span.End()
+
+	if err := s.repo.Delete(ctx, slug); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("deleting agent %q: %w", slug, err)
 	}
 	s.logger.Info("agent deleted", "slug", slug)

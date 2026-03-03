@@ -20,8 +20,7 @@ func NewSQLiteIntegrationStore(db *sql.DB) *SQLiteIntegrationStore {
 }
 
 // List returns all integration configs.
-func (s *SQLiteIntegrationStore) List() ([]*config.IntegrationConfig, error) {
-	ctx := context.Background()
+func (s *SQLiteIntegrationStore) List(ctx context.Context) ([]*config.IntegrationConfig, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, type, enabled, credentials, auth, services, created_at, updated_at
 		FROM integrations
@@ -43,8 +42,7 @@ func (s *SQLiteIntegrationStore) List() ([]*config.IntegrationConfig, error) {
 }
 
 // Get returns the integration config for the given id, or nil if not found.
-func (s *SQLiteIntegrationStore) Get(id string) (*config.IntegrationConfig, error) {
-	ctx := context.Background()
+func (s *SQLiteIntegrationStore) Get(ctx context.Context, id string) (*config.IntegrationConfig, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, name, type, enabled, credentials, auth, services, created_at, updated_at
 		FROM integrations WHERE id = ?`, id)
@@ -77,7 +75,7 @@ func (s *SQLiteIntegrationStore) Get(id string) (*config.IntegrationConfig, erro
 }
 
 // Save persists the integration config (upsert).
-func (s *SQLiteIntegrationStore) Save(cfg *config.IntegrationConfig) error {
+func (s *SQLiteIntegrationStore) Save(ctx context.Context, cfg *config.IntegrationConfig) error {
 	if cfg.ID == "" {
 		return fmt.Errorf("integration id is required")
 	}
@@ -98,7 +96,6 @@ func (s *SQLiteIntegrationStore) Save(cfg *config.IntegrationConfig) error {
 		enabled = 1
 	}
 
-	ctx := context.Background()
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO integrations (id, name, type, enabled, credentials, auth, services, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -121,8 +118,7 @@ func (s *SQLiteIntegrationStore) Save(cfg *config.IntegrationConfig) error {
 }
 
 // Delete removes the integration with the given id.
-func (s *SQLiteIntegrationStore) Delete(id string) error {
-	ctx := context.Background()
+func (s *SQLiteIntegrationStore) Delete(ctx context.Context, id string) error {
 	res, err := s.db.ExecContext(ctx, "DELETE FROM integrations WHERE id = ?", id)
 	if err != nil {
 		return fmt.Errorf("deleting integration %q: %w", id, err)

@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+
 	"github.com/shaharia-lab/agento/internal/storage"
 )
 
@@ -45,17 +48,27 @@ func NewTaskService(repo storage.TaskStore, scheduler TaskScheduler, logger *slo
 	return &taskService{repo: repo, scheduler: scheduler, logger: logger}
 }
 
-func (s *taskService) ListTasks(_ context.Context) ([]*storage.ScheduledTask, error) {
-	tasks, err := s.repo.ListTasks()
+func (s *taskService) ListTasks(ctx context.Context) ([]*storage.ScheduledTask, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.list")
+	defer span.End()
+
+	tasks, err := s.repo.ListTasks(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("listing tasks: %w", err)
 	}
 	return tasks, nil
 }
 
-func (s *taskService) GetTask(_ context.Context, id string) (*storage.ScheduledTask, error) {
-	task, err := s.repo.GetTask(id)
+func (s *taskService) GetTask(ctx context.Context, id string) (*storage.ScheduledTask, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.get")
+	defer span.End()
+
+	task, err := s.repo.GetTask(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("getting task %q: %w", id, err)
 	}
 	if task == nil {
@@ -64,7 +77,10 @@ func (s *taskService) GetTask(_ context.Context, id string) (*storage.ScheduledT
 	return task, nil
 }
 
-func (s *taskService) CreateTask(_ context.Context, task *storage.ScheduledTask) (*storage.ScheduledTask, error) {
+func (s *taskService) CreateTask(ctx context.Context, task *storage.ScheduledTask) (*storage.ScheduledTask, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.create")
+	defer span.End()
+
 	if err := validateTask(task); err != nil {
 		return nil, err
 	}
@@ -76,7 +92,9 @@ func (s *taskService) CreateTask(_ context.Context, task *storage.ScheduledTask)
 		task.TimeoutMinutes = 30
 	}
 
-	if err := s.repo.CreateTask(task); err != nil {
+	if err := s.repo.CreateTask(ctx, task); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("creating task: %w", err)
 	}
 
@@ -93,10 +111,15 @@ func (s *taskService) CreateTask(_ context.Context, task *storage.ScheduledTask)
 }
 
 func (s *taskService) UpdateTask(
-	_ context.Context, id string, task *storage.ScheduledTask,
+	ctx context.Context, id string, task *storage.ScheduledTask,
 ) (*storage.ScheduledTask, error) {
-	existing, err := s.repo.GetTask(id)
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.update")
+	defer span.End()
+
+	existing, err := s.repo.GetTask(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf(errFmtLookingUpTask, err)
 	}
 	if existing == nil {
@@ -117,7 +140,9 @@ func (s *taskService) UpdateTask(
 		task.TimeoutMinutes = 30
 	}
 
-	if err := s.repo.UpdateTask(task); err != nil {
+	if err := s.repo.UpdateTask(ctx, task); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("updating task: %w", err)
 	}
 
@@ -136,9 +161,14 @@ func (s *taskService) UpdateTask(
 	return task, nil
 }
 
-func (s *taskService) DeleteTask(_ context.Context, id string) error {
-	existing, err := s.repo.GetTask(id)
+func (s *taskService) DeleteTask(ctx context.Context, id string) error {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.delete")
+	defer span.End()
+
+	existing, err := s.repo.GetTask(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf(errFmtLookingUpTask, err)
 	}
 	if existing == nil {
@@ -150,16 +180,23 @@ func (s *taskService) DeleteTask(_ context.Context, id string) error {
 		s.scheduler.UnscheduleTask(id)
 	}
 
-	if err := s.repo.DeleteTask(id); err != nil {
+	if err := s.repo.DeleteTask(ctx, id); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("deleting task %q: %w", id, err)
 	}
 	s.logger.Info("task deleted", "id", id)
 	return nil
 }
 
-func (s *taskService) PauseTask(_ context.Context, id string) (*storage.ScheduledTask, error) {
-	task, err := s.repo.GetTask(id)
+func (s *taskService) PauseTask(ctx context.Context, id string) (*storage.ScheduledTask, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.pause")
+	defer span.End()
+
+	task, err := s.repo.GetTask(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf(errFmtLookingUpTask, err)
 	}
 	if task == nil {
@@ -167,7 +204,9 @@ func (s *taskService) PauseTask(_ context.Context, id string) (*storage.Schedule
 	}
 
 	task.Status = storage.TaskStatusPaused
-	if err := s.repo.UpdateTask(task); err != nil {
+	if err := s.repo.UpdateTask(ctx, task); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("pausing task: %w", err)
 	}
 
@@ -181,9 +220,14 @@ func (s *taskService) PauseTask(_ context.Context, id string) (*storage.Schedule
 	return task, nil
 }
 
-func (s *taskService) ResumeTask(_ context.Context, id string) (*storage.ScheduledTask, error) {
-	task, err := s.repo.GetTask(id)
+func (s *taskService) ResumeTask(ctx context.Context, id string) (*storage.ScheduledTask, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.resume")
+	defer span.End()
+
+	task, err := s.repo.GetTask(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf(errFmtLookingUpTask, err)
 	}
 	if task == nil {
@@ -194,7 +238,9 @@ func (s *taskService) ResumeTask(_ context.Context, id string) (*storage.Schedul
 	task.RunCount = 0
 	task.LastRunAt = nil
 	task.LastRunStatus = ""
-	if err := s.repo.UpdateTask(task); err != nil {
+	if err := s.repo.UpdateTask(ctx, task); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("resuming task: %w", err)
 	}
 
@@ -210,34 +256,49 @@ func (s *taskService) ResumeTask(_ context.Context, id string) (*storage.Schedul
 	return task, nil
 }
 
-func (s *taskService) ListJobHistory(_ context.Context, taskID string, limit int) ([]*storage.JobHistory, error) {
+func (s *taskService) ListJobHistory(ctx context.Context, taskID string, limit int) ([]*storage.JobHistory, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.list_job_history")
+	defer span.End()
+
 	if limit <= 0 {
 		limit = 50
 	}
-	history, err := s.repo.ListJobHistory(taskID, limit)
+	history, err := s.repo.ListJobHistory(ctx, taskID, limit)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("listing job history: %w", err)
 	}
 	return history, nil
 }
 
-func (s *taskService) ListAllJobHistory(_ context.Context, limit, offset int) ([]*storage.JobHistory, error) {
+func (s *taskService) ListAllJobHistory(ctx context.Context, limit, offset int) ([]*storage.JobHistory, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.list_all_job_history")
+	defer span.End()
+
 	if limit <= 0 {
 		limit = 50
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	history, err := s.repo.ListAllJobHistory(limit, offset)
+	history, err := s.repo.ListAllJobHistory(ctx, limit, offset)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("listing all job history: %w", err)
 	}
 	return history, nil
 }
 
-func (s *taskService) GetJobHistory(_ context.Context, id string) (*storage.JobHistory, error) {
-	jh, err := s.repo.GetJobHistory(id)
+func (s *taskService) GetJobHistory(ctx context.Context, id string) (*storage.JobHistory, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.get_job_history")
+	defer span.End()
+
+	jh, err := s.repo.GetJobHistory(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("getting job history %q: %w", id, err)
 	}
 	if jh == nil {
@@ -246,23 +307,35 @@ func (s *taskService) GetJobHistory(_ context.Context, id string) (*storage.JobH
 	return jh, nil
 }
 
-func (s *taskService) DeleteJobHistory(_ context.Context, id string) error {
-	jh, err := s.repo.GetJobHistory(id)
+func (s *taskService) DeleteJobHistory(ctx context.Context, id string) error {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.delete_job_history")
+	defer span.End()
+
+	jh, err := s.repo.GetJobHistory(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("looking up job history: %w", err)
 	}
 	if jh == nil {
 		return &NotFoundError{Resource: "job_history", ID: id}
 	}
-	if err := s.repo.DeleteJobHistory(id); err != nil {
+	if err := s.repo.DeleteJobHistory(ctx, id); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("deleting job history %q: %w", id, err)
 	}
 	s.logger.Info("job history deleted", "id", id)
 	return nil
 }
 
-func (s *taskService) BulkDeleteJobHistory(_ context.Context, ids []string) error {
-	if err := s.repo.BulkDeleteJobHistory(ids); err != nil {
+func (s *taskService) BulkDeleteJobHistory(ctx context.Context, ids []string) error {
+	ctx, span := otel.Tracer("agento").Start(ctx, "task.bulk_delete_job_history")
+	defer span.End()
+
+	if err := s.repo.BulkDeleteJobHistory(ctx, ids); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("bulk deleting job history: %w", err)
 	}
 	s.logger.Info("job history bulk deleted", "count", len(ids))

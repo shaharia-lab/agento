@@ -17,7 +17,8 @@ func (s *Scheduler) executeTask(taskID string) {
 	s.semaphore <- struct{}{}
 	defer func() { <-s.semaphore }()
 
-	task, err := s.cfg.TaskStore.GetTask(taskID)
+	ctx := context.Background()
+	task, err := s.cfg.TaskStore.GetTask(ctx, taskID)
 	if err != nil {
 		s.logger.Error("failed to load task for execution",
 			"task_id", taskID, "error", err)
@@ -138,7 +139,9 @@ func (s *Scheduler) runTask(task *storage.ScheduledTask) {
 func (s *Scheduler) createTaskSession(
 	task *storage.ScheduledTask,
 ) (*storage.ChatSession, error) {
+	ctx := context.Background()
 	chatSession, err := s.cfg.ChatStore.CreateSession(
+		ctx,
 		task.AgentSlug, task.WorkingDirectory,
 		task.Model, task.SettingsProfileID,
 	)
@@ -147,7 +150,7 @@ func (s *Scheduler) createTaskSession(
 	}
 
 	chatSession.Title = "[Task] " + task.Name
-	if updateErr := s.cfg.ChatStore.UpdateSession(chatSession); updateErr != nil {
+	if updateErr := s.cfg.ChatStore.UpdateSession(ctx, chatSession); updateErr != nil {
 		s.logger.Warn("failed to update session title", "error", updateErr)
 	}
 	return chatSession, nil
@@ -172,7 +175,7 @@ func (s *Scheduler) createInitialJobHistory(
 		Model:         task.Model,
 		PromptPreview: promptPreview,
 	}
-	if err := s.cfg.TaskStore.CreateJobHistory(jh); err != nil {
+	if err := s.cfg.TaskStore.CreateJobHistory(context.Background(), jh); err != nil {
 		s.logger.Error("failed to create job history",
 			"task_id", task.ID, "error", err)
 	}
@@ -204,13 +207,14 @@ func (s *Scheduler) saveSessionResults(
 	chatSession *storage.ChatSession, result *agent.AgentResult,
 	prompt string, startedAt time.Time,
 ) {
+	ctx := context.Background()
 	chatSession.SDKSession = result.SessionID
 	chatSession.TotalInputTokens = result.Usage.InputTokens
 	chatSession.TotalOutputTokens = result.Usage.OutputTokens
 	chatSession.TotalCacheCreationTokens = result.Usage.CacheCreationInputTokens
 	chatSession.TotalCacheReadTokens = result.Usage.CacheReadInputTokens
 	chatSession.UpdatedAt = time.Now().UTC()
-	if updateErr := s.cfg.ChatStore.UpdateSession(chatSession); updateErr != nil {
+	if updateErr := s.cfg.ChatStore.UpdateSession(ctx, chatSession); updateErr != nil {
 		s.logger.Warn("failed to update chat session after execution",
 			"error", updateErr)
 	}
@@ -221,7 +225,7 @@ func (s *Scheduler) saveSessionResults(
 			Content:   prompt,
 			Timestamp: startedAt,
 		}
-		if appendErr := s.cfg.ChatStore.AppendMessage(chatSession.ID, msg); appendErr != nil {
+		if appendErr := s.cfg.ChatStore.AppendMessage(ctx, chatSession.ID, msg); appendErr != nil {
 			s.logger.Warn("failed to store user message", "error", appendErr)
 		}
 
@@ -230,7 +234,7 @@ func (s *Scheduler) saveSessionResults(
 			Content:   result.Answer,
 			Timestamp: time.Now().UTC(),
 		}
-		if appendErr := s.cfg.ChatStore.AppendMessage(chatSession.ID, assistantMsg); appendErr != nil {
+		if appendErr := s.cfg.ChatStore.AppendMessage(ctx, chatSession.ID, assistantMsg); appendErr != nil {
 			s.logger.Warn("failed to store assistant message", "error", appendErr)
 		}
 	}
@@ -238,7 +242,7 @@ func (s *Scheduler) saveSessionResults(
 
 func (s *Scheduler) resolveAgentConfig(task *storage.ScheduledTask) (*config.AgentConfig, error) {
 	if task.AgentSlug != "" {
-		agentCfg, err := s.cfg.AgentStore.Get(task.AgentSlug)
+		agentCfg, err := s.cfg.AgentStore.Get(context.Background(), task.AgentSlug)
 		if err != nil {
 			return nil, fmt.Errorf("loading agent %q: %w", task.AgentSlug, err)
 		}
@@ -275,7 +279,7 @@ func (s *Scheduler) finishJobHistory(
 	jh.TotalCacheCreationTokens = usage.CacheCreationInputTokens
 	jh.TotalCacheReadTokens = usage.CacheReadInputTokens
 
-	if err := s.cfg.TaskStore.UpdateJobHistory(jh); err != nil {
+	if err := s.cfg.TaskStore.UpdateJobHistory(context.Background(), jh); err != nil {
 		s.logger.Error("failed to update job history", "job_id", jh.ID, "error", err)
 	}
 }
@@ -297,7 +301,7 @@ func (s *Scheduler) updateTaskAfterRun(task *storage.ScheduledTask, ranAt time.T
 		s.UnscheduleTask(task.ID)
 	}
 
-	if err := s.cfg.TaskStore.UpdateTask(task); err != nil {
+	if err := s.cfg.TaskStore.UpdateTask(context.Background(), task); err != nil {
 		s.logger.Error("failed to update task after run", "task_id", task.ID, "error", err)
 	}
 }
@@ -316,7 +320,7 @@ func (s *Scheduler) recordFailedRun(task *storage.ScheduledTask, startedAt time.
 	jh.FinishedAt = &now
 	jh.DurationMS = now.Sub(startedAt).Milliseconds()
 
-	if err := s.cfg.TaskStore.CreateJobHistory(jh); err != nil {
+	if err := s.cfg.TaskStore.CreateJobHistory(context.Background(), jh); err != nil {
 		s.logger.Error("failed to create failed job history", "task_id", task.ID, "error", err)
 	}
 	s.updateTaskAfterRun(task, startedAt, "failed")
@@ -325,7 +329,7 @@ func (s *Scheduler) recordFailedRun(task *storage.ScheduledTask, startedAt time.
 func (s *Scheduler) autoPause(task *storage.ScheduledTask, reason string) {
 	s.logger.Info("auto-pausing task", "task_id", task.ID, "reason", reason)
 	task.Status = storage.TaskStatusPaused
-	if err := s.cfg.TaskStore.UpdateTask(task); err != nil {
+	if err := s.cfg.TaskStore.UpdateTask(context.Background(), task); err != nil {
 		s.logger.Error("failed to auto-pause task", "task_id", task.ID, "error", err)
 	}
 	s.UnscheduleTask(task.ID)

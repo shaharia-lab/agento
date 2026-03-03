@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
 	"golang.org/x/oauth2"
 
 	"github.com/shaharia-lab/agento/internal/config"
@@ -213,32 +215,57 @@ func validateSlackCredentials(cfg *config.IntegrationConfig) error {
 	return nil
 }
 
-func (s *integrationService) List(_ context.Context) ([]*config.IntegrationConfig, error) {
-	return s.store.List()
+func (s *integrationService) List(ctx context.Context) ([]*config.IntegrationConfig, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "integration.list")
+	defer span.End()
+	cfgs, err := s.store.List(ctx)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return cfgs, err
 }
 
-func (s *integrationService) Get(_ context.Context, id string) (*config.IntegrationConfig, error) {
-	cfg, err := s.store.Get(id)
+func (s *integrationService) Get(ctx context.Context, id string) (*config.IntegrationConfig, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "integration.get")
+	defer span.End()
+	cfg, err := s.store.Get(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 	if cfg == nil {
-		return nil, &NotFoundError{Resource: "integration", ID: id}
+		notFound := &NotFoundError{Resource: "integration", ID: id}
+		span.RecordError(notFound)
+		span.SetStatus(codes.Error, notFound.Error())
+		return nil, notFound
 	}
 	return cfg, nil
 }
 
 func (s *integrationService) Create(
-	_ context.Context, cfg *config.IntegrationConfig,
+	ctx context.Context, cfg *config.IntegrationConfig,
 ) (*config.IntegrationConfig, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "integration.create")
+	defer span.End()
+
 	if cfg.Name == "" {
-		return nil, &ValidationError{Field: "name", Message: "name is required"}
+		err := &ValidationError{Field: "name", Message: "name is required"}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 	if cfg.Type == "" {
-		return nil, &ValidationError{Field: "type", Message: "type is required"}
+		err := &ValidationError{Field: "type", Message: "type is required"}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return nil, err
 	}
 
 	if err := validateIntegrationCredentials(cfg); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
@@ -253,7 +280,9 @@ func (s *integrationService) Create(
 		cfg.Services = make(map[string]config.ServiceConfig)
 	}
 
-	if err := s.store.Save(cfg); err != nil {
+	if err := s.store.Save(ctx, cfg); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("saving integration: %w", err)
 	}
 	s.logger.Info("integration created", "id", cfg.ID, "name", cfg.Name)
@@ -263,8 +292,13 @@ func (s *integrationService) Create(
 func (s *integrationService) Update(
 	ctx context.Context, id string, cfg *config.IntegrationConfig,
 ) (*config.IntegrationConfig, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "integration.update")
+	defer span.End()
+
 	existing, err := s.Get(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
@@ -276,7 +310,9 @@ func (s *integrationService) Update(
 		cfg.Auth = existing.Auth
 	}
 
-	if err := s.store.Save(cfg); err != nil {
+	if err := s.store.Save(ctx, cfg); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("saving integration: %w", err)
 	}
 
@@ -291,11 +327,18 @@ func (s *integrationService) Update(
 }
 
 func (s *integrationService) Delete(ctx context.Context, id string) error {
+	ctx, span := otel.Tracer("agento").Start(ctx, "integration.delete")
+	defer span.End()
+
 	if _, err := s.Get(ctx, id); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return err
 	}
 	s.registry.Stop(id)
-	if err := s.store.Delete(id); err != nil {
+	if err := s.store.Delete(ctx, id); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("deleting integration: %w", err)
 	}
 	s.logger.Info("integration deleted", "id", id)
@@ -303,19 +346,47 @@ func (s *integrationService) Delete(ctx context.Context, id string) error {
 }
 
 func (s *integrationService) StartOAuth(ctx context.Context, id string) (string, error) {
-	cfg, err := s.store.Get(id)
+	ctx, span := otel.Tracer("agento").Start(ctx, "integration.start_oauth")
+	defer span.End()
+
+	cfg, err := s.loadOAuthConfig(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return "", err
 	}
+
+	authURL, err := s.startOAuthFlow(ctx, id, cfg)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return authURL, err
+}
+
+// loadOAuthConfig retrieves and validates the integration config for an OAuth flow.
+func (s *integrationService) loadOAuthConfig(ctx context.Context, id string) (*config.IntegrationConfig, error) {
+	cfg, err := s.store.Get(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	if cfg == nil {
-		return "", &NotFoundError{Resource: "integration", ID: id}
+		return nil, &NotFoundError{Resource: "integration", ID: id}
 	}
-
 	if cfg.Type != "google" && cfg.Type != "slack" {
-		msg := fmt.Sprintf("OAuth flow is not supported for integration type %q", cfg.Type)
-		return "", &ValidationError{Field: "type", Message: msg}
+		return nil, &ValidationError{
+			Field:   "type",
+			Message: fmt.Sprintf("OAuth flow is not supported for integration type %q", cfg.Type),
+		}
 	}
+	return cfg, nil
+}
 
+// startOAuthFlow allocates a port, registers the flow state, and starts the
+// provider-specific callback server. Returns the auth URL the user must visit.
+func (s *integrationService) startOAuthFlow(
+	ctx context.Context, id string, cfg *config.IntegrationConfig,
+) (string, error) {
 	port, err := integrations.FreePort()
 	if err != nil {
 		return "", fmt.Errorf("finding free port: %w", err)
@@ -326,49 +397,56 @@ func (s *integrationService) StartOAuth(ctx context.Context, id string) (string,
 	s.oauthFlows[id] = state
 	s.mu.Unlock()
 
-	var authURL string
-	var buildErr error
-
-	// Detach from the request context so the callback server outlives the HTTP request,
-	// then apply a 10-minute deadline for the OAuth flow.
+	// Detach from the request context so the callback server outlives the HTTP
+	// request, then apply a 10-minute deadline for the OAuth flow.
 	//
 	// IMPORTANT: Do NOT defer cancelCallback() here. The HTTP handler that calls
-	// StartOAuth returns immediately after receiving the auth URL, which would trigger
-	// the defer and cancel callbackCtx — killing the callback server before the user
-	// has a chance to complete the OAuth redirect. Instead, cancelCallback is called
-	// by onToken (guaranteed to be invoked by the callback server on success, error,
-	// or timeout) and also on the early-error paths below.
+	// StartOAuth returns immediately after receiving the auth URL, which would
+	// trigger the defer and cancel callbackCtx — killing the callback server
+	// before the user has a chance to complete the OAuth redirect. Instead,
+	// cancelCallback is called by onToken (guaranteed to be invoked by the
+	// callback server on success, error, or timeout) and also on early-error paths.
 	callbackCtx, cancelCallback := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Minute)
-
 	onToken := func(tok *oauth2.Token, tokErr error) {
 		defer cancelCallback()
 		s.handleOAuthToken(id, state, tok, tokErr)
 	}
 
+	return s.startProviderCallback(callbackCtx, cancelCallback, cfg, port, onToken)
+}
+
+// startProviderCallback starts the OAuth callback server for the given integration type.
+func (s *integrationService) startProviderCallback(
+	callbackCtx context.Context, cancelCallback context.CancelFunc,
+	cfg *config.IntegrationConfig, port int,
+	onToken func(*oauth2.Token, error),
+) (string, error) {
 	switch cfg.Type {
 	case "google":
-		authURL, buildErr = google.BuildAuthURL(cfg, port)
-		if buildErr != nil {
+		authURL, err := google.BuildAuthURL(cfg, port)
+		if err != nil {
 			cancelCallback()
-			return "", fmt.Errorf("building auth URL: %w", buildErr)
+			return "", fmt.Errorf("building auth URL: %w", err)
 		}
 		if err := google.StartCallbackServer(callbackCtx, port, cfg, onToken, s.logger); err != nil {
 			cancelCallback()
 			return "", fmt.Errorf("starting callback server: %w", err)
 		}
+		return authURL, nil
 	case "slack":
-		authURL, buildErr = slackintegration.BuildAuthURL(cfg, port)
-		if buildErr != nil {
+		authURL, err := slackintegration.BuildAuthURL(cfg, port)
+		if err != nil {
 			cancelCallback()
-			return "", fmt.Errorf("building auth URL: %w", buildErr)
+			return "", fmt.Errorf("building auth URL: %w", err)
 		}
 		if err := slackintegration.StartCallbackServer(callbackCtx, port, cfg, onToken, s.logger); err != nil {
 			cancelCallback()
 			return "", fmt.Errorf("starting callback server: %w", err)
 		}
+		return authURL, nil
 	}
-
-	return authURL, nil
+	cancelCallback()
+	return "", fmt.Errorf("unsupported OAuth provider: %s", cfg.Type)
 }
 
 func (s *integrationService) handleOAuthToken(id string, state *oauthState, tok *oauth2.Token, tokErr error) {
@@ -383,7 +461,8 @@ func (s *integrationService) handleOAuthToken(id string, state *oauthState, tok 
 	}
 
 	// Save the token to the integration config.
-	latestCfg, loadErr := s.store.Get(id)
+	bgCtx := context.Background()
+	latestCfg, loadErr := s.store.Get(bgCtx, id)
 	if loadErr != nil || latestCfg == nil {
 		state.err = fmt.Errorf("loading integration after OAuth: %w", loadErr)
 		return
@@ -393,7 +472,7 @@ func (s *integrationService) handleOAuthToken(id string, state *oauthState, tok 
 		return
 	}
 	latestCfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(latestCfg); saveErr != nil {
+	if saveErr := s.store.Save(bgCtx, latestCfg); saveErr != nil {
 		state.err = fmt.Errorf("saving token: %w", saveErr)
 		return
 	}
@@ -409,32 +488,46 @@ func (s *integrationService) handleOAuthToken(id string, state *oauthState, tok 
 	}()
 }
 
-func (s *integrationService) GetAuthStatus(_ context.Context, id string) (bool, error) {
+func (s *integrationService) GetAuthStatus(ctx context.Context, id string) (bool, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "integration.get_auth_status")
+	defer span.End()
+
 	s.mu.Lock()
 	state, ok := s.oauthFlows[id]
 	s.mu.Unlock()
 
 	if ok {
 		if state.err != nil {
+			span.RecordError(state.err)
+			span.SetStatus(codes.Error, state.err.Error())
 			return false, state.err
 		}
 		return state.authenticated, nil
 	}
 
 	// No active flow — check stored token.
-	cfg, err := s.store.Get(id)
+	cfg, err := s.store.Get(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return false, err
 	}
 	if cfg == nil {
-		return false, &NotFoundError{Resource: "integration", ID: id}
+		notFound := &NotFoundError{Resource: "integration", ID: id}
+		span.RecordError(notFound)
+		span.SetStatus(codes.Error, notFound.Error())
+		return false, notFound
 	}
 	return cfg.IsAuthenticated(), nil
 }
 
-func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool, error) {
-	cfgs, err := s.store.List()
+func (s *integrationService) AvailableTools(ctx context.Context) ([]AvailableTool, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "integration.available_tools")
+	defer span.End()
+	cfgs, err := s.store.List(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, err
 	}
 
@@ -466,21 +559,29 @@ func (s *integrationService) AvailableTools(_ context.Context) ([]AvailableTool,
 // credentials. On success it marks the integration as authenticated, saves it, and reloads its
 // MCP server.
 func (s *integrationService) ValidateTokenAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
+	ctx, span := otel.Tracer("agento").Start(ctx, "integration.validate_token_auth")
+	defer span.End()
+	var err error
 	switch cfg.Type {
 	case "confluence":
-		return s.validateConfluenceAuth(ctx, cfg)
+		err = s.validateConfluenceAuth(ctx, cfg)
 	case "telegram":
-		return s.validateTelegramTokenAuth(ctx, cfg)
+		err = s.validateTelegramTokenAuth(ctx, cfg)
 	case "jira":
-		return s.validateJiraTokenAuth(ctx, cfg)
+		err = s.validateJiraTokenAuth(ctx, cfg)
 	case "github":
-		return s.validateGitHubPATAuth(ctx, cfg)
+		err = s.validateGitHubPATAuth(ctx, cfg)
 	case "slack":
-		return s.validateSlackTokenAuth(ctx, cfg)
+		err = s.validateSlackTokenAuth(ctx, cfg)
 	default:
 		// For other types, validation is not yet implemented. Return nil (unvalidated).
 		return nil
 	}
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	return err
 }
 
 func (s *integrationService) validateConfluenceAuth(ctx context.Context, cfg *config.IntegrationConfig) error {
@@ -499,7 +600,7 @@ func (s *integrationService) validateConfluenceAuth(ctx context.Context, cfg *co
 
 	cfg.Auth = json.RawMessage(`{"validated":true}`)
 	cfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(cfg); saveErr != nil {
+	if saveErr := s.store.Save(ctx, cfg); saveErr != nil {
 		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
@@ -525,7 +626,7 @@ func (s *integrationService) validateTelegramTokenAuth(ctx context.Context, cfg 
 
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"bot_username":%q}`, username))
 	cfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(cfg); saveErr != nil {
+	if saveErr := s.store.Save(ctx, cfg); saveErr != nil {
 		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
@@ -553,7 +654,7 @@ func (s *integrationService) validateJiraTokenAuth(ctx context.Context, cfg *con
 
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"display_name":%q}`, displayName))
 	cfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(cfg); saveErr != nil {
+	if saveErr := s.store.Save(ctx, cfg); saveErr != nil {
 		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
@@ -582,7 +683,7 @@ func (s *integrationService) validateGitHubPATAuth(ctx context.Context, cfg *con
 
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"username":%q}`, username))
 	cfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(cfg); saveErr != nil {
+	if saveErr := s.store.Save(ctx, cfg); saveErr != nil {
 		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 
@@ -608,7 +709,7 @@ func (s *integrationService) validateSlackTokenAuth(ctx context.Context, cfg *co
 
 	cfg.Auth = json.RawMessage(fmt.Sprintf(`{"validated":true,"team_name":%q}`, teamName))
 	cfg.UpdatedAt = time.Now().UTC()
-	if saveErr := s.store.Save(cfg); saveErr != nil {
+	if saveErr := s.store.Save(ctx, cfg); saveErr != nil {
 		return fmt.Errorf(errFmtSavingValidatedInteg, saveErr)
 	}
 

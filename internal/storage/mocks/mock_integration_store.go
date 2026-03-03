@@ -3,7 +3,10 @@
 package mocks
 
 import (
+	context "context"
+
 	config "github.com/shaharia-lab/agento/internal/config"
+
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -20,17 +23,17 @@ func (_m *MockIntegrationStore) EXPECT() *MockIntegrationStore_Expecter {
 	return &MockIntegrationStore_Expecter{mock: &_m.Mock}
 }
 
-// Delete provides a mock function with given fields: id
-func (_m *MockIntegrationStore) Delete(id string) error {
-	ret := _m.Called(id)
+// Delete provides a mock function with given fields: ctx, id
+func (_m *MockIntegrationStore) Delete(ctx context.Context, id string) error {
+	ret := _m.Called(ctx, id)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Delete")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(string) error); ok {
-		r0 = rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = rf(ctx, id)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -44,14 +47,15 @@ type MockIntegrationStore_Delete_Call struct {
 }
 
 // Delete is a helper method to define mock.On call
+//   - ctx context.Context
 //   - id string
-func (_e *MockIntegrationStore_Expecter) Delete(id interface{}) *MockIntegrationStore_Delete_Call {
-	return &MockIntegrationStore_Delete_Call{Call: _e.mock.On("Delete", id)}
+func (_e *MockIntegrationStore_Expecter) Delete(ctx interface{}, id interface{}) *MockIntegrationStore_Delete_Call {
+	return &MockIntegrationStore_Delete_Call{Call: _e.mock.On("Delete", ctx, id)}
 }
 
-func (_c *MockIntegrationStore_Delete_Call) Run(run func(id string)) *MockIntegrationStore_Delete_Call {
+func (_c *MockIntegrationStore_Delete_Call) Run(run func(ctx context.Context, id string)) *MockIntegrationStore_Delete_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -61,14 +65,14 @@ func (_c *MockIntegrationStore_Delete_Call) Return(_a0 error) *MockIntegrationSt
 	return _c
 }
 
-func (_c *MockIntegrationStore_Delete_Call) RunAndReturn(run func(string) error) *MockIntegrationStore_Delete_Call {
+func (_c *MockIntegrationStore_Delete_Call) RunAndReturn(run func(context.Context, string) error) *MockIntegrationStore_Delete_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// Get provides a mock function with given fields: id
-func (_m *MockIntegrationStore) Get(id string) (*config.IntegrationConfig, error) {
-	ret := _m.Called(id)
+// Get provides a mock function with given fields: ctx, id
+func (_m *MockIntegrationStore) Get(ctx context.Context, id string) (*config.IntegrationConfig, error) {
+	ret := _m.Called(ctx, id)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Get")
@@ -76,19 +80,19 @@ func (_m *MockIntegrationStore) Get(id string) (*config.IntegrationConfig, error
 
 	var r0 *config.IntegrationConfig
 	var r1 error
-	if rf, ok := ret.Get(0).(func(string) (*config.IntegrationConfig, error)); ok {
-		return rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) (*config.IntegrationConfig, error)); ok {
+		return rf(ctx, id)
 	}
-	if rf, ok := ret.Get(0).(func(string) *config.IntegrationConfig); ok {
-		r0 = rf(id)
+	if rf, ok := ret.Get(0).(func(context.Context, string) *config.IntegrationConfig); ok {
+		r0 = rf(ctx, id)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*config.IntegrationConfig)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(string) error); ok {
-		r1 = rf(id)
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, id)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -102,14 +106,15 @@ type MockIntegrationStore_Get_Call struct {
 }
 
 // Get is a helper method to define mock.On call
+//   - ctx context.Context
 //   - id string
-func (_e *MockIntegrationStore_Expecter) Get(id interface{}) *MockIntegrationStore_Get_Call {
-	return &MockIntegrationStore_Get_Call{Call: _e.mock.On("Get", id)}
+func (_e *MockIntegrationStore_Expecter) Get(ctx interface{}, id interface{}) *MockIntegrationStore_Get_Call {
+	return &MockIntegrationStore_Get_Call{Call: _e.mock.On("Get", ctx, id)}
 }
 
-func (_c *MockIntegrationStore_Get_Call) Run(run func(id string)) *MockIntegrationStore_Get_Call {
+func (_c *MockIntegrationStore_Get_Call) Run(run func(ctx context.Context, id string)) *MockIntegrationStore_Get_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -119,14 +124,14 @@ func (_c *MockIntegrationStore_Get_Call) Return(_a0 *config.IntegrationConfig, _
 	return _c
 }
 
-func (_c *MockIntegrationStore_Get_Call) RunAndReturn(run func(string) (*config.IntegrationConfig, error)) *MockIntegrationStore_Get_Call {
+func (_c *MockIntegrationStore_Get_Call) RunAndReturn(run func(context.Context, string) (*config.IntegrationConfig, error)) *MockIntegrationStore_Get_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// List provides a mock function with no fields
-func (_m *MockIntegrationStore) List() ([]*config.IntegrationConfig, error) {
-	ret := _m.Called()
+// List provides a mock function with given fields: ctx
+func (_m *MockIntegrationStore) List(ctx context.Context) ([]*config.IntegrationConfig, error) {
+	ret := _m.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for List")
@@ -134,19 +139,19 @@ func (_m *MockIntegrationStore) List() ([]*config.IntegrationConfig, error) {
 
 	var r0 []*config.IntegrationConfig
 	var r1 error
-	if rf, ok := ret.Get(0).(func() ([]*config.IntegrationConfig, error)); ok {
-		return rf()
+	if rf, ok := ret.Get(0).(func(context.Context) ([]*config.IntegrationConfig, error)); ok {
+		return rf(ctx)
 	}
-	if rf, ok := ret.Get(0).(func() []*config.IntegrationConfig); ok {
-		r0 = rf()
+	if rf, ok := ret.Get(0).(func(context.Context) []*config.IntegrationConfig); ok {
+		r0 = rf(ctx)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]*config.IntegrationConfig)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func() error); ok {
-		r1 = rf()
+	if rf, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = rf(ctx)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -160,13 +165,14 @@ type MockIntegrationStore_List_Call struct {
 }
 
 // List is a helper method to define mock.On call
-func (_e *MockIntegrationStore_Expecter) List() *MockIntegrationStore_List_Call {
-	return &MockIntegrationStore_List_Call{Call: _e.mock.On("List")}
+//   - ctx context.Context
+func (_e *MockIntegrationStore_Expecter) List(ctx interface{}) *MockIntegrationStore_List_Call {
+	return &MockIntegrationStore_List_Call{Call: _e.mock.On("List", ctx)}
 }
 
-func (_c *MockIntegrationStore_List_Call) Run(run func()) *MockIntegrationStore_List_Call {
+func (_c *MockIntegrationStore_List_Call) Run(run func(ctx context.Context)) *MockIntegrationStore_List_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		run(args[0].(context.Context))
 	})
 	return _c
 }
@@ -176,22 +182,22 @@ func (_c *MockIntegrationStore_List_Call) Return(_a0 []*config.IntegrationConfig
 	return _c
 }
 
-func (_c *MockIntegrationStore_List_Call) RunAndReturn(run func() ([]*config.IntegrationConfig, error)) *MockIntegrationStore_List_Call {
+func (_c *MockIntegrationStore_List_Call) RunAndReturn(run func(context.Context) ([]*config.IntegrationConfig, error)) *MockIntegrationStore_List_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// Save provides a mock function with given fields: cfg
-func (_m *MockIntegrationStore) Save(cfg *config.IntegrationConfig) error {
-	ret := _m.Called(cfg)
+// Save provides a mock function with given fields: ctx, cfg
+func (_m *MockIntegrationStore) Save(ctx context.Context, cfg *config.IntegrationConfig) error {
+	ret := _m.Called(ctx, cfg)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Save")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(*config.IntegrationConfig) error); ok {
-		r0 = rf(cfg)
+	if rf, ok := ret.Get(0).(func(context.Context, *config.IntegrationConfig) error); ok {
+		r0 = rf(ctx, cfg)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -205,14 +211,15 @@ type MockIntegrationStore_Save_Call struct {
 }
 
 // Save is a helper method to define mock.On call
+//   - ctx context.Context
 //   - cfg *config.IntegrationConfig
-func (_e *MockIntegrationStore_Expecter) Save(cfg interface{}) *MockIntegrationStore_Save_Call {
-	return &MockIntegrationStore_Save_Call{Call: _e.mock.On("Save", cfg)}
+func (_e *MockIntegrationStore_Expecter) Save(ctx interface{}, cfg interface{}) *MockIntegrationStore_Save_Call {
+	return &MockIntegrationStore_Save_Call{Call: _e.mock.On("Save", ctx, cfg)}
 }
 
-func (_c *MockIntegrationStore_Save_Call) Run(run func(cfg *config.IntegrationConfig)) *MockIntegrationStore_Save_Call {
+func (_c *MockIntegrationStore_Save_Call) Run(run func(ctx context.Context, cfg *config.IntegrationConfig)) *MockIntegrationStore_Save_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(*config.IntegrationConfig))
+		run(args[0].(context.Context), args[1].(*config.IntegrationConfig))
 	})
 	return _c
 }
@@ -222,7 +229,7 @@ func (_c *MockIntegrationStore_Save_Call) Return(_a0 error) *MockIntegrationStor
 	return _c
 }
 
-func (_c *MockIntegrationStore_Save_Call) RunAndReturn(run func(*config.IntegrationConfig) error) *MockIntegrationStore_Save_Call {
+func (_c *MockIntegrationStore_Save_Call) RunAndReturn(run func(context.Context, *config.IntegrationConfig) error) *MockIntegrationStore_Save_Call {
 	_c.Call.Return(run)
 	return _c
 }

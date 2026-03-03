@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
 
 	"github.com/shaharia-lab/agento/internal/agent"
@@ -95,39 +98,59 @@ func NewChatService(
 	}
 }
 
-func (s *chatService) ListSessions(_ context.Context) ([]*storage.ChatSession, error) {
-	sessions, err := s.chatRepo.ListSessions()
+func (s *chatService) ListSessions(ctx context.Context) ([]*storage.ChatSession, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "chat.list_sessions")
+	defer span.End()
+
+	sessions, err := s.chatRepo.ListSessions(ctx)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("listing sessions: %w", err)
 	}
 	return sessions, nil
 }
 
-func (s *chatService) GetSession(_ context.Context, id string) (*storage.ChatSession, error) {
-	session, err := s.chatRepo.GetSession(id)
+func (s *chatService) GetSession(ctx context.Context, id string) (*storage.ChatSession, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "chat.get_session")
+	defer span.End()
+
+	session, err := s.chatRepo.GetSession(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("getting session %q: %w", id, err)
 	}
 	return session, nil
 }
 
 func (s *chatService) GetSessionWithMessages(
-	_ context.Context, id string,
+	ctx context.Context, id string,
 ) (*storage.ChatSession, []storage.ChatMessage, error) {
-	session, msgs, err := s.chatRepo.GetSessionWithMessages(id)
+	ctx, span := otel.Tracer("agento").Start(ctx, "chat.get_session_with_messages")
+	defer span.End()
+
+	session, msgs, err := s.chatRepo.GetSessionWithMessages(ctx, id)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, nil, fmt.Errorf("getting session with messages %q: %w", id, err)
 	}
 	return session, msgs, nil
 }
 
 func (s *chatService) CreateSession(
-	_ context.Context, agentSlug, workingDir, model, settingsProfileID string,
+	ctx context.Context, agentSlug, workingDir, model, settingsProfileID string,
 ) (*storage.ChatSession, error) {
+	ctx, span := otel.Tracer("agento").Start(ctx, "chat.create_session")
+	defer span.End()
+
 	// Validate agent slug if provided.
 	if agentSlug != "" {
-		agentCfg, err := s.agentRepo.Get(agentSlug)
+		agentCfg, err := s.agentRepo.Get(ctx, agentSlug)
 		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return nil, fmt.Errorf("looking up agent: %w", err)
 		}
 		if agentCfg == nil {
@@ -135,8 +158,10 @@ func (s *chatService) CreateSession(
 		}
 	}
 
-	session, err := s.chatRepo.CreateSession(agentSlug, workingDir, model, settingsProfileID)
+	session, err := s.chatRepo.CreateSession(ctx, agentSlug, workingDir, model, settingsProfileID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, fmt.Errorf("creating session: %w", err)
 	}
 
@@ -148,16 +173,26 @@ func (s *chatService) CreateSession(
 	return session, nil
 }
 
-func (s *chatService) DeleteSession(_ context.Context, id string) error {
-	if err := s.chatRepo.DeleteSession(id); err != nil {
+func (s *chatService) DeleteSession(ctx context.Context, id string) error {
+	ctx, span := otel.Tracer("agento").Start(ctx, "chat.delete_session")
+	defer span.End()
+
+	if err := s.chatRepo.DeleteSession(ctx, id); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("deleting session %q: %w", id, err)
 	}
 	s.logger.Info("chat session deleted", "session_id", id)
 	return nil
 }
 
-func (s *chatService) BulkDeleteSessions(_ context.Context, ids []string) error {
-	if err := s.chatRepo.BulkDeleteSessions(ids); err != nil {
+func (s *chatService) BulkDeleteSessions(ctx context.Context, ids []string) error {
+	ctx, span := otel.Tracer("agento").Start(ctx, "chat.bulk_delete_sessions")
+	defer span.End()
+
+	if err := s.chatRepo.BulkDeleteSessions(ctx, ids); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("bulk deleting sessions: %w", err)
 	}
 	s.logger.Info("chat sessions bulk deleted", "count", len(ids))
@@ -168,16 +203,23 @@ func (s *chatService) BeginMessage(
 	ctx context.Context, sessionID, content string,
 	opts agent.RunOptions,
 ) (*claude.Session, *storage.ChatSession, error) {
-	session, err := s.chatRepo.GetSession(sessionID)
+	ctx, span := otel.Tracer("agento").Start(ctx, "chat.begin_message")
+	defer span.End()
+
+	session, err := s.chatRepo.GetSession(ctx, sessionID)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, nil, fmt.Errorf("loading session: %w", err)
 	}
 	if session == nil {
 		return nil, nil, &NotFoundError{Resource: "chat", ID: sessionID}
 	}
 
-	agentCfg, err := s.resolveAgentConfig(session)
+	agentCfg, err := s.resolveAgentConfig(ctx, session)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, nil, err
 	}
 
@@ -186,7 +228,9 @@ func (s *chatService) BeginMessage(
 		Content:   content,
 		Timestamp: time.Now().UTC(),
 	}
-	if appendErr := s.chatRepo.AppendMessage(sessionID, userMsg); appendErr != nil {
+	if appendErr := s.chatRepo.AppendMessage(ctx, sessionID, userMsg); appendErr != nil {
+		span.RecordError(appendErr)
+		span.SetStatus(codes.Error, appendErr.Error())
 		return nil, nil, fmt.Errorf("storing user message: %w", appendErr)
 	}
 
@@ -194,6 +238,8 @@ func (s *chatService) BeginMessage(
 
 	agentSession, err := agent.StartSession(ctx, agentCfg, content, opts)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return nil, nil, fmt.Errorf("starting agent session: %w", err)
 	}
 
@@ -203,9 +249,11 @@ func (s *chatService) BeginMessage(
 
 // resolveAgentConfig loads the agent config for the session, or synthesizes a
 // minimal one for no-agent (direct) chat sessions.
-func (s *chatService) resolveAgentConfig(session *storage.ChatSession) (*config.AgentConfig, error) {
+func (s *chatService) resolveAgentConfig(
+	ctx context.Context, session *storage.ChatSession,
+) (*config.AgentConfig, error) {
 	if session.AgentSlug != "" {
-		agentCfg, err := s.agentRepo.Get(session.AgentSlug)
+		agentCfg, err := s.agentRepo.Get(ctx, session.AgentSlug)
 		if err != nil {
 			return nil, fmt.Errorf("loading agent: %w", err)
 		}
@@ -242,10 +290,13 @@ func (s *chatService) populateRunOptions(opts *agent.RunOptions, session *storag
 }
 
 func (s *chatService) CommitMessage(
-	_ context.Context, session *storage.ChatSession,
+	ctx context.Context, session *storage.ChatSession,
 	assistantText, sdkSessionID string, _ bool,
 	blocks []storage.MessageBlock, usage agent.UsageStats,
 ) error {
+	ctx, span := otel.Tracer("agento").Start(ctx, "chat.commit_message")
+	defer span.End()
+
 	if assistantText != "" {
 		msg := storage.ChatMessage{
 			Role:      "assistant",
@@ -253,7 +304,9 @@ func (s *chatService) CommitMessage(
 			Timestamp: time.Now().UTC(),
 			Blocks:    blocks,
 		}
-		if err := s.chatRepo.AppendMessage(session.ID, msg); err != nil {
+		if err := s.chatRepo.AppendMessage(ctx, session.ID, msg); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("storing assistant message: %w", err)
 		}
 	}
@@ -266,7 +319,9 @@ func (s *chatService) CommitMessage(
 	session.TotalCacheCreationTokens += usage.CacheCreationInputTokens
 	session.TotalCacheReadTokens += usage.CacheReadInputTokens
 
-	if err := s.chatRepo.UpdateSession(session); err != nil {
+	if err := s.chatRepo.UpdateSession(ctx, session); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("updating session: %w", err)
 	}
 
@@ -274,9 +329,14 @@ func (s *chatService) CommitMessage(
 	return nil
 }
 
-func (s *chatService) UpdateSession(_ context.Context, session *storage.ChatSession) error {
+func (s *chatService) UpdateSession(ctx context.Context, session *storage.ChatSession) error {
+	ctx, span := otel.Tracer("agento").Start(ctx, "chat.update_session")
+	defer span.End()
+
 	session.UpdatedAt = time.Now().UTC()
-	if err := s.chatRepo.UpdateSession(session); err != nil {
+	if err := s.chatRepo.UpdateSession(ctx, session); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 		return fmt.Errorf("updating session: %w", err)
 	}
 	return nil

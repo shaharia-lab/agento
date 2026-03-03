@@ -67,7 +67,7 @@ func TestListSessions(t *testing.T) {
 			agentRepo := new(mocks.MockAgentStore)
 			svc := newTestService(chatRepo, agentRepo)
 
-			chatRepo.On("ListSessions").Return(tc.repoResult, tc.repoErr)
+			chatRepo.On("ListSessions", mock.Anything).Return(tc.repoResult, tc.repoErr)
 
 			result, err := svc.ListSessions(context.Background())
 
@@ -127,7 +127,7 @@ func TestGetSession(t *testing.T) {
 			agentRepo := new(mocks.MockAgentStore)
 			svc := newTestService(chatRepo, agentRepo)
 
-			chatRepo.On("GetSession", tc.sessionID).Return(tc.repoResult, tc.repoErr)
+			chatRepo.On("GetSession", mock.Anything, tc.sessionID).Return(tc.repoResult, tc.repoErr)
 
 			result, err := svc.GetSession(context.Background(), tc.sessionID)
 
@@ -197,7 +197,7 @@ func TestGetSessionWithMessages(t *testing.T) {
 			agentRepo := new(mocks.MockAgentStore)
 			svc := newTestService(chatRepo, agentRepo)
 
-			chatRepo.On("GetSessionWithMessages", tc.sessionID).Return(tc.repoSession, tc.repoMsgs, tc.repoErr)
+			chatRepo.On("GetSessionWithMessages", mock.Anything, tc.sessionID).Return(tc.repoSession, tc.repoMsgs, tc.repoErr)
 
 			session, msgs, err := svc.GetSessionWithMessages(context.Background(), tc.sessionID)
 
@@ -295,12 +295,12 @@ func TestCreateSession(t *testing.T) {
 			svc := newTestService(chatRepo, agentRepo)
 
 			if tc.agentSlug != "" {
-				agentRepo.On("Get", tc.agentSlug).Return(tc.agentGetResult, tc.agentGetErr)
+				agentRepo.On("Get", mock.Anything, tc.agentSlug).Return(tc.agentGetResult, tc.agentGetErr)
 			}
 
 			// Only expect CreateSession if agent validation passes.
 			if !tc.wantErr || tc.chatCreateErr != nil {
-				chatRepo.On("CreateSession", tc.agentSlug, tc.workingDir, tc.model, tc.settingsProfileID).
+				chatRepo.On("CreateSession", mock.Anything, tc.agentSlug, tc.workingDir, tc.model, tc.settingsProfileID).
 					Return(tc.chatCreateResult, tc.chatCreateErr)
 			}
 
@@ -358,7 +358,7 @@ func TestDeleteSession(t *testing.T) {
 			agentRepo := new(mocks.MockAgentStore)
 			svc := newTestService(chatRepo, agentRepo)
 
-			chatRepo.On("DeleteSession", tc.sessionID).Return(tc.repoErr)
+			chatRepo.On("DeleteSession", mock.Anything, tc.sessionID).Return(tc.repoErr)
 
 			err := svc.DeleteSession(context.Background(), tc.sessionID)
 
@@ -509,14 +509,14 @@ func TestCommitMessage(t *testing.T) {
 			svc := newTestService(chatRepo, agentRepo)
 
 			if tc.expectAppend {
-				chatRepo.On("AppendMessage", tc.session.ID, mock.MatchedBy(func(msg storage.ChatMessage) bool {
+				chatRepo.On("AppendMessage", mock.Anything, tc.session.ID, mock.MatchedBy(func(msg storage.ChatMessage) bool {
 					return msg.Role == "assistant" && msg.Content == tc.assistantText
 				})).Return(tc.appendErr)
 			}
 
 			// UpdateSession should only be called if AppendMessage succeeded (or was skipped).
 			if tc.appendErr == nil {
-				chatRepo.On("UpdateSession", mock.MatchedBy(func(s *storage.ChatSession) bool {
+				chatRepo.On("UpdateSession", mock.Anything, mock.MatchedBy(func(s *storage.ChatSession) bool {
 					return s.ID == tc.session.ID && s.SDKSession == tc.sdkSessionID
 				})).Return(tc.updateErr)
 			}
@@ -579,7 +579,7 @@ func TestUpdateSession(t *testing.T) {
 			agentRepo := new(mocks.MockAgentStore)
 			svc := newTestService(chatRepo, agentRepo)
 
-			chatRepo.On("UpdateSession", mock.MatchedBy(func(s *storage.ChatSession) bool {
+			chatRepo.On("UpdateSession", mock.Anything, mock.MatchedBy(func(s *storage.ChatSession) bool {
 				return s.ID == tc.session.ID
 			})).Return(tc.repoErr)
 

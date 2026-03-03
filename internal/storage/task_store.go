@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
 	"time"
 )
@@ -105,17 +106,17 @@ type JobHistory struct {
 
 // TaskStore defines the persistence interface for scheduled tasks and job history.
 type TaskStore interface {
-	ListTasks() ([]*ScheduledTask, error)
-	GetTask(id string) (*ScheduledTask, error)
-	CreateTask(task *ScheduledTask) error
-	UpdateTask(task *ScheduledTask) error
-	DeleteTask(id string) error
+	ListTasks(ctx context.Context) ([]*ScheduledTask, error)
+	GetTask(ctx context.Context, id string) (*ScheduledTask, error)
+	CreateTask(ctx context.Context, task *ScheduledTask) error
+	UpdateTask(ctx context.Context, task *ScheduledTask) error
+	DeleteTask(ctx context.Context, id string) error
 
-	ListJobHistory(taskID string, limit int) ([]*JobHistory, error)
-	ListAllJobHistory(limit, offset int) ([]*JobHistory, error)
-	GetJobHistory(id string) (*JobHistory, error)
-	CreateJobHistory(jh *JobHistory) error
-	UpdateJobHistory(jh *JobHistory) error
-	DeleteJobHistory(id string) error
-	BulkDeleteJobHistory(ids []string) error
+	ListJobHistory(ctx context.Context, taskID string, limit int) ([]*JobHistory, error)
+	ListAllJobHistory(ctx context.Context, limit, offset int) ([]*JobHistory, error)
+	GetJobHistory(ctx context.Context, id string) (*JobHistory, error)
+	CreateJobHistory(ctx context.Context, jh *JobHistory) error
+	UpdateJobHistory(ctx context.Context, jh *JobHistory) error
+	DeleteJobHistory(ctx context.Context, id string) error
+	BulkDeleteJobHistory(ctx context.Context, ids []string) error
 }

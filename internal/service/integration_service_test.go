@@ -65,7 +65,7 @@ func TestIntegrationService_List(t *testing.T) {
 		{
 			name: "returns_all_integrations",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return([]*config.IntegrationConfig{
+				m.On("List", mock.Anything).Return([]*config.IntegrationConfig{
 					{ID: "a", Name: "A"},
 					{ID: "b", Name: "B"},
 				}, nil)
@@ -75,14 +75,14 @@ func TestIntegrationService_List(t *testing.T) {
 		{
 			name: "returns_empty_list",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return([]*config.IntegrationConfig{}, nil)
+				m.On("List", mock.Anything).Return([]*config.IntegrationConfig{}, nil)
 			},
 			wantLen: 0,
 		},
 		{
 			name: "propagates_store_error",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return(nil, errors.New("db failure"))
+				m.On("List", mock.Anything).Return(nil, errors.New("db failure"))
 			},
 			wantErr:   true,
 			errSubstr: "db failure",
@@ -126,7 +126,7 @@ func TestIntegrationService_Get(t *testing.T) {
 			name: "returns_existing_integration",
 			id:   "int-1",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "int-1").Return(&config.IntegrationConfig{ID: "int-1", Name: "A"}, nil)
+				m.On("Get", mock.Anything, "int-1").Return(&config.IntegrationConfig{ID: "int-1", Name: "A"}, nil)
 			},
 			wantID: "int-1",
 		},
@@ -134,7 +134,7 @@ func TestIntegrationService_Get(t *testing.T) {
 			name: "returns_not_found_when_store_returns_nil",
 			id:   "missing",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "missing").Return(nil, nil)
+				m.On("Get", mock.Anything, "missing").Return(nil, nil)
 			},
 			wantErr: true,
 			errType: &NotFoundError{},
@@ -143,7 +143,7 @@ func TestIntegrationService_Get(t *testing.T) {
 			name: "propagates_store_error",
 			id:   "err-id",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "err-id").Return(nil, errors.New("disk error"))
+				m.On("Get", mock.Anything, "err-id").Return(nil, errors.New("disk error"))
 			},
 			wantErr:   true,
 			errSubstr: "disk error",
@@ -192,7 +192,7 @@ func TestIntegrationService_Create(t *testing.T) {
 			name:  "success_generates_id_and_timestamps",
 			input: validConfig(),
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Save", mock.AnythingOfType("*config.IntegrationConfig")).Return(nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.IntegrationConfig")).Return(nil)
 			},
 			checkFunc: func(t *testing.T, got *config.IntegrationConfig) {
 				assert.NotEmpty(t, got.ID, "should generate UUID")
@@ -210,7 +210,7 @@ func TestIntegrationService_Create(t *testing.T) {
 				return c
 			}(),
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Save", mock.MatchedBy(func(c *config.IntegrationConfig) bool {
+				m.On("Save", mock.Anything, mock.MatchedBy(func(c *config.IntegrationConfig) bool {
 					return c.ID == "custom-id"
 				})).Return(nil)
 			},
@@ -228,7 +228,7 @@ func TestIntegrationService_Create(t *testing.T) {
 				return c
 			}(),
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Save", mock.AnythingOfType("*config.IntegrationConfig")).Return(nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.IntegrationConfig")).Return(nil)
 			},
 			checkFunc: func(t *testing.T, got *config.IntegrationConfig) {
 				assert.Contains(t, got.Services, "calendar")
@@ -283,7 +283,7 @@ func TestIntegrationService_Create(t *testing.T) {
 			name:  "store_save_error",
 			input: validConfig(),
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Save", mock.AnythingOfType("*config.IntegrationConfig")).Return(errors.New("write failed"))
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.IntegrationConfig")).Return(errors.New("write failed"))
 			},
 			wantErr: true,
 		},
@@ -344,13 +344,13 @@ func TestIntegrationService_Update(t *testing.T) {
 			id:    "int-1",
 			input: &config.IntegrationConfig{Name: "Updated"},
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "int-1").Return(&config.IntegrationConfig{
+				m.On("Get", mock.Anything, "int-1").Return(&config.IntegrationConfig{
 					ID:        "int-1",
 					Name:      "Old",
 					Auth:      existingAuth,
 					CreatedAt: now,
 				}, nil)
-				m.On("Save", mock.AnythingOfType("*config.IntegrationConfig")).Return(nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.IntegrationConfig")).Return(nil)
 			},
 			checkFunc: func(t *testing.T, got *config.IntegrationConfig) {
 				assert.Equal(t, "int-1", got.ID, "should preserve ID")
@@ -367,13 +367,13 @@ func TestIntegrationService_Update(t *testing.T) {
 				Auth: testAuthToken("new-token"),
 			},
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "int-1").Return(&config.IntegrationConfig{
+				m.On("Get", mock.Anything, "int-1").Return(&config.IntegrationConfig{
 					ID:        "int-1",
 					Name:      "Old",
 					Auth:      existingAuth,
 					CreatedAt: now,
 				}, nil)
-				m.On("Save", mock.AnythingOfType("*config.IntegrationConfig")).Return(nil)
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.IntegrationConfig")).Return(nil)
 			},
 			checkFunc: func(t *testing.T, got *config.IntegrationConfig) {
 				assert.True(t, got.IsAuthenticated())
@@ -387,7 +387,7 @@ func TestIntegrationService_Update(t *testing.T) {
 			id:    "no-exist",
 			input: &config.IntegrationConfig{Name: "X"},
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "no-exist").Return(nil, nil)
+				m.On("Get", mock.Anything, "no-exist").Return(nil, nil)
 			},
 			wantErr: true,
 			errType: &NotFoundError{},
@@ -397,7 +397,7 @@ func TestIntegrationService_Update(t *testing.T) {
 			id:    "err-id",
 			input: &config.IntegrationConfig{Name: "X"},
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "err-id").Return(nil, errors.New("db read error"))
+				m.On("Get", mock.Anything, "err-id").Return(nil, errors.New("db read error"))
 			},
 			wantErr: true,
 		},
@@ -406,11 +406,11 @@ func TestIntegrationService_Update(t *testing.T) {
 			id:    "int-1",
 			input: &config.IntegrationConfig{Name: "Updated"},
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "int-1").Return(&config.IntegrationConfig{
+				m.On("Get", mock.Anything, "int-1").Return(&config.IntegrationConfig{
 					ID:        "int-1",
 					CreatedAt: now,
 				}, nil)
-				m.On("Save", mock.AnythingOfType("*config.IntegrationConfig")).Return(errors.New("write failed"))
+				m.On("Save", mock.Anything, mock.AnythingOfType("*config.IntegrationConfig")).Return(errors.New("write failed"))
 			},
 			wantErr: true,
 		},
@@ -460,15 +460,15 @@ func TestIntegrationService_Delete(t *testing.T) {
 			name: "success",
 			id:   "int-1",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "int-1").Return(&config.IntegrationConfig{ID: "int-1"}, nil)
-				m.On("Delete", "int-1").Return(nil)
+				m.On("Get", mock.Anything, "int-1").Return(&config.IntegrationConfig{ID: "int-1"}, nil)
+				m.On("Delete", mock.Anything, "int-1").Return(nil)
 			},
 		},
 		{
 			name: "not_found",
 			id:   "no-exist",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "no-exist").Return(nil, nil)
+				m.On("Get", mock.Anything, "no-exist").Return(nil, nil)
 			},
 			wantErr: true,
 			errType: &NotFoundError{},
@@ -477,7 +477,7 @@ func TestIntegrationService_Delete(t *testing.T) {
 			name: "store_get_error",
 			id:   "err-id",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "err-id").Return(nil, errors.New("db error"))
+				m.On("Get", mock.Anything, "err-id").Return(nil, errors.New("db error"))
 			},
 			wantErr:   true,
 			errSubstr: "db error",
@@ -486,8 +486,8 @@ func TestIntegrationService_Delete(t *testing.T) {
 			name: "store_delete_error",
 			id:   "int-1",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "int-1").Return(&config.IntegrationConfig{ID: "int-1"}, nil)
-				m.On("Delete", "int-1").Return(errors.New("delete failed"))
+				m.On("Get", mock.Anything, "int-1").Return(&config.IntegrationConfig{ID: "int-1"}, nil)
+				m.On("Delete", mock.Anything, "int-1").Return(errors.New("delete failed"))
 			},
 			wantErr:   true,
 			errSubstr: "delete failed",
@@ -561,7 +561,7 @@ func TestIntegrationService_GetAuthStatus(t *testing.T) {
 			name: "no_flow_has_stored_token",
 			id:   "int-1",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "int-1").Return(&config.IntegrationConfig{
+				m.On("Get", mock.Anything, "int-1").Return(&config.IntegrationConfig{
 					ID:   "int-1",
 					Auth: testAuthToken("tok"),
 				}, nil)
@@ -572,7 +572,7 @@ func TestIntegrationService_GetAuthStatus(t *testing.T) {
 			name: "no_flow_no_stored_token",
 			id:   "int-1",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "int-1").Return(&config.IntegrationConfig{
+				m.On("Get", mock.Anything, "int-1").Return(&config.IntegrationConfig{
 					ID: "int-1",
 				}, nil)
 			},
@@ -582,7 +582,7 @@ func TestIntegrationService_GetAuthStatus(t *testing.T) {
 			name: "no_flow_store_returns_nil",
 			id:   "missing",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "missing").Return(nil, nil)
+				m.On("Get", mock.Anything, "missing").Return(nil, nil)
 			},
 			wantErr: true,
 			errType: &NotFoundError{},
@@ -591,7 +591,7 @@ func TestIntegrationService_GetAuthStatus(t *testing.T) {
 			name: "no_flow_store_error",
 			id:   "err-id",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("Get", "err-id").Return(nil, errors.New("db error"))
+				m.On("Get", mock.Anything, "err-id").Return(nil, errors.New("db error"))
 			},
 			wantErr: true,
 		},
@@ -646,7 +646,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 		{
 			name: "returns_tools_from_enabled_authenticated_integrations",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return([]*config.IntegrationConfig{
+				m.On("List", mock.Anything).Return([]*config.IntegrationConfig{
 					{
 						ID:      "g1",
 						Name:    "Google 1",
@@ -676,7 +676,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 		{
 			name: "skips_disabled_integrations",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return([]*config.IntegrationConfig{
+				m.On("List", mock.Anything).Return([]*config.IntegrationConfig{
 					{
 						ID:      "g1",
 						Name:    "Disabled",
@@ -693,7 +693,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 		{
 			name: "skips_unauthenticated_integrations",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return([]*config.IntegrationConfig{
+				m.On("List", mock.Anything).Return([]*config.IntegrationConfig{
 					{
 						ID:      "g1",
 						Name:    "No Auth",
@@ -709,7 +709,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 		{
 			name: "skips_disabled_services",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return([]*config.IntegrationConfig{
+				m.On("List", mock.Anything).Return([]*config.IntegrationConfig{
 					{
 						ID:      "g1",
 						Name:    "G",
@@ -731,21 +731,21 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 		{
 			name: "returns_empty_for_no_integrations",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return([]*config.IntegrationConfig{}, nil)
+				m.On("List", mock.Anything).Return([]*config.IntegrationConfig{}, nil)
 			},
 			wantLen: 0,
 		},
 		{
 			name: "store_error",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return(nil, errors.New("db failure"))
+				m.On("List", mock.Anything).Return(nil, errors.New("db failure"))
 			},
 			wantErr: true,
 		},
 		{
 			name: "multiple_integrations_mixed",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return([]*config.IntegrationConfig{
+				m.On("List", mock.Anything).Return([]*config.IntegrationConfig{
 					{
 						ID: "g1", Name: "G1", Enabled: true,
 						Auth: testAuthToken("tok"),
@@ -783,7 +783,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 		{
 			name: "qualified_name_format",
 			setup: func(m *mocks.MockIntegrationStore) {
-				m.On("List").Return([]*config.IntegrationConfig{
+				m.On("List", mock.Anything).Return([]*config.IntegrationConfig{
 					{
 						ID: "my-id", Name: "G", Enabled: true,
 						Auth: testAuthToken("tok"),
@@ -829,7 +829,7 @@ func TestIntegrationService_AvailableTools(t *testing.T) {
 
 func TestIntegrationService_StartOAuth_NotFound(t *testing.T) {
 	store := new(mocks.MockIntegrationStore)
-	store.On("Get", "no-exist").Return(nil, nil)
+	store.On("Get", mock.Anything, "no-exist").Return(nil, nil)
 	svc := NewIntegrationService(store, nil, testLogger())
 
 	_, err := svc.StartOAuth(context.Background(), "no-exist")
@@ -840,7 +840,7 @@ func TestIntegrationService_StartOAuth_NotFound(t *testing.T) {
 
 func TestIntegrationService_StartOAuth_StoreError(t *testing.T) {
 	store := new(mocks.MockIntegrationStore)
-	store.On("Get", "int-1").Return(nil, errors.New("db error"))
+	store.On("Get", mock.Anything, "int-1").Return(nil, errors.New("db error"))
 	svc := NewIntegrationService(store, nil, testLogger())
 
 	_, err := svc.StartOAuth(context.Background(), "int-1")
@@ -851,7 +851,7 @@ func TestIntegrationService_StartOAuth_StoreError(t *testing.T) {
 
 func TestIntegrationService_StartOAuth_UnsupportedType(t *testing.T) {
 	store := new(mocks.MockIntegrationStore)
-	store.On("Get", "int-1").Return(&config.IntegrationConfig{
+	store.On("Get", mock.Anything, "int-1").Return(&config.IntegrationConfig{
 		ID:   "int-1",
 		Type: "telegram",
 	}, nil)
@@ -875,7 +875,7 @@ func TestIntegrationService_StartOAuth_GoogleReturnsAuthURL(t *testing.T) {
 		},
 	}
 	_ = cfg.SetCredentials(config.GoogleCredentials{ClientID: "cid", ClientSecret: "csecret"})
-	store.On("Get", "int-google").Return(cfg, nil)
+	store.On("Get", mock.Anything, "int-google").Return(cfg, nil)
 
 	registry := integrations.NewRegistry(store, testLogger())
 	svc := NewIntegrationService(store, registry, testLogger())
@@ -903,7 +903,7 @@ func TestIntegrationService_StartOAuth_CallbackContextNotCanceledImmediately(t *
 		},
 	}
 	_ = cfg.SetCredentials(config.GoogleCredentials{ClientID: "cid", ClientSecret: "csecret"})
-	store.On("Get", "int-google").Return(cfg, nil)
+	store.On("Get", mock.Anything, "int-google").Return(cfg, nil)
 
 	registry := integrations.NewRegistry(store, testLogger())
 	svc := NewIntegrationService(store, registry, testLogger())

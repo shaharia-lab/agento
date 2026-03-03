@@ -64,11 +64,12 @@ func TestNewSQLiteDB_FreshDBFlag(t *testing.T) {
 // --- Agent Store Tests ---
 
 func TestSQLiteAgentStore_CRUD(t *testing.T) {
+	ctx := context.Background()
 	db := newTestDB(t)
 	store := NewSQLiteAgentStore(db)
 
 	// List empty
-	agents, err := store.List()
+	agents, err := store.List(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -89,12 +90,12 @@ func TestSQLiteAgentStore_CRUD(t *testing.T) {
 			MCP:     map[string]config.MCPCap{"server1": {Tools: []string{"tool1"}}},
 		},
 	}
-	if saveErr := store.Save(agent); saveErr != nil {
+	if saveErr := store.Save(ctx, agent); saveErr != nil {
 		t.Fatalf("save: %v", saveErr)
 	}
 
 	// Get
-	got, err := store.Get("test-agent")
+	got, err := store.Get(ctx, "test-agent")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -112,7 +113,7 @@ func TestSQLiteAgentStore_CRUD(t *testing.T) {
 	}
 
 	// Get not found
-	missing, err := store.Get("nonexistent")
+	missing, err := store.Get(ctx, "nonexistent")
 	if err != nil {
 		t.Fatalf("get nonexistent: %v", err)
 	}
@@ -122,16 +123,16 @@ func TestSQLiteAgentStore_CRUD(t *testing.T) {
 
 	// Update (upsert)
 	agent.Description = "Updated description"
-	if updateErr := store.Save(agent); updateErr != nil {
+	if updateErr := store.Save(ctx, agent); updateErr != nil {
 		t.Fatalf("save update: %v", updateErr)
 	}
-	got, _ = store.Get("test-agent")
+	got, _ = store.Get(ctx, "test-agent")
 	if got.Description != "Updated description" {
 		t.Errorf("expected updated description, got %q", got.Description)
 	}
 
 	// List
-	agents, err = store.List()
+	agents, err = store.List(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -140,28 +141,29 @@ func TestSQLiteAgentStore_CRUD(t *testing.T) {
 	}
 
 	// Delete
-	if err := store.Delete("test-agent"); err != nil {
+	if err := store.Delete(ctx, "test-agent"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	agents, _ = store.List()
+	agents, _ = store.List(ctx)
 	if len(agents) != 0 {
 		t.Errorf("expected 0 agents after delete, got %d", len(agents))
 	}
 
 	// Delete not found
-	if err := store.Delete("nonexistent"); err == nil {
+	if err := store.Delete(ctx, "nonexistent"); err == nil {
 		t.Error("expected error deleting nonexistent agent")
 	}
 }
 
 func TestSQLiteAgentStore_ValidationErrors(t *testing.T) {
+	ctx := context.Background()
 	db := newTestDB(t)
 	store := NewSQLiteAgentStore(db)
 
-	if err := store.Save(&config.AgentConfig{Slug: "test"}); err == nil {
+	if err := store.Save(ctx, &config.AgentConfig{Slug: "test"}); err == nil {
 		t.Error("expected error for missing name")
 	}
-	if err := store.Save(&config.AgentConfig{Name: "Test"}); err == nil {
+	if err := store.Save(ctx, &config.AgentConfig{Name: "Test"}); err == nil {
 		t.Error("expected error for missing slug")
 	}
 }
@@ -169,11 +171,12 @@ func TestSQLiteAgentStore_ValidationErrors(t *testing.T) {
 // --- Chat Store Tests ---
 
 func TestSQLiteChatStore_CRUD(t *testing.T) {
+	ctx := context.Background()
 	db := newTestDB(t)
 	store := NewSQLiteChatStore(db)
 
 	// List empty
-	sessions, err := store.ListSessions()
+	sessions, err := store.ListSessions(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -182,7 +185,7 @@ func TestSQLiteChatStore_CRUD(t *testing.T) {
 	}
 
 	// Create
-	session, err := store.CreateSession("test-agent", "/tmp/work", "claude-sonnet-4-6", "profile1")
+	session, err := store.CreateSession(ctx, "test-agent", "/tmp/work", "claude-sonnet-4-6", "profile1")
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -197,7 +200,7 @@ func TestSQLiteChatStore_CRUD(t *testing.T) {
 	}
 
 	// Get
-	got, err := store.GetSession(session.ID)
+	got, err := store.GetSession(ctx, session.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -209,7 +212,7 @@ func TestSQLiteChatStore_CRUD(t *testing.T) {
 	}
 
 	// Get not found
-	missing, err := store.GetSession("nonexistent")
+	missing, err := store.GetSession(ctx, "nonexistent")
 	if err != nil {
 		t.Fatalf("get nonexistent: %v", err)
 	}
@@ -232,15 +235,15 @@ func TestSQLiteChatStore_CRUD(t *testing.T) {
 			{Type: "tool_use", ID: "t1", Name: "current_time", Input: json.RawMessage(`{"tz":"UTC"}`)},
 		},
 	}
-	if appendErr := store.AppendMessage(session.ID, msg1); appendErr != nil {
+	if appendErr := store.AppendMessage(ctx, session.ID, msg1); appendErr != nil {
 		t.Fatalf("append msg1: %v", appendErr)
 	}
-	if appendErr := store.AppendMessage(session.ID, msg2); appendErr != nil {
+	if appendErr := store.AppendMessage(ctx, session.ID, msg2); appendErr != nil {
 		t.Fatalf("append msg2: %v", appendErr)
 	}
 
 	// GetSessionWithMessages
-	gotSession, messages, err := store.GetSessionWithMessages(session.ID)
+	gotSession, messages, err := store.GetSessionWithMessages(ctx, session.ID)
 	if err != nil {
 		t.Fatalf("get with messages: %v", err)
 	}
@@ -265,10 +268,10 @@ func TestSQLiteChatStore_CRUD(t *testing.T) {
 	session.TotalInputTokens = 100
 	session.TotalOutputTokens = 50
 	session.UpdatedAt = time.Now().UTC()
-	if err := store.UpdateSession(session); err != nil {
+	if err := store.UpdateSession(ctx, session); err != nil {
 		t.Fatalf("update: %v", err)
 	}
-	got, _ = store.GetSession(session.ID)
+	got, _ = store.GetSession(ctx, session.ID)
 	if got.Title != "Updated Title" {
 		t.Errorf("expected updated title, got %q", got.Title)
 	}
@@ -277,16 +280,16 @@ func TestSQLiteChatStore_CRUD(t *testing.T) {
 	}
 
 	// List sessions
-	sessions, _ = store.ListSessions()
+	sessions, _ = store.ListSessions(ctx)
 	if len(sessions) != 1 {
 		t.Fatalf("expected 1 session, got %d", len(sessions))
 	}
 
 	// Delete (cascade should delete messages too)
-	if err := store.DeleteSession(session.ID); err != nil {
+	if err := store.DeleteSession(ctx, session.ID); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	sessions, _ = store.ListSessions()
+	sessions, _ = store.ListSessions(ctx)
 	if len(sessions) != 0 {
 		t.Errorf("expected 0 sessions after delete, got %d", len(sessions))
 	}
@@ -299,16 +302,17 @@ func TestSQLiteChatStore_CRUD(t *testing.T) {
 	}
 
 	// Delete not found
-	if err := store.DeleteSession("nonexistent"); err == nil {
+	if err := store.DeleteSession(ctx, "nonexistent"); err == nil {
 		t.Error("expected error deleting nonexistent session")
 	}
 }
 
 func TestSQLiteChatStore_GetSessionWithMessages_NotFound(t *testing.T) {
+	ctx := context.Background()
 	db := newTestDB(t)
 	store := NewSQLiteChatStore(db)
 
-	session, messages, err := store.GetSessionWithMessages("nonexistent")
+	session, messages, err := store.GetSessionWithMessages(ctx, "nonexistent")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -323,11 +327,12 @@ func TestSQLiteChatStore_GetSessionWithMessages_NotFound(t *testing.T) {
 // --- Integration Store Tests ---
 
 func TestSQLiteIntegrationStore_CRUD(t *testing.T) {
+	ctx := context.Background()
 	db := newTestDB(t)
 	store := NewSQLiteIntegrationStore(db)
 
 	// List empty
-	integrations, err := store.List()
+	integrations, err := store.List(ctx)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -350,12 +355,12 @@ func TestSQLiteIntegrationStore_CRUD(t *testing.T) {
 	}
 
 	// Save
-	if saveErr := store.Save(cfg); saveErr != nil {
+	if saveErr := store.Save(ctx, cfg); saveErr != nil {
 		t.Fatalf("save: %v", saveErr)
 	}
 
 	// Get
-	got, err := store.Get("google-1")
+	got, err := store.Get(ctx, "google-1")
 	if err != nil {
 		t.Fatalf("get: %v", err)
 	}
@@ -380,7 +385,7 @@ func TestSQLiteIntegrationStore_CRUD(t *testing.T) {
 	}
 
 	// Get not found
-	missing, err := store.Get("nonexistent")
+	missing, err := store.Get(ctx, "nonexistent")
 	if err != nil {
 		t.Fatalf("get nonexistent: %v", err)
 	}
@@ -390,34 +395,35 @@ func TestSQLiteIntegrationStore_CRUD(t *testing.T) {
 
 	// Update
 	cfg.Name = "Updated Name"
-	if err := store.Save(cfg); err != nil {
+	if err := store.Save(ctx, cfg); err != nil {
 		t.Fatalf("save update: %v", err)
 	}
-	got, _ = store.Get("google-1")
+	got, _ = store.Get(ctx, "google-1")
 	if got.Name != "Updated Name" {
 		t.Errorf("expected updated name, got %q", got.Name)
 	}
 
 	// Delete
-	if err := store.Delete("google-1"); err != nil {
+	if err := store.Delete(ctx, "google-1"); err != nil {
 		t.Fatalf("delete: %v", err)
 	}
-	integrations, _ = store.List()
+	integrations, _ = store.List(ctx)
 	if len(integrations) != 0 {
 		t.Errorf("expected 0 after delete, got %d", len(integrations))
 	}
 
 	// Delete not found
-	if err := store.Delete("nonexistent"); err == nil {
+	if err := store.Delete(ctx, "nonexistent"); err == nil {
 		t.Error("expected error deleting nonexistent integration")
 	}
 }
 
 func TestSQLiteIntegrationStore_SaveRequiresID(t *testing.T) {
+	ctx := context.Background()
 	db := newTestDB(t)
 	store := NewSQLiteIntegrationStore(db)
 
-	err := store.Save(&config.IntegrationConfig{Name: "No ID"})
+	err := store.Save(ctx, &config.IntegrationConfig{Name: "No ID"})
 	if err == nil {
 		t.Error("expected error for missing ID")
 	}
@@ -534,7 +540,7 @@ capabilities:
 
 	// Verify agent
 	agentStore := NewSQLiteAgentStore(db)
-	agent, err := agentStore.Get("hello")
+	agent, err := agentStore.Get(context.Background(), "hello")
 	if err != nil {
 		t.Fatalf("get agent: %v", err)
 	}
@@ -544,7 +550,7 @@ capabilities:
 
 	// Verify chat session and messages
 	chatStore := NewSQLiteChatStore(db)
-	session, messages, err := chatStore.GetSessionWithMessages("sess-1")
+	session, messages, err := chatStore.GetSessionWithMessages(context.Background(), "sess-1")
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
@@ -607,7 +613,7 @@ func TestMigrateFromFS_Idempotent(t *testing.T) {
 
 	// Should still have exactly 1 agent
 	store := NewSQLiteAgentStore(db)
-	agents, _ := store.List()
+	agents, _ := store.List(context.Background())
 	if len(agents) != 1 {
 		t.Errorf("expected 1 agent, got %d", len(agents))
 	}

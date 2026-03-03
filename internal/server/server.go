@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/shaharia-lab/agento/internal/api"
 )
@@ -63,7 +64,7 @@ func New(apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger) *S
 
 	s.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
-		Handler:           r,
+		Handler:           otelhttp.NewHandler(r, "agento"),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return s

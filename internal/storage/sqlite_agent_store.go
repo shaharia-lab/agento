@@ -21,8 +21,7 @@ func NewSQLiteAgentStore(db *sql.DB) *SQLiteAgentStore {
 }
 
 // List returns all agent configs.
-func (s *SQLiteAgentStore) List() ([]*config.AgentConfig, error) {
-	ctx := context.Background()
+func (s *SQLiteAgentStore) List(ctx context.Context) ([]*config.AgentConfig, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT slug, name, description, model, thinking, permission_mode,
 		       system_prompt, capabilities
@@ -45,8 +44,7 @@ func (s *SQLiteAgentStore) List() ([]*config.AgentConfig, error) {
 }
 
 // Get returns the agent config for the given slug, or nil if not found.
-func (s *SQLiteAgentStore) Get(slug string) (*config.AgentConfig, error) {
-	ctx := context.Background()
+func (s *SQLiteAgentStore) Get(ctx context.Context, slug string) (*config.AgentConfig, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT slug, name, description, model, thinking, permission_mode,
 		       system_prompt, capabilities
@@ -71,7 +69,7 @@ func (s *SQLiteAgentStore) Get(slug string) (*config.AgentConfig, error) {
 }
 
 // Save persists the agent config (upsert).
-func (s *SQLiteAgentStore) Save(agent *config.AgentConfig) error {
+func (s *SQLiteAgentStore) Save(ctx context.Context, agent *config.AgentConfig) error {
 	if err := validateAgentForSave(agent); err != nil {
 		return err
 	}
@@ -82,7 +80,6 @@ func (s *SQLiteAgentStore) Save(agent *config.AgentConfig) error {
 	}
 
 	now := time.Now().UTC()
-	ctx := context.Background()
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO agents (slug, name, description, model, thinking, permission_mode,
 		                    system_prompt, capabilities, created_at, updated_at)
@@ -107,8 +104,7 @@ func (s *SQLiteAgentStore) Save(agent *config.AgentConfig) error {
 }
 
 // Delete removes the agent with the given slug.
-func (s *SQLiteAgentStore) Delete(slug string) error {
-	ctx := context.Background()
+func (s *SQLiteAgentStore) Delete(ctx context.Context, slug string) error {
 	res, err := s.db.ExecContext(ctx, "DELETE FROM agents WHERE slug = ?", slug)
 	if err != nil {
 		return fmt.Errorf("deleting agent %q: %w", slug, err)

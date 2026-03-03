@@ -3,7 +3,10 @@
 package mocks
 
 import (
+	context "context"
+
 	config "github.com/shaharia-lab/agento/internal/config"
+
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -20,17 +23,17 @@ func (_m *MockAgentStore) EXPECT() *MockAgentStore_Expecter {
 	return &MockAgentStore_Expecter{mock: &_m.Mock}
 }
 
-// Delete provides a mock function with given fields: slug
-func (_m *MockAgentStore) Delete(slug string) error {
-	ret := _m.Called(slug)
+// Delete provides a mock function with given fields: ctx, slug
+func (_m *MockAgentStore) Delete(ctx context.Context, slug string) error {
+	ret := _m.Called(ctx, slug)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Delete")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(string) error); ok {
-		r0 = rf(slug)
+	if rf, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = rf(ctx, slug)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -44,14 +47,15 @@ type MockAgentStore_Delete_Call struct {
 }
 
 // Delete is a helper method to define mock.On call
+//   - ctx context.Context
 //   - slug string
-func (_e *MockAgentStore_Expecter) Delete(slug interface{}) *MockAgentStore_Delete_Call {
-	return &MockAgentStore_Delete_Call{Call: _e.mock.On("Delete", slug)}
+func (_e *MockAgentStore_Expecter) Delete(ctx interface{}, slug interface{}) *MockAgentStore_Delete_Call {
+	return &MockAgentStore_Delete_Call{Call: _e.mock.On("Delete", ctx, slug)}
 }
 
-func (_c *MockAgentStore_Delete_Call) Run(run func(slug string)) *MockAgentStore_Delete_Call {
+func (_c *MockAgentStore_Delete_Call) Run(run func(ctx context.Context, slug string)) *MockAgentStore_Delete_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -61,14 +65,14 @@ func (_c *MockAgentStore_Delete_Call) Return(_a0 error) *MockAgentStore_Delete_C
 	return _c
 }
 
-func (_c *MockAgentStore_Delete_Call) RunAndReturn(run func(string) error) *MockAgentStore_Delete_Call {
+func (_c *MockAgentStore_Delete_Call) RunAndReturn(run func(context.Context, string) error) *MockAgentStore_Delete_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// Get provides a mock function with given fields: slug
-func (_m *MockAgentStore) Get(slug string) (*config.AgentConfig, error) {
-	ret := _m.Called(slug)
+// Get provides a mock function with given fields: ctx, slug
+func (_m *MockAgentStore) Get(ctx context.Context, slug string) (*config.AgentConfig, error) {
+	ret := _m.Called(ctx, slug)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Get")
@@ -76,19 +80,19 @@ func (_m *MockAgentStore) Get(slug string) (*config.AgentConfig, error) {
 
 	var r0 *config.AgentConfig
 	var r1 error
-	if rf, ok := ret.Get(0).(func(string) (*config.AgentConfig, error)); ok {
-		return rf(slug)
+	if rf, ok := ret.Get(0).(func(context.Context, string) (*config.AgentConfig, error)); ok {
+		return rf(ctx, slug)
 	}
-	if rf, ok := ret.Get(0).(func(string) *config.AgentConfig); ok {
-		r0 = rf(slug)
+	if rf, ok := ret.Get(0).(func(context.Context, string) *config.AgentConfig); ok {
+		r0 = rf(ctx, slug)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*config.AgentConfig)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(string) error); ok {
-		r1 = rf(slug)
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, slug)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -102,14 +106,15 @@ type MockAgentStore_Get_Call struct {
 }
 
 // Get is a helper method to define mock.On call
+//   - ctx context.Context
 //   - slug string
-func (_e *MockAgentStore_Expecter) Get(slug interface{}) *MockAgentStore_Get_Call {
-	return &MockAgentStore_Get_Call{Call: _e.mock.On("Get", slug)}
+func (_e *MockAgentStore_Expecter) Get(ctx interface{}, slug interface{}) *MockAgentStore_Get_Call {
+	return &MockAgentStore_Get_Call{Call: _e.mock.On("Get", ctx, slug)}
 }
 
-func (_c *MockAgentStore_Get_Call) Run(run func(slug string)) *MockAgentStore_Get_Call {
+func (_c *MockAgentStore_Get_Call) Run(run func(ctx context.Context, slug string)) *MockAgentStore_Get_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(string))
+		run(args[0].(context.Context), args[1].(string))
 	})
 	return _c
 }
@@ -119,14 +124,14 @@ func (_c *MockAgentStore_Get_Call) Return(_a0 *config.AgentConfig, _a1 error) *M
 	return _c
 }
 
-func (_c *MockAgentStore_Get_Call) RunAndReturn(run func(string) (*config.AgentConfig, error)) *MockAgentStore_Get_Call {
+func (_c *MockAgentStore_Get_Call) RunAndReturn(run func(context.Context, string) (*config.AgentConfig, error)) *MockAgentStore_Get_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// List provides a mock function with no fields
-func (_m *MockAgentStore) List() ([]*config.AgentConfig, error) {
-	ret := _m.Called()
+// List provides a mock function with given fields: ctx
+func (_m *MockAgentStore) List(ctx context.Context) ([]*config.AgentConfig, error) {
+	ret := _m.Called(ctx)
 
 	if len(ret) == 0 {
 		panic("no return value specified for List")
@@ -134,19 +139,19 @@ func (_m *MockAgentStore) List() ([]*config.AgentConfig, error) {
 
 	var r0 []*config.AgentConfig
 	var r1 error
-	if rf, ok := ret.Get(0).(func() ([]*config.AgentConfig, error)); ok {
-		return rf()
+	if rf, ok := ret.Get(0).(func(context.Context) ([]*config.AgentConfig, error)); ok {
+		return rf(ctx)
 	}
-	if rf, ok := ret.Get(0).(func() []*config.AgentConfig); ok {
-		r0 = rf()
+	if rf, ok := ret.Get(0).(func(context.Context) []*config.AgentConfig); ok {
+		r0 = rf(ctx)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).([]*config.AgentConfig)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func() error); ok {
-		r1 = rf()
+	if rf, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = rf(ctx)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -160,13 +165,14 @@ type MockAgentStore_List_Call struct {
 }
 
 // List is a helper method to define mock.On call
-func (_e *MockAgentStore_Expecter) List() *MockAgentStore_List_Call {
-	return &MockAgentStore_List_Call{Call: _e.mock.On("List")}
+//   - ctx context.Context
+func (_e *MockAgentStore_Expecter) List(ctx interface{}) *MockAgentStore_List_Call {
+	return &MockAgentStore_List_Call{Call: _e.mock.On("List", ctx)}
 }
 
-func (_c *MockAgentStore_List_Call) Run(run func()) *MockAgentStore_List_Call {
+func (_c *MockAgentStore_List_Call) Run(run func(ctx context.Context)) *MockAgentStore_List_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run()
+		run(args[0].(context.Context))
 	})
 	return _c
 }
@@ -176,22 +182,22 @@ func (_c *MockAgentStore_List_Call) Return(_a0 []*config.AgentConfig, _a1 error)
 	return _c
 }
 
-func (_c *MockAgentStore_List_Call) RunAndReturn(run func() ([]*config.AgentConfig, error)) *MockAgentStore_List_Call {
+func (_c *MockAgentStore_List_Call) RunAndReturn(run func(context.Context) ([]*config.AgentConfig, error)) *MockAgentStore_List_Call {
 	_c.Call.Return(run)
 	return _c
 }
 
-// Save provides a mock function with given fields: agent
-func (_m *MockAgentStore) Save(agent *config.AgentConfig) error {
-	ret := _m.Called(agent)
+// Save provides a mock function with given fields: ctx, agent
+func (_m *MockAgentStore) Save(ctx context.Context, agent *config.AgentConfig) error {
+	ret := _m.Called(ctx, agent)
 
 	if len(ret) == 0 {
 		panic("no return value specified for Save")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(*config.AgentConfig) error); ok {
-		r0 = rf(agent)
+	if rf, ok := ret.Get(0).(func(context.Context, *config.AgentConfig) error); ok {
+		r0 = rf(ctx, agent)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -205,14 +211,15 @@ type MockAgentStore_Save_Call struct {
 }
 
 // Save is a helper method to define mock.On call
+//   - ctx context.Context
 //   - agent *config.AgentConfig
-func (_e *MockAgentStore_Expecter) Save(agent interface{}) *MockAgentStore_Save_Call {
-	return &MockAgentStore_Save_Call{Call: _e.mock.On("Save", agent)}
+func (_e *MockAgentStore_Expecter) Save(ctx interface{}, agent interface{}) *MockAgentStore_Save_Call {
+	return &MockAgentStore_Save_Call{Call: _e.mock.On("Save", ctx, agent)}
 }
 
-func (_c *MockAgentStore_Save_Call) Run(run func(agent *config.AgentConfig)) *MockAgentStore_Save_Call {
+func (_c *MockAgentStore_Save_Call) Run(run func(ctx context.Context, agent *config.AgentConfig)) *MockAgentStore_Save_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(*config.AgentConfig))
+		run(args[0].(context.Context), args[1].(*config.AgentConfig))
 	})
 	return _c
 }
@@ -222,7 +229,7 @@ func (_c *MockAgentStore_Save_Call) Return(_a0 error) *MockAgentStore_Save_Call 
 	return _c
 }
 
-func (_c *MockAgentStore_Save_Call) RunAndReturn(run func(*config.AgentConfig) error) *MockAgentStore_Save_Call {
+func (_c *MockAgentStore_Save_Call) RunAndReturn(run func(context.Context, *config.AgentConfig) error) *MockAgentStore_Save_Call {
 	_c.Call.Return(run)
 	return _c
 }
