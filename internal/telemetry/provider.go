@@ -126,7 +126,9 @@ func buildTracerProvider(
 
 	opts := []otlptracegrpc.Option{
 		otlptracegrpc.WithEndpoint(cfg.OTLPEndpoint),
-		otlptracegrpc.WithInsecure(),
+	}
+	if cfg.OTLPInsecure {
+		opts = append(opts, otlptracegrpc.WithInsecure())
 	}
 	if len(cfg.OTLPHeaders) > 0 {
 		opts = append(opts, otlptracegrpc.WithHeaders(cfg.OTLPHeaders))
@@ -175,7 +177,9 @@ func buildOTLPMeterProvider(
 ) (*sdkmetric.MeterProvider, error) {
 	opts := []otlpmetricgrpc.Option{
 		otlpmetricgrpc.WithEndpoint(cfg.OTLPEndpoint),
-		otlpmetricgrpc.WithInsecure(),
+	}
+	if cfg.OTLPInsecure {
+		opts = append(opts, otlpmetricgrpc.WithInsecure())
 	}
 	if len(cfg.OTLPHeaders) > 0 {
 		opts = append(opts, otlpmetricgrpc.WithHeaders(cfg.OTLPHeaders))
@@ -209,7 +213,9 @@ func buildLoggerProvider(
 
 	opts := []otlploggrpc.Option{
 		otlploggrpc.WithEndpoint(cfg.OTLPEndpoint),
-		otlploggrpc.WithInsecure(),
+	}
+	if cfg.OTLPInsecure {
+		opts = append(opts, otlploggrpc.WithInsecure())
 	}
 	if len(cfg.OTLPHeaders) > 0 {
 		opts = append(opts, otlploggrpc.WithHeaders(cfg.OTLPHeaders))

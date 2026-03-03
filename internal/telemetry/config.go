@@ -48,6 +48,10 @@ type MonitoringConfig struct {
 	// Maps to OTEL_EXPORTER_OTLP_HEADERS (comma-separated key=value).
 	OTLPHeaders map[string]string
 
+	// OTLPInsecure disables TLS for gRPC connections to the OTLP endpoint.
+	// Maps to OTEL_EXPORTER_OTLP_INSECURE. Defaults to false (TLS enabled).
+	OTLPInsecure bool
+
 	// MetricExportInterval is how often metrics are pushed to OTLP.
 	// Maps to OTEL_METRIC_EXPORT_INTERVAL (milliseconds). Default: 60000ms.
 	MetricExportInterval time.Duration
@@ -89,6 +93,8 @@ func ConfigFromEnv() MonitoringConfig {
 	cfg.LogsExporter = parseLogsExporter(logsExp)
 	cfg.OTLPEndpoint = endpoint
 	cfg.OTLPHeaders = parseOTLPHeaders(os.Getenv("OTEL_EXPORTER_OTLP_HEADERS"))
+	insecure := os.Getenv("OTEL_EXPORTER_OTLP_INSECURE")
+	cfg.OTLPInsecure = insecure == "true" || insecure == "1"
 	cfg.MetricExportInterval = parseMetricExportInterval(
 		os.Getenv("OTEL_METRIC_EXPORT_INTERVAL"),
 		cfg.MetricExportInterval,

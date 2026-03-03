@@ -52,3 +52,16 @@ func TestConfigFromEnv_MetricInterval(t *testing.T) {
 	cfg := telemetry.ConfigFromEnv()
 	assert.Equal(t, 5*time.Second, cfg.MetricExportInterval)
 }
+
+func TestConfigFromEnv_Insecure(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "localhost:4317")
+	t.Setenv("OTEL_EXPORTER_OTLP_INSECURE", "true")
+	cfg := telemetry.ConfigFromEnv()
+	assert.True(t, cfg.OTLPInsecure)
+}
+
+func TestConfigFromEnv_SecureByDefault(t *testing.T) {
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "collector.example.com:4317")
+	cfg := telemetry.ConfigFromEnv()
+	assert.False(t, cfg.OTLPInsecure)
+}

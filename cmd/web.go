@@ -139,6 +139,13 @@ func initObservability(
 
 	sysLogger, logCleanup, err := logger.NewSystemLogger(cfg.LogDir(), cfg.SlogLevel())
 	if err != nil {
+		// Shut down already-initialized OTel providers before returning.
+		// Logger is unavailable here so use the default slog sink.
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if shutdownErr := otelProviders.Shutdown(shutdownCtx); shutdownErr != nil {
+			slog.Default().Error("telemetry shutdown during logger init failure", "error", shutdownErr)
+		}
 		return otelCfg, nil, nil, func() {}, fmt.Errorf("initializing logger: %w", err)
 	}
 
