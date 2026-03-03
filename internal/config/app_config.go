@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/kelseyhightower/envconfig"
 )
@@ -44,13 +45,11 @@ func Load() (*AppConfig, error) {
 	if err := envconfig.Process("", &c); err != nil {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
-	if c.DataDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("resolving home directory: %w", err)
-		}
-		c.DataDir = filepath.Join(home, ".agento")
+	resolvedDataDir, err := resolveDataDir(c.DataDir)
+	if err != nil {
+		return nil, err
 	}
+	c.DataDir = resolvedDataDir
 
 	// Resolve the effective default model:
 	//   1. AGENTO_DEFAULT_MODEL — highest priority, locks the field
@@ -105,4 +104,31 @@ func (c *AppConfig) MCPsFile() string {
 // IntegrationsDir returns the path to the integrations storage directory.
 func (c *AppConfig) IntegrationsDir() string {
 	return filepath.Join(c.DataDir, "integrations")
+}
+
+// DatabasePath returns the path to the SQLite database file.
+func (c *AppConfig) DatabasePath() string {
+	return filepath.Join(c.DataDir, "agento.db")
+}
+
+// resolveDataDir returns the resolved data directory path.
+// If dir is empty it defaults to ~/.agento.
+// A leading ~/ is expanded to the user's home directory so that values like
+// AGENTO_DATA_DIR=~/.agento-dev work correctly without relying on shell expansion.
+func resolveDataDir(dir string) (string, error) {
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolving home directory: %w", err)
+		}
+		return filepath.Join(home, ".agento"), nil
+	}
+	if strings.HasPrefix(dir, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("resolving home directory: %w", err)
+		}
+		return filepath.Join(home, dir[2:]), nil
+	}
+	return dir, nil
 }

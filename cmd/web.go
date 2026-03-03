@@ -131,7 +131,7 @@ func ensureWebDirectories(cfg *config.AppConfig) error {
 }
 
 func initDatabase(cfg *config.AppConfig, sysLogger *slog.Logger) (*sql.DB, func(), error) {
-	dbPath := filepath.Join(cfg.DataDir, "agento.db")
+	dbPath := cfg.DatabasePath()
 	db, freshDB, err := storage.NewSQLiteDB(dbPath, sysLogger)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening database: %w", err)
