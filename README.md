@@ -109,11 +109,22 @@ All settings are optional and can be overridden with environment variables:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8990` | HTTP server port |
-| `AGENTO_DATA_DIR` | `~/.agento` | Root directory for agents, chats, and logs |
+| `AGENTO_DATA_DIR` | `~/.agento` | Root directory for agents, chats, and database. Supports `~` expansion (e.g. `~/.agento-dev`) |
 | `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `ANTHROPIC_API_KEY` | — | Use the Anthropic API directly instead of Claude Code CLI authentication |
 | `AGENTO_DEFAULT_MODEL` | *(Claude default)* | Lock the Claude model used for direct chat sessions |
 | `AGENTO_WORKING_DIR` | `/tmp/agento/work` | Default working directory for agent sessions |
+
+### Local Development Isolation
+
+Use `AGENTO_DATA_DIR` to keep development data separate from production:
+
+```bash
+# Run against an isolated dev directory — production data is untouched
+AGENTO_DATA_DIR=~/.agento-dev make dev-backend
+```
+
+The resolved path is logged at startup (`data_dir` field) so you can confirm which directory is in use.
 
 ### Logs
 

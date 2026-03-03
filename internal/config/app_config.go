@@ -113,8 +113,9 @@ func (c *AppConfig) DatabasePath() string {
 
 // resolveDataDir returns the resolved data directory path.
 // If dir is empty it defaults to ~/.agento.
-// A leading ~/ is expanded to the user's home directory so that values like
+// A leading ~ is expanded to the user's home directory so that values like
 // AGENTO_DATA_DIR=~/.agento-dev work correctly without relying on shell expansion.
+// Both forward-slash (Unix) and backslash (Windows) separators after ~ are supported.
 func resolveDataDir(dir string) (string, error) {
 	if dir == "" {
 		home, err := os.UserHomeDir()
@@ -123,10 +124,13 @@ func resolveDataDir(dir string) (string, error) {
 		}
 		return filepath.Join(home, ".agento"), nil
 	}
-	if strings.HasPrefix(dir, "~/") {
+	if dir == "~" || strings.HasPrefix(dir, "~/") || strings.HasPrefix(dir, `~\`) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", fmt.Errorf("resolving home directory: %w", err)
+		}
+		if dir == "~" {
+			return home, nil
 		}
 		return filepath.Join(home, dir[2:]), nil
 	}

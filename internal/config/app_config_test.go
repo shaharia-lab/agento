@@ -97,6 +97,7 @@ func TestResolveDataDir(t *testing.T) {
 		want  string
 	}{
 		{"empty defaults to ~/.agento", "", filepath.Join(home, ".agento")},
+		{"bare tilde resolves to home", "~", home},
 		{"tilde prefix is expanded", "~/.agento-dev", filepath.Join(home, ".agento-dev")},
 		{"absolute path is unchanged", "/custom/data", "/custom/data"},
 		{"relative path is unchanged", "relative/path", "relative/path"},

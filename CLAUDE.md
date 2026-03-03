@@ -38,7 +38,7 @@ Two terminals are needed in dev mode:
 ### Required Environment
 ```bash
 ANTHROPIC_API_KEY=...        # Optional (uses Claude Code CLI auth if unset)
-AGENTO_DATA_DIR=~/.agento   # Optional, default: ~/.agento
+AGENTO_DATA_DIR=~/.agento   # Optional, default: ~/.agento (supports ~ expansion, e.g. ~/.agento-dev for local dev)
 PORT=8990                    # Optional, default: 8990
 ```
 
