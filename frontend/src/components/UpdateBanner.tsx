@@ -6,9 +6,9 @@ import type { UpdateCheckResponse } from '@/types'
 const DISMISS_STORAGE_KEY = 'agento-update-dismissed-version'
 
 interface HowToUpdateModalProps {
-  latestVersion: string
-  releaseUrl: string
-  onClose: () => void
+  readonly latestVersion: string
+  readonly releaseUrl: string
+  readonly onClose: () => void
 }
 
 function HowToUpdateModal({ latestVersion, releaseUrl, onClose }: HowToUpdateModalProps) {
@@ -16,22 +16,22 @@ function HowToUpdateModal({ latestVersion, releaseUrl, onClose }: HowToUpdateMod
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
     }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
+    globalThis.addEventListener('keydown', handler)
+    return () => globalThis.removeEventListener('keydown', handler)
   }, [onClose])
 
   return (
     <div
+      role="none"
       className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm"
       onClick={e => {
         if (e.target === e.currentTarget) onClose()
       }}
     >
-      <div
-        role="dialog"
-        aria-modal="true"
+      <dialog
+        open
         aria-labelledby="update-modal-title"
-        className="relative w-full max-w-lg rounded-xl bg-white dark:bg-zinc-900 shadow-2xl border border-zinc-200 dark:border-zinc-700 overflow-hidden"
+        className="relative m-0 p-0 w-full max-w-lg rounded-xl bg-white dark:bg-zinc-900 shadow-2xl border border-zinc-200 dark:border-zinc-700 overflow-hidden"
       >
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-700">
@@ -133,7 +133,7 @@ function HowToUpdateModal({ latestVersion, releaseUrl, onClose }: HowToUpdateMod
             Got it
           </button>
         </div>
-      </div>
+      </dialog>
     </div>
   )
 }
