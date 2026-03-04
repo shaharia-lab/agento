@@ -15,6 +15,7 @@ import {
   CalendarClock,
   ClipboardList,
   Info,
+  Star,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -431,6 +432,19 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
               <Info className="h-4 w-4 shrink-0" />
               <span className="text-[13px]">About</span>
             </button>
+          )}
+
+          {/* Star on GitHub — only when expanded */}
+          {!collapsed && (
+            <a
+              href="https://github.com/shaharia-lab/agento"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-amber-500 dark:hover:text-amber-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors h-8 w-full px-3 gap-2 mb-1"
+            >
+              <Star className="h-3.5 w-3.5 shrink-0" />
+              <span className="text-[12px]">Star on GitHub</span>
+            </a>
           )}
 
           {/* Collapse toggle */}
