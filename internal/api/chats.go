@@ -236,10 +236,16 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Serialize concurrent sends to the same chat session. Without this a second
-	// request arriving while the first is still streaming reads a stale SDKSession
-	// from the DB, causing the Claude CLI to start a new session instead of resuming.
-	unlock := s.liveSessions.lock(id)
+	// Reject concurrent sends to the same chat session. A second request
+	// arriving while the first is still streaming would read a stale SDKSession
+	// from the DB, causing the Claude CLI to start a new session instead of
+	// resuming the right one. Return 409 so the client can surface a clear
+	// "session is busy" message rather than silently corrupting state.
+	unlock := s.liveSessions.tryLock(id)
+	if unlock == nil {
+		s.writeError(w, http.StatusConflict, "session is busy, wait for the current message to complete")
+		return
+	}
 	defer unlock()
 
 	chs := newSendMessageChannels()
@@ -483,9 +489,12 @@ func (ep *eventProcessor) processAgentEvent(event claude.Event, state *streamSta
 		if event.Result.IsError {
 			// Preserve the SDK session ID on error so the next attempt still
 			// resumes the same Claude CLI session. The chat ID == SDK session ID
-			// (set via --session-id on first message), so there is nothing stale
-			// to clear here.
-			state.sdkSessionID = event.Result.SessionID
+			// (set via --session-id on first message). Only update if the error
+			// result carries a non-empty SessionID; otherwise keep whatever was
+			// already accumulated so we do not lose a previously valid session ID.
+			if event.Result.SessionID != "" {
+				state.sdkSessionID = event.Result.SessionID
+			}
 			return true
 		}
 		state.sdkSessionID = event.Result.SessionID
