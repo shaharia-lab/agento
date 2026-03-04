@@ -149,3 +149,19 @@ func (c *Cache) UpdateCustomTitle(sessionID, title string) error {
 	)
 	return err
 }
+
+// GetCustomTitle returns the stored custom_title for the given session ID.
+// Returns an empty string if the session is not cached or has no custom title.
+func (c *Cache) GetCustomTitle(sessionID string) string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var title string
+	row := c.db.QueryRowContext(context.Background(),
+		`SELECT custom_title FROM claude_session_cache WHERE session_id = ?`,
+		sessionID,
+	)
+	if err := row.Scan(&title); err != nil {
+		return ""
+	}
+	return title
+}

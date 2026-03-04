@@ -74,6 +74,8 @@ func (s *Server) handleGetClaudeSession(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, http.StatusNotFound, "session not found")
 		return
 	}
+	// Attach the user-defined title from the SQLite cache (not present in JSONL).
+	detail.CustomTitle = s.claudeSessionCache.GetCustomTitle(id)
 	s.writeJSON(w, http.StatusOK, detail)
 }
 
