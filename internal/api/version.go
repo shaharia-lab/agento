@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/creativeprojects/go-selfupdate"
 
 	"github.com/shaharia-lab/agento/internal/build"
@@ -44,8 +45,9 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	current := build.Version
 	currentTrimmed := strings.TrimPrefix(current, "v")
 
-	// Dev/unknown builds cannot be compared to releases.
-	if currentTrimmed == "dev" || currentTrimmed == "unknown" {
+	// Skip the update check for any build that is not a proper semver release
+	// (e.g. "dev", "unknown", or a bare git commit SHA like "00f2331").
+	if _, err := semver.NewVersion(currentTrimmed); err != nil {
 		s.writeJSON(w, http.StatusOK, map[string]interface{}{
 			"current_version":  current,
 			"update_available": false,
