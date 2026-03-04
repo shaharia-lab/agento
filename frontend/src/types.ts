@@ -571,6 +571,51 @@ export interface ClaudeSessionDetail extends ClaudeSessionSummary {
   todos: ClaudeTodo[]
 }
 
+// ── Session Journey ──────────────────────────────────────────────────────────
+
+export interface SessionJourney {
+  session_id: string
+  model?: string
+  cwd?: string
+  git_branch?: string
+  start_time: string
+  end_time: string
+  total_duration_ms: number
+  total_turns: number
+  usage: ClaudeTokenUsage
+  summary?: string
+  turns: JourneyTurn[]
+}
+
+export interface JourneyTurn {
+  number: number
+  start_time: string
+  end_time: string
+  duration_ms: number
+  usage?: ClaudeTokenUsage
+  tool_calls: number
+  steps: JourneyStep[]
+}
+
+export interface JourneyStep {
+  type: JourneyStepType
+  timestamp: string
+  duration_ms: number
+  data: Record<string, unknown>
+}
+
+export type JourneyStepType =
+  | 'user_input'
+  | 'thinking'
+  | 'text_response'
+  | 'tool_call'
+  | 'tool_result'
+  | 'bash_output'
+  | 'thinking_duration'
+  | 'sub_agent'
+  | 'skill'
+  | 'mcp_tool'
+
 // ── Notifications ─────────────────────────────────────────────────────────────
 
 export interface SMTPConfig {

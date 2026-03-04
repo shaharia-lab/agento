@@ -22,6 +22,7 @@ import type {
   ClaudeProject,
   ClaudeSessionSummary,
   ClaudeSessionDetail,
+  SessionJourney,
   AnalyticsReport,
   Integration,
   AvailableTool,
@@ -217,6 +218,9 @@ export const claudeSessionsApi = {
 
   /** Get the full detail of a single session including messages and todos. */
   get: (id: string) => request<ClaudeSessionDetail>(`/claude-sessions/${id}`),
+
+  /** Get the structured turn-by-turn journey visualization for a session. */
+  journey: (id: string) => request<SessionJourney>(`/claude-sessions/${id}/journey`),
 
   /** Invalidate the server-side session cache and trigger a background rescan. */
   refresh: () =>

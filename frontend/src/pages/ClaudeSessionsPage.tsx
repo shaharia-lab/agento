@@ -11,7 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { History, Search, RefreshCw, ExternalLink, Zap, Star } from 'lucide-react'
+import { History, Search, RefreshCw, ExternalLink, Zap, Star, Activity } from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
 
 function formatTokens(n: number): string {
@@ -126,6 +126,7 @@ export default function ClaudeSessionsPage() {
             key={session.session_id}
             session={session}
             onClick={() => navigate(`/claude-sessions/${session.session_id}`)}
+            onJourney={() => navigate(`/claude-sessions/${session.session_id}/journey`)}
             onToggleFavorite={() => {
               const next = !session.is_favorite
               setSessions(prev =>
@@ -233,10 +234,12 @@ function SessionRow({
   session,
   onClick,
   onToggleFavorite,
+  onJourney,
 }: Readonly<{
   session: ClaudeSessionSummary
   onClick: () => void
   onToggleFavorite: () => void
+  onJourney: () => void
 }>) {
   const totalTokens = (session.usage?.input_tokens ?? 0) + (session.usage?.output_tokens ?? 0)
   const hasTokens = totalTokens > 0
@@ -333,6 +336,17 @@ function SessionRow({
         title={session.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
       >
         <Star className={`h-3.5 w-3.5 ${session.is_favorite ? 'fill-amber-400' : ''}`} />
+      </button>
+      <button
+        type="button"
+        className="h-7 w-7 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 text-zinc-300 dark:text-zinc-600 hover:text-zinc-500 dark:hover:text-zinc-400 transition-all shrink-0 mt-0.5 cursor-pointer"
+        onClick={e => {
+          e.stopPropagation()
+          onJourney()
+        }}
+        title="View session journey"
+      >
+        <Activity className="h-3.5 w-3.5" />
       </button>
       <ExternalLink className="h-3.5 w-3.5 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-400 dark:group-hover:text-zinc-400 shrink-0 mt-1.5 transition-colors" />
     </div>
