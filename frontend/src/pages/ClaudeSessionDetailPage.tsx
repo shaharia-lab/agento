@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { claudeSessionsApi } from '@/lib/api'
 import type { ClaudeSessionDetail, ClaudeMessage, ClaudeNormalizedBlock, ClaudeTodo } from '@/types'
@@ -18,6 +18,7 @@ import {
   Clock,
   Play,
   Loader2,
+  Pencil,
 } from 'lucide-react'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -285,6 +286,9 @@ export default function ClaudeSessionDetailPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [continuing, setContinuing] = useState(false)
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [titleDraft, setTitleDraft] = useState('')
+  const titleInputRef = useRef<HTMLInputElement>(null)
 
   const load = useCallback(async () => {
     if (!id) return
@@ -297,6 +301,28 @@ export default function ClaudeSessionDetailPage() {
       setLoading(false)
     }
   }, [id])
+
+  const startEditingTitle = () => {
+    if (!detail) return
+    setTitleDraft(detail.custom_title || detail.preview || '')
+    setEditingTitle(true)
+    setTimeout(() => titleInputRef.current?.select(), 0)
+  }
+
+  const saveTitle = async () => {
+    if (!id || !detail) return
+    const trimmed = titleDraft.trim()
+    setEditingTitle(false)
+    if (trimmed === (detail.custom_title ?? '')) return
+    try {
+      await claudeSessionsApi.updateTitle(id, trimmed)
+      setDetail(prev => (prev ? { ...prev, custom_title: trimmed } : prev))
+    } catch {
+      // silently ignore — title stays as-is
+    }
+  }
+
+  const cancelEditingTitle = () => setEditingTitle(false)
 
   useEffect(() => {
     load()
@@ -356,9 +382,31 @@ export default function ClaudeSessionDetailPage() {
         </button>
         <div className="flex items-start justify-between gap-3">
           <div className="flex-1 min-w-0">
-            <p className="text-base font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-              {detail.preview || 'Session ' + (id ?? '').slice(0, 8)}
-            </p>
+            {editingTitle ? (
+              <input
+                ref={titleInputRef}
+                value={titleDraft}
+                onChange={e => setTitleDraft(e.target.value)}
+                onBlur={saveTitle}
+                onKeyDown={e => {
+                  if (e.key === 'Enter') saveTitle()
+                  if (e.key === 'Escape') cancelEditingTitle()
+                }}
+                className="w-full text-base font-semibold text-zinc-900 dark:text-zinc-100 bg-transparent border-b border-zinc-400 dark:border-zinc-500 outline-none pb-0.5 truncate"
+                autoFocus
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={startEditingTitle}
+                className="group flex items-center gap-1.5 text-left w-full min-w-0"
+              >
+                <p className="text-base font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+                  {detail.custom_title || detail.preview || 'Session ' + (id ?? '').slice(0, 8)}
+                </p>
+                <Pencil className="h-3 w-3 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 shrink-0 transition-colors" />
+              </button>
+            )}
             {/* Session meta */}
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-1.5">
               {detail.cwd && (

@@ -157,6 +157,7 @@ func (s *Server) mountClaudeSessionRoutes(r chi.Router) {
 	r.Get("/claude-sessions/projects", s.handleListClaudeProjects)
 	r.Post("/claude-sessions/refresh", s.handleRefreshClaudeSessionCache)
 	r.Get("/claude-sessions/{id}", s.handleGetClaudeSession)
+	r.Patch("/claude-sessions/{id}", s.handleUpdateClaudeSession)
 	r.Post("/claude-sessions/{id}/continue", s.handleContinueClaudeSession)
 	r.Get("/claude-analytics", s.handleGetClaudeAnalytics)
 }

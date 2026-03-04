@@ -227,6 +227,16 @@ export const claudeSessionsApi = {
     request<{ chat_id: string }>(`/claude-sessions/${sessionId}/continue`, {
       method: 'POST',
     }),
+
+  /** Set a user-defined title for a session (preserved across cache rescans). */
+  updateTitle: (sessionId: string, customTitle: string) =>
+    fetch(`${BASE}/claude-sessions/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ custom_title: customTitle }),
+    }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
 }
 
 // ── Streaming message ─────────────────────────────────────────────────────────

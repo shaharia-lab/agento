@@ -207,9 +207,11 @@ function SessionRow({
         <History className="h-3.5 w-3.5" />
       </div>
       <div className="flex-1 min-w-0">
-        {/* Preview / first message */}
+        {/* Custom title or preview / first message */}
         <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate leading-snug">
-          {session.preview || <span className="italic text-zinc-400">No message content</span>}
+          {session.custom_title || session.preview || (
+            <span className="italic text-zinc-400">No message content</span>
+          )}
         </p>
         {/* Meta row */}
         <div className="flex items-center gap-2 mt-1 flex-wrap">

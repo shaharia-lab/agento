@@ -103,7 +103,7 @@ func (c *Cache) isFresh() bool {
 func (c *Cache) loadAll() ([]ClaudeSessionSummary, error) {
 	ctx := context.Background()
 	rows, err := c.db.QueryContext(ctx, `
-		SELECT session_id, project_path, preview, start_time, last_activity,
+		SELECT session_id, project_path, preview, custom_title, start_time, last_activity,
 		       message_count, input_tokens, output_tokens, cache_creation_tokens,
 		       cache_read_tokens, git_branch, model, cwd
 		FROM claude_session_cache
@@ -121,7 +121,7 @@ func (c *Cache) loadAll() ([]ClaudeSessionSummary, error) {
 	for rows.Next() {
 		var s ClaudeSessionSummary
 		if err := rows.Scan(
-			&s.SessionID, &s.ProjectPath, &s.Preview,
+			&s.SessionID, &s.ProjectPath, &s.Preview, &s.CustomTitle,
 			&s.StartTime, &s.LastActivity, &s.MessageCount,
 			&s.Usage.InputTokens, &s.Usage.OutputTokens,
 			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
@@ -135,4 +135,17 @@ func (c *Cache) loadAll() ([]ClaudeSessionSummary, error) {
 		sessions = []ClaudeSessionSummary{}
 	}
 	return sessions, rows.Err()
+}
+
+// UpdateCustomTitle sets a user-defined label for the given session. The title
+// is preserved across incremental rescans and removed only when the underlying
+// JSONL file is deleted from ~/.claude/projects/.
+func (c *Cache) UpdateCustomTitle(sessionID, title string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, err := c.db.ExecContext(context.Background(),
+		`UPDATE claude_session_cache SET custom_title = ? WHERE session_id = ?`,
+		title, sessionID,
+	)
+	return err
 }

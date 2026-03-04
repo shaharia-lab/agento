@@ -526,6 +526,7 @@ export interface ClaudeSessionSummary {
   session_id: string
   project_path: string
   preview: string
+  custom_title?: string
   start_time: string
   last_activity: string
   message_count: number

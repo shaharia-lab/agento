@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -83,6 +84,26 @@ func (s *Server) handleRefreshClaudeSessionCache(w http.ResponseWriter, _ *http.
 	// Trigger rescan in background so the next list request gets fresh data.
 	go func() { s.claudeSessionCache.List() }()
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// handleUpdateClaudeSession updates mutable fields of a cached Claude Code session.
+// Currently only custom_title is supported — all other JSONL-derived fields are read-only.
+func (s *Server) handleUpdateClaudeSession(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		CustomTitle string `json:"custom_title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		return
+	}
+	title := strings.TrimSpace(req.CustomTitle)
+	if err := s.claudeSessionCache.UpdateCustomTitle(id, title); err != nil {
+		s.logger.Error("update claude session title failed", "session_id", id, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "failed to update title")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // handleContinueClaudeSession creates a new Agento chat session that inherits the
