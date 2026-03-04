@@ -36,6 +36,7 @@ import {
   ShieldQuestion,
   Copy,
   Check,
+  Pencil,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -48,6 +49,9 @@ export default function ChatSessionPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [titleDraft, setTitleDraft] = useState('')
+  const titleInputRef = useRef<HTMLInputElement>(null)
 
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
@@ -354,6 +358,29 @@ export default function ChatSessionPage() {
 
   const agentLabel = detail?.session.agent_slug || null
 
+  const startEditingTitle = () => {
+    setTitleDraft(detail?.session.title ?? '')
+    setEditingTitle(true)
+    setTimeout(() => titleInputRef.current?.select(), 0)
+  }
+
+  const saveTitle = async () => {
+    const trimmed = titleDraft.trim()
+    if (!trimmed || !id || trimmed === detail?.session.title) {
+      setEditingTitle(false)
+      return
+    }
+    try {
+      await chatsApi.updateTitle(id, trimmed)
+      setDetail(prev => (prev ? { ...prev, session: { ...prev.session, title: trimmed } } : prev))
+    } catch {
+      // silently revert
+    }
+    setEditingTitle(false)
+  }
+
+  const cancelEditingTitle = () => setEditingTitle(false)
+
   return (
     <div className="flex flex-col h-full min-w-0 overflow-hidden">
       {/* Header */}
@@ -365,9 +392,30 @@ export default function ChatSessionPage() {
           <ArrowLeft className="h-4 w-4" />
         </button>
         <div className="flex-1 min-w-0">
-          <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-            {detail?.session.title ?? 'Chat'}
-          </h2>
+          {editingTitle ? (
+            <input
+              ref={titleInputRef}
+              value={titleDraft}
+              onChange={e => setTitleDraft(e.target.value)}
+              onBlur={saveTitle}
+              onKeyDown={e => {
+                if (e.key === 'Enter') saveTitle()
+                if (e.key === 'Escape') cancelEditingTitle()
+              }}
+              className="w-full text-sm font-semibold text-zinc-900 dark:text-zinc-100 bg-zinc-100 dark:bg-zinc-800 rounded px-2 py-0.5 outline-none focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500"
+            />
+          ) : (
+            <button
+              onClick={startEditingTitle}
+              className="group flex items-center gap-1.5 max-w-full text-left cursor-pointer"
+              title="Click to edit title"
+            >
+              <h2 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 truncate">
+                {detail?.session.title ?? 'Chat'}
+              </h2>
+              <Pencil className="h-3 w-3 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 shrink-0 transition-colors" />
+            </button>
+          )}
         </div>
         <span className="text-xs text-zinc-400 dark:text-zinc-500 shrink-0 font-mono">
           {agentLabel ?? 'Direct chat'}

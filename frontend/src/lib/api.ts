@@ -75,6 +75,9 @@ export const chatsApi = {
 
   get: (id: string) => request<ChatDetail>(`/chats/${id}`),
 
+  updateTitle: (id: string, title: string) =>
+    request<ChatSession>(`/chats/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
+
   /**
    * Creates a new chat session.
    * @param agentSlug - optional agent slug. Pass empty string or omit for no-agent chat.

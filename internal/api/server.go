@@ -94,6 +94,7 @@ func (s *Server) Mount(r chi.Router) {
 	r.Post(routeChatsBase, s.handleCreateChat)
 	r.Delete(routeChatsBase, s.handleBulkDeleteChats)
 	r.Get("/chats/{id}", s.handleGetChat)
+	r.Patch("/chats/{id}", s.handleUpdateChat)
 	r.Delete("/chats/{id}", s.handleDeleteChat)
 	r.Post("/chats/{id}/messages", s.handleSendMessage)
 	r.Post("/chats/{id}/input", s.handleProvideInput)

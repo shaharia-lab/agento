@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -151,6 +152,34 @@ func (s *Server) handleGetChat(w http.ResponseWriter, r *http.Request) {
 		"session":  session,
 		"messages": messages,
 	})
+}
+
+func (s *Server) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
+		return
+	}
+	req.Title = strings.TrimSpace(req.Title)
+	if req.Title == "" {
+		s.writeError(w, http.StatusBadRequest, "title cannot be empty")
+		return
+	}
+	session, _, err := s.chatSvc.GetSessionWithMessages(r.Context(), id)
+	if err != nil || session == nil {
+		s.writeError(w, http.StatusNotFound, "chat not found")
+		return
+	}
+	session.Title = req.Title
+	if err := s.chatSvc.UpdateSession(r.Context(), session); err != nil {
+		s.logger.Error("update chat title failed", "session_id", id, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "failed to update chat title")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, session)
 }
 
 func (s *Server) handleDeleteChat(w http.ResponseWriter, r *http.Request) {
