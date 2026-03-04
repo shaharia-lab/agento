@@ -236,6 +236,12 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialize concurrent sends to the same chat session. Without this a second
+	// request arriving while the first is still streaming reads a stale SDKSession
+	// from the DB, causing the Claude CLI to start a new session instead of resuming.
+	unlock := s.liveSessions.lock(id)
+	defer unlock()
+
 	chs := newSendMessageChannels()
 	permHandler := s.buildPermissionHandler(r, chs)
 
@@ -475,10 +481,11 @@ func (ep *eventProcessor) processAgentEvent(event claude.Event, state *streamSta
 		agent.EnrichSpanFromResult(ep.execSpan, event.Result, event.Raw)
 		state.tokens.add(event.Result)
 		if event.Result.IsError {
-			// Clear the stale SDK session ID so the next attempt starts a fresh
-			// session instead of endlessly retrying a session that no longer exists
-			// (e.g. "No conversation found with session ID: ...").
-			state.sdkSessionID = ""
+			// Preserve the SDK session ID on error so the next attempt still
+			// resumes the same Claude CLI session. The chat ID == SDK session ID
+			// (set via --session-id on first message), so there is nothing stale
+			// to clear here.
+			state.sdkSessionID = event.Result.SessionID
 			return true
 		}
 		state.sdkSessionID = event.Result.SessionID

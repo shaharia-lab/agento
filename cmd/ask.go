@@ -73,10 +73,10 @@ func runAsk(args []string, agentSlug string, noThinking bool, agentsDir, mcpsFil
 	}
 
 	runOpts := agent.RunOptions{
-		SessionID:     sessionID,
-		NoThinking:    noThinking,
-		LocalToolsMCP: localToolsMCP,
-		MCPRegistry:   mcpRegistry,
+		ResumeSessionID: sessionID,
+		NoThinking:      noThinking,
+		LocalToolsMCP:   localToolsMCP,
+		MCPRegistry:     mcpRegistry,
 	}
 
 	stream, err := agent.StreamAgent(ctx, agentCfg, question, runOpts)

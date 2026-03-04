@@ -17,13 +17,37 @@ type liveSession struct {
 
 // liveSessionStore is an in-memory map of chat-session-ID → liveSession.
 // It is safe for concurrent use.
+//
+// It also holds a per-session mutex (inFlight) so that concurrent
+// POST /chats/{id}/messages requests are serialized per chat session.
+// Without this, a second request arriving while the first is still streaming
+// reads a stale SDKSession from the DB (empty or the previous value), causing
+// the Claude CLI to start a fresh session instead of resuming the right one.
 type liveSessionStore struct {
 	mu       sync.Mutex
 	sessions map[string]*liveSession
+	inFlight map[string]*sync.Mutex
 }
 
 func newLiveSessionStore() *liveSessionStore {
-	return &liveSessionStore{sessions: make(map[string]*liveSession)}
+	return &liveSessionStore{
+		sessions: make(map[string]*liveSession),
+		inFlight: make(map[string]*sync.Mutex),
+	}
+}
+
+// lock acquires the per-session send mutex. The caller must call the returned
+// function to release it when the send (including CommitMessage) is complete.
+func (s *liveSessionStore) lock(id string) func() {
+	s.mu.Lock()
+	m, ok := s.inFlight[id]
+	if !ok {
+		m = &sync.Mutex{}
+		s.inFlight[id] = m
+	}
+	s.mu.Unlock()
+	m.Lock()
+	return m.Unlock
 }
 
 func (s *liveSessionStore) put(id string, ls *liveSession) {

@@ -181,15 +181,32 @@ func TestBuildSDKOptions_SessionIDResume(t *testing.T) {
 		Model: "claude-sonnet-4-6",
 	}
 	opts := RunOptions{
-		SessionID:  "sess-abc-123",
-		WorkingDir: t.TempDir(),
+		ResumeSessionID: "sess-abc-123",
+		WorkingDir:      t.TempDir(),
 	}
 
 	sdkOpts := buildSDKOptions(context.Background(), agentCfg, opts, "")
 	o := applyOpts(sdkOpts)
 
-	if o.SessionID != "sess-abc-123" {
-		t.Errorf("SessionID = %q, want %q", o.SessionID, "sess-abc-123")
+	if o.ResumeSessionID != "sess-abc-123" {
+		t.Errorf("ResumeSessionID = %q, want %q", o.ResumeSessionID, "sess-abc-123")
+	}
+}
+
+func TestBuildSDKOptions_CustomSessionID(t *testing.T) {
+	agentCfg := &config.AgentConfig{
+		Model: "claude-sonnet-4-6",
+	}
+	opts := RunOptions{
+		CustomSessionID: "chat-uuid-xyz",
+		WorkingDir:      t.TempDir(),
+	}
+
+	sdkOpts := buildSDKOptions(context.Background(), agentCfg, opts, "")
+	o := applyOpts(sdkOpts)
+
+	if o.CustomSessionID != "chat-uuid-xyz" {
+		t.Errorf("CustomSessionID = %q, want %q", o.CustomSessionID, "chat-uuid-xyz")
 	}
 }
 
