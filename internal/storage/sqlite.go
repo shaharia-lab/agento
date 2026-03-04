@@ -201,6 +201,44 @@ CREATE INDEX idx_notification_log_created ON notification_log(created_at DESC);
 		sql: `ALTER TABLE chat_sessions ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE claude_session_cache ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;`,
 	},
+	{
+		version: 9,
+		sql: `
+CREATE TABLE IF NOT EXISTS session_insights (
+    session_id                  TEXT PRIMARY KEY,
+    processor_version           INTEGER NOT NULL DEFAULT 0,
+    scanned_at                  DATETIME NOT NULL,
+
+    turn_count                  INTEGER NOT NULL DEFAULT 0,
+    steps_per_turn_avg          REAL    NOT NULL DEFAULT 0,
+
+    autonomy_score              REAL    NOT NULL DEFAULT 0,
+
+    tool_calls_total            INTEGER NOT NULL DEFAULT 0,
+    tool_breakdown              TEXT    NOT NULL DEFAULT '{}',
+    tool_error_rate             REAL    NOT NULL DEFAULT 0,
+
+    total_duration_ms           INTEGER NOT NULL DEFAULT 0,
+    thinking_time_ms            INTEGER NOT NULL DEFAULT 0,
+
+    cache_hit_rate              REAL    NOT NULL DEFAULT 0,
+    tokens_per_turn_avg         REAL    NOT NULL DEFAULT 0,
+    cost_estimate_usd           REAL    NOT NULL DEFAULT 0,
+
+    tool_error_count            INTEGER NOT NULL DEFAULT 0,
+    has_errors                  INTEGER NOT NULL DEFAULT 0,
+
+    max_consecutive_tool_calls  INTEGER NOT NULL DEFAULT 0,
+    longest_autonomous_chain    INTEGER NOT NULL DEFAULT 0,
+
+    avg_user_response_time_ms   REAL    NOT NULL DEFAULT 0,
+    avg_claude_response_time_ms REAL    NOT NULL DEFAULT 0,
+
+    session_type                TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_session_insights_version ON session_insights(processor_version);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

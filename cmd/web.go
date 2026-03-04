@@ -321,8 +321,14 @@ func buildAPIServer(ctx context.Context, deps appDeps) (*api.Server, eventbus.Ev
 	taskSvc := service.NewTaskService(taskStore, taskScheduler, deps.logger)
 	profileSvc := service.NewClaudeSettingsProfileService(deps.logger)
 
-	sessionCache := claudesessions.NewCache(deps.db, deps.logger)
+	sessionCache := claudesessions.NewCache(deps.db, deps.logger).WithEventBus(bus)
 	sessionCache.StartBackgroundScan()
+
+	rawInsightStore := storage.NewSQLiteSessionInsightsStore(deps.db)
+	insightStore := api.NewInsightStoreAdapter(rawInsightStore)
+	insightRegistry := claudesessions.DefaultProcessorRegistry(deps.logger)
+	insightWorker := claudesessions.NewInsightWorker(insightStore, insightRegistry, bus, deps.logger)
+	insightWorker.Start(ctx)
 
 	apiSrv := api.New(api.ServerConfig{
 		AgentSvc:        agentSvc,
@@ -335,6 +341,7 @@ func buildAPIServer(ctx context.Context, deps appDeps) (*api.Server, eventbus.Ev
 		Logger:          deps.logger,
 		SessionCache:    sessionCache,
 		MonitoringMgr:   deps.monitoringMgr,
+		InsightStore:    insightStore,
 	})
 	return apiSrv, bus, nil
 }

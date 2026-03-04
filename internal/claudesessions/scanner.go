@@ -243,6 +243,14 @@ type cachedEntry struct {
 // inserted, modified files are updated, and deleted files are removed from the
 // cache. Returns all cached sessions sorted by last_activity desc.
 func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, error) {
+	return IncrementalScanWithNotify(db, logger, nil)
+}
+
+// IncrementalScanWithNotify is like IncrementalScan but calls notify for each
+// session that is newly inserted or updated. notify may be nil.
+func IncrementalScanWithNotify(
+	db *sql.DB, logger *slog.Logger, notify func(sessionID, filePath string),
+) ([]ClaudeSessionSummary, error) {
 	projectsDir := filepath.Join(ClaudeHome(), "projects")
 
 	onDisk, err := walkDiskFiles(projectsDir)
@@ -263,7 +271,7 @@ func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 	}
 
 	toUpsert, toDelete := diffDiskAndCache(onDisk, cached)
-	applyChanges(db, logger, onDisk, toUpsert, toDelete)
+	applyChangesWithNotify(db, logger, onDisk, toUpsert, toDelete, notify)
 
 	updateLastScanned(db, logger)
 	return loadAllSessions(db, logger)
@@ -348,7 +356,12 @@ func diffDiskAndCache(onDisk map[string]diskFile, cached map[string]cachedEntry)
 	return toUpsert, toDelete
 }
 
-func applyChanges(db *sql.DB, logger *slog.Logger, onDisk map[string]diskFile, toUpsert, toDelete []string) {
+func applyChangesWithNotify(
+	db *sql.DB, logger *slog.Logger,
+	onDisk map[string]diskFile,
+	toUpsert, toDelete []string,
+	notify func(sessionID, filePath string),
+) {
 	if len(toUpsert) > 0 || len(toDelete) > 0 {
 		logger.Info("claude sessions: incremental scan",
 			"new_or_modified", len(toUpsert),
@@ -365,6 +378,10 @@ func applyChanges(db *sql.DB, logger *slog.Logger, onDisk map[string]diskFile, t
 		if err := upsertCacheRow(db, df, summary); err != nil {
 			logger.Warn("claude sessions: failed to upsert cache row",
 				"file", df.filePath, "error", err)
+			continue
+		}
+		if notify != nil {
+			notify(df.sessionID, df.filePath)
 		}
 	}
 

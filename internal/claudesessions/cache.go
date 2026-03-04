@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/shaharia-lab/agento/internal/eventbus"
 )
 
 // CacheTTL is the duration after which the SQLite-backed cache is considered
@@ -18,6 +20,7 @@ type Cache struct {
 	mu     sync.Mutex
 	db     *sql.DB
 	logger *slog.Logger
+	bus    eventbus.EventBus // optional; publishes session events on scan
 }
 
 // NewCache creates a new Cache backed by the given SQLite database.
@@ -28,6 +31,24 @@ func NewCache(db *sql.DB, logger *slog.Logger) *Cache {
 	}
 }
 
+// WithEventBus attaches an event bus to the cache so that newly discovered or
+// updated sessions trigger EventSessionDiscovered / EventSessionUpdated events.
+func (c *Cache) WithEventBus(bus eventbus.EventBus) *Cache {
+	c.bus = bus
+	return c
+}
+
+// notify publishes a session event to the bus if one is configured.
+func (c *Cache) notify(sessionID, filePath string) {
+	if c.bus == nil {
+		return
+	}
+	c.bus.Publish(eventbus.EventSessionDiscovered, map[string]string{
+		eventbus.PayloadKeySessionID: sessionID,
+		eventbus.PayloadKeyFilePath:  filePath,
+	})
+}
+
 // StartBackgroundScan runs an incremental scan in a background goroutine so
 // the server starts immediately while the cache is being populated.
 func (c *Cache) StartBackgroundScan() {
@@ -36,7 +57,7 @@ func (c *Cache) StartBackgroundScan() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 
-		if _, err := IncrementalScan(c.db, c.logger); err != nil {
+		if _, err := IncrementalScanWithNotify(c.db, c.logger, c.notify); err != nil {
 			c.logger.Warn("claude sessions: background scan failed", "error", err)
 			return
 		}
@@ -59,7 +80,7 @@ func (c *Cache) List() []ClaudeSessionSummary {
 		return sessions
 	}
 
-	sessions, err := IncrementalScan(c.db, c.logger)
+	sessions, err := IncrementalScanWithNotify(c.db, c.logger, c.notify)
 	if err != nil {
 		c.logger.Warn("claude sessions: refresh scan failed", "error", err)
 		// Try returning stale data.
