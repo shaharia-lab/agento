@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/integrations"
@@ -466,7 +467,7 @@ func RunAgent(
 		return nil, fmt.Errorf("starting agent: %w", err)
 	}
 
-	result, err := collectRunResult(stream)
+	result, err := collectRunResult(ctx, stream, span)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -475,12 +476,7 @@ func RunAgent(
 
 	durationSec := time.Since(start).Seconds()
 	recordAgentMetrics(ctx, model, durationSec, result)
-
-	span.SetAttributes(
-		attribute.Int("agent.input_tokens", result.Usage.InputTokens),
-		attribute.Int("agent.output_tokens", result.Usage.OutputTokens),
-		attribute.Float64("agent.duration_sec", durationSec),
-	)
+	span.SetAttributes(attribute.Float64("agent.duration_sec", durationSec))
 
 	return result, nil
 }
@@ -538,14 +534,16 @@ func resolveSystemPrompt(agentCfg *config.AgentConfig, opts RunOptions) (string,
 	return Interpolate(agentCfg.SystemPrompt, opts.Variables)
 }
 
-func collectRunResult(stream *claude.Stream) (*AgentResult, error) {
+func collectRunResult(ctx context.Context, stream *claude.Stream, runSpan trace.Span) (*AgentResult, error) {
 	var finalThinking string
 	var result *AgentResult
 	var resultErr error
+	toolSpans := make(map[string]ToolSpanEntry)
 
 	for event := range stream.Events() {
-		processRunEvent(event, &finalThinking, &result, &resultErr)
+		processRunEvent(ctx, event, &finalThinking, &result, &resultErr, runSpan, toolSpans)
 	}
+	FlushToolSpans(toolSpans)
 
 	if resultErr != nil {
 		return nil, resultErr
@@ -557,10 +555,15 @@ func collectRunResult(stream *claude.Stream) (*AgentResult, error) {
 }
 
 // processRunEvent handles a single event during result collection.
-// It updates the thinking, result, and error pointers in place.
+// It updates the thinking, result, and error pointers in place and records
+// OTel spans for tool calls and result metadata.
 // We do NOT return early on TypeResult — the remaining events must be drained
 // so the subprocess has time to finish writing the session to disk.
-func processRunEvent(event claude.Event, thinking *string, result **AgentResult, resultErr *error) {
+func processRunEvent(
+	ctx context.Context, event claude.Event,
+	thinking *string, result **AgentResult, resultErr *error,
+	runSpan trace.Span, toolSpans map[string]ToolSpanEntry,
+) {
 	switch event.Type {
 	case claude.TypeAssistant:
 		if event.Assistant != nil {
@@ -568,10 +571,18 @@ func processRunEvent(event claude.Event, thinking *string, result **AgentResult,
 				*thinking = t
 			}
 		}
+		OpenToolSpans(ctx, runSpan, event.Raw, toolSpans)
+	case claude.TypeSystem:
+		AddSystemInitEvent(runSpan, event.System)
+	case claude.TypeToolProgress:
+		RecordToolProgress(event.ToolProgress, toolSpans)
+	case MessageTypeUser:
+		CloseToolSpans(event.Raw, toolSpans)
 	case claude.TypeResult:
 		if event.Result == nil {
 			return
 		}
+		EnrichSpanFromResult(runSpan, event.Result, event.Raw)
 		if event.Result.IsError {
 			*resultErr = buildResultError(event.Result)
 		} else {
