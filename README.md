@@ -7,6 +7,7 @@
 [![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
 [![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
 [![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/shaharia-lab/agento/total)
 
 <img width="1820" height="922" alt="carbon (4)" src="https://github.com/user-attachments/assets/62ce9188-2aeb-4ec3-847c-3b50346d0adb" />
 
