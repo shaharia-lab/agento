@@ -538,12 +538,12 @@ func collectRunResult(stream *claude.Stream, runSpan trace.Span) (*AgentResult, 
 	var finalThinking string
 	var result *AgentResult
 	var resultErr error
-	toolSpans := make(map[string]toolSpanEntry)
+	toolSpans := make(map[string]ToolSpanEntry)
 
 	for event := range stream.Events() {
 		processRunEvent(event, &finalThinking, &result, &resultErr, runSpan, toolSpans)
 	}
-	flushToolSpans(toolSpans)
+	FlushToolSpans(toolSpans)
 
 	if resultErr != nil {
 		return nil, resultErr
@@ -562,7 +562,7 @@ func collectRunResult(stream *claude.Stream, runSpan trace.Span) (*AgentResult, 
 func processRunEvent(
 	event claude.Event,
 	thinking *string, result **AgentResult, resultErr *error,
-	runSpan trace.Span, toolSpans map[string]toolSpanEntry,
+	runSpan trace.Span, toolSpans map[string]ToolSpanEntry,
 ) {
 	switch event.Type {
 	case claude.TypeAssistant:
@@ -571,18 +571,18 @@ func processRunEvent(
 				*thinking = t
 			}
 		}
-		openToolSpans(runSpan, event.Raw, toolSpans)
+		OpenToolSpans(runSpan, event.Raw, toolSpans)
 	case claude.TypeSystem:
-		addSystemInitEvent(runSpan, event.System)
+		AddSystemInitEvent(runSpan, event.System)
 	case claude.TypeToolProgress:
-		recordToolProgress(event.ToolProgress, toolSpans)
-	case messageTypeUser:
-		closeToolSpans(event.Raw, toolSpans)
+		RecordToolProgress(event.ToolProgress, toolSpans)
+	case MessageTypeUser:
+		CloseToolSpans(event.Raw, toolSpans)
 	case claude.TypeResult:
 		if event.Result == nil {
 			return
 		}
-		enrichRunSpanFromResult(runSpan, event.Result, event.Raw)
+		EnrichSpanFromResult(runSpan, event.Result, event.Raw)
 		if event.Result.IsError {
 			*resultErr = buildResultError(event.Result)
 		} else {

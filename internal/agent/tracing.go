@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"unicode/utf8"
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
 	"go.opentelemetry.io/otel"
@@ -10,18 +11,18 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// messageTypeUser is the "user" event emitted by the CLI when a tool result
+// MessageTypeUser is the "user" event emitted by the CLI when a tool result
 // is returned. It is not a named constant in the SDK.
-const messageTypeUser claude.MessageType = "user"
+const MessageTypeUser claude.MessageType = "user"
 
-// toolSpanEntry tracks an in-flight tool_use span keyed by tool_use_id.
-type toolSpanEntry struct {
+// ToolSpanEntry tracks an in-flight tool_use span keyed by tool_use_id.
+type ToolSpanEntry struct {
 	span trace.Span
 }
 
-// openToolSpans starts a child span for every tool_use block found in an
+// OpenToolSpans starts a child span for every tool_use block found in an
 // assistant event. Existing entries are skipped (idempotent).
-func openToolSpans(runSpan trace.Span, raw json.RawMessage, toolSpans map[string]toolSpanEntry) {
+func OpenToolSpans(runSpan trace.Span, raw json.RawMessage, toolSpans map[string]ToolSpanEntry) {
 	var msg struct {
 		Message struct {
 			Content []struct {
@@ -47,14 +48,14 @@ func openToolSpans(runSpan trace.Span, raw json.RawMessage, toolSpans map[string
 		span.SetAttributes(
 			attribute.String("tool.id", blk.ID),
 			attribute.String("tool.name", blk.Name),
-			attribute.String("tool.input", truncateAttr(string(blk.Input), 512)),
+			attribute.String("tool.input", TruncateAttr(string(blk.Input), 512)),
 		)
-		toolSpans[blk.ID] = toolSpanEntry{span: span}
+		toolSpans[blk.ID] = ToolSpanEntry{span: span}
 	}
 }
 
-// closeToolSpans ends spans for completed tool_result items in a "user" event.
-func closeToolSpans(raw json.RawMessage, toolSpans map[string]toolSpanEntry) {
+// CloseToolSpans ends spans for completed tool_result items in a "user" event.
+func CloseToolSpans(raw json.RawMessage, toolSpans map[string]ToolSpanEntry) {
 	var msg struct {
 		Type    string `json:"type"`
 		Message struct {
@@ -77,24 +78,24 @@ func closeToolSpans(raw json.RawMessage, toolSpans map[string]toolSpanEntry) {
 			continue
 		}
 		entry.span.SetAttributes(
-			attribute.String("tool.result", truncateAttr(string(c.Content), 512)),
+			attribute.String("tool.result", TruncateAttr(string(c.Content), 512)),
 		)
 		entry.span.End()
 		delete(toolSpans, c.ToolUseID)
 	}
 }
 
-// flushToolSpans ends all in-flight tool spans. Called when the event loop
+// FlushToolSpans ends all in-flight tool spans. Called when the event loop
 // exits to prevent spans from being left open on cancellation or error.
-func flushToolSpans(toolSpans map[string]toolSpanEntry) {
+func FlushToolSpans(toolSpans map[string]ToolSpanEntry) {
 	for id, entry := range toolSpans {
 		entry.span.End()
 		delete(toolSpans, id)
 	}
 }
 
-// recordToolProgress adds a progress event to the matching in-flight tool span.
-func recordToolProgress(tp *claude.ToolProgressMessage, toolSpans map[string]toolSpanEntry) {
+// RecordToolProgress adds a progress event to the matching in-flight tool span.
+func RecordToolProgress(tp *claude.ToolProgressMessage, toolSpans map[string]ToolSpanEntry) {
 	if tp == nil || tp.ToolUseID == "" {
 		return
 	}
@@ -110,8 +111,8 @@ func recordToolProgress(tp *claude.ToolProgressMessage, toolSpans map[string]too
 	)
 }
 
-// addSystemInitEvent annotates the run span with session init metadata.
-func addSystemInitEvent(runSpan trace.Span, sys *claude.SystemMessage) {
+// AddSystemInitEvent annotates the run span with session init metadata.
+func AddSystemInitEvent(runSpan trace.Span, sys *claude.SystemMessage) {
 	if sys == nil || sys.Subtype != claude.SubtypeInit {
 		return
 	}
@@ -126,9 +127,9 @@ func addSystemInitEvent(runSpan trace.Span, sys *claude.SystemMessage) {
 	)
 }
 
-// rawRunResultExtras holds result fields the SDK struct cannot parse because
+// rawResultExtras holds result fields the SDK struct cannot parse because
 // the CLI emits them in camelCase or in a nested structure.
-type rawRunResultExtras struct {
+type rawResultExtras struct {
 	ModelUsage map[string]struct {
 		InputTokens              int     `json:"inputTokens"`
 		OutputTokens             int     `json:"outputTokens"`
@@ -144,20 +145,20 @@ type rawRunResultExtras struct {
 	} `json:"usage"`
 }
 
-// enrichRunSpanFromResult adds final result metadata to the agent.run span.
+// EnrichSpanFromResult adds final result metadata to a span.
 // raw is needed to recover camelCase fields (modelUsage, web_search_requests)
 // that the SDK's Result struct cannot parse due to JSON key mismatches.
-func enrichRunSpanFromResult(runSpan trace.Span, result *claude.Result, raw json.RawMessage) {
+func EnrichSpanFromResult(span trace.Span, result *claude.Result, raw json.RawMessage) {
 	if result == nil {
 		return
 	}
 
-	var extras rawRunResultExtras
+	var extras rawResultExtras
 	if err := json.Unmarshal(raw, &extras); err != nil {
-		extras = rawRunResultExtras{}
+		extras = rawResultExtras{}
 	}
 
-	runSpan.SetAttributes(
+	span.SetAttributes(
 		attribute.Int("agent.num_turns", result.NumTurns),
 		attribute.Int64("agent.duration_ms", result.DurationMS),
 		attribute.Int64("agent.duration_api_ms", result.DurationAPIMS),
@@ -172,7 +173,7 @@ func enrichRunSpanFromResult(runSpan trace.Span, result *claude.Result, raw json
 	)
 
 	for modelID, mu := range extras.ModelUsage {
-		runSpan.AddEvent("agent.model_usage",
+		span.AddEvent("agent.model_usage",
 			trace.WithAttributes(
 				attribute.String("model.id", modelID),
 				attribute.Int("model.input_tokens", mu.InputTokens),
@@ -186,10 +187,16 @@ func enrichRunSpanFromResult(runSpan trace.Span, result *claude.Result, raw json
 	}
 }
 
-// truncateAttr truncates a string to at most max bytes, appending "…" when cut.
-func truncateAttr(s string, max int) string {
+// TruncateAttr truncates s to at most max bytes for use as a span attribute
+// value, appending "…" when truncated. It walks back to a valid UTF-8 rune
+// boundary so multi-byte characters are never split.
+func TruncateAttr(s string, max int) string {
 	if len(s) <= max {
 		return s
+	}
+	// Walk back from max until we land on a valid rune-start byte.
+	for max > 0 && !utf8.RuneStart(s[max]) {
+		max--
 	}
 	return s[:max] + "…"
 }

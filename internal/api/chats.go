@@ -206,7 +206,7 @@ type streamState struct {
 	blocks        []storage.MessageBlock
 	tokens        tokenAccumulator
 	pendingInput  json.RawMessage
-	toolSpans     map[string]toolSpanEntry // in-flight tool_use spans keyed by tool_use_id
+	toolSpans     map[string]agent.ToolSpanEntry // in-flight tool_use spans keyed by tool_use_id
 }
 
 // eventProcessor captures the shared context for processing agent events during
@@ -303,7 +303,7 @@ func (s *Server) streamAgentSession(
 		execSpan:     execSpan,
 	}
 	state := ep.consumeAgentEvents()
-	flushToolSpans(state.toolSpans) // close any spans not ended by a tool_result
+	agent.FlushToolSpans(state.toolSpans) // close any spans not ended by a tool_result
 	return state
 }
 
@@ -420,7 +420,7 @@ func (s *Server) handleBeginMessageError(w http.ResponseWriter, id string, err e
 }
 
 func (ep *eventProcessor) consumeAgentEvents() streamState {
-	state := streamState{toolSpans: make(map[string]toolSpanEntry)}
+	state := streamState{toolSpans: make(map[string]agent.ToolSpanEntry)}
 	eventsCh := ep.agentSession.Events()
 
 	for {
@@ -453,26 +453,26 @@ func (ep *eventProcessor) processAgentEvent(event claude.Event, state *streamSta
 	switch event.Type {
 	case claude.TypeAssistant:
 		state.blocks = appendAssistantBlocks(state.blocks, event.Raw)
-		openToolSpans(ep.execSpan, event.Raw, state.toolSpans)
+		agent.OpenToolSpans(ep.execSpan, event.Raw, state.toolSpans)
 		if input := extractAskUserQuestionInput(event.Raw); input != nil {
 			state.pendingInput = input
 			ep.server.logger.Info("AskUserQuestion detected in stream", "session_id", ep.id)
 		}
 
 	case claude.TypeSystem:
-		addSystemInitEvent(ep.execSpan, event.System)
+		agent.AddSystemInitEvent(ep.execSpan, event.System)
 
 	case claude.TypeToolProgress:
-		recordToolProgress(event.ToolProgress, state.toolSpans)
+		agent.RecordToolProgress(event.ToolProgress, state.toolSpans)
 
-	case messageTypeUser:
-		closeToolSpans(event.Raw, state.toolSpans)
+	case agent.MessageTypeUser:
+		agent.CloseToolSpans(event.Raw, state.toolSpans)
 
 	case claude.TypeResult:
 		if event.Result == nil {
 			return false
 		}
-		enrichExecSpanFromResult(ep.execSpan, event.Result, event.Raw)
+		agent.EnrichSpanFromResult(ep.execSpan, event.Result, event.Raw)
 		state.tokens.add(event.Result)
 		if event.Result.IsError {
 			// Clear the stale SDK session ID so the next attempt starts a fresh
