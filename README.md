@@ -35,6 +35,7 @@ You can define agents with custom system prompts and tools, start multi-turn con
 - **Integrations** — Connect Google (Calendar, Gmail, Drive), GitHub, Slack, Jira, Confluence, and Telegram as agent tools
 - **Task scheduler** — Schedule recurring agent tasks with cron expressions and track job history
 - **Notifications** — Event-driven notification system with SMTP email support
+- **Observability** — OpenTelemetry traces, metrics, and logs with OTLP and Prometheus exporters, configurable via UI or environment variables
 - **Auto-update check** — Banner notification when a newer release is available, with one-command update
 
 ---
@@ -129,6 +130,9 @@ All settings are optional and can be overridden with environment variables:
 | `ANTHROPIC_API_KEY` | — | Use the Anthropic API directly instead of Claude Code CLI authentication |
 | `AGENTO_DEFAULT_MODEL` | *(Claude default)* | Lock the Claude model used for direct chat sessions |
 | `AGENTO_WORKING_DIR` | `/tmp/agento/work` | Default working directory for agent sessions |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP gRPC collector endpoint (e.g. `localhost:4317`). Can also be configured via Settings UI |
+| `OTEL_METRICS_EXPORTER` | — | `otlp` (push) or `prometheus` (pull via `/metrics`) |
+| `OTEL_LOGS_EXPORTER` | — | `otlp` |
 
 ### Local Development Isolation
 
