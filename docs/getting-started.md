@@ -56,6 +56,8 @@ Visit [http://localhost:8990](http://localhost:8990) in your browser.
 | — | `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | — | `AGENTO_WORKING_DIR` | `/tmp/agento/work` | Default working directory for agent sessions |
 | — | `ANTHROPIC_API_KEY` | — | Anthropic API key (optional if already stored by the Claude CLI) |
+| — | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP gRPC endpoint for traces/metrics/logs (see [Monitoring](monitoring.md)) |
+| — | `OTEL_METRICS_EXPORTER` | — | `otlp` or `prometheus` (see [Monitoring](monitoring.md)) |
 
 **Example: run on a different port**
 

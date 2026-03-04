@@ -98,6 +98,7 @@ agento/
 │   ├── scheduler/      # Task scheduler and job executor
 │   ├── service/        # Business logic (AgentService, ChatService, TaskService, NotificationService, etc.)
 │   ├── storage/        # SQLite persistence (~/.agento/agento.db)
+│   ├── telemetry/      # OpenTelemetry traces, metrics, logs (config, providers, hot-reload manager)
 │   └── tools/          # Local MCP tool server
 ├── docs/             # Documentation
 ├── .goreleaser.yaml  # Release configuration

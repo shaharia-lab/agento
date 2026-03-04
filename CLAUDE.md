@@ -40,6 +40,14 @@ Two terminals are needed in dev mode:
 ANTHROPIC_API_KEY=...        # Optional (uses Claude Code CLI auth if unset)
 AGENTO_DATA_DIR=~/.agento   # Optional, default: ~/.agento (supports ~ expansion, e.g. ~/.agento-dev for local dev)
 PORT=8990                    # Optional, default: 8990
+# OpenTelemetry (all optional — can also be configured via Settings UI)
+OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317  # OTLP collector gRPC endpoint
+OTEL_EXPORTER_OTLP_INSECURE=true           # Skip TLS for local collectors
+OTEL_METRICS_EXPORTER=otlp                 # "otlp" or "prometheus"
+OTEL_LOGS_EXPORTER=otlp                    # "otlp"
+OTEL_EXPORTER_OTLP_HEADERS=key=value       # Auth headers for the collector
+OTEL_METRIC_EXPORT_INTERVAL=60000          # Push interval in ms (default: 60000)
+OTEL_SDK_DISABLED=true                     # Disable telemetry entirely
 ```
 
 ## Architecture
@@ -61,15 +69,15 @@ Browser → Vite (dev) / embedded FS (prod) → React SPA
 
 **`cmd/`** — Cobra CLI commands: `web` (HTTP server), `ask` (CLI), `update` (self-update). `cmd/assets.go` embeds the frontend build; `cmd/assets_dev.go` proxies to Vite.
 
-**`internal/server/`** — Chi router setup with middleware (Recoverer, RequestID, request logger). Mounts `/api` routes and serves SPA. Graceful shutdown with 5s timeout.
+**`internal/server/`** — Chi router setup with middleware (Recoverer, RequestID, request logger), wrapped in `otelhttp.NewHandler` for automatic HTTP trace/span generation. Mounts `/api` routes, serves SPA, and exposes a dynamic `/metrics` handler (Prometheus pull endpoint, active only when configured). Graceful shutdown with 5s timeout.
 
-**`internal/api/`** — HTTP handlers. `Server` struct holds all service dependencies. `Mount()` registers all routes. SSE streaming for live sessions via `livesessions.go`. `types.go` defines request/response types shared across handlers.
+**`internal/api/`** — HTTP handlers. `Server` struct holds all service dependencies (including `MonitoringManager`). `Mount()` registers all routes. SSE streaming for live sessions via `livesessions.go` (includes per-session mutex for concurrent send serialization). `monitoring.go` exposes `GET/PUT /api/monitoring` and `POST /api/monitoring/test` for OTel configuration. `PATCH /api/chats/{id}` and `PATCH /api/claude-sessions/{id}` support title editing and favorites. `types.go` defines request/response types shared across handlers.
 
 **`internal/service/`** — Business logic. `ChatService`, `AgentService`, `IntegrationService`, `NotificationService`, `TaskService`, and `ClaudeSettingsProfileService` interfaces decouple handlers from storage. `errors.go` defines typed errors for HTTP mapping.
 
-**`internal/agent/runner.go`** — Integration with `github.com/shaharia-lab/claude-agent-sdk-go`. Converts agent config to SDK `RunOptions`, executes sessions, streams results.
+**`internal/agent/`** — Integration with `github.com/shaharia-lab/claude-agent-sdk-go`. `runner.go` converts agent config to SDK `RunOptions`, executes sessions, streams results. `tracing.go` provides OTel span helpers for per-tool-call and per-run tracing in both chat and scheduler paths.
 
-**`internal/storage/`** — SQLite persistence (`~/.agento/agento.db`). `SQLiteAgentStore`, `SQLiteChatStore`, `SQLiteIntegrationStore`, `SQLiteSettingsStore`, `SQLiteNotificationStore`, `SQLiteTaskStore` implement store interfaces. `migrate_fs_to_sqlite.go` handles one-time migration from the legacy filesystem format. Uses `modernc.org/sqlite` (pure Go, no CGo).
+**`internal/storage/`** — SQLite persistence (`~/.agento/agento.db`). `SQLiteAgentStore`, `SQLiteChatStore`, `SQLiteIntegrationStore`, `SQLiteSettingsStore`, `SQLiteNotificationStore`, `SQLiteTaskStore` implement store interfaces. `migrate_fs_to_sqlite.go` handles one-time migration from the legacy filesystem format. `telemetry.go` provides `withStorageSpan` helper for OTel span/metric instrumentation on storage operations. Uses `modernc.org/sqlite` (pure Go, no CGo).
 
 **`internal/config/`** — Shared configuration layer. `AppConfig` loads from env. `profiles.go` has shared profile types to prevent import cycles. **Import rule**: `config` ← `service` ← `api` (never reverse).
 
@@ -85,7 +93,9 @@ Browser → Vite (dev) / embedded FS (prod) → React SPA
 
 **`internal/notification/`** — Notification system with SMTP email support. `handler.go` processes events, `smtp.go` sends emails, `template.go` renders notification content.
 
-**`internal/logger/`** — Structured `slog` loggers for system-wide and per-session logging. `NewSystemLogger` writes JSON to a rotating log file via `lumberjack` (50MB, 3 backups, 30 days, compressed). `NewSessionLogger` writes per-session logs to `<logDir>/sessions/<id>.log`.
+**`internal/logger/`** — Structured `slog` loggers for system-wide and per-session logging. `NewSystemLogger` writes JSON to a rotating log file via `lumberjack` (50MB, 3 backups, 30 days, compressed). `NewSessionLogger` writes per-session logs to `<logDir>/sessions/<id>.log`. Includes an `otelslog` bridge that forwards structured logs to the OTel LoggerProvider when telemetry is enabled.
+
+**`internal/telemetry/`** — OpenTelemetry integration. `config.go` reads `OTEL_*` env vars into `MonitoringConfig`. `provider.go` initializes TracerProvider/MeterProvider/LoggerProvider with OTLP gRPC or Prometheus exporters. `manager.go` persists config to `<data_dir>/monitoring.json` and hot-reloads providers via `Update()`. `instruments.go` holds pre-built metric instruments (`agento.http.*`, `agento.agent.*`, `agento.chat.*`, `agento.storage.*`). Returns `EnvLockedError` (HTTP 409) when env vars override UI config.
 
 **`internal/build/`** — Build-time version variables injected via `-ldflags` (Version, CommitSHA, BuildDate).
 

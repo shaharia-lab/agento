@@ -31,6 +31,7 @@ Read these as needed based on your task:
 | Development Guide | `docs/development.md` | Dev workflow, project structure, testing |
 | Agent Config | `docs/agents.md` | Agent YAML format, capabilities, template vars |
 | Integrations | `docs/integrations.md` | MCP, Google integrations, OAuth flow |
+| Monitoring | `docs/monitoring.md` | OpenTelemetry setup, exporters, Grafana LGTM local testing |
 
 ### Codebase Index
 
@@ -50,6 +51,7 @@ Read these as needed based on your task:
 | Scheduler | `internal/scheduler/` | Task scheduler and background job executor |
 | Event Bus | `internal/eventbus/` | In-process event bus for decoupled communication |
 | Notifications | `internal/notification/` | Notification system with SMTP email support |
+| Telemetry | `internal/telemetry/` | OpenTelemetry config, providers, instruments, hot-reload manager |
 | Frontend App | `frontend/src/App.tsx` | React Router, page routes |
 | Frontend API | `frontend/src/lib/api.ts` | Typed API client |
 | Frontend Types | `frontend/src/types.ts` | TypeScript types mirroring Go structs |

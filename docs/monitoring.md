@@ -55,9 +55,9 @@ agento web
 
 | Signal | What is captured |
 |--------|-----------------|
-| **Traces** | Every HTTP request (method, path, status, duration) |
-| **Metrics** | HTTP requests & duration · Agent runs, duration, input/output tokens · Chat sessions created/deleted · Storage operation counts & duration |
-| **Logs** | All structured application logs (startup, requests, errors, agent events) |
+| **Traces** | Every HTTP request (method, path, status, duration) · `chat.agent_execution` span covering the full streaming window + commit · `tool_use.<ToolName>` child spans per tool call with input/result attributes · `agent.session_init` and `agent.model_usage` span events · Scheduler `task.execution` root span with `agent.run` child span and the same granular tool/event tracing · Storage `db.operation` / `db.entity` spans via `withStorageSpan` |
+| **Metrics** | HTTP requests & duration · Agent runs, duration, input/output tokens (with `model` + `status` attributes) · Chat sessions created/deleted · Storage operation counts & duration |
+| **Logs** | All structured application logs forwarded to OTel via `otelslog` bridge (startup, requests, errors, agent events) |
 
 ---
 
