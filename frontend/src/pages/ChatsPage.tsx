@@ -64,6 +64,7 @@ export default function ChatsPage() {
   // Filters
   const [search, setSearch] = useState('')
   const [filterAgent, setFilterAgent] = useState('all')
+  const [filterWorkingDir, setFilterWorkingDir] = useState('all')
 
   const load = useCallback(async () => {
     try {
@@ -212,13 +213,20 @@ export default function ChatsPage() {
 
   const getAgentName = (slug: string) => agents.find(a => a.slug === slug)?.name ?? slug
 
+  const uniqueWorkingDirs = useMemo(
+    () => [...new Set(sessions.map(s => s.working_directory).filter(Boolean))].sort(),
+    [sessions],
+  )
+
   const filtered = useMemo(() => {
     return sessions.filter(s => {
       const matchesSearch = !search || s.title.toLowerCase().includes(search.toLowerCase())
       const matchesAgent = filterAgent === 'all' || s.agent_slug === filterAgent
-      return matchesSearch && matchesAgent
+      const matchesWorkingDir =
+        filterWorkingDir === 'all' || s.working_directory === filterWorkingDir
+      return matchesSearch && matchesAgent && matchesWorkingDir
     })
-  }, [sessions, search, filterAgent])
+  }, [sessions, search, filterAgent, filterWorkingDir])
 
   if (loading) {
     return (
@@ -342,6 +350,21 @@ export default function ChatsPage() {
                 {agents.map(a => (
                   <SelectItem key={a.slug} value={a.slug}>
                     {a.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          {uniqueWorkingDirs.length >= 2 && (
+            <Select value={filterWorkingDir} onValueChange={setFilterWorkingDir}>
+              <SelectTrigger className="w-full sm:w-48 h-8 text-xs font-mono">
+                <SelectValue placeholder="All directories" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All directories</SelectItem>
+                {uniqueWorkingDirs.map(dir => (
+                  <SelectItem key={dir} value={dir} className="font-mono text-xs">
+                    {dir}
                   </SelectItem>
                 ))}
               </SelectContent>

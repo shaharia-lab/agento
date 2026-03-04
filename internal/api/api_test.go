@@ -474,6 +474,112 @@ func TestDeleteChat(t *testing.T) {
 	}
 }
 
+// ---------- Update Chat ----------
+
+func TestUpdateChat(t *testing.T) {
+	tests := []struct {
+		name       string
+		id         string
+		body       string
+		session    *storage.ChatSession
+		messages   []storage.ChatMessage
+		getErr     error
+		updateErr  error
+		wantStatus int
+	}{
+		{
+			name:       "success",
+			id:         "s1",
+			body:       `{"title":"New Title"}`,
+			session:    &storage.ChatSession{ID: "s1", Title: "Old Title"},
+			messages:   nil,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "title with surrounding whitespace is trimmed",
+			id:         "s1",
+			body:       `{"title":"  Trimmed Title  "}`,
+			session:    &storage.ChatSession{ID: "s1", Title: "Old Title"},
+			messages:   nil,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "invalid JSON",
+			id:         "s1",
+			body:       `{bad`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "empty title",
+			id:         "s1",
+			body:       `{"title":""}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "whitespace-only title",
+			id:         "s1",
+			body:       `{"title":"   "}`,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "chat not found (nil session)",
+			id:         "no-exist",
+			body:       `{"title":"X"}`,
+			session:    nil,
+			messages:   nil,
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "chat not found (get error)",
+			id:         "err-id",
+			body:       `{"title":"X"}`,
+			session:    nil,
+			messages:   nil,
+			getErr:     fmt.Errorf("db error"),
+			wantStatus: http.StatusNotFound,
+		},
+		{
+			name:       "update fails",
+			id:         "s1",
+			body:       `{"title":"New Title"}`,
+			session:    &storage.ChatSession{ID: "s1", Title: "Old Title"},
+			messages:   nil,
+			updateErr:  fmt.Errorf("db error"),
+			wantStatus: http.StatusInternalServerError,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+
+			// Only set up the GetSessionWithMessages mock when the body is valid and non-empty title
+			needsGet := tc.body != `{bad` && tc.body != `{"title":""}` && tc.body != `{"title":"   "}`
+			if needsGet {
+				h.chatSvc.On("GetSessionWithMessages", mock.Anything, tc.id).Return(tc.session, tc.messages, tc.getErr)
+			}
+
+			if tc.session != nil && tc.getErr == nil && needsGet {
+				h.chatSvc.On("UpdateSession", mock.Anything, mock.MatchedBy(func(s *storage.ChatSession) bool {
+					return s.ID == tc.id
+				})).Return(tc.updateErr)
+			}
+
+			req := httptest.NewRequest(http.MethodPatch, "/chats/"+tc.id, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := h.do(req)
+			assert.Equal(t, tc.wantStatus, w.Code)
+
+			if tc.wantStatus == http.StatusOK {
+				var result storage.ChatSession
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+				assert.Equal(t, tc.id, result.ID)
+				assert.NotEmpty(t, result.Title)
+			}
+		})
+	}
+}
+
 // ---------- Settings ----------
 
 func TestGetSettings(t *testing.T) {
