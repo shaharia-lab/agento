@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { tasksApi } from '@/lib/api'
 import type { ScheduledTask, ScheduleConfig } from '@/types'
@@ -33,6 +33,20 @@ function formatInterval(cfg: ScheduleConfig): string {
     return 'Every ' + String(cfg.every_days) + ' day' + plural + time
   }
   return 'Interval'
+}
+
+function formatNextRun(nextRunAt: string | undefined): string | null {
+  if (!nextRunAt) return null
+  const diff = new Date(nextRunAt).getTime() - Date.now()
+  if (diff <= 0) return 'soon'
+  const totalSecs = Math.floor(diff / 1000)
+  if (totalSecs < 60) return `in ${totalSecs}s`
+  const mins = Math.floor(totalSecs / 60)
+  if (mins < 60) return `in ${mins} min${mins === 1 ? '' : 's'}`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `in ${hrs} hr${hrs === 1 ? '' : 's'}`
+  const days = Math.floor(hrs / 24)
+  return `in ${days} day${days === 1 ? '' : 's'}`
 }
 
 function formatSchedule(task: ScheduledTask): string {
@@ -207,6 +221,15 @@ function TaskCard({
   onDelete: () => void
   onTogglePause: () => void
 }>) {
+  const getNextRun = useCallback(() => formatNextRun(task.next_run_at), [task.next_run_at])
+  const [nextRun, setNextRun] = useState(getNextRun)
+
+  useEffect(() => {
+    if (task.status !== 'active' || !task.next_run_at) return
+    const timer = setInterval(() => setNextRun(getNextRun()), 10_000)
+    return () => clearInterval(timer)
+  }, [task.status, task.next_run_at, getNextRun])
+
   return (
     <div className="flex flex-col rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 p-4 hover:border-zinc-300 dark:hover:border-zinc-600 transition-colors">
       <div className="flex items-start gap-3 mb-3">
@@ -239,6 +262,11 @@ function TaskCard({
         <span>Runs: {task.run_count}</span>
         {task.last_run_at && <span>Last: {new Date(task.last_run_at).toLocaleString()}</span>}
         {task.last_run_status && <RunStatusBadge status={task.last_run_status} />}
+        {task.status === 'active' && nextRun && (
+          <span className="text-green-600 dark:text-green-400 font-medium">
+            Next run: {nextRun}
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-1 pt-2 border-t border-zinc-100 dark:border-zinc-800">
