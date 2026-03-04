@@ -164,6 +164,10 @@ func (s *Server) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
+	if req.Title == nil && req.IsFavorite == nil {
+		s.writeError(w, http.StatusBadRequest, "no fields to update")
+		return
+	}
 	if req.Title != nil {
 		trimmed := strings.TrimSpace(*req.Title)
 		if trimmed == "" {
@@ -172,7 +176,7 @@ func (s *Server) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Title = &trimmed
 	}
-	session, _, err := s.chatSvc.GetSessionWithMessages(r.Context(), id)
+	session, err := s.chatSvc.GetSession(r.Context(), id)
 	if err != nil || session == nil {
 		s.writeError(w, http.StatusNotFound, "chat not found")
 		return

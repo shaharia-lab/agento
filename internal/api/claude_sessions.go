@@ -101,6 +101,10 @@ func (s *Server) handleUpdateClaudeSession(w http.ResponseWriter, r *http.Reques
 		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
+	if req.CustomTitle == nil && req.IsFavorite == nil {
+		s.writeError(w, http.StatusBadRequest, "no fields to update")
+		return
+	}
 	if req.CustomTitle != nil {
 		title := strings.TrimSpace(*req.CustomTitle)
 		if err := s.claudeSessionCache.UpdateCustomTitle(id, title); err != nil {

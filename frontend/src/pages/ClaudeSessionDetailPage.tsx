@@ -390,7 +390,7 @@ export default function ClaudeSessionDetailPage() {
                 onChange={e => setTitleDraft(e.target.value)}
                 onBlur={saveTitle}
                 onKeyDown={e => {
-                  if (e.key === 'Enter') saveTitle()
+                  if (e.key === 'Enter') e.currentTarget.blur()
                   if (e.key === 'Escape') cancelEditingTitle()
                 }}
                 className="w-full text-base font-semibold text-zinc-900 dark:text-zinc-100 bg-transparent border-b border-zinc-400 dark:border-zinc-500 outline-none pb-0.5 truncate"

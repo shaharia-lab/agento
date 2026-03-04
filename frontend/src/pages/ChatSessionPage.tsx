@@ -400,7 +400,7 @@ export default function ChatSessionPage() {
               onChange={e => setTitleDraft(e.target.value)}
               onBlur={saveTitle}
               onKeyDown={e => {
-                if (e.key === 'Enter') saveTitle()
+                if (e.key === 'Enter') e.currentTarget.blur()
                 if (e.key === 'Escape') cancelEditingTitle()
               }}
               className="w-full text-sm font-semibold text-zinc-900 dark:text-zinc-100 bg-zinc-100 dark:bg-zinc-800 rounded px-2 py-0.5 outline-none focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-500"

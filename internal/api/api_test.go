@@ -482,7 +482,6 @@ func TestUpdateChat(t *testing.T) {
 		id         string
 		body       string
 		session    *storage.ChatSession
-		messages   []storage.ChatMessage
 		getErr     error
 		updateErr  error
 		wantStatus int
@@ -492,7 +491,6 @@ func TestUpdateChat(t *testing.T) {
 			id:         "s1",
 			body:       `{"title":"New Title"}`,
 			session:    &storage.ChatSession{ID: "s1", Title: "Old Title"},
-			messages:   nil,
 			wantStatus: http.StatusOK,
 		},
 		{
@@ -500,8 +498,20 @@ func TestUpdateChat(t *testing.T) {
 			id:         "s1",
 			body:       `{"title":"  Trimmed Title  "}`,
 			session:    &storage.ChatSession{ID: "s1", Title: "Old Title"},
-			messages:   nil,
 			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "toggle favorite only",
+			id:         "s1",
+			body:       `{"is_favorite":true}`,
+			session:    &storage.ChatSession{ID: "s1", Title: "Old Title"},
+			wantStatus: http.StatusOK,
+		},
+		{
+			name:       "no fields to update",
+			id:         "s1",
+			body:       `{}`,
+			wantStatus: http.StatusBadRequest,
 		},
 		{
 			name:       "invalid JSON",
@@ -526,7 +536,6 @@ func TestUpdateChat(t *testing.T) {
 			id:         "no-exist",
 			body:       `{"title":"X"}`,
 			session:    nil,
-			messages:   nil,
 			wantStatus: http.StatusNotFound,
 		},
 		{
@@ -534,7 +543,6 @@ func TestUpdateChat(t *testing.T) {
 			id:         "err-id",
 			body:       `{"title":"X"}`,
 			session:    nil,
-			messages:   nil,
 			getErr:     fmt.Errorf("db error"),
 			wantStatus: http.StatusNotFound,
 		},
@@ -543,7 +551,6 @@ func TestUpdateChat(t *testing.T) {
 			id:         "s1",
 			body:       `{"title":"New Title"}`,
 			session:    &storage.ChatSession{ID: "s1", Title: "Old Title"},
-			messages:   nil,
 			updateErr:  fmt.Errorf("db error"),
 			wantStatus: http.StatusInternalServerError,
 		},
@@ -553,10 +560,10 @@ func TestUpdateChat(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 
-			// Only set up the GetSessionWithMessages mock when the body is valid and non-empty title
-			needsGet := tc.body != `{bad` && tc.body != `{"title":""}` && tc.body != `{"title":"   "}`
+			// Only set up the GetSession mock when the body passes all early-exit checks.
+			needsGet := tc.body != `{bad` && tc.body != `{"title":""}` && tc.body != `{"title":"   "}` && tc.body != `{}`
 			if needsGet {
-				h.chatSvc.On("GetSessionWithMessages", mock.Anything, tc.id).Return(tc.session, tc.messages, tc.getErr)
+				h.chatSvc.On("GetSession", mock.Anything, tc.id).Return(tc.session, tc.getErr)
 			}
 
 			if tc.session != nil && tc.getErr == nil && needsGet {
