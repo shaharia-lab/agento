@@ -47,7 +47,9 @@ func (p *TokenProfileProcessor) Finalize(insight *SessionInsight) {
 
 	pr := pricingForModel(p.model)
 	insight.CostEstimateUSD = (float64(p.inputTokens)*pr.InputPerMTok +
-		float64(p.outputTokens)*pr.OutputPerMTok) / 1_000_000
+		float64(p.outputTokens)*pr.OutputPerMTok +
+		float64(p.cacheCreation)*pr.CacheWritePerMTok +
+		float64(p.cacheRead)*pr.CacheReadPerMTok) / 1_000_000
 }
 
 // Reset clears all internal state.

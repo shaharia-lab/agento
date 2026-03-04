@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,7 @@ import (
 // depend on earlier results (e.g. AutonomyScoreProcessor depends on
 // TurnCountProcessor) must be registered after their dependencies.
 type ProcessorRegistry struct {
+	mu         sync.Mutex
 	processors []SessionProcessor
 	logger     *slog.Logger
 }
@@ -45,7 +47,10 @@ func DefaultProcessorRegistry(logger *slog.Logger) *ProcessorRegistry {
 
 // RunSession opens filePath, feeds every event to all registered processors in
 // sequence, then finalizes them and returns a populated SessionInsight.
+// It is safe to call from multiple goroutines; a mutex serializes each run.
 func (r *ProcessorRegistry) RunSession(sessionID, filePath string) (*SessionInsight, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	f, err := os.Open(filePath) //nolint:gosec
 	if err != nil {
 		return nil, fmt.Errorf("opening session file %q: %w", filePath, err)

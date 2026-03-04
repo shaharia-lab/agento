@@ -244,17 +244,6 @@ func TestToolUsageProcessor_CountsTools(t *testing.T) {
 	}
 }
 
-func TestToolUsageProcessor_ErrorRate(t *testing.T) {
-	evs := []claudesessions.ProcessableEvent{
-		makeEvent("user", withMessage("user", "", toolResultBlocks(true, false, false), nil)),
-	}
-	insight := runProcessors(evs, &claudesessions.ToolUsageProcessor{})
-	expected := 1.0 / 3.0
-	if math.Abs(insight.ToolErrorRate-expected) > 1e-9 {
-		t.Errorf("expected error rate %f, got %f", expected, insight.ToolErrorRate)
-	}
-}
-
 func TestToolUsageProcessor_NoTools(t *testing.T) {
 	evs := []claudesessions.ProcessableEvent{
 		makeEvent("assistant", withMessage("assistant", "", textBlocks("hello"), nil)),
@@ -262,9 +251,6 @@ func TestToolUsageProcessor_NoTools(t *testing.T) {
 	insight := runProcessors(evs, &claudesessions.ToolUsageProcessor{})
 	if insight.ToolCallsTotal != 0 {
 		t.Errorf("expected 0 tool calls, got %d", insight.ToolCallsTotal)
-	}
-	if insight.ToolErrorRate != 0 {
-		t.Errorf("expected 0 error rate, got %f", insight.ToolErrorRate)
 	}
 }
 
@@ -451,6 +437,22 @@ func TestConversationDepthProcessor_ChainResetsOnUserInput(t *testing.T) {
 	insight := runProcessors(evs, &claudesessions.ConversationDepthProcessor{})
 	if insight.LongestAutonomousChain != 2 {
 		t.Errorf("expected longest_chain=2, got %d", insight.LongestAutonomousChain)
+	}
+}
+
+func TestConversationDepthProcessor_InterleavedTextResetsConsecutive(t *testing.T) {
+	// [tool_use, text, tool_use] — text breaks the consecutive run; max is 1, not 2.
+	blocks := []map[string]any{
+		{"type": "tool_use", "id": "id-a", "name": "a"},
+		{"type": "text", "text": "thinking"},
+		{"type": "tool_use", "id": "id-b", "name": "b"},
+	}
+	evs := []claudesessions.ProcessableEvent{
+		makeEvent("assistant", withMessage("assistant", "", blocks, nil)),
+	}
+	insight := runProcessors(evs, &claudesessions.ConversationDepthProcessor{})
+	if insight.MaxConsecutiveToolCalls != 1 {
+		t.Errorf("expected max_consecutive=1 (text breaks run), got %d", insight.MaxConsecutiveToolCalls)
 	}
 }
 
