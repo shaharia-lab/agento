@@ -38,15 +38,25 @@ function formatInterval(cfg: ScheduleConfig): string {
 function formatNextRun(nextRunAt: string | undefined): string | null {
   if (!nextRunAt) return null
   const diff = new Date(nextRunAt).getTime() - Date.now()
-  if (diff <= 0) return 'soon'
+  if (diff <= 0) return 'very soon'
   const totalSecs = Math.floor(diff / 1000)
   if (totalSecs < 60) return `in ${totalSecs}s`
-  const mins = Math.floor(totalSecs / 60)
-  if (mins < 60) return `in ${mins} min${mins === 1 ? '' : 's'}`
-  const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `in ${hrs} hr${hrs === 1 ? '' : 's'}`
+  const totalMins = Math.floor(totalSecs / 60)
+  const hrs = Math.floor(totalMins / 60)
+  const mins = totalMins % 60
   const days = Math.floor(hrs / 24)
-  return `in ${days} day${days === 1 ? '' : 's'}`
+  const remHrs = hrs % 24
+  if (days > 0) {
+    const parts = [`${days}d`]
+    if (remHrs > 0) parts.push(`${remHrs}h`)
+    return `in ${parts.join(' ')}`
+  }
+  if (hrs > 0) {
+    const parts = [`${hrs}h`]
+    if (mins > 0) parts.push(`${mins}m`)
+    return `in ${parts.join(' ')}`
+  }
+  return `in ${mins}m`
 }
 
 function formatSchedule(task: ScheduledTask): string {
@@ -263,7 +273,10 @@ function TaskCard({
         {task.last_run_at && <span>Last: {new Date(task.last_run_at).toLocaleString()}</span>}
         {task.last_run_status && <RunStatusBadge status={task.last_run_status} />}
         {task.status === 'active' && nextRun && (
-          <span className="text-green-600 dark:text-green-400 font-medium">
+          <span
+            className="text-green-600 dark:text-green-400 font-medium cursor-default"
+            title={task.next_run_at ? new Date(task.next_run_at).toLocaleString() : undefined}
+          >
             Next run: {nextRun}
           </span>
         )}
