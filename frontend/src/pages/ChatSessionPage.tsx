@@ -37,6 +37,7 @@ import {
   Copy,
   Check,
   Pencil,
+  Star,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -417,6 +418,28 @@ export default function ChatSessionPage() {
             </button>
           )}
         </div>
+        <button
+          className={`h-7 w-7 flex items-center justify-center rounded-md transition-colors shrink-0 ${
+            detail?.session.is_favorite
+              ? 'text-amber-400'
+              : 'text-zinc-300 dark:text-zinc-600 hover:text-amber-400'
+          }`}
+          onClick={() => {
+            if (!id || !detail) return
+            const next = !detail.session.is_favorite
+            setDetail(prev =>
+              prev ? { ...prev, session: { ...prev.session, is_favorite: next } } : prev,
+            )
+            chatsApi.toggleFavorite(id, next).catch(() => {
+              setDetail(prev =>
+                prev ? { ...prev, session: { ...prev.session, is_favorite: !next } } : prev,
+              )
+            })
+          }}
+          title={detail?.session.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+        >
+          <Star className={`h-3.5 w-3.5 ${detail?.session.is_favorite ? 'fill-amber-400' : ''}`} />
+        </button>
         <span className="text-xs text-zinc-400 dark:text-zinc-500 shrink-0 font-mono">
           {agentLabel ?? 'Direct chat'}
         </span>

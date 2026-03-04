@@ -19,6 +19,7 @@ import {
   Play,
   Loader2,
   Pencil,
+  Star,
 } from 'lucide-react'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -434,6 +435,24 @@ export default function ClaudeSessionDetailPage() {
               </span>
             </div>
           </div>
+          <button
+            className={`h-8 w-8 flex items-center justify-center rounded-md transition-colors shrink-0 ${
+              detail.is_favorite
+                ? 'text-amber-400'
+                : 'text-zinc-300 dark:text-zinc-600 hover:text-amber-400 hover:bg-zinc-100 dark:hover:bg-zinc-800'
+            }`}
+            onClick={() => {
+              if (!id) return
+              const next = !detail.is_favorite
+              setDetail(prev => (prev ? { ...prev, is_favorite: next } : prev))
+              claudeSessionsApi.toggleFavorite(id, next).catch(() => {
+                setDetail(prev => (prev ? { ...prev, is_favorite: !next } : prev))
+              })
+            }}
+            title={detail.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+          >
+            <Star className={`h-4 w-4 ${detail.is_favorite ? 'fill-amber-400' : ''}`} />
+          </button>
           <Button
             size="sm"
             className="gap-1.5 bg-zinc-900 hover:bg-zinc-800 text-white text-xs h-8 shrink-0"

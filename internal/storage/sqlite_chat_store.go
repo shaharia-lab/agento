@@ -31,7 +31,7 @@ func (s *SQLiteChatStore) ListSessions(ctx context.Context) (sessions []*ChatSes
 		SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
 		       settings_profile_id, total_input_tokens, total_output_tokens,
 		       total_cache_creation_tokens, total_cache_read_tokens,
-		       created_at, updated_at
+		       created_at, updated_at, is_favorite
 		FROM chat_sessions
 		ORDER BY updated_at DESC`)
 	if err != nil {
@@ -60,7 +60,7 @@ func (s *SQLiteChatStore) GetSession(ctx context.Context, id string) (cs *ChatSe
 		SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
 		       settings_profile_id, total_input_tokens, total_output_tokens,
 		       total_cache_creation_tokens, total_cache_read_tokens,
-		       created_at, updated_at
+		       created_at, updated_at, is_favorite
 		FROM chat_sessions WHERE id = ?`, id)
 
 	cs = &ChatSession{}
@@ -69,7 +69,7 @@ func (s *SQLiteChatStore) GetSession(ctx context.Context, id string) (cs *ChatSe
 		&cs.Model, &cs.SettingsProfileID,
 		&cs.TotalInputTokens, &cs.TotalOutputTokens,
 		&cs.TotalCacheCreationTokens, &cs.TotalCacheReadTokens,
-		&cs.CreatedAt, &cs.UpdatedAt,
+		&cs.CreatedAt, &cs.UpdatedAt, &cs.IsFavorite,
 	)
 	if err == sql.ErrNoRows {
 		err = nil
@@ -190,12 +190,14 @@ func (s *SQLiteChatStore) UpdateSession(ctx context.Context, session *ChatSessio
 			model = ?, settings_profile_id = ?,
 			total_input_tokens = ?, total_output_tokens = ?,
 			total_cache_creation_tokens = ?, total_cache_read_tokens = ?,
+			is_favorite = ?,
 			updated_at = ?
 		WHERE id = ?`,
 		session.Title, session.AgentSlug, session.SDKSession, session.WorkingDir,
 		session.Model, session.SettingsProfileID,
 		session.TotalInputTokens, session.TotalOutputTokens,
 		session.TotalCacheCreationTokens, session.TotalCacheReadTokens,
+		session.IsFavorite,
 		session.UpdatedAt, session.ID,
 	)
 	if err != nil {
@@ -262,7 +264,7 @@ func scanChatSession(rows *sql.Rows) (*ChatSession, error) {
 		&cs.Model, &cs.SettingsProfileID,
 		&cs.TotalInputTokens, &cs.TotalOutputTokens,
 		&cs.TotalCacheCreationTokens, &cs.TotalCacheReadTokens,
-		&cs.CreatedAt, &cs.UpdatedAt,
+		&cs.CreatedAt, &cs.UpdatedAt, &cs.IsFavorite,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scanning session: %w", err)

@@ -37,7 +37,17 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
 import FilesystemBrowserModal from '@/components/FilesystemBrowserModal'
-import { Plus, MessageSquare, Trash2, Search, Send, FolderOpen, Lock, Zap } from 'lucide-react'
+import {
+  Plus,
+  MessageSquare,
+  Trash2,
+  Search,
+  Send,
+  FolderOpen,
+  Lock,
+  Zap,
+  Star,
+} from 'lucide-react'
 
 export default function ChatsPage() {
   const navigate = useNavigate()
@@ -65,6 +75,7 @@ export default function ChatsPage() {
   const [search, setSearch] = useState('')
   const [filterAgent, setFilterAgent] = useState('all')
   const [filterWorkingDir, setFilterWorkingDir] = useState('all')
+  const [filterFavorites, setFilterFavorites] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -218,15 +229,18 @@ export default function ChatsPage() {
     [sessions],
   )
 
+  const hasFavorites = sessions.some(s => s.is_favorite)
+
   const filtered = useMemo(() => {
     return sessions.filter(s => {
       const matchesSearch = !search || s.title.toLowerCase().includes(search.toLowerCase())
       const matchesAgent = filterAgent === 'all' || s.agent_slug === filterAgent
       const matchesWorkingDir =
         filterWorkingDir === 'all' || s.working_directory === filterWorkingDir
-      return matchesSearch && matchesAgent && matchesWorkingDir
+      const matchesFavorites = !filterFavorites || s.is_favorite
+      return matchesSearch && matchesAgent && matchesWorkingDir && matchesFavorites
     })
-  }, [sessions, search, filterAgent, filterWorkingDir])
+  }, [sessions, search, filterAgent, filterWorkingDir, filterFavorites])
 
   if (loading) {
     return (
@@ -288,6 +302,17 @@ export default function ChatsPage() {
               onCheck={() => toggleCheck(session.id)}
               onClick={() => navigate(`/chats/${session.id}`)}
               onDelete={() => deleteSession(session.id)}
+              onToggleFavorite={() => {
+                const next = !session.is_favorite
+                setSessions(prev =>
+                  prev.map(s => (s.id === session.id ? { ...s, is_favorite: next } : s)),
+                )
+                chatsApi.toggleFavorite(session.id, next).catch(() => {
+                  setSessions(prev =>
+                    prev.map(s => (s.id === session.id ? { ...s, is_favorite: !next } : s)),
+                  )
+                })
+              }}
             />
           ))}
         </div>
@@ -369,6 +394,22 @@ export default function ChatsPage() {
                 ))}
               </SelectContent>
             </Select>
+          )}
+          {hasFavorites && (
+            <button
+              onClick={() => setFilterFavorites(f => !f)}
+              className={`flex items-center gap-1.5 rounded-md border h-8 px-3 text-xs transition-colors shrink-0 ${
+                filterFavorites
+                  ? 'border-amber-400 bg-amber-50 dark:bg-amber-950/30 text-amber-600 dark:text-amber-400'
+                  : 'border-zinc-200 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 hover:border-amber-300 hover:text-amber-500'
+              }`}
+              title={filterFavorites ? 'Show all' : 'Show favorites only'}
+            >
+              <Star
+                className={`h-3.5 w-3.5 ${filterFavorites ? 'fill-amber-400 text-amber-400' : ''}`}
+              />
+              Favorites
+            </button>
           )}
         </div>
       )}
@@ -571,6 +612,7 @@ function ChatRow({
   onCheck,
   onClick,
   onDelete,
+  onToggleFavorite,
 }: Readonly<{
   session: ChatSession
   agentName: string | null
@@ -578,6 +620,7 @@ function ChatRow({
   onCheck: () => void
   onClick: () => void
   onDelete: () => void
+  onToggleFavorite: () => void
 }>) {
   const hasTokens = (session.total_input_tokens ?? 0) > 0 || (session.total_output_tokens ?? 0) > 0
 
@@ -629,6 +672,20 @@ function ChatRow({
             )}
           </div>
         </div>
+      </button>
+      <button
+        className={`h-7 w-7 flex items-center justify-center rounded-md transition-all shrink-0 ${
+          session.is_favorite
+            ? 'text-amber-400'
+            : 'opacity-0 group-hover:opacity-100 text-zinc-400 dark:text-zinc-500 hover:text-amber-400'
+        }`}
+        onClick={(e: React.MouseEvent) => {
+          e.stopPropagation()
+          onToggleFavorite()
+        }}
+        title={session.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+      >
+        <Star className={`h-3.5 w-3.5 ${session.is_favorite ? 'fill-amber-400' : ''}`} />
       </button>
       <AlertDialog>
         <AlertDialogTrigger asChild>

@@ -400,8 +400,8 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 			git_branch = excluded.git_branch,
 			model = excluded.model,
 			cwd = excluded.cwd`,
-		// custom_title is intentionally omitted from both INSERT and UPDATE SET
-		// so any user-defined label is preserved across rescans.
+		// custom_title and is_favorite are intentionally omitted from both INSERT and UPDATE SET
+		// so any user-defined values are preserved across rescans.
 		s.SessionID, s.ProjectPath, df.filePath, df.mtime,
 		s.Preview, s.StartTime, s.LastActivity, s.MessageCount,
 		s.Usage.InputTokens, s.Usage.OutputTokens,
@@ -425,7 +425,7 @@ func updateLastScanned(db *sql.DB, logger *slog.Logger) {
 func loadAllSessions(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, error) {
 	ctx := context.Background()
 	rows, err := db.QueryContext(ctx, `
-		SELECT session_id, project_path, preview, custom_title, start_time, last_activity,
+		SELECT session_id, project_path, preview, custom_title, is_favorite, start_time, last_activity,
 		       message_count, input_tokens, output_tokens, cache_creation_tokens,
 		       cache_read_tokens, git_branch, model, cwd
 		FROM claude_session_cache
@@ -443,7 +443,7 @@ func loadAllSessions(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 	for rows.Next() {
 		var s ClaudeSessionSummary
 		if err := rows.Scan(
-			&s.SessionID, &s.ProjectPath, &s.Preview, &s.CustomTitle,
+			&s.SessionID, &s.ProjectPath, &s.Preview, &s.CustomTitle, &s.IsFavorite,
 			&s.StartTime, &s.LastActivity, &s.MessageCount,
 			&s.Usage.InputTokens, &s.Usage.OutputTokens,
 			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,

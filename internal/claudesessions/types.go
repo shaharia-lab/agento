@@ -26,6 +26,7 @@ type ClaudeSessionSummary struct {
 	ProjectPath  string     `json:"project_path"`
 	Preview      string     `json:"preview"`                // first user message text, truncated
 	CustomTitle  string     `json:"custom_title,omitempty"` // user-defined label, preserved across rescans
+	IsFavorite   bool       `json:"is_favorite,omitempty"`  // user-starred, preserved across rescans
 	StartTime    time.Time  `json:"start_time"`
 	LastActivity time.Time  `json:"last_activity"`
 	MessageCount int        `json:"message_count"` // user + assistant top-level messages

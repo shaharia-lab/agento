@@ -196,6 +196,11 @@ CREATE INDEX idx_notification_log_created ON notification_log(created_at DESC);
 		version: 7,
 		sql:     `ALTER TABLE claude_session_cache ADD COLUMN custom_title TEXT NOT NULL DEFAULT '';`,
 	},
+	{
+		version: 8,
+		sql: `ALTER TABLE chat_sessions ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE claude_session_cache ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0;`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

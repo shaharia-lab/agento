@@ -114,6 +114,12 @@ export const chatsApi = {
     }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
+
+  toggleFavorite: (id: string, isFavorite: boolean) =>
+    request<ChatSession>(`/chats/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_favorite: isFavorite }),
+    }),
 }
 
 // ── Settings ──────────────────────────────────────────────────────────────────
@@ -234,6 +240,16 @@ export const claudeSessionsApi = {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ custom_title: customTitle }),
+    }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
+
+  /** Toggle the is_favorite flag for a session (preserved across cache rescans). */
+  toggleFavorite: (sessionId: string, isFavorite: boolean) =>
+    fetch(`${BASE}/claude-sessions/${sessionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ is_favorite: isFavorite }),
     }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),

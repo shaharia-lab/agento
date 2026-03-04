@@ -18,10 +18,11 @@ type ChatSession struct {
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 	// Cumulative token usage across all turns in this session.
-	TotalInputTokens         int `json:"total_input_tokens,omitempty"`
-	TotalOutputTokens        int `json:"total_output_tokens,omitempty"`
-	TotalCacheCreationTokens int `json:"total_cache_creation_tokens,omitempty"`
-	TotalCacheReadTokens     int `json:"total_cache_read_tokens,omitempty"`
+	TotalInputTokens         int  `json:"total_input_tokens,omitempty"`
+	TotalOutputTokens        int  `json:"total_output_tokens,omitempty"`
+	TotalCacheCreationTokens int  `json:"total_cache_creation_tokens,omitempty"`
+	TotalCacheReadTokens     int  `json:"total_cache_read_tokens,omitempty"`
+	IsFavorite               bool `json:"is_favorite,omitempty"`
 }
 
 // MessageBlock represents a single ordered content block within an assistant message.
