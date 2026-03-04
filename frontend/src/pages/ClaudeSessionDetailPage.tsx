@@ -22,19 +22,9 @@ import {
   Star,
   Activity,
 } from 'lucide-react'
+import { formatTokens, shortPath } from '@/lib/format'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function formatTokens(n: number): string {
-  if (!n) return '—'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
-}
-
-function shortPath(path: string): string {
-  return path.replace(/^\/home\/[^/]+\//, '~/')
-}
 
 function todoIcon(status: string) {
   if (status === 'completed')

@@ -23,30 +23,9 @@ import {
   Bot,
   Plug,
 } from 'lucide-react'
+import { formatTokens, shortPath, formatDuration } from '@/lib/format'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function formatTokens(n: number): string {
-  if (!n) return '0'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
-}
-
-function shortPath(path: string): string {
-  return path.replace(/^\/home\/[^/]+\//, '~/')
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
-  const min = Math.floor(ms / 60_000)
-  const sec = Math.round((ms % 60_000) / 1000)
-  if (min < 60) return `${min}m ${sec}s`
-  const hr = Math.floor(min / 60)
-  const remMin = min % 60
-  return `${hr}h ${remMin}m`
-}
 
 function formatTime(ts: string): string {
   return new Date(ts).toLocaleTimeString([], {
@@ -396,7 +375,7 @@ function TurnCard({ turn }: Readonly<{ turn: JourneyTurn }>) {
       {open && (
         <div className="px-4 pb-3 pt-1 border-t border-zinc-100 dark:border-zinc-700/50">
           {turn.steps.map((step, idx) => (
-            <StepRow key={`${step.type}-${idx}`} step={step} />
+            <StepRow key={`${step.type}-${step.timestamp}-${idx}`} step={step} />
           ))}
         </div>
       )}

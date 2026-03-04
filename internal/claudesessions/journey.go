@@ -3,9 +3,11 @@ package claudesessions
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 )
 
@@ -145,8 +147,14 @@ type rawJourneyEvent struct {
 
 // ── Journey builder ─────────────────────────────────────────────────────────
 
+// validSessionID matches the UUID format used by Claude Code session IDs.
+var validSessionID = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+
 // GetSessionJourney reads a session's JSONL file and produces a structured journey.
 func GetSessionJourney(sessionID string, logger *slog.Logger) (*SessionJourney, error) {
+	if !validSessionID.MatchString(sessionID) {
+		return nil, fmt.Errorf("invalid session ID format: %q", sessionID)
+	}
 	projectsDir := filepath.Join(ClaudeHome(), "projects")
 	entries, rdErr := os.ReadDir(projectsDir)
 	if rdErr != nil {
@@ -189,6 +197,9 @@ func buildJourney(sessionID, filePath string, logger *slog.Logger) (*SessionJour
 		if json.Unmarshal(sc.Bytes(), &ev) != nil {
 			continue
 		}
+		// Skip file-history-snapshot events — they can be very large (full file contents)
+		// and carry no useful journey information. All other unrecognized types are
+		// safely ignored by the switch in processEvent.
 		if ev.Type == "file-history-snapshot" {
 			continue
 		}
@@ -391,7 +402,7 @@ func (b *journeyBuilder) processContentBlock(blk rawContentBlock, ts time.Time) 
 		}
 		data := ThinkingData{
 			Preview: truncateRunes(blk.Thinking, 500),
-			Full:    blk.Thinking,
+			Full:    truncateRunes(blk.Thinking, 20000),
 		}
 		raw, _ := json.Marshal(data) //nolint:errcheck
 		b.addStep(JourneyStep{Type: "thinking", Timestamp: ts, Data: raw})

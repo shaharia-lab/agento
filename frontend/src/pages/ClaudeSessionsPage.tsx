@@ -13,19 +13,7 @@ import {
 } from '@/components/ui/select'
 import { History, Search, RefreshCw, ExternalLink, Zap, Star, Activity } from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
-
-function formatTokens(n: number): string {
-  if (!n) return '—'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
-  return String(n)
-}
-
-function shortPath(path: string): string {
-  // Show last two segments for readability: ~/Projects/foo → Projects/foo
-  const parts = path.replace(/^\/home\/[^/]+\//, '~/').split('/')
-  return parts.slice(-2).join('/')
-}
+import { formatTokens, shortPath } from '@/lib/format'
 
 export default function ClaudeSessionsPage() {
   const navigate = useNavigate()
