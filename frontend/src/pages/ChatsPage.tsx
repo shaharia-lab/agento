@@ -355,7 +355,7 @@ export default function ChatsPage() {
               </SelectContent>
             </Select>
           )}
-          {uniqueWorkingDirs.length >= 2 && (
+          {uniqueWorkingDirs.length >= 1 && (
             <Select value={filterWorkingDir} onValueChange={setFilterWorkingDir}>
               <SelectTrigger className="w-full sm:w-48 h-8 text-xs font-mono">
                 <SelectValue placeholder="All directories" />
