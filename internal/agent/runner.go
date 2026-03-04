@@ -467,7 +467,7 @@ func RunAgent(
 		return nil, fmt.Errorf("starting agent: %w", err)
 	}
 
-	result, err := collectRunResult(stream, span)
+	result, err := collectRunResult(ctx, stream, span)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -534,14 +534,14 @@ func resolveSystemPrompt(agentCfg *config.AgentConfig, opts RunOptions) (string,
 	return Interpolate(agentCfg.SystemPrompt, opts.Variables)
 }
 
-func collectRunResult(stream *claude.Stream, runSpan trace.Span) (*AgentResult, error) {
+func collectRunResult(ctx context.Context, stream *claude.Stream, runSpan trace.Span) (*AgentResult, error) {
 	var finalThinking string
 	var result *AgentResult
 	var resultErr error
 	toolSpans := make(map[string]ToolSpanEntry)
 
 	for event := range stream.Events() {
-		processRunEvent(event, &finalThinking, &result, &resultErr, runSpan, toolSpans)
+		processRunEvent(ctx, event, &finalThinking, &result, &resultErr, runSpan, toolSpans)
 	}
 	FlushToolSpans(toolSpans)
 
@@ -560,7 +560,7 @@ func collectRunResult(stream *claude.Stream, runSpan trace.Span) (*AgentResult, 
 // We do NOT return early on TypeResult — the remaining events must be drained
 // so the subprocess has time to finish writing the session to disk.
 func processRunEvent(
-	event claude.Event,
+	ctx context.Context, event claude.Event,
 	thinking *string, result **AgentResult, resultErr *error,
 	runSpan trace.Span, toolSpans map[string]ToolSpanEntry,
 ) {
@@ -571,7 +571,7 @@ func processRunEvent(
 				*thinking = t
 			}
 		}
-		OpenToolSpans(runSpan, event.Raw, toolSpans)
+		OpenToolSpans(ctx, runSpan, event.Raw, toolSpans)
 	case claude.TypeSystem:
 		AddSystemInitEvent(runSpan, event.System)
 	case claude.TypeToolProgress:

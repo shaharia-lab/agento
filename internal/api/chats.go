@@ -453,7 +453,7 @@ func (ep *eventProcessor) processAgentEvent(event claude.Event, state *streamSta
 	switch event.Type {
 	case claude.TypeAssistant:
 		state.blocks = appendAssistantBlocks(state.blocks, event.Raw)
-		agent.OpenToolSpans(ep.execSpan, event.Raw, state.toolSpans)
+		agent.OpenToolSpans(ep.r.Context(), ep.execSpan, event.Raw, state.toolSpans)
 		if input := extractAskUserQuestionInput(event.Raw); input != nil {
 			state.pendingInput = input
 			ep.server.logger.Info("AskUserQuestion detected in stream", "session_id", ep.id)

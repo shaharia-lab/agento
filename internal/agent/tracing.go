@@ -17,12 +17,14 @@ const MessageTypeUser claude.MessageType = "user"
 
 // ToolSpanEntry tracks an in-flight tool_use span keyed by tool_use_id.
 type ToolSpanEntry struct {
-	span trace.Span
+	Span trace.Span
 }
 
 // OpenToolSpans starts a child span for every tool_use block found in an
 // assistant event. Existing entries are skipped (idempotent).
-func OpenToolSpans(runSpan trace.Span, raw json.RawMessage, toolSpans map[string]ToolSpanEntry) {
+// ctx is used as the parent context so W3C baggage and sampling decisions
+// are preserved; runSpan is injected as the parent span.
+func OpenToolSpans(ctx context.Context, runSpan trace.Span, raw json.RawMessage, toolSpans map[string]ToolSpanEntry) {
 	var msg struct {
 		Message struct {
 			Content []struct {
@@ -43,14 +45,14 @@ func OpenToolSpans(runSpan trace.Span, raw json.RawMessage, toolSpans map[string
 		if _, exists := toolSpans[blk.ID]; exists {
 			continue
 		}
-		parentCtx := trace.ContextWithSpan(context.Background(), runSpan)
+		parentCtx := trace.ContextWithSpan(ctx, runSpan)
 		_, span := otel.Tracer("agento").Start(parentCtx, "tool_use."+blk.Name)
 		span.SetAttributes(
 			attribute.String("tool.id", blk.ID),
 			attribute.String("tool.name", blk.Name),
 			attribute.String("tool.input", TruncateAttr(string(blk.Input), 512)),
 		)
-		toolSpans[blk.ID] = ToolSpanEntry{span: span}
+		toolSpans[blk.ID] = ToolSpanEntry{Span: span}
 	}
 }
 
@@ -77,10 +79,10 @@ func CloseToolSpans(raw json.RawMessage, toolSpans map[string]ToolSpanEntry) {
 		if !ok {
 			continue
 		}
-		entry.span.SetAttributes(
+		entry.Span.SetAttributes(
 			attribute.String("tool.result", TruncateAttr(string(c.Content), 512)),
 		)
-		entry.span.End()
+		entry.Span.End()
 		delete(toolSpans, c.ToolUseID)
 	}
 }
@@ -89,7 +91,7 @@ func CloseToolSpans(raw json.RawMessage, toolSpans map[string]ToolSpanEntry) {
 // exits to prevent spans from being left open on cancellation or error.
 func FlushToolSpans(toolSpans map[string]ToolSpanEntry) {
 	for id, entry := range toolSpans {
-		entry.span.End()
+		entry.Span.End()
 		delete(toolSpans, id)
 	}
 }
@@ -103,7 +105,7 @@ func RecordToolProgress(tp *claude.ToolProgressMessage, toolSpans map[string]Too
 	if !ok {
 		return
 	}
-	entry.span.AddEvent("tool.progress",
+	entry.Span.AddEvent("tool.progress",
 		trace.WithAttributes(
 			attribute.String("tool.message", tp.Message),
 			attribute.Float64("tool.progress_pct", tp.Progress),
