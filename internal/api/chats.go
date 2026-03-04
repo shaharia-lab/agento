@@ -472,7 +472,7 @@ func (ep *eventProcessor) processAgentEvent(event claude.Event, state *streamSta
 		if event.Result == nil {
 			return false
 		}
-		enrichExecSpanFromResult(ep.execSpan, event.Result)
+		enrichExecSpanFromResult(ep.execSpan, event.Result, event.Raw)
 		state.tokens.add(event.Result)
 		if event.Result.IsError {
 			// Clear the stale SDK session ID so the next attempt starts a fresh

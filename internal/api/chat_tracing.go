@@ -90,12 +90,43 @@ func closeToolSpans(raw json.RawMessage, toolSpans map[string]toolSpanEntry) {
 	}
 }
 
+// rawResultExtras holds fields that the SDK's Result struct cannot parse
+// because the Claude CLI emits them in camelCase or nested form.
+type rawResultExtras struct {
+	// modelUsage is keyed by model ID; inner fields are camelCase.
+	ModelUsage map[string]struct {
+		InputTokens              int     `json:"inputTokens"`
+		OutputTokens             int     `json:"outputTokens"`
+		CacheReadInputTokens     int     `json:"cacheReadInputTokens"`
+		CacheCreationInputTokens int     `json:"cacheCreationInputTokens"`
+		WebSearchRequests        int     `json:"webSearchRequests"`
+		CostUSD                  float64 `json:"costUSD"`
+	} `json:"modelUsage"`
+	// web_search_requests lives at usage.server_tool_use.web_search_requests.
+	Usage struct {
+		ServerToolUse struct {
+			WebSearchRequests int `json:"web_search_requests"`
+		} `json:"server_tool_use"`
+	} `json:"usage"`
+}
+
 // enrichExecSpanFromResult adds final result metadata (turns, duration, cost,
 // tokens, per-model usage) to the parent execution span.
-func enrichExecSpanFromResult(execSpan trace.Span, result *claude.Result) {
+// raw is the original SSE JSON line needed to recover camelCase fields that
+// the SDK struct cannot parse (modelUsage, nested web_search_requests).
+func enrichExecSpanFromResult(execSpan trace.Span, result *claude.Result, raw json.RawMessage) {
 	if result == nil {
 		return
 	}
+
+	// Parse camelCase / nested fields directly from the raw JSON.
+	// Errors are intentionally ignored: if parsing fails the fields stay zero.
+	var extras rawResultExtras
+	if err := json.Unmarshal(raw, &extras); err != nil { //nolint:errcheck
+		extras = rawResultExtras{}
+	}
+	webSearches := extras.Usage.ServerToolUse.WebSearchRequests
+
 	execSpan.SetAttributes(
 		attribute.Int("agent.num_turns", result.NumTurns),
 		attribute.Int64("agent.duration_ms", result.DurationMS),
@@ -105,14 +136,14 @@ func enrichExecSpanFromResult(execSpan trace.Span, result *claude.Result) {
 		attribute.Int("agent.output_tokens", result.Usage.OutputTokens),
 		attribute.Int("agent.cache_read_tokens", result.Usage.CacheReadInputTokens),
 		attribute.Int("agent.cache_creation_tokens", result.Usage.CacheCreationInputTokens),
-		attribute.Int("agent.web_searches", result.Usage.WebSearchRequests),
+		attribute.Int("agent.web_searches", webSearches),
 		attribute.Int("agent.permission_denials", len(result.PermissionDenials)),
 		attribute.Bool("agent.is_error", result.IsError),
 	)
 
-	// Per-model cost/token breakdown as individual span events so they show
-	// up in Grafana without cluttering top-level attributes.
-	for modelID, mu := range result.ModelUsages {
+	// Per-model cost/token breakdown parsed from raw JSON (SDK struct key
+	// "model_usages" does not match the CLI's "modelUsage" camelCase key).
+	for modelID, mu := range extras.ModelUsage {
 		execSpan.AddEvent("agent.model_usage",
 			trace.WithAttributes(
 				attribute.String("model.id", modelID),
@@ -120,6 +151,7 @@ func enrichExecSpanFromResult(execSpan trace.Span, result *claude.Result) {
 				attribute.Int("model.output_tokens", mu.OutputTokens),
 				attribute.Int("model.cache_read_tokens", mu.CacheReadInputTokens),
 				attribute.Int("model.cache_creation_tokens", mu.CacheCreationInputTokens),
+				attribute.Int("model.web_searches", mu.WebSearchRequests),
 				attribute.Float64("model.cost_usd", mu.CostUSD),
 			),
 		)
