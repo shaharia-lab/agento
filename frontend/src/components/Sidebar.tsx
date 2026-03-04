@@ -104,9 +104,14 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
       >
         <AgentoLogo size={28} />
         {(isMobile || !collapsed) && (
-          <span className="text-[15px] font-semibold tracking-wide text-zinc-900 dark:text-zinc-100">
-            Agento
-          </span>
+          <div className="flex flex-col leading-tight">
+            <span className="text-[15px] font-semibold tracking-wide text-zinc-900 dark:text-zinc-100">
+              Agento
+            </span>
+            <span className="text-[10px] text-zinc-400 dark:text-zinc-500 tracking-wide">
+              for Claude Code
+            </span>
+          </div>
         )}
         {isMobile && (
           <button
