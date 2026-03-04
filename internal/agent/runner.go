@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
@@ -14,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/integrations"
@@ -140,69 +138,6 @@ func Interpolate(template string, vars map[string]string) (string, error) {
 	return result, nil
 }
 
-// toolCallInput is the minimal structure of the JSON payload received by
-// PreToolUse / PostToolUse hooks that identifies the tool name.
-type toolCallInput struct {
-	ToolName string `json:"tool_name"`
-}
-
-// buildToolTracingHooks returns a claude.Option that registers PreToolUse,
-// PostToolUse, and PostToolUseFailure hooks. Each tool invocation becomes a
-// child span of the span embedded in ctx, keyed by toolUseID.
-//
-// Note: the hook callbacks do not receive a context (that is an SDK limitation),
-// so this function captures ctx at call time. For RunAgent the parent span lives
-// for the full call, so all tool spans are correctly parented. For long-lived
-// StartSession flows the parent span may have ended before some tools run; those
-// spans will still be recorded but may appear as orphans in the trace backend.
-func buildToolTracingHooks(ctx context.Context) claude.Option {
-	var toolSpans sync.Map // map[string]trace.Span keyed by toolUseID
-
-	preHook := func(event claude.HookEvent, input json.RawMessage, toolUseID string) (*claude.HookOutput, error) {
-		var tc toolCallInput
-		if err := json.Unmarshal(input, &tc); err != nil {
-			slog.Debug("tool tracing hook: failed to parse input", "error", err)
-		}
-
-		toolName := tc.ToolName
-		if toolName == "" {
-			toolName = "unknown"
-		}
-
-		_, toolSpan := otel.Tracer("agento").Start(ctx, "agent.tool."+toolName,
-			trace.WithSpanKind(trace.SpanKindInternal),
-		)
-		toolSpan.SetAttributes(
-			attribute.String("tool.name", toolName),
-			attribute.String("tool.use_id", toolUseID),
-		)
-		toolSpans.Store(toolUseID, toolSpan)
-		return nil, nil
-	}
-
-	postHook := func(_ claude.HookEvent, _ json.RawMessage, toolUseID string) (*claude.HookOutput, error) {
-		if v, ok := toolSpans.LoadAndDelete(toolUseID); ok {
-			v.(trace.Span).End() //nolint:forcetypeassert
-		}
-		return nil, nil
-	}
-
-	failureHook := func(_ claude.HookEvent, _ json.RawMessage, toolUseID string) (*claude.HookOutput, error) {
-		if v, ok := toolSpans.LoadAndDelete(toolUseID); ok {
-			s := v.(trace.Span) //nolint:forcetypeassert
-			s.SetStatus(codes.Error, "tool use failed")
-			s.End()
-		}
-		return nil, nil
-	}
-
-	return claude.WithHooks(map[claude.HookEvent][]claude.HookMatcher{
-		claude.HookEventPreToolUse:         {{Hooks: []claude.HookFunc{preHook}}},
-		claude.HookEventPostToolUse:        {{Hooks: []claude.HookFunc{postHook}}},
-		claude.HookEventPostToolUseFailure: {{Hooks: []claude.HookFunc{failureHook}}},
-	})
-}
-
 // buildSDKOptions constructs the claude SDK options for the given agent config and run options.
 // ctx is used to scope the lifetime of any per-session MCP servers started for integrations,
 // and to attach per-tool-call child spans when the context carries an active trace span.
@@ -229,11 +164,6 @@ func buildSDKOptions(
 	if opts.PermissionHandler != nil {
 		handler := wrapPermissionHandler(opts.PermissionHandler, allowedTools)
 		sdkOpts = append(sdkOpts, claude.WithPermissionHandler(handler))
-	}
-
-	// Register per-tool-call tracing hooks when the context carries an active span.
-	if trace.SpanFromContext(ctx).IsRecording() {
-		sdkOpts = append(sdkOpts, buildToolTracingHooks(ctx))
 	}
 
 	return sdkOpts
