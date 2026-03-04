@@ -305,7 +305,14 @@ func (s *chatService) resolveAgentConfig(
 
 // populateRunOptions fills in the run options from service dependencies and session state.
 func (s *chatService) populateRunOptions(opts *agent.RunOptions, session *storage.ChatSession) {
-	opts.SessionID = session.SDKSession
+	if session.SDKSession != "" {
+		// Resume existing Claude CLI session.
+		opts.ResumeSessionID = session.SDKSession
+	} else {
+		// New session: pin the Claude CLI session ID to the chat ID so both
+		// identifiers stay in sync — no more two-ID confusion.
+		opts.CustomSessionID = session.ID
+	}
 	opts.LocalToolsMCP = s.localMCP
 	opts.MCPRegistry = s.mcpRegistry
 	opts.IntegrationRegistry = s.integrationRegistry

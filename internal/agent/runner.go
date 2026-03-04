@@ -29,8 +29,13 @@ var allBuiltInTools = []string{
 
 // RunOptions configures an agent invocation.
 type RunOptions struct {
-	// SessionID resumes an existing session for multi-turn conversations.
-	SessionID string
+	// ResumeSessionID resumes an existing session for multi-turn conversations (--resume <id>).
+	ResumeSessionID string
+
+	// CustomSessionID sets a fixed UUID for a brand-new session (--session-id <uuid>).
+	// When set, the Claude CLI session ID will match this value so Agento's chat ID
+	// and the SDK session ID stay in sync.
+	CustomSessionID string
 
 	// NoThinking disables extended thinking regardless of agent config.
 	NoThinking bool
@@ -226,8 +231,10 @@ func appendModelAndPromptOpts(
 	if systemPrompt != "" {
 		sdkOpts = append(sdkOpts, claude.WithSystemPrompt(systemPrompt))
 	}
-	if opts.SessionID != "" {
-		sdkOpts = append(sdkOpts, claude.WithSessionID(opts.SessionID))
+	if opts.ResumeSessionID != "" {
+		sdkOpts = append(sdkOpts, claude.WithSessionIDToResume(opts.ResumeSessionID))
+	} else if opts.CustomSessionID != "" {
+		sdkOpts = append(sdkOpts, claude.WithSessionID(opts.CustomSessionID))
 	}
 	return sdkOpts
 }
@@ -447,8 +454,10 @@ func RunAgent(
 			attribute.String("agent.permission_mode", agentCfg.PermissionMode),
 		)
 	}
-	if opts.SessionID != "" {
-		span.SetAttributes(attribute.String("agent.session_id", opts.SessionID))
+	if opts.ResumeSessionID != "" {
+		span.SetAttributes(attribute.String("agent.session_id", opts.ResumeSessionID))
+	} else if opts.CustomSessionID != "" {
+		span.SetAttributes(attribute.String("agent.session_id", opts.CustomSessionID))
 	}
 
 	systemPrompt, err := resolveSystemPrompt(agentCfg, opts)
