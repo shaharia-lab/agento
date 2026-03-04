@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
@@ -308,11 +310,15 @@ func (s *Server) prepareSSEResponse(
 }
 
 func (s *Server) commitMessage(
-	r *http.Request, chatSession *storage.ChatSession,
+	_ *http.Request, chatSession *storage.ChatSession,
 	state streamState, isFirstMessage bool, id string,
 ) {
+	// Use a fresh context so the commit always succeeds even if the SSE
+	// connection was canceled (e.g. client disconnected mid-stream).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	if err := s.chatSvc.CommitMessage(
-		r.Context(), chatSession,
+		ctx, chatSession,
 		state.assistantText, state.sdkSessionID,
 		isFirstMessage, state.blocks,
 		state.tokens.toUsageStats(),
