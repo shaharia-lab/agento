@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { X, Github, ExternalLink, Tag, AlertCircle, BookOpen } from 'lucide-react'
+import { X, Github, ExternalLink, Tag, AlertCircle, BookOpen, Star } from 'lucide-react'
 import { versionApi } from '@/lib/api'
 import type { UpdateCheckResponse } from '@/types'
 
@@ -96,6 +96,20 @@ export default function AboutModal({ onClose }: AboutModalProps) {
               )}
             </div>
           </div>
+
+          {/* Star CTA */}
+          <a
+            href="https://github.com/shaharia-lab/agento"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-3 rounded-lg px-4 py-3 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors group"
+          >
+            <Star className="h-4 w-4 text-amber-500 shrink-0 group-hover:fill-amber-500 transition-all" />
+            <span className="flex-1 text-sm text-amber-800 dark:text-amber-300 font-medium">
+              Star on GitHub to support this project
+            </span>
+            <ExternalLink className="h-3.5 w-3.5 text-amber-400 dark:text-amber-600 shrink-0" />
+          </a>
 
           <div className="border-t border-zinc-100 dark:border-zinc-800" />
 
