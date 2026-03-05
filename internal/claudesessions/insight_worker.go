@@ -14,29 +14,39 @@ const (
 	// sessions that need (re-)processing due to a processor version bump.
 	insightWorkerRescanInterval = 5 * time.Minute
 
-	// maxConcurrentInsightWorkers limits the number of simultaneously running
-	// processor pipeline calls so that insight processing cannot saturate all
-	// available file-descriptor and CPU resources.
-	maxConcurrentInsightWorkers = 4
+	// insightWorkerPoolSize is the fixed number of goroutines in the worker
+	// pool. This bounds both concurrency and goroutine count regardless of how
+	// many sessions are discovered at once.
+	insightWorkerPoolSize = 4
+
+	// insightWorkerQueueSize is the capacity of the work channel. Items
+	// submitted when the channel is full are dropped with a warning log.
+	insightWorkerQueueSize = 100
 )
 
-// InsightWorker is a background goroutine that subscribes to session lifecycle
-// events on the event bus and runs the processor pipeline for any new or changed
-// session. It also performs a periodic sweep to catch sessions that were scanned
-// before a processor version bump.
+// workItem is a single unit of work for the InsightWorker pool.
+type workItem struct {
+	sessionID string
+	filePath  string
+}
+
+// InsightWorker subscribes to session lifecycle events and runs the processor
+// pipeline for new or changed sessions. A fixed pool of worker goroutines
+// reads from a bounded work channel so that discovering thousands of sessions
+// at once does not fan out thousands of goroutines.
 //
-// The event-bus subscriber returns immediately (non-blocking) by dispatching
-// each processOne call into its own goroutine. A shared semaphore limits
-// concurrency, and a sync.Map deduplicates in-flight sessions so the same
-// session is never processed twice simultaneously.
+// Lifecycle:
+//  1. Call Start(ctx) to launch the pool and subscribe to the event bus.
+//  2. Cancel ctx to signal shutdown (stops event delivery and exits workers).
+//  3. Call Wait() after ctx is canceled to drain in-flight work.
 type InsightWorker struct {
 	store    InsightStorer
 	registry *ProcessorRegistry
 	bus      eventbus.EventBus
 	logger   *slog.Logger
 
-	sem      chan struct{} // bounded concurrency — capacity maxConcurrentInsightWorkers
-	inFlight sync.Map      // set of sessionIDs currently being processed (value: struct{})
+	work     chan workItem // bounded queue feeding the worker pool
+	inFlight sync.Map
 	wg       sync.WaitGroup
 }
 
@@ -52,16 +62,13 @@ func NewInsightWorker(
 		registry: registry,
 		bus:      bus,
 		logger:   logger,
-		sem:      make(chan struct{}, maxConcurrentInsightWorkers),
+		work:     make(chan workItem, insightWorkerQueueSize),
 	}
 }
 
-// Start registers the worker as an event bus listener and launches the
-// background re-scan goroutine. It returns immediately; cancel ctx to stop.
-// Call Wait after the context is canceled to drain all in-flight processing.
-//
-// The event-bus subscriber returns immediately by dispatching each session into
-// a goroutine. This avoids blocking the shared event bus worker pool on file I/O.
+// Start registers the event bus subscriber, launches the fixed worker pool,
+// and starts the background re-scan goroutine. It returns immediately.
+// Cancel the context to initiate shutdown, then call Wait to drain workers.
 func (w *InsightWorker) Start(ctx context.Context) {
 	w.bus.Subscribe(func(ev eventbus.Event) {
 		if ev.Type != eventbus.EventSessionDiscovered && ev.Type != eventbus.EventSessionUpdated {
@@ -72,13 +79,17 @@ func (w *InsightWorker) Start(ctx context.Context) {
 		if sessionID == "" || filePath == "" {
 			return
 		}
-		// Dispatch immediately so the event bus worker is not blocked.
+		// Non-blocking enqueue: the subscriber must not block the bus worker pool.
+		w.enqueue(sessionID, filePath)
+	})
+
+	for range insightWorkerPoolSize {
 		w.wg.Add(1)
 		go func() {
 			defer w.wg.Done()
-			w.tryProcess(ctx, sessionID, filePath)
+			w.runWorker(ctx)
 		}()
-	})
+	}
 
 	w.wg.Add(1)
 	go func() {
@@ -87,30 +98,41 @@ func (w *InsightWorker) Start(ctx context.Context) {
 	}()
 }
 
-// Wait blocks until all in-flight processing goroutines have finished.
-// Typically called after the context passed to Start is canceled.
+// Wait blocks until all worker goroutines have exited.
+// Call after canceling the context passed to Start.
 func (w *InsightWorker) Wait() {
 	w.wg.Wait()
 }
 
-// tryProcess acquires a semaphore slot and deduplicates in-flight sessions before
-// calling processOne. If the session is already being processed, or if the
-// semaphore is full and the context is canceled, the call is a no-op.
+// enqueue submits a session to the work channel in a non-blocking manner.
+// If the channel is full the item is dropped and a warning is logged.
+func (w *InsightWorker) enqueue(sessionID, filePath string) {
+	select {
+	case w.work <- workItem{sessionID: sessionID, filePath: filePath}:
+	default:
+		w.logger.Warn("insight_worker: work queue full, dropping session", "session_id", sessionID)
+	}
+}
+
+// runWorker reads from the work channel until the context is canceled.
+func (w *InsightWorker) runWorker(ctx context.Context) {
+	for {
+		select {
+		case item := <-w.work:
+			w.tryProcess(ctx, item.sessionID, item.filePath)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// tryProcess deduplicates in-flight sessions before calling processOne.
+// If the session is already being processed, the call is a no-op.
 func (w *InsightWorker) tryProcess(ctx context.Context, sessionID, filePath string) {
-	// Deduplicate: if the session is already in-flight, skip.
 	if _, loaded := w.inFlight.LoadOrStore(sessionID, struct{}{}); loaded {
 		return
 	}
 	defer w.inFlight.Delete(sessionID)
-
-	// Acquire a semaphore slot (blocks until one is available or ctx is done).
-	select {
-	case w.sem <- struct{}{}:
-	case <-ctx.Done():
-		return
-	}
-	defer func() { <-w.sem }()
-
 	w.processOne(ctx, sessionID, filePath)
 }
 
@@ -131,7 +153,6 @@ func (w *InsightWorker) processOne(ctx context.Context, sessionID, filePath stri
 // rescanLoop runs at startup and then every insightWorkerRescanInterval to
 // re-process sessions whose insight row has an outdated processor_version.
 func (w *InsightWorker) rescanLoop(ctx context.Context) {
-	// Run immediately on startup.
 	w.rescanOutdated(ctx)
 
 	ticker := time.NewTicker(insightWorkerRescanInterval)
@@ -147,8 +168,8 @@ func (w *InsightWorker) rescanLoop(ctx context.Context) {
 }
 
 // rescanOutdated finds all sessions whose insight is missing or outdated and
-// re-processes them concurrently via tryProcess. The file path for each session
-// is retrieved from the cache DB to avoid a filesystem walk.
+// enqueues them for processing. The file path is retrieved from the cache DB,
+// avoiding a filesystem walk.
 func (w *InsightWorker) rescanOutdated(ctx context.Context) {
 	sessions, err := w.store.NeedsProcessing(ctx, CurrentProcessorVersion)
 	if err != nil {
@@ -167,13 +188,6 @@ func (w *InsightWorker) rescanOutdated(ctx context.Context) {
 		if s.FilePath == "" {
 			continue
 		}
-		// Dispatch each session concurrently so the rescan loop is not serialized
-		// behind the semaphore. tryProcess handles deduplication with in-flight sessions
-		// triggered by the event bus.
-		w.wg.Add(1)
-		go func(sessionID, filePath string) {
-			defer w.wg.Done()
-			w.tryProcess(ctx, sessionID, filePath)
-		}(s.SessionID, s.FilePath)
+		w.enqueue(s.SessionID, s.FilePath)
 	}
 }

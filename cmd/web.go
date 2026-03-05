@@ -252,12 +252,12 @@ func buildWebServer(
 	}
 	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr)
 
-	// On shutdown: drain the insight worker (wait for in-flight processing to
-	// finish), then close the event bus so no further events are dispatched.
+	// On shutdown: close the event bus first so no further events are enqueued,
+	// then wait for in-flight worker goroutines to finish.
 	go func() {
 		<-ctx.Done()
-		insightWorker.Wait()
 		bus.Close()
+		insightWorker.Wait()
 	}()
 
 	return srv, monitoringMgr, nil
