@@ -56,6 +56,15 @@ function fmtUsd(n: number): string {
   return usdFmt.format(n)
 }
 
+// Tooltip style consistent with light + dark mode
+const TOOLTIP_STYLE = {
+  fontSize: 12,
+  borderRadius: 6,
+  backgroundColor: 'var(--color-tooltip-bg, #ffffff)',
+  border: '1px solid var(--color-tooltip-border, #e4e4e7)',
+  color: 'var(--color-tooltip-text, #18181b)',
+}
+
 // ─── Autonomy Score Gauge ─────────────────────────────────────────────────────
 
 function AutonomyGauge({ score }: Readonly<{ score: number }>) {
@@ -63,7 +72,11 @@ function AutonomyGauge({ score }: Readonly<{ score: number }>) {
   const color = clamped >= 70 ? '#22c55e' : clamped >= 40 ? '#f59e0b' : '#ef4444'
   const label = clamped >= 70 ? 'High' : clamped >= 40 ? 'Medium' : 'Low'
 
-  const data = [{ name: 'Autonomy', value: clamped, fill: color }]
+  // Use a neutral that reads well in both light (#d4d4d8 = zinc-300) and dark mode
+  const data = [
+    { value: 100, fill: '#d4d4d8' },
+    { name: 'Autonomy', value: clamped, fill: color },
+  ]
 
   return (
     <ChartCard title="Avg. Autonomy Score">
@@ -77,7 +90,7 @@ function AutonomyGauge({ score }: Readonly<{ score: number }>) {
               outerRadius={90}
               startAngle={180}
               endAngle={0}
-              data={[{ value: 100, fill: '#27272a' }, ...data]}
+              data={data}
             >
               <RadialBar dataKey="value" cornerRadius={4} background={false} />
             </RadialBarChart>
@@ -113,6 +126,10 @@ const TOOL_COLORS = [
   '#84cc16',
 ]
 
+function truncateTool(name: string): string {
+  return name.length > 22 ? `${name.slice(0, 20)}…` : name
+}
+
 function TopToolsChart({ tools }: Readonly<{ tools: ToolUsageStat[] }>) {
   const top = tools.slice(0, 10)
   return (
@@ -132,11 +149,12 @@ function TopToolsChart({ tools }: Readonly<{ tools: ToolUsageStat[] }>) {
             tick={{ fontSize: 11 }}
             tickLine={false}
             axisLine={false}
-            width={100}
+            width={160}
+            tickFormatter={truncateTool}
           />
           <Tooltip
             formatter={(v: number | undefined) => [(v ?? 0).toLocaleString(), 'Calls']}
-            contentStyle={{ fontSize: 12, borderRadius: 6 }}
+            contentStyle={TOOLTIP_STYLE}
           />
           <Bar dataKey="count" radius={[0, 3, 3, 0]}>
             {top.map((_, i) => (
@@ -155,7 +173,7 @@ function CacheEfficiencyPie({ hitRate }: Readonly<{ hitRate: number }>) {
   const clamped = Math.max(0, Math.min(1, hitRate))
   const data = [
     { name: 'Cache Hit', value: Math.round(clamped * 100), fill: '#22c55e' },
-    { name: 'Cache Miss', value: Math.round((1 - clamped) * 100), fill: '#27272a' },
+    { name: 'Cache Miss', value: Math.round((1 - clamped) * 100), fill: '#d4d4d8' },
   ]
   return (
     <ChartCard title="Avg. Cache Hit Rate">
@@ -179,7 +197,7 @@ function CacheEfficiencyPie({ hitRate }: Readonly<{ hitRate: number }>) {
           <Legend wrapperStyle={{ fontSize: 12 }} />
           <Tooltip
             formatter={(v: number | undefined) => [`${v ?? 0}%`]}
-            contentStyle={{ fontSize: 12, borderRadius: 6 }}
+            contentStyle={TOOLTIP_STYLE}
           />
         </PieChart>
       </ResponsiveContainer>
@@ -217,7 +235,7 @@ function ErrorSessionsPie({ withErrors, total }: Readonly<{ withErrors: number; 
           <Legend wrapperStyle={{ fontSize: 12 }} />
           <Tooltip
             formatter={(v: number | undefined) => [(v ?? 0).toLocaleString(), 'Sessions']}
-            contentStyle={{ fontSize: 12, borderRadius: 6 }}
+            contentStyle={TOOLTIP_STYLE}
           />
         </PieChart>
       </ResponsiveContainer>
@@ -233,10 +251,16 @@ function ProductivityCard({ summary }: Readonly<{ summary: InsightSummary }>) {
     summary.total_sessions > 0
       ? (summary.total_sessions - summary.sessions_with_errors) / summary.total_sessions
       : 1
-  const score = Math.round(
-    summary.avg_autonomy_score * 0.5 +
-      summary.avg_cache_hit_rate * 100 * 0.3 +
-      errorFreeRatio * 100 * 0.2,
+  const score = Math.min(
+    100,
+    Math.max(
+      0,
+      Math.round(
+        summary.avg_autonomy_score * 0.5 +
+          summary.avg_cache_hit_rate * 100 * 0.3 +
+          errorFreeRatio * 100 * 0.2,
+      ),
+    ),
   )
   const color =
     score >= 70
@@ -327,7 +351,7 @@ export default function InsightsPage() {
         <div>
           <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Insights</h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            {summary
+            {summary && summary.total_sessions > 0
               ? `${summary.total_sessions.toLocaleString()} session${summary.total_sessions === 1 ? '' : 's'} analysed`
               : 'Productivity & efficiency metrics for your Claude Code sessions'}
           </p>
@@ -345,7 +369,7 @@ export default function InsightsPage() {
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-5">
         {error && (
-          <div className="rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
+          <div className="rounded-md border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950 px-4 py-2.5 text-sm text-red-700 dark:text-red-300">
             {error}
           </div>
         )}
@@ -354,7 +378,7 @@ export default function InsightsPage() {
           <div className="flex items-center justify-center py-20">
             <p className="text-sm text-zinc-400">Analysing sessions…</p>
           </div>
-        ) : summary ? (
+        ) : summary && summary.total_sessions > 0 ? (
           <>
             {/* Productivity Score */}
             <ProductivityCard summary={summary} />
@@ -420,19 +444,14 @@ export default function InsightsPage() {
               <KPICard
                 icon={Layers}
                 label="Error-Free Rate"
-                value={
-                  summary.total_sessions > 0
-                    ? fmtPct(
-                        (summary.total_sessions - summary.sessions_with_errors) /
-                          summary.total_sessions,
-                      )
-                    : 'N/A'
-                }
+                value={fmtPct(
+                  (summary.total_sessions - summary.sessions_with_errors) / summary.total_sessions,
+                )}
                 color="text-emerald-600 dark:text-emerald-400"
               />
             </div>
 
-            {/* Autonomy Gauge + Cache Pie */}
+            {/* Autonomy Gauge + Cache Pie + Error Pie */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
               <AutonomyGauge score={summary.avg_autonomy_score} />
               <CacheEfficiencyPie hitRate={summary.avg_cache_hit_rate} />
@@ -447,14 +466,22 @@ export default function InsightsPage() {
               <TopToolsChart tools={summary.top_tools} />
             )}
 
-            {/* Insights footer note */}
+            {/* Footer note */}
             <p className="text-xs text-zinc-400 dark:text-zinc-500 text-center pb-2">
               Insights are computed from Claude Code session JSONL files and updated incrementally
               in the background. Cost estimates use approximate pricing and may not reflect current
               Anthropic rates.
             </p>
           </>
-        ) : null}
+        ) : (
+          <div className="flex flex-col items-center justify-center py-20 gap-2">
+            <p className="text-sm text-zinc-500 dark:text-zinc-400">No sessions processed yet.</p>
+            <p className="text-xs text-zinc-400 dark:text-zinc-500 text-center max-w-sm">
+              Session insights will appear here once Claude Code sessions are scanned and processed
+              in the background.
+            </p>
+          </div>
+        )}
       </div>
     </div>
   )

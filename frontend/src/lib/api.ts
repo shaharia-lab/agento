@@ -34,7 +34,6 @@ import type {
   MonitoringConfig,
   MonitoringResponse,
   MonitoringTestResult,
-  SessionInsight,
   InsightSummary,
 } from '../types'
 
@@ -607,10 +606,6 @@ export const analyticsApi = {
 // ── Session Insights ─────────────────────────────────────────────────────────
 
 export const insightsApi = {
-  /** Fetch the insight record for a single session. */
-  getSession: (sessionId: string): Promise<SessionInsight> =>
-    request<SessionInsight>(`/claude-sessions/${sessionId}/insights`),
-
   /** Aggregate insights across multiple (or all) sessions. */
   getSummary: (ids?: string[]): Promise<InsightSummary> => {
     const qs = new URLSearchParams()
