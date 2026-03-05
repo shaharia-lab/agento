@@ -708,7 +708,12 @@ export default function InsightsPage() {
       {/* Header */}
       <div className="flex items-center justify-between border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 py-4 shrink-0">
         <div>
-          <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Insights</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-100">Insights</h1>
+            <span className="text-[10px] font-semibold uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400">
+              Experimental
+            </span>
+          </div>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{subtitle}</p>
         </div>
         <button
@@ -737,6 +742,23 @@ export default function InsightsPage() {
             setPreset('custom')
           }}
         />
+      </div>
+
+      {/* Experimental notice */}
+      <div className="px-4 sm:px-6 py-2.5 border-b border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-950/30 shrink-0">
+        <p className="text-xs text-amber-800 dark:text-amber-300">
+          <span className="font-semibold">Experimental:</span> These metrics are based on heuristics
+          and may not fully reflect your actual productivity. Formulas and weights will be refined
+          in upcoming releases.{' '}
+          <a
+            href="https://github.com/shaharia-lab/agento/discussions/110"
+            target="_blank"
+            rel="noreferrer"
+            className="underline underline-offset-2 hover:text-amber-900 dark:hover:text-amber-200"
+          >
+            Share your feedback →
+          </a>
+        </p>
       </div>
 
       {/* Content */}

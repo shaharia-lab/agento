@@ -89,7 +89,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
   const analyticsNavItems = [
     { to: '/analytics/token-usage', icon: BarChart2, label: 'Token Usage' },
     { to: '/analytics/general-usage', icon: LayoutDashboard, label: 'General Usage' },
-    { to: '/analytics/insights', icon: Lightbulb, label: 'Insights' },
+    { to: '/analytics/insights', icon: Lightbulb, label: 'Insights', experimental: true },
   ]
 
   const handleNavClick = () => {
@@ -306,9 +306,9 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
             <div className="mx-2 mb-2 border-t border-zinc-200 dark:border-zinc-700/50" />
           )}
           <div className="space-y-0.5">
-            {analyticsNavItems.map(({ to, icon: Icon, label }) =>
+            {analyticsNavItems.map(({ to, icon: Icon, label, experimental }) =>
               !isMobile && collapsed ? (
-                <Tooltip key={to} content={label}>
+                <Tooltip key={to} content={experimental ? `${label} (Experimental)` : label}>
                   <NavLink
                     to={to}
                     className={({ isActive }) =>
@@ -339,6 +339,11 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
                 >
                   <Icon className="h-4 w-4 shrink-0" />
                   <span>{label}</span>
+                  {experimental && (
+                    <span className="ml-auto text-[9px] font-semibold uppercase tracking-wide px-1 py-0.5 rounded bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-400">
+                      exp
+                    </span>
+                  )}
                 </NavLink>
               ),
             )}
