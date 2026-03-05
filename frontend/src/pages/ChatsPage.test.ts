@@ -23,7 +23,9 @@ function filterSessions(
  * Derives unique working directories from sessions, matching ChatsPage logic.
  */
 function uniqueWorkingDirs(sessions: ChatSession[]): string[] {
-  return [...new Set(sessions.map(s => s.working_directory).filter(Boolean))].sort()
+  return [...new Set(sessions.map(s => s.working_directory).filter(Boolean))].sort((a, b) =>
+    a.localeCompare(b),
+  )
 }
 
 function makeSession(overrides: Partial<ChatSession> = {}): ChatSession {

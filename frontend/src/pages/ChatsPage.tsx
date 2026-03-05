@@ -224,8 +224,22 @@ export default function ChatsPage() {
 
   const getAgentName = (slug: string) => agents.find(a => a.slug === slug)?.name ?? slug
 
+  const applyFavorite = (sessionId: string, value: boolean) => (prev: ChatSession[]) =>
+    prev.map(s => (s.id === sessionId ? { ...s, is_favorite: value } : s))
+
+  const handleToggleFavorite = (sessionId: string, isFavorite: boolean) => {
+    const next = !isFavorite
+    setSessions(applyFavorite(sessionId, next))
+    chatsApi
+      .toggleFavorite(sessionId, next)
+      .catch(() => setSessions(applyFavorite(sessionId, !next)))
+  }
+
   const uniqueWorkingDirs = useMemo(
-    () => [...new Set(sessions.map(s => s.working_directory).filter(Boolean))].sort(),
+    () =>
+      [...new Set(sessions.map(s => s.working_directory).filter(Boolean))].sort((a, b) =>
+        a.localeCompare(b),
+      ),
     [sessions],
   )
 
@@ -302,17 +316,7 @@ export default function ChatsPage() {
               onCheck={() => toggleCheck(session.id)}
               onClick={() => navigate(`/chats/${session.id}`)}
               onDelete={() => deleteSession(session.id)}
-              onToggleFavorite={() => {
-                const next = !session.is_favorite
-                setSessions(prev =>
-                  prev.map(s => (s.id === session.id ? { ...s, is_favorite: next } : s)),
-                )
-                chatsApi.toggleFavorite(session.id, next).catch(() => {
-                  setSessions(prev =>
-                    prev.map(s => (s.id === session.id ? { ...s, is_favorite: !next } : s)),
-                  )
-                })
-              }}
+              onToggleFavorite={() => handleToggleFavorite(session.id, !!session.is_favorite)}
             />
           ))}
         </div>

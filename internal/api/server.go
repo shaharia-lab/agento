@@ -22,6 +22,7 @@ const (
 // Route pattern constants to avoid duplication.
 const (
 	routeChatsBase       = "/chats"
+	routeChatByID        = "/chats/{id}"
 	routeAgentBySlug     = "/agents/{slug}"
 	routeIntegrationByID = "/integrations/{id}"
 	routeProfileByID     = "/claude-settings/profiles/{id}"
@@ -93,9 +94,9 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get(routeChatsBase, s.handleListChats)
 	r.Post(routeChatsBase, s.handleCreateChat)
 	r.Delete(routeChatsBase, s.handleBulkDeleteChats)
-	r.Get("/chats/{id}", s.handleGetChat)
-	r.Patch("/chats/{id}", s.handleUpdateChat)
-	r.Delete("/chats/{id}", s.handleDeleteChat)
+	r.Get(routeChatByID, s.handleGetChat)
+	r.Patch(routeChatByID, s.handleUpdateChat)
+	r.Delete(routeChatByID, s.handleDeleteChat)
 	r.Post("/chats/{id}/messages", s.handleSendMessage)
 	r.Post("/chats/{id}/input", s.handleProvideInput)
 	r.Post("/chats/{id}/permission", s.handlePermissionResponse)

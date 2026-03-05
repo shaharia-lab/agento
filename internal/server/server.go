@@ -23,7 +23,10 @@ import (
 	"github.com/shaharia-lab/agento/internal/telemetry"
 )
 
-const contentTypeJSON = "application/json"
+const (
+	contentTypeJSON   = "application/json"
+	headerContentType = "Content-Type"
+)
 
 // Server is the HTTP server for the agents platform.
 type Server struct {
@@ -56,7 +59,7 @@ func New(
 
 	// Health check
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", contentTypeJSON)
+		w.Header().Set(headerContentType, contentTypeJSON)
 		w.WriteHeader(http.StatusOK)
 		if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
 			return
@@ -131,7 +134,7 @@ func (s *Server) corsMiddleware() func(http.Handler) http.Handler {
 	return cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"http://localhost:5173"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowedHeaders:   []string{"Accept", "Authorization", headerContentType},
 		AllowCredentials: false,
 		MaxAge:           300,
 	})
@@ -147,7 +150,7 @@ func (s *Server) metricsHandler() http.HandlerFunc {
 			promHandler.ServeHTTP(w, r)
 			return
 		}
-		w.Header().Set("Content-Type", contentTypeJSON)
+		w.Header().Set(headerContentType, contentTypeJSON)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		if _, err := w.Write([]byte(
 			`{"error":"metrics endpoint is disabled; set OTEL_METRICS_EXPORTER=prometheus to enable"}`,

@@ -42,7 +42,7 @@ import (
 
 // noopCleanup is a no-op cleanup function returned on early-exit error paths
 // where no resources have been acquired yet.
-var noopCleanup = func() {} //nolint:gochecknoglobals
+var noopCleanup = func() { /* no resources acquired yet, nothing to clean up */ } //nolint:gochecknoglobals
 
 // NewWebCmd returns the "web" subcommand that starts the HTTP server.
 func NewWebCmd(cfg *config.AppConfig) *cobra.Command {

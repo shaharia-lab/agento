@@ -160,7 +160,7 @@ func (c *Cache) GetCustomTitle(sessionID string) string {
 		`SELECT custom_title FROM claude_session_cache WHERE session_id = ?`,
 		sessionID,
 	)
-	if err := row.Scan(&title); err != nil {
+	if row.Scan(&title) != nil {
 		return ""
 	}
 	return title
@@ -187,7 +187,7 @@ func (c *Cache) GetFavorite(sessionID string) bool {
 		`SELECT is_favorite FROM claude_session_cache WHERE session_id = ?`,
 		sessionID,
 	)
-	if err := row.Scan(&v); err != nil {
+	if row.Scan(&v) != nil {
 		return false
 	}
 	return v

@@ -57,6 +57,17 @@ export default function ClaudeSessionsPage() {
     }
   }
 
+  const applyFavorite = (sessionId: string, value: boolean) => (prev: ClaudeSessionSummary[]) =>
+    prev.map(s => (s.session_id === sessionId ? { ...s, is_favorite: value } : s))
+
+  const handleToggleFavorite = (sessionId: string, isFavorite: boolean) => {
+    const next = !isFavorite
+    setSessions(applyFavorite(sessionId, next))
+    claudeSessionsApi
+      .toggleFavorite(sessionId, next)
+      .catch(() => setSessions(applyFavorite(sessionId, !next)))
+  }
+
   const hasFavorites = sessions.some(s => s.is_favorite)
 
   const filtered = useMemo(() => {
@@ -115,21 +126,7 @@ export default function ClaudeSessionsPage() {
             session={session}
             onClick={() => navigate(`/claude-sessions/${session.session_id}`)}
             onJourney={() => navigate(`/claude-sessions/${session.session_id}/journey`)}
-            onToggleFavorite={() => {
-              const next = !session.is_favorite
-              setSessions(prev =>
-                prev.map(s =>
-                  s.session_id === session.session_id ? { ...s, is_favorite: next } : s,
-                ),
-              )
-              claudeSessionsApi.toggleFavorite(session.session_id, next).catch(() => {
-                setSessions(prev =>
-                  prev.map(s =>
-                    s.session_id === session.session_id ? { ...s, is_favorite: !next } : s,
-                  ),
-                )
-              })
-            }}
+            onToggleFavorite={() => handleToggleFavorite(session.session_id, !!session.is_favorite)}
           />
         ))}
       </div>

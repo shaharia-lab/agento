@@ -160,7 +160,7 @@ func (s *Server) handleUpdateChat(w http.ResponseWriter, r *http.Request) {
 		Title      *string `json:"title"`
 		IsFavorite *bool   `json:"is_favorite"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if json.NewDecoder(r.Body).Decode(&req) != nil {
 		s.writeError(w, http.StatusBadRequest, errInvalidJSONBody)
 		return
 	}
