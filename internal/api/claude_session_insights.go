@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -35,14 +36,16 @@ func (s *Server) handleGetClaudeSessionInsights(w http.ResponseWriter, r *http.R
 }
 
 // handleGetClaudeSessionInsightsSummary returns aggregated insight statistics
-// across all sessions, optionally filtered by session IDs. Scalar aggregations
-// are computed in SQL to avoid loading all insight rows into memory.
+// across all sessions, optionally filtered by session IDs and/or date range.
+// Scalar aggregations are computed in SQL to avoid loading all rows into memory.
 //
 //	GET /api/claude-sessions/insights/summary
 //
 // Query params:
 //
-//	ids  comma-separated list of session IDs to include (empty = all sessions)
+//	ids   comma-separated list of session IDs to include (empty = all sessions)
+//	from  inclusive start date (YYYY-MM-DD); filters by session start_time
+//	to    inclusive end date   (YYYY-MM-DD); filters by session start_time
 func (s *Server) handleGetClaudeSessionInsightsSummary(w http.ResponseWriter, r *http.Request) {
 	var sessionIDs []string
 	if raw := r.URL.Query().Get("ids"); raw != "" {
@@ -53,7 +56,19 @@ func (s *Server) handleGetClaudeSessionInsightsSummary(w http.ResponseWriter, r 
 		}
 	}
 
-	agg, err := s.insightStore.GetSummary(r.Context(), sessionIDs)
+	var from, to *time.Time
+	if raw := r.URL.Query().Get("from"); raw != "" {
+		if t, err := time.Parse("2006-01-02", raw); err == nil {
+			from = &t
+		}
+	}
+	if raw := r.URL.Query().Get("to"); raw != "" {
+		if t, err := time.Parse("2006-01-02", raw); err == nil {
+			to = &t
+		}
+	}
+
+	agg, err := s.insightStore.GetSummary(r.Context(), sessionIDs, from, to)
 	if err != nil {
 		s.logger.Error("failed to get session insights summary", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "failed to retrieve insights summary")

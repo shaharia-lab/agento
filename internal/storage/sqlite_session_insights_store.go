@@ -199,14 +199,16 @@ type InsightAggregateSummary struct {
 // GetAggregateSummary computes aggregated insight statistics using SQL aggregation
 // for scalars and fetches only the tool_breakdown JSON column for top-tool computation.
 // If sessionIDs is non-empty, results are filtered to those sessions.
+// from and to are inclusive date boundaries applied against claude_session_cache.start_time;
+// nil means unbounded.
 func (s *SQLiteSessionInsightsStore) GetAggregateSummary(
-	ctx context.Context, sessionIDs []string,
+	ctx context.Context, sessionIDs []string, from, to *time.Time,
 ) (*InsightAggregateSummary, error) {
 	ctx, end := withStorageSpan(ctx, "get_aggregate_summary", "session_insights")
 	var err error
 	defer func() { end(err) }()
 
-	where, args := insightWhereClause(sessionIDs)
+	where, args := insightWhereClause(sessionIDs, from, to)
 	summary, err := s.queryAggregateScalars(ctx, where, args)
 	if err != nil || summary.TotalSessions == 0 {
 		return summary, err
@@ -216,20 +218,56 @@ func (s *SQLiteSessionInsightsStore) GetAggregateSummary(
 	return summary, err
 }
 
-// insightWhereClause returns a WHERE clause and argument slice for filtering by session IDs.
-// Returns empty strings/nil when sessionIDs is empty (matches all rows).
-func insightWhereClause(sessionIDs []string) (string, []any) {
-	if len(sessionIDs) == 0 {
+// insightWhereClause builds a WHERE clause that optionally filters by session ID list
+// and/or by session start_time range (via a subquery on claude_session_cache).
+// All predicates use parameterised placeholders to prevent SQL injection.
+func insightWhereClause(sessionIDs []string, from, to *time.Time) (string, []any) {
+	var clauses []string
+	var args []any
+
+	if len(sessionIDs) > 0 {
+		placeholders := make([]string, len(sessionIDs))
+		for i, id := range sessionIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		//nolint:gosec // placeholders are generated from fixed pattern, not user input
+		clauses = append(clauses, "session_id IN ("+strings.Join(placeholders, ",")+")")
+	}
+
+	if from != nil || to != nil {
+		// Use a subquery so we never JOIN and accidentally duplicate rows when a
+		// session_id appears in multiple project_path entries.
+		sub, subArgs := dateRangeSubquery(from, to)
+		clauses = append(clauses, "session_id IN ("+sub+")")
+		args = append(args, subArgs...)
+	}
+
+	if len(clauses) == 0 {
 		return "", nil
 	}
-	placeholders := make([]string, len(sessionIDs))
-	args := make([]any, len(sessionIDs))
-	for i, id := range sessionIDs {
-		placeholders[i] = "?"
-		args[i] = id
+	return " WHERE " + strings.Join(clauses, " AND "), args
+}
+
+// dateRangeSubquery returns a SELECT subquery that returns session_ids from
+// claude_session_cache whose start_time falls within [from, to] (inclusive).
+// Nil boundaries are treated as unbounded.
+func dateRangeSubquery(from, to *time.Time) (string, []any) {
+	var conds []string
+	var args []any
+	if from != nil {
+		conds = append(conds, "start_time >= ?")
+		args = append(args, from.UTC().Format(time.RFC3339))
 	}
-	//nolint:gosec // placeholders are generated from fixed pattern, not user input
-	return " WHERE session_id IN (" + strings.Join(placeholders, ",") + ")", args
+	if to != nil {
+		// Add one day so "to" is inclusive for day-level comparisons.
+		end := to.UTC().Add(24 * time.Hour)
+		conds = append(conds, "start_time < ?")
+		args = append(args, end.Format(time.RFC3339))
+	}
+	//nolint:gosec // conds are hard-coded string literals, not user input
+	sub := "SELECT DISTINCT session_id FROM claude_session_cache WHERE " + strings.Join(conds, " AND ")
+	return sub, args
 }
 
 const insightAggregateSQL = `SELECT

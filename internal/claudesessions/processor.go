@@ -117,10 +117,12 @@ type InsightStorer interface {
 	Upsert(ctx context.Context, insight *SessionInsight) error
 	Get(ctx context.Context, sessionID string) (*SessionInsight, error)
 	GetMany(ctx context.Context, sessionIDs []string) ([]*SessionInsight, error)
-	// GetSummary returns aggregated statistics across the given sessions.
+	// GetSummary returns aggregated statistics across the given sessions,
+	// optionally filtered to sessions whose start_time falls within [from, to].
 	// If sessionIDs is empty, all sessions are included. Scalar stats are
 	// computed in SQL to avoid loading all rows into memory.
-	GetSummary(ctx context.Context, sessionIDs []string) (*InsightAggregateSummary, error)
+	// from and to are inclusive date boundaries; nil means unbounded.
+	GetSummary(ctx context.Context, sessionIDs []string, from, to *time.Time) (*InsightAggregateSummary, error)
 	// NeedsProcessing returns sessions present in the scanner cache that have
 	// no insight row or whose insight has processor_version < version.
 	// The FilePath is included so callers avoid a separate filesystem walk.

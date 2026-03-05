@@ -164,7 +164,7 @@ func TestSQLiteSessionInsightsStore_GetAggregateSummary(t *testing.T) {
 	}
 
 	// All sessions (empty filter).
-	summary, err := store.GetAggregateSummary(ctx, nil)
+	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestSQLiteSessionInsightsStore_GetAggregateSummary(t *testing.T) {
 	}
 
 	// Filtered to one session.
-	filtered, err := store.GetAggregateSummary(ctx, []string{"a1"})
+	filtered, err := store.GetAggregateSummary(ctx, []string{"a1"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
