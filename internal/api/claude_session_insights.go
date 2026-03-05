@@ -58,14 +58,20 @@ func (s *Server) handleGetClaudeSessionInsightsSummary(w http.ResponseWriter, r 
 
 	var from, to *time.Time
 	if raw := r.URL.Query().Get("from"); raw != "" {
-		if t, err := time.Parse("2006-01-02", raw); err == nil {
-			from = &t
+		t, err := time.Parse("2006-01-02", raw)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, "invalid 'from' date: expected YYYY-MM-DD")
+			return
 		}
+		from = &t
 	}
 	if raw := r.URL.Query().Get("to"); raw != "" {
-		if t, err := time.Parse("2006-01-02", raw); err == nil {
-			to = &t
+		t, err := time.Parse("2006-01-02", raw)
+		if err != nil {
+			s.writeError(w, http.StatusBadRequest, "invalid 'to' date: expected YYYY-MM-DD")
+			return
 		}
+		to = &t
 	}
 
 	agg, err := s.insightStore.GetSummary(r.Context(), sessionIDs, from, to)

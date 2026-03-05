@@ -197,7 +197,7 @@ function TopToolsChart({
         <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 0 }}>
           <CartesianGrid
             strokeDasharray="3 3"
-            stroke="#27272a"
+            stroke="#d4d4d8"
             strokeOpacity={0.4}
             horizontal={false}
           />

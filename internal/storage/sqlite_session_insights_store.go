@@ -253,6 +253,9 @@ func insightWhereClause(sessionIDs []string, from, to *time.Time) (string, []any
 // claude_session_cache whose start_time falls within [from, to] (inclusive).
 // Nil boundaries are treated as unbounded.
 func dateRangeSubquery(from, to *time.Time) (string, []any) {
+	if from == nil && to == nil {
+		return "SELECT DISTINCT session_id FROM claude_session_cache", nil
+	}
 	var conds []string
 	var args []any
 	if from != nil {

@@ -182,6 +182,81 @@ func TestSQLiteSessionInsightsStore_GetAggregateSummary(t *testing.T) {
 	}
 }
 
+func TestSQLiteSessionInsightsStore_GetAggregateSummary_DateFilter(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, _, err := storage.NewSQLiteDB(dbPath, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	store := storage.NewSQLiteSessionInsightsStore(db)
+	ctx := context.Background()
+
+	// Seed three sessions at known timestamps in claude_session_cache.
+	sessions := []struct {
+		id        string
+		startTime time.Time
+	}{
+		{"old-session", time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC)},
+		{"mid-session", time.Date(2024, 3, 15, 12, 0, 0, 0, time.UTC)},
+		{"new-session", time.Date(2024, 6, 20, 12, 0, 0, 0, time.UTC)},
+	}
+	for _, s := range sessions {
+		_, err := db.ExecContext(ctx, `
+			INSERT INTO claude_session_cache (
+				session_id, project_path, file_path, file_mtime, start_time, last_activity
+			) VALUES (?, '/proj', '/proj/file.jsonl', ?, ?, ?)`,
+			s.id, s.startTime, s.startTime, s.startTime,
+		)
+		if err != nil {
+			t.Fatalf("inserting cache row for %s: %v", s.id, err)
+		}
+		if err := store.Upsert(ctx, sampleRecord(s.id)); err != nil {
+			t.Fatalf("Upsert %s: %v", s.id, err)
+		}
+	}
+
+	// Filter with from only — should return mid and new sessions.
+	from := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
+	summary, err := store.GetAggregateSummary(ctx, nil, &from, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalSessions != 2 {
+		t.Errorf("from-only filter: expected TotalSessions=2, got %d", summary.TotalSessions)
+	}
+
+	// Filter with from and to — should return only mid-session.
+	to := time.Date(2024, 4, 1, 0, 0, 0, 0, time.UTC)
+	summary, err = store.GetAggregateSummary(ctx, nil, &from, &to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalSessions != 1 {
+		t.Errorf("from+to filter: expected TotalSessions=1, got %d", summary.TotalSessions)
+	}
+
+	// Filter with to only — should return only old and mid sessions.
+	summary, err = store.GetAggregateSummary(ctx, nil, nil, &to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalSessions != 2 {
+		t.Errorf("to-only filter: expected TotalSessions=2, got %d", summary.TotalSessions)
+	}
+
+	// No sessions in range — should return zero count.
+	future := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	summary, err = store.GetAggregateSummary(ctx, nil, &future, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalSessions != 0 {
+		t.Errorf("empty range filter: expected TotalSessions=0, got %d", summary.TotalSessions)
+	}
+}
+
 func TestSQLiteSessionInsightsStore_NeedsProcessing(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	db, _, err := storage.NewSQLiteDB(dbPath, slog.Default())
