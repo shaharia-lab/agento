@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/storage"
@@ -35,23 +36,50 @@ func (a *insightStoreAdapter) Get(ctx context.Context, sessionID string) (*claud
 func (a *insightStoreAdapter) GetMany(
 	ctx context.Context, sessionIDs []string,
 ) ([]*claudesessions.SessionInsight, error) {
-	var records []*storage.InsightRecord
-	var err error
-
 	if len(sessionIDs) == 0 {
-		records, err = a.store.GetAll(ctx)
-	} else {
-		records, err = a.store.GetMany(ctx, sessionIDs)
+		return nil, nil
 	}
+	records, err := a.store.GetMany(ctx, sessionIDs)
 	if err != nil {
 		return nil, err
 	}
-
 	results := make([]*claudesessions.SessionInsight, len(records))
 	for i, r := range records {
 		results[i] = fromInsightRecord(r)
 	}
 	return results, nil
+}
+
+func (a *insightStoreAdapter) GetSummary(
+	ctx context.Context, sessionIDs []string,
+) (*claudesessions.InsightAggregateSummary, error) {
+	raw, err := a.store.GetAggregateSummary(ctx, sessionIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	// Aggregate tool breakdowns from the per-session JSON strings.
+	toolTotals := make(map[string]int)
+	for _, tbJSON := range raw.ToolBreakdowns {
+		var breakdown map[string]int
+		if jsonErr := json.Unmarshal([]byte(tbJSON), &breakdown); jsonErr == nil {
+			for tool, count := range breakdown {
+				toolTotals[tool] += count
+			}
+		}
+	}
+
+	return &claudesessions.InsightAggregateSummary{
+		TotalSessions:        raw.TotalSessions,
+		AvgAutonomyScore:     raw.AvgAutonomyScore,
+		AvgTurnCount:         raw.AvgTurnCount,
+		AvgToolCallsTotal:    raw.AvgToolCallsTotal,
+		TotalCostEstimateUSD: raw.TotalCostEstimateUSD,
+		AvgCacheHitRate:      raw.AvgCacheHitRate,
+		AvgTotalDurationMs:   raw.AvgTotalDurationMs,
+		SessionsWithErrors:   raw.SessionsWithErrors,
+		TopToolTotals:        toolTotals,
+	}, nil
 }
 
 func (a *insightStoreAdapter) NeedsProcessing(ctx context.Context, version int) ([]string, error) {

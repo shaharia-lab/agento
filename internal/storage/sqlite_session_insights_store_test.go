@@ -153,7 +153,7 @@ func TestSQLiteSessionInsightsStore_GetManyEmpty(t *testing.T) {
 	}
 }
 
-func TestSQLiteSessionInsightsStore_GetAll(t *testing.T) {
+func TestSQLiteSessionInsightsStore_GetAggregateSummary(t *testing.T) {
 	store := setupInsightsTestDB(t)
 	ctx := context.Background()
 
@@ -163,12 +163,22 @@ func TestSQLiteSessionInsightsStore_GetAll(t *testing.T) {
 		}
 	}
 
-	all, err := store.GetAll(ctx)
+	// All sessions (empty filter).
+	summary, err := store.GetAggregateSummary(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 2 {
-		t.Errorf("expected 2 records, got %d", len(all))
+	if summary.TotalSessions != 2 {
+		t.Errorf("expected TotalSessions=2, got %d", summary.TotalSessions)
+	}
+
+	// Filtered to one session.
+	filtered, err := store.GetAggregateSummary(ctx, []string{"a1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filtered.TotalSessions != 1 {
+		t.Errorf("expected TotalSessions=1 when filtering, got %d", filtered.TotalSessions)
 	}
 }
 

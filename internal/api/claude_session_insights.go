@@ -35,7 +35,8 @@ func (s *Server) handleGetClaudeSessionInsights(w http.ResponseWriter, r *http.R
 }
 
 // handleGetClaudeSessionInsightsSummary returns aggregated insight statistics
-// across all sessions, optionally filtered by session IDs.
+// across all sessions, optionally filtered by session IDs. Scalar aggregations
+// are computed in SQL to avoid loading all insight rows into memory.
 //
 //	GET /api/claude-sessions/insights/summary
 //
@@ -52,14 +53,14 @@ func (s *Server) handleGetClaudeSessionInsightsSummary(w http.ResponseWriter, r 
 		}
 	}
 
-	insights, err := s.insightStore.GetMany(r.Context(), sessionIDs)
+	agg, err := s.insightStore.GetSummary(r.Context(), sessionIDs)
 	if err != nil {
 		s.logger.Error("failed to get session insights summary", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "failed to retrieve insights summary")
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, buildInsightsSummary(insights))
+	s.writeJSON(w, http.StatusOK, buildInsightsSummaryFromAggregate(agg))
 }
 
 // insightsSummary holds aggregated statistics across multiple sessions.
@@ -82,40 +83,25 @@ type toolCount struct {
 	Count int    `json:"count"`
 }
 
-func buildInsightsSummary(insights []*claudesessions.SessionInsight) *insightsSummary {
-	if len(insights) == 0 {
+// buildInsightsSummaryFromAggregate converts SQL-computed aggregate stats into
+// the HTTP response type.
+func buildInsightsSummaryFromAggregate(agg *claudesessions.InsightAggregateSummary) *insightsSummary {
+	if agg == nil || agg.TotalSessions == 0 {
 		return &insightsSummary{TopTools: []toolCount{}}
 	}
-
-	summary := &insightsSummary{TotalSessions: len(insights)}
-
-	toolTotals := make(map[string]int)
-	for _, ins := range insights {
-		summary.AvgAutonomyScore += ins.AutonomyScore
-		summary.AvgTurnCount += float64(ins.TurnCount)
-		summary.AvgToolCallsTotal += float64(ins.ToolCallsTotal)
-		summary.TotalCostEstimateUSD += ins.CostEstimateUSD
-		summary.AvgCacheHitRate += ins.CacheHitRate
-		summary.AvgTotalDurationMs += float64(ins.TotalDurationMs)
-		if ins.HasErrors {
-			summary.SessionsWithErrors++
-		}
-		for tool, count := range ins.ToolBreakdown {
-			toolTotals[tool] += count
-		}
+	n := float64(agg.TotalSessions)
+	return &insightsSummary{
+		TotalSessions:        agg.TotalSessions,
+		AvgAutonomyScore:     agg.AvgAutonomyScore,
+		AvgTurnCount:         agg.AvgTurnCount,
+		AvgToolCallsTotal:    agg.AvgToolCallsTotal,
+		TotalCostEstimateUSD: agg.TotalCostEstimateUSD,
+		AvgCostEstimateUSD:   agg.TotalCostEstimateUSD / n,
+		AvgCacheHitRate:      agg.AvgCacheHitRate,
+		SessionsWithErrors:   agg.SessionsWithErrors,
+		AvgTotalDurationMs:   agg.AvgTotalDurationMs,
+		TopTools:             sortedToolCounts(agg.TopToolTotals, 10),
 	}
-
-	n := float64(len(insights))
-	summary.AvgAutonomyScore /= n
-	summary.AvgTurnCount /= n
-	summary.AvgToolCallsTotal /= n
-	summary.AvgCostEstimateUSD = summary.TotalCostEstimateUSD / n
-	summary.AvgCacheHitRate /= n
-	summary.AvgTotalDurationMs /= n
-
-	summary.TopTools = sortedToolCounts(toolTotals, 10)
-
-	return summary
 }
 
 // sortedToolCounts returns at most limit toolCount entries sorted by count descending.

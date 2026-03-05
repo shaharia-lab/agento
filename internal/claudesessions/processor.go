@@ -55,7 +55,6 @@ type SessionInsight struct {
 	// ToolUsageProcessor
 	ToolCallsTotal int            `json:"tool_calls_total"`
 	ToolBreakdown  map[string]int `json:"tool_breakdown"`
-	ToolErrorRate  float64        `json:"tool_error_rate"`
 
 	// TimeProfileProcessor
 	TotalDurationMs int64 `json:"total_duration_ms"`
@@ -67,8 +66,9 @@ type SessionInsight struct {
 	CostEstimateUSD  float64 `json:"cost_estimate_usd"`
 
 	// ErrorRateProcessor
-	ToolErrorCount int  `json:"tool_error_count"`
-	HasErrors      bool `json:"has_errors"`
+	ToolErrorRate  float64 `json:"tool_error_rate"`
+	ToolErrorCount int     `json:"tool_error_count"`
+	HasErrors      bool    `json:"has_errors"`
 
 	// ConversationDepthProcessor
 	MaxConsecutiveToolCalls int `json:"max_consecutive_tool_calls"`
@@ -97,11 +97,30 @@ type SessionProcessor interface {
 	Reset()
 }
 
+// InsightAggregateSummary holds SQL-computed aggregate statistics across sessions.
+// Scalar fields are computed via SQL aggregation; TopToolTotals is the merged
+// tool_breakdown across all included sessions.
+type InsightAggregateSummary struct {
+	TotalSessions        int
+	AvgAutonomyScore     float64
+	AvgTurnCount         float64
+	AvgToolCallsTotal    float64
+	TotalCostEstimateUSD float64
+	AvgCacheHitRate      float64
+	AvgTotalDurationMs   float64
+	SessionsWithErrors   int
+	TopToolTotals        map[string]int
+}
+
 // InsightStorer persists and retrieves per-session insight records.
 type InsightStorer interface {
 	Upsert(ctx context.Context, insight *SessionInsight) error
 	Get(ctx context.Context, sessionID string) (*SessionInsight, error)
 	GetMany(ctx context.Context, sessionIDs []string) ([]*SessionInsight, error)
+	// GetSummary returns aggregated statistics across the given sessions.
+	// If sessionIDs is empty, all sessions are included. Scalar stats are
+	// computed in SQL to avoid loading all rows into memory.
+	GetSummary(ctx context.Context, sessionIDs []string) (*InsightAggregateSummary, error)
 	// NeedsProcessing returns session IDs present in the scanner cache that
 	// have no insight row or whose insight has processor_version < version.
 	NeedsProcessing(ctx context.Context, version int) ([]string, error)

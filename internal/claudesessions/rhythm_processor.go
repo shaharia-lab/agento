@@ -64,8 +64,8 @@ func (p *SessionRhythmProcessor) Finalize(insight *SessionInsight) {
 func (p *SessionRhythmProcessor) Reset() {
 	p.lastAssistantTS = time.Time{}
 	p.lastGenuineUserTS = time.Time{}
-	p.userResponseGaps = p.userResponseGaps[:0]
-	p.claudeResponseGaps = p.claudeResponseGaps[:0]
+	p.userResponseGaps = nil
+	p.claudeResponseGaps = nil
 }
 
 // avg returns the mean of a slice, or 0 if empty.
