@@ -12,6 +12,7 @@ import ClaudeSessionDetailPage from '@/pages/ClaudeSessionDetailPage'
 import SessionJourneyPage from '@/pages/SessionJourneyPage'
 import TokenUsagePage from '@/pages/TokenUsagePage'
 import GeneralUsagePage from '@/pages/GeneralUsagePage'
+import InsightsPage from '@/pages/InsightsPage'
 import IntegrationsPage from '@/pages/IntegrationsPage'
 import IntegrationConfluencePage from '@/pages/IntegrationConfluencePage'
 import IntegrationGooglePage from '@/pages/IntegrationGooglePage'
@@ -91,6 +92,7 @@ export default function App() {
             <Route path="claude-sessions/:id/journey" element={<SessionJourneyPage />} />
             <Route path="analytics/token-usage" element={<TokenUsagePage />} />
             <Route path="analytics/general-usage" element={<GeneralUsagePage />} />
+            <Route path="analytics/insights" element={<InsightsPage />} />
             <Route path="integrations" element={<IntegrationsPage />} />
             <Route path="integrations/confluence" element={<IntegrationConfluencePage />} />
             <Route path="integrations/google" element={<IntegrationGooglePage />} />

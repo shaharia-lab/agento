@@ -744,6 +744,50 @@ export interface MonitoringTestResult {
   error?: string
 }
 
+// ── Session Insights ─────────────────────────────────────────────────────────
+
+export interface SessionInsight {
+  session_id: string
+  processor_version: number
+  scanned_at: string
+  turn_count: number
+  steps_per_turn_avg: number
+  autonomy_score: number
+  tool_calls_total: number
+  tool_breakdown: Record<string, number>
+  total_duration_ms: number
+  thinking_time_ms: number
+  cache_hit_rate: number
+  tokens_per_turn_avg: number
+  cost_estimate_usd: number
+  tool_error_rate: number
+  tool_error_count: number
+  has_errors: boolean
+  max_consecutive_tool_calls: number
+  longest_autonomous_chain: number
+  avg_user_response_time_ms: number
+  avg_claude_response_time_ms: number
+  session_type: string
+}
+
+export interface ToolUsageStat {
+  tool: string
+  count: number
+}
+
+export interface InsightSummary {
+  total_sessions: number
+  avg_autonomy_score: number
+  avg_turn_count: number
+  avg_tool_calls_total: number
+  avg_cost_estimate_usd: number
+  total_cost_estimate_usd: number
+  avg_cache_hit_rate: number
+  sessions_with_errors: number
+  avg_total_duration_ms: number
+  top_tools: ToolUsageStat[]
+}
+
 // ── Analytics ─────────────────────────────────────────────────────────────────
 
 export interface AnalyticsSummary {

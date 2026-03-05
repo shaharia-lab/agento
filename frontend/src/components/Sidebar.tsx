@@ -12,6 +12,7 @@ import {
   History,
   BarChart2,
   LayoutDashboard,
+  Lightbulb,
   CalendarClock,
   ClipboardList,
   Info,
@@ -88,6 +89,7 @@ export default function Sidebar({ mobileOpen = false, onMobileClose }: SidebarPr
   const analyticsNavItems = [
     { to: '/analytics/token-usage', icon: BarChart2, label: 'Token Usage' },
     { to: '/analytics/general-usage', icon: LayoutDashboard, label: 'General Usage' },
+    { to: '/analytics/insights', icon: Lightbulb, label: 'Insights' },
   ]
 
   const handleNavClick = () => {
