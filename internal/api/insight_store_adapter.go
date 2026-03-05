@@ -82,8 +82,21 @@ func (a *insightStoreAdapter) GetSummary(
 	}, nil
 }
 
-func (a *insightStoreAdapter) NeedsProcessing(ctx context.Context, version int) ([]string, error) {
-	return a.store.NeedsProcessing(ctx, version)
+func (a *insightStoreAdapter) NeedsProcessing(
+	ctx context.Context, version int,
+) ([]claudesessions.SessionToProcess, error) {
+	raw, err := a.store.NeedsProcessing(ctx, version)
+	if err != nil {
+		return nil, err
+	}
+	sessions := make([]claudesessions.SessionToProcess, len(raw))
+	for i, r := range raw {
+		sessions[i] = claudesessions.SessionToProcess{
+			SessionID: r.SessionID,
+			FilePath:  r.FilePath,
+		}
+	}
+	return sessions, nil
 }
 
 // toInsightRecord converts a domain SessionInsight to a storage InsightRecord.

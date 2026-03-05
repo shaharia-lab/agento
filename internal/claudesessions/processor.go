@@ -121,9 +121,18 @@ type InsightStorer interface {
 	// If sessionIDs is empty, all sessions are included. Scalar stats are
 	// computed in SQL to avoid loading all rows into memory.
 	GetSummary(ctx context.Context, sessionIDs []string) (*InsightAggregateSummary, error)
-	// NeedsProcessing returns session IDs present in the scanner cache that
-	// have no insight row or whose insight has processor_version < version.
-	NeedsProcessing(ctx context.Context, version int) ([]string, error)
+	// NeedsProcessing returns sessions present in the scanner cache that have
+	// no insight row or whose insight has processor_version < version.
+	// The FilePath is included so callers avoid a separate filesystem walk.
+	NeedsProcessing(ctx context.Context, version int) ([]SessionToProcess, error)
+}
+
+// SessionToProcess pairs a session ID with its JSONL file path.
+// Returned by InsightStorer.NeedsProcessing so callers do not need a separate
+// filesystem walk to locate the JSONL file.
+type SessionToProcess struct {
+	SessionID string
+	FilePath  string
 }
 
 // contentBlock is the decoded form of a single block within a message's content array.

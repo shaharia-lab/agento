@@ -225,16 +225,7 @@ func buildWebServer(
 
 	chatStore := storage.NewSQLiteChatStore(db)
 	integrationStore := storage.NewSQLiteIntegrationStore(db)
-	integrationRegistry := integrations.NewRegistry(integrationStore, sysLogger)
-	integrationRegistry.RegisterStarter("confluence", confluenceintegration.Start)
-	integrationRegistry.RegisterStarter("google", googleintegration.Start)
-	integrationRegistry.RegisterStarter("telegram", telegramintegration.Start)
-	integrationRegistry.RegisterStarter("jira", jiraintegration.Start)
-	integrationRegistry.RegisterStarter("github", githubintegration.Start)
-	integrationRegistry.RegisterStarter("slack", slackintegration.Start)
-	if startErr := integrationRegistry.Start(ctx); startErr != nil {
-		sysLogger.Warn("some integrations failed to start", "error", startErr)
-	}
+	integrationRegistry := buildIntegrationRegistry(ctx, integrationStore, sysLogger)
 
 	settingsStore := storage.NewSQLiteSettingsStore(db)
 	settingsMgr, err := config.NewSettingsManager(settingsStore, cfg)
@@ -244,7 +235,7 @@ func buildWebServer(
 
 	monitoringMgr := initMonitoringManager(cfg.DataDir, otelProviders, otelCfg, sysLogger)
 
-	apiSrv, bus, err := buildAPIServer(ctx, appDeps{
+	apiSrv, bus, insightWorker, err := buildAPIServer(ctx, appDeps{
 		db:                  db,
 		logger:              sysLogger,
 		agentStore:          agentStore,
@@ -261,9 +252,11 @@ func buildWebServer(
 	}
 	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr)
 
-	// Ensure the event bus is drained cleanly on shutdown.
+	// On shutdown: drain the insight worker (wait for in-flight processing to
+	// finish), then close the event bus so no further events are dispatched.
 	go func() {
 		<-ctx.Done()
+		insightWorker.Wait()
 		bus.Close()
 	}()
 
@@ -283,6 +276,24 @@ func initMonitoringManager(
 	return mgr
 }
 
+// buildIntegrationRegistry creates the integration registry, registers all
+// integration starters, and starts them. Non-fatal start errors are logged.
+func buildIntegrationRegistry(
+	ctx context.Context, store storage.IntegrationStore, logger *slog.Logger,
+) *integrations.IntegrationRegistry {
+	reg := integrations.NewRegistry(store, logger)
+	reg.RegisterStarter("confluence", confluenceintegration.Start)
+	reg.RegisterStarter("google", googleintegration.Start)
+	reg.RegisterStarter("telegram", telegramintegration.Start)
+	reg.RegisterStarter("jira", jiraintegration.Start)
+	reg.RegisterStarter("github", githubintegration.Start)
+	reg.RegisterStarter("slack", slackintegration.Start)
+	if err := reg.Start(ctx); err != nil {
+		logger.Warn("some integrations failed to start", "error", err)
+	}
+	return reg
+}
+
 // appDeps bundles the stores, registries, and configuration needed to wire up
 // the API server and task scheduler. It replaces the long parameter lists of
 // buildAPIServer and initTaskScheduler.
@@ -300,7 +311,9 @@ type appDeps struct {
 }
 
 // buildAPIServer wires all services and returns the api.Server and the event bus.
-func buildAPIServer(ctx context.Context, deps appDeps) (*api.Server, eventbus.EventBus, error) {
+func buildAPIServer(
+	ctx context.Context, deps appDeps,
+) (*api.Server, eventbus.EventBus, *claudesessions.InsightWorker, error) {
 	notifStore, bus := setupNotifications(deps.db, deps.settingsMgr, deps.logger)
 
 	agentSvc := service.NewAgentService(deps.agentStore, deps.logger)
@@ -315,7 +328,7 @@ func buildAPIServer(ctx context.Context, deps appDeps) (*api.Server, eventbus.Ev
 
 	taskScheduler, err := initTaskScheduler(ctx, deps, taskStore, bus)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	taskSvc := service.NewTaskService(taskStore, taskScheduler, deps.logger)
@@ -343,7 +356,7 @@ func buildAPIServer(ctx context.Context, deps appDeps) (*api.Server, eventbus.Ev
 		MonitoringMgr:   deps.monitoringMgr,
 		InsightStore:    insightStore,
 	})
-	return apiSrv, bus, nil
+	return apiSrv, bus, insightWorker, nil
 }
 
 // setupNotifications creates the notification store, event bus, and wires the

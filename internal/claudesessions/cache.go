@@ -39,11 +39,17 @@ func (c *Cache) WithEventBus(bus eventbus.EventBus) *Cache {
 }
 
 // notify publishes a session event to the bus if one is configured.
-func (c *Cache) notify(sessionID, filePath string) {
+// isNew distinguishes a newly discovered session (EventSessionDiscovered) from
+// a session whose JSONL file changed since last scan (EventSessionUpdated).
+func (c *Cache) notify(sessionID, filePath string, isNew bool) {
 	if c.bus == nil {
 		return
 	}
-	c.bus.Publish(eventbus.EventSessionDiscovered, map[string]string{
+	eventType := eventbus.EventSessionUpdated
+	if isNew {
+		eventType = eventbus.EventSessionDiscovered
+	}
+	c.bus.Publish(eventType, map[string]string{
 		eventbus.PayloadKeySessionID: sessionID,
 		eventbus.PayloadKeyFilePath:  filePath,
 	})

@@ -3,8 +3,6 @@ package claudesessions
 import (
 	"context"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
@@ -39,6 +37,7 @@ type InsightWorker struct {
 
 	sem      chan struct{} // bounded concurrency — capacity maxConcurrentInsightWorkers
 	inFlight sync.Map      // set of sessionIDs currently being processed (value: struct{})
+	wg       sync.WaitGroup
 }
 
 // NewInsightWorker creates an InsightWorker. Call Start to begin processing.
@@ -59,6 +58,7 @@ func NewInsightWorker(
 
 // Start registers the worker as an event bus listener and launches the
 // background re-scan goroutine. It returns immediately; cancel ctx to stop.
+// Call Wait after the context is canceled to drain all in-flight processing.
 //
 // The event-bus subscriber returns immediately by dispatching each session into
 // a goroutine. This avoids blocking the shared event bus worker pool on file I/O.
@@ -73,10 +73,24 @@ func (w *InsightWorker) Start(ctx context.Context) {
 			return
 		}
 		// Dispatch immediately so the event bus worker is not blocked.
-		go w.tryProcess(ctx, sessionID, filePath)
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.tryProcess(ctx, sessionID, filePath)
+		}()
 	})
 
-	go w.rescanLoop(ctx)
+	w.wg.Add(1)
+	go func() {
+		defer w.wg.Done()
+		w.rescanLoop(ctx)
+	}()
+}
+
+// Wait blocks until all in-flight processing goroutines have finished.
+// Typically called after the context passed to Start is canceled.
+func (w *InsightWorker) Wait() {
+	w.wg.Wait()
 }
 
 // tryProcess acquires a semaphore slot and deduplicates in-flight sessions before
@@ -133,52 +147,33 @@ func (w *InsightWorker) rescanLoop(ctx context.Context) {
 }
 
 // rescanOutdated finds all sessions whose insight is missing or outdated and
-// re-processes them concurrently via tryProcess.
+// re-processes them concurrently via tryProcess. The file path for each session
+// is retrieved from the cache DB to avoid a filesystem walk.
 func (w *InsightWorker) rescanOutdated(ctx context.Context) {
-	sessionIDs, err := w.store.NeedsProcessing(ctx, CurrentProcessorVersion)
+	sessions, err := w.store.NeedsProcessing(ctx, CurrentProcessorVersion)
 	if err != nil {
 		w.logger.Warn("insight_worker: failed to list sessions needing processing", "error", err)
 		return
 	}
-	if len(sessionIDs) == 0 {
+	if len(sessions) == 0 {
 		return
 	}
-	w.logger.Info("insight_worker: re-scanning outdated sessions", "count", len(sessionIDs))
+	w.logger.Info("insight_worker: re-scanning outdated sessions", "count", len(sessions))
 
-	for _, sessionID := range sessionIDs {
+	for _, s := range sessions {
 		if ctx.Err() != nil {
 			return
 		}
-		filePath, findErr := findSessionFilePath(sessionID)
-		if findErr != nil || filePath == "" {
+		if s.FilePath == "" {
 			continue
 		}
 		// Dispatch each session concurrently so the rescan loop is not serialized
 		// behind the semaphore. tryProcess handles deduplication with in-flight sessions
 		// triggered by the event bus.
-		go w.tryProcess(ctx, sessionID, filePath)
+		w.wg.Add(1)
+		go func(sessionID, filePath string) {
+			defer w.wg.Done()
+			w.tryProcess(ctx, sessionID, filePath)
+		}(s.SessionID, s.FilePath)
 	}
-}
-
-// findSessionFilePath locates the JSONL file for the given session ID by
-// searching ~/.claude/projects/. Returns an empty string if not found.
-func findSessionFilePath(sessionID string) (string, error) {
-	projectsDir := filepath.Join(ClaudeHome(), "projects")
-	entries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return "", nil
-		}
-		return "", err
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		candidate := filepath.Join(projectsDir, e.Name(), sessionID+jsonlExt)
-		if _, statErr := os.Stat(candidate); statErr == nil {
-			return candidate, nil
-		}
-	}
-	return "", nil
 }

@@ -291,15 +291,25 @@ func (s *SQLiteSessionInsightsStore) queryToolBreakdowns(
 	return breakdowns, rows.Err()
 }
 
-// NeedsProcessing returns session IDs from claude_session_cache that either
+// SessionToProcess pairs a session ID with its JSONL file path for processing.
+type SessionToProcess struct {
+	SessionID string
+	FilePath  string
+}
+
+// NeedsProcessing returns sessions from claude_session_cache that either
 // have no insight row or whose insight has processor_version < version.
-func (s *SQLiteSessionInsightsStore) NeedsProcessing(ctx context.Context, version int) ([]string, error) {
+// The file_path is included in the result so callers do not need a separate
+// filesystem walk to locate the JSONL file.
+func (s *SQLiteSessionInsightsStore) NeedsProcessing(
+	ctx context.Context, version int,
+) ([]SessionToProcess, error) {
 	ctx, end := withStorageSpan(ctx, "needs_processing", "session_insights")
 	var err error
 	defer func() { end(err) }()
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT DISTINCT c.session_id
+SELECT DISTINCT c.session_id, c.file_path
 FROM claude_session_cache c
 LEFT JOIN session_insights i ON c.session_id = i.session_id
 WHERE i.session_id IS NULL OR i.processor_version < ?`, version)
@@ -312,15 +322,15 @@ WHERE i.session_id IS NULL OR i.processor_version < ?`, version)
 		}
 	}()
 
-	var ids []string
+	var sessions []SessionToProcess
 	for rows.Next() {
-		var id string
-		if scanErr := rows.Scan(&id); scanErr != nil {
+		var s SessionToProcess
+		if scanErr := rows.Scan(&s.SessionID, &s.FilePath); scanErr != nil {
 			return nil, scanErr
 		}
-		ids = append(ids, id)
+		sessions = append(sessions, s)
 	}
-	return ids, rows.Err()
+	return sessions, rows.Err()
 }
 
 const insightSelectCols = `

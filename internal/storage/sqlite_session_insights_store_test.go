@@ -210,7 +210,7 @@ func TestSQLiteSessionInsightsStore_NeedsProcessing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ids) != 1 || ids[0] != "cached-session" {
+	if len(ids) != 1 || ids[0].SessionID != "cached-session" {
 		t.Errorf("expected ['cached-session'], got %v", ids)
 	}
 
