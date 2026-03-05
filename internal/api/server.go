@@ -17,11 +17,13 @@ import (
 // Common error message constants used across API handlers.
 const (
 	errInvalidJSONBody = "invalid JSON body"
+	headerContentType  = "Content-Type"
 )
 
 // Route pattern constants to avoid duplication.
 const (
 	routeChatsBase       = "/chats"
+	routeChatByID        = "/chats/{id}"
 	routeAgentBySlug     = "/agents/{slug}"
 	routeIntegrationByID = "/integrations/{id}"
 	routeProfileByID     = "/claude-settings/profiles/{id}"
@@ -96,13 +98,13 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get(routeChatsBase, s.handleListChats)
 	r.Post(routeChatsBase, s.handleCreateChat)
 	r.Delete(routeChatsBase, s.handleBulkDeleteChats)
-	r.Get("/chats/{id}", s.handleGetChat)
-	r.Patch("/chats/{id}", s.handleUpdateChat)
-	r.Delete("/chats/{id}", s.handleDeleteChat)
-	r.Post("/chats/{id}/messages", s.handleSendMessage)
-	r.Post("/chats/{id}/input", s.handleProvideInput)
-	r.Post("/chats/{id}/permission", s.handlePermissionResponse)
-	r.Post("/chats/{id}/stop", s.handleStopSession)
+	r.Get(routeChatByID, s.handleGetChat)
+	r.Patch(routeChatByID, s.handleUpdateChat)
+	r.Delete(routeChatByID, s.handleDeleteChat)
+	r.Post(routeChatByID+"/messages", s.handleSendMessage)
+	r.Post(routeChatByID+"/input", s.handleProvideInput)
+	r.Post(routeChatByID+"/permission", s.handlePermissionResponse)
+	r.Post(routeChatByID+"/stop", s.handleStopSession)
 
 	// Agento settings
 	r.Get("/settings", s.handleGetSettings)
@@ -209,7 +211,7 @@ func (s *Server) mountTaskRoutes(r chi.Router) {
 // ─── Shared helpers ───────────────────────────────────────────────────────────
 
 func (s *Server) writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, "application/json")
 	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		s.logger.Error("writeJSON: failed to encode response", "error", err)

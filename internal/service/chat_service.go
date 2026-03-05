@@ -21,6 +21,9 @@ import (
 	"github.com/shaharia-lab/agento/internal/tools"
 )
 
+// chatSessionIDAttr is the OTel attribute key for chat session IDs.
+const chatSessionIDAttr = "chat.session_id"
+
 // ChatService defines the business logic interface for managing chat sessions
 // and streaming agent responses.
 type ChatService interface {
@@ -173,7 +176,7 @@ func (s *chatService) CreateSession(
 		return nil, fmt.Errorf("creating session: %w", err)
 	}
 
-	span.SetAttributes(attribute.String("chat.session_id", session.ID))
+	span.SetAttributes(attribute.String(chatSessionIDAttr, session.ID))
 
 	if instr := telemetry.GetGlobalInstruments(); instr != nil {
 		instr.ChatSessionsCreated.Add(ctx, 1, metric.WithAttributes(
@@ -193,7 +196,7 @@ func (s *chatService) DeleteSession(ctx context.Context, id string) error {
 	ctx, span := otel.Tracer("agento").Start(ctx, "chat.delete_session")
 	defer span.End()
 
-	span.SetAttributes(attribute.String("chat.session_id", id))
+	span.SetAttributes(attribute.String(chatSessionIDAttr, id))
 
 	if err := s.chatRepo.DeleteSession(ctx, id); err != nil {
 		span.RecordError(err)
@@ -229,7 +232,7 @@ func (s *chatService) BeginMessage(
 	ctx, span := otel.Tracer("agento").Start(ctx, "chat.begin_message")
 	defer span.End()
 
-	span.SetAttributes(attribute.String("chat.session_id", sessionID))
+	span.SetAttributes(attribute.String(chatSessionIDAttr, sessionID))
 
 	session, err := s.chatRepo.GetSession(ctx, sessionID)
 	if err != nil {

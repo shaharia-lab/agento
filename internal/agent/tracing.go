@@ -129,6 +129,16 @@ func AddSystemInitEvent(runSpan trace.Span, sys *claude.SystemMessage) {
 	)
 }
 
+// rawServerToolUse holds server-side tool usage statistics from the CLI result.
+type rawServerToolUse struct {
+	WebSearchRequests int `json:"web_search_requests"`
+}
+
+// rawUsage holds usage statistics from the CLI result.
+type rawUsage struct {
+	ServerToolUse rawServerToolUse `json:"server_tool_use"`
+}
+
 // rawResultExtras holds result fields the SDK struct cannot parse because
 // the CLI emits them in camelCase or in a nested structure.
 type rawResultExtras struct {
@@ -140,11 +150,7 @@ type rawResultExtras struct {
 		WebSearchRequests        int     `json:"webSearchRequests"`
 		CostUSD                  float64 `json:"costUSD"`
 	} `json:"modelUsage"`
-	Usage struct {
-		ServerToolUse struct {
-			WebSearchRequests int `json:"web_search_requests"`
-		} `json:"server_tool_use"`
-	} `json:"usage"`
+	Usage rawUsage `json:"usage"`
 }
 
 // EnrichSpanFromResult adds final result metadata to a span.
@@ -156,7 +162,7 @@ func EnrichSpanFromResult(span trace.Span, result *claude.Result, raw json.RawMe
 	}
 
 	var extras rawResultExtras
-	if err := json.Unmarshal(raw, &extras); err != nil {
+	if json.Unmarshal(raw, &extras) != nil {
 		extras = rawResultExtras{}
 	}
 

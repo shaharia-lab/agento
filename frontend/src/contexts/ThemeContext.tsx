@@ -34,15 +34,13 @@ function loadFromStorage(): AppearanceSettings {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (raw) {
       const p = JSON.parse(raw) as Partial<AppearanceSettings>
+      // Migrate old default of 15px to the new standard 16px baseline
+      const rawFontSize =
+        p.fontSize && p.fontSize >= 12 && p.fontSize <= 24 ? p.fontSize : DEFAULTS.fontSize
+      const fontSize = rawFontSize === 15 ? 16 : rawFontSize
       return {
         darkMode: typeof p.darkMode === 'boolean' ? p.darkMode : DEFAULTS.darkMode,
-        // Migrate old default of 15px to the new standard 16px baseline
-        fontSize:
-          p.fontSize && p.fontSize >= 12 && p.fontSize <= 24
-            ? p.fontSize === 15
-              ? 16
-              : p.fontSize
-            : DEFAULTS.fontSize,
+        fontSize,
         fontFamily:
           p.fontFamily && FONT_OPTIONS.some(f => f.value === p.fontFamily)
             ? p.fontFamily
