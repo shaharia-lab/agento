@@ -243,6 +243,15 @@ type cachedEntry struct {
 // inserted, modified files are updated, and deleted files are removed from the
 // cache. Returns all cached sessions sorted by last_activity desc.
 func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, error) {
+	return IncrementalScanWithNotify(db, logger, nil)
+}
+
+// IncrementalScanWithNotify is like IncrementalScan but calls notify for each
+// session that is newly inserted (isNew=true) or updated (isNew=false).
+// notify may be nil.
+func IncrementalScanWithNotify(
+	db *sql.DB, logger *slog.Logger, notify func(sessionID, filePath string, isNew bool),
+) ([]ClaudeSessionSummary, error) {
 	projectsDir := filepath.Join(ClaudeHome(), "projects")
 
 	onDisk, err := walkDiskFiles(projectsDir)
@@ -262,8 +271,8 @@ func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 		return nil, err
 	}
 
-	toUpsert, toDelete := diffDiskAndCache(onDisk, cached)
-	applyChanges(db, logger, onDisk, toUpsert, toDelete)
+	diff := diffDiskAndCache(onDisk, cached)
+	applyChangesWithNotify(db, logger, onDisk, diff, notify)
 
 	updateLastScanned(db, logger)
 	return loadAllSessions(db, logger)
@@ -330,51 +339,82 @@ func loadCachedEntries(db *sql.DB, logger *slog.Logger) (map[string]cachedEntry,
 	return cached, rows.Err()
 }
 
-func diffDiskAndCache(onDisk map[string]diskFile, cached map[string]cachedEntry) ([]string, []string) {
-	var toUpsert []string
-	for fp, df := range onDisk {
-		ce, exists := cached[fp]
-		if !exists || !ce.mtime.Equal(df.mtime) {
-			toUpsert = append(toUpsert, fp)
-		}
-	}
-
-	var toDelete []string
-	for fp := range cached {
-		if _, exists := onDisk[fp]; !exists {
-			toDelete = append(toDelete, fp)
-		}
-	}
-	return toUpsert, toDelete
+// diskDiff groups file paths by their change type.
+type diskDiff struct {
+	toInsert []string // file paths not present in the cache
+	toUpdate []string // file paths present in the cache but with a changed mtime
+	toDelete []string // file paths present in the cache but no longer on disk
 }
 
-func applyChanges(db *sql.DB, logger *slog.Logger, onDisk map[string]diskFile, toUpsert, toDelete []string) {
-	if len(toUpsert) > 0 || len(toDelete) > 0 {
+func diffDiskAndCache(onDisk map[string]diskFile, cached map[string]cachedEntry) diskDiff {
+	var d diskDiff
+	for fp, df := range onDisk {
+		ce, exists := cached[fp]
+		switch {
+		case !exists:
+			d.toInsert = append(d.toInsert, fp)
+		case !ce.mtime.Equal(df.mtime):
+			d.toUpdate = append(d.toUpdate, fp)
+		}
+	}
+	for fp := range cached {
+		if _, exists := onDisk[fp]; !exists {
+			d.toDelete = append(d.toDelete, fp)
+		}
+	}
+	return d
+}
+
+func applyChangesWithNotify(
+	db *sql.DB, logger *slog.Logger,
+	onDisk map[string]diskFile,
+	diff diskDiff,
+	notify func(sessionID, filePath string, isNew bool),
+) {
+	total := len(diff.toInsert) + len(diff.toUpdate)
+	if total > 0 || len(diff.toDelete) > 0 {
 		logger.Info("claude sessions: incremental scan",
-			"new_or_modified", len(toUpsert),
-			"deleted", len(toDelete),
-			"unchanged", len(onDisk)-len(toUpsert))
+			"new", len(diff.toInsert),
+			"modified", len(diff.toUpdate),
+			"deleted", len(diff.toDelete),
+			"unchanged", len(onDisk)-total)
 	}
 
-	for _, fp := range toUpsert {
+	for _, fp := range diff.toInsert {
 		df := onDisk[fp]
-		summary, err := readSessionSummary(df.sessionID, df.projectPath, df.filePath, logger)
-		if err != nil || summary == nil {
-			continue
+		if applyUpsert(db, logger, df) && notify != nil {
+			notify(df.sessionID, df.filePath, true)
 		}
-		if err := upsertCacheRow(db, df, summary); err != nil {
-			logger.Warn("claude sessions: failed to upsert cache row",
-				"file", df.filePath, "error", err)
+	}
+	for _, fp := range diff.toUpdate {
+		df := onDisk[fp]
+		if applyUpsert(db, logger, df) && notify != nil {
+			notify(df.sessionID, df.filePath, false)
 		}
 	}
 
-	for _, fp := range toDelete {
+	for _, fp := range diff.toDelete {
 		deleteQuery := "DELETE FROM claude_session_cache WHERE file_path = ?"
 		if _, err := db.ExecContext(context.Background(), deleteQuery, fp); err != nil {
 			logger.Warn("claude sessions: failed to delete cache row",
 				"file", fp, "error", err)
 		}
 	}
+}
+
+// applyUpsert reads the session summary and writes it to the cache.
+// Returns true on success.
+func applyUpsert(db *sql.DB, logger *slog.Logger, df diskFile) bool {
+	summary, err := readSessionSummary(df.sessionID, df.projectPath, df.filePath, logger)
+	if err != nil || summary == nil {
+		return false
+	}
+	if err := upsertCacheRow(db, df, summary); err != nil {
+		logger.Warn("claude sessions: failed to upsert cache row",
+			"file", df.filePath, "error", err)
+		return false
+	}
+	return true
 }
 
 func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {

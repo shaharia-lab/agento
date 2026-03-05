@@ -44,6 +44,7 @@ type ServerConfig struct {
 	Logger          *slog.Logger
 	SessionCache    *claudesessions.Cache
 	MonitoringMgr   *telemetry.MonitoringManager
+	InsightStore    claudesessions.InsightStorer
 }
 
 // Server holds all dependencies for the REST API handlers.
@@ -60,6 +61,7 @@ type Server struct {
 	claudeSessionCache *claudesessions.Cache
 	updateCache        updateCheckCache
 	monitoringMgr      *telemetry.MonitoringManager
+	insightStore       claudesessions.InsightStorer
 }
 
 // New creates a new API Server backed by the provided services.
@@ -79,6 +81,7 @@ func New(cfg ServerConfig) *Server {
 		liveSessions:       newLiveSessionStore(),
 		claudeSessionCache: cfg.SessionCache,
 		monitoringMgr:      cfg.MonitoringMgr,
+		insightStore:       cfg.InsightStore,
 	}
 }
 
@@ -158,9 +161,12 @@ func (s *Server) mountClaudeSessionRoutes(r chi.Router) {
 	r.Get("/claude-sessions", s.handleListClaudeSessions)
 	r.Get("/claude-sessions/projects", s.handleListClaudeProjects)
 	r.Post("/claude-sessions/refresh", s.handleRefreshClaudeSessionCache)
+	// Insights summary must come before /{id} to avoid chi routing conflicts.
+	r.Get("/claude-sessions/insights/summary", s.handleGetClaudeSessionInsightsSummary)
 	r.Get("/claude-sessions/{id}", s.handleGetClaudeSession)
 	r.Patch("/claude-sessions/{id}", s.handleUpdateClaudeSession)
 	r.Post("/claude-sessions/{id}/continue", s.handleContinueClaudeSession)
+	r.Get("/claude-sessions/{id}/insights", s.handleGetClaudeSessionInsights)
 	r.Get("/claude-sessions/{id}/journey", s.handleGetClaudeSessionJourney)
 	r.Get("/claude-analytics", s.handleGetClaudeAnalytics)
 }
