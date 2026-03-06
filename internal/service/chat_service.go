@@ -351,7 +351,13 @@ func (s *chatService) CommitMessage(
 		}
 	}
 
-	session.SDKSession = sdkSessionID
+	// Only overwrite SDKSession when the agent returned a valid session ID.
+	// When a stream is interrupted (user stops mid-stream), sdkSessionID is
+	// empty — preserving the existing value lets the next message resume the
+	// Claude CLI session instead of creating a conflicting new one.
+	if sdkSessionID != "" {
+		session.SDKSession = sdkSessionID
+	}
 	session.UpdatedAt = time.Now().UTC()
 	// Accumulate token usage into the session running totals.
 	session.TotalInputTokens += usage.InputTokens
