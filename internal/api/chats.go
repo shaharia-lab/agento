@@ -243,6 +243,7 @@ type sendMessageChannels struct {
 
 // streamState tracks the mutable state accumulated while consuming agent events.
 type streamState struct {
+	userContent   string // original user message, persisted atomically with the assistant response
 	assistantText string
 	sdkSessionID  string
 	blocks        []storage.MessageBlock
@@ -312,6 +313,7 @@ func (s *Server) handleSendMessage(w http.ResponseWriter, r *http.Request) {
 
 	isFirstMessage := chatSession.Title == "New Chat"
 	state := s.streamAgentSession(w, r, id, agentSession, chs, execSpan)
+	state.userContent = req.Content
 
 	if isFirstMessage {
 		chatSession.Title = truncateTitle(req.Content, 60)
@@ -409,7 +411,7 @@ func (s *Server) commitMessage(
 
 	if err := s.chatSvc.CommitMessage(
 		commitCtx, chatSession,
-		state.assistantText, state.sdkSessionID,
+		state.userContent, state.assistantText, state.sdkSessionID,
 		isFirstMessage, state.blocks,
 		state.tokens.toUsageStats(),
 	); err != nil {
