@@ -46,6 +46,7 @@ import {
   Pencil,
   Star,
   Upload,
+  Paperclip,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -96,6 +97,7 @@ export default function ChatSessionPage() {
   const [isDragging, setIsDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
   const dragCounter = useRef(0)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -791,31 +793,56 @@ export default function ChatSessionPage() {
             </button>
           )}
         </div>
-        {/* Session info pills */}
-        {detail && (detail.session.working_directory || detail.session.model) && (
-          <div className="flex items-center gap-3 max-w-4xl mx-auto mt-1.5">
-            {detail.session.working_directory && (
-              <span
-                className="flex items-center gap-1 text-xs text-zinc-400 truncate max-w-[200px]"
-                title={detail.session.working_directory}
-              >
-                <Folder className="h-3 w-3 shrink-0" />
-                {detail.session.working_directory}
-              </span>
-            )}
-            {detail.session.working_directory && detail.session.model && (
-              <span className="text-zinc-200">•</span>
-            )}
-            {detail.session.model && (
-              <span
-                className="text-xs text-zinc-400 font-mono truncate max-w-[180px]"
-                title={detail.session.model}
-              >
-                {detail.session.model}
-              </span>
-            )}
-          </div>
-        )}
+        {/* Bottom bar: attach button + session info pills */}
+        <div className="flex items-center gap-3 max-w-4xl mx-auto mt-1.5">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={streaming || uploading}
+            className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+            title="Attach files"
+          >
+            <Paperclip className="h-3 w-3" />
+            Add files
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={e => {
+              if (e.target.files && e.target.files.length > 0) {
+                handleFilesUpload(e.target.files)
+                e.target.value = ''
+              }
+            }}
+          />
+          {detail && (detail.session.working_directory || detail.session.model) && (
+            <>
+              <span className="text-zinc-300 dark:text-zinc-600">|</span>
+              {detail.session.working_directory && (
+                <span
+                  className="flex items-center gap-1 text-xs text-zinc-400 truncate max-w-[200px]"
+                  title={detail.session.working_directory}
+                >
+                  <Folder className="h-3 w-3 shrink-0" />
+                  {detail.session.working_directory}
+                </span>
+              )}
+              {detail.session.working_directory && detail.session.model && (
+                <span className="text-zinc-200">•</span>
+              )}
+              {detail.session.model && (
+                <span
+                  className="text-xs text-zinc-400 font-mono truncate max-w-[180px]"
+                  title={detail.session.model}
+                >
+                  {detail.session.model}
+                </span>
+              )}
+            </>
+          )}
+        </div>
       </div>
     </div>
   )
