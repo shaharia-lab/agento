@@ -369,12 +369,15 @@ export default function ChatSessionPage() {
       if (files.length === 0) return
       setUploading(true)
       try {
-        const paths: string[] = []
-        for (const file of Array.from(files)) {
-          const path = await uploadFile(file)
-          paths.push(path)
+        const results = await Promise.allSettled(Array.from(files).map(f => uploadFile(f)))
+        const paths = results
+          .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
+          .map(r => r.value)
+        const failures = results.filter(r => r.status === 'rejected')
+        if (paths.length > 0) appendFileTags(paths)
+        if (failures.length > 0) {
+          setError(`${failures.length} file(s) failed to upload`)
         }
-        appendFileTags(paths)
       } catch (err) {
         setError(err instanceof Error ? err.message : 'File upload failed')
       } finally {

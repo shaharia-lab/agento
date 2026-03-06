@@ -15,6 +15,10 @@ import (
 // maxUploadSize limits file uploads to 100 MB.
 const maxUploadSize = 100 << 20 // 100 MB
 
+// parseMemoryLimit controls how much multipart form data is kept in RAM.
+// Data beyond this threshold is automatically spilled to temp files by the stdlib.
+const parseMemoryLimit = 10 << 20 // 10 MB
+
 // handleUploadFile handles POST /api/uploads.
 // It reads a multipart file, saves it to the tmp-uploads directory, and returns the absolute path.
 func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
@@ -25,7 +29,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxUploadSize)
 
-	if err := r.ParseMultipartForm(maxUploadSize); err != nil {
+	if err := r.ParseMultipartForm(parseMemoryLimit); err != nil {
 		s.writeError(w, http.StatusBadRequest, "file too large or invalid multipart form")
 		return
 	}
@@ -54,10 +58,11 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	destPath := filepath.Join(uploadDir, filename)
+	destPath := filepath.Clean(filepath.Join(uploadDir, filename))
 
 	// Verify the resolved path is still inside the upload directory (defense against path traversal).
-	if !strings.HasPrefix(destPath, uploadDir) {
+	// Use Clean(uploadDir) + separator to prevent prefix collisions (e.g. tmp-uploads vs tmp-uploads-evil).
+	if !strings.HasPrefix(destPath, filepath.Clean(uploadDir)+string(filepath.Separator)) {
 		s.writeError(w, http.StatusBadRequest, "invalid filename")
 		return
 	}
@@ -80,6 +85,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.logger.Info("file uploaded", "path", destPath, "size", header.Size, "extension", ext)
 	s.writeJSON(w, http.StatusOK, map[string]string{"path": destPath})
 }
 
