@@ -49,22 +49,27 @@ type ChatService interface {
 	// BulkDeleteSessions removes multiple sessions and their messages.
 	BulkDeleteSessions(ctx context.Context, ids []string) error
 
-	// BeginMessage stores the user message, resolves the agent config, and starts
-	// a persistent agent session. The caller must consume events from session.Events()
-	// (breaking at each TypeResult), inject follow-up messages via session.Send() as
-	// needed, call session.Close() when done, and then call CommitMessage.
+	// BeginMessage resolves the agent config and starts a persistent agent session.
+	// The user message is NOT stored here; it is persisted atomically with the
+	// assistant response in CommitMessage. The caller must consume events from
+	// session.Events() (breaking at each TypeResult), inject follow-up messages
+	// via session.Send() as needed, call session.Close() when done, and then
+	// call CommitMessage.
 	BeginMessage(
 		ctx context.Context, sessionID, content string, opts agent.RunOptions,
 	) (*claude.Session, *storage.ChatSession, error)
 
-	// CommitMessage persists the assistant response and updates session metadata.
+	// CommitMessage persists both the user and assistant messages as an atomic
+	// turn and updates session metadata. When assistantText is empty (e.g. the
+	// stream was interrupted), neither the user nor assistant message is stored,
+	// preventing orphaned user messages that diverge from the Claude session.
 	// blocks contains the ordered content blocks (thinking/text/tool_use) captured
 	// during streaming so they can be re-rendered faithfully after a page reload.
 	// usage holds the cumulative token counts for the completed turn(s); they are
 	// added to the session's running totals.
 	CommitMessage(
 		ctx context.Context, session *storage.ChatSession,
-		assistantText, sdkSessionID string, isFirstMessage bool,
+		userContent, assistantText, sdkSessionID string, isFirstMessage bool,
 		blocks []storage.MessageBlock, usage agent.UsageStats,
 	) error
 
@@ -256,17 +261,6 @@ func (s *chatService) BeginMessage(
 		return nil, nil, err
 	}
 
-	userMsg := storage.ChatMessage{
-		Role:      "user",
-		Content:   content,
-		Timestamp: time.Now().UTC(),
-	}
-	if appendErr := s.chatRepo.AppendMessage(ctx, sessionID, userMsg); appendErr != nil {
-		span.RecordError(appendErr)
-		span.SetStatus(codes.Error, appendErr.Error())
-		return nil, nil, fmt.Errorf("storing user message: %w", appendErr)
-	}
-
 	s.populateRunOptions(&opts, session)
 
 	agentSession, err := agent.StartSession(ctx, agentCfg, content, opts)
@@ -331,20 +325,37 @@ func (s *chatService) populateRunOptions(opts *agent.RunOptions, session *storag
 
 func (s *chatService) CommitMessage(
 	ctx context.Context, session *storage.ChatSession,
-	assistantText, sdkSessionID string, _ bool,
+	userContent, assistantText, sdkSessionID string, _ bool,
 	blocks []storage.MessageBlock, usage agent.UsageStats,
 ) error {
 	ctx, span := otel.Tracer("agento").Start(ctx, "chat.commit_message")
 	defer span.End()
 
+	// Only persist the turn when the assistant actually produced a response.
+	// When the stream is interrupted (assistantText is empty), neither the
+	// user nor assistant message is stored, preventing orphaned user messages
+	// that would diverge from the Claude CLI session context.
 	if assistantText != "" {
-		msg := storage.ChatMessage{
+		if userContent != "" {
+			userMsg := storage.ChatMessage{
+				Role:      "user",
+				Content:   userContent,
+				Timestamp: time.Now().UTC(),
+			}
+			if err := s.chatRepo.AppendMessage(ctx, session.ID, userMsg); err != nil {
+				span.RecordError(err)
+				span.SetStatus(codes.Error, err.Error())
+				return fmt.Errorf("storing user message: %w", err)
+			}
+		}
+
+		assistantMsg := storage.ChatMessage{
 			Role:      "assistant",
 			Content:   assistantText,
 			Timestamp: time.Now().UTC(),
 			Blocks:    blocks,
 		}
-		if err := s.chatRepo.AppendMessage(ctx, session.ID, msg); err != nil {
+		if err := s.chatRepo.AppendMessage(ctx, session.ID, assistantMsg); err != nil {
 			span.RecordError(err)
 			span.SetStatus(codes.Error, err.Error())
 			return fmt.Errorf("storing assistant message: %w", err)

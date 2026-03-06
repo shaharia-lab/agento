@@ -143,17 +143,17 @@ func (_c *MockChatService_BulkDeleteSessions_Call) RunAndReturn(run func(context
 	return _c
 }
 
-// CommitMessage provides a mock function with given fields: ctx, session, assistantText, sdkSessionID, isFirstMessage, blocks, usage
-func (_m *MockChatService) CommitMessage(ctx context.Context, session *storage.ChatSession, assistantText string, sdkSessionID string, isFirstMessage bool, blocks []storage.MessageBlock, usage agent.UsageStats) error {
-	ret := _m.Called(ctx, session, assistantText, sdkSessionID, isFirstMessage, blocks, usage)
+// CommitMessage provides a mock function with given fields: ctx, session, userContent, assistantText, sdkSessionID, isFirstMessage, blocks, usage
+func (_m *MockChatService) CommitMessage(ctx context.Context, session *storage.ChatSession, userContent string, assistantText string, sdkSessionID string, isFirstMessage bool, blocks []storage.MessageBlock, usage agent.UsageStats) error {
+	ret := _m.Called(ctx, session, userContent, assistantText, sdkSessionID, isFirstMessage, blocks, usage)
 
 	if len(ret) == 0 {
 		panic("no return value specified for CommitMessage")
 	}
 
 	var r0 error
-	if rf, ok := ret.Get(0).(func(context.Context, *storage.ChatSession, string, string, bool, []storage.MessageBlock, agent.UsageStats) error); ok {
-		r0 = rf(ctx, session, assistantText, sdkSessionID, isFirstMessage, blocks, usage)
+	if rf, ok := ret.Get(0).(func(context.Context, *storage.ChatSession, string, string, string, bool, []storage.MessageBlock, agent.UsageStats) error); ok {
+		r0 = rf(ctx, session, userContent, assistantText, sdkSessionID, isFirstMessage, blocks, usage)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -169,18 +169,19 @@ type MockChatService_CommitMessage_Call struct {
 // CommitMessage is a helper method to define mock.On call
 //   - ctx context.Context
 //   - session *storage.ChatSession
+//   - userContent string
 //   - assistantText string
 //   - sdkSessionID string
 //   - isFirstMessage bool
 //   - blocks []storage.MessageBlock
 //   - usage agent.UsageStats
-func (_e *MockChatService_Expecter) CommitMessage(ctx interface{}, session interface{}, assistantText interface{}, sdkSessionID interface{}, isFirstMessage interface{}, blocks interface{}, usage interface{}) *MockChatService_CommitMessage_Call {
-	return &MockChatService_CommitMessage_Call{Call: _e.mock.On("CommitMessage", ctx, session, assistantText, sdkSessionID, isFirstMessage, blocks, usage)}
+func (_e *MockChatService_Expecter) CommitMessage(ctx interface{}, session interface{}, userContent interface{}, assistantText interface{}, sdkSessionID interface{}, isFirstMessage interface{}, blocks interface{}, usage interface{}) *MockChatService_CommitMessage_Call {
+	return &MockChatService_CommitMessage_Call{Call: _e.mock.On("CommitMessage", ctx, session, userContent, assistantText, sdkSessionID, isFirstMessage, blocks, usage)}
 }
 
-func (_c *MockChatService_CommitMessage_Call) Run(run func(ctx context.Context, session *storage.ChatSession, assistantText string, sdkSessionID string, isFirstMessage bool, blocks []storage.MessageBlock, usage agent.UsageStats)) *MockChatService_CommitMessage_Call {
+func (_c *MockChatService_CommitMessage_Call) Run(run func(ctx context.Context, session *storage.ChatSession, userContent string, assistantText string, sdkSessionID string, isFirstMessage bool, blocks []storage.MessageBlock, usage agent.UsageStats)) *MockChatService_CommitMessage_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(context.Context), args[1].(*storage.ChatSession), args[2].(string), args[3].(string), args[4].(bool), args[5].([]storage.MessageBlock), args[6].(agent.UsageStats))
+		run(args[0].(context.Context), args[1].(*storage.ChatSession), args[2].(string), args[3].(string), args[4].(string), args[5].(bool), args[6].([]storage.MessageBlock), args[7].(agent.UsageStats))
 	})
 	return _c
 }
@@ -190,7 +191,7 @@ func (_c *MockChatService_CommitMessage_Call) Return(_a0 error) *MockChatService
 	return _c
 }
 
-func (_c *MockChatService_CommitMessage_Call) RunAndReturn(run func(context.Context, *storage.ChatSession, string, string, bool, []storage.MessageBlock, agent.UsageStats) error) *MockChatService_CommitMessage_Call {
+func (_c *MockChatService_CommitMessage_Call) RunAndReturn(run func(context.Context, *storage.ChatSession, string, string, string, bool, []storage.MessageBlock, agent.UsageStats) error) *MockChatService_CommitMessage_Call {
 	_c.Call.Return(run)
 	return _c
 }

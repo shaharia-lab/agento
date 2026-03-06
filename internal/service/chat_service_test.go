@@ -381,27 +381,31 @@ func TestCommitMessage(t *testing.T) {
 	tests := []struct {
 		name           string
 		session        *storage.ChatSession
+		userContent    string
 		assistantText  string
 		sdkSessionID   string
 		isFirstMessage bool
 		blocks         []storage.MessageBlock
 		usage          agent.UsageStats
 		// mock behavior
-		appendErr error
-		updateErr error
+		userAppendErr      error
+		assistantAppendErr error
+		updateErr          error
 		// assertions
-		wantErr            bool
-		errContains        string
-		expectAppend       bool
-		wantInputTok       int
-		wantOutputTok      int
-		wantCacheCreate    int
-		wantCacheRead      int
-		expectedSDKSession string
+		wantErr               bool
+		errContains           string
+		expectUserAppend      bool
+		expectAssistantAppend bool
+		wantInputTok          int
+		wantOutputTok         int
+		wantCacheCreate       int
+		wantCacheRead         int
+		expectedSDKSession    string
 	}{
 		{
-			name:               "commits message with text and usage",
+			name:               "commits both user and assistant messages atomically",
 			session:            &storage.ChatSession{ID: "s1"},
+			userContent:        "What is 2+2?",
 			assistantText:      "Here is the answer.",
 			sdkSessionID:       "sdk-123",
 			expectedSDKSession: "sdk-123",
@@ -414,11 +418,12 @@ func TestCommitMessage(t *testing.T) {
 				CacheCreationInputTokens: 10,
 				CacheReadInputTokens:     5,
 			},
-			expectAppend:    true,
-			wantInputTok:    100,
-			wantOutputTok:   50,
-			wantCacheCreate: 10,
-			wantCacheRead:   5,
+			expectUserAppend:      true,
+			expectAssistantAppend: true,
+			wantInputTok:          100,
+			wantOutputTok:         50,
+			wantCacheCreate:       10,
+			wantCacheRead:         5,
 		},
 		{
 			name: "accumulates tokens on existing totals",
@@ -429,6 +434,7 @@ func TestCommitMessage(t *testing.T) {
 				TotalCacheCreationTokens: 20,
 				TotalCacheReadTokens:     10,
 			},
+			userContent:        "Follow up question",
 			assistantText:      "More text.",
 			sdkSessionID:       "sdk-456",
 			expectedSDKSession: "sdk-456",
@@ -439,61 +445,96 @@ func TestCommitMessage(t *testing.T) {
 				CacheCreationInputTokens: 5,
 				CacheReadInputTokens:     3,
 			},
-			expectAppend:    true,
-			wantInputTok:    250,
-			wantOutputTok:   130,
-			wantCacheCreate: 25,
-			wantCacheRead:   13,
+			expectUserAppend:      true,
+			expectAssistantAppend: true,
+			wantInputTok:          250,
+			wantOutputTok:         130,
+			wantCacheCreate:       25,
+			wantCacheRead:         13,
 		},
 		{
-			name:               "skips AppendMessage when assistantText is empty",
-			session:            &storage.ChatSession{ID: "s3"},
-			assistantText:      "",
-			sdkSessionID:       "sdk-789",
-			blocks:             nil,
-			usage:              agent.UsageStats{InputTokens: 10, OutputTokens: 5},
-			expectAppend:       false,
-			wantInputTok:       10,
-			wantOutputTok:      5,
-			expectedSDKSession: "sdk-789",
+			name:                  "skips all messages when assistantText is empty (interrupted stream)",
+			session:               &storage.ChatSession{ID: "s3"},
+			userContent:           "This message was interrupted",
+			assistantText:         "",
+			sdkSessionID:          "sdk-789",
+			blocks:                nil,
+			usage:                 agent.UsageStats{InputTokens: 10, OutputTokens: 5},
+			expectUserAppend:      false,
+			expectAssistantAppend: false,
+			wantInputTok:          10,
+			wantOutputTok:         5,
+			expectedSDKSession:    "sdk-789",
 		},
 		{
-			name:               "preserves existing SDKSession when sdkSessionID is empty (interrupted stream)",
-			session:            &storage.ChatSession{ID: "s8", SDKSession: "existing-sdk-id"},
-			assistantText:      "",
-			sdkSessionID:       "",
-			blocks:             nil,
-			usage:              agent.UsageStats{},
-			expectAppend:       false,
-			expectedSDKSession: "existing-sdk-id",
+			name:                  "preserves existing SDKSession when sdkSessionID is empty (interrupted stream)",
+			session:               &storage.ChatSession{ID: "s8", SDKSession: "existing-sdk-id"},
+			userContent:           "Another interrupted message",
+			assistantText:         "",
+			sdkSessionID:          "",
+			blocks:                nil,
+			usage:                 agent.UsageStats{},
+			expectUserAppend:      false,
+			expectAssistantAppend: false,
+			expectedSDKSession:    "existing-sdk-id",
 		},
 		{
-			name:          "wraps AppendMessage error",
-			session:       &storage.ChatSession{ID: "s4"},
-			assistantText: "fail text",
-			sdkSessionID:  "sdk-err",
-			blocks:        nil,
-			usage:         agent.UsageStats{},
-			appendErr:     errors.New("write error"),
-			expectAppend:  true,
-			wantErr:       true,
-			errContains:   "storing assistant message",
+			name:                  "no orphaned user message when stream interrupted with empty assistant",
+			session:               &storage.ChatSession{ID: "s9"},
+			userContent:           "User typed this but stopped mid-stream",
+			assistantText:         "",
+			sdkSessionID:          "",
+			blocks:                nil,
+			usage:                 agent.UsageStats{},
+			expectUserAppend:      false,
+			expectAssistantAppend: false,
 		},
 		{
-			name:          "wraps UpdateSession error",
-			session:       &storage.ChatSession{ID: "s5"},
-			assistantText: "ok text",
-			sdkSessionID:  "sdk-upd",
-			blocks:        nil,
-			usage:         agent.UsageStats{},
-			updateErr:     errors.New("update failed"),
-			expectAppend:  true,
-			wantErr:       true,
-			errContains:   "updating session",
+			name:                  "wraps user AppendMessage error",
+			session:               &storage.ChatSession{ID: "s10"},
+			userContent:           "User message",
+			assistantText:         "Assistant response",
+			sdkSessionID:          "sdk-err",
+			blocks:                nil,
+			usage:                 agent.UsageStats{},
+			userAppendErr:         errors.New("user write error"),
+			expectUserAppend:      true,
+			expectAssistantAppend: false,
+			wantErr:               true,
+			errContains:           "storing user message",
+		},
+		{
+			name:                  "wraps assistant AppendMessage error",
+			session:               &storage.ChatSession{ID: "s4"},
+			userContent:           "User question",
+			assistantText:         "fail text",
+			sdkSessionID:          "sdk-err",
+			blocks:                nil,
+			usage:                 agent.UsageStats{},
+			assistantAppendErr:    errors.New("write error"),
+			expectUserAppend:      true,
+			expectAssistantAppend: true,
+			wantErr:               true,
+			errContains:           "storing assistant message",
+		},
+		{
+			name:                  "wraps UpdateSession error",
+			session:               &storage.ChatSession{ID: "s5"},
+			userContent:           "User message",
+			assistantText:         "ok text",
+			sdkSessionID:          "sdk-upd",
+			blocks:                nil,
+			usage:                 agent.UsageStats{},
+			updateErr:             errors.New("update failed"),
+			expectUserAppend:      true,
+			expectAssistantAppend: true,
+			wantErr:               true,
+			errContains:           "updating session",
 		},
 		{
 			name:               "commits with thinking blocks",
 			session:            &storage.ChatSession{ID: "s6"},
+			userContent:        "Think about this",
 			assistantText:      "Answer after thinking.",
 			sdkSessionID:       "sdk-think",
 			expectedSDKSession: "sdk-think",
@@ -501,20 +542,36 @@ func TestCommitMessage(t *testing.T) {
 				{Type: "thinking", Text: "Let me think..."},
 				{Type: "text", Text: "Answer after thinking."},
 			},
-			usage:         agent.UsageStats{InputTokens: 200, OutputTokens: 150},
-			expectAppend:  true,
-			wantInputTok:  200,
-			wantOutputTok: 150,
+			usage:                 agent.UsageStats{InputTokens: 200, OutputTokens: 150},
+			expectUserAppend:      true,
+			expectAssistantAppend: true,
+			wantInputTok:          200,
+			wantOutputTok:         150,
 		},
 		{
-			name:               "commits with zero usage",
-			session:            &storage.ChatSession{ID: "s7"},
-			assistantText:      "Zero usage response.",
-			sdkSessionID:       "sdk-zero",
-			expectedSDKSession: "sdk-zero",
-			blocks:             []storage.MessageBlock{{Type: "text", Text: "Zero usage response."}},
-			usage:              agent.UsageStats{},
-			expectAppend:       true,
+			name:                  "commits with zero usage",
+			session:               &storage.ChatSession{ID: "s7"},
+			userContent:           "Simple question",
+			assistantText:         "Zero usage response.",
+			sdkSessionID:          "sdk-zero",
+			expectedSDKSession:    "sdk-zero",
+			blocks:                []storage.MessageBlock{{Type: "text", Text: "Zero usage response."}},
+			usage:                 agent.UsageStats{},
+			expectUserAppend:      true,
+			expectAssistantAppend: true,
+		},
+		{
+			name:                  "commits assistant without user content",
+			session:               &storage.ChatSession{ID: "s11"},
+			userContent:           "",
+			assistantText:         "Response without user content.",
+			sdkSessionID:          "sdk-no-user",
+			expectedSDKSession:    "sdk-no-user",
+			blocks:                []storage.MessageBlock{{Type: "text", Text: "Response without user content."}},
+			usage:                 agent.UsageStats{InputTokens: 10},
+			expectUserAppend:      false,
+			expectAssistantAppend: true,
+			wantInputTok:          10,
 		},
 	}
 
@@ -524,14 +581,20 @@ func TestCommitMessage(t *testing.T) {
 			agentRepo := new(mocks.MockAgentStore)
 			svc := newTestService(chatRepo, agentRepo)
 
-			if tc.expectAppend {
+			if tc.expectUserAppend {
 				chatRepo.On("AppendMessage", mock.Anything, tc.session.ID, mock.MatchedBy(func(msg storage.ChatMessage) bool {
-					return msg.Role == "assistant" && msg.Content == tc.assistantText
-				})).Return(tc.appendErr)
+					return msg.Role == "user" && msg.Content == tc.userContent
+				})).Return(tc.userAppendErr).Once()
 			}
 
-			// UpdateSession should only be called if AppendMessage succeeded (or was skipped).
-			if tc.appendErr == nil {
+			if tc.expectAssistantAppend {
+				chatRepo.On("AppendMessage", mock.Anything, tc.session.ID, mock.MatchedBy(func(msg storage.ChatMessage) bool {
+					return msg.Role == "assistant" && msg.Content == tc.assistantText
+				})).Return(tc.assistantAppendErr).Once()
+			}
+
+			// UpdateSession should only be called if both AppendMessages succeeded (or were skipped).
+			if tc.userAppendErr == nil && tc.assistantAppendErr == nil {
 				// When sdkSessionID is non-empty it overwrites session.SDKSession;
 				// when empty the original value is preserved (the bug fix).
 				expectedSDK := tc.sdkSessionID
@@ -545,7 +608,7 @@ func TestCommitMessage(t *testing.T) {
 
 			err := svc.CommitMessage(
 				context.Background(), tc.session,
-				tc.assistantText, tc.sdkSessionID, tc.isFirstMessage,
+				tc.userContent, tc.assistantText, tc.sdkSessionID, tc.isFirstMessage,
 				tc.blocks, tc.usage,
 			)
 
