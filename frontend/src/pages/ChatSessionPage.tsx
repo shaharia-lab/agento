@@ -54,15 +54,15 @@ import { cn } from '@/lib/utils'
 
 interface ChatSessionPageProps {
   /** Overrides useParams when rendered inside multi-chat context. */
-  chatId?: string
+  readonly chatId?: string
   /** Overrides the back button; in multi-chat, closes the tab instead. */
-  onBack?: () => void
+  readonly onBack?: () => void
   /** Notifies parent when the chat title changes, for tab label updates. */
-  onTitleChange?: (title: string) => void
+  readonly onTitleChange?: (title: string) => void
   /** Message to send automatically once the session finishes loading. */
-  pendingMessage?: string
+  readonly pendingMessage?: string
   /** Called after pendingMessage has been consumed (sent). */
-  onPendingMessageConsumed?: () => void
+  readonly onPendingMessageConsumed?: () => void
 }
 
 export default function ChatSessionPage(props: ChatSessionPageProps) {
@@ -117,6 +117,13 @@ export default function ChatSessionPage(props: ChatSessionPageProps) {
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const pendingSent = useRef(false)
+
+  // Abort any in-flight SSE stream when the component unmounts (e.g., tab closed).
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [])
 
   const scrollToBottom = useCallback(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -362,6 +369,11 @@ export default function ChatSessionPage(props: ChatSessionPageProps) {
     }
   }, [loading, location.state, doSend, props.chatId])
 
+  // Reset the guard whenever the chat id changes so a new pending message can be consumed.
+  useEffect(() => {
+    pendingSent.current = false
+  }, [id])
+
   // Consume a pending message passed via props once the session has loaded.
   const { pendingMessage, onPendingMessageConsumed } = props
   useEffect(() => {
@@ -547,7 +559,7 @@ export default function ChatSessionPage(props: ChatSessionPageProps) {
           )}
         </div>
         <button
-          className={`h-7 w-7 flex items-center justify-center rounded-md transition-colors shrink-0 ${
+          className={`h-7 w-7 flex items-center justify-center rounded-md transition-colors shrink-0 cursor-pointer ${
             detail?.session.is_favorite
               ? 'text-amber-400'
               : 'text-zinc-300 dark:text-zinc-600 hover:text-amber-400'
@@ -571,10 +583,11 @@ export default function ChatSessionPage(props: ChatSessionPageProps) {
         {!props.chatId && (
           <button
             onClick={() => navigate('/multi-chat', { state: { fromChatId: id } })}
-            className="h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors shrink-0"
+            className="flex items-center gap-1.5 px-2.5 h-7 rounded-md text-xs text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors shrink-0 font-medium cursor-pointer"
             title="Open in multi-chat workspace"
           >
-            <Plus className="h-4 w-4" />
+            <Plus className="h-3.5 w-3.5" />
+            New Chat Tab
           </button>
         )}
         <span className="text-xs text-zinc-400 dark:text-zinc-500 shrink-0 font-mono">

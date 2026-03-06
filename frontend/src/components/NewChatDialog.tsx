@@ -25,10 +25,10 @@ import FilesystemBrowserModal from '@/components/FilesystemBrowserModal'
 import { Send, FolderOpen, Lock } from 'lucide-react'
 
 interface NewChatDialogProps {
-  open: boolean
-  onOpenChange: (open: boolean) => void
+  readonly open: boolean
+  readonly onOpenChange: (open: boolean) => void
   /** Called with the newly created session. Caller decides where to navigate. */
-  onCreated: (session: ChatSession, firstMessage: string) => void
+  readonly onCreated: (session: ChatSession, firstMessage: string) => void
 }
 
 export default function NewChatDialog({ open, onOpenChange, onCreated }: NewChatDialogProps) {
@@ -181,7 +181,7 @@ export default function NewChatDialog({ open, onOpenChange, onCreated }: NewChat
                 <Input
                   value={effectiveModel}
                   disabled
-                  className="font-mono text-xs h-8 bg-zinc-50"
+                  className="font-mono text-xs h-8 bg-zinc-50 dark:bg-zinc-800"
                 />
               ) : (
                 <Select value={selectedModel} onValueChange={setSelectedModel}>
@@ -237,7 +237,7 @@ export default function NewChatDialog({ open, onOpenChange, onCreated }: NewChat
               <button
                 onClick={() => createChat()}
                 disabled={!firstMessage.trim() || creating}
-                className="absolute right-2.5 bottom-2.5 h-7 w-7 flex items-center justify-center rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-zinc-900 text-white hover:bg-zinc-700"
+                className="absolute right-2.5 bottom-2.5 h-7 w-7 flex items-center justify-center rounded-md transition-colors disabled:opacity-40 disabled:cursor-not-allowed bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-700 dark:hover:bg-zinc-300"
               >
                 <Send className="h-3.5 w-3.5" />
               </button>

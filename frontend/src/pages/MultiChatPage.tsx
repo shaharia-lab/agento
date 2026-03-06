@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { chatsApi } from '@/lib/api'
 import type { ChatSession } from '@/types'
@@ -39,6 +39,7 @@ export default function MultiChatPage() {
   const navigate = useNavigate()
   const location = useLocation()
   const [tabs, setTabs] = useState<TabInfo[]>([])
+  const tabsRef = useRef<TabInfo[]>([])
   const [activeTabId, setActiveTabId] = useState<string>('')
   const [newChatDialogOpen, setNewChatDialogOpen] = useState(false)
   const [initialized, setInitialized] = useState(false)
@@ -102,6 +103,11 @@ export default function MultiChatPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Keep ref in sync so callbacks can read current tabs without extra nesting.
+  useEffect(() => {
+    tabsRef.current = tabs
+  }, [tabs])
+
   // Persist tab state whenever it changes.
   useEffect(() => {
     if (initialized && tabs.length > 0) {
@@ -115,22 +121,26 @@ export default function MultiChatPage() {
 
   const handleTabClose = useCallback(
     (closingId: string) => {
-      setTabs(prev => {
-        const next = prev.filter(t => t.id !== closingId)
-        if (next.length === 0) {
-          localStorage.removeItem(STORAGE_KEY)
-          navigate('/chats')
-          return prev
-        }
-        setActiveTabId(currentActive => {
-          if (closingId === currentActive) {
-            const closedIdx = prev.findIndex(t => t.id === closingId)
-            return next[Math.min(closedIdx, next.length - 1)].id
-          }
-          return currentActive
-        })
+      // Drop any unsent pending message for the closed tab.
+      setPendingMessages(prev => {
+        if (!(closingId in prev)) return prev
+        const next = { ...prev }
+        delete next[closingId]
         return next
       })
+
+      // Read current tabs from the ref to avoid deeply-nested functional updaters.
+      const current = tabsRef.current
+      const next = current.filter(t => t.id !== closingId)
+      if (next.length === 0) {
+        localStorage.removeItem(STORAGE_KEY)
+        navigate('/chats')
+        return
+      }
+      const closedIdx = current.findIndex(t => t.id === closingId)
+      const fallbackId = next[Math.min(closedIdx, next.length - 1)].id
+      setTabs(next)
+      setActiveTabId(id => (id === closingId ? fallbackId : id))
     },
     [navigate],
   )
