@@ -24,8 +24,8 @@ Extract the issue number from `$ARGUMENTS`. Strip leading `#` if present. If no 
 
 ```
 Error: No issue number provided.
-Usage: /workflows:implement-issue <issue-number>
-Example: /workflows:implement-issue 123
+Usage: /implement-issue <issue-number>
+Example: /implement-issue 123
 ```
 
 ---

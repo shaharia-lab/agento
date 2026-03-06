@@ -123,17 +123,9 @@ Custom Claude Code skills in `.claude/skills/`. Invoke with `/skill-name <args>`
 | `/pr-reviewer` | PR review — correctness, quality, security, UI/UX, cross-platform, docs | `/pr-reviewer 42` or `/pr-reviewer feature/my-branch` |
 | `/context-updater` | Documentation & context maintenance — keeps CLAUDE.md, README, docs/ current | `/context-updater since last 7 days` |
 | `/engineering` | Development agent — features, bugs, refactoring with full project context | `/engineering add pagination to list endpoints` |
-| `/workflows:implement-issue` | End-to-end autonomous workflow: GitHub issue → worktree → implementation → CI → PR review → ready PR | `/workflows:implement-issue 123` |
+| `/implement-issue` | End-to-end autonomous workflow: GitHub issue → worktree → implementation → CI → PR review → ready PR | `/implement-issue 123` |
 
 All review skills use Opus model, run in forked context, and include cross-platform checks (Linux, macOS, Windows).
-
-### Workflow Skills
-
-Workflow skills live in `.claude/skills/workflows/` and are invoked with `/workflows:<name> <args>`.
-
-| Workflow | Purpose | Usage |
-|----------|---------|-------|
-| `/workflows:implement-issue` | Full dev cycle: claim issue, create worktree, implement, commit, push, monitor CI, PR review, promote | `/workflows:implement-issue 123` |
 
 ## Linting
 
