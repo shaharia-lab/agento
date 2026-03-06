@@ -26,10 +26,15 @@ export default function MultiChatTabStrip({
   const copyLink = (e: React.MouseEvent, tabId: string) => {
     e.stopPropagation()
     const url = `${window.location.origin}/chats/${tabId}`
-    navigator.clipboard.writeText(url).then(() => {
-      setCopiedId(tabId)
-      setTimeout(() => setCopiedId(null), 2000)
-    })
+    navigator.clipboard
+      .writeText(url)
+      .then(() => {
+        setCopiedId(tabId)
+        setTimeout(() => setCopiedId(null), 2000)
+      })
+      .catch(() => {
+        // Clipboard API may fail in insecure contexts; silently ignore.
+      })
   }
 
   return (

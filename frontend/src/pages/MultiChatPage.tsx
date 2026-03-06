@@ -42,6 +42,7 @@ export default function MultiChatPage() {
   const [activeTabId, setActiveTabId] = useState<string>('')
   const [newChatDialogOpen, setNewChatDialogOpen] = useState(false)
   const [initialized, setInitialized] = useState(false)
+  const [pendingMessages, setPendingMessages] = useState<Record<string, string>>({})
 
   // On mount: restore tabs from localStorage and integrate navigation state.
   useEffect(() => {
@@ -113,25 +114,25 @@ export default function MultiChatPage() {
   }, [])
 
   const handleTabClose = useCallback(
-    (id: string) => {
+    (closingId: string) => {
       setTabs(prev => {
-        const next = prev.filter(t => t.id !== id)
+        const next = prev.filter(t => t.id !== closingId)
         if (next.length === 0) {
-          // Last tab closed — clear storage and redirect.
           localStorage.removeItem(STORAGE_KEY)
           navigate('/chats')
           return prev
         }
-        // If closing the active tab, switch to the nearest neighbor.
-        if (id === activeTabId) {
-          const closedIdx = prev.findIndex(t => t.id === id)
-          const newActive = next[Math.min(closedIdx, next.length - 1)]
-          setActiveTabId(newActive.id)
-        }
+        setActiveTabId(currentActive => {
+          if (closingId === currentActive) {
+            const closedIdx = prev.findIndex(t => t.id === closingId)
+            return next[Math.min(closedIdx, next.length - 1)].id
+          }
+          return currentActive
+        })
         return next
       })
     },
-    [activeTabId, navigate],
+    [navigate],
   )
 
   const handleAddTab = useCallback(() => {
@@ -144,17 +145,8 @@ export default function MultiChatPage() {
     setActiveTabId(session.id)
     setNewChatDialogOpen(false)
 
-    // Send the first message by navigating with pendingMessage state.
-    // Since ChatSessionPage is already mounted (or about to be), we store
-    // the pending message in a way that the component can pick up.
-    // We use a custom event to communicate to the specific ChatSessionPage instance.
-    setTimeout(() => {
-      window.dispatchEvent(
-        new CustomEvent('multi-chat-pending-message', {
-          detail: { chatId: session.id, message: firstMessage },
-        }),
-      )
-    }, 100)
+    // Store the pending message so ChatSessionPage can pick it up via props.
+    setPendingMessages(prev => ({ ...prev, [session.id]: firstMessage }))
   }, [])
 
   const handleTitleChange = useCallback((chatId: string, newTitle: string) => {
@@ -190,6 +182,14 @@ export default function MultiChatPage() {
               chatId={tab.id}
               onBack={() => handleTabClose(tab.id)}
               onTitleChange={title => handleTitleChange(tab.id, title)}
+              pendingMessage={pendingMessages[tab.id]}
+              onPendingMessageConsumed={() =>
+                setPendingMessages(prev => {
+                  const next = { ...prev }
+                  delete next[tab.id]
+                  return next
+                })
+              }
             />
           </div>
         ))}

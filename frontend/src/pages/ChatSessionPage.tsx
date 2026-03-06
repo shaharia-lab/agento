@@ -59,6 +59,10 @@ interface ChatSessionPageProps {
   onBack?: () => void
   /** Notifies parent when the chat title changes, for tab label updates. */
   onTitleChange?: (title: string) => void
+  /** Message to send automatically once the session finishes loading. */
+  pendingMessage?: string
+  /** Called after pendingMessage has been consumed (sent). */
+  onPendingMessageConsumed?: () => void
 }
 
 export default function ChatSessionPage(props: ChatSessionPageProps) {
@@ -358,19 +362,15 @@ export default function ChatSessionPage(props: ChatSessionPageProps) {
     }
   }, [loading, location.state, doSend, props.chatId])
 
-  // Listen for pending messages from multi-chat workspace (via custom events).
+  // Consume a pending message passed via props once the session has loaded.
+  const { pendingMessage, onPendingMessageConsumed } = props
   useEffect(() => {
-    if (!props.chatId) return
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent).detail as { chatId: string; message: string }
-      if (detail.chatId === id && detail.message && !pendingSent.current) {
-        pendingSent.current = true
-        doSend(detail.message)
-      }
+    if (!loading && pendingMessage && !pendingSent.current) {
+      pendingSent.current = true
+      doSend(pendingMessage)
+      onPendingMessageConsumed?.()
     }
-    window.addEventListener('multi-chat-pending-message', handler)
-    return () => window.removeEventListener('multi-chat-pending-message', handler)
-  }, [props.chatId, id, doSend])
+  }, [loading, pendingMessage, onPendingMessageConsumed, doSend])
 
   const handleSend = () => {
     if (!input.trim()) return
