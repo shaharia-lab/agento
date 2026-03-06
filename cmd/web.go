@@ -238,6 +238,7 @@ func buildWebServer(
 	apiSrv, bus, insightWorker, err := buildAPIServer(ctx, appDeps{
 		db:                  db,
 		logger:              sysLogger,
+		appConfig:           cfg,
 		agentStore:          agentStore,
 		chatStore:           chatStore,
 		integrationStore:    integrationStore,
@@ -300,6 +301,7 @@ func buildIntegrationRegistry(
 type appDeps struct {
 	db                  *sql.DB
 	logger              *slog.Logger
+	appConfig           *config.AppConfig
 	agentStore          storage.AgentStore
 	chatStore           storage.ChatStore
 	integrationStore    storage.IntegrationStore
@@ -351,6 +353,7 @@ func buildAPIServer(
 		TaskSvc:         taskSvc,
 		ProfileSvc:      profileSvc,
 		SettingsMgr:     deps.settingsMgr,
+		AppConfig:       deps.appConfig,
 		Logger:          deps.logger,
 		SessionCache:    sessionCache,
 		MonitoringMgr:   deps.monitoringMgr,

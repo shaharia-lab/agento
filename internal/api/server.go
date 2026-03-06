@@ -41,6 +41,7 @@ type ServerConfig struct {
 	TaskSvc         service.TaskService
 	ProfileSvc      service.ClaudeSettingsProfileService
 	SettingsMgr     *config.SettingsManager
+	AppConfig       *config.AppConfig
 	Logger          *slog.Logger
 	SessionCache    *claudesessions.Cache
 	MonitoringMgr   *telemetry.MonitoringManager
@@ -56,6 +57,7 @@ type Server struct {
 	taskSvc            service.TaskService
 	profileSvc         service.ClaudeSettingsProfileService
 	settingsMgr        *config.SettingsManager
+	appConfig          *config.AppConfig
 	logger             *slog.Logger
 	liveSessions       *liveSessionStore
 	claudeSessionCache *claudesessions.Cache
@@ -77,6 +79,7 @@ func New(cfg ServerConfig) *Server {
 		taskSvc:            cfg.TaskSvc,
 		profileSvc:         cfg.ProfileSvc,
 		settingsMgr:        cfg.SettingsMgr,
+		appConfig:          cfg.AppConfig,
 		logger:             cfg.Logger,
 		liveSessions:       newLiveSessionStore(),
 		claudeSessionCache: cfg.SessionCache,
@@ -125,6 +128,9 @@ func (s *Server) Mount(r chi.Router) {
 
 	// Claude Code sessions and analytics
 	s.mountClaudeSessionRoutes(r)
+
+	// File uploads
+	r.Post("/uploads", s.handleUploadFile)
 
 	// Filesystem, integrations, tasks, job history
 	s.mountExtensionRoutes(r)
