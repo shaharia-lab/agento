@@ -454,6 +454,15 @@ func TestCommitMessage(t *testing.T) {
 			wantOutputTok: 5,
 		},
 		{
+			name:          "preserves existing SDKSession when sdkSessionID is empty (interrupted stream)",
+			session:       &storage.ChatSession{ID: "s8", SDKSession: "existing-sdk-id"},
+			assistantText: "",
+			sdkSessionID:  "",
+			blocks:        nil,
+			usage:         agent.UsageStats{},
+			expectAppend:  false,
+		},
+		{
 			name:          "wraps AppendMessage error",
 			session:       &storage.ChatSession{ID: "s4"},
 			assistantText: "fail text",
@@ -516,8 +525,14 @@ func TestCommitMessage(t *testing.T) {
 
 			// UpdateSession should only be called if AppendMessage succeeded (or was skipped).
 			if tc.appendErr == nil {
+				// When sdkSessionID is non-empty it overwrites session.SDKSession;
+				// when empty the original value is preserved (the bug fix).
+				expectedSDK := tc.sdkSessionID
+				if expectedSDK == "" {
+					expectedSDK = tc.session.SDKSession
+				}
 				chatRepo.On("UpdateSession", mock.Anything, mock.MatchedBy(func(s *storage.ChatSession) bool {
-					return s.ID == tc.session.ID && s.SDKSession == tc.sdkSessionID
+					return s.ID == tc.session.ID && s.SDKSession == expectedSDK
 				})).Return(tc.updateErr)
 			}
 
@@ -537,8 +552,10 @@ func TestCommitMessage(t *testing.T) {
 				assert.Equal(t, tc.wantOutputTok, tc.session.TotalOutputTokens)
 				assert.Equal(t, tc.wantCacheCreate, tc.session.TotalCacheCreationTokens)
 				assert.Equal(t, tc.wantCacheRead, tc.session.TotalCacheReadTokens)
-				// Verify SDKSession was set.
-				assert.Equal(t, tc.sdkSessionID, tc.session.SDKSession)
+				// Verify SDKSession: non-empty sdkSessionID overwrites; empty preserves original.
+				if tc.sdkSessionID != "" {
+					assert.Equal(t, tc.sdkSessionID, tc.session.SDKSession)
+				}
 				// Verify UpdatedAt was set recently.
 				assert.WithinDuration(t, time.Now().UTC(), tc.session.UpdatedAt, 2*time.Second)
 			}
