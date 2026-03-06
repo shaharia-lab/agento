@@ -47,12 +47,27 @@ import {
   Star,
   Upload,
   Paperclip,
+  Plus,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 
-export default function ChatSessionPage() {
-  const { id } = useParams<{ id: string }>()
+interface ChatSessionPageProps {
+  /** Overrides useParams when rendered inside multi-chat context. */
+  readonly chatId?: string
+  /** Overrides the back button; in multi-chat, closes the tab instead. */
+  readonly onBack?: () => void
+  /** Notifies parent when the chat title changes, for tab label updates. */
+  readonly onTitleChange?: (title: string) => void
+  /** Message to send automatically once the session finishes loading. */
+  readonly pendingMessage?: string
+  /** Called after pendingMessage has been consumed (sent). */
+  readonly onPendingMessageConsumed?: () => void
+}
+
+export default function ChatSessionPage(props: ChatSessionPageProps) {
+  const { id: routeId } = useParams<{ id: string }>()
+  const id = props.chatId ?? routeId
   const navigate = useNavigate()
   const location = useLocation()
   const [detail, setDetail] = useState<ChatDetail | null>(null)
@@ -103,6 +118,13 @@ export default function ChatSessionPage() {
   const abortRef = useRef<AbortController | null>(null)
   const pendingSent = useRef(false)
 
+  // Abort any in-flight SSE stream when the component unmounts (e.g., tab closed).
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort()
+    }
+  }, [])
+
   const scrollToBottom = useCallback(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [])
@@ -114,9 +136,13 @@ export default function ChatSessionPage() {
       .then(d => {
         setDetail(d)
         setMessages(d.messages)
+        if (d.session.title) {
+          props.onTitleChange?.(d.session.title)
+        }
       })
       .catch(err => setError(err instanceof Error ? err.message : 'Failed to load chat'))
       .finally(() => setLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
   useEffect(() => {
@@ -331,8 +357,9 @@ export default function ChatSessionPage() {
     [id, streaming, detail],
   )
 
-  // Auto-send first message passed from ChatsPage via navigation state.
+  // Auto-send first message passed from ChatsPage via navigation state (single-chat mode).
   useEffect(() => {
+    if (props.chatId) return // Multi-chat mode uses custom events instead.
     const pending = (location.state as { pendingMessage?: string } | null)?.pendingMessage
     if (pending && !loading && !pendingSent.current) {
       pendingSent.current = true
@@ -340,7 +367,22 @@ export default function ChatSessionPage() {
       globalThis.history.replaceState({}, '')
       doSend(pending)
     }
-  }, [loading, location.state, doSend])
+  }, [loading, location.state, doSend, props.chatId])
+
+  // Reset the guard whenever the chat id changes so a new pending message can be consumed.
+  useEffect(() => {
+    pendingSent.current = false
+  }, [id])
+
+  // Consume a pending message passed via props once the session has loaded.
+  const { pendingMessage, onPendingMessageConsumed } = props
+  useEffect(() => {
+    if (!loading && pendingMessage && !pendingSent.current) {
+      pendingSent.current = true
+      doSend(pendingMessage)
+      onPendingMessageConsumed?.()
+    }
+  }, [loading, pendingMessage, onPendingMessageConsumed, doSend])
 
   const handleSend = () => {
     if (!input.trim()) return
@@ -471,6 +513,7 @@ export default function ChatSessionPage() {
     try {
       await chatsApi.updateTitle(id, trimmed)
       setDetail(prev => (prev ? { ...prev, session: { ...prev.session, title: trimmed } } : prev))
+      props.onTitleChange?.(trimmed)
     } catch {
       // silently revert
     }
@@ -484,7 +527,7 @@ export default function ChatSessionPage() {
       {/* Header */}
       <div className="flex items-center gap-3 border-b border-zinc-100 dark:border-zinc-700/50 px-3 sm:px-4 py-3 shrink-0">
         <button
-          onClick={() => navigate('/chats')}
+          onClick={() => (props.onBack ? props.onBack() : navigate('/chats'))}
           className="h-7 w-7 flex items-center justify-center rounded-md text-zinc-400 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
         >
           <ArrowLeft className="h-4 w-4" />
@@ -516,7 +559,7 @@ export default function ChatSessionPage() {
           )}
         </div>
         <button
-          className={`h-7 w-7 flex items-center justify-center rounded-md transition-colors shrink-0 ${
+          className={`h-7 w-7 flex items-center justify-center rounded-md transition-colors shrink-0 cursor-pointer ${
             detail?.session.is_favorite
               ? 'text-amber-400'
               : 'text-zinc-300 dark:text-zinc-600 hover:text-amber-400'
@@ -537,6 +580,16 @@ export default function ChatSessionPage() {
         >
           <Star className={`h-3.5 w-3.5 ${detail?.session.is_favorite ? 'fill-amber-400' : ''}`} />
         </button>
+        {!props.chatId && (
+          <button
+            onClick={() => navigate('/multi-chat', { state: { fromChatId: id } })}
+            className="flex items-center gap-1.5 px-2.5 h-7 rounded-md text-xs text-zinc-500 dark:text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors shrink-0 font-medium cursor-pointer"
+            title="Open in multi-chat workspace"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            New Chat Tab
+          </button>
+        )}
         <span className="text-xs text-zinc-400 dark:text-zinc-500 shrink-0 font-mono">
           {agentLabel ?? 'Direct chat'}
         </span>

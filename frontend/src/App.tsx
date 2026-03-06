@@ -6,6 +6,7 @@ import AgentCreatePage from '@/pages/AgentCreatePage'
 import AgentEditPage from '@/pages/AgentEditPage'
 import ChatsPage from '@/pages/ChatsPage'
 import ChatSessionPage from '@/pages/ChatSessionPage'
+import MultiChatPage from '@/pages/MultiChatPage'
 import SettingsPage from '@/pages/SettingsPage'
 import ClaudeSessionsPage from '@/pages/ClaudeSessionsPage'
 import ClaudeSessionDetailPage from '@/pages/ClaudeSessionDetailPage'
@@ -84,6 +85,7 @@ export default function App() {
             <Route index element={<Navigate to="/chats" replace />} />
             <Route path="chats" element={<ChatsPage />} />
             <Route path="chats/:id" element={<ChatSessionPage />} />
+            <Route path="multi-chat" element={<MultiChatPage />} />
             <Route path="agents" element={<AgentsPage />} />
             <Route path="agents/new" element={<AgentCreatePage />} />
             <Route path="agents/:slug/edit" element={<AgentEditPage />} />
