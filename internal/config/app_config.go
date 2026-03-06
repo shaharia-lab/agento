@@ -111,6 +111,12 @@ func (c *AppConfig) DatabasePath() string {
 	return filepath.Join(c.DataDir, "agento.db")
 }
 
+// TmpUploadsDir returns the path to the temporary uploads directory.
+// Files here are cleaned up at startup (files older than 24 hours are removed).
+func (c *AppConfig) TmpUploadsDir() string {
+	return filepath.Join(c.DataDir, "tmp-uploads")
+}
+
 // resolveDataDir returns the resolved data directory path.
 // If dir is empty it defaults to ~/.agento.
 // A leading ~ is expanded to the user's home directory so that values like

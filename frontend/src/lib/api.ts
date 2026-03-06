@@ -453,6 +453,24 @@ export async function provideInput(chatId: string, answer: string): Promise<void
   }
 }
 
+// ── File Uploads ──────────────────────────────────────────────────────────────
+
+/**
+ * Uploads a file to the server's tmp-uploads directory and returns the absolute path.
+ * Used by drag-drop and paste handlers to inject `[File: /path]` tags into prompts.
+ */
+export async function uploadFile(file: File): Promise<string> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch(`${BASE}/uploads`, { method: 'POST', body: form })
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }))
+    throw new Error(body.error || `Upload failed: HTTP ${res.status}`)
+  }
+  const { path } = (await res.json()) as { path: string }
+  return path
+}
+
 // ── Integrations ─────────────────────────────────────────────────────────────
 
 export const integrationsApi = {

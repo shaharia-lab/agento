@@ -2,7 +2,14 @@ import { Fragment, useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { chatsApi, sendMessage, provideInput, permissionResponse, stopSession } from '@/lib/api'
+import {
+  chatsApi,
+  sendMessage,
+  provideInput,
+  permissionResponse,
+  stopSession,
+  uploadFile,
+} from '@/lib/api'
 import { applyThinkingDelta, applyTextDelta, applyToolUseBlocks } from '@/lib/streamingBlocks'
 import type {
   ChatDetail,
@@ -38,6 +45,8 @@ import {
   Check,
   Pencil,
   Star,
+  Upload,
+  Paperclip,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -83,6 +92,12 @@ export default function ChatSessionPage() {
     toolName: string
     input: unknown
   } | null>(null)
+
+  // File drag-and-drop state
+  const [isDragging, setIsDragging] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const dragCounter = useRef(0)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -340,6 +355,88 @@ export default function ChatSessionPage() {
       handleSend()
     }
   }
+
+  // ── File drag-drop and paste handlers ───────────────────────────────────────
+
+  const appendFileTags = useCallback((paths: string[]) => {
+    const tags = paths.map(p => `[File: ${p}]`).join('\n')
+    setInput(prev => {
+      const separator = prev.length > 0 && !prev.endsWith('\n') ? '\n' : ''
+      return prev + separator + tags
+    })
+  }, [])
+
+  const handleFilesUpload = useCallback(
+    async (files: FileList | File[]) => {
+      if (files.length === 0) return
+      setUploading(true)
+      try {
+        const results = await Promise.allSettled(Array.from(files).map(f => uploadFile(f)))
+        const paths = results
+          .filter((r): r is PromiseFulfilledResult<string> => r.status === 'fulfilled')
+          .map(r => r.value)
+        const failures = results.filter(r => r.status === 'rejected')
+        if (paths.length > 0) appendFileTags(paths)
+        if (failures.length > 0) {
+          setError(`${failures.length} file(s) failed to upload`)
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'File upload failed')
+      } finally {
+        setUploading(false)
+      }
+    },
+    [appendFileTags],
+  )
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current += 1
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragging(true)
+    }
+  }, [])
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current -= 1
+    if (dragCounter.current <= 0) {
+      dragCounter.current = 0
+      setIsDragging(false)
+    }
+  }, [])
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault()
+      e.stopPropagation()
+      dragCounter.current = 0
+      setIsDragging(false)
+      if (e.dataTransfer.files.length > 0) {
+        handleFilesUpload(e.dataTransfer.files)
+      }
+    },
+    [handleFilesUpload],
+  )
+
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const files = e.clipboardData?.files
+      if (files && files.length > 0) {
+        e.preventDefault()
+        handleFilesUpload(files)
+      }
+      // If no files in clipboard, let the default paste handle text normally.
+    },
+    [handleFilesUpload],
+  )
 
   if (loading) {
     return (
@@ -626,15 +723,40 @@ export default function ChatSessionPage() {
       </div>
 
       {/* Input */}
-      <div className="border-t border-zinc-100 dark:border-zinc-700/50 px-3 py-3 sm:px-6 shrink-0 bg-white dark:bg-zinc-950">
-        <div className="flex gap-2 max-w-4xl mx-auto">
+      <div
+        className="border-t border-zinc-100 dark:border-zinc-700/50 px-3 py-3 sm:px-6 shrink-0 bg-white dark:bg-zinc-950"
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+      >
+        <div className="flex gap-2 max-w-4xl mx-auto relative">
+          {/* Drop zone overlay */}
+          {isDragging && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md border-2 border-dashed border-zinc-400 dark:border-zinc-500 bg-zinc-50/90 dark:bg-zinc-800/90">
+              <div className="flex items-center gap-2 text-sm font-medium text-zinc-500 dark:text-zinc-400">
+                <Upload className="h-5 w-5" />
+                Drop file here
+              </div>
+            </div>
+          )}
+          {/* Upload progress indicator */}
+          {uploading && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center rounded-md bg-zinc-50/90 dark:bg-zinc-800/90">
+              <div className="flex items-center gap-2 text-sm font-medium text-zinc-500 dark:text-zinc-400">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Uploading...
+              </div>
+            </div>
+          )}
           <Textarea
             value={input}
             onChange={e => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Message… (Enter to send, Shift+Enter for new line)"
+            onPaste={handlePaste}
+            placeholder="Message… (Enter to send, Shift+Enter for new line, drop/paste files)"
             className="min-h-[72px] max-h-[240px] resize-none text-sm border-zinc-200 focus:border-zinc-900 focus:ring-zinc-900"
-            disabled={streaming}
+            disabled={streaming || uploading}
             rows={3}
           />
           {streaming ? (
@@ -671,31 +793,56 @@ export default function ChatSessionPage() {
             </button>
           )}
         </div>
-        {/* Session info pills */}
-        {detail && (detail.session.working_directory || detail.session.model) && (
-          <div className="flex items-center gap-3 max-w-4xl mx-auto mt-1.5">
-            {detail.session.working_directory && (
-              <span
-                className="flex items-center gap-1 text-xs text-zinc-400 truncate max-w-[200px]"
-                title={detail.session.working_directory}
-              >
-                <Folder className="h-3 w-3 shrink-0" />
-                {detail.session.working_directory}
-              </span>
-            )}
-            {detail.session.working_directory && detail.session.model && (
-              <span className="text-zinc-200">•</span>
-            )}
-            {detail.session.model && (
-              <span
-                className="text-xs text-zinc-400 font-mono truncate max-w-[180px]"
-                title={detail.session.model}
-              >
-                {detail.session.model}
-              </span>
-            )}
-          </div>
-        )}
+        {/* Bottom bar: attach button + session info pills */}
+        <div className="flex items-center gap-3 max-w-4xl mx-auto mt-1.5">
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={streaming || uploading}
+            className="flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+            title="Attach files"
+          >
+            <Paperclip className="h-3 w-3" />
+            Add files
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            onChange={e => {
+              if (e.target.files && e.target.files.length > 0) {
+                handleFilesUpload(e.target.files)
+                e.target.value = ''
+              }
+            }}
+          />
+          {detail && (detail.session.working_directory || detail.session.model) && (
+            <>
+              <span className="text-zinc-300 dark:text-zinc-600">|</span>
+              {detail.session.working_directory && (
+                <span
+                  className="flex items-center gap-1 text-xs text-zinc-400 truncate max-w-[200px]"
+                  title={detail.session.working_directory}
+                >
+                  <Folder className="h-3 w-3 shrink-0" />
+                  {detail.session.working_directory}
+                </span>
+              )}
+              {detail.session.working_directory && detail.session.model && (
+                <span className="text-zinc-200 dark:text-zinc-600">•</span>
+              )}
+              {detail.session.model && (
+                <span
+                  className="text-xs text-zinc-400 font-mono truncate max-w-[180px]"
+                  title={detail.session.model}
+                >
+                  {detail.session.model}
+                </span>
+              )}
+            </>
+          )}
+        </div>
       </div>
     </div>
   )
