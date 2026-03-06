@@ -33,6 +33,11 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusBadRequest, "file too large or invalid multipart form")
 		return
 	}
+	defer func() {
+		if err := r.MultipartForm.RemoveAll(); err != nil {
+			s.logger.Error("failed to remove multipart temp files", "error", err)
+		}
+	}()
 
 	file, header, err := r.FormFile("file")
 	if err != nil {
@@ -73,13 +78,8 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, http.StatusInternalServerError, "failed to save file")
 		return
 	}
-	defer func() {
-		if cerr := dst.Close(); cerr != nil {
-			s.logger.Error("failed to close destination file", "path", destPath, "error", cerr)
-		}
-	}()
 
-	if _, err := io.Copy(dst, file); err != nil {
+	if err := copyAndClose(dst, file, destPath); err != nil {
 		s.logger.Error("failed to write uploaded file", "path", destPath, "error", err)
 		s.writeError(w, http.StatusInternalServerError, "failed to save file")
 		return
@@ -87,6 +87,18 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("file uploaded", "path", destPath, "size", header.Size, "extension", ext)
 	s.writeJSON(w, http.StatusOK, map[string]string{"path": destPath})
+}
+
+// copyAndClose copies src into dst, closes dst, and removes destPath if the copy fails.
+// It takes ownership of dst — callers must not close dst themselves.
+func copyAndClose(dst *os.File, src io.Reader, destPath string) error {
+	_, copyErr := io.Copy(dst, src)
+	closeErr := dst.Close()
+	if copyErr != nil {
+		_ = os.Remove(destPath) //nolint:errcheck // best-effort cleanup of partial file
+		return copyErr
+	}
+	return closeErr
 }
 
 // sanitizeExtension extracts the file extension from a filename and validates it.

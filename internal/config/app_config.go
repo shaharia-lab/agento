@@ -112,7 +112,7 @@ func (c *AppConfig) DatabasePath() string {
 }
 
 // TmpUploadsDir returns the path to the temporary uploads directory.
-// TODO: add periodic cleanup of files older than a configurable TTL.
+// Files here are cleaned up at startup (files older than 24 hours are removed).
 func (c *AppConfig) TmpUploadsDir() string {
 	return filepath.Join(c.DataDir, "tmp-uploads")
 }

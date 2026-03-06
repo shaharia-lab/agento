@@ -180,7 +180,30 @@ func ensureWebDirectories(cfg *config.AppConfig) error {
 	if err := os.MkdirAll(config.DefaultWorkingDir(), 0750); err != nil {
 		return fmt.Errorf("creating default working directory: %w", err)
 	}
+	cleanOldUploads(cfg.TmpUploadsDir(), 24*time.Hour)
 	return nil
+}
+
+// cleanOldUploads removes files from dir that are older than ttl.
+// Errors are silently ignored — this is best-effort housekeeping.
+func cleanOldUploads(dir string, ttl time.Duration) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return // dir may not exist yet; nothing to clean
+	}
+	cutoff := time.Now().Add(-ttl)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(dir, e.Name())) //nolint:errcheck
+		}
+	}
 }
 
 func initDatabase(cfg *config.AppConfig, sysLogger *slog.Logger) (*sql.DB, func(), error) {

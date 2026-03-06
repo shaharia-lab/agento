@@ -830,7 +830,7 @@ export default function ChatSessionPage() {
                 </span>
               )}
               {detail.session.working_directory && detail.session.model && (
-                <span className="text-zinc-200">•</span>
+                <span className="text-zinc-200 dark:text-zinc-600">•</span>
               )}
               {detail.session.model && (
                 <span
