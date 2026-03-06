@@ -49,10 +49,12 @@ type ChatService interface {
 	// BulkDeleteSessions removes multiple sessions and their messages.
 	BulkDeleteSessions(ctx context.Context, ids []string) error
 
-	// BeginMessage stores the user message, resolves the agent config, and starts
-	// a persistent agent session. The caller must consume events from session.Events()
-	// (breaking at each TypeResult), inject follow-up messages via session.Send() as
-	// needed, call session.Close() when done, and then call CommitMessage.
+	// BeginMessage resolves the agent config and starts a persistent agent session.
+	// The user message is NOT stored here; it is persisted atomically with the
+	// assistant response in CommitMessage. The caller must consume events from
+	// session.Events() (breaking at each TypeResult), inject follow-up messages
+	// via session.Send() as needed, call session.Close() when done, and then
+	// call CommitMessage.
 	BeginMessage(
 		ctx context.Context, sessionID, content string, opts agent.RunOptions,
 	) (*claude.Session, *storage.ChatSession, error)
