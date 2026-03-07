@@ -54,9 +54,9 @@ Token Usage: <img width="1202" height="1545" alt="image" src="https://github.com
 General Usage: <img width="1201" height="1327" alt="image" src="https://github.com/user-attachments/assets/e21522b4-7ee9-4728-bb79-a62857d619ae" />
 Favorite and Chat title change: 
 
-[fullchat.mp4](https://github.com/user-attachments/assets/18867268-c3fc-490b-b27e-e0a2689daa29)
+[Multi-Tab Chat - Demo.webm](https://github.com/user-attachments/assets/91794133-9f90-4eb0-a62c-885be70b3c39)
+[Favorite and Chat Title Demo.webm](https://github.com/user-attachments/assets/9a4892c6-eee5-46c4-af1a-eeb65e613aa3)
 
-[Multi-chat demo](https://github.com/user-attachments/assets/a2f87266-4c7f-46b0-9250-cf3e51f6b624)
 
 
 
