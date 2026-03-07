@@ -36,34 +36,117 @@ You can define agents with custom system prompts and tools, start multi-turn con
 
 ## 🎬 Demo
 
+See Agento in action across its core features. Click any section below to expand the demo.
+
 <details>
-  
-  <summery>Full app</summery>
+<summary><strong>💬 Chat with an AI Agent</strong></summary>
+<br>
+
+Start a multi-turn conversation with any agent you've built. Responses stream live in the browser via Server-Sent Events, so you see output as it's generated — just like a terminal.
 
 [demo.webm](https://github.com/user-attachments/assets/1fa2b716-cbb8-459e-b2e1-f6c252c086c2)
 
 </details>
 
-Monitoring: <img width="1271" height="682" alt="image" src="https://github.com/user-attachments/assets/c515cc62-3070-4576-b20b-86552df074e7" />
-Notification: <img width="1203" height="747" alt="image" src="https://github.com/user-attachments/assets/5451a9ce-82a6-40fa-b86b-f298ab062abb" />
-Apprearence settings: <img width="731" height="634" alt="image" src="https://github.com/user-attachments/assets/b73b2d73-00ad-4b2a-84d6-ad70785898ae" />
-Scheduled Task: <img width="1490" height="962" alt="image" src="https://github.com/user-attachments/assets/b5fafaa7-5f3e-4c0c-9b4d-ba85dbcb28cf" />
-Claude Code Session Journey: <img width="1490" height="809" alt="image" src="https://github.com/user-attachments/assets/b45a5cdb-93d9-482a-9b08-b3394907ba40" />
-Integration: <img width="1212" height="361" alt="image" src="https://github.com/user-attachments/assets/6dcb9079-a7ff-47b3-9096-54de2314d544" />
-Token Usage: <img width="1202" height="1545" alt="image" src="https://github.com/user-attachments/assets/29bcadf2-56ef-4728-badf-c01e4c71a860" />
-General Usage: <img width="1201" height="1327" alt="image" src="https://github.com/user-attachments/assets/e21522b4-7ee9-4728-bb79-a62857d619ae" />
-Favorite and Chat title change: 
+<details>
+<summary><strong>🗂️ Multi-Chat Workspace</strong></summary>
+<br>
+
+Open multiple conversations side by side using tabbed workspaces. Each tab maintains its own session state so you can run independent agent tasks in parallel without losing context.
 
 [Multi-Tab Chat - Demo.webm](https://github.com/user-attachments/assets/91794133-9f90-4eb0-a62c-885be70b3c39)
+
+</details>
+
+<details>
+<summary><strong>⭐ Favorites & Chat Title</strong></summary>
+<br>
+
+Mark important conversations as favorites and rename chat titles inline — keeping your workspace organized without leaving the chat view.
+
 [Favorite and Chat Title Demo.webm](https://github.com/user-attachments/assets/9a4892c6-eee5-46c4-af1a-eeb65e613aa3)
 
+</details>
 
+<details>
+<summary><strong>🔌 Integrations (Google, GitHub, Slack, and more)</strong></summary>
+<br>
 
+Connect external services — Google Calendar, Gmail, Drive, GitHub, Slack, Jira, Confluence, and Telegram — and expose them as tools your agents can call during a conversation.
 
+<img width="1212" height="361" alt="Integrations" src="https://github.com/user-attachments/assets/6dcb9079-a7ff-47b3-9096-54de2314d544" />
 
+</details>
 
+<details>
+<summary><strong>⏰ Task Scheduler</strong></summary>
+<br>
 
+Schedule agents to run automatically on a cron expression. Each run is logged with full job history so you can review what the agent did, when it ran, and whether it succeeded.
 
+<img width="1490" height="962" alt="Scheduled Task" src="https://github.com/user-attachments/assets/b5fafaa7-5f3e-4c0c-9b4d-ba85dbcb28cf" />
+
+</details>
+
+<details>
+<summary><strong>📊 Token Usage Analytics</strong></summary>
+<br>
+
+Track token consumption, cache hit rates, and estimated costs across all your Claude sessions. Charts break down usage by model and time range so you always know where tokens are going.
+
+<img width="1202" height="1545" alt="Token Usage" src="https://github.com/user-attachments/assets/29bcadf2-56ef-4728-badf-c01e4c71a860" />
+
+</details>
+
+<details>
+<summary><strong>📈 General Usage Analytics</strong></summary>
+<br>
+
+Visualize session volume over time, per-model breakdowns, and activity heatmaps. A quick way to understand how heavily your agents are being used and when.
+
+<img width="1201" height="1327" alt="General Usage" src="https://github.com/user-attachments/assets/e21522b4-7ee9-4728-bb79-a62857d619ae" />
+
+</details>
+
+<details>
+<summary><strong>🗄️ Claude Code Session Journey</strong></summary>
+<br>
+
+Browse and replay your Claude Code session history with a full timeline of tool calls, messages, and token usage — useful for auditing what an agent actually did during a run.
+
+<img width="1490" height="809" alt="Claude Code Session Journey" src="https://github.com/user-attachments/assets/b45a5cdb-93d9-482a-9b08-b3394907ba40" />
+
+</details>
+
+<details>
+<summary><strong>📡 Monitoring & Observability</strong></summary>
+<br>
+
+Configure OpenTelemetry exporters for traces, metrics, and logs directly from the Settings UI — no config files needed. Works with any OTLP-compatible collector or Prometheus.
+
+<img width="1271" height="682" alt="Monitoring" src="https://github.com/user-attachments/assets/c515cc62-3070-4576-b20b-86552df074e7" />
+
+</details>
+
+<details>
+<summary><strong>🔔 Notifications</strong></summary>
+<br>
+
+Set up SMTP email notifications for task completions and agent events. Configure recipients, test delivery, and review the notification log — all from the Settings page.
+
+<img width="1203" height="747" alt="Notifications" src="https://github.com/user-attachments/assets/5451a9ce-82a6-40fa-b86b-f298ab062abb" />
+
+</details>
+
+<details>
+<summary><strong>🎨 Appearance Settings</strong></summary>
+<br>
+
+Switch between light and dark themes and customize the UI appearance to match your workflow preferences, with changes applied instantly across the entire app.
+
+<img width="731" height="634" alt="Appearance Settings" src="https://github.com/user-attachments/assets/b73b2d73-00ad-4b2a-84d6-ad70785898ae" />
+
+</details>
 
 ---
 
