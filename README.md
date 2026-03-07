@@ -18,19 +18,147 @@ You can define agents with custom system prompts and tools, start multi-turn con
 
 ## ✨ Features
 
-- **Web UI + CLI** — Access agents from a browser or run one-shot queries from the terminal
-- **Agent builder** — Define agents with custom system prompts, models, thinking modes, and tools via the UI or YAML
-- **Multi-turn conversations** — Resume sessions using session IDs
-- **Extended thinking** — Control Claude's reasoning depth per agent (`adaptive`, `enabled`, `disabled`)
-- **Template variables** — Inject `{{current_date}}`, `{{current_time}}`, and custom values into system prompts
-- **Built-in Claude Code tools** — `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`
-- **External MCP servers** — Connect any MCP-compatible server via `stdio`, `streamable_http`, or `sse`
-- **Real-time streaming** — Responses stream live in the UI via Server-Sent Events
-- **Integrations** — Connect Google (Calendar, Gmail, Drive), GitHub, Slack, Jira, Confluence, and Telegram as agent tools
-- **Task scheduler** — Schedule recurring agent tasks with cron expressions and track job history
-- **Notifications** — Event-driven notification system with SMTP email support
-- **Observability** — OpenTelemetry traces, metrics, and logs with OTLP and Prometheus exporters, configurable via UI or environment variables
-- **Auto-update check** — Banner notification when a newer release is available, with one-command update
+<details>
+<summary><strong>💬 Chats — Multi-turn conversations with your agents</strong></summary>
+<br>
+
+Start a conversation with any agent you've built and continue it across multiple turns. Sessions are persisted locally so you can pick up right where you left off. Responses stream live via Server-Sent Events — no waiting for the full reply. You can favorite important chats and rename their titles inline to keep your workspace organized.
+
+</details>
+
+<details>
+<summary><strong>🗂️ Multi-Chat Workspace — Run multiple conversations in parallel</strong></summary>
+<br>
+
+Open several chat sessions simultaneously in a tabbed workspace. Each tab is fully independent with its own agent, session state, and streaming output. Tab state persists across page reloads, so you never lose your place even if you navigate away.
+
+</details>
+
+<details>
+<summary><strong>🤖 Agent Builder — Define custom AI agents</strong></summary>
+<br>
+
+Create agents with a custom name, system prompt, Claude model, and thinking mode (`adaptive`, `enabled`, or `disabled`). Assign exactly which tools each agent can access — built-in Claude Code tools, local in-process tools, external MCP servers, or third-party integrations. Agents are stored in a local SQLite database and can also be defined as YAML files. Template variables like `{{current_date}}` and `{{current_time}}` are automatically injected into system prompts at runtime.
+
+**Built-in tools available:** `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`
+
+</details>
+
+<details>
+<summary><strong>🔌 Integrations — Connect external services as agent tools</strong></summary>
+<br>
+
+Turn external services into tools your agents can call directly during a conversation. Each integration runs as an in-process MCP server with no external daemon required.
+
+Supported integrations:
+- **Google** — Calendar (read/create events), Gmail (read/send), Drive (search/read files) via OAuth
+- **GitHub** — Repos, issues, pull requests, Actions workflows, and releases via personal access token
+- **Slack** — Read channels and messages, send messages, search, look up users via bot token
+- **Jira** — Browse projects, search issues with JQL, create and update issues via API token
+- **Confluence** — Read spaces and pages, search with CQL via API token
+- **Telegram** — Send/receive messages, photos, polls, and locations via bot token
+
+</details>
+
+<details>
+<summary><strong>🔗 External MCP Servers — Plug in any MCP-compatible tool server</strong></summary>
+<br>
+
+Extend agents with any MCP server by listing it in `~/.agento/mcps.yaml`. Supports all three transports: `stdio` (subprocess), `streamable_http`, and `sse`. Environment variable references (`${ENV:VAR_NAME}`) keep credentials out of config files. Once registered, MCP tools appear alongside built-in tools in the agent builder and can be selectively assigned per agent.
+
+</details>
+
+<details>
+<summary><strong>⏰ Task Scheduler — Automate recurring agent jobs</strong></summary>
+<br>
+
+Schedule any agent to run automatically on a cron expression. Agento runs tasks in the background and records the outcome, duration, and output of every execution. Use this for daily summaries, automated reports, periodic file processing, or any workflow you'd otherwise run manually on a schedule.
+
+</details>
+
+<details>
+<summary><strong>📋 Job History — Audit every scheduled run</strong></summary>
+<br>
+
+Every task execution is logged with its start time, duration, exit status, and full agent output. Browse the job history page to review what each agent did, diagnose failures, and track trends over time without digging through log files.
+
+</details>
+
+<details>
+<summary><strong>🗄️ Claude Sessions — Browse your Claude Code session history</strong></summary>
+<br>
+
+Agento automatically scans the Claude Code session JSONL files on your machine and makes them browsable in the UI. View any session's full message history, drill into individual tool calls, and follow the complete session journey from start to finish. Results are cached in SQLite and updated incrementally in the background as new sessions appear.
+
+</details>
+
+<details>
+<summary><strong>📊 Token Usage Analytics — Track cost and consumption over time</strong></summary>
+<br>
+
+See exactly how many tokens your Claude sessions are consuming, broken down by input, output, and cache tokens. Charts show trends over your chosen date range, and cost estimates let you stay on top of spending before bills arrive. Filter by model to compare usage across Claude Sonnet, Haiku, and Opus.
+
+</details>
+
+<details>
+<summary><strong>📈 General Usage Analytics — Understand your session patterns</strong></summary>
+<br>
+
+Visualize how many sessions you're running per day, which models you're using most, and when you're most active via an activity heatmap. Compare any date range to spot growth trends or usage spikes across all your Claude Code work.
+
+</details>
+
+<details>
+<summary><strong>💡 Insights — Productivity metrics for your AI workflow <em>(experimental)</em></strong></summary>
+<br>
+
+A deeper analytics view that goes beyond raw token counts. Insights computes an **Autonomy Score** (how independently Claude worked, based on human interruptions), a **Productivity Score** (composite of autonomy, cache efficiency, and error-free sessions), average tool call counts, session durations, and a top-10 tool usage breakdown. All metrics support period-over-period comparison so you can see whether your agents are becoming more effective over time.
+
+</details>
+
+<details>
+<summary><strong>⚙️ Settings — General, Claude Profiles, Appearance, and more</strong></summary>
+<br>
+
+All configuration lives in a single Settings page organized into tabs:
+
+- **General** — Set the default working directory and Claude model. Fields locked by environment variables are shown as read-only with the overriding env var name.
+- **Claude Settings Profiles** — Create multiple named Claude settings profiles (each stored as `~/.claude/settings_<slug>.json`) and switch between them per agent or per chat. A default profile is auto-created from your existing `~/.claude/settings.json` on first launch.
+- **Appearance** — Toggle dark/light mode, choose font size and font family. Changes apply instantly across the entire UI.
+- **Notifications** — Configure SMTP email delivery for task completion and agent events. Test delivery directly from the UI and browse the notification log.
+- **Monitoring** — Configure OpenTelemetry exporters (OTLP gRPC or Prometheus) for traces, metrics, and logs. Hot-reload settings without restarting. Fields set via environment variables show a lock indicator and return HTTP 409 if you try to override them via UI.
+- **Advanced** — Additional low-level configuration options.
+
+</details>
+
+<details>
+<summary><strong>💻 CLI — Run agents directly from the terminal</strong></summary>
+<br>
+
+Use `agento ask` to send a one-shot query to any agent without opening the browser. Pass a session ID as a positional argument to continue an existing conversation. Useful for scripting, quick lookups, or integrating Agento into other shell workflows.
+
+```bash
+agento ask "What changed in the repo today?"
+agento ask --agent my-agent "Follow up" <session-id>
+```
+
+</details>
+
+<details>
+<summary><strong>🔄 Auto-Update — Stay current with one command</strong></summary>
+<br>
+
+Agento checks for newer releases on startup and shows an amber banner at the top of the UI when an update is available. Dismiss it per-version or run `agento update` to upgrade in place. The update check is cached for one hour so it doesn't slow down your workflow.
+
+</details>
+
+<details>
+<summary><strong>📡 Observability — OpenTelemetry traces, metrics, and logs</strong></summary>
+<br>
+
+Every HTTP request, agent run, tool call, and storage operation is instrumented with OpenTelemetry spans and metrics. Configure OTLP gRPC export or a Prometheus pull endpoint directly from the Monitoring settings tab — no config files or restarts needed. Structured JSON logs are written to `~/.agento/logs/system.log` with per-session logs at `~/.agento/logs/sessions/<id>.log`.
+
+</details>
 
 ---
 
