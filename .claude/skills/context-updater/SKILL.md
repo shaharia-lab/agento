@@ -26,6 +26,10 @@ If no scope is provided, check changes since the last 7 days.
 3. Run `git log --since="N days ago" --stat` to see which files were touched
 4. Read the commit messages to understand intent of each change
 5. Check merged PRs: `git log --merges --since="N days ago" --oneline`
+6. Extract PR numbers from merge commit messages (e.g. `(#123)` or `Merge pull request #123`)
+7. For each PR number found, run `gh pr view <number> --json number,title,body,closingIssuesReferences` to fetch the full PR description and any linked issues
+8. For each linked issue found in the PR, run `gh issue view <number> --json number,title,body,comments` to understand the original problem and requirements
+9. Use PR descriptions and issue context to supplement commit messages — PR/issue bodies often contain design decisions, rationale, and edge cases not captured in commits
 
 ### Step 2: Read all current documentation
 Read every documentation and context file:
@@ -54,14 +58,23 @@ For each changed area of the codebase:
 1. Read the actual changed code to understand the new state
 2. Check if any doc references this area
 3. Determine if the doc is now inaccurate, incomplete, or missing coverage
-4. Note what specifically needs updating
+4. Explicitly ask: **does this feature have any documentation at all?** If not, it needs a new doc
+5. Note what specifically needs updating or creating
 
-### Step 4: Apply surgical updates
+### Step 3a: Identify new features that need new docs
+For every significant new feature or module introduced in the scoped commits/PRs:
+1. Check if a relevant doc already exists in `docs/`
+2. If no doc covers it, create a new `docs/<feature-name>.md`
+3. A new doc is warranted when the feature introduces: a new package/subsystem, a new user-facing workflow, new API endpoints, new configuration options, or new integration patterns
+4. New docs should cover: what it does, how it works architecturally, key configuration, and usage examples
+5. Follow the style and structure of existing docs in `docs/`
+
+### Step 4: Apply surgical updates and create missing docs
 For each documentation gap found:
 1. Make the minimum change needed — don't rewrite sections that are still accurate
 2. Keep the existing style and tone of the document
 3. Be concise and direct — no fluff, no filler
-4. If a new doc is needed, create it in the appropriate location
+4. **Create new docs** in `docs/` for any significant feature with no existing coverage — do not skip this step
 
 ## What to Check
 
@@ -87,10 +100,12 @@ This is the most critical file — AI agents read it on every interaction.
 
 ### docs/ directory
 - [ ] Each doc file — does content match current code?
-- [ ] Are there features/modules with no documentation that should have it?
+- [ ] Are there features/modules introduced in recent changes with NO existing doc? → **create one**
 - [ ] Are there docs for features that were removed or significantly changed?
 - [ ] Do cross-references between docs still hold?
 - [ ] API documentation matches current endpoints?
+- [ ] New packages under `internal/` — does each significant one have a doc?
+- [ ] New integrations, tools, or schedulers — are they documented?
 
 ### Claude skills (`.claude/skills/*/SKILL.md`)
 For each skill, check:
@@ -143,5 +158,6 @@ After listing all findings, apply the changes using Edit/Write tools.
 - ALWAYS preserve existing structure and organization of documents
 - Keep descriptions concise and direct — every word must earn its place
 - If a doc section is accurate, leave it alone completely
-- If creating a new doc, follow the style of existing docs in the same directory
+- ALWAYS create a new doc in `docs/` for any significant new feature/subsystem that has no existing coverage — this is not optional
+- If creating a new doc, follow the style and structure of existing docs in the same directory
 - Flag docs that need human input (e.g., screenshots, external links) rather than guessing
