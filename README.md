@@ -290,20 +290,16 @@ Switch between light and dark themes and customize the UI appearance to match yo
 
 <br>
 
-## 📋 Requirements
+## 🚀 Getting Started
+
+### Requirements
 
 - [Claude Code CLI](https://claude.ai/code) installed and authenticated on your machine
 - Go 1.25+ and Node.js *(only required when building from source)*
 
 No Anthropic API key is required. Agento uses the Claude Code CLI's existing authentication by default. If you prefer to call the Anthropic API directly, you can set `ANTHROPIC_API_KEY` as an optional override.
 
-
-
-<br>
-
-## 📦 Installation
-
-### Download binary
+### Installation
 
 Download the latest release for your platform from [GitHub Releases](https://github.com/shaharia-lab/agento/releases):
 
@@ -322,15 +318,13 @@ tar -xzf agento_Linux_x86_64.tar.gz
 sudo mv agento /usr/local/bin/
 ```
 
-### Homebrew
+**Homebrew:**
 
 ```bash
 brew install shaharia-lab/tap/agento
 ```
 
-### Build from source
-
-Requires Go 1.25+ and Node.js.
+**Build from source** *(requires Go 1.25+ and Node.js):*
 
 ```bash
 git clone https://github.com/shaharia-lab/agento.git
@@ -338,13 +332,7 @@ cd agento
 make build
 ```
 
-This produces an `agento` binary in the project root.
-
-
-
-<br>
-
-## 🚀 Quick Start
+### Quick Start
 
 ```bash
 agento web
