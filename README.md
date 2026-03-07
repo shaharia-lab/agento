@@ -36,7 +36,34 @@ You can define agents with custom system prompts and tools, start multi-turn con
 
 ## 🎬 Demo
 
+<details>
+  
+  <summery>Full app</summery>
+
 [demo.webm](https://github.com/user-attachments/assets/1fa2b716-cbb8-459e-b2e1-f6c252c086c2)
+
+</details>
+
+Monitoring: <img width="1271" height="682" alt="image" src="https://github.com/user-attachments/assets/c515cc62-3070-4576-b20b-86552df074e7" />
+Notification: <img width="1203" height="747" alt="image" src="https://github.com/user-attachments/assets/5451a9ce-82a6-40fa-b86b-f298ab062abb" />
+Apprearence settings: <img width="731" height="634" alt="image" src="https://github.com/user-attachments/assets/b73b2d73-00ad-4b2a-84d6-ad70785898ae" />
+Scheduled Task: <img width="1490" height="962" alt="image" src="https://github.com/user-attachments/assets/b5fafaa7-5f3e-4c0c-9b4d-ba85dbcb28cf" />
+Claude Code Session Journey: <img width="1490" height="809" alt="image" src="https://github.com/user-attachments/assets/b45a5cdb-93d9-482a-9b08-b3394907ba40" />
+Integration: <img width="1212" height="361" alt="image" src="https://github.com/user-attachments/assets/6dcb9079-a7ff-47b3-9096-54de2314d544" />
+Token Usage: <img width="1202" height="1545" alt="image" src="https://github.com/user-attachments/assets/29bcadf2-56ef-4728-badf-c01e4c71a860" />
+General Usage: <img width="1201" height="1327" alt="image" src="https://github.com/user-attachments/assets/e21522b4-7ee9-4728-bb79-a62857d619ae" />
+Favorite and Chat title change: 
+
+[fullchat.mp4](https://github.com/user-attachments/assets/18867268-c3fc-490b-b27e-e0a2689daa29)
+
+[Multi-chat demo](https://github.com/user-attachments/assets/a2f87266-4c7f-46b0-9250-cf3e51f6b624)
+
+
+
+
+
+
+
 
 ---
 
