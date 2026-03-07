@@ -38,7 +38,7 @@ Open several chat sessions simultaneously in a tabbed workspace. Each tab is ful
 <summary><strong>🤖 Agent Builder — Define custom AI agents</strong></summary>
 <br>
 
-Create agents with a custom name, system prompt, Claude model, and thinking mode (`adaptive`, `enabled`, or `disabled`). Assign exactly which tools each agent can access — built-in Claude Code tools, local in-process tools, external MCP servers, or third-party integrations. Agents are stored in a local SQLite database and can also be defined as YAML files. Template variables like `{{current_date}}` and `{{current_time}}` are automatically injected into system prompts at runtime.
+Create agents with a custom name, system prompt, Claude model, and thinking mode (`adaptive`, `enabled`, or `disabled`). Assign exactly which tools each agent can access — built-in Claude Code tools, local in-process tools, external MCP servers, or third-party integrations. Agents are saved locally on your machine and can also be defined as YAML files. Template variables like `{{current_date}}` and `{{current_time}}` are automatically injected into system prompts at runtime.
 
 **Built-in tools available:** `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`
 
@@ -88,7 +88,7 @@ Every task execution is logged with its start time, duration, exit status, and f
 <summary><strong>🗄️ Claude Sessions — Browse your Claude Code session history</strong></summary>
 <br>
 
-Agento automatically scans the Claude Code session JSONL files on your machine and makes them browsable in the UI. View any session's full message history, drill into individual tool calls, and follow the complete session journey from start to finish. Results are cached in SQLite and updated incrementally in the background as new sessions appear.
+Agento automatically scans the Claude Code session JSONL files on your machine and makes them browsable in the UI. View any session's full message history, drill into individual tool calls, and follow the complete session journey from start to finish. Results are cached locally and updated incrementally in the background as new sessions appear.
 
 </details>
 
@@ -398,7 +398,7 @@ Agents are specialized assistants with a custom system prompt, model, and set of
 5. Select which tools the agent can use.
 6. Click **Save**.
 
-Agents are stored in the SQLite database at `~/.agento/agento.db`. Legacy YAML files in `~/.agento/agents/` are auto-migrated on first startup. You can also define agents as YAML files:
+Agents are stored locally on your machine and auto-migrated from legacy YAML files in `~/.agento/agents/` on first startup. You can also define agents as YAML files:
 
 ```yaml
 name: My Assistant
