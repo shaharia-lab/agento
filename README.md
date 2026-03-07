@@ -182,7 +182,7 @@ See Agento in action across its core features. Click any section below to expand
 
 Start a multi-turn conversation with any agent you've built. Responses stream live in the browser via Server-Sent Events, so you see output as it's generated — just like a terminal.
 
-[demo.webm](https://github.com/user-attachments/assets/1fa2b716-cbb8-459e-b2e1-f6c252c086c2)
+[▶ Watch: Chat with an AI Agent](https://github.com/user-attachments/assets/1fa2b716-cbb8-459e-b2e1-f6c252c086c2)
 
 </details>
 
@@ -192,7 +192,7 @@ Start a multi-turn conversation with any agent you've built. Responses stream li
 
 Open multiple conversations side by side using tabbed workspaces. Each tab maintains its own session state so you can run independent agent tasks in parallel without losing context.
 
-[Multi-Tab Chat - Demo.webm](https://github.com/user-attachments/assets/91794133-9f90-4eb0-a62c-885be70b3c39)
+[▶ Watch: Multi-Chat Workspace in Action](https://github.com/user-attachments/assets/91794133-9f90-4eb0-a62c-885be70b3c39)
 
 </details>
 
@@ -202,7 +202,7 @@ Open multiple conversations side by side using tabbed workspaces. Each tab maint
 
 Mark important conversations as favorites and rename chat titles inline — keeping your workspace organized without leaving the chat view.
 
-[Favorite and Chat Title Demo.webm](https://github.com/user-attachments/assets/9a4892c6-eee5-46c4-af1a-eeb65e613aa3)
+[▶ Watch: Favorites & Chat Title Rename](https://github.com/user-attachments/assets/9a4892c6-eee5-46c4-af1a-eeb65e613aa3)
 
 </details>
 
