@@ -71,25 +71,25 @@ Browser → Vite (dev) / embedded FS (prod) → React SPA
 
 **`internal/server/`** — Chi router setup with middleware (Recoverer, RequestID, request logger), wrapped in `otelhttp.NewHandler` for automatic HTTP trace/span generation. Mounts `/api` routes, serves SPA, and exposes a dynamic `/metrics` handler (Prometheus pull endpoint, active only when configured). Graceful shutdown with 5s timeout.
 
-**`internal/api/`** — HTTP handlers. `Server` struct holds all service dependencies (including `MonitoringManager`). `Mount()` registers all routes. SSE streaming for live sessions via `livesessions.go` (includes per-session mutex for concurrent send serialization). `monitoring.go` exposes `GET/PUT /api/monitoring` and `POST /api/monitoring/test` for OTel configuration. `PATCH /api/chats/{id}` and `PATCH /api/claude-sessions/{id}` support title editing and favorites. `types.go` defines request/response types shared across handlers.
+**`internal/api/`** — HTTP handlers. `Server` struct holds all service dependencies (including `MonitoringManager` and `AppConfig`). `Mount()` registers all routes. SSE streaming for live sessions via `livesessions.go` (includes per-session mutex for concurrent send serialization). `monitoring.go` exposes `GET/PUT /api/monitoring` and `POST /api/monitoring/test` for OTel configuration. `PATCH /api/chats/{id}` and `PATCH /api/claude-sessions/{id}` support title editing and favorites. `types.go` defines request/response types shared across handlers. `uploads.go` handles `POST /api/uploads` for file/image drag-drop and paste (saves to `tmp-uploads/` directory). `claude_session_insights.go` and `insight_store_adapter.go` expose per-session and aggregated insight metrics. `claude_session_journey.go` provides a step-by-step timeline visualization endpoint.
 
 **`internal/service/`** — Business logic. `ChatService`, `AgentService`, `IntegrationService`, `NotificationService`, `TaskService`, and `ClaudeSettingsProfileService` interfaces decouple handlers from storage. `errors.go` defines typed errors for HTTP mapping.
 
 **`internal/agent/`** — Integration with `github.com/shaharia-lab/claude-agent-sdk-go`. `runner.go` converts agent config to SDK `RunOptions`, executes sessions, streams results. `tracing.go` provides OTel span helpers for per-tool-call and per-run tracing in both chat and scheduler paths.
 
-**`internal/storage/`** — SQLite persistence (`~/.agento/agento.db`). `SQLiteAgentStore`, `SQLiteChatStore`, `SQLiteIntegrationStore`, `SQLiteSettingsStore`, `SQLiteNotificationStore`, `SQLiteTaskStore` implement store interfaces. `migrate_fs_to_sqlite.go` handles one-time migration from the legacy filesystem format. `telemetry.go` provides `withStorageSpan` helper for OTel span/metric instrumentation on storage operations. Uses `modernc.org/sqlite` (pure Go, no CGo).
+**`internal/storage/`** — SQLite persistence (`~/.agento/agento.db`). `SQLiteAgentStore`, `SQLiteChatStore`, `SQLiteIntegrationStore`, `SQLiteSettingsStore`, `SQLiteNotificationStore`, `SQLiteTaskStore`, `SQLiteSessionInsightsStore` implement store interfaces. `migrate_fs_to_sqlite.go` handles one-time migration from the legacy filesystem format. `telemetry.go` provides `withStorageSpan` helper for OTel span/metric instrumentation on storage operations. Uses `modernc.org/sqlite` (pure Go, no CGo).
 
 **`internal/config/`** — Shared configuration layer. `AppConfig` loads from env. `profiles.go` has shared profile types to prevent import cycles. **Import rule**: `config` ← `service` ← `api` (never reverse).
 
 **`internal/integrations/`** — Integration system. `registry.go` manages server lifecycle (Start/Stop/Reload). Backends: `google/` (Calendar, Gmail, Drive with OAuth), `github/` (repos, issues, PRs, actions, releases), `slack/` (channels, messages, users), `jira/` (issues, projects, boards), `confluence/` (pages, spaces, search), `telegram/` (messages, chats, media). Each backend runs as an in-process MCP server.
 
-**`internal/claudesessions/`** — Scanner and analytics for Claude Code session JSONL files. `scanner.go` parses session data, `analytics.go` computes token usage and cost metrics, `cache.go` caches results in SQLite.
+**`internal/claudesessions/`** — Scanner, analytics, and static analysis for Claude Code session JSONL files. `scanner.go` parses session data, `analytics.go` computes token usage and cost metrics, `cache.go` caches results in SQLite. `processor.go` and `processor_registry.go` define the session processor pipeline — 8 processors (turn count, autonomy score, tool usage, time profile, token profile, error rate, conversation depth, session rhythm) run in a single pass over each JSONL file. `insight_worker.go` subscribes to the event bus and runs processors for new/updated sessions with a 5-minute rescan loop for version-bump reprocessing. `journey.go` reconstructs a step-by-step timeline of turns and tool calls for session journey visualization.
 
 **`internal/tools/`** — Local MCP server running in-process. Register built-in tools here (e.g., `current_time`).
 
 **`internal/scheduler/`** — Task scheduler with background job execution. `scheduler.go` manages cron-like scheduling, `executor.go` runs jobs and records history.
 
-**`internal/eventbus/`** — In-process event bus for decoupled communication between components (e.g., task completion triggers notifications).
+**`internal/eventbus/`** — In-process event bus for decoupled communication between components (e.g., task completion triggers notifications, session discovered/updated events trigger insight processing).
 
 **`internal/notification/`** — Notification system with SMTP email support. `handler.go` processes events, `smtp.go` sends emails, `template.go` renders notification content.
 
@@ -101,10 +101,13 @@ Browser → Vite (dev) / embedded FS (prod) → React SPA
 
 ### Frontend
 
-**`frontend/src/lib/api.ts`** — Typed API client for all backend endpoints.
-**`frontend/src/types.ts`** — Shared TypeScript types mirroring Go structs.
-**`frontend/src/App.tsx`** — React Router routes (Agents, Chats, Settings pages).
+**`frontend/src/lib/api.ts`** — Typed API client for all backend endpoints (includes `uploadFile`, `insightsApi`, session journey).
+**`frontend/src/types.ts`** — Shared TypeScript types mirroring Go structs (includes `SessionInsight`, `InsightSummary`, journey types).
+**`frontend/src/App.tsx`** — React Router routes (Agents, Chats, Multi-Chat, Claude Sessions, Session Journey, Analytics/Insights, Settings, Integrations, Tasks pages).
 **`frontend/src/contexts/`** — Theme and appearance state shared across components.
+**`frontend/src/pages/MultiChatPage.tsx`** — Tabbed workspace for running multiple conversations in parallel with persistent tab state via localStorage.
+**`frontend/src/pages/SessionJourneyPage.tsx`** — Step-by-step timeline visualization of Claude Code sessions.
+**`frontend/src/pages/InsightsPage.tsx`** — Productivity and efficiency metrics dashboard (autonomy score, cache hit rate, tool usage breakdown).
 
 ### Agent Configuration
 Agents are stored in the SQLite database (legacy YAML files in `~/.agento/agents/` are auto-migrated on first startup). Create and edit agents via the UI or API. Fields: `name`, `slug`, `model`, `system_prompt`, `thinking`, `permission_mode`, `capabilities` (built_in/local/mcp/integration tools). Permission modes: `bypass` (default), `default`, `plan`, `dontAsk`. Template variables: `{{current_date}}`, `{{current_time}}`.

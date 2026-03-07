@@ -28,7 +28,7 @@ You can define agents with custom system prompts and tools, start multi-turn con
 <summary><strong>💬 Chats — Multi-turn conversations with your agents</strong></summary>
 <br>
 
-Start a conversation with any agent you've built and continue it across multiple turns. Sessions are persisted locally so you can pick up right where you left off. Responses stream live via Server-Sent Events — no waiting for the full reply. You can favorite important chats and rename their titles inline to keep your workspace organized.
+Start a conversation with any agent you've built and continue it across multiple turns. Sessions are persisted locally so you can pick up right where you left off. Responses stream live via Server-Sent Events — no waiting for the full reply. You can favorite important chats and rename their titles inline to keep your workspace organized. Drag-and-drop files or paste images directly into the chat input to share them with the agent.
 
 </details>
 
