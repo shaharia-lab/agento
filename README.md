@@ -388,7 +388,6 @@ Set `LOG_LEVEL=debug` to include HTTP request logs.
 - [Integrations](docs/integrations.md) — Connecting Google, GitHub, Slack, Jira, Confluence, and Telegram as agent tools
 - [MCP Registry](docs/mcp.md) — Plugging in external MCP-compatible tool servers
 - [Monitoring](docs/monitoring.md) — Setting up OpenTelemetry traces, metrics, and logs
-- [CLI Reference](docs/cli.md) — Full command reference for `agento ask` and `agento update`
 
 
 
@@ -396,12 +395,11 @@ Set `LOG_LEVEL=debug` to include HTTP request logs.
 
 ## 💻 CLI Reference
 
-### `agento web` — Start the web UI
+<details>
+<summary><strong>agento web</strong> — Start the web UI</summary>
+<br>
 
 ```
-Start the Agento HTTP server which serves both the REST API and the
-embedded React UI. Open http://localhost:<port> in your browser.
-
 Usage:
   agento web [flags]
 
@@ -410,11 +408,13 @@ Flags:
       --port int     HTTP server port (overrides PORT env var) (default 8990)
 ```
 
-### `agento ask` — Query an agent from the terminal
+</details>
+
+<details>
+<summary><strong>agento ask</strong> — Query an agent from the terminal</summary>
+<br>
 
 ```
-Ask a question directly via the CLI.
-
 Usage:
   agento ask [flags] <question> [session-id]
 
@@ -431,17 +431,21 @@ Examples:
   agento ask --agent hello-world --no-thinking "Quick question"
 ```
 
-### `agento update` — Update to the latest release
+</details>
+
+<details>
+<summary><strong>agento update</strong> — Update to the latest release</summary>
+<br>
 
 ```
-Check GitHub releases for a newer version of agento and update the binary in place.
-
 Usage:
   agento update [flags]
 
 Flags:
   -y, --yes    Skip confirmation prompt
 ```
+
+</details>
 
 
 
