@@ -63,11 +63,15 @@ For each changed area of the codebase:
 
 ### Step 3a: Identify new features that need new docs
 For every significant new feature or module introduced in the scoped commits/PRs:
-1. Check if a relevant doc already exists in `docs/`
-2. If no doc covers it, create a new `docs/<feature-name>.md`
-3. A new doc is warranted when the feature introduces: a new package/subsystem, a new user-facing workflow, new API endpoints, new configuration options, or new integration patterns
-4. New docs should cover: what it does, how it works architecturally, key configuration, and usage examples
-5. Follow the style and structure of existing docs in `docs/`
+1. Check if a relevant doc already exists in `docs/` or `docs/dev/`
+2. Determine the audience and place the doc accordingly:
+   - **`docs/`** — user-facing documentation: what the feature does, how to use it, how to configure it, workflows, examples. Written for end users, not engineers. Avoid internal implementation details.
+   - **`docs/development.md`** — developer documentation: architecture, package internals, data flows, interfaces, design decisions. Written for contributors and maintainers. Add new sections here rather than creating separate files.
+3. A new user doc (`docs/`) is warranted when the feature introduces: a new user-facing capability, new configuration options, new UI workflows, new integrations a user sets up, or new API endpoints users call
+4. New developer content belongs in `docs/development.md` as a new well-organized section — warranted when the feature introduces: a new internal package/subsystem, significant architectural patterns, non-obvious data flows, or design decisions future contributors need to understand
+5. User docs should cover: what it does, why it's useful, how to enable/configure it, step-by-step usage, and common examples — no internal code details
+6. Dev docs should cover: package purpose, key types/interfaces, data flow, extension points, and gotchas — link to relevant source files
+7. Follow the style and structure of existing docs in the same directory
 
 ### Step 4: Apply surgical updates and create missing docs
 For each documentation gap found:
@@ -98,14 +102,18 @@ This is the most critical file — AI agents read it on every interaction.
 - [ ] Links still valid?
 - [ ] Badge versions correct?
 
-### docs/ directory
-- [ ] Each doc file — does content match current code?
-- [ ] Are there features/modules introduced in recent changes with NO existing doc? → **create one**
+### docs/ directory (user-facing)
+- [ ] Each doc file — does content match current behavior from a user's perspective?
+- [ ] New user-facing features with no existing doc? → **create `docs/<feature>.md`**
+- [ ] Are docs written for users (how-to, config, workflows) — not for developers (internals, architecture)?
 - [ ] Are there docs for features that were removed or significantly changed?
 - [ ] Do cross-references between docs still hold?
-- [ ] API documentation matches current endpoints?
-- [ ] New packages under `internal/` — does each significant one have a doc?
-- [ ] New integrations, tools, or schedulers — are they documented?
+- [ ] New integrations, configuration options, or UI workflows — are they documented for users?
+
+### docs/development.md (developer-facing)
+- [ ] New internal packages/subsystems introduced? → **add a well-organized section to `docs/development.md`**
+- [ ] New packages under `internal/` — are they covered with technical details (data flows, interfaces, design decisions)?
+- [ ] Are sections that were significantly refactored updated to reflect the new architecture?
 
 ### Claude skills (`.claude/skills/*/SKILL.md`)
 For each skill, check:
