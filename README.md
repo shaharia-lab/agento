@@ -14,7 +14,6 @@
 
 You can define agents with custom system prompts and tools, start multi-turn conversations with them, and manage everything from a browser or directly from your terminal.
 
----
 
 ## ✨ Features
 
@@ -164,7 +163,6 @@ Every HTTP request, agent run, tool call, and storage operation is instrumented 
 
 > 💡 **Missing a feature?** If there's something you'd like to see in Agento, [open an issue on GitHub](https://github.com/shaharia-lab/agento/issues/new) — we'd love to hear from you.
 
----
 
 ## 🎬 Demo
 
@@ -280,7 +278,6 @@ Switch between light and dark themes and customize the UI appearance to match yo
 
 </details>
 
----
 
 ## 📋 Requirements
 
@@ -289,7 +286,6 @@ Switch between light and dark themes and customize the UI appearance to match yo
 
 No Anthropic API key is required. Agento uses the Claude Code CLI's existing authentication by default. If you prefer to call the Anthropic API directly, you can set `ANTHROPIC_API_KEY` as an optional override.
 
----
 
 ## 📦 Installation
 
@@ -330,7 +326,6 @@ make build
 
 This produces an `agento` binary in the project root.
 
----
 
 ## 🚀 Quick Start
 
@@ -350,7 +345,6 @@ To use a different port:
 agento web --port 3000
 ```
 
----
 
 ## ⚙️ Configuration
 
@@ -387,7 +381,6 @@ All logs are written in JSON format to `~/.agento/logs/system.log` (or `$AGENTO_
 
 Set `LOG_LEVEL=debug` to include HTTP request logs.
 
----
 
 ## 🤖 Agents
 
@@ -438,7 +431,6 @@ capabilities:
 
 **Template variables:** `{{current_date}}` (YYYY-MM-DD), `{{current_time}}` (HH:MM:SS), plus any custom variables.
 
----
 
 ## 🔌 MCP Registry
 
@@ -470,7 +462,6 @@ my-sse-server:
 
 Use `${ENV:VAR_NAME}` to reference environment variables in the config. Supported transports: `stdio`, `streamable_http`, `sse`.
 
----
 
 ## 💻 CLI Usage
 
@@ -493,13 +484,11 @@ agento update        # prompts for confirmation
 agento update --yes  # skip confirmation
 ```
 
----
 
 ## 🛠️ Development
 
 For architecture overview, local development setup, and contribution guidelines, see the [developer documentation](docs/).
 
----
 
 ## 📄 License
 
