@@ -14,7 +14,9 @@
 
 You can define agents with custom system prompts and tools, start multi-turn conversations with them, and manage everything from a browser or directly from your terminal.
 
+<br>
 
+> ⭐ **If Agento is useful to you, consider [starring the repository](https://github.com/shaharia-lab/agento) — it helps others discover the project and keeps us motivated to keep building.**
 
 <br>
 
