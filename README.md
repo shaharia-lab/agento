@@ -394,25 +394,53 @@ Set `LOG_LEVEL=debug` to include HTTP request logs.
 
 <br>
 
-## 💻 CLI Usage
+## 💻 CLI Reference
 
-### ask
+### `agento web` — Start the web UI
 
-Run a one-shot query from the terminal:
+```
+Start the Agento HTTP server which serves both the REST API and the
+embedded React UI. Open http://localhost:<port> in your browser.
 
-```bash
-agento ask "What is the capital of France?"
-agento ask --agent my-assistant "Summarise this document"
-agento ask --agent my-assistant "Follow up question" <session-id>
+Usage:
+  agento web [flags]
+
+Flags:
+      --no-browser   Do not automatically open the browser on startup
+      --port int     HTTP server port (overrides PORT env var) (default 8990)
 ```
 
-### update
+### `agento ask` — Query an agent from the terminal
 
-Update Agento to the latest release:
+```
+Ask a question directly via the CLI.
 
-```bash
-agento update        # prompts for confirmation
-agento update --yes  # skip confirmation
+Usage:
+  agento ask [flags] <question> [session-id]
+
+Flags:
+      --agent string        Agent slug to use
+      --agents-dir string   Directory containing agent YAML files (overrides AGENTO_DATA_DIR)
+      --mcps-file string    Path to the MCP registry YAML file (overrides AGENTO_DATA_DIR)
+      --no-thinking         Disable extended thinking
+
+Examples:
+  agento ask "What is 2+2?"
+  agento ask --agent hello-world "What time is it?"
+  agento ask --agent hello-world "Follow up" <session-uuid>
+  agento ask --agent hello-world --no-thinking "Quick question"
+```
+
+### `agento update` — Update to the latest release
+
+```
+Check GitHub releases for a newer version of agento and update the binary in place.
+
+Usage:
+  agento update [flags]
+
+Flags:
+  -y, --yes    Skip confirmation prompt
 ```
 
 
