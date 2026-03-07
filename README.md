@@ -7,6 +7,8 @@
 [![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
 [![Vulnerabilities](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=vulnerabilities)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
 [![Release](https://img.shields.io/github/v/release/shaharia-lab/agento)](https://github.com/shaharia-lab/agento/releases)
+[![Stars](https://img.shields.io/github/stars/shaharia-lab/agento)](https://github.com/shaharia-lab/agento/stargazers)
+[![License](https://img.shields.io/github/license/shaharia-lab/agento)](https://github.com/shaharia-lab/agento/blob/main/LICENSE)
 
 <img width="1820" height="922" alt="carbon (4)" src="https://github.com/user-attachments/assets/62ce9188-2aeb-4ec3-847c-3b50346d0adb" />
 
@@ -16,7 +18,7 @@ You can define agents with custom system prompts and tools, start multi-turn con
 
 <br>
 
-> ⭐ **If Agento is useful to you, consider [starring the repository](https://github.com/shaharia-lab/agento) — it helps others discover the project and keeps us motivated to keep building.**
+> ⭐ **If Agento is useful to you, consider [starring the repository](https://github.com/shaharia-lab/agento) — it helps the project grow and others discover it.**
 
 <br>
 
@@ -130,7 +132,7 @@ All configuration lives in a single Settings page organized into tabs:
 - **Claude Settings Profiles** — Create multiple named Claude settings profiles (each stored as `~/.claude/settings_<slug>.json`) and switch between them per agent or per chat. A default profile is auto-created from your existing `~/.claude/settings.json` on first launch.
 - **Appearance** — Toggle dark/light mode, choose font size and font family. Changes apply instantly across the entire UI.
 - **Notifications** — Configure SMTP email delivery for task completion and agent events. Test delivery directly from the UI and browse the notification log.
-- **Monitoring** — Configure OpenTelemetry exporters (OTLP gRPC or Prometheus) for traces, metrics, and logs. Hot-reload settings without restarting. Fields set via environment variables show a lock indicator and return HTTP 409 if you try to override them via UI.
+- **Monitoring** — Configure OpenTelemetry exporters (OTLP gRPC or Prometheus) for traces, metrics, and logs. Hot-reload settings without restarting.
 - **Advanced** — Additional low-level configuration options.
 
 </details>
@@ -167,8 +169,6 @@ Every HTTP request, agent run, tool call, and storage operation is instrumented 
 <br>
 
 > 💡 **Missing a feature?** If there's something you'd like to see in Agento, [open an issue on GitHub](https://github.com/shaharia-lab/agento/issues/new) — we'd love to hear from you.
-
-
 
 <br>
 
@@ -286,8 +286,6 @@ Switch between light and dark themes and customize the UI appearance to match yo
 
 </details>
 
-
-
 <br>
 
 ## 🚀 Getting Started
@@ -350,20 +348,20 @@ To use a different port:
 agento web --port 3000
 ```
 
-
-
 <br>
 
 ## ⚙️ Configuration
 
-No configuration is required. Agento works out of the box using your local Claude Code setup.
+No configuration is required. Agento works out of the box using your local Claude Code setup. All settings are optional and can be overridden with environment variables:
 
-All settings are optional and can be overridden with environment variables:
+<details>
+<summary><strong>Environment variables</strong></summary>
+<br>
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8990` | HTTP server port |
-| `AGENTO_DATA_DIR` | `~/.agento` | Root directory for agents, chats, and database. Supports `~` expansion (e.g. `~/.agento-dev`) |
+| `AGENTO_DATA_DIR` | `~/.agento` | Root directory for agents, chats, and logs. Supports `~` expansion |
 | `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `ANTHROPIC_API_KEY` | — | Use the Anthropic API directly instead of Claude Code CLI authentication |
 | `AGENTO_DEFAULT_MODEL` | *(Claude default)* | Lock the Claude model used for direct chat sessions |
@@ -372,24 +370,9 @@ All settings are optional and can be overridden with environment variables:
 | `OTEL_METRICS_EXPORTER` | — | `otlp` (push) or `prometheus` (pull via `/metrics`) |
 | `OTEL_LOGS_EXPORTER` | — | `otlp` |
 
-### Logs
+Logs are written in JSON format to `~/.agento/logs/system.log`. Per-session logs are at `~/.agento/logs/sessions/<session-id>.log`. Set `LOG_LEVEL=debug` to include HTTP request logs.
 
-All logs are written in JSON format to `~/.agento/logs/system.log` (or `$AGENTO_DATA_DIR/logs/system.log`). Per-session logs are stored at `~/.agento/logs/sessions/<session-id>.log`.
-
-Set `LOG_LEVEL=debug` to include HTTP request logs.
-
-
-
-<br>
-
-## 📚 Additional Resources
-
-- [Agents](docs/agents.md) — Building and configuring custom agents with system prompts, models, tools, and template variables
-- [Integrations](docs/integrations.md) — Connecting Google, GitHub, Slack, Jira, Confluence, and Telegram as agent tools
-- [MCP Registry](docs/mcp.md) — Plugging in external MCP-compatible tool servers
-- [Monitoring](docs/monitoring.md) — Setting up OpenTelemetry traces, metrics, and logs
-
-
+</details>
 
 <br>
 
@@ -447,15 +430,15 @@ Flags:
 
 </details>
 
-
-
 <br>
 
-## 🛠️ Development
+## 📚 Additional Resources
 
-For architecture overview, local development setup, and contribution guidelines, see the [developer documentation](docs/).
-
-
+- [Getting Started](docs/getting-started.md) — Detailed setup and first-run walkthrough
+- [Agents](docs/agents.md) — Building and configuring custom agents with system prompts, models, tools, and template variables
+- [Integrations](docs/integrations.md) — Connecting Google, GitHub, Slack, Jira, Confluence, and Telegram as agent tools
+- [Monitoring](docs/monitoring.md) — Setting up OpenTelemetry traces, metrics, and logs
+- [Development](docs/development.md) — Architecture overview, local setup, and contribution guidelines
 
 <br>
 
