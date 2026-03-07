@@ -372,17 +372,6 @@ All settings are optional and can be overridden with environment variables:
 | `OTEL_METRICS_EXPORTER` | — | `otlp` (push) or `prometheus` (pull via `/metrics`) |
 | `OTEL_LOGS_EXPORTER` | — | `otlp` |
 
-### Local Development Isolation
-
-Use `AGENTO_DATA_DIR` to keep development data separate from production:
-
-```bash
-# Run against an isolated dev directory — production data is untouched
-AGENTO_DATA_DIR=~/.agento-dev make dev-backend
-```
-
-The resolved path is logged at startup (`data_dir` field) so you can confirm which directory is in use.
-
 ### Logs
 
 All logs are written in JSON format to `~/.agento/logs/system.log` (or `$AGENTO_DATA_DIR/logs/system.log`). Per-session logs are stored at `~/.agento/logs/sessions/<session-id>.log`.
