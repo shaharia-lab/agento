@@ -382,88 +382,13 @@ Set `LOG_LEVEL=debug` to include HTTP request logs.
 
 <br>
 
-## 🤖 Agents
+## 📚 Additional Resources
 
-Agents are specialized assistants with a custom system prompt, model, and set of tools. You create and manage them from the **Agents** page in the UI, then chat with them from the **Chats** page.
-
-### Agent Definition
-
-1. Open the UI and go to the **Agents** page.
-2. Click **New Agent**.
-3. Fill in the name, description, and system prompt.
-4. Choose the Claude model and thinking mode.
-5. Select which tools the agent can use.
-6. Click **Save**.
-
-Agents are stored locally on your machine and auto-migrated from legacy YAML files in `~/.agento/agents/` on first startup. You can also define agents as YAML files:
-
-```yaml
-name: My Assistant
-slug: my-assistant
-description: A helpful assistant.
-model: claude-sonnet-4-6
-thinking: adaptive          # adaptive | enabled | disabled
-
-system_prompt: |
-  You are a helpful assistant.
-  Today is {{current_date}}.
-
-capabilities:
-  built_in:                 # Claude Code built-in tools
-    - Read
-    - Write
-    - Bash
-    - WebSearch
-  local:                    # Local in-process tools
-    - current_time
-  mcp:                      # External MCP servers
-    my-server:
-      tools:
-        - tool_name
-```
-
-**Available built-in tools:** `Read`, `Write`, `Edit`, `Bash`, `Glob`, `Grep`, `WebFetch`, `WebSearch`, `Task`
-
-**Thinking modes:**
-- `adaptive` — Claude decides when to use extended thinking
-- `enabled` — Extended thinking always on
-- `disabled` — No extended thinking
-
-**Template variables:** `{{current_date}}` (YYYY-MM-DD), `{{current_time}}` (HH:MM:SS), plus any custom variables.
-
-
-
-<br>
-
-## 🔌 MCP Registry
-
-To connect external MCP servers, create `~/.agento/mcps.yaml`:
-
-```yaml
-# stdio-based MCP server (subprocess)
-my-stdio-server:
-  transport: stdio
-  command: /path/to/mcp-server
-  args:
-    - --config
-    - /path/to/config.json
-  env:
-    API_KEY: ${ENV:MY_SERVER_API_KEY}
-
-# HTTP-based MCP server
-my-http-server:
-  transport: streamable_http
-  url: https://api.example.com/mcp
-  headers:
-    Authorization: Bearer ${ENV:MY_HTTP_TOKEN}
-
-# SSE-based MCP server
-my-sse-server:
-  transport: sse
-  url: https://stream.example.com/mcp
-```
-
-Use `${ENV:VAR_NAME}` to reference environment variables in the config. Supported transports: `stdio`, `streamable_http`, `sse`.
+- [Agents](docs/agents.md) — Building and configuring custom agents with system prompts, models, tools, and template variables
+- [Integrations](docs/integrations.md) — Connecting Google, GitHub, Slack, Jira, Confluence, and Telegram as agent tools
+- [MCP Registry](docs/mcp.md) — Plugging in external MCP-compatible tool servers
+- [Monitoring](docs/monitoring.md) — Setting up OpenTelemetry traces, metrics, and logs
+- [CLI Reference](docs/cli.md) — Full command reference for `agento ask` and `agento update`
 
 
 
