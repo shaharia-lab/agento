@@ -91,7 +91,7 @@ agento/
 │   ├── config/       # AppConfig, AgentConfig, MCP config
 │   ├── logger/       # Structured slog loggers (system + per-session), log rotation
 │   ├── server/       # HTTP server wiring
-│   ├── claudesessions/ # Claude session scanner and analytics
+│   ├── claudesessions/ # Claude session scanner, analytics, processor pipeline, journey
 │   ├── eventbus/       # In-process event bus
 │   ├── integrations/   # Integration registry + MCP servers (Google, GitHub, Slack, Jira, Confluence, Telegram)
 │   ├── notification/   # Notification system (SMTP email)

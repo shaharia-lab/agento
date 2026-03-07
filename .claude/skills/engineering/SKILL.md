@@ -52,6 +52,11 @@ Read these as needed based on your task:
 | Event Bus | `internal/eventbus/` | In-process event bus for decoupled communication |
 | Notifications | `internal/notification/` | Notification system with SMTP email support |
 | Telemetry | `internal/telemetry/` | OpenTelemetry config, providers, instruments, hot-reload manager |
+| Session Insights | `internal/claudesessions/processor*.go` | 8-processor pipeline for per-session static analysis metrics |
+| Insight Worker | `internal/claudesessions/insight_worker.go` | Event-driven + rescan loop for session insight processing |
+| Session Journey | `internal/claudesessions/journey.go` | Step-by-step timeline reconstruction from JSONL |
+| Insight Storage | `internal/storage/sqlite_session_insights_store.go` | SQLite persistence for session insights |
+| File Uploads | `internal/api/uploads.go` | Multipart file upload handler (drag-drop, paste) |
 | Frontend App | `frontend/src/App.tsx` | React Router, page routes |
 | Frontend API | `frontend/src/lib/api.ts` | Typed API client |
 | Frontend Types | `frontend/src/types.ts` | TypeScript types mirroring Go structs |
