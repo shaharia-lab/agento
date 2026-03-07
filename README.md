@@ -160,6 +160,8 @@ Every HTTP request, agent run, tool call, and storage operation is instrumented 
 
 </details>
 
+> 💡 **Missing a feature?** If there's something you'd like to see in Agento, [open an issue on GitHub](https://github.com/shaharia-lab/agento/issues/new) — we'd love to hear from you.
+
 ---
 
 ## 🎬 Demo
