@@ -1,6 +1,14 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowLeft, ArrowRight, CheckCircle, Loader2, AlertCircle, Smartphone } from 'lucide-react'
+import {
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle,
+  Loader2,
+  AlertCircle,
+  Smartphone,
+  Info,
+} from 'lucide-react'
 import QRCode from 'react-qr-code'
 import { integrationsApi } from '@/lib/api'
 import type { ServiceConfig } from '@/types'
@@ -288,10 +296,40 @@ export default function IntegrationWhatsAppPage() {
                   Your WhatsApp device has been linked successfully.
                 </p>
                 {phone && (
-                  <p className="text-sm text-zinc-600 dark:text-zinc-300 font-mono mb-6">
+                  <p className="text-sm text-zinc-600 dark:text-zinc-300 font-mono mb-4">
                     Phone: {phone}
                   </p>
                 )}
+
+                {/* Linked-device capability note */}
+                <div className="rounded-md border border-blue-200 dark:border-blue-800/50 bg-blue-50 dark:bg-blue-900/20 px-4 py-3 text-left mb-6 max-w-md mx-auto">
+                  <div className="flex gap-2.5">
+                    <Info className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0 mt-0.5" />
+                    <div className="text-sm text-blue-700 dark:text-blue-300 space-y-1.5">
+                      <p className="font-medium">What your agent can do right now</p>
+                      <ul className="space-y-1 text-xs text-blue-600 dark:text-blue-400">
+                        <li>
+                          ✅ <strong>send_message</strong> — provide a phone number and the agent
+                          can send messages immediately
+                        </li>
+                        <li>
+                          ✅ <strong>send_media</strong> — send images or documents by URL
+                        </li>
+                        <li>
+                          ⏳ <strong>list_chats / get_contacts</strong> — these read from a local
+                          contact store that starts empty. WhatsApp does not sync contact history to
+                          linked devices, so these populate gradually as messages flow through this
+                          session.
+                        </li>
+                      </ul>
+                      <p className="text-xs text-blue-600 dark:text-blue-400">
+                        💡 Tip: tell your agent the phone number directly (e.g. "message
+                        +1234567890") rather than asking it to look up contacts.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="flex justify-center gap-3">
                   <button
                     onClick={() => navigate('/integrations')}

@@ -16,12 +16,20 @@ interface ServiceInfo {
 const WHATSAPP_SERVICES: Record<string, ServiceInfo> = {
   messaging: {
     label: 'Messaging',
-    description: 'Send messages, media, and manage contacts',
+    description: 'Send messages and media. Contact tools reflect the local device store.',
     tools: [
       { name: 'send_message', description: 'Send a text message to a phone number or group' },
       { name: 'send_media', description: 'Send an image or document by URL' },
-      { name: 'list_chats', description: 'List recent chats with contact info' },
-      { name: 'get_contacts', description: 'List contacts from the linked device' },
+      {
+        name: 'list_chats',
+        description:
+          'List contacts from the local device store — not message history. Starts empty after first pairing; populates as messages flow through this linked device.',
+      },
+      {
+        name: 'get_contacts',
+        description:
+          'List contacts from the local device store. Same data source as list_chats. Starts empty after first pairing.',
+      },
     ],
   },
 }
