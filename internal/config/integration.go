@@ -13,7 +13,7 @@ import (
 type IntegrationConfig struct {
 	ID          string                   `json:"id"`
 	Name        string                   `json:"name"`
-	Type        string                   `json:"type"` // "google", "telegram", "jira", "confluence", "slack", "github"
+	Type        string                   `json:"type"` // e.g. "google", "telegram", "whatsapp"
 	Enabled     bool                     `json:"enabled"`
 	Credentials json.RawMessage          `json:"credentials"`
 	Auth        json.RawMessage          `json:"auth,omitempty"`
@@ -91,6 +91,22 @@ type SlackCredentials struct {
 	BotToken     string `json:"bot_token,omitempty"`
 	ClientID     string `json:"client_id,omitempty"`
 	ClientSecret string `json:"client_secret,omitempty"`
+}
+
+// WhatsAppCredentials holds credentials for a WhatsApp linked-device integration.
+// WhatsApp does not use API tokens; authentication is via QR code pairing.
+// The credentials struct is intentionally minimal — the actual session data
+// is persisted in a separate SQLite file by whatsmeow.
+type WhatsAppCredentials struct {
+	// Phone is set after successful pairing for display purposes only.
+	Phone string `json:"phone,omitempty"`
+}
+
+// WhatsAppAuthData represents the auth data stored in IntegrationConfig.Auth
+// after successful QR code pairing.
+type WhatsAppAuthData struct {
+	Paired bool   `json:"paired"`
+	Phone  string `json:"phone,omitempty"`
 }
 
 // GitHubCredentials holds credentials for a GitHub integration.

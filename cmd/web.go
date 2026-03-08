@@ -30,6 +30,7 @@ import (
 	jiraintegration "github.com/shaharia-lab/agento/internal/integrations/jira"
 	slackintegration "github.com/shaharia-lab/agento/internal/integrations/slack"
 	telegramintegration "github.com/shaharia-lab/agento/internal/integrations/telegram"
+	whatsappintegration "github.com/shaharia-lab/agento/internal/integrations/whatsapp"
 	"github.com/shaharia-lab/agento/internal/logger"
 	"github.com/shaharia-lab/agento/internal/notification"
 	"github.com/shaharia-lab/agento/internal/scheduler"
@@ -248,7 +249,7 @@ func buildWebServer(
 
 	chatStore := storage.NewSQLiteChatStore(db)
 	integrationStore := storage.NewSQLiteIntegrationStore(db)
-	integrationRegistry := buildIntegrationRegistry(ctx, integrationStore, sysLogger)
+	integrationRegistry := buildIntegrationRegistry(ctx, integrationStore, cfg, sysLogger)
 
 	settingsStore := storage.NewSQLiteSettingsStore(db)
 	settingsMgr, err := config.NewSettingsManager(settingsStore, cfg)
@@ -303,7 +304,7 @@ func initMonitoringManager(
 // buildIntegrationRegistry creates the integration registry, registers all
 // integration starters, and starts them. Non-fatal start errors are logged.
 func buildIntegrationRegistry(
-	ctx context.Context, store storage.IntegrationStore, logger *slog.Logger,
+	ctx context.Context, store storage.IntegrationStore, cfg *config.AppConfig, logger *slog.Logger,
 ) *integrations.IntegrationRegistry {
 	reg := integrations.NewRegistry(store, logger)
 	reg.RegisterStarter("confluence", confluenceintegration.Start)
@@ -312,6 +313,7 @@ func buildIntegrationRegistry(
 	reg.RegisterStarter("jira", jiraintegration.Start)
 	reg.RegisterStarter("github", githubintegration.Start)
 	reg.RegisterStarter("slack", slackintegration.Start)
+	reg.RegisterStarter("whatsapp", whatsappintegration.NewStarter(cfg.DataDir))
 	if err := reg.Start(ctx); err != nil {
 		logger.Warn("some integrations failed to start", "error", err)
 	}
@@ -368,19 +370,22 @@ func buildAPIServer(
 	insightWorker := claudesessions.NewInsightWorker(insightStore, insightRegistry, bus, deps.logger)
 	insightWorker.Start(ctx)
 
+	whatsappPairingMgr := whatsappintegration.NewPairingManager(deps.appConfig.DataDir, deps.logger)
+
 	apiSrv := api.New(api.ServerConfig{
-		AgentSvc:        agentSvc,
-		ChatSvc:         chatSvc,
-		IntegrationSvc:  integrationSvc,
-		NotificationSvc: notificationSvc,
-		TaskSvc:         taskSvc,
-		ProfileSvc:      profileSvc,
-		SettingsMgr:     deps.settingsMgr,
-		AppConfig:       deps.appConfig,
-		Logger:          deps.logger,
-		SessionCache:    sessionCache,
-		MonitoringMgr:   deps.monitoringMgr,
-		InsightStore:    insightStore,
+		AgentSvc:           agentSvc,
+		ChatSvc:            chatSvc,
+		IntegrationSvc:     integrationSvc,
+		NotificationSvc:    notificationSvc,
+		TaskSvc:            taskSvc,
+		ProfileSvc:         profileSvc,
+		SettingsMgr:        deps.settingsMgr,
+		AppConfig:          deps.appConfig,
+		Logger:             deps.logger,
+		SessionCache:       sessionCache,
+		MonitoringMgr:      deps.monitoringMgr,
+		InsightStore:       insightStore,
+		WhatsAppPairingMgr: whatsappPairingMgr,
 	})
 	return apiSrv, bus, insightWorker, nil
 }

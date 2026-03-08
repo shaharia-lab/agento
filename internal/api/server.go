@@ -10,6 +10,7 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
+	whatsappintegration "github.com/shaharia-lab/agento/internal/integrations/whatsapp"
 	"github.com/shaharia-lab/agento/internal/service"
 	"github.com/shaharia-lab/agento/internal/telemetry"
 )
@@ -34,18 +35,19 @@ const (
 
 // ServerConfig bundles all dependencies needed to construct an API Server.
 type ServerConfig struct {
-	AgentSvc        service.AgentService
-	ChatSvc         service.ChatService
-	IntegrationSvc  service.IntegrationService
-	NotificationSvc service.NotificationService
-	TaskSvc         service.TaskService
-	ProfileSvc      service.ClaudeSettingsProfileService
-	SettingsMgr     *config.SettingsManager
-	AppConfig       *config.AppConfig
-	Logger          *slog.Logger
-	SessionCache    *claudesessions.Cache
-	MonitoringMgr   *telemetry.MonitoringManager
-	InsightStore    claudesessions.InsightStorer
+	AgentSvc           service.AgentService
+	ChatSvc            service.ChatService
+	IntegrationSvc     service.IntegrationService
+	NotificationSvc    service.NotificationService
+	TaskSvc            service.TaskService
+	ProfileSvc         service.ClaudeSettingsProfileService
+	SettingsMgr        *config.SettingsManager
+	AppConfig          *config.AppConfig
+	Logger             *slog.Logger
+	SessionCache       *claudesessions.Cache
+	MonitoringMgr      *telemetry.MonitoringManager
+	InsightStore       claudesessions.InsightStorer
+	WhatsAppPairingMgr *whatsappintegration.PairingManager
 }
 
 // Server holds all dependencies for the REST API handlers.
@@ -64,6 +66,7 @@ type Server struct {
 	updateCache        updateCheckCache
 	monitoringMgr      *telemetry.MonitoringManager
 	insightStore       claudesessions.InsightStorer
+	whatsappPairingMgr *whatsappintegration.PairingManager
 }
 
 // New creates a new API Server backed by the provided services.
@@ -85,6 +88,7 @@ func New(cfg ServerConfig) *Server {
 		claudeSessionCache: cfg.SessionCache,
 		monitoringMgr:      cfg.MonitoringMgr,
 		insightStore:       cfg.InsightStore,
+		whatsappPairingMgr: cfg.WhatsAppPairingMgr,
 	}
 }
 
@@ -188,6 +192,10 @@ func (s *Server) mountIntegrationRoutes(r chi.Router) {
 	r.Post(routeIntegrationByID+"/auth/start", s.handleStartOAuth)
 	r.Get(routeIntegrationByID+"/auth/status", s.handleGetAuthStatus)
 	r.Post(routeIntegrationByID+"/auth/validate", s.handleValidateAuth)
+
+	// WhatsApp QR code pairing
+	r.Post(routeIntegrationByID+"/whatsapp/pair", s.handleStartWhatsAppPairing)
+	r.Get(routeIntegrationByID+"/whatsapp/qr", s.handleGetWhatsAppQR)
 }
 
 // mountNotificationRoutes registers the notification-related API routes.

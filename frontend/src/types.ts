@@ -336,7 +336,7 @@ export interface ServiceConfig {
 export interface Integration {
   id: string
   name: string
-  type: 'google' | 'telegram' | 'jira' | 'confluence' | 'slack' | 'github'
+  type: 'google' | 'telegram' | 'jira' | 'confluence' | 'slack' | 'github' | 'whatsapp'
   enabled: boolean
   authenticated: boolean
   services: Record<string, ServiceConfig>
