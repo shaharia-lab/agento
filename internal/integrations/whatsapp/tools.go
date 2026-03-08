@@ -45,17 +45,6 @@ func registerMessagingTools(server *mcp.Server, client *Client, allowed map[stri
 		})
 	}
 
-	if len(allowed) == 0 || allowed["list_chats"] {
-		mcp.AddTool(server, &mcp.Tool{
-			Name: "list_chats",
-			Description: "List known contacts from the linked WhatsApp device store. " +
-				"Note: WhatsApp linked devices do not receive message history, so this " +
-				"returns contacts that have been seen on this device, not a chat inbox.",
-		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *listChatsParams) (*mcp.CallToolResult, any, error) {
-			return handleListChats(ctx, client, params)
-		})
-	}
-
 	if len(allowed) == 0 || allowed["get_contacts"] {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "get_contacts",
@@ -197,68 +186,6 @@ func handleSendMedia(
 		"Media sent successfully. ID: %s, Timestamp: %s",
 		resp.ID, resp.Timestamp.Format(time.RFC3339),
 	))
-}
-
-// list_chats
-//
-// Note: list_chats and get_contacts currently share the same data source
-// (the device contact store). list_chats is intentionally kept as a separate
-// tool so that it can be wired to real message history once whatsmeow exposes
-// chat-level events for linked devices, without breaking the existing
-// get_contacts API surface.
-
-type listChatsParams struct {
-	Limit int `json:"limit" jsonschema:"Maximum number of entries to return (default 50, max 200)"`
-}
-
-func handleListChats(
-	ctx context.Context, client *Client, params *listChatsParams,
-) (*mcp.CallToolResult, any, error) {
-	limit := params.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 200 {
-		limit = 200
-	}
-
-	// Use contacts as a proxy for chats — the device store tracks contacts
-	// that have been communicated with.
-	contacts, err := client.WM().Store.Contacts.GetAllContacts(ctx)
-	if err != nil {
-		return nil, nil, fmt.Errorf("listing contacts for chats: %w", err)
-	}
-
-	type chatEntry struct {
-		JID      string `json:"jid"`
-		Name     string `json:"name,omitempty"`
-		PushName string `json:"push_name,omitempty"`
-	}
-
-	result := make([]chatEntry, 0, limit)
-	count := 0
-	for jid, contact := range contacts {
-		if count >= limit {
-			break
-		}
-		name := contact.FullName
-		if name == "" {
-			name = contact.BusinessName
-		}
-		result = append(result, chatEntry{
-			JID:      jid.String(),
-			Name:     name,
-			PushName: contact.PushName,
-		})
-		count++
-	}
-
-	b, err := json.Marshal(result)
-	if err != nil {
-		return nil, nil, fmt.Errorf("marshaling chats: %w", err)
-	}
-
-	return textResult(fmt.Sprintf("Chats (%d): %s", len(result), string(b)))
 }
 
 // get_contacts

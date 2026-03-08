@@ -316,9 +316,9 @@ export default function IntegrationWhatsAppPage() {
                           ✅ <strong>send_media</strong> — send images or documents by URL
                         </li>
                         <li>
-                          ⏳ <strong>list_chats / get_contacts</strong> — these read from a local
-                          contact store that starts empty. WhatsApp does not sync contact history to
-                          linked devices, so these populate gradually as messages flow through this
+                          ⏳ <strong>get_contacts</strong> — reads from the local device contact
+                          store, which starts empty. WhatsApp does not sync contact history to
+                          linked devices, so it populates gradually as messages flow through this
                           session.
                         </li>
                       </ul>
