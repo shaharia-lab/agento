@@ -35,7 +35,8 @@ func NewClient(ctx context.Context, dataDir, integrationID string, logger *slog.
 		return nil, fmt.Errorf("creating data directory: %w", err)
 	}
 
-	container, err := sqlstore.New(ctx, "sqlite", fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)", dbPath), waLog.Noop)
+	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)", dbPath)
+	container, err := sqlstore.New(ctx, "sqlite", dsn, waLog.Noop)
 	if err != nil {
 		return nil, fmt.Errorf("creating whatsmeow store at %s: %w", dbPath, err)
 	}
