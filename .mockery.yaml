@@ -13,6 +13,7 @@ packages:
       ChatStore:
       IntegrationStore:
       TaskStore:
+      TriggerStore:
   github.com/shaharia-lab/agento/internal/config:
     interfaces:
       SettingsStore:
@@ -23,3 +24,4 @@ packages:
       IntegrationService:
       NotificationService:
       TaskService:
+      TriggerService:

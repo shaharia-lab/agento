@@ -35,6 +35,8 @@ import type {
   MonitoringResponse,
   MonitoringTestResult,
   InsightSummary,
+  TriggerRule,
+  WebhookStatus,
 } from '../types'
 
 const BASE = '/api'
@@ -502,6 +504,56 @@ export const integrationsApi = {
     ),
 
   availableTools: () => request<AvailableTool[]>('/integrations/available-tools'),
+}
+
+// ── Trigger Rules ─────────────────────────────────────────────────────────────
+
+export const triggerRulesApi = {
+  list: (integrationId: string) =>
+    request<TriggerRule[]>(`/integrations/${integrationId}/triggers`),
+
+  create: (integrationId: string, data: Partial<TriggerRule>) =>
+    request<TriggerRule>(`/integrations/${integrationId}/triggers`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  update: (integrationId: string, ruleId: string, data: Partial<TriggerRule>) =>
+    request<TriggerRule>(`/integrations/${integrationId}/triggers/${ruleId}`, {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+
+  delete: (integrationId: string, ruleId: string) =>
+    fetch(`${BASE}/integrations/${integrationId}/triggers/${ruleId}`, {
+      method: 'DELETE',
+    }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
+}
+
+// ── Webhook Management ────────────────────────────────────────────────────────
+
+export const webhookApi = {
+  register: (integrationId: string) =>
+    request<{ status: string }>(`/integrations/${integrationId}/webhook/register`, {
+      method: 'POST',
+    }),
+
+  remove: (integrationId: string) =>
+    fetch(`${BASE}/integrations/${integrationId}/webhook/register`, {
+      method: 'DELETE',
+    }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    }),
+
+  status: (integrationId: string) =>
+    request<WebhookStatus>(`/integrations/${integrationId}/webhook/status`),
+
+  regenerateSecret: (integrationId: string) =>
+    request<{ status: string }>(`/integrations/${integrationId}/webhook/regenerate-secret`, {
+      method: 'POST',
+    }),
 }
 
 // ── Notifications ─────────────────────────────────────────────────────────────

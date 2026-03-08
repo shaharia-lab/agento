@@ -28,27 +28,36 @@ const (
 	headerContentType = "Content-Type"
 )
 
+// WebhookMounter registers webhook routes on a chi.Router.
+type WebhookMounter interface {
+	Mount(r chi.Router)
+}
+
 // Server is the HTTP server for the agents platform.
 type Server struct {
-	apiServer     *api.Server
-	frontendFS    fs.FS // nil in dev mode
-	port          int
-	logger        *slog.Logger
-	httpServer    *http.Server
-	monitoringMgr *telemetry.MonitoringManager
+	apiServer      *api.Server
+	frontendFS     fs.FS // nil in dev mode
+	port           int
+	logger         *slog.Logger
+	httpServer     *http.Server
+	monitoringMgr  *telemetry.MonitoringManager
+	webhookHandler WebhookMounter
 }
 
 // New creates a new Server. Pass frontendFS=nil to proxy to Vite dev server on port 5173.
+// webhookHandler is optional; when non-nil, its routes are mounted at the root level.
 func New(
 	apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger,
 	monitoringMgr *telemetry.MonitoringManager,
+	webhookHandler WebhookMounter,
 ) *Server {
 	s := &Server{
-		apiServer:     apiSrv,
-		frontendFS:    frontendFS,
-		port:          port,
-		logger:        logger,
-		monitoringMgr: monitoringMgr,
+		apiServer:      apiSrv,
+		frontendFS:     frontendFS,
+		port:           port,
+		logger:         logger,
+		monitoringMgr:  monitoringMgr,
+		webhookHandler: webhookHandler,
 	}
 
 	r := chi.NewRouter()
@@ -73,6 +82,11 @@ func New(
 	r.Route("/api", func(r chi.Router) {
 		apiSrv.Mount(r)
 	})
+
+	// Webhook routes (mounted at root level, outside /api)
+	if s.webhookHandler != nil {
+		s.webhookHandler.Mount(r)
+	}
 
 	// Static files + SPA fallback
 	r.Get("/*", s.spaHandler())
