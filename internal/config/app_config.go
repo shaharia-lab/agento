@@ -36,6 +36,11 @@ type AppConfig struct {
 	// WorkingDir is the default working directory for chat sessions.
 	// Can be overridden with the AGENTO_WORKING_DIR environment variable.
 	WorkingDir string `envconfig:"AGENTO_WORKING_DIR"`
+
+	// PublicURL is the externally reachable URL of this Agento instance.
+	// Required for webhook registration (e.g. Telegram inbound triggers).
+	// When set via env var, it takes precedence over the settings-stored value.
+	PublicURL string `envconfig:"AGENTO_PUBLIC_URL"`
 }
 
 // Load reads AppConfig from environment variables using envconfig.

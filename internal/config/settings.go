@@ -26,6 +26,7 @@ type UserSettings struct {
 	AppearanceFontFamily   string `json:"appearance_font_family"`
 	NotificationSettings   string `json:"notification_settings"`
 	EventBusWorkerPoolSize int    `json:"event_bus_worker_pool_size"`
+	PublicURL              string `json:"public_url"`
 }
 
 // SettingsStore defines the interface for persisting user settings.
@@ -52,25 +53,36 @@ func NewSettingsManager(store SettingsStore, cfg *AppConfig) (*SettingsManager, 
 		locked: make(map[string]string),
 	}
 
-	// Determine which fields are locked by env vars.
+	m.detectLockedFields(cfg)
+
+	if err := m.load(); err != nil {
+		return nil, fmt.Errorf("loading settings: %w", err)
+	}
+
+	m.applyEnvOverrides(cfg)
+
+	return m, nil
+}
+
+// detectLockedFields marks fields that are set via environment variables.
+func (m *SettingsManager) detectLockedFields(cfg *AppConfig) {
 	if cfg.DefaultModel != "" && os.Getenv("AGENTO_DEFAULT_MODEL") != "" {
 		m.locked["default_model"] = "AGENTO_DEFAULT_MODEL"
 	}
 	if cfg.WorkingDir != "" && os.Getenv("AGENTO_WORKING_DIR") != "" {
 		m.locked["default_working_dir"] = "AGENTO_WORKING_DIR"
 	}
-
-	if err := m.load(); err != nil {
-		return nil, fmt.Errorf("loading settings: %w", err)
+	if cfg.PublicURL != "" && os.Getenv("AGENTO_PUBLIC_URL") != "" {
+		m.locked["public_url"] = "AGENTO_PUBLIC_URL"
 	}
+}
 
-	// Apply env-locked overrides so Get() always returns env values for locked fields.
+// applyEnvOverrides sets field values from AppConfig for locked fields.
+func (m *SettingsManager) applyEnvOverrides(cfg *AppConfig) {
 	if _, ok := m.locked["default_model"]; ok {
 		m.settings.DefaultModel = cfg.DefaultModel
 		m.modelFromEnv = true
 	} else if cfg.AnthropicDefaultSonnetModel != "" && !m.modelInFile {
-		// ANTHROPIC_DEFAULT_SONNET_MODEL provides a soft default when the user has
-		// not explicitly saved a model choice to the settings file.
 		m.settings.DefaultModel = cfg.AnthropicDefaultSonnetModel
 		m.modelFromEnv = true
 	}
@@ -79,7 +91,9 @@ func NewSettingsManager(store SettingsStore, cfg *AppConfig) (*SettingsManager, 
 		m.settings.DefaultWorkingDir = cfg.WorkingDir
 	}
 
-	return m, nil
+	if _, ok := m.locked["public_url"]; ok {
+		m.settings.PublicURL = cfg.PublicURL
+	}
 }
 
 func (m *SettingsManager) load() error {
@@ -135,6 +149,12 @@ func (m *SettingsManager) Update(incoming UserSettings) error {
 			return fmt.Errorf("default_working_dir is locked by environment variable %s", m.locked["default_working_dir"])
 		}
 		incoming.DefaultWorkingDir = m.settings.DefaultWorkingDir
+	}
+	if _, ok := m.locked["public_url"]; ok {
+		if incoming.PublicURL != "" && incoming.PublicURL != m.settings.PublicURL {
+			return fmt.Errorf("public_url is locked by environment variable %s", m.locked["public_url"])
+		}
+		incoming.PublicURL = m.settings.PublicURL
 	}
 
 	m.settings = incoming

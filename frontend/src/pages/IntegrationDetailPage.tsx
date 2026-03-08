@@ -6,6 +6,7 @@ import type { Integration, ServiceConfig } from '@/types'
 import ConfluenceIntegrationEditor from '@/components/integrations/ConfluenceIntegrationEditor'
 import GoogleIntegrationEditor from '@/components/integrations/GoogleIntegrationEditor'
 import TelegramIntegrationEditor from '@/components/integrations/TelegramIntegrationEditor'
+import TriggerRulesPanel from '@/components/TriggerRulesPanel'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -34,6 +35,7 @@ export default function IntegrationDetailPage() {
   const [name, setName] = useState('')
   const [enabled, setEnabled] = useState(false)
   const [services, setServices] = useState<Record<string, ServiceConfig>>({})
+  const [activeTab, setActiveTab] = useState<'config' | 'triggers'>('config')
 
   useEffect(() => {
     if (!id) return
@@ -203,6 +205,34 @@ export default function IntegrationDetailPage() {
         </div>
       </div>
 
+      {/* Tab navigation for telegram */}
+      {integration.type === 'telegram' && (
+        <div className="border-b border-zinc-100 dark:border-zinc-700/50 px-4 sm:px-6 shrink-0">
+          <div className="flex gap-4">
+            <button
+              onClick={() => setActiveTab('config')}
+              className={`py-2 text-xs font-medium border-b-2 transition-colors cursor-pointer ${
+                activeTab === 'config'
+                  ? 'border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100'
+                  : 'border-transparent text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300'
+              }`}
+            >
+              Configuration
+            </button>
+            <button
+              onClick={() => setActiveTab('triggers')}
+              className={`py-2 text-xs font-medium border-b-2 transition-colors cursor-pointer ${
+                activeTab === 'triggers'
+                  ? 'border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100'
+                  : 'border-transparent text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-300'
+              }`}
+            >
+              Inbound Triggers
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Scrollable content */}
       <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-4">
         {error && (
@@ -216,60 +246,70 @@ export default function IntegrationDetailPage() {
           </div>
         )}
 
-        {/* General section — shared across all integration types */}
-        <div className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 p-4">
-          <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-400 mb-4">
-            General
-          </h2>
-          <div className="space-y-4">
-            <div>
-              <label
-                htmlFor="integration-name"
-                className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1"
-              >
-                Name
-              </label>
-              <input
-                id="integration-name"
-                type="text"
-                value={name}
-                onChange={e => setName(e.target.value)}
-                className="w-full max-w-sm rounded-md border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-3 py-2 text-sm text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400"
-              />
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                id="enabled"
-                checked={enabled}
-                onChange={e => setEnabled(e.target.checked)}
-                className="h-4 w-4 rounded border-zinc-300 dark:border-zinc-600"
-              />
-              <label
-                htmlFor="enabled"
-                className="text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer"
-              >
-                Enabled
-              </label>
-            </div>
-          </div>
-        </div>
+        {/* Triggers tab content (telegram only) */}
+        {integration.type === 'telegram' && activeTab === 'triggers' && (
+          <TriggerRulesPanel integrationId={integration.id} />
+        )}
 
-        {/* Type-specific services & tools editor */}
-        <div>
-          <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-400 mb-3">
-            Services & Tools
-          </h2>
-          {integration.type === 'confluence' && (
-            <ConfluenceIntegrationEditor services={services} onServicesChange={setServices} />
-          )}
-          {integration.type === 'google' && (
-            <GoogleIntegrationEditor services={services} onServicesChange={setServices} />
-          )}
-          {integration.type === 'telegram' && (
-            <TelegramIntegrationEditor services={services} onServicesChange={setServices} />
-          )}
-        </div>
+        {/* Config tab content (or always for non-telegram) */}
+        {(integration.type !== 'telegram' || activeTab === 'config') && (
+          <>
+            {/* General section -- shared across all integration types */}
+            <div className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 p-4">
+              <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-400 mb-4">
+                General
+              </h2>
+              <div className="space-y-4">
+                <div>
+                  <label
+                    htmlFor="integration-name"
+                    className="block text-sm font-medium text-zinc-700 dark:text-zinc-300 mb-1"
+                  >
+                    Name
+                  </label>
+                  <input
+                    id="integration-name"
+                    type="text"
+                    value={name}
+                    onChange={e => setName(e.target.value)}
+                    className="w-full max-w-sm rounded-md border border-zinc-300 dark:border-zinc-600 bg-white dark:bg-zinc-900 px-3 py-2 text-sm text-zinc-900 dark:text-zinc-100 focus:outline-none focus:ring-2 focus:ring-zinc-900 dark:focus:ring-zinc-400"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    id="enabled"
+                    checked={enabled}
+                    onChange={e => setEnabled(e.target.checked)}
+                    className="h-4 w-4 rounded border-zinc-300 dark:border-zinc-600"
+                  />
+                  <label
+                    htmlFor="enabled"
+                    className="text-sm text-zinc-700 dark:text-zinc-300 cursor-pointer"
+                  >
+                    Enabled
+                  </label>
+                </div>
+              </div>
+            </div>
+
+            {/* Type-specific services & tools editor */}
+            <div>
+              <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-400 mb-3">
+                Services & Tools
+              </h2>
+              {integration.type === 'confluence' && (
+                <ConfluenceIntegrationEditor services={services} onServicesChange={setServices} />
+              )}
+              {integration.type === 'google' && (
+                <GoogleIntegrationEditor services={services} onServicesChange={setServices} />
+              )}
+              {integration.type === 'telegram' && (
+                <TelegramIntegrationEditor services={services} onServicesChange={setServices} />
+              )}
+            </div>
+          </>
+        )}
 
         {/* Danger zone — shared across all integration types */}
         <div className="rounded-lg border border-red-100 dark:border-red-900/50 bg-white dark:bg-zinc-800 p-4">

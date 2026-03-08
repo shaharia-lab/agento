@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { FolderOpen, Lock } from 'lucide-react'
+import { FolderOpen, Lock, Globe } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -30,6 +30,7 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [workingDir, setWorkingDir] = useState('')
   const [model, setModel] = useState('')
+  const [publicUrl, setPublicUrl] = useState('')
   const [browserOpen, setBrowserOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
@@ -41,6 +42,7 @@ export default function SettingsPage() {
       setResp(data)
       setWorkingDir(data.settings.default_working_dir)
       setModel(data.settings.default_model)
+      setPublicUrl(data.settings.public_url ?? '')
     } catch {
       setError('Failed to load settings')
     } finally {
@@ -62,9 +64,11 @@ export default function SettingsPage() {
     setError(null)
     try {
       const updated = await settingsApi.update({
+        ...resp?.settings,
         default_working_dir: workingDir,
         default_model: model,
         onboarding_complete: resp?.settings.onboarding_complete ?? true,
+        public_url: publicUrl,
       })
       setResp(updated)
       showToast('Settings saved')
@@ -78,6 +82,7 @@ export default function SettingsPage() {
   const locked = resp?.locked ?? {}
   const wdirLocked = 'default_working_dir' in locked
   const modelLocked = 'default_model' in locked
+  const publicUrlLocked = 'public_url' in locked
 
   if (loading) {
     return (
@@ -221,6 +226,33 @@ export default function SettingsPage() {
                     </Select>
                   )}
                   {modelLocked && <LockedNote envVar={locked['default_model']} />}
+                </div>
+
+                {/* Public URL */}
+                <div className="flex flex-col gap-1.5">
+                  <Label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                    Public URL
+                  </Label>
+                  <div className="flex gap-2">
+                    <div className="relative flex-1">
+                      <Globe className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400 pointer-events-none" />
+                      <Input
+                        value={publicUrl}
+                        onChange={e => setPublicUrl(e.target.value)}
+                        disabled={publicUrlLocked}
+                        className="pl-8 font-mono text-sm"
+                        placeholder="https://your-domain.example.com"
+                      />
+                    </div>
+                  </div>
+                  {publicUrlLocked ? (
+                    <LockedNote envVar={locked['public_url']} />
+                  ) : (
+                    <p className="text-xs text-zinc-400">
+                      Externally reachable URL of this Agento instance. Required for Telegram
+                      inbound webhooks.
+                    </p>
+                  )}
                 </div>
 
                 {error && (
