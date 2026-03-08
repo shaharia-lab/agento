@@ -35,16 +35,6 @@ func registerMessagingTools(server *mcp.Server, client *Client, allowed map[stri
 		})
 	}
 
-	if len(allowed) == 0 || allowed["read_messages"] {
-		mcp.AddTool(server, &mcp.Tool{
-			Name: "read_messages",
-			Description: "Read recent messages from a WhatsApp chat. " +
-				"Only messages received while the integration is connected are available.",
-		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *readMessagesParams) (*mcp.CallToolResult, any, error) {
-			return handleReadMessages(ctx, client, params)
-		})
-	}
-
 	if len(allowed) == 0 || allowed["send_media"] {
 		mcp.AddTool(server, &mcp.Tool{
 			Name:        "send_media",
@@ -128,46 +118,6 @@ func handleSendMessage(
 	return textResult(fmt.Sprintf(
 		"Message sent successfully. ID: %s, Timestamp: %s",
 		resp.ID, resp.Timestamp.Format(time.RFC3339),
-	))
-}
-
-// read_messages
-// WhatsApp linked devices receive messages via events. This tool requests a
-// history sync from the device, which provides recent message history.
-
-type readMessagesParams struct {
-	Chat  string `json:"chat" jsonschema:"required,Phone number (with country code) or group JID to read from"`
-	Count int    `json:"count" jsonschema:"Number of messages to request (default 20, max 50)"`
-}
-
-func handleReadMessages(
-	_ context.Context, _ *Client, params *readMessagesParams,
-) (*mcp.CallToolResult, any, error) {
-	jid, err := parseJID(params.Chat)
-	if err != nil {
-		return nil, nil, fmt.Errorf("parsing chat JID: %w", err)
-	}
-
-	count := params.Count
-	if count <= 0 {
-		count = 20
-	}
-	if count > 50 {
-		count = 50
-	}
-
-	// Use the newsletter/history message request API if available.
-	// For linked devices, direct message history access is limited.
-	// Return what we can from the device's message store.
-	_ = count // count is used as a hint but actual availability depends on sync state
-
-	return textResult(fmt.Sprintf(
-		"Message history for chat %s is limited on linked devices. "+
-			"The WhatsApp Web protocol does not provide random-access message history. "+
-			"Messages are received in real-time via event handlers. "+
-			"To see messages, ensure the integration has been connected and receiving events. "+
-			"Chat JID: %s",
-		jid.String(), jid.String(),
 	))
 }
 

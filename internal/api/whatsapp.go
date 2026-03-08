@@ -40,7 +40,10 @@ func (s *Server) handleStartWhatsAppPairing(w http.ResponseWriter, r *http.Reque
 	s.writeJSON(w, http.StatusOK, map[string]string{"qr_code": qrCode})
 
 	// Start polling for pairing completion in the background.
-	go s.watchWhatsAppPairing(id)
+	// Use a detached context so polling survives the HTTP request, but can
+	// still be stopped when the pairing session is cleaned up.
+	pairingCtx := s.whatsappPairingMgr.SessionContext(id)
+	go s.watchWhatsAppPairing(pairingCtx, id)
 }
 
 // handleGetWhatsAppQR returns the current QR code for an active pairing session.
@@ -85,7 +88,9 @@ func (s *Server) handleGetWhatsAppQR(w http.ResponseWriter, r *http.Request) {
 }
 
 // watchWhatsAppPairing polls the pairing session and saves auth data on success.
-func (s *Server) watchWhatsAppPairing(integrationID string) {
+// The provided context is canceled when the pairing session is cleaned up or
+// the server shuts down, which stops this goroutine.
+func (s *Server) watchWhatsAppPairing(ctx context.Context, integrationID string) {
 	if s.whatsappPairingMgr == nil {
 		return
 	}
@@ -98,6 +103,9 @@ func (s *Server) watchWhatsAppPairing(integrationID string) {
 
 	for {
 		select {
+		case <-ctx.Done():
+			s.logger.Info("WhatsApp pairing watch canceled", "id", integrationID)
+			return
 		case <-ticker.C:
 			paired, phone, pairingErr := s.whatsappPairingMgr.GetStatus(integrationID)
 			if pairingErr != nil {

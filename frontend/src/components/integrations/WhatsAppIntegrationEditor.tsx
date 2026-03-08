@@ -19,10 +19,6 @@ const WHATSAPP_SERVICES: Record<string, ServiceInfo> = {
     description: 'Send messages, media, and manage contacts',
     tools: [
       { name: 'send_message', description: 'Send a text message to a phone number or group' },
-      {
-        name: 'read_messages',
-        description: 'Read recent messages from a chat (limited on linked devices)',
-      },
       { name: 'send_media', description: 'Send an image or document by URL' },
       { name: 'list_chats', description: 'List recent chats with contact info' },
       { name: 'get_contacts', description: 'List contacts from the linked device' },

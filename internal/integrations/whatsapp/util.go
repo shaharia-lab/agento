@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -14,8 +17,65 @@ var httpClient = &http.Client{Timeout: 60 * time.Second} //nolint:gochecknogloba
 // maxMediaSize is the maximum allowed media download size (50 MB).
 const maxMediaSize = 50 * 1024 * 1024
 
+// validateMediaURL checks that the URL is safe to fetch (no SSRF).
+// It rejects non-HTTP(S) schemes, loopback addresses, and private/internal IP ranges.
+func validateMediaURL(mediaURL string) error {
+	return validateMediaURLWithResolver(mediaURL, net.DefaultResolver)
+}
+
+// validateMediaURLWithResolver is the internal implementation that accepts a resolver for testing.
+func validateMediaURLWithResolver(mediaURL string, resolver *net.Resolver) error {
+	parsed, err := url.Parse(mediaURL)
+	if err != nil {
+		return fmt.Errorf("invalid URL: %w", err)
+	}
+
+	scheme := strings.ToLower(parsed.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return fmt.Errorf("unsupported URL scheme %q: only http and https are allowed", parsed.Scheme)
+	}
+
+	host := parsed.Hostname()
+	if host == "" {
+		return fmt.Errorf("URL has no host")
+	}
+
+	// Resolve the hostname to IP addresses and check each one.
+	ips, err := resolver.LookupHost(context.Background(), host)
+	if err != nil {
+		return fmt.Errorf("resolving host %q: %w", host, err)
+	}
+
+	for _, ipStr := range ips {
+		ip := net.ParseIP(ipStr)
+		if ip == nil {
+			return fmt.Errorf("invalid resolved IP %q for host %q", ipStr, host)
+		}
+		if isPrivateOrReservedIP(ip) {
+			return fmt.Errorf("URL resolves to private/reserved IP %s", ipStr)
+		}
+	}
+
+	return nil
+}
+
+// isPrivateOrReservedIP returns true if the IP is loopback, link-local,
+// private (RFC 1918 / RFC 4193), or otherwise reserved.
+func isPrivateOrReservedIP(ip net.IP) bool {
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified()
+}
+
 // downloadMedia downloads media content from a URL with a size limit.
+// The URL is validated against SSRF before making the request.
 func downloadMedia(ctx context.Context, mediaURL string) ([]byte, error) {
+	if err := validateMediaURL(mediaURL); err != nil {
+		return nil, fmt.Errorf("URL validation failed: %w", err)
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, mediaURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)

@@ -1,14 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import {
-  ArrowLeft,
-  ArrowRight,
-  CheckCircle,
-  Loader2,
-  AlertCircle,
-  Smartphone,
-  QrCode,
-} from 'lucide-react'
+import { ArrowLeft, ArrowRight, CheckCircle, Loader2, AlertCircle, Smartphone } from 'lucide-react'
+import QRCode from 'react-qr-code'
 import { integrationsApi } from '@/lib/api'
 import type { ServiceConfig } from '@/types'
 import WhatsAppIntegrationEditor from '@/components/integrations/WhatsAppIntegrationEditor'
@@ -264,10 +257,7 @@ export default function IntegrationWhatsAppPage() {
                 <div className="flex flex-col items-center gap-4 mb-6">
                   {qrCode ? (
                     <div className="p-4 bg-white rounded-lg border border-zinc-200 dark:border-zinc-700 inline-block">
-                      <QrCode className="h-48 w-48 text-zinc-900" />
-                      <div className="mt-3 p-2 bg-zinc-50 dark:bg-zinc-800 rounded text-xs font-mono text-zinc-600 dark:text-zinc-400 break-all max-w-sm">
-                        {qrCode.substring(0, 80)}...
-                      </div>
+                      <QRCode value={qrCode} size={256} />
                     </div>
                   ) : (
                     <Loader2 className="h-12 w-12 text-zinc-400 animate-spin" />

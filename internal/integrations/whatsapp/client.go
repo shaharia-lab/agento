@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
@@ -19,8 +18,8 @@ import (
 )
 
 // Client wraps a whatsmeow.Client with lifecycle management.
+// whatsmeow.Client is documented as goroutine-safe, so no mutex is needed.
 type Client struct {
-	mu     sync.RWMutex
 	wm     *whatsmeow.Client
 	store  *sqlstore.Container
 	logger *slog.Logger
@@ -58,35 +57,25 @@ func NewClient(ctx context.Context, dataDir, integrationID string, logger *slog.
 // Connect establishes the WebSocket connection to WhatsApp servers.
 // If the device is already paired, it reconnects automatically.
 func (c *Client) Connect() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	return c.wm.Connect()
 }
 
 // Disconnect gracefully closes the WhatsApp connection.
 func (c *Client) Disconnect() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.wm.Disconnect()
 }
 
 // IsConnected returns true if the client has an active connection.
 func (c *Client) IsConnected() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.wm.IsConnected()
 }
 
 // IsLoggedIn returns true if the device store has a valid session.
 func (c *Client) IsLoggedIn() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.wm.IsLoggedIn()
 }
 
 // WM returns the underlying whatsmeow client for direct access by tools and pairing.
 func (c *Client) WM() *whatsmeow.Client {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
 	return c.wm
 }

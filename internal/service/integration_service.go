@@ -587,10 +587,6 @@ func (s *integrationService) ValidateTokenAuth(ctx context.Context, cfg *config.
 		err = s.validateGitHubPATAuth(ctx, cfg)
 	case "slack":
 		err = s.validateSlackTokenAuth(ctx, cfg)
-	case "whatsapp":
-		// WhatsApp uses QR code pairing, not token validation.
-		// Auth status is managed by the pairing flow, not this endpoint.
-		return nil
 	default:
 		// For other types, validation is not yet implemented. Return nil (unvalidated).
 		return nil

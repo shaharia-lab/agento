@@ -147,7 +147,7 @@ func (s *Server) handleValidateAuth(w http.ResponseWriter, r *http.Request) {
 
 	// For types with real validation (e.g. telegram, confluence, jira), the credentials have been verified.
 	// For types without validation, this is a no-op success.
-	validated := cfg.Type == "telegram" || cfg.Type == "confluence" || cfg.Type == "jira" || cfg.Type == "whatsapp"
+	validated := cfg.Type == "telegram" || cfg.Type == "confluence" || cfg.Type == "jira"
 	s.writeJSON(w, http.StatusOK, map[string]any{"valid": true, "validated": validated})
 }
 

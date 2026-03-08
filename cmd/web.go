@@ -259,7 +259,7 @@ func buildWebServer(
 
 	monitoringMgr := initMonitoringManager(cfg.DataDir, otelProviders, otelCfg, sysLogger)
 
-	apiSrv, bus, insightWorker, err := buildAPIServer(ctx, appDeps{
+	apiSrv, bus, insightWorker, whatsappPairingMgr, err := buildAPIServer(ctx, appDeps{
 		db:                  db,
 		logger:              sysLogger,
 		appConfig:           cfg,
@@ -277,10 +277,11 @@ func buildWebServer(
 	}
 	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr)
 
-	// On shutdown: close the event bus first so no further events are enqueued,
-	// then wait for in-flight worker goroutines to finish.
+	// On shutdown: clean up pairing sessions, close the event bus so no further
+	// events are enqueued, then wait for in-flight worker goroutines to finish.
 	go func() {
 		<-ctx.Done()
+		whatsappPairingMgr.Shutdown()
 		bus.Close()
 		insightWorker.Wait()
 	}()
@@ -340,7 +341,7 @@ type appDeps struct {
 // buildAPIServer wires all services and returns the api.Server and the event bus.
 func buildAPIServer(
 	ctx context.Context, deps appDeps,
-) (*api.Server, eventbus.EventBus, *claudesessions.InsightWorker, error) {
+) (*api.Server, eventbus.EventBus, *claudesessions.InsightWorker, *whatsappintegration.PairingManager, error) {
 	notifStore, bus := setupNotifications(deps.db, deps.settingsMgr, deps.logger)
 
 	agentSvc := service.NewAgentService(deps.agentStore, deps.logger)
@@ -355,7 +356,7 @@ func buildAPIServer(
 
 	taskScheduler, err := initTaskScheduler(ctx, deps, taskStore, bus)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	taskSvc := service.NewTaskService(taskStore, taskScheduler, deps.logger)
@@ -387,7 +388,7 @@ func buildAPIServer(
 		InsightStore:       insightStore,
 		WhatsAppPairingMgr: whatsappPairingMgr,
 	})
-	return apiSrv, bus, insightWorker, nil
+	return apiSrv, bus, insightWorker, whatsappPairingMgr, nil
 }
 
 // setupNotifications creates the notification store, event bus, and wires the

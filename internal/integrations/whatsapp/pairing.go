@@ -18,6 +18,7 @@ type PairingSession struct {
 	phone       string
 	err         error
 	done        bool
+	ctx         context.Context //nolint:containedctx // stored for session lifecycle management
 	cancel      context.CancelFunc
 	logger      *slog.Logger
 	integration string
@@ -53,14 +54,20 @@ func (m *PairingManager) StartPairing(ctx context.Context, integrationID string)
 	}
 	m.mu.Unlock()
 
-	client, err := NewClient(ctx, m.dataDir, integrationID, m.logger)
+	// Detach from the caller's context so the pairing session survives after
+	// the HTTP handler returns. Use context.WithoutCancel to inherit values
+	// (e.g. tracing) without inheriting the cancellation signal.
+	detachedCtx := context.WithoutCancel(ctx)
+
+	client, err := NewClient(detachedCtx, m.dataDir, integrationID, m.logger)
 	if err != nil {
 		return "", fmt.Errorf("creating whatsapp client: %w", err)
 	}
 
-	pairingCtx, cancel := context.WithCancel(ctx)
+	pairingCtx, cancel := context.WithCancel(detachedCtx)
 	session := &PairingSession{
 		client:      client,
+		ctx:         pairingCtx,
 		cancel:      cancel,
 		logger:      m.logger,
 		integration: integrationID,
@@ -116,6 +123,33 @@ func (m *PairingManager) GetStatus(integrationID string) (paired bool, phone str
 	defer session.mu.Unlock()
 
 	return session.paired, session.phone, session.err
+}
+
+// SessionContext returns the context for an active pairing session.
+// If no session exists, it returns a canceled context.
+func (m *PairingManager) SessionContext(integrationID string) context.Context {
+	m.mu.Lock()
+	session, ok := m.sessions[integrationID]
+	m.mu.Unlock()
+
+	if !ok || session == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		return ctx
+	}
+
+	return session.ctx
+}
+
+// Shutdown cancels all active pairing sessions. Call this on server shutdown.
+func (m *PairingManager) Shutdown() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for id, session := range m.sessions {
+		session.cancelSession()
+		delete(m.sessions, id)
+	}
 }
 
 // CleanupSession removes a completed pairing session.
