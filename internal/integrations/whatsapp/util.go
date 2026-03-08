@@ -40,20 +40,27 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 
 // httpClient is used for downloading media from URLs. The transport uses
 // safeDialContext so IP validation happens at connection time, preventing
-// DNS rebinding attacks.
+// DNS rebinding attacks. CheckRedirect limits redirects to 3 and rejects
+// non-HTTP(S) redirect targets; safeDialContext handles IP validation at dial time.
 var httpClient = &http.Client{ //nolint:gochecknoglobals
 	Timeout:   60 * time.Second,
 	Transport: &http.Transport{DialContext: safeDialContext},
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return fmt.Errorf("too many redirects")
+		}
+		if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+			return fmt.Errorf("redirect to non-HTTP scheme %q", req.URL.Scheme)
+		}
+		return nil
+	},
 }
 
-// validateMediaURL checks that the URL is safe to fetch (no SSRF).
-// It rejects non-HTTP(S) schemes, loopback addresses, and private/internal IP ranges.
+// validateMediaURL checks that the URL uses an http or https scheme and has a
+// non-empty host. It does NOT perform DNS resolution — safeDialContext is the
+// actual SSRF guard and resolves addresses at connection time, preventing TOCTOU
+// attacks where the DNS response changes between pre-check and dial.
 func validateMediaURL(mediaURL string) error {
-	return validateMediaURLWithResolver(mediaURL, net.DefaultResolver)
-}
-
-// validateMediaURLWithResolver is the internal implementation that accepts a resolver for testing.
-func validateMediaURLWithResolver(mediaURL string, resolver *net.Resolver) error {
 	parsed, err := url.Parse(mediaURL)
 	if err != nil {
 		return fmt.Errorf("invalid URL: %w", err)
@@ -67,22 +74,6 @@ func validateMediaURLWithResolver(mediaURL string, resolver *net.Resolver) error
 	host := parsed.Hostname()
 	if host == "" {
 		return fmt.Errorf("URL has no host")
-	}
-
-	// Resolve the hostname to IP addresses and check each one.
-	ips, err := resolver.LookupHost(context.Background(), host)
-	if err != nil {
-		return fmt.Errorf("resolving host %q: %w", host, err)
-	}
-
-	for _, ipStr := range ips {
-		ip := net.ParseIP(ipStr)
-		if ip == nil {
-			return fmt.Errorf("invalid resolved IP %q for host %q", ipStr, host)
-		}
-		if isPrivateOrReservedIP(ip) {
-			return fmt.Errorf("URL resolves to private/reserved IP %s", ipStr)
-		}
 	}
 
 	return nil
@@ -120,9 +111,18 @@ func downloadMedia(ctx context.Context, mediaURL string) ([]byte, error) {
 		return nil, fmt.Errorf("download returned status %d", resp.StatusCode)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaSize))
+	// Reject immediately if Content-Length header reports oversized payload.
+	if resp.ContentLength > maxMediaSize {
+		return nil, fmt.Errorf("media too large: %d bytes (max %d)", resp.ContentLength, maxMediaSize)
+	}
+
+	// Read one byte over the limit to detect truncation vs exact-size files.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxMediaSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading media: %w", err)
+	}
+	if int64(len(data)) > maxMediaSize {
+		return nil, fmt.Errorf("media exceeds %d bytes", maxMediaSize)
 	}
 
 	return data, nil

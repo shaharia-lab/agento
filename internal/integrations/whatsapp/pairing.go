@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 )
@@ -185,8 +186,13 @@ func (s *PairingSession) start(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("connecting for pairing: %w", err)
 	}
 
-	// Wait for the first QR code event.
-	for evt := range qrChan {
+	// Wait for the first QR code with a timeout so we don't block indefinitely
+	// if WhatsApp never sends a code.
+	select {
+	case evt, ok := <-qrChan:
+		if !ok {
+			return "", fmt.Errorf("QR channel closed before first code")
+		}
 		if evt.Event == "code" {
 			s.mu.Lock()
 			s.currentQR = evt.Code
@@ -213,9 +219,12 @@ func (s *PairingSession) start(ctx context.Context) (string, error) {
 			s.mu.Unlock()
 			return "", s.err
 		}
+		return "", fmt.Errorf("unexpected QR event before first code: %s", evt.Event)
+	case <-time.After(30 * time.Second):
+		return "", fmt.Errorf("timed out waiting for QR code from WhatsApp")
+	case <-ctx.Done():
+		return "", ctx.Err()
 	}
-
-	return "", fmt.Errorf("QR channel closed without producing a code")
 }
 
 // processQREvents continues processing QR events in the background after

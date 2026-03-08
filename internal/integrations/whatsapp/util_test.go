@@ -48,53 +48,14 @@ func TestValidateMediaURL(t *testing.T) {
 			errMsg:  "invalid URL",
 		},
 		{
-			name:    "loopback IPv4 rejected",
-			url:     "http://127.0.0.1/metadata",
-			wantErr: true,
-			errMsg:  "private/reserved IP",
-		},
-		{
-			name:    "loopback localhost rejected",
-			url:     "http://localhost/metadata",
-			wantErr: true,
-			errMsg:  "private/reserved IP",
-		},
-		{
-			name:    "private 10.x rejected",
-			url:     "http://10.0.0.1/internal",
-			wantErr: true,
-			errMsg:  "private/reserved IP",
-		},
-		{
-			name:    "private 192.168.x rejected",
-			url:     "http://192.168.1.1/admin",
-			wantErr: true,
-			errMsg:  "private/reserved IP",
-		},
-		{
-			name:    "private 172.16.x rejected",
-			url:     "http://172.16.0.1/secret",
-			wantErr: true,
-			errMsg:  "private/reserved IP",
-		},
-		{
-			name:    "link-local rejected",
-			url:     "http://169.254.169.254/latest/meta-data/",
-			wantErr: true,
-			errMsg:  "private/reserved IP",
-		},
-		{
 			name:    "no host rejected",
 			url:     "http:///path",
 			wantErr: true,
 			errMsg:  "URL has no host",
 		},
-		{
-			name:    "unresolvable host rejected",
-			url:     "https://thisdomaindoesnotexist.invalid/file",
-			wantErr: true,
-			errMsg:  "resolving host",
-		},
+		// Note: private/reserved IP rejection and DNS-based SSRF protection are
+		// enforced by safeDialContext at connection time, not here. See
+		// TestDownloadMedia for end-to-end SSRF rejection tests.
 	}
 
 	for _, tt := range tests {
@@ -148,6 +109,9 @@ func TestIsPrivateOrReservedIP(t *testing.T) {
 	}
 }
 
+// TestDownloadMedia verifies end-to-end SSRF rejection via safeDialContext.
+// Private/reserved IPs are blocked at dial time (connection time), not at URL
+// validation time, which prevents TOCTOU DNS rebinding attacks.
 func TestDownloadMedia(t *testing.T) {
 	t.Run("rejects private URL", func(t *testing.T) {
 		_, err := downloadMedia(t.Context(), "http://127.0.0.1:1234/secret")

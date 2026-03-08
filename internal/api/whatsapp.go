@@ -53,6 +53,16 @@ func (s *Server) handleStartWhatsAppPairing(w http.ResponseWriter, r *http.Reque
 func (s *Server) handleGetWhatsAppQR(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
+	cfg, err := s.integrationSvc.Get(r.Context(), id)
+	if err != nil {
+		s.httpErr(w, err)
+		return
+	}
+	if cfg.Type != "whatsapp" {
+		s.writeError(w, http.StatusBadRequest, "integration is not a whatsapp type")
+		return
+	}
+
 	if s.whatsappPairingMgr == nil {
 		s.writeError(w, http.StatusServiceUnavailable, "WhatsApp pairing is not available")
 		return
@@ -134,6 +144,17 @@ func (s *Server) watchWhatsAppPairing(ctx context.Context, integrationID string)
 // GET /api/integrations/{id}/whatsapp/status
 func (s *Server) handleGetWhatsAppStatus(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
+
+	cfg, err := s.integrationSvc.Get(r.Context(), id)
+	if err != nil {
+		s.httpErr(w, err)
+		return
+	}
+	if cfg.Type != "whatsapp" {
+		s.writeError(w, http.StatusBadRequest, "integration is not a whatsapp type")
+		return
+	}
+
 	connected, loggedIn := whatsappintegration.ConnectionStatus(id)
 	s.writeJSON(w, http.StatusOK, map[string]any{
 		"connected": connected,
@@ -198,6 +219,6 @@ func (s *Server) saveWhatsAppAuth(integrationID, phone string) error {
 		return err
 	}
 
-	s.logger.Info("WhatsApp auth saved", "id", integrationID, "phone", phone)
+	s.logger.Debug("WhatsApp auth saved", "id", integrationID, "phone", phone)
 	return nil
 }

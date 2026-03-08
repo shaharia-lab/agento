@@ -200,6 +200,12 @@ func handleSendMedia(
 }
 
 // list_chats
+//
+// Note: list_chats and get_contacts currently share the same data source
+// (the device contact store). list_chats is intentionally kept as a separate
+// tool so that it can be wired to real message history once whatsmeow exposes
+// chat-level events for linked devices, without breaking the existing
+// get_contacts API surface.
 
 type listChatsParams struct {
 	Limit int `json:"limit" jsonschema:"Maximum number of entries to return (default 50, max 200)"`
