@@ -1,7 +1,9 @@
 package api
 
 import (
+	"crypto/subtle"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -17,6 +19,7 @@ type TelegramWebhookHandler struct {
 	triggerStore     storage.TriggerStore
 	integrationStore storage.IntegrationStore
 	dispatcher       *trigger.Dispatcher
+	logger           *slog.Logger
 }
 
 // NewTelegramWebhookHandler creates a handler for inbound Telegram webhooks.
@@ -24,11 +27,13 @@ func NewTelegramWebhookHandler(
 	triggerStore storage.TriggerStore,
 	integrationStore storage.IntegrationStore,
 	dispatcher *trigger.Dispatcher,
+	logger *slog.Logger,
 ) *TelegramWebhookHandler {
 	return &TelegramWebhookHandler{
 		triggerStore:     triggerStore,
 		integrationStore: integrationStore,
 		dispatcher:       dispatcher,
+		logger:           logger,
 	}
 }
 
@@ -50,7 +55,7 @@ func (h *TelegramWebhookHandler) handleInbound(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	if headerSecret != storedSecret {
+	if subtle.ConstantTimeCompare([]byte(headerSecret), []byte(storedSecret)) != 1 {
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -64,7 +69,9 @@ func (h *TelegramWebhookHandler) handleInbound(w http.ResponseWriter, r *http.Re
 
 	// Parse the update.
 	var update trigger.TelegramUpdate
-	if json.NewDecoder(r.Body).Decode(&update) != nil {
+	if decodeErr := json.NewDecoder(r.Body).Decode(&update); decodeErr != nil {
+		h.logger.Debug("failed to decode telegram webhook payload",
+			"integration_id", integrationID, "error", decodeErr)
 		w.WriteHeader(http.StatusOK)
 		return
 	}

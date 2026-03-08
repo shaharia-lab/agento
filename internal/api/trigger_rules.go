@@ -50,7 +50,19 @@ func (s *Server) handleCreateTriggerRule(w http.ResponseWriter, r *http.Request)
 
 // handleUpdateTriggerRule updates an existing trigger rule.
 func (s *Server) handleUpdateTriggerRule(w http.ResponseWriter, r *http.Request) {
+	integrationID := chi.URLParam(r, "id")
 	ruleID := chi.URLParam(r, "rid")
+
+	// Verify the rule belongs to this integration.
+	existing, err := s.triggerSvc.GetRule(r.Context(), ruleID)
+	if err != nil {
+		s.httpErr(w, err)
+		return
+	}
+	if existing.IntegrationID != integrationID {
+		s.writeError(w, http.StatusForbidden, "rule does not belong to this integration")
+		return
+	}
 
 	var req UpdateTriggerRuleRequest
 	if json.NewDecoder(r.Body).Decode(&req) != nil {
@@ -77,7 +89,20 @@ func (s *Server) handleUpdateTriggerRule(w http.ResponseWriter, r *http.Request)
 
 // handleDeleteTriggerRule removes a trigger rule.
 func (s *Server) handleDeleteTriggerRule(w http.ResponseWriter, r *http.Request) {
+	integrationID := chi.URLParam(r, "id")
 	ruleID := chi.URLParam(r, "rid")
+
+	// Verify the rule belongs to this integration.
+	existing, err := s.triggerSvc.GetRule(r.Context(), ruleID)
+	if err != nil {
+		s.httpErr(w, err)
+		return
+	}
+	if existing.IntegrationID != integrationID {
+		s.writeError(w, http.StatusForbidden, "rule does not belong to this integration")
+		return
+	}
+
 	if err := s.triggerSvc.DeleteRule(r.Context(), ruleID); err != nil {
 		s.httpErr(w, err)
 		return

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"unicode/utf8"
 )
 
 // RegisterWebhook calls Telegram's setWebhook API to register a webhook URL
@@ -75,20 +76,28 @@ func SendReply(ctx context.Context, botToken string, chatID int64, replyToMsgID 
 	return nil
 }
 
-// splitMessage splits text into chunks of at most maxLen characters.
+// splitMessage splits text into chunks of at most maxLen bytes,
+// ensuring splits occur on valid UTF-8 rune boundaries.
 func splitMessage(text string, maxLen int) []string {
 	if len(text) <= maxLen {
 		return []string{text}
 	}
 
 	chunks := make([]string, 0, (len(text)/maxLen)+1)
-	for len(text) > 0 {
+	for len(text) > maxLen {
 		end := maxLen
-		if end > len(text) {
-			end = len(text)
+		for end > 0 && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		if end == 0 {
+			// Fallback: should not happen with valid UTF-8, but avoid infinite loop.
+			end = maxLen
 		}
 		chunks = append(chunks, text[:end])
 		text = text[end:]
+	}
+	if len(text) > 0 {
+		chunks = append(chunks, text)
 	}
 	return chunks
 }

@@ -360,8 +360,8 @@ func buildAPIServer(
 
 	sessionCache, insightStore, insightWorker := setupInsights(ctx, deps.db, deps.logger, bus)
 
-	dispatcher := buildTriggerDispatcher(deps, triggerStore)
-	webhookHandler := api.NewTelegramWebhookHandler(triggerStore, deps.integrationStore, dispatcher)
+	dispatcher := buildTriggerDispatcher(ctx, deps, triggerStore)
+	webhookHandler := api.NewTelegramWebhookHandler(triggerStore, deps.integrationStore, dispatcher, deps.logger)
 
 	apiSrv := api.New(api.ServerConfig{
 		AgentSvc:        service.NewAgentService(deps.agentStore, deps.logger),
@@ -410,7 +410,7 @@ func setupInsights(
 	return sessionCache, insightStore, insightWorker
 }
 
-func buildTriggerDispatcher(deps appDeps, triggerStore storage.TriggerStore) *trigger.Dispatcher {
+func buildTriggerDispatcher(ctx context.Context, deps appDeps, triggerStore storage.TriggerStore) *trigger.Dispatcher {
 	return trigger.NewDispatcher(trigger.DispatcherConfig{
 		TriggerStore:        triggerStore,
 		AgentStore:          deps.agentStore,
@@ -421,6 +421,7 @@ func buildTriggerDispatcher(deps appDeps, triggerStore storage.TriggerStore) *tr
 		IntegrationRegistry: deps.integrationRegistry,
 		SettingsMgr:         deps.settingsMgr,
 		Logger:              deps.logger,
+		Ctx:                 ctx,
 	})
 }
 

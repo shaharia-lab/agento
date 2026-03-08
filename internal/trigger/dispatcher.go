@@ -15,6 +15,10 @@ import (
 	"github.com/shaharia-lab/agento/internal/tools"
 )
 
+// maxConcurrentExecutions limits the number of concurrent agent executions
+// dispatched from incoming Telegram messages.
+const maxConcurrentExecutions = 10
+
 // Dispatcher matches incoming messages against trigger rules, runs the
 // appropriate agent, and sends the reply back to Telegram.
 type Dispatcher struct {
@@ -27,6 +31,8 @@ type Dispatcher struct {
 	integrationRegistry *integrations.IntegrationRegistry
 	settingsMgr         *config.SettingsManager
 	logger              *slog.Logger
+	sem                 chan struct{}
+	ctx                 context.Context
 }
 
 // DispatcherConfig holds all dependencies for the Dispatcher.
@@ -40,10 +46,15 @@ type DispatcherConfig struct {
 	IntegrationRegistry *integrations.IntegrationRegistry
 	SettingsMgr         *config.SettingsManager
 	Logger              *slog.Logger
+	Ctx                 context.Context
 }
 
 // NewDispatcher creates a new Dispatcher.
 func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
+	ctx := cfg.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	return &Dispatcher{
 		triggerStore:        cfg.TriggerStore,
 		agentStore:          cfg.AgentStore,
@@ -54,6 +65,8 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		integrationRegistry: cfg.IntegrationRegistry,
 		settingsMgr:         cfg.SettingsMgr,
 		logger:              cfg.Logger,
+		sem:                 make(chan struct{}, maxConcurrentExecutions),
+		ctx:                 ctx,
 	}
 }
 
@@ -85,18 +98,28 @@ type TelegramUser struct {
 
 // HandleTelegramUpdate processes an incoming Telegram update for the given integration.
 // It runs asynchronously: returns immediately and processes in the background.
+// Concurrent executions are capped by the semaphore.
 func (d *Dispatcher) HandleTelegramUpdate(
 	integrationID, botToken string,
 	update TelegramUpdate,
 ) {
-	go d.processTelegramUpdate(integrationID, botToken, update)
+	go func() {
+		select {
+		case d.sem <- struct{}{}:
+			defer func() { <-d.sem }()
+			d.processTelegramUpdate(integrationID, botToken, update)
+		case <-d.ctx.Done():
+			d.logger.Warn("dispatcher context canceled, dropping telegram update",
+				"integration_id", integrationID, "update_id", update.UpdateID)
+		}
+	}()
 }
 
 func (d *Dispatcher) processTelegramUpdate(
 	integrationID, botToken string,
 	update TelegramUpdate,
 ) {
-	ctx := context.Background()
+	ctx := d.ctx
 
 	if update.Message == nil || update.Message.Text == "" {
 		return
@@ -236,10 +259,11 @@ func matchRule(rule *config.TriggerRule, text, chatID string) (bool, string) {
 
 	// Check prefix filter.
 	if rule.FilterPrefix != "" {
-		if !strings.HasPrefix(strings.ToLower(text), strings.ToLower(rule.FilterPrefix)) {
+		prefixLen := len(rule.FilterPrefix)
+		if len(text) < prefixLen || !strings.EqualFold(text[:prefixLen], rule.FilterPrefix) {
 			return false, ""
 		}
-		prompt = strings.TrimSpace(text[len(rule.FilterPrefix):])
+		prompt = strings.TrimSpace(text[prefixLen:])
 		if prompt == "" {
 			return false, ""
 		}

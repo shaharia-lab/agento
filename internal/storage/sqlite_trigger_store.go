@@ -188,17 +188,25 @@ func (s *SQLiteTriggerStore) IsUpdateProcessed(
 	return count > 0, nil
 }
 
-// MarkUpdateProcessed records a Telegram update_id as processed.
+// MarkUpdateProcessed records a Telegram update_id as processed and cleans up
+// entries older than 48 hours to prevent unbounded table growth.
 func (s *SQLiteTriggerStore) MarkUpdateProcessed(ctx context.Context, integrationID string, updateID int64) error {
+	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO telegram_processed_updates
 			(integration_id, update_id, processed_at)
 		VALUES (?, ?, ?)`,
-		integrationID, updateID, time.Now().UTC(),
+		integrationID, updateID, now,
 	)
 	if err != nil {
 		return fmt.Errorf("marking update as processed: %w", err)
 	}
+
+	// Clean up entries older than 48 hours.
+	cutoff := now.Add(-48 * time.Hour)
+	//nolint:errcheck // best-effort cleanup, failure is non-critical
+	_, _ = s.db.ExecContext(ctx, `DELETE FROM telegram_processed_updates WHERE processed_at < ?`, cutoff)
+
 	return nil
 }
 
