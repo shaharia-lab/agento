@@ -136,29 +136,36 @@ export default function TriggerRulesPanel({ integrationId }: Props) {
   return (
     <div className="space-y-4">
       {/* Setup guide */}
-      <div className="rounded-lg border border-blue-200 dark:border-blue-800/50 bg-blue-50 dark:bg-blue-900/20 p-4">
+      <div className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 p-4">
         <div className="flex items-start gap-2">
-          <Info className="h-4 w-4 text-blue-500 shrink-0 mt-0.5" />
-          <div className="text-sm text-blue-700 dark:text-blue-300">
-            <p className="font-medium mb-1">Setup checklist</p>
-            <ol className="list-decimal list-inside space-y-1 text-xs text-blue-600 dark:text-blue-400">
-              <li className={isActive ? 'line-through opacity-50' : ''}>
-                Set your <strong>Public URL</strong> in{' '}
+          <Info className="h-4 w-4 text-zinc-400 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-widest text-zinc-400 mb-2">
+              Setup checklist
+            </p>
+            <ol className="list-decimal list-inside space-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+              <li className={isActive ? 'line-through opacity-40' : ''}>
+                Set your{' '}
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">Public URL</span> in{' '}
                 <a href="/settings" className="underline hover:no-underline">
                   Settings → General
                 </a>{' '}
-                (the externally reachable URL of this Agento instance).
+                (the externally reachable URL of this instance).
               </li>
-              <li className={isActive ? 'line-through opacity-50' : ''}>
-                Click <strong>Register Webhook</strong> below — Agento will automatically notify
-                Telegram of the webhook URL.
+              <li className={isActive ? 'line-through opacity-40' : ''}>
+                Click{' '}
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                  Register Webhook
+                </span>{' '}
+                below — Agento will automatically notify Telegram of the webhook URL.
               </li>
-              <li className={!isActive ? 'opacity-50' : hasRules ? 'line-through opacity-50' : ''}>
-                Add at least one <strong>Trigger Rule</strong> to route incoming messages to an
-                agent.
+              <li className={!isActive ? 'opacity-40' : hasRules ? 'line-through opacity-40' : ''}>
+                Add at least one{' '}
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">Trigger Rule</span>{' '}
+                to route incoming messages to an agent.
               </li>
-              <li className={!isActive || !hasRules ? 'opacity-50' : ''}>
-                Send a message to your bot in Telegram and the matching agent will reply.
+              <li className={!isActive || !hasRules ? 'opacity-40' : ''}>
+                Send a message to your bot in Telegram — the matching agent will reply.
               </li>
             </ol>
           </div>
