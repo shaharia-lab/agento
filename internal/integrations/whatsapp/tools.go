@@ -46,8 +46,10 @@ func registerMessagingTools(server *mcp.Server, client *Client, allowed map[stri
 
 	if len(allowed) == 0 || allowed["list_chats"] {
 		mcp.AddTool(server, &mcp.Tool{
-			Name:        "list_chats",
-			Description: "List WhatsApp chats from the device's contact store.",
+			Name: "list_chats",
+			Description: "List known contacts from the linked WhatsApp device store. " +
+				"Note: WhatsApp linked devices do not receive message history, so this " +
+				"returns contacts that have been seen on this device, not a chat inbox.",
 		}, func(ctx context.Context, _ *mcp.CallToolRequest, params *listChatsParams) (*mcp.CallToolResult, any, error) {
 			return handleListChats(ctx, client, params)
 		})

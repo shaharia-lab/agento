@@ -11,11 +11,40 @@ import (
 	"time"
 )
 
-// httpClient is used for downloading media from URLs.
-var httpClient = &http.Client{Timeout: 60 * time.Second} //nolint:gochecknoglobals
+// maxMediaSize is the maximum allowed media download size (15 MB).
+// WhatsApp's own limits are 16 MB for video and lower for other types.
+const maxMediaSize = 15 * 1024 * 1024
 
-// maxMediaSize is the maximum allowed media download size (50 MB).
-const maxMediaSize = 50 * 1024 * 1024
+// safeDialContext dials network addresses but rejects connections to private or
+// reserved IP addresses at connection time (not as a pre-check), preventing
+// DNS rebinding / TOCTOU SSRF attacks.
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing dial address: %w", err)
+	}
+
+	ips, err := net.DefaultResolver.LookupHost(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("resolving host %q: %w", host, err)
+	}
+
+	for _, ipStr := range ips {
+		if ip := net.ParseIP(ipStr); ip != nil && isPrivateOrReservedIP(ip) {
+			return nil, fmt.Errorf("blocked connection to private/reserved IP %s", ipStr)
+		}
+	}
+
+	return (&net.Dialer{}).DialContext(ctx, network, net.JoinHostPort(ips[0], port))
+}
+
+// httpClient is used for downloading media from URLs. The transport uses
+// safeDialContext so IP validation happens at connection time, preventing
+// DNS rebinding attacks.
+var httpClient = &http.Client{ //nolint:gochecknoglobals
+	Timeout:   60 * time.Second,
+	Transport: &http.Transport{DialContext: safeDialContext},
+}
 
 // validateMediaURL checks that the URL is safe to fetch (no SSRF).
 // It rejects non-HTTP(S) schemes, loopback addresses, and private/internal IP ranges.

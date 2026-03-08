@@ -61,9 +61,15 @@ func (c *Client) Connect() error {
 	return c.wm.Connect()
 }
 
-// Disconnect gracefully closes the WhatsApp connection.
+// Disconnect gracefully closes the WhatsApp connection and the underlying
+// SQLite device store so that no database connections are leaked.
 func (c *Client) Disconnect() {
 	c.wm.Disconnect()
+	if c.store != nil {
+		if err := c.store.Close(); err != nil {
+			c.logger.Error("failed to close whatsmeow store", "error", err)
+		}
+	}
 }
 
 // IsConnected returns true if the client has an active connection.

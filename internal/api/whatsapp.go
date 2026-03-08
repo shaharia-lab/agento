@@ -33,7 +33,7 @@ func (s *Server) handleStartWhatsAppPairing(w http.ResponseWriter, r *http.Reque
 	qrCode, err := s.whatsappPairingMgr.StartPairing(r.Context(), id)
 	if err != nil {
 		s.logger.Error("WhatsApp pairing failed", "id", id, "error", err)
-		s.writeError(w, http.StatusInternalServerError, "failed to start pairing: "+err.Error())
+		s.writeError(w, http.StatusInternalServerError, "failed to start pairing")
 		return
 	}
 
@@ -130,7 +130,8 @@ func (s *Server) watchWhatsAppPairing(ctx context.Context, integrationID string)
 
 // saveWhatsAppAuth persists the paired status to the integration's Auth field.
 func (s *Server) saveWhatsAppAuth(integrationID, phone string) error {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
 	cfg, err := s.integrationSvc.Get(ctx, integrationID)
 	if err != nil {
