@@ -12,6 +12,7 @@ import {
   GitBranch,
   Github,
   Hash,
+  Smartphone,
 } from 'lucide-react'
 import { integrationsApi } from '@/lib/api'
 import type { Integration } from '@/types'
@@ -75,6 +76,13 @@ const AVAILABLE_PROVIDERS = [
     description: 'Send messages, read channels & search',
     icon: <Hash className="h-6 w-6 text-[#4A154B]" />,
     path: '/integrations/slack',
+  },
+  {
+    id: 'whatsapp',
+    name: 'WhatsApp',
+    description: 'Send messages, media & manage contacts',
+    icon: <Smartphone className="h-6 w-6 text-[#25D366]" />,
+    path: '/integrations/whatsapp',
   },
 ]
 
@@ -197,6 +205,8 @@ function IntegrationTypeIcon({ type, size }: Readonly<{ type: string; size: numb
   if (type === 'github') return <Github style={{ width: size, height: size }} />
   if (type === 'slack')
     return <Hash style={{ width: size, height: size }} className="text-[#4A154B]" />
+  if (type === 'whatsapp')
+    return <Smartphone style={{ width: size, height: size }} className="text-[#25D366]" />
   return <Plug className="h-4 w-4 text-zinc-400" />
 }
 

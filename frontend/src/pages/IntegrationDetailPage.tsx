@@ -6,6 +6,8 @@ import type { Integration, ServiceConfig } from '@/types'
 import ConfluenceIntegrationEditor from '@/components/integrations/ConfluenceIntegrationEditor'
 import GoogleIntegrationEditor from '@/components/integrations/GoogleIntegrationEditor'
 import TelegramIntegrationEditor from '@/components/integrations/TelegramIntegrationEditor'
+import WhatsAppIntegrationEditor from '@/components/integrations/WhatsAppIntegrationEditor'
+import WhatsAppStatusPanel from '@/components/integrations/WhatsAppStatusPanel'
 import TriggerRulesPanel from '@/components/TriggerRulesPanel'
 import {
   AlertDialog,
@@ -166,30 +168,32 @@ export default function IntegrationDetailPage() {
           {integration.authenticated ? (
             <span className="flex items-center gap-1 text-xs text-green-600 dark:text-green-400 font-medium shrink-0">
               <CheckCircle className="h-3.5 w-3.5" />
-              Connected
+              {integration.type === 'whatsapp' ? 'Paired' : 'Connected'}
             </span>
           ) : (
             <span className="flex items-center gap-1 text-xs text-zinc-400 shrink-0">
               <XCircle className="h-3.5 w-3.5" />
-              Not connected
+              {integration.type === 'whatsapp' ? 'Not paired' : 'Not connected'}
             </span>
           )}
         </div>
 
         {/* Right: actions */}
         <div className="flex items-center gap-2 shrink-0">
-          <button
-            onClick={handleReauth}
-            disabled={reauthing || polling}
-            className="flex items-center gap-1.5 rounded-md border border-zinc-200 dark:border-zinc-600 px-3 py-1.5 text-xs text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-40 transition-colors cursor-pointer"
-          >
-            {polling ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-            {polling ? 'Waiting…' : 'Re-authenticate'}
-          </button>
+          {integration.type !== 'whatsapp' && (
+            <button
+              onClick={handleReauth}
+              disabled={reauthing || polling}
+              className="flex items-center gap-1.5 rounded-md border border-zinc-200 dark:border-zinc-600 px-3 py-1.5 text-xs text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-40 transition-colors cursor-pointer"
+            >
+              {polling ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              {polling ? 'Waiting…' : 'Re-authenticate'}
+            </button>
+          )}
           <button
             onClick={handleSave}
             disabled={saving}
@@ -293,6 +297,11 @@ export default function IntegrationDetailPage() {
               </div>
             </div>
 
+            {/* WhatsApp live connection status panel */}
+            {integration.type === 'whatsapp' && integration.authenticated && (
+              <WhatsAppStatusPanel integrationId={integration.id} />
+            )}
+
             {/* Type-specific services & tools editor */}
             <div>
               <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-400 mb-3">
@@ -306,6 +315,9 @@ export default function IntegrationDetailPage() {
               )}
               {integration.type === 'telegram' && (
                 <TelegramIntegrationEditor services={services} onServicesChange={setServices} />
+              )}
+              {integration.type === 'whatsapp' && (
+                <WhatsAppIntegrationEditor services={services} onServicesChange={setServices} />
               )}
             </div>
           </>

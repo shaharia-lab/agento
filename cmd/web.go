@@ -30,6 +30,7 @@ import (
 	jiraintegration "github.com/shaharia-lab/agento/internal/integrations/jira"
 	slackintegration "github.com/shaharia-lab/agento/internal/integrations/slack"
 	telegramintegration "github.com/shaharia-lab/agento/internal/integrations/telegram"
+	whatsappintegration "github.com/shaharia-lab/agento/internal/integrations/whatsapp"
 	"github.com/shaharia-lab/agento/internal/logger"
 	"github.com/shaharia-lab/agento/internal/notification"
 	"github.com/shaharia-lab/agento/internal/scheduler"
@@ -249,7 +250,7 @@ func buildWebServer(
 
 	chatStore := storage.NewSQLiteChatStore(db)
 	integrationStore := storage.NewSQLiteIntegrationStore(db)
-	integrationRegistry := buildIntegrationRegistry(ctx, integrationStore, sysLogger)
+	integrationRegistry := buildIntegrationRegistry(ctx, integrationStore, cfg, sysLogger)
 
 	settingsStore := storage.NewSQLiteSettingsStore(db)
 	settingsMgr, err := config.NewSettingsManager(settingsStore, cfg)
@@ -277,10 +278,11 @@ func buildWebServer(
 	}
 	srv := server.New(result.apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr, result.webhookHandler)
 
-	// On shutdown: close the event bus first so no further events are enqueued,
-	// then wait for in-flight worker goroutines to finish.
+	// On shutdown: clean up pairing sessions, close the event bus so no further
+	// events are enqueued, then wait for in-flight worker goroutines to finish.
 	go func() {
 		<-ctx.Done()
+		result.whatsappPairingMgr.Shutdown()
 		result.bus.Close()
 		result.insightWorker.Wait()
 	}()
@@ -304,7 +306,7 @@ func initMonitoringManager(
 // buildIntegrationRegistry creates the integration registry, registers all
 // integration starters, and starts them. Non-fatal start errors are logged.
 func buildIntegrationRegistry(
-	ctx context.Context, store storage.IntegrationStore, logger *slog.Logger,
+	ctx context.Context, store storage.IntegrationStore, cfg *config.AppConfig, logger *slog.Logger,
 ) *integrations.IntegrationRegistry {
 	reg := integrations.NewRegistry(store, logger)
 	reg.RegisterStarter("confluence", confluenceintegration.Start)
@@ -313,6 +315,7 @@ func buildIntegrationRegistry(
 	reg.RegisterStarter("jira", jiraintegration.Start)
 	reg.RegisterStarter("github", githubintegration.Start)
 	reg.RegisterStarter("slack", slackintegration.Start)
+	reg.RegisterStarter("whatsapp", whatsappintegration.NewStarter(cfg.DataDir))
 	if err := reg.Start(ctx); err != nil {
 		logger.Warn("some integrations failed to start", "error", err)
 	}
@@ -338,10 +341,11 @@ type appDeps struct {
 
 // buildAPIServerResult holds all objects returned by buildAPIServer.
 type buildAPIServerResult struct {
-	apiSrv         *api.Server
-	bus            eventbus.EventBus
-	insightWorker  *claudesessions.InsightWorker
-	webhookHandler *api.TelegramWebhookHandler
+	apiSrv             *api.Server
+	bus                eventbus.EventBus
+	insightWorker      *claudesessions.InsightWorker
+	webhookHandler     *api.TelegramWebhookHandler
+	whatsappPairingMgr *whatsappintegration.PairingManager
 }
 
 // buildAPIServer wires all services and returns the api.Server, event bus, and webhook handler.
@@ -363,6 +367,8 @@ func buildAPIServer(
 	dispatcher := buildTriggerDispatcher(ctx, deps, triggerStore)
 	webhookHandler := api.NewTelegramWebhookHandler(triggerStore, deps.integrationStore, dispatcher, deps.logger)
 
+	whatsappPairingMgr := whatsappintegration.NewPairingManager(deps.appConfig.DataDir, deps.logger)
+
 	apiSrv := api.New(api.ServerConfig{
 		AgentSvc:        service.NewAgentService(deps.agentStore, deps.logger),
 		ChatSvc:         buildChatService(deps),
@@ -372,19 +378,21 @@ func buildAPIServer(
 		TriggerSvc: service.NewTriggerService(
 			triggerStore, deps.integrationStore, deps.settingsMgr, deps.appConfig, deps.logger,
 		),
-		ProfileSvc:    service.NewClaudeSettingsProfileService(deps.logger),
-		SettingsMgr:   deps.settingsMgr,
-		AppConfig:     deps.appConfig,
-		Logger:        deps.logger,
-		SessionCache:  sessionCache,
-		MonitoringMgr: deps.monitoringMgr,
-		InsightStore:  insightStore,
+		ProfileSvc:         service.NewClaudeSettingsProfileService(deps.logger),
+		SettingsMgr:        deps.settingsMgr,
+		AppConfig:          deps.appConfig,
+		Logger:             deps.logger,
+		SessionCache:       sessionCache,
+		MonitoringMgr:      deps.monitoringMgr,
+		InsightStore:       insightStore,
+		WhatsAppPairingMgr: whatsappPairingMgr,
 	})
 	return &buildAPIServerResult{
-		apiSrv:         apiSrv,
-		bus:            bus,
-		insightWorker:  insightWorker,
-		webhookHandler: webhookHandler,
+		apiSrv:             apiSrv,
+		bus:                bus,
+		insightWorker:      insightWorker,
+		webhookHandler:     webhookHandler,
+		whatsappPairingMgr: whatsappPairingMgr,
 	}, nil
 }
 

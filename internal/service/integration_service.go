@@ -101,6 +101,8 @@ func validateIntegrationCredentials(cfg *config.IntegrationConfig) error {
 		return validateGitHubCredentials(cfg)
 	case "slack":
 		return validateSlackCredentials(cfg)
+	case "whatsapp":
+		return validateWhatsAppCredentials(cfg)
 	default:
 		if len(cfg.Credentials) == 0 {
 			return &ValidationError{Field: "credentials", Message: "credentials are required"}
@@ -211,6 +213,18 @@ func validateSlackCredentials(cfg *config.IntegrationConfig) error {
 		}
 	default:
 		return &ValidationError{Field: "credentials.auth_mode", Message: "auth_mode must be 'bot_token' or 'oauth'"}
+	}
+	return nil
+}
+
+func validateWhatsAppCredentials(cfg *config.IntegrationConfig) error {
+	// WhatsApp uses QR code pairing, not API credentials.
+	// Credentials are optional — phone may be set after pairing.
+	if len(cfg.Credentials) > 0 {
+		var creds config.WhatsAppCredentials
+		if err := cfg.ParseCredentials(&creds); err != nil {
+			return &ValidationError{Field: "credentials", Message: "invalid whatsapp credentials: " + err.Error()}
+		}
 	}
 	return nil
 }

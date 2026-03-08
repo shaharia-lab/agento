@@ -504,6 +504,21 @@ export const integrationsApi = {
     ),
 
   availableTools: () => request<AvailableTool[]>('/integrations/available-tools'),
+
+  // WhatsApp QR code pairing
+  startWhatsAppPairing: (id: string) =>
+    request<{ qr_code: string }>(`/integrations/${id}/whatsapp/pair`, { method: 'POST' }),
+
+  getWhatsAppQR: (id: string) =>
+    request<{ status: string; qr_code?: string; phone?: string; error?: string }>(
+      `/integrations/${id}/whatsapp/qr`,
+    ),
+
+  getWhatsAppStatus: (id: string) =>
+    request<{ connected: boolean; logged_in: boolean }>(`/integrations/${id}/whatsapp/status`),
+
+  whatsAppReconnect: (id: string) =>
+    request<{ status: string }>(`/integrations/${id}/whatsapp/reconnect`, { method: 'POST' }),
 }
 
 // ── Trigger Rules ─────────────────────────────────────────────────────────────
