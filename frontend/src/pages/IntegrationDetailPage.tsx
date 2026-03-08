@@ -168,12 +168,12 @@ export default function IntegrationDetailPage() {
           {integration.authenticated ? (
             <span className="flex items-center gap-1 text-xs text-green-600 dark:text-green-400 font-medium shrink-0">
               <CheckCircle className="h-3.5 w-3.5" />
-              Connected
+              {integration.type === 'whatsapp' ? 'Paired' : 'Connected'}
             </span>
           ) : (
             <span className="flex items-center gap-1 text-xs text-zinc-400 shrink-0">
               <XCircle className="h-3.5 w-3.5" />
-              Not connected
+              {integration.type === 'whatsapp' ? 'Not paired' : 'Not connected'}
             </span>
           )}
         </div>

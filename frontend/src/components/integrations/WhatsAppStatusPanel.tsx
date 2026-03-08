@@ -6,9 +6,29 @@ interface WhatsAppStatusPanelProps {
   readonly integrationId: string
 }
 
+type ConnectionState = 'connected' | 'reconnecting' | 'disconnected'
+
+function connectionState(connected: boolean, loggedIn: boolean): ConnectionState {
+  if (loggedIn && connected) return 'connected'
+  if (loggedIn && !connected) return 'reconnecting'
+  return 'disconnected'
+}
+
+const STATE_LABEL: Record<ConnectionState, string> = {
+  connected: 'Connected',
+  reconnecting: 'Reconnecting…',
+  disconnected: 'Disconnected',
+}
+
+const STATE_DETAIL: Record<ConnectionState, string> = {
+  connected: 'The agent can send messages right now.',
+  reconnecting:
+    'Session is valid — WhatsApp will reconnect automatically. Use Reconnect if this persists.',
+  disconnected: 'No active session found. Reconnect to re-establish the WhatsApp connection.',
+}
+
 export default function WhatsAppStatusPanel({ integrationId }: WhatsAppStatusPanelProps) {
-  const [connected, setConnected] = useState(false)
-  const [loggedIn, setLoggedIn] = useState(false)
+  const [state, setState] = useState<ConnectionState>('disconnected')
   const [reconnecting, setReconnecting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -17,10 +37,7 @@ export default function WhatsAppStatusPanel({ integrationId }: WhatsAppStatusPan
     const poll = () => {
       integrationsApi
         .getWhatsAppStatus(integrationId)
-        .then(s => {
-          setConnected(s.connected)
-          setLoggedIn(s.logged_in)
-        })
+        .then(s => setState(connectionState(s.connected, s.logged_in)))
         .catch(() => {
           /* ignore poll errors */
         })
@@ -38,14 +55,11 @@ export default function WhatsAppStatusPanel({ integrationId }: WhatsAppStatusPan
     setError(null)
     try {
       await integrationsApi.whatsAppReconnect(integrationId)
-      // Give the server a moment to restart, then refresh status.
+      // Give the server a moment to restart the MCP server, then refresh status.
       setTimeout(() => {
         integrationsApi
           .getWhatsAppStatus(integrationId)
-          .then(s => {
-            setConnected(s.connected)
-            setLoggedIn(s.logged_in)
-          })
+          .then(s => setState(connectionState(s.connected, s.logged_in)))
           .catch(() => {
             /* ignore */
           })
@@ -57,18 +71,6 @@ export default function WhatsAppStatusPanel({ integrationId }: WhatsAppStatusPan
     }
   }
 
-  const statusLabel =
-    connected && loggedIn
-      ? 'Connected & logged in'
-      : connected
-        ? 'Connected but not logged in'
-        : 'Disconnected'
-
-  const statusDetail =
-    connected && loggedIn
-      ? 'The agent can send messages right now.'
-      : 'Use Reconnect to re-establish the WhatsApp WebSocket session.'
-
   return (
     <div className="rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 p-4">
       <h2 className="text-xs font-semibold uppercase tracking-widest text-zinc-400 mb-3">
@@ -77,19 +79,31 @@ export default function WhatsAppStatusPanel({ integrationId }: WhatsAppStatusPan
       {error && <p className="text-xs text-red-600 dark:text-red-400 mb-2">{error}</p>}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          {connected && loggedIn ? (
+          {state === 'connected' ? (
             <Wifi className="h-5 w-5 text-green-500" />
+          ) : state === 'reconnecting' ? (
+            <Wifi className="h-5 w-5 text-amber-500" />
           ) : (
             <WifiOff className="h-5 w-5 text-zinc-400" />
           )}
           <div>
-            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{statusLabel}</p>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{statusDetail}</p>
+            <p
+              className={`text-sm font-medium ${
+                state === 'connected'
+                  ? 'text-green-700 dark:text-green-400'
+                  : state === 'reconnecting'
+                    ? 'text-amber-700 dark:text-amber-400'
+                    : 'text-zinc-900 dark:text-zinc-100'
+              }`}
+            >
+              {STATE_LABEL[state]}
+            </p>
+            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">{STATE_DETAIL[state]}</p>
           </div>
         </div>
         <button
           onClick={handleReconnect}
-          disabled={reconnecting}
+          disabled={reconnecting || state === 'connected'}
           className="flex items-center gap-1.5 rounded-md border border-zinc-200 dark:border-zinc-600 px-3 py-1.5 text-xs text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-40 transition-colors cursor-pointer"
         >
           {reconnecting ? (
