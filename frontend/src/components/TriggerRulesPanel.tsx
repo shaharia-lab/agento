@@ -8,6 +8,7 @@ import {
   XCircle,
   RefreshCw,
   Globe,
+  Info,
 } from 'lucide-react'
 import { triggerRulesApi, webhookApi, agentsApi } from '@/lib/api'
 import type { TriggerRule, WebhookStatus, Agent } from '@/types'
@@ -129,8 +130,41 @@ export default function TriggerRulesPanel({ integrationId }: Props) {
     )
   }
 
+  const isActive = webhookStatus?.status === 'active'
+  const hasRules = rules.length > 0
+
   return (
     <div className="space-y-4">
+      {/* Setup guide */}
+      <div className="rounded-lg border border-blue-200 dark:border-blue-800/50 bg-blue-50 dark:bg-blue-900/20 p-4">
+        <div className="flex items-start gap-2">
+          <Info className="h-4 w-4 text-blue-500 shrink-0 mt-0.5" />
+          <div className="text-sm text-blue-700 dark:text-blue-300">
+            <p className="font-medium mb-1">Setup checklist</p>
+            <ol className="list-decimal list-inside space-y-1 text-xs text-blue-600 dark:text-blue-400">
+              <li className={isActive ? 'line-through opacity-50' : ''}>
+                Set your <strong>Public URL</strong> in{' '}
+                <a href="/settings" className="underline hover:no-underline">
+                  Settings → General
+                </a>{' '}
+                (the externally reachable URL of this Agento instance).
+              </li>
+              <li className={isActive ? 'line-through opacity-50' : ''}>
+                Click <strong>Register Webhook</strong> below — Agento will automatically notify
+                Telegram of the webhook URL.
+              </li>
+              <li className={!isActive ? 'opacity-50' : hasRules ? 'line-through opacity-50' : ''}>
+                Add at least one <strong>Trigger Rule</strong> to route incoming messages to an
+                agent.
+              </li>
+              <li className={!isActive || !hasRules ? 'opacity-50' : ''}>
+                Send a message to your bot in Telegram and the matching agent will reply.
+              </li>
+            </ol>
+          </div>
+        </div>
+      </div>
+
       {error && (
         <div className="rounded-md border border-red-200 dark:border-red-800/50 bg-red-50 dark:bg-red-900/20 px-4 py-2.5 text-sm text-red-700 dark:text-red-400">
           {error}
