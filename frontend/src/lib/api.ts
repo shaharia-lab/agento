@@ -513,6 +513,12 @@ export const integrationsApi = {
     request<{ status: string; qr_code?: string; phone?: string; error?: string }>(
       `/integrations/${id}/whatsapp/qr`,
     ),
+
+  getWhatsAppStatus: (id: string) =>
+    request<{ connected: boolean; logged_in: boolean }>(`/integrations/${id}/whatsapp/status`),
+
+  whatsAppReconnect: (id: string) =>
+    request<{ status: string }>(`/integrations/${id}/whatsapp/reconnect`, { method: 'POST' }),
 }
 
 // ── Trigger Rules ─────────────────────────────────────────────────────────────

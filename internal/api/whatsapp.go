@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	whatsappintegration "github.com/shaharia-lab/agento/internal/integrations/whatsapp"
 )
 
 // handleStartWhatsAppPairing begins the QR code pairing flow for a WhatsApp integration.
@@ -126,6 +128,49 @@ func (s *Server) watchWhatsAppPairing(ctx context.Context, integrationID string)
 			return
 		}
 	}
+}
+
+// handleGetWhatsAppStatus returns the live connection state of the WhatsApp client.
+// GET /api/integrations/{id}/whatsapp/status
+func (s *Server) handleGetWhatsAppStatus(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	connected, loggedIn := whatsappintegration.ConnectionStatus(id)
+	s.writeJSON(w, http.StatusOK, map[string]any{
+		"connected": connected,
+		"logged_in": loggedIn,
+	})
+}
+
+// handleWhatsAppReconnect triggers a reload of the WhatsApp MCP server, re-establishing
+// the WebSocket connection to WhatsApp without requiring re-pairing.
+// POST /api/integrations/{id}/whatsapp/reconnect
+func (s *Server) handleWhatsAppReconnect(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	cfg, err := s.integrationSvc.Get(r.Context(), id)
+	if err != nil {
+		s.httpErr(w, err)
+		return
+	}
+
+	if cfg.Type != "whatsapp" {
+		s.writeError(w, http.StatusBadRequest, "not a whatsapp integration")
+		return
+	}
+
+	if !cfg.IsAuthenticated() {
+		s.writeError(w, http.StatusBadRequest, "integration is not yet paired")
+		return
+	}
+
+	_, err = s.integrationSvc.Update(r.Context(), id, cfg)
+	if err != nil {
+		s.logger.Error("WhatsApp reconnect failed", "id", id, "error", err)
+		s.writeError(w, http.StatusInternalServerError, "reconnect failed")
+		return
+	}
+
+	s.writeJSON(w, http.StatusOK, map[string]string{"status": "reconnecting"})
 }
 
 // saveWhatsAppAuth persists the paired status to the integration's Auth field.

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -67,22 +68,22 @@ func registerMessagingTools(server *mcp.Server, client *Client, allowed map[stri
 
 // ── Parameter types and handlers ─────────────────────────────────────────────
 
-// parseJID parses a JID string. If the input looks like a phone number (digits only),
-// it is treated as an individual chat JID (user@s.whatsapp.net).
+// parseJID parses a JID string or phone number.
+// Strings containing "@" are parsed as JIDs directly (e.g. "491234@s.whatsapp.net",
+// "group-id@g.us"). Strings without "@" are treated as phone numbers: the leading
+// "+" is stripped and the remaining digits become a user@s.whatsapp.net JID.
 func parseJID(jidStr string) (types.JID, error) {
-	// Try direct parse first.
-	jid, err := types.ParseJID(jidStr)
-	if err == nil {
-		return jid, nil
+	if strings.Contains(jidStr, "@") {
+		return types.ParseJID(jidStr)
 	}
-	// Treat as phone number: digits and '+' allowed -> user@s.whatsapp.net
+	// Phone number path: strip leading "+" and keep digits only.
 	cleaned := ""
 	for _, c := range jidStr {
 		switch {
 		case c >= '0' && c <= '9':
 			cleaned += string(c)
 		case c == '+':
-			continue // skip plus sign
+			continue // strip plus sign
 		default:
 			return types.JID{}, fmt.Errorf("invalid JID or phone number: %s", jidStr)
 		}

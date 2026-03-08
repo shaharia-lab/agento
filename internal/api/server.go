@@ -199,6 +199,8 @@ func (s *Server) mountIntegrationRoutes(r chi.Router) {
 	// WhatsApp QR code pairing
 	r.Post(routeIntegrationByID+"/whatsapp/pair", s.handleStartWhatsAppPairing)
 	r.Get(routeIntegrationByID+"/whatsapp/qr", s.handleGetWhatsAppQR)
+	r.Get(routeIntegrationByID+"/whatsapp/status", s.handleGetWhatsAppStatus)
+	r.Post(routeIntegrationByID+"/whatsapp/reconnect", s.handleWhatsAppReconnect)
 
 	// Trigger rules CRUD
 	r.Get(routeIntegrationByID+"/triggers", s.handleListTriggerRules)

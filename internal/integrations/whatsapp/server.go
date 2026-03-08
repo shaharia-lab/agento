@@ -3,6 +3,7 @@ package whatsapp
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
@@ -28,7 +29,7 @@ func Start(ctx context.Context, cfg *config.IntegrationConfig, dataDir string) (
 		return claude.McpHTTPServer{}, fmt.Errorf("integration %q is not paired", cfg.ID)
 	}
 
-	client, err := NewClient(ctx, dataDir, cfg.ID, nil)
+	client, err := NewClient(ctx, dataDir, cfg.ID, slog.Default())
 	if err != nil {
 		return claude.McpHTTPServer{}, fmt.Errorf("creating whatsapp client for %q: %w", cfg.ID, err)
 	}
@@ -37,9 +38,12 @@ func Start(ctx context.Context, cfg *config.IntegrationConfig, dataDir string) (
 		return claude.McpHTTPServer{}, fmt.Errorf("connecting whatsapp client for %q: %w", cfg.ID, err)
 	}
 
-	// Disconnect on context cancellation.
+	// Register the live client for status queries, then deregister and
+	// disconnect when the context is canceled (integration stop/reload).
+	connections.register(cfg.ID, client)
 	go func() {
 		<-ctx.Done()
+		connections.deregister(cfg.ID)
 		client.Disconnect()
 	}()
 
