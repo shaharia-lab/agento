@@ -43,6 +43,7 @@ export interface UserSettings {
   appearance_font_family?: string
   notification_settings?: string
   event_bus_worker_pool_size?: number
+  public_url?: string
 }
 
 export interface SettingsResponse {
@@ -874,4 +875,26 @@ export interface AnalyticsReport {
   cost_over_time: CostPoint[]
   cost_summary: CostSummary
   projects: string[]
+}
+
+// ── Inbound Triggers ──────────────────────────────────────────────────────────
+
+export interface TriggerRule {
+  id: string
+  integration_id: string
+  name: string
+  agent_slug: string
+  enabled: boolean
+  filter_prefix: string
+  filter_keywords: string[]
+  filter_chat_ids: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface WebhookStatus {
+  status: 'active' | 'inactive' | 'error'
+  url: string
+  has_secret: boolean
+  error: string
 }

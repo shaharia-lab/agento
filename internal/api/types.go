@@ -87,6 +87,28 @@ type BulkDeleteRequest struct {
 	IDs []string `json:"ids"`
 }
 
+// ─── Trigger rule request types ────────────────────────────────────────────────
+
+// CreateTriggerRuleRequest is the request body for creating a new trigger rule.
+type CreateTriggerRuleRequest struct {
+	Name           string   `json:"name"`
+	AgentSlug      string   `json:"agent_slug"`
+	Enabled        bool     `json:"enabled"`
+	FilterPrefix   string   `json:"filter_prefix"`
+	FilterKeywords []string `json:"filter_keywords"`
+	FilterChatIDs  []string `json:"filter_chat_ids"`
+}
+
+// UpdateTriggerRuleRequest is the request body for updating a trigger rule.
+type UpdateTriggerRuleRequest struct {
+	Name           string   `json:"name"`
+	AgentSlug      string   `json:"agent_slug"`
+	Enabled        bool     `json:"enabled"`
+	FilterPrefix   string   `json:"filter_prefix"`
+	FilterKeywords []string `json:"filter_keywords"`
+	FilterChatIDs  []string `json:"filter_chat_ids"`
+}
+
 // UpdateProfileRequest is the request body for updating a Claude settings profile.
 type UpdateProfileRequest struct {
 	Name     *string         `json:"name"`

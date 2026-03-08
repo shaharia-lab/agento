@@ -239,6 +239,37 @@ CREATE TABLE IF NOT EXISTS session_insights (
 CREATE INDEX IF NOT EXISTS idx_session_insights_version ON session_insights(processor_version);
 `,
 	},
+	{
+		version: 10,
+		sql: `
+ALTER TABLE user_settings ADD COLUMN public_url TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE integrations ADD COLUMN webhook_secret TEXT NOT NULL DEFAULT '';
+ALTER TABLE integrations ADD COLUMN webhook_status TEXT NOT NULL DEFAULT '';
+ALTER TABLE integrations ADD COLUMN webhook_error TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE trigger_rules (
+    id              TEXT PRIMARY KEY,
+    integration_id  TEXT NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+    name            TEXT NOT NULL DEFAULT '',
+    agent_slug      TEXT NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    filter_prefix   TEXT NOT NULL DEFAULT '',
+    filter_keywords TEXT NOT NULL DEFAULT '[]',
+    filter_chat_ids TEXT NOT NULL DEFAULT '[]',
+    created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX idx_trigger_rules_integration ON trigger_rules(integration_id);
+
+CREATE TABLE telegram_processed_updates (
+    integration_id  TEXT NOT NULL,
+    update_id       INTEGER NOT NULL,
+    processed_at    DATETIME NOT NULL,
+    PRIMARY KEY (integration_id, update_id)
+);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

@@ -40,6 +40,7 @@ type ServerConfig struct {
 	IntegrationSvc     service.IntegrationService
 	NotificationSvc    service.NotificationService
 	TaskSvc            service.TaskService
+	TriggerSvc         service.TriggerService
 	ProfileSvc         service.ClaudeSettingsProfileService
 	SettingsMgr        *config.SettingsManager
 	AppConfig          *config.AppConfig
@@ -57,6 +58,7 @@ type Server struct {
 	integrationSvc     service.IntegrationService
 	notificationSvc    service.NotificationService
 	taskSvc            service.TaskService
+	triggerSvc         service.TriggerService
 	profileSvc         service.ClaudeSettingsProfileService
 	settingsMgr        *config.SettingsManager
 	appConfig          *config.AppConfig
@@ -80,6 +82,7 @@ func New(cfg ServerConfig) *Server {
 		integrationSvc:     cfg.IntegrationSvc,
 		notificationSvc:    cfg.NotificationSvc,
 		taskSvc:            cfg.TaskSvc,
+		triggerSvc:         cfg.TriggerSvc,
 		profileSvc:         cfg.ProfileSvc,
 		settingsMgr:        cfg.SettingsMgr,
 		appConfig:          cfg.AppConfig,
@@ -196,6 +199,18 @@ func (s *Server) mountIntegrationRoutes(r chi.Router) {
 	// WhatsApp QR code pairing
 	r.Post(routeIntegrationByID+"/whatsapp/pair", s.handleStartWhatsAppPairing)
 	r.Get(routeIntegrationByID+"/whatsapp/qr", s.handleGetWhatsAppQR)
+
+	// Trigger rules CRUD
+	r.Get(routeIntegrationByID+"/triggers", s.handleListTriggerRules)
+	r.Post(routeIntegrationByID+"/triggers", s.handleCreateTriggerRule)
+	r.Put(routeIntegrationByID+"/triggers/{rid}", s.handleUpdateTriggerRule)
+	r.Delete(routeIntegrationByID+"/triggers/{rid}", s.handleDeleteTriggerRule)
+
+	// Webhook management
+	r.Post(routeIntegrationByID+"/webhook/register", s.handleRegisterWebhook)
+	r.Delete(routeIntegrationByID+"/webhook/register", s.handleDeleteWebhook)
+	r.Get(routeIntegrationByID+"/webhook/status", s.handleGetWebhookStatus)
+	r.Post(routeIntegrationByID+"/webhook/regenerate-secret", s.handleRegenerateWebhookSecret)
 }
 
 // mountNotificationRoutes registers the notification-related API routes.

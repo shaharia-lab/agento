@@ -39,6 +39,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/storage"
 	"github.com/shaharia-lab/agento/internal/telemetry"
 	"github.com/shaharia-lab/agento/internal/tools"
+	"github.com/shaharia-lab/agento/internal/trigger"
 )
 
 // noopCleanup is a no-op cleanup function returned on early-exit error paths
@@ -259,7 +260,7 @@ func buildWebServer(
 
 	monitoringMgr := initMonitoringManager(cfg.DataDir, otelProviders, otelCfg, sysLogger)
 
-	apiSrv, bus, insightWorker, whatsappPairingMgr, err := buildAPIServer(ctx, appDeps{
+	result, err := buildAPIServer(ctx, appDeps{
 		db:                  db,
 		logger:              sysLogger,
 		appConfig:           cfg,
@@ -275,15 +276,15 @@ func buildWebServer(
 	if err != nil {
 		return nil, nil, err
 	}
-	srv := server.New(apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr)
+	srv := server.New(result.apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr, result.webhookHandler)
 
 	// On shutdown: clean up pairing sessions, close the event bus so no further
 	// events are enqueued, then wait for in-flight worker goroutines to finish.
 	go func() {
 		<-ctx.Done()
-		whatsappPairingMgr.Shutdown()
-		bus.Close()
-		insightWorker.Wait()
+		result.whatsappPairingMgr.Shutdown()
+		result.bus.Close()
+		result.insightWorker.Wait()
 	}()
 
 	return srv, monitoringMgr, nil
@@ -338,48 +339,46 @@ type appDeps struct {
 	monitoringMgr       *telemetry.MonitoringManager
 }
 
-// buildAPIServer wires all services and returns the api.Server and the event bus.
+// buildAPIServerResult holds all objects returned by buildAPIServer.
+type buildAPIServerResult struct {
+	apiSrv             *api.Server
+	bus                eventbus.EventBus
+	insightWorker      *claudesessions.InsightWorker
+	webhookHandler     *api.TelegramWebhookHandler
+	whatsappPairingMgr *whatsappintegration.PairingManager
+}
+
+// buildAPIServer wires all services and returns the api.Server, event bus, and webhook handler.
 func buildAPIServer(
 	ctx context.Context, deps appDeps,
-) (*api.Server, eventbus.EventBus, *claudesessions.InsightWorker, *whatsappintegration.PairingManager, error) {
+) (*buildAPIServerResult, error) {
 	notifStore, bus := setupNotifications(deps.db, deps.settingsMgr, deps.logger)
 
-	agentSvc := service.NewAgentService(deps.agentStore, deps.logger)
-	chatSvc := service.NewChatService(
-		deps.chatStore, deps.agentStore, deps.mcpRegistry, deps.localToolsMCP,
-		deps.integrationRegistry, deps.settingsMgr, deps.logger,
-	)
-	integrationSvc := service.NewIntegrationService(deps.integrationStore, deps.integrationRegistry, deps.logger)
-	notificationSvc := service.NewNotificationService(deps.settingsMgr, notifStore)
-
 	taskStore := storage.NewSQLiteTaskStore(deps.db)
+	triggerStore := storage.NewSQLiteTriggerStore(deps.db)
 
 	taskScheduler, err := initTaskScheduler(ctx, deps, taskStore, bus)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, err
 	}
 
-	taskSvc := service.NewTaskService(taskStore, taskScheduler, deps.logger)
-	profileSvc := service.NewClaudeSettingsProfileService(deps.logger)
+	sessionCache, insightStore, insightWorker := setupInsights(ctx, deps.db, deps.logger, bus)
 
-	sessionCache := claudesessions.NewCache(deps.db, deps.logger).WithEventBus(bus)
-	sessionCache.StartBackgroundScan()
-
-	rawInsightStore := storage.NewSQLiteSessionInsightsStore(deps.db)
-	insightStore := api.NewInsightStoreAdapter(rawInsightStore)
-	insightRegistry := claudesessions.DefaultProcessorRegistry(deps.logger)
-	insightWorker := claudesessions.NewInsightWorker(insightStore, insightRegistry, bus, deps.logger)
-	insightWorker.Start(ctx)
+	dispatcher := buildTriggerDispatcher(ctx, deps, triggerStore)
+	webhookHandler := api.NewTelegramWebhookHandler(triggerStore, deps.integrationStore, dispatcher, deps.logger)
 
 	whatsappPairingMgr := whatsappintegration.NewPairingManager(deps.appConfig.DataDir, deps.logger)
 
 	apiSrv := api.New(api.ServerConfig{
-		AgentSvc:           agentSvc,
-		ChatSvc:            chatSvc,
-		IntegrationSvc:     integrationSvc,
-		NotificationSvc:    notificationSvc,
-		TaskSvc:            taskSvc,
-		ProfileSvc:         profileSvc,
+		AgentSvc:        service.NewAgentService(deps.agentStore, deps.logger),
+		ChatSvc:         buildChatService(deps),
+		IntegrationSvc:  service.NewIntegrationService(deps.integrationStore, deps.integrationRegistry, deps.logger),
+		NotificationSvc: service.NewNotificationService(deps.settingsMgr, notifStore),
+		TaskSvc:         service.NewTaskService(taskStore, taskScheduler, deps.logger),
+		TriggerSvc: service.NewTriggerService(
+			triggerStore, deps.integrationStore, deps.settingsMgr, deps.appConfig, deps.logger,
+		),
+		ProfileSvc:         service.NewClaudeSettingsProfileService(deps.logger),
 		SettingsMgr:        deps.settingsMgr,
 		AppConfig:          deps.appConfig,
 		Logger:             deps.logger,
@@ -388,7 +387,50 @@ func buildAPIServer(
 		InsightStore:       insightStore,
 		WhatsAppPairingMgr: whatsappPairingMgr,
 	})
-	return apiSrv, bus, insightWorker, whatsappPairingMgr, nil
+	return &buildAPIServerResult{
+		apiSrv:             apiSrv,
+		bus:                bus,
+		insightWorker:      insightWorker,
+		webhookHandler:     webhookHandler,
+		whatsappPairingMgr: whatsappPairingMgr,
+	}, nil
+}
+
+func buildChatService(deps appDeps) service.ChatService {
+	return service.NewChatService(
+		deps.chatStore, deps.agentStore, deps.mcpRegistry, deps.localToolsMCP,
+		deps.integrationRegistry, deps.settingsMgr, deps.logger,
+	)
+}
+
+func setupInsights(
+	ctx context.Context, db *sql.DB, logger *slog.Logger, bus eventbus.EventBus,
+) (*claudesessions.Cache, claudesessions.InsightStorer, *claudesessions.InsightWorker) {
+	sessionCache := claudesessions.NewCache(db, logger).WithEventBus(bus)
+	sessionCache.StartBackgroundScan()
+
+	rawInsightStore := storage.NewSQLiteSessionInsightsStore(db)
+	insightStore := api.NewInsightStoreAdapter(rawInsightStore)
+	insightRegistry := claudesessions.DefaultProcessorRegistry(logger)
+	insightWorker := claudesessions.NewInsightWorker(insightStore, insightRegistry, bus, logger)
+	insightWorker.Start(ctx)
+
+	return sessionCache, insightStore, insightWorker
+}
+
+func buildTriggerDispatcher(ctx context.Context, deps appDeps, triggerStore storage.TriggerStore) *trigger.Dispatcher {
+	return trigger.NewDispatcher(trigger.DispatcherConfig{
+		TriggerStore:        triggerStore,
+		AgentStore:          deps.agentStore,
+		ChatStore:           deps.chatStore,
+		IntegrationStore:    deps.integrationStore,
+		MCPRegistry:         deps.mcpRegistry,
+		LocalToolsMCP:       deps.localToolsMCP,
+		IntegrationRegistry: deps.integrationRegistry,
+		SettingsMgr:         deps.settingsMgr,
+		Logger:              deps.logger,
+		Ctx:                 ctx,
+	})
 }
 
 // setupNotifications creates the notification store, event bus, and wires the
