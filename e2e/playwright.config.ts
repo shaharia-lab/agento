@@ -21,6 +21,7 @@ const PORT = 8990;
 const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({
+  globalSetup: './global-setup',
   testDir: './tests',
   timeout: 120_000,       // 2 min per test (Claude may take time to respond)
   expect: { timeout: 30_000 },
