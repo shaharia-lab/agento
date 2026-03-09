@@ -187,8 +187,9 @@ test.describe('Chat', () => {
     await expect(inputTextarea).toBeEnabled()
 
     // Both user messages visible in the conversation
-    await expect(page.getByText('Say "hello" and nothing else.')).toBeVisible()
-    await expect(page.getByText('Now say "goodbye" and nothing else.')).toBeVisible()
+    // .first() because the text also appears in the auto-generated chat title
+    await expect(page.getByText('Say "hello" and nothing else.').first()).toBeVisible()
+    await expect(page.getByText('Now say "goodbye" and nothing else.').first()).toBeVisible()
   })
 
   // ── 3. Stop generation ────────────────────────────────────────────────────
