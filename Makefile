@@ -1,4 +1,4 @@
-.PHONY: build build-frontend build-go dev-frontend dev-backend run-serve run-ask tidy lint test generate clean
+.PHONY: build build-frontend build-go dev-frontend dev-backend run-serve run-ask tidy lint test generate clean e2e e2e-setup
 
 BINARY := agento
 
@@ -46,6 +46,16 @@ lint:
 
 test:
 	go test ./...
+
+# ── E2E tests (local only — requires built binary) ────────────────────────────
+# First-time setup: installs Playwright + downloads Chromium
+e2e-setup:
+	cd e2e && npm ci && npx playwright install chromium
+
+# Run e2e tests against the locally-built binary.
+# The binary must be built first: make build
+e2e: build
+	cd e2e && npm test
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 clean:
