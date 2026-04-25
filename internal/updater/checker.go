@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -40,11 +41,20 @@ const CacheFileName = "update-check.json"
 // A CheckResult with UpdateAvailable=false is still valid and should be cached
 // to avoid re-querying GitHub on every command.
 type CheckResult struct {
-	UpdateAvailable bool      `json:"update_available"`
-	LatestVersion   string    `json:"latest_version"`
-	ReleaseURL      string    `json:"release_url"`
-	CurrentVersion  string    `json:"current_version"`
-	CheckedAt       time.Time `json:"checked_at"`
+	UpdateAvailable bool   `json:"update_available"`
+	LatestVersion   string `json:"latest_version"`
+	ReleaseURL      string `json:"release_url"`
+	CurrentVersion  string `json:"current_version"`
+	// Platform is the GOOS/GOARCH the result was computed for. A cache entry
+	// from a different platform (e.g. shared ~/.agento across machines) must
+	// be invalidated because the install step would fail on missing assets.
+	Platform  string    `json:"platform"`
+	CheckedAt time.Time `json:"checked_at"`
+}
+
+// currentPlatform returns the runtime platform string used for cache validation.
+func currentPlatform() string {
+	return runtime.GOOS + "/" + runtime.GOARCH
 }
 
 // Checker performs cached release detection against GitHub.
@@ -121,6 +131,7 @@ func (c *Checker) Check(ctx context.Context, currentVersion string, forceFresh b
 		return nil, err
 	}
 	result.CurrentVersion = currentVersion
+	result.Platform = currentPlatform()
 	result.CheckedAt = c.nowFunc()()
 
 	// Best-effort cache write. Failures here are logged-via-return only and
@@ -217,6 +228,12 @@ func (c *Checker) readCache(currentVersion string) (*CheckResult, bool) {
 	if cached.CurrentVersion != currentVersion {
 		return nil, false
 	}
+	// Invalidate cache entries that were written for a different GOOS/GOARCH
+	// (e.g. when ~/.agento is shared across machines via dotfiles or syncthing).
+	// Empty Platform on legacy cache files is also treated as a miss.
+	if cached.Platform != currentPlatform() {
+		return nil, false
+	}
 	if c.nowFunc()().Sub(cached.CheckedAt) >= c.cacheTTL() {
 		return nil, false
 	}
@@ -229,7 +246,7 @@ func (c *Checker) writeCache(result *CheckResult) error {
 	if path == "" {
 		return nil
 	}
-	if err := os.MkdirAll(c.CacheDir, 0o750); err != nil {
+	if err := os.MkdirAll(c.CacheDir, 0o700); err != nil {
 		return fmt.Errorf("creating cache dir: %w", err)
 	}
 	data, err := json.MarshalIndent(result, "", "  ")

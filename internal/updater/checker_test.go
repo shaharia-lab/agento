@@ -126,6 +126,7 @@ func TestChecker_Check_UsesCacheWhenFresh(t *testing.T) {
 		LatestVersion:   "9.9.9",
 		ReleaseURL:      "https://example.com",
 		CurrentVersion:  "v1.0.0",
+		Platform:        currentPlatform(),
 		CheckedAt:       fixedNow.Add(-1 * time.Hour),
 	}
 	data, _ := json.Marshal(cached)
@@ -163,6 +164,7 @@ func TestChecker_Check_BypassesCacheWhenStale(t *testing.T) {
 		UpdateAvailable: true,
 		LatestVersion:   "9.9.9",
 		CurrentVersion:  "v1.0.0",
+		Platform:        currentPlatform(),
 		CheckedAt:       fixedNow.Add(-25 * time.Hour), // older than DefaultCacheTTL
 	}
 	data, _ := json.Marshal(cached)
@@ -196,6 +198,7 @@ func TestChecker_Check_BypassesCacheWhenVersionDiffers(t *testing.T) {
 		UpdateAvailable: true,
 		LatestVersion:   "0.6.0",
 		CurrentVersion:  "v0.5.0",
+		Platform:        currentPlatform(),
 		CheckedAt:       fixedNow.Add(-1 * time.Hour),
 	}
 	data, _ := json.Marshal(cached)
@@ -224,6 +227,91 @@ func TestChecker_Check_BypassesCacheWhenVersionDiffers(t *testing.T) {
 	}
 }
 
+// TestChecker_Check_BypassesCacheWhenPlatformDiffers covers the case where
+// ~/.agento is shared across machines (e.g. via dotfiles) and the cached
+// release was written for a different GOOS/GOARCH.
+func TestChecker_Check_BypassesCacheWhenPlatformDiffers(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	fixedNow := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	cached := CheckResult{
+		UpdateAvailable: true,
+		LatestVersion:   "9.9.9",
+		CurrentVersion:  "v1.0.0",
+		Platform:        "some-other-os/some-other-arch",
+		CheckedAt:       fixedNow.Add(-1 * time.Hour),
+	}
+	data, _ := json.Marshal(cached)
+	if err := os.WriteFile(filepath.Join(tmp, CacheFileName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	c := &Checker{
+		CacheDir: tmp,
+		now:      func() time.Time { return fixedNow },
+		detectLatest: func(_ context.Context) (string, string, bool, error) {
+			called = true
+			return "1.2.3", "", true, nil
+		},
+	}
+	got, err := c.Check(context.Background(), "v1.0.0", false)
+	if err != nil {
+		t.Fatalf("Check returned error: %v", err)
+	}
+	if !called {
+		t.Fatalf("detectLatest must be called when cached Platform mismatches")
+	}
+	if got.LatestVersion != "1.2.3" {
+		t.Errorf("LatestVersion = %q, want %q", got.LatestVersion, "1.2.3")
+	}
+	if got.Platform != currentPlatform() {
+		t.Errorf("Platform = %q, want %q", got.Platform, currentPlatform())
+	}
+}
+
+// TestChecker_Check_LegacyCacheMissingPlatformIsInvalidated handles cache
+// files written by an earlier version of agento that did not record Platform.
+func TestChecker_Check_LegacyCacheMissingPlatformIsInvalidated(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	fixedNow := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+
+	// Marshal a struct that omits the platform field entirely.
+	legacy := struct {
+		UpdateAvailable bool      `json:"update_available"`
+		LatestVersion   string    `json:"latest_version"`
+		CurrentVersion  string    `json:"current_version"`
+		CheckedAt       time.Time `json:"checked_at"`
+	}{
+		UpdateAvailable: true,
+		LatestVersion:   "9.9.9",
+		CurrentVersion:  "v1.0.0",
+		CheckedAt:       fixedNow.Add(-1 * time.Hour),
+	}
+	data, _ := json.Marshal(legacy)
+	if err := os.WriteFile(filepath.Join(tmp, CacheFileName), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	called := false
+	c := &Checker{
+		CacheDir: tmp,
+		now:      func() time.Time { return fixedNow },
+		detectLatest: func(_ context.Context) (string, string, bool, error) {
+			called = true
+			return "1.2.3", "", true, nil
+		},
+	}
+	if _, err := c.Check(context.Background(), "v1.0.0", false); err != nil {
+		t.Fatalf("Check returned error: %v", err)
+	}
+	if !called {
+		t.Fatalf("detectLatest must be called when cached Platform is empty (legacy cache)")
+	}
+}
+
 func TestChecker_Check_ForceFreshBypassesCache(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
@@ -233,6 +321,7 @@ func TestChecker_Check_ForceFreshBypassesCache(t *testing.T) {
 		UpdateAvailable: true,
 		LatestVersion:   "9.9.9",
 		CurrentVersion:  "v1.0.0",
+		Platform:        currentPlatform(),
 		CheckedAt:       fixedNow.Add(-1 * time.Hour),
 	}
 	data, _ := json.Marshal(cached)

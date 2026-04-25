@@ -128,6 +128,18 @@ func Install(ctx context.Context, latestVersion string) error {
 		return fmt.Errorf("release %s not found on GitHub", latestVersion)
 	}
 
+	// Guard against the cache-vs-live race: between Check (cache hit) and Install,
+	// a newer release may have landed on GitHub. Refuse to install a different
+	// version than the user agreed to — they should re-run and confirm.
+	if want := strings.TrimPrefix(latestVersion, "v"); want != "" {
+		if got := strings.TrimPrefix(release.Version(), "v"); got != want {
+			return fmt.Errorf(
+				"release on GitHub (%s) no longer matches the version you confirmed (%s); please re-run",
+				got, want,
+			)
+		}
+	}
+
 	// go-selfupdate handles the Windows rename trick internally, so the same
 	// call path works on Linux, macOS, and Windows.
 	if err := upd.UpdateTo(ctx, release, exe); err != nil {

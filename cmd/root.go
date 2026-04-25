@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -114,11 +115,23 @@ func shouldRunAutoCheck(cmd *cobra.Command) bool {
 		return false
 	}
 
+	if cmd == nil {
+		return false
+	}
+	// Skip when no subcommand is being run (bare `agento` prints help) or when
+	// help was requested via --help/-h on any subcommand.
+	if !cmd.Runnable() {
+		return false
+	}
+	// GetBool returns an error only when the flag is undefined; cobra adds
+	// --help to every command at execute time, but skip-on-error is the safe
+	// default if it ever isn't there.
+	if helpFlag, err := cmd.Flags().GetBool("help"); err == nil && helpFlag {
+		return false
+	}
 	// Skip subcommands where the check is irrelevant or duplicative.
-	if cmd != nil {
-		if _, skip := updateCheckSkipCommands[cmd.Name()]; skip {
-			return false
-		}
+	if _, skip := updateCheckSkipCommands[cmd.Name()]; skip {
+		return false
 	}
 	return true
 }
@@ -146,12 +159,17 @@ func promptAndMaybeUpdate(ctx context.Context, result *updater.CheckResult) {
 	}
 
 	fmt.Fprintf(os.Stderr, "\nA new version (v%s) is available. Update now? [y/N] ", result.LatestVersion)
-	var input string
-	if _, err := fmt.Scanln(&input); err != nil {
-		// Empty input or read error → treat as decline. Continue with the user's command.
+	// bufio.Reader is used (rather than fmt.Scanln) so the whole line — including
+	// the trailing newline — is consumed. Otherwise leftover bytes leak into the
+	// stdin of the user's subcommand (e.g. `agento ask` reading from a pipe).
+	reader := bufio.NewReader(os.Stdin)
+	line, err := reader.ReadString('\n')
+	if err != nil {
+		// EOF or read error → treat as decline. Continue with the user's command.
 		return
 	}
-	if input != "y" && input != "Y" {
+	answer := strings.TrimSpace(strings.ToLower(line))
+	if answer != "y" && answer != "yes" {
 		return
 	}
 
