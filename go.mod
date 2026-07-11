@@ -1,6 +1,6 @@
 module github.com/shaharia-lab/agento
 
-go 1.25.10
+go 1.25.12
 
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
