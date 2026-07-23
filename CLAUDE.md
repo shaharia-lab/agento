@@ -2,6 +2,20 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## What is Agento
+
+Agento is a local, self-hosted platform for building and running AI agents through a web UI and CLI. It runs on top of the Claude Code CLI already installed on the user's machine (via `github.com/shaharia-lab/claude-agent-sdk-go`) — no separate API key required. It ships as a single Go binary with the React frontend embedded, persisting everything in SQLite at `~/.agento/agento.db`.
+
+Core domain objects:
+- **Agents** — user-defined: name, slug, model, system prompt, thinking mode, permission mode, and an explicit tool allowlist (built-in Claude Code tools, local in-process tools, external MCP servers, integrations).
+- **Chats** — persistent multi-turn conversations with agents, streamed live over SSE; a tabbed multi-chat workspace runs conversations in parallel.
+- **Integrations** — external services (Google, GitHub, Slack, Jira, Confluence, Telegram, WhatsApp) exposed as agent tools, each running as an in-process MCP server.
+- **Tasks** — cron-scheduled agent runs with full job history.
+- **Triggers** — rules that match incoming Telegram messages and dispatch agent runs, replying on the same channel.
+- **Claude Sessions & Insights** — scans local Claude Code JSONL session files for browsing, token/cost analytics, journey timelines, and productivity metrics.
+
+Cross-cutting: OpenTelemetry instrumentation (hot-reloadable from the UI), SMTP notifications, self-update (`agento update`), and an `agento ask` CLI for one-shot queries.
+
 ## Commands
 
 ### Backend (Go)
@@ -22,7 +36,7 @@ go test ./internal/service/... -run TestChatService
 
 ### Frontend (React/TypeScript)
 ```bash
-cd frontend && npm ci        # Install dependencies
+cd frontend && npm ci --legacy-peer-deps   # Install dependencies
 make dev-frontend            # Vite dev server on :5173
 npm run build                # TypeScript check + Vite bundle
 npm run lint                 # ESLint
@@ -30,25 +44,18 @@ npm run typecheck            # TypeScript strict check
 npm run format               # Prettier
 ```
 
+### E2E (Playwright)
+```bash
+cd e2e && npm ci && npm test   # Headless run; npm run test:ui / test:headed / test:debug also available
+```
+
 ### Development Setup
 Two terminals are needed in dev mode:
 1. `make dev-backend` — Go API server on `:8990` (or `PORT` env)
 2. `make dev-frontend` — Vite dev server on `:5173` (proxies API calls to `:8990`)
 
-### Required Environment
-```bash
-ANTHROPIC_API_KEY=...        # Optional (uses Claude Code CLI auth if unset)
-AGENTO_DATA_DIR=~/.agento   # Optional, default: ~/.agento (supports ~ expansion, e.g. ~/.agento-dev for local dev)
-PORT=8990                    # Optional, default: 8990
-# OpenTelemetry (all optional — can also be configured via Settings UI)
-OTEL_EXPORTER_OTLP_ENDPOINT=localhost:4317  # OTLP collector gRPC endpoint
-OTEL_EXPORTER_OTLP_INSECURE=true           # Skip TLS for local collectors
-OTEL_METRICS_EXPORTER=otlp                 # "otlp" or "prometheus"
-OTEL_LOGS_EXPORTER=otlp                    # "otlp"
-OTEL_EXPORTER_OTLP_HEADERS=key=value       # Auth headers for the collector
-OTEL_METRIC_EXPORT_INTERVAL=60000          # Push interval in ms (default: 60000)
-OTEL_SDK_DISABLED=true                     # Disable telemetry entirely
-```
+### Environment
+All optional: `ANTHROPIC_API_KEY` (falls back to Claude Code CLI auth), `AGENTO_DATA_DIR` (default `~/.agento`, supports `~` expansion), `PORT` (default `8990`). OpenTelemetry is configured via standard `OTEL_*` env vars or the Settings UI — see `docs/monitoring.md`. Env vars override UI settings; the API returns HTTP 409 (`EnvLockedError`) when a UI update targets an env-locked value.
 
 ## Architecture
 
@@ -65,71 +72,44 @@ Browser → Vite (dev) / embedded FS (prod) → React SPA
                         Storage (internal/storage/) + Agent SDK
 ```
 
-### Backend Layers
+### Backend Packages
 
-**`cmd/`** — Cobra CLI commands: `web` (HTTP server), `ask` (CLI), `update` (self-update). `cmd/assets.go` embeds the frontend build; `cmd/assets_dev.go` proxies to Vite.
+One line per package — list files in a directory to see current contents.
 
-**`internal/server/`** — Chi router setup with middleware (Recoverer, RequestID, request logger), wrapped in `otelhttp.NewHandler` for automatic HTTP trace/span generation. Mounts `/api` routes, serves SPA, and exposes a dynamic `/metrics` handler (Prometheus pull endpoint, active only when configured). Graceful shutdown with 5s timeout.
+- **`cmd/`** — Cobra commands: `web` (HTTP server), `ask` (CLI), `update` (self-update). Frontend embedding lives at repo root: `assets.go` (`//go:embed frontend/dist`, prod) and `assets_dev.go` (nil FS → server proxies to Vite), wired through `cmd/webfs.go`.
+- **`internal/server/`** — Chi router + middleware, wrapped in `otelhttp` for automatic tracing. Mounts `/api`, serves the SPA, exposes a dynamic `/metrics` Prometheus endpoint. Graceful shutdown with 5s timeout.
+- **`internal/api/`** — HTTP handlers. `Server` struct holds all service dependencies; `Mount()` registers routes. SSE streaming in `livesessions.go` (per-session mutex serializes concurrent sends). Shared request/response types in `types.go`.
+- **`internal/service/`** — Business logic behind interfaces (`ChatService`, `AgentService`, `IntegrationService`, `NotificationService`, `TaskService`, `ClaudeSettingsProfileService`) so handlers never touch storage directly. Typed errors in `errors.go` map to HTTP statuses.
+- **`internal/agent/`** — Claude Agent SDK integration: converts agent config to SDK `RunOptions`, executes sessions, streams results; OTel span helpers for per-tool-call and per-run tracing.
+- **`internal/storage/`** — SQLite persistence via `modernc.org/sqlite` (pure Go, **no CGo**). One `SQLite*Store` per domain implementing a store interface. `migrate_fs_to_sqlite.go` migrates the legacy filesystem format once. `withStorageSpan` instruments all operations.
+- **`internal/config/`** — `AppConfig` from env; shared profile types in `profiles.go` to avoid import cycles.
+- **`internal/integrations/`** — Integration registry (Start/Stop/Reload lifecycle). One subpackage per backend (google, github, slack, jira, confluence, telegram, whatsapp), each an in-process MCP server.
+- **`internal/trigger/`** — Dispatcher matching incoming Telegram messages against trigger rules, running the matched agent (bounded concurrency), and replying via Telegram.
+- **`internal/claudesessions/`** — Scanner/analytics for Claude Code session JSONL files, cached in SQLite. Insight pipeline: 8 processors run in a single pass per file; `insight_worker.go` reacts to event-bus session events with a 5-minute rescan loop for version-bump reprocessing. `journey.go` builds step-by-step session timelines.
+- **`internal/tools/`** — Local in-process MCP server; register built-in tools in `registry.go`.
+- **`internal/scheduler/`** — Cron-like task scheduling and job execution with history.
+- **`internal/eventbus/`** — In-process pub/sub decoupling components (task completion → notifications, session discovered → insight processing).
+- **`internal/notification/`** — Event-driven notifications with SMTP email delivery and templates.
+- **`internal/logger/`** — Structured `slog`: rotating system log (lumberjack) + per-session logs at `<logDir>/sessions/<id>.log`; `otelslog` bridge forwards logs to OTel when enabled.
+- **`internal/telemetry/`** — OTel providers (OTLP gRPC or Prometheus), config persisted to `<data_dir>/monitoring.json`, hot-reload via `Manager.Update()`, pre-built instruments (`agento.http.*`, `agento.agent.*`, `agento.chat.*`, `agento.storage.*`).
+- **`internal/updater/`** — Release checker (cached 1h, feeds the UI update banner) and in-place installer behind `agento update`.
+- **`internal/build/`** — Version variables injected via `-ldflags`.
 
-**`internal/api/`** — HTTP handlers. `Server` struct holds all service dependencies (including `MonitoringManager` and `AppConfig`). `Mount()` registers all routes. SSE streaming for live sessions via `livesessions.go` (includes per-session mutex for concurrent send serialization). `monitoring.go` exposes `GET/PUT /api/monitoring` and `POST /api/monitoring/test` for OTel configuration. `PATCH /api/chats/{id}` and `PATCH /api/claude-sessions/{id}` support title editing and favorites. `types.go` defines request/response types shared across handlers. `uploads.go` handles `POST /api/uploads` for file/image drag-drop and paste (saves to `tmp-uploads/` directory). `claude_session_insights.go` and `insight_store_adapter.go` expose per-session and aggregated insight metrics. `claude_session_journey.go` provides a step-by-step timeline visualization endpoint.
-
-**`internal/service/`** — Business logic. `ChatService`, `AgentService`, `IntegrationService`, `NotificationService`, `TaskService`, and `ClaudeSettingsProfileService` interfaces decouple handlers from storage. `errors.go` defines typed errors for HTTP mapping.
-
-**`internal/agent/`** — Integration with `github.com/shaharia-lab/claude-agent-sdk-go`. `runner.go` converts agent config to SDK `RunOptions`, executes sessions, streams results. `tracing.go` provides OTel span helpers for per-tool-call and per-run tracing in both chat and scheduler paths.
-
-**`internal/storage/`** — SQLite persistence (`~/.agento/agento.db`). `SQLiteAgentStore`, `SQLiteChatStore`, `SQLiteIntegrationStore`, `SQLiteSettingsStore`, `SQLiteNotificationStore`, `SQLiteTaskStore`, `SQLiteSessionInsightsStore` implement store interfaces. `migrate_fs_to_sqlite.go` handles one-time migration from the legacy filesystem format. `telemetry.go` provides `withStorageSpan` helper for OTel span/metric instrumentation on storage operations. Uses `modernc.org/sqlite` (pure Go, no CGo).
-
-**`internal/config/`** — Shared configuration layer. `AppConfig` loads from env. `profiles.go` has shared profile types to prevent import cycles. **Import rule**: `config` ← `service` ← `api` (never reverse).
-
-**`internal/integrations/`** — Integration system. `registry.go` manages server lifecycle (Start/Stop/Reload). Backends: `google/` (Calendar, Gmail, Drive with OAuth), `github/` (repos, issues, PRs, actions, releases), `slack/` (channels, messages, users), `jira/` (issues, projects, boards), `confluence/` (pages, spaces, search), `telegram/` (messages, chats, media). Each backend runs as an in-process MCP server.
-
-**`internal/claudesessions/`** — Scanner, analytics, and static analysis for Claude Code session JSONL files. `scanner.go` parses session data, `analytics.go` computes token usage and cost metrics, `cache.go` caches results in SQLite. `processor.go` and `processor_registry.go` define the session processor pipeline — 8 processors (turn count, autonomy score, tool usage, time profile, token profile, error rate, conversation depth, session rhythm) run in a single pass over each JSONL file. `insight_worker.go` subscribes to the event bus and runs processors for new/updated sessions with a 5-minute rescan loop for version-bump reprocessing. `journey.go` reconstructs a step-by-step timeline of turns and tool calls for session journey visualization.
-
-**`internal/tools/`** — Local MCP server running in-process. Register built-in tools here (e.g., `current_time`).
-
-**`internal/scheduler/`** — Task scheduler with background job execution. `scheduler.go` manages cron-like scheduling, `executor.go` runs jobs and records history.
-
-**`internal/eventbus/`** — In-process event bus for decoupled communication between components (e.g., task completion triggers notifications, session discovered/updated events trigger insight processing).
-
-**`internal/notification/`** — Notification system with SMTP email support. `handler.go` processes events, `smtp.go` sends emails, `template.go` renders notification content.
-
-**`internal/logger/`** — Structured `slog` loggers for system-wide and per-session logging. `NewSystemLogger` writes JSON to a rotating log file via `lumberjack` (50MB, 3 backups, 30 days, compressed). `NewSessionLogger` writes per-session logs to `<logDir>/sessions/<id>.log`. Includes an `otelslog` bridge that forwards structured logs to the OTel LoggerProvider when telemetry is enabled.
-
-**`internal/telemetry/`** — OpenTelemetry integration. `config.go` reads `OTEL_*` env vars into `MonitoringConfig`. `provider.go` initializes TracerProvider/MeterProvider/LoggerProvider with OTLP gRPC or Prometheus exporters. `manager.go` persists config to `<data_dir>/monitoring.json` and hot-reloads providers via `Update()`. `instruments.go` holds pre-built metric instruments (`agento.http.*`, `agento.agent.*`, `agento.chat.*`, `agento.storage.*`). Returns `EnvLockedError` (HTTP 409) when env vars override UI config.
-
-**`internal/build/`** — Build-time version variables injected via `-ldflags` (Version, CommitSHA, BuildDate).
+**Import rule**: `config` ← `service` ← `api` (never reverse).
 
 ### Frontend
 
-**`frontend/src/lib/api.ts`** — Typed API client for all backend endpoints (includes `uploadFile`, `insightsApi`, session journey).
-**`frontend/src/types.ts`** — Shared TypeScript types mirroring Go structs (includes `SessionInsight`, `InsightSummary`, journey types).
-**`frontend/src/App.tsx`** — React Router routes (Agents, Chats, Multi-Chat, Claude Sessions, Session Journey, Analytics/Insights, Settings, Integrations, Tasks pages).
-**`frontend/src/contexts/`** — Theme and appearance state shared across components.
-**`frontend/src/pages/MultiChatPage.tsx`** — Tabbed workspace for running multiple conversations in parallel with persistent tab state via localStorage.
-**`frontend/src/pages/SessionJourneyPage.tsx`** — Step-by-step timeline visualization of Claude Code sessions.
-**`frontend/src/pages/InsightsPage.tsx`** — Productivity and efficiency metrics dashboard (autonomy score, cache hit rate, tool usage breakdown).
+- `frontend/src/lib/api.ts` — typed API client for all backend endpoints.
+- `frontend/src/types.ts` — TypeScript types mirroring Go structs; keep in sync when changing API types.
+- `frontend/src/App.tsx` — React Router routes; one page component per feature under `frontend/src/pages/`.
+- `frontend/src/contexts/` — theme/appearance state.
 
 ### Agent Configuration
-Agents are stored in the SQLite database (legacy YAML files in `~/.agento/agents/` are auto-migrated on first startup). Create and edit agents via the UI or API. Fields: `name`, `slug`, `model`, `system_prompt`, `thinking`, `permission_mode`, `capabilities` (built_in/local/mcp/integration tools). Permission modes: `bypass` (default), `default`, `plan`, `dontAsk`. Template variables: `{{current_date}}`, `{{current_time}}`.
+Agents are stored in SQLite (legacy YAML files in `~/.agento/agents/` are auto-migrated on first startup); create/edit via UI or API. Permission modes: `bypass` (default), `default`, `plan`, `dontAsk`. System prompts support `{{current_date}}` and `{{current_time}}` template variables.
 
 ### MCP Integration
-External MCP servers defined in `mcps.yaml` (or `MCPS_FILE`). Local in-process tools registered via `internal/tools/registry.go`. Claude settings profiles stored as `~/.claude/settings_<slug>.json` with metadata at `~/.claude/settings_profiles.json`.
-
-## Available Skills
-
-Custom Claude Code skills in `.claude/skills/`. Invoke with `/skill-name <args>`.
-
-| Skill | Purpose | Usage |
-|-------|---------|-------|
-| `/architect-reviewer` | Architecture audit — patterns, code smells, tech debt, maintainability | `/architect-reviewer audit the codebase` or `review last 7 days changes` |
-| `/security-reviewer` | Security audit — OWASP, CWE, CVSS, attack scenarios, remediation | `/security-reviewer audit the API handlers` |
-| `/pr-reviewer` | PR review — correctness, quality, security, UI/UX, cross-platform, docs | `/pr-reviewer 42` or `/pr-reviewer feature/my-branch` |
-| `/context-updater` | Documentation & context maintenance — keeps CLAUDE.md, README, docs/ current | `/context-updater since last 7 days` |
-| `/engineering` | Development agent — features, bugs, refactoring with full project context | `/engineering add pagination to list endpoints` |
-| `/implement-issue` | End-to-end autonomous workflow: GitHub issue → worktree → implementation → CI → PR review → ready PR | `/implement-issue 123` |
-
-All review skills use Opus model, run in forked context, and include cross-platform checks (Linux, macOS, Windows).
+External MCP servers are defined in `mcps.yaml` (or `MCPS_FILE`); local in-process tools go in `internal/tools/registry.go`. Claude settings profiles are stored as `~/.claude/settings_<slug>.json` with metadata in `~/.claude/settings_profiles.json`.
 
 ## Linting
 
-Go linters active: `govet`, `errcheck`, `staticcheck`, `ineffassign`, `unused`, `bodyclose`, `noctx`, `unconvert`, `revive`, `misspell`, `nakedret`, `unparam`, `durationcheck`, `gocognit`, `funlen`, `lll`, `gocyclo`, `gocritic`, `makezero`, `prealloc`, `gosec`. Config in `.golangci.yml`. Pre-commit hooks enforce linting, formatting, and TypeScript checks before every commit.
+Go: `golangci-lint` with a strict linter set — config in `.golangci.yml`. Frontend: ESLint + Prettier + strict TypeScript. Pre-commit hooks enforce linting, formatting, and type checks on every commit.
