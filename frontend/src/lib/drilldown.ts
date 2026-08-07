@@ -58,8 +58,9 @@ function collectWindows(
   matches: (start: Date) => boolean,
 ): DrilldownWindow[] {
   const windows: DrilldownWindow[] = []
-  // Walk hour-by-hour from the range start; ranges are at most ~90 days so this
-  // stays cheap (≤ ~2200 iterations) and avoids day/hour juggling edge cases.
+  // Walk hour-by-hour from the range start; ranges are capped at
+  // MAX_DRILLDOWN_DAYS so this stays cheap (≤ ~4400 iterations) and avoids
+  // day/hour juggling edge cases.
   const cursor = new Date(bounds.from)
   while (cursor.getTime() < bounds.to) {
     if (matches(cursor)) {
