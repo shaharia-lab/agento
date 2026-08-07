@@ -1,5 +1,11 @@
 // GitHub mark — lucide-react removed brand icons in v1, so inline the SVG.
-export function GithubIcon({ className, style }: { className?: string; style?: React.CSSProperties }) {
+export function GithubIcon({
+  className,
+  style,
+}: {
+  className?: string
+  style?: React.CSSProperties
+}) {
   return (
     <svg
       viewBox="0 0 24 24"

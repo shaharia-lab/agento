@@ -58,7 +58,7 @@ function SessionsTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>
             width={36}
           />
           <Tooltip
-            formatter={(v) => [v ?? 0, 'Sessions']}
+            formatter={v => [v ?? 0, 'Sessions']}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
           <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -213,7 +213,7 @@ function HourlyActivityChart({ data }: Readonly<{ data: HourlyActivity[] }>) {
             allowDecimals={false}
           />
           <Tooltip
-            formatter={(v) => [v ?? 0, 'Sessions']}
+            formatter={v => [v ?? 0, 'Sessions']}
             labelFormatter={h => `Hour ${h}:00`}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />

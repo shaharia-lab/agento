@@ -276,10 +276,7 @@ function CacheEfficiencyPie({
             ))}
           </Pie>
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Tooltip
-            formatter={(v) => [`${v ?? 0}%`]}
-            contentStyle={TOOLTIP_STYLE}
-          />
+          <Tooltip formatter={v => [`${v ?? 0}%`]} contentStyle={TOOLTIP_STYLE} />
         </PieChart>
       </ResponsiveContainer>
       {prevHitRate !== undefined && (
@@ -337,7 +334,7 @@ function ErrorSessionsPie({
           </Pie>
           <Legend wrapperStyle={{ fontSize: 12 }} />
           <Tooltip
-            formatter={(v) => [(v ?? 0).toLocaleString(), 'Sessions']}
+            formatter={v => [(v ?? 0).toLocaleString(), 'Sessions']}
             contentStyle={TOOLTIP_STYLE}
           />
         </PieChart>
