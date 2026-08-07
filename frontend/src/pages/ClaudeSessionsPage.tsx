@@ -44,6 +44,13 @@ export default function ClaudeSessionsPage() {
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [filterProject, setFilterProject] = useState(searchParams.get('project') ?? 'all')
+
+  // Keep the project filter in sync when arriving via a new drill-down URL
+  // while the page is already mounted.
+  const projectParam = searchParams.get('project')
+  useEffect(() => {
+    if (projectParam) setFilterProject(projectParam)
+  }, [projectParam])
   const [filterFavorites, setFilterFavorites] = useState(false)
   const [timePreset, setTimePreset] = useState<TimePreset>('all')
   const [customFrom, setCustomFrom] = useState('')
@@ -95,7 +102,14 @@ export default function ClaudeSessionsPage() {
 
   const timeFilterActive = drilldownActive || timePreset !== 'all'
 
-  const clearDrilldown = () => setSearchParams({}, { replace: true })
+  const clearDrilldown = () => {
+    // Drop only the time drill-down; a project carried over from analytics
+    // stays applied (and visible in the project dropdown).
+    const next = new URLSearchParams(searchParams)
+    next.delete('windows')
+    next.delete('label')
+    setSearchParams(next, { replace: true })
+  }
 
   const filtered = useMemo(() => {
     const { from, to } = resolvePresetRange(timePreset, customFrom, customTo)

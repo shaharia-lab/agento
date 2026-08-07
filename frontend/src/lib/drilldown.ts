@@ -33,7 +33,8 @@ export interface DrilldownTarget {
  * Parses the analytics date range ("YYYY-MM-DD" strings, inclusive) into UTC
  * millisecond bounds, matching how the backend parses the same params
  * (`time.Parse("2006-01-02", …)` → UTC midnight). Returns null when either
- * bound is invalid.
+ * bound is invalid, or when the range exceeds MAX_DRILLDOWN_DAYS — the
+ * serialized window list would otherwise exceed URL length limits.
  */
 export function parseRangeBounds(fromDate: string, toDate: string): { from: number; to: number } | null {
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
@@ -41,8 +42,16 @@ export function parseRangeBounds(fromDate: string, toDate: string): { from: numb
   const from = Date.parse(`${fromDate}T00:00:00Z`)
   const to = Date.parse(`${toDate}T00:00:00Z`) + 24 * 60 * 60 * 1000 // `to` date is inclusive
   if (Number.isNaN(from) || Number.isNaN(to) || from >= to) return null
+  if (to - from > MAX_DRILLDOWN_DAYS * 24 * 60 * 60 * 1000) return null
   return { from, to }
 }
+
+/**
+ * Ranges longer than this produce window lists too large for a URL (all-time
+ * would be ~2400 windows ≈ 67 KB of query string), so drill-down is disabled
+ * beyond it.
+ */
+export const MAX_DRILLDOWN_DAYS = 180
 
 function collectWindows(
   bounds: { from: number; to: number },

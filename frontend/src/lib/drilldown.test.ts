@@ -29,6 +29,12 @@ describe('parseRangeBounds', () => {
   it('rejects inverted ranges', () => {
     expect(parseRangeBounds(TO, FROM)).toBeNull()
   })
+
+  it('rejects ranges beyond MAX_DRILLDOWN_DAYS (URL length guard)', () => {
+    expect(parseRangeBounds('2020-01-01', '2026-08-07')).toBeNull() // all-time preset
+    expect(parseRangeBounds('2026-02-08', '2026-08-07')).toBeNull() // 181 days
+    expect(parseRangeBounds('2026-02-09', '2026-08-07')).not.toBeNull() // 180 days
+  })
 })
 
 describe('heatmapCellTarget', () => {

@@ -14,7 +14,7 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { analyticsApi } from '@/lib/api'
-import { drilldownUrl, heatmapCellTarget, hourlyBarTarget } from '@/lib/drilldown'
+import { drilldownUrl, heatmapCellTarget, hourlyBarTarget, parseRangeBounds, MAX_DRILLDOWN_DAYS } from '@/lib/drilldown'
 import type {
   AnalyticsReport,
   AnalyticsSummary,
@@ -445,6 +445,10 @@ export default function GeneralUsagePage() {
     load(from, to, project)
   }
 
+  // Beyond MAX_DRILLDOWN_DAYS the serialized window list would exceed URL
+  // length limits, so charts render without click-through.
+  const drilldownEnabled = parseRangeBounds(from, to) !== null
+
   const drillIntoSessions = useCallback(
     (dayOfWeek: number | null, hour: number) => {
       const target =
@@ -561,13 +565,21 @@ export default function GeneralUsagePage() {
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
               <ActivityHeatmap
                 data={report?.heatmap ?? []}
-                onCellClick={(dow, hour) => drillIntoSessions(dow, hour)}
+                onCellClick={
+                  drilldownEnabled ? (dow, hour) => drillIntoSessions(dow, hour) : undefined
+                }
               />
               <HourlyActivityChart
                 data={report?.hourly_activity ?? []}
-                onBarClick={hour => drillIntoSessions(null, hour)}
+                onBarClick={drilldownEnabled ? hour => drillIntoSessions(null, hour) : undefined}
               />
             </div>
+            {!drilldownEnabled && (
+              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 -mt-3">
+                Session drill-down is available for ranges up to {MAX_DRILLDOWN_DAYS} days — pick a
+                narrower date range to click through to sessions.
+              </p>
+            )}
           </>
         )}
       </div>
