@@ -1,0 +1,43 @@
+version: 2
+updates:
+  # Backend: Go modules — single grouped PR, max 1 open at a time
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 1
+    groups:
+      backend:
+        patterns:
+          - "*"
+
+  # Frontend: npm packages — single grouped PR, max 1 open at a time
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 1
+    groups:
+      frontend:
+        patterns:
+          - "*"
+
+  # GitHub Actions — single grouped PR
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/Berlin
+    open-pull-requests-limit: 1
+    groups:
+      actions:
+        patterns:
+          - "*"
