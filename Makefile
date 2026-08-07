@@ -14,7 +14,7 @@ LDFLAGS := -s -w \
 build: build-frontend build-go
 
 build-frontend:
-	cd frontend && npm install && npm run build
+	cd frontend && npm ci --legacy-peer-deps && npm run build
 
 build-go:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) .
