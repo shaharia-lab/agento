@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   AreaChart,
   Area,
@@ -13,6 +14,13 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { analyticsApi } from '@/lib/api'
+import {
+  drilldownUrl,
+  heatmapCellTarget,
+  hourlyBarTarget,
+  parseRangeBounds,
+  MAX_DRILLDOWN_DAYS,
+} from '@/lib/drilldown'
 import type {
   AnalyticsReport,
   AnalyticsSummary,
@@ -114,22 +122,152 @@ function SessionsPerModelChart({ data }: Readonly<{ data: ModelSessionStat[] }>)
   )
 }
 
-function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
-  const grid: number[][] = Array.from({ length: 7 }, () => new Array(24).fill(0))
+function heatmapCellBg(intensity: number): string {
+  if (intensity === 0) return 'bg-zinc-100 dark:bg-zinc-800'
+  if (intensity < 0.25) return 'bg-indigo-200 dark:bg-indigo-900/60'
+  if (intensity < 0.5) return 'bg-indigo-400 dark:bg-indigo-700'
+  if (intensity < 0.75) return 'bg-indigo-600 dark:bg-indigo-500'
+  return 'bg-indigo-800 dark:bg-indigo-400'
+}
+
+const ARROW_MOVES: Record<string, [number, number]> = {
+  ArrowRight: [0, 1],
+  ArrowLeft: [0, -1],
+  ArrowDown: [1, 0],
+  ArrowUp: [-1, 0],
+}
+
+function cellTitle(day: string, hour: number, cell: HeatmapCell | undefined): string {
+  if (!cell) return `${day} ${hour}:00 — no activity`
+  return `${day} ${hour}:00 — ${cell.sessions} sessions, ${formatTokens(cell.tokens)} tokens — click to view sessions`
+}
+
+interface HeatmapCellCommonProps {
+  day: string
+  dow: number
+  hour: number
+  cell: HeatmapCell | undefined
+  maxSessions: number
+}
+
+function StaticHeatmapCell({ day, hour, cell, maxSessions }: Readonly<HeatmapCellCommonProps>) {
+  const intensity = maxSessions > 0 ? (cell?.sessions ?? 0) / maxSessions : 0
+  return (
+    <div
+      className={`flex-1 aspect-square rounded-[2px] mx-px ${heatmapCellBg(intensity)} cursor-default`}
+      title={
+        cell
+          ? cellTitle(day, hour, cell).replace(' — click to view sessions', '')
+          : `${day} ${hour}:00 — no activity`
+      }
+    />
+  )
+}
+
+function InteractiveHeatmapCell({
+  day,
+  dow,
+  hour,
+  cell,
+  maxSessions,
+  focused,
+  registerRef,
+  onCellClick,
+  onMoveFocus,
+}: Readonly<
+  HeatmapCellCommonProps & {
+    focused: boolean
+    registerRef: (key: string, el: HTMLDivElement | null) => void
+    onCellClick: (dayOfWeek: number, hour: number) => void
+    onMoveFocus: (dayOfWeek: number, hour: number) => void
+  }
+>) {
+  const intensity = maxSessions > 0 ? (cell?.sessions ?? 0) / maxSessions : 0
+  const clickable = !!cell
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    const move = ARROW_MOVES[e.key]
+    if (move) {
+      e.preventDefault()
+      onMoveFocus(dow + move[0], hour + move[1])
+      return
+    }
+    if ((e.key === 'Enter' || e.key === ' ') && clickable) {
+      e.preventDefault()
+      onCellClick(dow, hour)
+    }
+  }
+
+  return (
+    <div
+      ref={el => registerRef(`${dow}-${hour}`, el)}
+      role="gridcell"
+      aria-label={`${day} ${hour}:00 — ${cell ? `${cell.sessions} sessions` : 'no activity'}`}
+      tabIndex={focused ? 0 : -1}
+      onClick={clickable ? () => onCellClick(dow, hour) : undefined}
+      onKeyDown={handleKeyDown}
+      className={`flex-1 aspect-square rounded-[2px] mx-px ${heatmapCellBg(intensity)} focus:outline-none focus:ring-2 focus:ring-indigo-500 ${
+        clickable ? 'cursor-pointer hover:ring-1 hover:ring-indigo-500' : 'cursor-default'
+      }`}
+      title={cellTitle(day, hour, cell)}
+    />
+  )
+}
+
+function HeatmapGridCell({
+  interactive,
+  ...props
+}: Readonly<
+  HeatmapCellCommonProps & {
+    interactive: boolean
+    focused: boolean
+    registerRef: (key: string, el: HTMLDivElement | null) => void
+    onCellClick?: (dayOfWeek: number, hour: number) => void
+    onMoveFocus: (dayOfWeek: number, hour: number) => void
+  }
+>) {
+  if (!interactive) return <StaticHeatmapCell {...props} />
+  return <InteractiveHeatmapCell {...props} onCellClick={props.onCellClick ?? (() => {})} />
+}
+
+function ActivityHeatmap({
+  data,
+  onCellClick,
+}: Readonly<{ data: HeatmapCell[]; onCellClick?: (dayOfWeek: number, hour: number) => void }>) {
   let maxSessions = 0
   for (const cell of data) {
-    grid[cell.day_of_week][cell.hour] = cell.sessions
     if (cell.sessions > maxSessions) maxSessions = cell.sessions
   }
 
   const cellMap = new Map(data.map(c => [`${c.day_of_week}-${c.hour}`, c]))
 
+  // Roving tabindex: only the focused cell is in the tab order; arrows move
+  // focus across the grid (WAI-ARIA grid pattern).
+  const interactive = !!onCellClick
+  const [focusPos, setFocusPos] = useState({ dow: 0, hour: 0 })
+  const cellRefs = useRef(new Map<string, HTMLDivElement | null>())
+  const registerRef = useCallback((key: string, el: HTMLDivElement | null) => {
+    cellRefs.current.set(key, el)
+  }, [])
+  const moveFocus = useCallback((dow: number, hour: number) => {
+    const next = {
+      dow: Math.min(6, Math.max(0, dow)),
+      hour: Math.min(23, Math.max(0, hour)),
+    }
+    setFocusPos(next)
+    cellRefs.current.get(`${next.dow}-${next.hour}`)?.focus()
+  }, [])
+
   return (
     <ChartCard title="Activity Heatmap (Day × Hour)">
       <div className="overflow-x-auto">
-        <div className="min-w-[560px]">
+        <div
+          className="min-w-[560px]"
+          role={interactive ? 'grid' : undefined}
+          aria-label={interactive ? 'Activity by day and hour' : undefined}
+        >
           {/* Hour labels */}
-          <div className="flex ml-8 mb-1">
+          <div className="flex ml-8 mb-1" role={interactive ? 'presentation' : undefined}>
             {Array.from({ length: 24 }, (_, h) => (
               <div
                 key={`hour-${h}`}
@@ -141,35 +279,32 @@ function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
           </div>
           {/* Rows */}
           {DAY_NAMES.map((day, dow) => (
-            <div key={`day-${day}`} className="flex items-center mb-0.5">
-              <span className="w-8 text-[12px] text-zinc-400 dark:text-zinc-500 shrink-0">
+            <div
+              key={`day-${day}`}
+              className="flex items-center mb-0.5"
+              role={interactive ? 'row' : undefined}
+            >
+              <span
+                className="w-8 text-[12px] text-zinc-400 dark:text-zinc-500 shrink-0"
+                role={interactive ? 'rowheader' : undefined}
+              >
                 {day}
               </span>
-              {Array.from({ length: 24 }, (_, h) => {
-                const cell = cellMap.get(`${dow}-${h}`)
-                const intensity = maxSessions > 0 ? (cell?.sessions ?? 0) / maxSessions : 0
-                let bg = 'bg-indigo-800 dark:bg-indigo-400'
-                if (intensity === 0) {
-                  bg = 'bg-zinc-100 dark:bg-zinc-800'
-                } else if (intensity < 0.25) {
-                  bg = 'bg-indigo-200 dark:bg-indigo-900/60'
-                } else if (intensity < 0.5) {
-                  bg = 'bg-indigo-400 dark:bg-indigo-700'
-                } else if (intensity < 0.75) {
-                  bg = 'bg-indigo-600 dark:bg-indigo-500'
-                }
-                return (
-                  <div
-                    key={`cell-${dow}-${h}`}
-                    className={`flex-1 aspect-square rounded-[2px] mx-px ${bg} cursor-default`}
-                    title={
-                      cell
-                        ? `${day} ${h}:00 — ${cell.sessions} sessions, ${formatTokens(cell.tokens)} tokens`
-                        : `${day} ${h}:00 — no activity`
-                    }
-                  />
-                )
-              })}
+              {Array.from({ length: 24 }, (_, h) => (
+                <HeatmapGridCell
+                  key={`cell-${dow}-${h}`}
+                  day={day}
+                  dow={dow}
+                  hour={h}
+                  cell={cellMap.get(`${dow}-${h}`)}
+                  maxSessions={maxSessions}
+                  interactive={interactive}
+                  focused={focusPos.dow === dow && focusPos.hour === h}
+                  registerRef={registerRef}
+                  onCellClick={onCellClick}
+                  onMoveFocus={moveFocus}
+                />
+              ))}
             </div>
           ))}
           {/* Legend */}
@@ -186,17 +321,42 @@ function ActivityHeatmap({ data }: Readonly<{ data: HeatmapCell[] }>) {
             ))}
             <span className="text-[12px] text-zinc-400 dark:text-zinc-500 ml-1">More</span>
           </div>
+          {onCellClick && (
+            <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1.5 ml-8">
+              Click a cell to view the sessions from that day and hour (UTC). Keyboard: tab to the
+              grid, arrow keys to move, Enter to open.
+            </p>
+          )}
         </div>
       </div>
     </ChartCard>
   )
 }
 
-function HourlyActivityChart({ data }: Readonly<{ data: HourlyActivity[] }>) {
+function HourlyActivityChart({
+  data,
+  onBarClick,
+}: Readonly<{ data: HourlyActivity[]; onBarClick?: (hour: number) => void }>) {
+  // Per-bar click handler: recharts 3 does not reliably populate activePayload
+  // in chart-level onClick state, but Bar's own onClick receives the bar's
+  // data entry directly.
+  const handleBarClick = onBarClick
+    ? (entry: unknown) => {
+        const hour = (entry as { hour?: unknown })?.hour
+        if (typeof hour === 'number' && data.find(d => d.hour === hour)?.sessions) {
+          onBarClick(hour)
+        }
+      }
+    : undefined
+
   return (
     <ChartCard title="Activity by Hour of Day">
       <ResponsiveContainer width="100%" height={240}>
-        <BarChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <BarChart
+          data={data}
+          margin={{ top: 4, right: 8, left: 0, bottom: 0 }}
+          style={onBarClick ? { userSelect: 'none' } : undefined}
+        >
           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" strokeOpacity={0.5} />
           <XAxis
             dataKey="hour"
@@ -217,9 +377,21 @@ function HourlyActivityChart({ data }: Readonly<{ data: HourlyActivity[] }>) {
             labelFormatter={h => `Hour ${h}:00`}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
-          <Bar dataKey="sessions" name="Sessions" fill="#22c55e" radius={[2, 2, 0, 0]} />
+          <Bar
+            dataKey="sessions"
+            name="Sessions"
+            fill="#22c55e"
+            radius={[2, 2, 0, 0]}
+            cursor={onBarClick ? 'pointer' : undefined}
+            onClick={handleBarClick}
+          />
         </BarChart>
       </ResponsiveContainer>
+      {onBarClick && (
+        <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1.5">
+          Click a bar to view the sessions from that hour (UTC).
+        </p>
+      )}
     </ChartCard>
   )
 }
@@ -238,6 +410,7 @@ function avgSessionsPerDay(totalSessions: number, fromDate: string, toDate: stri
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function GeneralUsagePage() {
+  const navigate = useNavigate()
   const [report, setReport] = useState<AnalyticsReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
@@ -282,6 +455,22 @@ export default function GeneralUsagePage() {
     setRefreshing(true)
     load(from, to, project)
   }
+
+  // Beyond MAX_DRILLDOWN_DAYS the serialized window list would exceed URL
+  // length limits, so charts render without click-through.
+  const drilldownEnabled = parseRangeBounds(from, to) !== null
+
+  const drillIntoSessions = useCallback(
+    (dayOfWeek: number | null, hour: number) => {
+      const target =
+        dayOfWeek === null
+          ? hourlyBarTarget(from, to, hour)
+          : heatmapCellTarget(from, to, dayOfWeek, hour)
+      if (target && target.windows.length > 0)
+        navigate(drilldownUrl(target, project === 'all' ? undefined : project))
+    },
+    [from, to, project, navigate],
+  )
 
   const summary: AnalyticsSummary = report?.summary ?? {
     total_sessions: 0,
@@ -385,9 +574,23 @@ export default function GeneralUsagePage() {
 
             {/* Heatmap + Hourly */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <ActivityHeatmap data={report?.heatmap ?? []} />
-              <HourlyActivityChart data={report?.hourly_activity ?? []} />
+              <ActivityHeatmap
+                data={report?.heatmap ?? []}
+                onCellClick={
+                  drilldownEnabled ? (dow, hour) => drillIntoSessions(dow, hour) : undefined
+                }
+              />
+              <HourlyActivityChart
+                data={report?.hourly_activity ?? []}
+                onBarClick={drilldownEnabled ? hour => drillIntoSessions(null, hour) : undefined}
+              />
             </div>
+            {!drilldownEnabled && (
+              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 -mt-3">
+                Session drill-down is available for ranges up to {MAX_DRILLDOWN_DAYS} days — pick a
+                narrower date range to click through to sessions.
+              </p>
+            )}
           </>
         )}
       </div>

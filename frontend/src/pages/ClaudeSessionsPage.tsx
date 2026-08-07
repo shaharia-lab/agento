@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { claudeSessionsApi } from '@/lib/api'
 import type { ClaudeSessionSummary, ClaudeProject } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
@@ -11,11 +11,22 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { History, Search, RefreshCw, ExternalLink, Zap, Star, Activity, Clock } from 'lucide-react'
+import {
+  History,
+  Search,
+  RefreshCw,
+  ExternalLink,
+  Zap,
+  Star,
+  Activity,
+  Clock,
+  X,
+} from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
 import { CopyableId } from '@/components/CopyableId'
 import { formatTokens, shortPath } from '@/lib/format'
 import { overlapsRange, resolvePresetRange, type TimePreset } from '@/lib/timefilter'
+import { decodeWindows, overlapsAnyWindow } from '@/lib/drilldown'
 
 const TIME_PRESET_LABELS: Record<TimePreset, string> = {
   all: 'All time',
@@ -28,13 +39,25 @@ const TIME_PRESET_LABELS: Record<TimePreset, string> = {
 
 export default function ClaudeSessionsPage() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  // Drill-down from the analytics page: explicit hour windows + a label.
+  const drilldownWindows = useMemo(() => decodeWindows(searchParams.get('windows')), [searchParams])
+  const drilldownLabel = searchParams.get('label')
+  const drilldownActive = drilldownWindows.length > 0
   const [sessions, setSessions] = useState<ClaudeSessionSummary[]>([])
   const [projects, setProjects] = useState<ClaudeProject[]>([])
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
-  const [filterProject, setFilterProject] = useState('all')
+  const [filterProject, setFilterProject] = useState(searchParams.get('project') ?? 'all')
+
+  // Keep the project filter in sync when arriving via a new drill-down URL
+  // while the page is already mounted.
+  const projectParam = searchParams.get('project')
+  useEffect(() => {
+    if (projectParam) setFilterProject(projectParam)
+  }, [projectParam])
   const [filterFavorites, setFilterFavorites] = useState(false)
   const [timePreset, setTimePreset] = useState<TimePreset>('all')
   const [customFrom, setCustomFrom] = useState('')
@@ -84,7 +107,16 @@ export default function ClaudeSessionsPage() {
 
   const hasFavorites = sessions.some(s => s.is_favorite)
 
-  const timeFilterActive = timePreset !== 'all'
+  const timeFilterActive = drilldownActive || timePreset !== 'all'
+
+  const clearDrilldown = () => {
+    // Drop only the time drill-down; a project carried over from analytics
+    // stays applied (and visible in the project dropdown).
+    const next = new URLSearchParams(searchParams)
+    next.delete('windows')
+    next.delete('label')
+    setSearchParams(next, { replace: true })
+  }
 
   const filtered = useMemo(() => {
     const { from, to } = resolvePresetRange(timePreset, customFrom, customTo)
@@ -97,11 +129,23 @@ export default function ClaudeSessionsPage() {
         s.preview.toLowerCase().includes(q) ||
         s.project_path.toLowerCase().includes(q)
       const matchesFavorites = !filterFavorites || !!s.is_favorite
-      const matchesTime = overlapsRange(s.start_time, s.last_activity, from, to)
+      const matchesTime = drilldownActive
+        ? overlapsAnyWindow(s.start_time, s.last_activity, drilldownWindows)
+        : overlapsRange(s.start_time, s.last_activity, from, to)
       return matchesProject && matchesSearch && matchesFavorites && matchesTime
     })
     return result
-  }, [sessions, search, filterProject, filterFavorites, timePreset, customFrom, customTo])
+  }, [
+    sessions,
+    search,
+    filterProject,
+    filterFavorites,
+    timePreset,
+    customFrom,
+    customTo,
+    drilldownActive,
+    drilldownWindows,
+  ])
 
   if (loading) {
     return (
@@ -134,6 +178,14 @@ export default function ClaudeSessionsPage() {
             ? 'No sessions active in the selected time range.'
             : 'No sessions match your filters.'}
         </p>
+        {drilldownActive && (
+          <button
+            onClick={clearDrilldown}
+            className="mt-3 text-xs text-indigo-500 hover:text-indigo-600 dark:hover:text-indigo-400"
+          >
+            Clear time filter
+          </button>
+        )}
       </div>
     )
   } else {
@@ -178,6 +230,25 @@ export default function ClaudeSessionsPage() {
         </button>
       </div>
 
+      {/* Drill-down banner (from analytics charts) */}
+      {drilldownActive && (
+        <div className="flex items-center justify-between gap-3 px-4 sm:px-6 py-2 border-b border-indigo-100 dark:border-indigo-900/50 bg-indigo-50/60 dark:bg-indigo-950/30 shrink-0">
+          <p className="text-xs text-indigo-700 dark:text-indigo-300 truncate">
+            Showing sessions active {drilldownLabel ?? 'in the selected hours'} ·{' '}
+            <span className="text-indigo-500 dark:text-indigo-400">
+              {filtered.length} match{filtered.length === 1 ? '' : 'es'}
+            </span>
+          </p>
+          <button
+            onClick={clearDrilldown}
+            className="flex items-center gap-1 text-xs text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-200 shrink-0"
+          >
+            <X className="h-3 w-3" />
+            Clear
+          </button>
+        </div>
+      )}
+
       {/* Filters */}
       {sessions.length > 0 && (
         <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 px-4 sm:px-6 py-3 border-b border-zinc-100 dark:border-zinc-700/50 shrink-0">
@@ -206,7 +277,11 @@ export default function ClaudeSessionsPage() {
               </SelectContent>
             </Select>
           )}
-          <Select value={timePreset} onValueChange={v => setTimePreset(v as TimePreset)}>
+          <Select
+            value={timePreset}
+            onValueChange={v => setTimePreset(v as TimePreset)}
+            disabled={drilldownActive}
+          >
             <SelectTrigger className="w-full sm:w-44 h-8 text-xs">
               <Clock className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500 mr-1.5 shrink-0" />
               <SelectValue placeholder="All time" />
@@ -219,7 +294,7 @@ export default function ClaudeSessionsPage() {
               ))}
             </SelectContent>
           </Select>
-          {timePreset === 'custom' && (
+          {timePreset === 'custom' && !drilldownActive && (
             <div className="flex items-center gap-1.5 shrink-0">
               <input
                 type="datetime-local"
