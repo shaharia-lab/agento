@@ -11,10 +11,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { History, Search, RefreshCw, ExternalLink, Zap, Star, Activity } from 'lucide-react'
+import { History, Search, RefreshCw, ExternalLink, Zap, Star, Activity, Clock } from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
 import { CopyableId } from '@/components/CopyableId'
 import { formatTokens, shortPath } from '@/lib/format'
+import { overlapsRange, resolvePresetRange, type TimePreset } from '@/lib/timefilter'
+
+const TIME_PRESET_LABELS: Record<TimePreset, string> = {
+  all: 'All time',
+  '1h': 'Last hour',
+  '24h': 'Last 24 hours',
+  '7d': 'Last 7 days',
+  '30d': 'Last 30 days',
+  custom: 'Custom range…',
+}
 
 export default function ClaudeSessionsPage() {
   const navigate = useNavigate()
@@ -26,6 +36,9 @@ export default function ClaudeSessionsPage() {
   const [search, setSearch] = useState('')
   const [filterProject, setFilterProject] = useState('all')
   const [filterFavorites, setFilterFavorites] = useState(false)
+  const [timePreset, setTimePreset] = useState<TimePreset>('all')
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo, setCustomTo] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -71,7 +84,10 @@ export default function ClaudeSessionsPage() {
 
   const hasFavorites = sessions.some(s => s.is_favorite)
 
+  const timeFilterActive = timePreset !== 'all'
+
   const filtered = useMemo(() => {
+    const { from, to } = resolvePresetRange(timePreset, customFrom, customTo)
     const result = sessions.filter(s => {
       const matchesProject = filterProject === 'all' || s.project_path === filterProject
       const q = search.toLowerCase()
@@ -81,10 +97,11 @@ export default function ClaudeSessionsPage() {
         s.preview.toLowerCase().includes(q) ||
         s.project_path.toLowerCase().includes(q)
       const matchesFavorites = !filterFavorites || !!s.is_favorite
-      return matchesProject && matchesSearch && matchesFavorites
+      const matchesTime = overlapsRange(s.start_time, s.last_activity, from, to)
+      return matchesProject && matchesSearch && matchesFavorites && matchesTime
     })
     return result
-  }, [sessions, search, filterProject, filterFavorites])
+  }, [sessions, search, filterProject, filterFavorites, timePreset, customFrom, customTo])
 
   if (loading) {
     return (
@@ -112,13 +129,17 @@ export default function ClaudeSessionsPage() {
   } else if (filtered.length === 0) {
     sessionListContent = (
       <div className="flex flex-col items-center justify-center py-16 text-center">
-        <p className="text-sm text-zinc-400">No sessions match your filters.</p>
+        <p className="text-sm text-zinc-400">
+          {timeFilterActive
+            ? 'No sessions active in the selected time range.'
+            : 'No sessions match your filters.'}
+        </p>
       </div>
     )
   } else {
     sessionListContent = (
       <div
-        key={`${filterFavorites}-${filterProject}-${search}`}
+        key={`${filterFavorites}-${filterProject}-${search}-${timePreset}-${customFrom}-${customTo}`}
         className="divide-y divide-zinc-100 dark:divide-zinc-700/50"
       >
         {filtered.map(session => (
@@ -184,6 +205,38 @@ export default function ClaudeSessionsPage() {
                 ))}
               </SelectContent>
             </Select>
+          )}
+          <Select value={timePreset} onValueChange={v => setTimePreset(v as TimePreset)}>
+            <SelectTrigger className="w-full sm:w-44 h-8 text-xs">
+              <Clock className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500 mr-1.5 shrink-0" />
+              <SelectValue placeholder="All time" />
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(TIME_PRESET_LABELS) as TimePreset[]).map(p => (
+                <SelectItem key={p} value={p} className="text-xs">
+                  {TIME_PRESET_LABELS[p]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {timePreset === 'custom' && (
+            <div className="flex items-center gap-1.5 shrink-0">
+              <input
+                type="datetime-local"
+                value={customFrom}
+                onChange={e => setCustomFrom(e.target.value)}
+                aria-label="Active from"
+                className="rounded-md border border-zinc-200 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 px-2 py-1 h-8 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400"
+              />
+              <span className="text-xs text-zinc-400 dark:text-zinc-500">–</span>
+              <input
+                type="datetime-local"
+                value={customTo}
+                onChange={e => setCustomTo(e.target.value)}
+                aria-label="Active to"
+                className="rounded-md border border-zinc-200 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 px-2 py-1 h-8 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400"
+              />
+            </div>
           )}
           {hasFavorites && (
             <button
