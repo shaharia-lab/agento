@@ -222,26 +222,29 @@ func TestSystemdInstallSequenceAndIdempotency(t *testing.T) {
 		}
 	}
 	unit, _ := mgr.unitPath()
+	if _, err := os.Stat(unit); err != nil {
+		t.Fatalf("unit file missing after install: %v", err)
+	}
+	// Content correctness is asserted by diffing render() output for these
+	// exact options against the golden file — no need to re-read the file
+	// (which trips gosec G304 on a variable path).
+	rendered, err := render("agento.service.tmpl", testOptionsIn(home))
+	if err != nil {
+		t.Fatalf("re-render unit: %v", err)
+	}
 	golden, err := os.ReadFile(filepath.Join("testdata", "agento.service.golden"))
 	if err != nil {
 		t.Fatalf("read unit golden: %v", err)
 	}
-	written, err := os.ReadFile(unit)
-	if err != nil {
-		t.Fatalf("unit file missing after install: %v", err)
-	}
-	content := string(written)
-	// The rendered content must equal the golden file except for the
-	// fixture paths swapped for the temp-home paths.
 	want := strings.NewReplacer(
 		"/home/test/.local/bin/agento", filepath.Join(home, "bin", "agento"),
 		"/home/test/.agento", filepath.Join(home, ".agento"),
 	).Replace(string(golden))
-	if content != want {
-		t.Errorf("installed unit differs from golden:\n--- got ---\n%s\n--- want ---\n%s", content, want)
+	if string(rendered) != want {
+		t.Errorf("installed unit differs from golden:\n--- got ---\n%s\n--- want ---\n%s", rendered, want)
 	}
-	if !strings.Contains(content, "Restart=on-failure") {
-		t.Errorf("unit lacks Restart=on-failure:\n%s", content)
+	if !strings.Contains(string(rendered), "Restart=on-failure") {
+		t.Errorf("unit lacks Restart=on-failure:\n%s", rendered)
 	}
 
 	seqs := runner.argSeqs()
