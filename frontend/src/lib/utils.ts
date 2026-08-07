@@ -23,6 +23,7 @@ export function formatRelativeTime(dateStr: string): string {
 
 export function formatDateTime(dateStr: string, withSeconds = false): string {
   const date = new Date(dateStr)
+  if (isNaN(date.getTime())) return ''
   const datePart = date.toLocaleDateString('en-GB', {
     day: 'numeric',
     month: 'short',

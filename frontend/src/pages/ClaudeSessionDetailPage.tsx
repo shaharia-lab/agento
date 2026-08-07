@@ -181,10 +181,7 @@ function UserMessage({ msg }: Readonly<{ msg: ClaudeMessage }>) {
         <p className="text-sm text-zinc-800 dark:text-zinc-200 whitespace-pre-wrap leading-relaxed">
           {msg.content}
         </p>
-        <span
-          className="text-xs text-zinc-400 dark:text-zinc-500 mt-0.5 block"
-          title={formatDateTime(msg.timestamp, true)}
-        >
+        <span className="text-xs text-zinc-400 dark:text-zinc-500 mt-0.5 block">
           {formatDateTime(msg.timestamp, true)}
         </span>
       </div>
@@ -209,10 +206,7 @@ function AssistantMessage({ msg }: Readonly<{ msg: ClaudeMessage }>) {
         )}
         {hasChildren && <ProgressChildren messages={msg.children!} />}
         <div className="flex items-center gap-3 mt-1">
-          <span
-            className="text-xs text-zinc-400 dark:text-zinc-500"
-            title={formatDateTime(msg.timestamp, true)}
-          >
+          <span className="text-xs text-zinc-400 dark:text-zinc-500">
             {formatDateTime(msg.timestamp, true)}
           </span>
           {msg.usage && (
