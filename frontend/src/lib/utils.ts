@@ -21,6 +21,21 @@ export function formatRelativeTime(dateStr: string): string {
   return date.toLocaleDateString()
 }
 
+export function formatDateTime(dateStr: string, withSeconds = false): string {
+  const date = new Date(dateStr)
+  const datePart = date.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+  })
+  const timePart = date.toLocaleTimeString('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    ...(withSeconds ? { second: '2-digit' as const } : {}),
+  })
+  return `${datePart} ${timePart}`
+}
+
 export function truncate(str: string, max: number): string {
   if (str.length <= max) return str
   return str.slice(0, max) + '…'
