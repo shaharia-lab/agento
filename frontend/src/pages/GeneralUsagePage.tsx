@@ -337,14 +337,15 @@ function HourlyActivityChart({
   data,
   onBarClick,
 }: Readonly<{ data: HourlyActivity[]; onBarClick?: (hour: number) => void }>) {
-  const handleClick = onBarClick
-    ? (state: unknown) => {
-        // Recharts' MouseHandlerDataParam doesn't expose activePayload in its
-        // public type, but BarChart click state carries it at runtime.
-        const payload = (state as { activePayload?: Array<{ payload?: { hour?: number } }> })
-          ?.activePayload?.[0]?.payload
-        const hour = payload?.hour
-        if (typeof hour === 'number' && data.find(d => d.hour === hour)?.sessions) onBarClick(hour)
+  // Per-bar click handler: recharts 3 does not reliably populate activePayload
+  // in chart-level onClick state, but Bar's own onClick receives the bar's
+  // data entry directly.
+  const handleBarClick = onBarClick
+    ? (entry: unknown) => {
+        const hour = (entry as { hour?: unknown })?.hour
+        if (typeof hour === 'number' && data.find(d => d.hour === hour)?.sessions) {
+          onBarClick(hour)
+        }
       }
     : undefined
 
@@ -354,7 +355,7 @@ function HourlyActivityChart({
         <BarChart
           data={data}
           margin={{ top: 4, right: 8, left: 0, bottom: 0 }}
-          onClick={handleClick}
+          style={onBarClick ? { userSelect: 'none' } : undefined}
         >
           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" strokeOpacity={0.5} />
           <XAxis
@@ -382,6 +383,7 @@ function HourlyActivityChart({
             fill="#22c55e"
             radius={[2, 2, 0, 0]}
             cursor={onBarClick ? 'pointer' : undefined}
+            onClick={handleBarClick}
           />
         </BarChart>
       </ResponsiveContainer>
