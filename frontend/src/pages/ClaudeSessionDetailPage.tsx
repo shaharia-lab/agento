@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { claudeSessionsApi } from '@/lib/api'
 import type { ClaudeSessionDetail, ClaudeMessage, ClaudeNormalizedBlock, ClaudeTodo } from '@/types'
-import { formatRelativeTime } from '@/lib/utils'
+import { formatRelativeTime, formatDateTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { CopyableId } from '@/components/CopyableId'
@@ -182,7 +182,7 @@ function UserMessage({ msg }: Readonly<{ msg: ClaudeMessage }>) {
           {msg.content}
         </p>
         <span className="text-xs text-zinc-400 dark:text-zinc-500 mt-0.5 block">
-          {formatRelativeTime(msg.timestamp)}
+          {formatDateTime(msg.timestamp, true)}
         </span>
       </div>
     </div>
@@ -207,7 +207,7 @@ function AssistantMessage({ msg }: Readonly<{ msg: ClaudeMessage }>) {
         {hasChildren && <ProgressChildren messages={msg.children!} />}
         <div className="flex items-center gap-3 mt-1">
           <span className="text-xs text-zinc-400 dark:text-zinc-500">
-            {formatRelativeTime(msg.timestamp)}
+            {formatDateTime(msg.timestamp, true)}
           </span>
           {msg.usage && (
             <span className="flex items-center gap-0.5 text-xs text-zinc-400 dark:text-zinc-500">
@@ -423,6 +423,24 @@ export default function ClaudeSessionDetailPage() {
                 </Badge>
               )}
               {id && <CopyableId value={id} label="Copy session ID" />}
+              {detail.start_time && (
+                <span
+                  className="flex items-center gap-1 text-xs text-zinc-500 dark:text-zinc-400"
+                  title={formatDateTime(detail.start_time, true)}
+                >
+                  <Play className="h-3 w-3" />
+                  Started {formatRelativeTime(detail.start_time)}
+                </span>
+              )}
+              {detail.last_activity && (
+                <span
+                  className="flex items-center gap-1 text-xs text-zinc-500 dark:text-zinc-400"
+                  title={formatDateTime(detail.last_activity, true)}
+                >
+                  <Clock className="h-3 w-3" />
+                  Active {formatRelativeTime(detail.last_activity)}
+                </span>
+              )}
             </div>
           </div>
           <button
