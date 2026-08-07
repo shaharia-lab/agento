@@ -1,0 +1,19 @@
+[Unit]
+Description=Agento — AI Agents Platform
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{.BinaryPath}} web --no-browser
+Restart=on-failure
+RestartSec=5
+Environment=PATH={{.ExtraPath}}
+Environment=PORT={{.Port}}
+Environment=AGENTO_DATA_DIR={{.DataDir}}
+Environment=AGENTO_SKIP_UPDATE_CHECK=1
+StandardOutput=append:{{.LogPath}}
+StandardError=append:{{.LogPath}}
+
+[Install]
+WantedBy=default.target

@@ -348,6 +348,12 @@ To use a different port:
 agento web --port 3000
 ```
 
+To run Agento in the background (survives logout, reboot, and crashes) as a managed service on macOS or Linux:
+
+```bash
+agento service install   # then: agento service status|stop|start|restart|logs|uninstall
+```
+
 <br>
 
 ## ⚙️ Configuration
@@ -427,6 +433,30 @@ Usage:
 Flags:
   -y, --yes    Skip confirmation prompt
 ```
+
+</details>
+
+<details>
+<summary><strong>agento service</strong> — Run Agento as a background service (macOS + Linux)</summary>
+<br>
+
+```
+Usage:
+  agento service [command]
+
+Available Commands:
+  install      Install Agento as a background service (enable + start)
+  uninstall    Stop, disable, and remove the background service
+  start        Start the installed service
+  stop         Stop the service without removing it
+  restart      Restart the service
+  status       Show installed/enabled/running state, PID, URL, and log path
+  logs         Print the service log (-f to follow, -n to set line count)
+```
+
+macOS uses a LaunchAgent (`~/Library/LaunchAgents/io.shaharialab.agento.plist`, starts at login);
+Linux uses a systemd user unit (`~/.config/systemd/user/agento.service`, lingering enabled).
+See [Run Agento in the background](docs/getting-started.md#run-agento-in-the-background).
 
 </details>
 

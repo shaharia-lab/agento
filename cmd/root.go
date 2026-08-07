@@ -22,12 +22,14 @@ import (
 const skipUpdateCheckEnv = "AGENTO_SKIP_UPDATE_CHECK"
 
 // updateCheckSkipCommands lists subcommand names that must never trigger the
-// auto-update check. The "update" command runs its own (uncached) check, and
-// help/version are non-interactive metadata commands.
+// auto-update check. The "update" command runs its own (uncached) check,
+// help/version are non-interactive metadata commands, and "service" manages
+// the background daemon — it must stay fast and side-effect free.
 var updateCheckSkipCommands = map[string]struct{}{ //nolint:gochecknoglobals
 	"update":     {},
 	"help":       {},
 	"completion": {},
+	"service":    {},
 	"__complete": {}, // cobra's hidden shell-completion command
 }
 
@@ -65,6 +67,7 @@ func Execute() {
 	root.AddCommand(NewWebCmd(cfg))
 	root.AddCommand(NewAskCmd(cfg))
 	root.AddCommand(NewUpdateCmd(cfg))
+	root.AddCommand(NewServiceCmd(cfg))
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
