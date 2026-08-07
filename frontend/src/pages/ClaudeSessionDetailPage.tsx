@@ -5,6 +5,7 @@ import type { ClaudeSessionDetail, ClaudeMessage, ClaudeNormalizedBlock, ClaudeT
 import { formatRelativeTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { CopyableId } from '@/components/CopyableId'
 import {
   ArrowLeft,
   ChevronDown,
@@ -421,9 +422,7 @@ export default function ClaudeSessionDetailPage() {
                   {detail.model}
                 </Badge>
               )}
-              <span className="text-xs text-zinc-400 dark:text-zinc-500 font-mono">
-                {(id ?? '').slice(0, 8)}…
-              </span>
+              {id && <CopyableId value={id} label="Copy session ID" />}
             </div>
           </div>
           <button
