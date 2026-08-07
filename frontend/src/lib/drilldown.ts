@@ -5,10 +5,12 @@ const DAY_NAMES_PLURAL = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thurs
 /**
  * Drill-down helpers for the analytics → Claude Sessions navigation.
  *
- * The heatmap and hourly charts bucket sessions by the *local* weekday/hour of
- * their last activity, so a click must expand back into every matching concrete
- * hour window inside the analytics date range. The sessions page then keeps the
- * sessions whose activity window overlaps any of those windows.
+ * The backend buckets sessions by the UTC weekday/hour of their last activity
+ * (session timestamps are parsed from JSONL `Z` timestamps and never converted,
+ * and the analytics `from`/`to` params are UTC midnights). So a click must
+ * expand back into every matching concrete UTC hour window inside the range.
+ * The sessions page then keeps the sessions whose activity window overlaps any
+ * of those windows.
  */
 
 export interface DrilldownWindow {
@@ -28,12 +30,16 @@ export interface DrilldownTarget {
 }
 
 /**
- * Parses the analytics date range ("YYYY-MM-DD" strings, inclusive) into local
- * millisecond bounds. Returns null when either bound is invalid.
+ * Parses the analytics date range ("YYYY-MM-DD" strings, inclusive) into UTC
+ * millisecond bounds, matching how the backend parses the same params
+ * (`time.Parse("2006-01-02", …)` → UTC midnight). Returns null when either
+ * bound is invalid.
  */
 export function parseRangeBounds(fromDate: string, toDate: string): { from: number; to: number } | null {
-  const from = new Date(`${fromDate}T00:00:00`).getTime()
-  const to = new Date(`${toDate}T00:00:00`).getTime() + 24 * 60 * 60 * 1000 // `to` date is inclusive
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+  if (!DATE_RE.test(fromDate) || !DATE_RE.test(toDate)) return null
+  const from = Date.parse(`${fromDate}T00:00:00Z`)
+  const to = Date.parse(`${toDate}T00:00:00Z`) + 24 * 60 * 60 * 1000 // `to` date is inclusive
   if (Number.isNaN(from) || Number.isNaN(to) || from >= to) return null
   return { from, to }
 }
@@ -46,12 +52,11 @@ function collectWindows(
   // Walk hour-by-hour from the range start; ranges are at most ~90 days so this
   // stays cheap (≤ ~2200 iterations) and avoids day/hour juggling edge cases.
   const cursor = new Date(bounds.from)
-  cursor.setMinutes(0, 0, 0)
   while (cursor.getTime() < bounds.to) {
     if (matches(cursor)) {
       windows.push({ from: cursor.getTime(), to: cursor.getTime() + 60 * 60 * 1000 })
     }
-    cursor.setHours(cursor.getHours() + 1)
+    cursor.setUTCHours(cursor.getUTCHours() + 1)
   }
   return windows
 }
@@ -66,13 +71,13 @@ export function heatmapCellTarget(
   const bounds = parseRangeBounds(fromDate, toDate)
   if (!bounds) return null
   return {
-    windows: collectWindows(bounds, d => d.getDay() === dayOfWeek && d.getHours() === hour),
-    label: `${DAY_NAMES_PLURAL[dayOfWeek] ?? DAY_NAMES[dayOfWeek]} ${padHour(hour)}:00–${padHour((hour + 1) % 24)}:00`,
+    windows: collectWindows(bounds, d => d.getUTCDay() === dayOfWeek && d.getUTCHours() === hour),
+    label: `${DAY_NAMES_PLURAL[dayOfWeek] ?? DAY_NAMES[dayOfWeek]} ${padHour(hour)}:00–${padHour((hour + 1) % 24)}:00 UTC`,
     rangeLabel: `${fromDate} → ${toDate}`,
   }
 }
 
-/** Windows for an hourly bar: the given hour of every day in the range. */
+/** Windows for an hourly bar: the given UTC hour of every day in the range. */
 export function hourlyBarTarget(
   fromDate: string,
   toDate: string,
@@ -81,8 +86,8 @@ export function hourlyBarTarget(
   const bounds = parseRangeBounds(fromDate, toDate)
   if (!bounds) return null
   return {
-    windows: collectWindows(bounds, d => d.getHours() === hour),
-    label: `every day ${padHour(hour)}:00–${padHour((hour + 1) % 24)}:00`,
+    windows: collectWindows(bounds, d => d.getUTCHours() === hour),
+    label: `every day ${padHour(hour)}:00–${padHour((hour + 1) % 24)}:00 UTC`,
     rangeLabel: `${fromDate} → ${toDate}`,
   }
 }
@@ -113,10 +118,11 @@ export function decodeWindows(value: string | null): DrilldownWindow[] {
 }
 
 /** Builds the `/claude-sessions` URL for a drill-down target. */
-export function drilldownUrl(target: DrilldownTarget): string {
+export function drilldownUrl(target: DrilldownTarget, project?: string): string {
   const qs = new URLSearchParams()
   qs.set('windows', encodeWindows(target.windows))
   qs.set('label', `${target.label} · ${target.rangeLabel}`)
+  if (project) qs.set('project', project)
   return `/claude-sessions?${qs.toString()}`
 }
 

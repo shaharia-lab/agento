@@ -43,7 +43,7 @@ export default function ClaudeSessionsPage() {
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
-  const [filterProject, setFilterProject] = useState('all')
+  const [filterProject, setFilterProject] = useState(searchParams.get('project') ?? 'all')
   const [filterFavorites, setFilterFavorites] = useState(false)
   const [timePreset, setTimePreset] = useState<TimePreset>('all')
   const [customFrom, setCustomFrom] = useState('')
