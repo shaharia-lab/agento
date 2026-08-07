@@ -11,7 +11,17 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { History, Search, RefreshCw, ExternalLink, Zap, Star, Activity, Clock, X } from 'lucide-react'
+import {
+  History,
+  Search,
+  RefreshCw,
+  ExternalLink,
+  Zap,
+  Star,
+  Activity,
+  Clock,
+  X,
+} from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
 import { CopyableId } from '@/components/CopyableId'
 import { formatTokens, shortPath } from '@/lib/format'
@@ -31,10 +41,7 @@ export default function ClaudeSessionsPage() {
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
   // Drill-down from the analytics page: explicit hour windows + a label.
-  const drilldownWindows = useMemo(
-    () => decodeWindows(searchParams.get('windows')),
-    [searchParams],
-  )
+  const drilldownWindows = useMemo(() => decodeWindows(searchParams.get('windows')), [searchParams])
   const drilldownLabel = searchParams.get('label')
   const drilldownActive = drilldownWindows.length > 0
   const [sessions, setSessions] = useState<ClaudeSessionSummary[]>([])

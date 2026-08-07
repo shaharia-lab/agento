@@ -14,7 +14,13 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { analyticsApi } from '@/lib/api'
-import { drilldownUrl, heatmapCellTarget, hourlyBarTarget, parseRangeBounds, MAX_DRILLDOWN_DAYS } from '@/lib/drilldown'
+import {
+  drilldownUrl,
+  heatmapCellTarget,
+  hourlyBarTarget,
+  parseRangeBounds,
+  MAX_DRILLDOWN_DAYS,
+} from '@/lib/drilldown'
 import type {
   AnalyticsReport,
   AnalyticsSummary,
@@ -149,7 +155,11 @@ function StaticHeatmapCell({ day, hour, cell, maxSessions }: Readonly<HeatmapCel
   return (
     <div
       className={`flex-1 aspect-square rounded-[2px] mx-px ${heatmapCellBg(intensity)} cursor-default`}
-      title={cell ? cellTitle(day, hour, cell).replace(' — click to view sessions', '') : `${day} ${hour}:00 — no activity`}
+      title={
+        cell
+          ? cellTitle(day, hour, cell).replace(' — click to view sessions', '')
+          : `${day} ${hour}:00 — no activity`
+      }
     />
   )
 }
@@ -217,12 +227,7 @@ function HeatmapGridCell({
   }
 >) {
   if (!interactive) return <StaticHeatmapCell {...props} />
-  return (
-    <InteractiveHeatmapCell
-      {...props}
-      onCellClick={props.onCellClick ?? (() => {})}
-    />
-  )
+  return <InteractiveHeatmapCell {...props} onCellClick={props.onCellClick ?? (() => {})} />
 }
 
 function ActivityHeatmap({
@@ -256,7 +261,11 @@ function ActivityHeatmap({
   return (
     <ChartCard title="Activity Heatmap (Day × Hour)">
       <div className="overflow-x-auto">
-        <div className="min-w-[560px]" role={interactive ? 'grid' : undefined} aria-label={interactive ? 'Activity by day and hour' : undefined}>
+        <div
+          className="min-w-[560px]"
+          role={interactive ? 'grid' : undefined}
+          aria-label={interactive ? 'Activity by day and hour' : undefined}
+        >
           {/* Hour labels */}
           <div className="flex ml-8 mb-1" role={interactive ? 'presentation' : undefined}>
             {Array.from({ length: 24 }, (_, h) => (

@@ -1,6 +1,14 @@
 import { DAY_NAMES } from '@/pages/analyticsShared'
 
-const DAY_NAMES_PLURAL = ['Sundays', 'Mondays', 'Tuesdays', 'Wednesdays', 'Thursdays', 'Fridays', 'Saturdays']
+const DAY_NAMES_PLURAL = [
+  'Sundays',
+  'Mondays',
+  'Tuesdays',
+  'Wednesdays',
+  'Thursdays',
+  'Fridays',
+  'Saturdays',
+]
 
 /**
  * Drill-down helpers for the analytics → Claude Sessions navigation.
@@ -36,7 +44,10 @@ export interface DrilldownTarget {
  * bound is invalid, or when the range exceeds MAX_DRILLDOWN_DAYS — the
  * serialized window list would otherwise exceed URL length limits.
  */
-export function parseRangeBounds(fromDate: string, toDate: string): { from: number; to: number } | null {
+export function parseRangeBounds(
+  fromDate: string,
+  toDate: string,
+): { from: number; to: number } | null {
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
   if (!DATE_RE.test(fromDate) || !DATE_RE.test(toDate)) return null
   const from = Date.parse(`${fromDate}T00:00:00Z`)
