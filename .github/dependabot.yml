@@ -23,6 +23,13 @@ updates:
       time: "06:00"
       timezone: Europe/Berlin
     open-pull-requests-limit: 1
+    # typescript-eslint does not support TS 7 yet; eslint-plugin-react-hooks 7.1
+    # introduces stricter rules that need a dedicated cleanup pass
+    ignore:
+      - dependency-name: typescript
+        versions: [">=7.0.0"]
+      - dependency-name: eslint-plugin-react-hooks
+        versions: [">=7.1.0"]
     groups:
       frontend:
         patterns:
