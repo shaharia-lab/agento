@@ -11,9 +11,20 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { History, Search, RefreshCw, ExternalLink, Zap, Star, Activity } from 'lucide-react'
+import { History, Search, RefreshCw, ExternalLink, Zap, Star, Activity, Clock } from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
+import { CopyableId } from '@/components/CopyableId'
 import { formatTokens, shortPath } from '@/lib/format'
+import { overlapsRange, resolvePresetRange, type TimePreset } from '@/lib/timefilter'
+
+const TIME_PRESET_LABELS: Record<TimePreset, string> = {
+  all: 'All time',
+  '1h': 'Last hour',
+  '24h': 'Last 24 hours',
+  '7d': 'Last 7 days',
+  '30d': 'Last 30 days',
+  custom: 'Custom range…',
+}
 
 export default function ClaudeSessionsPage() {
   const navigate = useNavigate()
@@ -25,6 +36,9 @@ export default function ClaudeSessionsPage() {
   const [search, setSearch] = useState('')
   const [filterProject, setFilterProject] = useState('all')
   const [filterFavorites, setFilterFavorites] = useState(false)
+  const [timePreset, setTimePreset] = useState<TimePreset>('all')
+  const [customFrom, setCustomFrom] = useState('')
+  const [customTo, setCustomTo] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -70,7 +84,10 @@ export default function ClaudeSessionsPage() {
 
   const hasFavorites = sessions.some(s => s.is_favorite)
 
+  const timeFilterActive = timePreset !== 'all'
+
   const filtered = useMemo(() => {
+    const { from, to } = resolvePresetRange(timePreset, customFrom, customTo)
     const result = sessions.filter(s => {
       const matchesProject = filterProject === 'all' || s.project_path === filterProject
       const q = search.toLowerCase()
@@ -80,10 +97,11 @@ export default function ClaudeSessionsPage() {
         s.preview.toLowerCase().includes(q) ||
         s.project_path.toLowerCase().includes(q)
       const matchesFavorites = !filterFavorites || !!s.is_favorite
-      return matchesProject && matchesSearch && matchesFavorites
+      const matchesTime = overlapsRange(s.start_time, s.last_activity, from, to)
+      return matchesProject && matchesSearch && matchesFavorites && matchesTime
     })
     return result
-  }, [sessions, search, filterProject, filterFavorites])
+  }, [sessions, search, filterProject, filterFavorites, timePreset, customFrom, customTo])
 
   if (loading) {
     return (
@@ -111,13 +129,17 @@ export default function ClaudeSessionsPage() {
   } else if (filtered.length === 0) {
     sessionListContent = (
       <div className="flex flex-col items-center justify-center py-16 text-center">
-        <p className="text-sm text-zinc-400">No sessions match your filters.</p>
+        <p className="text-sm text-zinc-400">
+          {timeFilterActive
+            ? 'No sessions active in the selected time range.'
+            : 'No sessions match your filters.'}
+        </p>
       </div>
     )
   } else {
     sessionListContent = (
       <div
-        key={`${filterFavorites}-${filterProject}-${search}`}
+        key={`${filterFavorites}-${filterProject}-${search}-${timePreset}-${customFrom}-${customTo}`}
         className="divide-y divide-zinc-100 dark:divide-zinc-700/50"
       >
         {filtered.map(session => (
@@ -184,6 +206,38 @@ export default function ClaudeSessionsPage() {
               </SelectContent>
             </Select>
           )}
+          <Select value={timePreset} onValueChange={v => setTimePreset(v as TimePreset)}>
+            <SelectTrigger className="w-full sm:w-44 h-8 text-xs">
+              <Clock className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500 mr-1.5 shrink-0" />
+              <SelectValue placeholder="All time" />
+            </SelectTrigger>
+            <SelectContent>
+              {(Object.keys(TIME_PRESET_LABELS) as TimePreset[]).map(p => (
+                <SelectItem key={p} value={p} className="text-xs">
+                  {TIME_PRESET_LABELS[p]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          {timePreset === 'custom' && (
+            <div className="flex items-center gap-1.5 shrink-0">
+              <input
+                type="datetime-local"
+                value={customFrom}
+                onChange={e => setCustomFrom(e.target.value)}
+                aria-label="Active from"
+                className="rounded-md border border-zinc-200 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 px-2 py-1 h-8 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400"
+              />
+              <span className="text-xs text-zinc-400 dark:text-zinc-500">–</span>
+              <input
+                type="datetime-local"
+                value={customTo}
+                onChange={e => setCustomTo(e.target.value)}
+                aria-label="Active to"
+                className="rounded-md border border-zinc-200 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-900 dark:text-zinc-100 px-2 py-1 h-8 text-xs focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-400"
+              />
+            </div>
+          )}
           {hasFavorites && (
             <button
               onClick={() => setFilterFavorites(f => !f)}
@@ -230,110 +284,112 @@ function SessionRow({
   const hasTokens = totalTokens > 0
 
   return (
-    <div className="flex items-start gap-3 px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors relative">
-      <button
-        type="button"
-        className="flex items-start gap-3 flex-1 min-w-0 text-left appearance-none bg-transparent border-0 p-0"
-        onClick={onClick}
-      >
-        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0 mt-0.5">
-          <History className="h-3.5 w-3.5" />
-        </div>
-        <div className="flex-1 min-w-0">
-          {/* Custom title or preview / first message */}
-          <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate leading-snug">
-            {session.custom_title || session.preview || (
-              <span className="italic text-zinc-400">No message content</span>
-            )}
-          </p>
-          {/* Meta row */}
-          <div className="flex items-center gap-2 mt-1 flex-wrap">
-            <Badge
-              variant="secondary"
-              className="text-xs py-0 h-4 bg-zinc-100 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 border-0 font-mono font-normal"
-            >
-              {shortPath(session.project_path)}
-            </Badge>
-            {session.git_branch && (
-              <span className="text-xs text-zinc-400 dark:text-zinc-500 font-mono">
-                {session.git_branch}
-              </span>
-            )}
-            <span className="text-xs text-zinc-400 dark:text-zinc-500">
-              {formatRelativeTime(session.last_activity)}
-            </span>
-            <span className="text-xs text-zinc-400 dark:text-zinc-500">
-              {session.message_count} msg{session.message_count === 1 ? '' : 's'}
-            </span>
-            {hasTokens && (
-              <Tooltip
-                side="top"
-                content={
-                  <div className="space-y-1">
-                    <div className="flex justify-between gap-4">
-                      <span className="text-zinc-400">Input tokens</span>
-                      <span>{session.usage.input_tokens.toLocaleString()}</span>
-                    </div>
-                    <div className="flex justify-between gap-4">
-                      <span className="text-zinc-400">Output tokens</span>
-                      <span>{session.usage.output_tokens.toLocaleString()}</span>
-                    </div>
-                    {session.usage.cache_read_tokens > 0 && (
-                      <div className="flex justify-between gap-4">
-                        <span className="text-zinc-400">Cache read</span>
-                        <span>{session.usage.cache_read_tokens.toLocaleString()}</span>
-                      </div>
-                    )}
-                    {session.usage.cache_creation_tokens > 0 && (
-                      <div className="flex justify-between gap-4">
-                        <span className="text-zinc-400">Cache write</span>
-                        <span>{session.usage.cache_creation_tokens.toLocaleString()}</span>
-                      </div>
-                    )}
-                  </div>
-                }
-              >
-                <span className="flex items-center gap-0.5 text-xs text-zinc-400 dark:text-zinc-500 cursor-default">
-                  <Zap className="h-2.5 w-2.5" />
-                  {formatTokens(session.usage.input_tokens)}↑&nbsp;
-                  {formatTokens(session.usage.output_tokens)}↓
-                </span>
-              </Tooltip>
-            )}
+    <div className="px-4 sm:px-6 py-3.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer group transition-colors relative">
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          className="flex items-start gap-3 flex-1 min-w-0 text-left appearance-none bg-transparent border-0 p-0"
+          onClick={onClick}
+        >
+          <div className="flex h-8 w-8 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 shrink-0 mt-0.5">
+            <History className="h-3.5 w-3.5" />
           </div>
-          {/* Session ID */}
-          <p className="text-xs text-zinc-300 dark:text-zinc-600 font-mono mt-0.5 truncate">
-            {session.session_id}
-          </p>
-        </div>
-      </button>
-      <button
-        type="button"
-        className={`h-7 w-7 flex items-center justify-center rounded-md transition-all shrink-0 mt-0.5 ${
-          session.is_favorite
-            ? 'text-amber-400'
-            : 'opacity-0 group-hover:opacity-100 text-zinc-300 dark:text-zinc-600 hover:text-amber-400'
-        }`}
-        onClick={e => {
-          e.stopPropagation()
-          onToggleFavorite()
-        }}
-        title={session.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
-      >
-        <Star className={`h-3.5 w-3.5 ${session.is_favorite ? 'fill-amber-400' : ''}`} />
-      </button>
-      <button
-        type="button"
-        className="h-7 w-7 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 text-zinc-300 dark:text-zinc-600 hover:text-zinc-500 dark:hover:text-zinc-400 transition-all shrink-0 mt-0.5 cursor-pointer"
-        onClick={e => {
-          e.stopPropagation()
-          onJourney()
-        }}
-        title="View session journey"
-      >
-        <Activity className="h-3.5 w-3.5" />
-      </button>
-      <ExternalLink className="h-3.5 w-3.5 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-400 dark:group-hover:text-zinc-400 shrink-0 mt-1.5 transition-colors" />
+          <div className="flex-1 min-w-0">
+            {/* Custom title or preview / first message */}
+            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate leading-snug">
+              {session.custom_title || session.preview || (
+                <span className="italic text-zinc-400">No message content</span>
+              )}
+            </p>
+            {/* Meta row */}
+            <div className="flex items-center gap-2 mt-1 flex-wrap">
+              <Badge
+                variant="secondary"
+                className="text-xs py-0 h-4 bg-zinc-100 dark:bg-zinc-700 text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-700 border-0 font-mono font-normal"
+              >
+                {shortPath(session.project_path)}
+              </Badge>
+              {session.git_branch && (
+                <span className="text-xs text-zinc-400 dark:text-zinc-500 font-mono">
+                  {session.git_branch}
+                </span>
+              )}
+              <span className="text-xs text-zinc-400 dark:text-zinc-500">
+                {formatRelativeTime(session.last_activity)}
+              </span>
+              <span className="text-xs text-zinc-400 dark:text-zinc-500">
+                {session.message_count} msg{session.message_count === 1 ? '' : 's'}
+              </span>
+              {hasTokens && (
+                <Tooltip
+                  side="top"
+                  content={
+                    <div className="space-y-1">
+                      <div className="flex justify-between gap-4">
+                        <span className="text-zinc-400">Input tokens</span>
+                        <span>{session.usage.input_tokens.toLocaleString()}</span>
+                      </div>
+                      <div className="flex justify-between gap-4">
+                        <span className="text-zinc-400">Output tokens</span>
+                        <span>{session.usage.output_tokens.toLocaleString()}</span>
+                      </div>
+                      {session.usage.cache_read_tokens > 0 && (
+                        <div className="flex justify-between gap-4">
+                          <span className="text-zinc-400">Cache read</span>
+                          <span>{session.usage.cache_read_tokens.toLocaleString()}</span>
+                        </div>
+                      )}
+                      {session.usage.cache_creation_tokens > 0 && (
+                        <div className="flex justify-between gap-4">
+                          <span className="text-zinc-400">Cache write</span>
+                          <span>{session.usage.cache_creation_tokens.toLocaleString()}</span>
+                        </div>
+                      )}
+                    </div>
+                  }
+                >
+                  <span className="flex items-center gap-0.5 text-xs text-zinc-400 dark:text-zinc-500 cursor-default">
+                    <Zap className="h-2.5 w-2.5" />
+                    {formatTokens(session.usage.input_tokens)}↑&nbsp;
+                    {formatTokens(session.usage.output_tokens)}↓
+                  </span>
+                </Tooltip>
+              )}
+            </div>
+          </div>
+        </button>
+        <button
+          type="button"
+          className={`h-7 w-7 flex items-center justify-center rounded-md transition-all shrink-0 mt-0.5 ${
+            session.is_favorite
+              ? 'text-amber-400'
+              : 'opacity-0 group-hover:opacity-100 text-zinc-300 dark:text-zinc-600 hover:text-amber-400'
+          }`}
+          onClick={e => {
+            e.stopPropagation()
+            onToggleFavorite()
+          }}
+          title={session.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
+        >
+          <Star className={`h-3.5 w-3.5 ${session.is_favorite ? 'fill-amber-400' : ''}`} />
+        </button>
+        <button
+          type="button"
+          className="h-7 w-7 flex items-center justify-center rounded-md opacity-0 group-hover:opacity-100 text-zinc-300 dark:text-zinc-600 hover:text-zinc-500 dark:hover:text-zinc-400 transition-all shrink-0 mt-0.5 cursor-pointer"
+          onClick={e => {
+            e.stopPropagation()
+            onJourney()
+          }}
+          title="View session journey"
+        >
+          <Activity className="h-3.5 w-3.5" />
+        </button>
+        <ExternalLink className="h-3.5 w-3.5 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-400 dark:group-hover:text-zinc-400 shrink-0 mt-1.5 transition-colors" />
+      </div>
+      {/* Session ID — copies to clipboard on click, does not navigate */}
+      <div className="pl-11 mt-0.5">
+        <CopyableId value={session.session_id} label="Copy session ID" />
+      </div>
     </div>
   )
 }
