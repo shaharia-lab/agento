@@ -10,11 +10,11 @@ import {
   MessageCircle,
   FileText,
   GitBranch,
-  Github,
   Hash,
   Smartphone,
 } from 'lucide-react'
 import { integrationsApi } from '@/lib/api'
+import { GithubIcon } from '@/components/GithubIcon'
 import type { Integration } from '@/types'
 import {
   GoogleIcon,
@@ -67,7 +67,7 @@ const AVAILABLE_PROVIDERS = [
     id: 'github',
     name: 'GitHub',
     description: 'Repos, issues, PRs, Actions & releases',
-    icon: <Github className="h-6 w-6" />,
+    icon: <GithubIcon className="h-6 w-6" />,
     path: '/integrations/github',
   },
   {
@@ -202,7 +202,7 @@ function IntegrationTypeIcon({ type, size }: Readonly<{ type: string; size: numb
     return <FileText style={{ width: size, height: size }} className="text-[#0052CC]" />
   if (type === 'jira')
     return <GitBranch style={{ width: size, height: size }} className="text-[#0052CC]" />
-  if (type === 'github') return <Github style={{ width: size, height: size }} />
+  if (type === 'github') return <GithubIcon style={{ width: size, height: size }} />
   if (type === 'slack')
     return <Hash style={{ width: size, height: size }} className="text-[#4A154B]" />
   if (type === 'whatsapp')

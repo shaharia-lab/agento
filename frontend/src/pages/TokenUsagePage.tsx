@@ -93,9 +93,9 @@ function TokenTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>) {
             width={48}
           />
           <Tooltip
-            formatter={(v: number | undefined, name: string | undefined) => [
-              formatTokens(v ?? 0),
-              (name ?? '').replaceAll('_', ' '),
+            formatter={(v, name) => [
+              formatTokens(Number(v ?? 0)),
+              String(name ?? '').replaceAll('_', ' '),
             ]}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
@@ -155,7 +155,7 @@ function CacheEfficiencyChart({ data }: Readonly<{ data: CacheEfficiencyPoint[] 
             width={40}
           />
           <Tooltip
-            formatter={(v: number | undefined) => [`${(v ?? 0).toFixed(1)}%`, 'Cache Hit Rate']}
+            formatter={(v) => [`${Number(v ?? 0).toFixed(1)}%`, 'Cache Hit Rate']}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
           <Line
@@ -193,7 +193,7 @@ function CostOverTimeChart({ data }: Readonly<{ data: CostPoint[] }>) {
             width={56}
           />
           <Tooltip
-            formatter={(v: number | undefined) => [formatCost(v ?? 0), 'Estimated Cost']}
+            formatter={(v) => [formatCost(Number(v ?? 0)), 'Estimated Cost']}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
           <Bar dataKey="estimated_cost_usd" name="Cost" fill="#6366f1" radius={[2, 2, 0, 0]} />
@@ -247,9 +247,9 @@ function ModelPieChart({ data }: Readonly<{ data: ModelStat[] }>) {
             ))}
           </Pie>
           <Tooltip
-            formatter={(v: number | undefined, name: string | undefined) => [
-              formatTokens(v ?? 0),
-              formatModelName(name ?? ''),
+            formatter={(v, name) => [
+              formatTokens(Number(v ?? 0)),
+              formatModelName(String(name ?? '')),
             ]}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
