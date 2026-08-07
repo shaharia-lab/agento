@@ -29,6 +29,7 @@
     "lucide-react": "^1.28.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-is": "^19.2.8",
     "react-markdown": "^10.1.0",
     "react-qr-code": "^2.2.0",
     "react-router-dom": "^7.18.2",
