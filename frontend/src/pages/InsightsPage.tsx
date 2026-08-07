@@ -212,7 +212,7 @@ function TopToolsChart({
             tickFormatter={truncateTool}
           />
           <Tooltip
-            formatter={(v: number | undefined, name: string | undefined) => [
+            formatter={(v, name) => [
               (v ?? 0).toLocaleString(),
               name === 'current' ? 'Current period' : 'Previous period',
             ]}
@@ -276,10 +276,7 @@ function CacheEfficiencyPie({
             ))}
           </Pie>
           <Legend wrapperStyle={{ fontSize: 12 }} />
-          <Tooltip
-            formatter={(v: number | undefined) => [`${v ?? 0}%`]}
-            contentStyle={TOOLTIP_STYLE}
-          />
+          <Tooltip formatter={v => [`${v ?? 0}%`]} contentStyle={TOOLTIP_STYLE} />
         </PieChart>
       </ResponsiveContainer>
       {prevHitRate !== undefined && (
@@ -337,7 +334,7 @@ function ErrorSessionsPie({
           </Pie>
           <Legend wrapperStyle={{ fontSize: 12 }} />
           <Tooltip
-            formatter={(v: number | undefined) => [(v ?? 0).toLocaleString(), 'Sessions']}
+            formatter={v => [(v ?? 0).toLocaleString(), 'Sessions']}
             contentStyle={TOOLTIP_STYLE}
           />
         </PieChart>

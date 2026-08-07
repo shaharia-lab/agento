@@ -1,6 +1,6 @@
 import { Switch } from '@/components/ui/switch'
 import type { ServiceConfig } from '@/types'
-import { Github } from 'lucide-react'
+import { GithubIcon } from '@/components/GithubIcon'
 
 interface ToolInfo {
   name: string
@@ -120,7 +120,7 @@ export default function GitHubIntegrationEditor({
             <div className="flex items-start justify-between gap-3 mb-1">
               <div className="flex items-center gap-2.5">
                 <div className="flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 shrink-0">
-                  <Github className="h-5 w-5 text-zinc-800 dark:text-zinc-200" />
+                  <GithubIcon className="h-5 w-5 text-zinc-800 dark:text-zinc-200" />
                 </div>
                 <div>
                   <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { X, Github, ExternalLink, Tag, AlertCircle, BookOpen, Star } from 'lucide-react'
+import { X, ExternalLink, Tag, AlertCircle, BookOpen, Star } from 'lucide-react'
+import { GithubIcon } from '@/components/GithubIcon'
 import { versionApi } from '@/lib/api'
 import type { UpdateCheckResponse } from '@/types'
 
@@ -121,7 +122,7 @@ export default function AboutModal({ onClose }: AboutModalProps) {
               rel="noopener noreferrer"
               className="flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors group"
             >
-              <Github className="h-4 w-4 text-zinc-400 group-hover:text-zinc-600 dark:group-hover:text-zinc-200 shrink-0" />
+              <GithubIcon className="h-4 w-4 text-zinc-400 group-hover:text-zinc-600 dark:group-hover:text-zinc-200 shrink-0" />
               <span className="flex-1">GitHub Repository</span>
               <ExternalLink className="h-3.5 w-3.5 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-400 dark:group-hover:text-zinc-400" />
             </a>
