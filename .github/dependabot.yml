@@ -1,6 +1,6 @@
 version: 2
 updates:
-  # Backend: Go modules — single grouped PR, max 1 open at a time
+  # Backend: Go modules — patch updates only, single grouped PR
   - package-ecosystem: gomod
     directory: /
     schedule:
@@ -9,12 +9,17 @@ updates:
       time: "06:00"
       timezone: Europe/Berlin
     open-pull-requests-limit: 1
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
     groups:
       backend:
         patterns:
           - "*"
 
-  # Frontend: npm packages — single grouped PR, max 1 open at a time
+  # Frontend: npm packages — patch updates only, single grouped PR
   - package-ecosystem: npm
     directory: /frontend
     schedule:
@@ -26,6 +31,10 @@ updates:
     # typescript-eslint does not support TS 7 yet; eslint-plugin-react-hooks 7.1
     # introduces stricter rules that need a dedicated cleanup pass
     ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
       - dependency-name: typescript
         versions: [">=7.0.0"]
       - dependency-name: eslint-plugin-react-hooks
@@ -35,7 +44,7 @@ updates:
         patterns:
           - "*"
 
-  # GitHub Actions — single grouped PR
+  # GitHub Actions — single grouped PR (all actions are pinned to commit SHAs)
   - package-ecosystem: github-actions
     directory: /
     schedule:
