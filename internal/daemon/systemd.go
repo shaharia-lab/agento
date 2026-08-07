@@ -107,13 +107,15 @@ func (s *systemd) Uninstall(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// disable --now is a no-op when the unit is already disabled/stopped.
-	_, _ = s.runner.Run(ctx, "systemctl", "--user", "disable", "--now", systemdUnitName) //nolint:errcheck // best-effort
+	// enable --now is a no-op when the unit is already disabled/stopped.
+	//nolint:errcheck // best-effort
+	_, _ = s.runner.Run(ctx, "systemctl", "--user", "disable", "--now", systemdUnitName)
 	if err := os.Remove(unit); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("removing unit %s: %w", unit, err)
 	}
 	// Reload so systemd forgets the removed unit. Failure here is benign.
-	_, _ = s.runner.Run(ctx, "systemctl", "--user", "daemon-reload") //nolint:errcheck // best-effort
+	//nolint:errcheck // best-effort
+	_, _ = s.runner.Run(ctx, "systemctl", "--user", "daemon-reload")
 	return nil
 }
 

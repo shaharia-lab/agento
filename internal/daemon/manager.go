@@ -70,7 +70,9 @@ type Options struct {
 	ExtraPath string
 }
 
-// Status describes the installed/enabled/running state of the service.
+// Status describes the installed/enabled/running state of the service. It
+// carries only what the platform manager itself knows; presentation fields
+// like the URL and log path are derived by the caller.
 type Status struct {
 	Installed bool
 	Enabled   bool
@@ -79,8 +81,6 @@ type Status struct {
 	PID int
 	// UnitPath is the plist/unit file location (empty when not installed).
 	UnitPath string
-	LogPath  string
-	URL      string
 }
 
 // Manager installs, removes, and controls the OS-level background service.

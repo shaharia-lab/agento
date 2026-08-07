@@ -168,6 +168,9 @@ func (l *launchd) Status(ctx context.Context) (Status, error) {
 	if printErr != nil {
 		return st, nil // not loaded — installed state still reported
 	}
+	// LaunchAgents have no separate enable/disable state: being registered in
+	// the gui domain at all means the agent starts at login, so "loaded" is
+	// the closest meaningful answer to "enabled".
 	st.Enabled = true
 	if m := launchdPIDRe.FindStringSubmatch(out); m != nil {
 		if pid, convErr := strconv.Atoi(m[1]); convErr == nil {

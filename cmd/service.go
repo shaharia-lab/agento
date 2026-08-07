@@ -130,7 +130,32 @@ func runServiceInstall(ctx context.Context, cfg *config.AppConfig) error {
 	} else {
 		fmt.Println("Note: lingering was enabled so the service keeps running after logout.")
 	}
+	if !waitForRunning(ctx, mgr, 3*time.Second) {
+		fmt.Println("warning: the service is not answering yet — run `agento service status` " +
+			"and `agento service logs` to diagnose, or `agento service restart` to retry")
+	}
 	return nil
+}
+
+// waitForRunning polls the service status until it reports running or the
+// timeout elapses. Right after install the process may need a moment to come
+// up, so a single check would produce false alarms.
+func waitForRunning(ctx context.Context, mgr daemon.Manager, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		st, err := mgr.Status(ctx)
+		if err == nil && st.Running {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
 }
 
 // runServiceLifecycle dispatches uninstall/start/stop/restart to the Manager.
@@ -169,17 +194,16 @@ func runServiceStatus(ctx context.Context, cfg *config.AppConfig) error {
 	if err != nil {
 		return fmt.Errorf("reading service status: %w", err)
 	}
-	st.LogPath = daemon.ServiceLogPath(cfg)
-	st.URL = fmt.Sprintf("http://localhost:%d", cfg.Port)
-	printServiceStatus(st)
+	printServiceStatus(st, cfg)
 	if !st.Running {
 		return errors.New("service is not running")
 	}
 	return nil
 }
 
-// printServiceStatus renders the Status fields in a stable, greppable shape.
-func printServiceStatus(st daemon.Status) {
+// printServiceStatus renders the Status fields plus the URL and log path
+// derived from config, in a stable, greppable shape.
+func printServiceStatus(st daemon.Status, cfg *config.AppConfig) {
 	fmt.Printf("Installed: %s\n", yesNo(st.Installed))
 	fmt.Printf("Enabled:   %s\n", yesNo(st.Enabled))
 	fmt.Printf("Running:   %s\n", yesNo(st.Running))
@@ -189,8 +213,8 @@ func printServiceStatus(st daemon.Status) {
 	if st.UnitPath != "" {
 		fmt.Printf("Unit:      %s\n", st.UnitPath)
 	}
-	fmt.Printf("URL:       %s\n", st.URL)
-	fmt.Printf("Log:       %s\n", st.LogPath)
+	fmt.Printf("URL:       http://localhost:%d\n", cfg.Port)
+	fmt.Printf("Log:       %s\n", daemon.ServiceLogPath(cfg))
 }
 
 func yesNo(v bool) string {
@@ -224,12 +248,18 @@ func runServiceLogs(ctx context.Context, logPath string, follow bool, lines int)
 	if !follow {
 		return nil
 	}
+	// Seek past what was already printed: the bufio reader in followLog reads
+	// ahead of the offset the last line was printed at, so without this the
+	// follow loop would re-print a buffered chunk.
+	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+		return fmt.Errorf("following service log: %w", err)
+	}
 	return followLog(ctx, f)
 }
 
-// tailLines returns up to n trailing lines of f, reading from the end. n == 0
-// prints nothing (the whole log is skipped); a negative n is rejected by the
-// caller.
+// tailLines returns up to n trailing lines of f. n == 0 prints nothing; a
+// negative n is rejected by the caller. The log is read whole — service logs
+// are small, and this keeps the implementation simple.
 func tailLines(f *os.File, n int) ([]byte, error) {
 	if n == 0 {
 		return nil, nil

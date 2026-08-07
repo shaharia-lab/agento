@@ -78,17 +78,24 @@ func TestRunServiceLogsMissingFile(t *testing.T) {
 	}
 }
 
+// writeLogFile writes content to a fresh temp file and returns it open for
+// reading — the shape tailLines expects.
+func writeLogFile(t *testing.T, content string) *os.File {
+	t.Helper()
+	f, err := os.CreateTemp(t.TempDir(), "log-*")
+	if err != nil {
+		t.Fatalf("create temp log: %v", err)
+	}
+	if _, err := f.WriteString(content); err != nil {
+		t.Fatalf("write temp log: %v", err)
+	}
+	t.Cleanup(func() { _ = f.Close() })
+	return f
+}
+
 func TestTailLines(t *testing.T) {
 	t.Parallel()
-	logPath := filepath.Join(t.TempDir(), "log")
-	if err := os.WriteFile(logPath, []byte("a\nb\nc\n"), 0o600); err != nil {
-		t.Fatalf("write log: %v", err)
-	}
-	f, err := os.Open(logPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = f.Close() }()
+	f := writeLogFile(t, "a\nb\nc\n")
 
 	got, err := tailLines(f, 2)
 	if err != nil {
@@ -101,15 +108,7 @@ func TestTailLines(t *testing.T) {
 
 func TestTailLinesMoreThanAvailable(t *testing.T) {
 	t.Parallel()
-	logPath := filepath.Join(t.TempDir(), "log")
-	if err := os.WriteFile(logPath, []byte("only\n"), 0o600); err != nil {
-		t.Fatalf("write log: %v", err)
-	}
-	f, err := os.Open(logPath)
-	if err != nil {
-		t.Fatalf("open: %v", err)
-	}
-	defer func() { _ = f.Close() }()
+	f := writeLogFile(t, "only\n")
 
 	got, err := tailLines(f, 50)
 	if err != nil {
