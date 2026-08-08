@@ -554,6 +554,30 @@ export interface ClaudeSessionSummary {
   subagent_count: number
   /** Summed usage of those transcripts, reported additively to `usage`. */
   subagent_usage: ClaudeTokenUsage
+  /** Sub-agent label from an `agent-name` event; last occurrence wins. */
+  agent_name?: string
+  /** e.g. `bypassPermissions`; last occurrence wins. */
+  permission_mode?: string
+  mode?: string
+  relocated_cwd?: string
+  worktree_name?: string
+  worktree_branch?: string
+  /** The branch the worktree was created from. */
+  original_branch?: string
+  /** How many times the conversation was compacted. */
+  compaction_count: number
+  /** Tokens discarded by compaction across the session. */
+  dropped_tokens: number
+  /** Pull requests this session was linked to, deduplicated by URL. */
+  prs?: ClaudeSessionPR[]
+}
+
+/** A pull request a session produced, from a `pr-link` event. */
+export interface ClaudeSessionPR {
+  pr_number: number
+  pr_url: string
+  pr_repository?: string
+  first_seen_at: string
 }
 
 /** A sub-agent run delegated from a parent session via the Task/Agent tool. */
@@ -647,6 +671,7 @@ export type JourneyStepType =
   | 'sub_agent'
   | 'skill'
   | 'mcp_tool'
+  | 'compaction'
 
 // ── Notifications ─────────────────────────────────────────────────────────────
 

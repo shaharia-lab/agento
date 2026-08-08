@@ -21,6 +21,9 @@ import {
   Activity,
   Clock,
   X,
+  Shield,
+  GitPullRequest,
+  Scissors,
 } from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
 import { CopyableId } from '@/components/CopyableId'
@@ -59,6 +62,8 @@ export default function ClaudeSessionsPage() {
     if (projectParam) setFilterProject(projectParam)
   }, [projectParam])
   const [filterFavorites, setFilterFavorites] = useState(false)
+  const [filterHasPR, setFilterHasPR] = useState(false)
+  const [filterPermissionMode, setFilterPermissionMode] = useState('all')
   const [timePreset, setTimePreset] = useState<TimePreset>('all')
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState('')
@@ -106,6 +111,13 @@ export default function ClaudeSessionsPage() {
   }
 
   const hasFavorites = sessions.some(s => s.is_favorite)
+  const hasPRs = sessions.some(s => (s.prs?.length ?? 0) > 0)
+  // Only offer the permission-mode filter once more than one mode is present —
+  // a single-value dropdown filters nothing.
+  const permissionModes = useMemo(
+    () => [...new Set(sessions.map(s => s.permission_mode).filter((m): m is string => !!m))].sort(),
+    [sessions],
+  )
 
   const timeFilterActive = drilldownActive || timePreset !== 'all'
 
@@ -130,10 +142,20 @@ export default function ClaudeSessionsPage() {
         s.preview.toLowerCase().includes(q) ||
         s.project_path.toLowerCase().includes(q)
       const matchesFavorites = !filterFavorites || !!s.is_favorite
+      const matchesHasPR = !filterHasPR || (s.prs?.length ?? 0) > 0
+      const matchesPermissionMode =
+        filterPermissionMode === 'all' || s.permission_mode === filterPermissionMode
       const matchesTime = drilldownActive
         ? overlapsAnyWindow(s.start_time, s.last_activity, drilldownWindows)
         : overlapsRange(s.start_time, s.last_activity, from, to)
-      return matchesProject && matchesSearch && matchesFavorites && matchesTime
+      return (
+        matchesProject &&
+        matchesSearch &&
+        matchesFavorites &&
+        matchesHasPR &&
+        matchesPermissionMode &&
+        matchesTime
+      )
     })
     return result
   }, [
@@ -141,6 +163,8 @@ export default function ClaudeSessionsPage() {
     search,
     filterProject,
     filterFavorites,
+    filterHasPR,
+    filterPermissionMode,
     timePreset,
     customFrom,
     customTo,
@@ -192,7 +216,7 @@ export default function ClaudeSessionsPage() {
   } else {
     sessionListContent = (
       <div
-        key={`${filterFavorites}-${filterProject}-${search}-${timePreset}-${customFrom}-${customTo}`}
+        key={`${filterFavorites}-${filterHasPR}-${filterPermissionMode}-${filterProject}-${search}-${timePreset}-${customFrom}-${customTo}`}
         className="divide-y divide-zinc-100 dark:divide-zinc-700/50"
       >
         {filtered.map(session => (
@@ -314,6 +338,36 @@ export default function ClaudeSessionsPage() {
               />
             </div>
           )}
+          {permissionModes.length > 1 && (
+            <Select value={filterPermissionMode} onValueChange={setFilterPermissionMode}>
+              <SelectTrigger className="w-full sm:w-48 h-8 text-xs">
+                <Shield className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500 mr-1.5 shrink-0" />
+                <SelectValue placeholder="All permissions" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">All permissions</SelectItem>
+                {permissionModes.map(m => (
+                  <SelectItem key={m} value={m} className="text-xs">
+                    <span className="font-mono">{m}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
+          {hasPRs && (
+            <button
+              onClick={() => setFilterHasPR(f => !f)}
+              className={`flex items-center gap-1.5 rounded-md border h-8 px-3 text-xs transition-colors shrink-0 ${
+                filterHasPR
+                  ? 'border-emerald-400 bg-emerald-50 dark:bg-emerald-950/30 text-emerald-600 dark:text-emerald-400'
+                  : 'border-zinc-200 dark:border-zinc-600 bg-white dark:bg-zinc-800 text-zinc-500 dark:text-zinc-400 hover:border-emerald-300 hover:text-emerald-500'
+              }`}
+              title={filterHasPR ? 'Show all' : 'Show sessions with a linked PR only'}
+            >
+              <GitPullRequest className="h-3.5 w-3.5" />
+              Has PR
+            </button>
+          )}
           {hasFavorites && (
             <button
               onClick={() => setFilterFavorites(f => !f)}
@@ -389,6 +443,41 @@ function SessionRow({
                 <span className="text-xs text-zinc-400 dark:text-zinc-500 font-mono">
                   {session.git_branch}
                 </span>
+              )}
+              {session.prs?.map(pr => (
+                <a
+                  key={pr.pr_url}
+                  href={pr.pr_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={e => e.stopPropagation()}
+                  className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400 hover:underline"
+                  title={pr.pr_repository ? `${pr.pr_repository}#${pr.pr_number}` : pr.pr_url}
+                >
+                  <GitPullRequest className="h-3 w-3" />#{pr.pr_number}
+                </a>
+              ))}
+              {session.compaction_count > 0 && (
+                <Tooltip
+                  side="top"
+                  content={
+                    <div className="space-y-1">
+                      <div className="flex justify-between gap-4">
+                        <span className="text-zinc-400">Compactions</span>
+                        <span>{session.compaction_count.toLocaleString()}</span>
+                      </div>
+                      <div className="flex justify-between gap-4">
+                        <span className="text-zinc-400">Dropped tokens</span>
+                        <span>{session.dropped_tokens.toLocaleString()}</span>
+                      </div>
+                    </div>
+                  }
+                >
+                  <span className="flex items-center gap-0.5 text-xs text-amber-600 dark:text-amber-400 cursor-default">
+                    <Scissors className="h-2.5 w-2.5" />
+                    {session.compaction_count}
+                  </span>
+                </Tooltip>
               )}
               <span className="text-xs text-zinc-400 dark:text-zinc-500">
                 {formatRelativeTime(session.last_activity)}

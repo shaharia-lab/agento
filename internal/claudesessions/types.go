@@ -63,6 +63,42 @@ type ClaudeSessionSummary struct {
 	// reported separately from Usage so the existing per-session numbers keep
 	// meaning "main thread" rather than silently changing definition.
 	SubagentUsage TokenUsage `json:"subagent_usage"`
+
+	// The fields below come from metadata events Claude Code re-appends on every
+	// session resume. Like the title events they carry no timestamp, so the last
+	// occurrence in the file wins and none of them bounds the session's time
+	// range — see boundsSessionTimeRange.
+	AgentName      string `json:"agent_name,omitempty"`
+	PermissionMode string `json:"permission_mode,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	RelocatedCWD   string `json:"relocated_cwd,omitempty"`
+	WorktreeName   string `json:"worktree_name,omitempty"`
+	WorktreeBranch string `json:"worktree_branch,omitempty"`
+	OriginalBranch string `json:"original_branch,omitempty"`
+
+	// CompactionCount is how many times the conversation was compacted, from
+	// `system` events with subtype compact_boundary.
+	CompactionCount int `json:"compaction_count"`
+	// DroppedTokens is how many tokens compaction discarded. Claude Code
+	// normally reports cumulativeDroppedTokens, a running total, so the maximum
+	// seen is the session's figure rather than the sum. Older releases omit it
+	// and only report preTokens/postTokens; those boundaries contribute their
+	// own difference instead, accumulated on top.
+	DroppedTokens int `json:"dropped_tokens"`
+
+	// PRs are the pull requests this session was linked to, deduplicated by URL.
+	// A session can produce several.
+	PRs []ClaudeSessionPR `json:"prs,omitempty"`
+}
+
+// ClaudeSessionPR is one pull request a session was linked to, from a `pr-link`
+// event. Claude Code re-emits the event on every resume, so rows are keyed by
+// URL and the first sighting's timestamp is kept.
+type ClaudeSessionPR struct {
+	PRNumber     int       `json:"pr_number"`
+	PRURL        string    `json:"pr_url"`
+	PRRepository string    `json:"pr_repository,omitempty"`
+	FirstSeenAt  time.Time `json:"first_seen_at"`
 }
 
 // ResolveDisplayTitle picks the label to show for a session, most specific

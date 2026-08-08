@@ -155,19 +155,26 @@ func TestIncrementalScan_TitleEventsDoNotAffectTimeRange(t *testing.T) {
 	if !s.LastActivity.Equal(ts.Add(time.Minute)) {
 		t.Errorf("last_activity = %v, want the assistant event", s.LastActivity)
 	}
-	// Also asserted at the unit level, so a future timestamp on a title event
-	// cannot silently start counting.
-	for _, title := range []string{"custom-title", "ai-title"} {
-		if boundsSessionTimeRange(title) {
-			t.Errorf("%q must not bound the session time range", title)
+	// Also asserted at the unit level, so a future timestamp on one of these
+	// events cannot silently start counting. The title and metadata events
+	// describe the session rather than occurring within it; `pr-link` was moved
+	// here by #183, because it carries a real timestamp that can post-date the
+	// conversation and would otherwise reorder the sessions list.
+	for _, describes := range []string{
+		"custom-title", "ai-title",
+		"pr-link",
+		"agent-name", "permission-mode", "mode", "relocated", "worktree-state",
+	} {
+		if boundsSessionTimeRange(describes) {
+			t.Errorf("%q must not bound the session time range", describes)
 		}
 	}
 	// Everything else still bounds it. These all carry timestamps in real
 	// transcripts, and an allowlist that omitted them would silently shrink
-	// last_activity for existing sessions.
+	// last_activity for existing sessions — which is why this stays a denylist.
 	for _, other := range []string{
 		"user", "assistant", "system", "attachment",
-		"pr-link", "queue-operation", "file-history-delta",
+		"queue-operation", "file-history-delta",
 	} {
 		if !boundsSessionTimeRange(other) {
 			t.Errorf("%q should bound the time range", other)

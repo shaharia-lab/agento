@@ -100,6 +100,18 @@ type SkillData struct {
 	Prompt string `json:"prompt,omitempty"`
 }
 
+// CompactionData is the data for a compaction step: the point where the
+// conversation was summarized to fit the context window. Trigger is "auto" or
+// "manual". DroppedTokens is what THIS compaction dropped, derived from
+// pre/post — unlike ClaudeSessionSummary.DroppedTokens, which is the session's
+// running total.
+type CompactionData struct {
+	Trigger       string `json:"trigger,omitempty"`
+	PreTokens     int    `json:"pre_tokens,omitempty"`
+	PostTokens    int    `json:"post_tokens,omitempty"`
+	DroppedTokens int    `json:"dropped_tokens,omitempty"`
+}
+
 // MCPToolData is the data for an mcp_tool step.
 type MCPToolData struct {
 	ServerName string `json:"server_name,omitempty"`
@@ -143,6 +155,9 @@ type rawJourneyEvent struct {
 	DurationMs  int64           `json:"durationMs,omitempty"`
 	Message     *rawMessage     `json:"message,omitempty"`
 	Data        json.RawMessage `json:"data,omitempty"`
+
+	// CompactMetadata is present on system events with subtype compact_boundary.
+	CompactMetadata *rawCompactMetadata `json:"compactMetadata,omitempty"`
 }
 
 // ── Journey builder ─────────────────────────────────────────────────────────
@@ -485,6 +500,10 @@ func (b *journeyBuilder) processProgressEvent(ev rawJourneyEvent) {
 }
 
 func (b *journeyBuilder) processSystemEvent(ev rawJourneyEvent) {
+	if ev.Subtype == "compact_boundary" {
+		b.addCompactionStep(ev)
+		return
+	}
 	if ev.Subtype != "turn_duration" {
 		return
 	}
@@ -503,6 +522,32 @@ func (b *journeyBuilder) processSystemEvent(ev rawJourneyEvent) {
 	if b.currentTurn != nil && ev.Timestamp.After(b.currentTurn.EndTime) {
 		b.currentTurn.EndTime = ev.Timestamp
 	}
+}
+
+// addCompactionStep records where the conversation was compacted. It reads as a
+// divider in the timeline: everything before it was summarized away, which is
+// usually the explanation for a sudden drop in context the user is looking for.
+func (b *journeyBuilder) addCompactionStep(ev rawJourneyEvent) {
+	if ev.CompactMetadata == nil {
+		return
+	}
+	b.ensureTurn(ev.Timestamp)
+
+	data := CompactionData{
+		Trigger:    ev.CompactMetadata.Trigger,
+		PreTokens:  ev.CompactMetadata.PreTokens,
+		PostTokens: ev.CompactMetadata.PostTokens,
+	}
+	if dropped := ev.CompactMetadata.PreTokens - ev.CompactMetadata.PostTokens; dropped > 0 {
+		data.DroppedTokens = dropped
+	}
+	raw, _ := json.Marshal(data) //nolint:errcheck
+	b.addStep(JourneyStep{
+		Type:       "compaction",
+		Timestamp:  ev.Timestamp,
+		DurationMs: ev.CompactMetadata.DurationMs,
+		Data:       raw,
+	})
 }
 
 func (b *journeyBuilder) finalize(j *SessionJourney) {

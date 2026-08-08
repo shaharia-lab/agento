@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -31,7 +32,12 @@ const (
 	// v3: message_count switched from raw event volume to conversational turns
 	// and event_count was added — rows written before v3 hold the old inflated
 	// number in message_count and zero in event_count.
-	CurrentScannerVersion = 3
+	// v4: pr-link, agent-name, permission-mode, mode, relocated, worktree-state
+	// and system/compact_boundary are read — rows written before v4 have every
+	// one of those columns empty and no claude_session_pr rows at all. The same
+	// bump also drops pr-link from the session time range, so last_activity is
+	// recomputed.
+	CurrentScannerVersion = 4
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -50,6 +56,44 @@ type rawEvent struct {
 	// Title events carry no timestamp and no message — only these fields.
 	CustomTitle string `json:"customTitle,omitempty"` // native /rename
 	AITitle     string `json:"aiTitle,omitempty"`     // Claude Code's auto-title
+
+	// pr-link: the pull request a session produced. Carries a real timestamp.
+	PRNumber     int    `json:"prNumber,omitempty"`
+	PRUrl        string `json:"prUrl,omitempty"`
+	PRRepository string `json:"prRepository,omitempty"`
+
+	// Session metadata events. Like the title events these carry no timestamp
+	// and are re-appended on every resume, so the last one in the file wins.
+	AgentName       string              `json:"agentName,omitempty"`
+	PermissionMode  string              `json:"permissionMode,omitempty"`
+	Mode            string              `json:"mode,omitempty"`
+	RelocatedCWD    string              `json:"relocatedCwd,omitempty"`
+	WorktreeSession *rawWorktreeSession `json:"worktreeSession,omitempty"`
+
+	// system events: Subtype selects the payload; compact_boundary carries
+	// CompactMetadata.
+	Subtype         string              `json:"subtype,omitempty"`
+	CompactMetadata *rawCompactMetadata `json:"compactMetadata,omitempty"`
+}
+
+// rawWorktreeSession is the payload of a worktree-state event: the throwaway
+// worktree a session ran in, plus where it came from.
+type rawWorktreeSession struct {
+	WorktreeName       string `json:"worktreeName,omitempty"`
+	WorktreeBranch     string `json:"worktreeBranch,omitempty"`
+	OriginalBranch     string `json:"originalBranch,omitempty"`
+	OriginalCwd        string `json:"originalCwd,omitempty"`
+	OriginalHeadCommit string `json:"originalHeadCommit,omitempty"`
+}
+
+// rawCompactMetadata is the payload of a system/compact_boundary event.
+// CumulativeDroppedTokens is a running total across the session, not a delta.
+type rawCompactMetadata struct {
+	Trigger                 string `json:"trigger,omitempty"`
+	PreTokens               int    `json:"preTokens,omitempty"`
+	PostTokens              int    `json:"postTokens,omitempty"`
+	CumulativeDroppedTokens int    `json:"cumulativeDroppedTokens,omitempty"`
+	DurationMs              int64  `json:"durationMs,omitempty"`
 }
 
 type rawMessage struct {
@@ -330,7 +374,9 @@ func IncrementalScanWithNotify(
 	onDisk, err := walkDiskFiles(projectsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			for _, table := range []string{"claude_session_cache", "claude_subagent_cache"} {
+			for _, table := range []string{
+				"claude_session_cache", "claude_subagent_cache", "claude_session_pr",
+			} {
 				// #nosec G202 -- table is a package-internal constant, never user input.
 				if _, execErr := db.ExecContext(context.Background(), "DELETE FROM "+table); execErr != nil {
 					logger.Warn("failed to clear session cache", "table", table, "error", execErr)
@@ -593,16 +639,34 @@ func applyChangesWithNotify(
 	}
 
 	for _, ce := range diff.toDelete {
-		table := "claude_session_cache"
-		if ce.isSubagent {
-			table = "claude_subagent_cache"
-		}
-		// #nosec G202 -- table is a package-internal constant, never user input.
-		deleteQuery := "DELETE FROM " + table + " WHERE file_path = ?"
-		if _, err := db.ExecContext(context.Background(), deleteQuery, ce.filePath); err != nil {
-			logger.Warn("claude sessions: failed to delete cache row",
+		deleteCachedFile(db, logger, ce)
+	}
+}
+
+// deleteCachedFile removes every cache row belonging to a transcript that is no
+// longer on disk.
+func deleteCachedFile(db *sql.DB, logger *slog.Logger, ce cachedEntry) {
+	table := "claude_session_cache"
+	if ce.isSubagent {
+		table = "claude_subagent_cache"
+	} else {
+		// Linked PRs hang off the session row with no foreign key, so they must
+		// be cleared here or they outlive the session forever — and attachPRs
+		// reads the whole table on every list. This runs before the session row
+		// is deleted, because it resolves the session through it.
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM claude_session_pr WHERE session_id IN (
+				SELECT session_id FROM claude_session_cache WHERE file_path = ?)`,
+			ce.filePath); err != nil {
+			logger.Warn("claude sessions: failed to delete linked PRs",
 				"file", ce.filePath, "error", err)
 		}
+	}
+	// #nosec G202 -- table is a package-internal constant, never user input.
+	deleteQuery := "DELETE FROM " + table + " WHERE file_path = ?"
+	if _, err := db.ExecContext(context.Background(), deleteQuery, ce.filePath); err != nil {
+		logger.Warn("claude sessions: failed to delete cache row",
+			"file", ce.filePath, "error", err)
 	}
 }
 
@@ -653,16 +717,52 @@ func applyUpsert(db *sql.DB, logger *slog.Logger, df diskFile) bool {
 	return true
 }
 
-func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
+// upsertCacheRow writes one session's cache row and its linked pull requests.
+//
+// Both happen in a single transaction: the row carries the file's mtime, so a
+// PR write failing after the row committed would leave the file looking
+// unchanged to diffDiskAndCache, and the PR rows would never be rebuilt — not
+// until an unrelated scanner-version bump or a touch of the file.
+func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) (err error) {
 	ctx := context.Background()
-	_, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				err = errors.Join(err, rbErr)
+			}
+		}
+	}()
+
+	if err = insertCacheRow(ctx, tx, df, s); err != nil {
+		return err
+	}
+	if err = replacePRRows(ctx, tx, s.SessionID, s.PRs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// insertCacheRow writes the session's own row. custom_title and is_favorite are
+// intentionally absent from both the INSERT and the UPDATE SET so user-defined
+// values survive a rescan; everything else is derived from the transcript and
+// must refresh.
+func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessionSummary) error {
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO claude_session_cache (
 			session_id, project_path, file_path, file_mtime,
 			preview, start_time, last_activity, message_count, event_count,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			cache_creation_5m_tokens, cache_creation_1h_tokens,
-			git_branch, model, cwd, native_title, ai_title
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			git_branch, model, cwd, native_title, ai_title,
+			agent_name, permission_mode, mode, relocated_cwd,
+			worktree_name, worktree_branch, original_branch,
+			compaction_count, dropped_tokens
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+		          ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, project_path) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -681,7 +781,16 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 			model = excluded.model,
 			cwd = excluded.cwd,
 			native_title = excluded.native_title,
-			ai_title = excluded.ai_title`,
+			ai_title = excluded.ai_title,
+			agent_name = excluded.agent_name,
+			permission_mode = excluded.permission_mode,
+			mode = excluded.mode,
+			relocated_cwd = excluded.relocated_cwd,
+			worktree_name = excluded.worktree_name,
+			worktree_branch = excluded.worktree_branch,
+			original_branch = excluded.original_branch,
+			compaction_count = excluded.compaction_count,
+			dropped_tokens = excluded.dropped_tokens`,
 		// custom_title and is_favorite are intentionally omitted from both INSERT and UPDATE SET
 		// so any user-defined values are preserved across rescans.
 		//
@@ -696,8 +805,36 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 		s.Usage.CacheCreationTokens, s.Usage.CacheReadTokens,
 		s.Usage.CacheCreation5mTokens, s.Usage.CacheCreation1hTokens,
 		s.GitBranch, s.Model, s.CWD, s.NativeTitle, s.AITitle,
+		// Derived from transcript metadata events, so unlike custom_title these
+		// must refresh on every rescan.
+		s.AgentName, s.PermissionMode, s.Mode, s.RelocatedCWD,
+		s.WorktreeName, s.WorktreeBranch, s.OriginalBranch,
+		s.CompactionCount, s.DroppedTokens,
 	)
 	return err
+}
+
+// replacePRRows rewrites a session's linked pull requests. The transcript is
+// the source of truth and a rescan re-reads it whole, so the rows are replaced
+// rather than merged — that way a PR link removed upstream disappears here too.
+//
+// The DELETE clears every row for this session first, and summary.PRs is
+// already deduplicated by URL, so the insert cannot conflict.
+func replacePRRows(ctx context.Context, tx *sql.Tx, sessionID string, prs []ClaudeSessionPR) error {
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM claude_session_pr WHERE session_id = ?`, sessionID); err != nil {
+		return err
+	}
+	for _, pr := range prs {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO claude_session_pr (session_id, pr_url, pr_number, pr_repository, first_seen_at)
+			VALUES (?, ?, ?, ?, ?)`,
+			sessionID, pr.PRURL, pr.PRNumber, pr.PRRepository, pr.FirstSeenAt,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // subagentMeta is the agent-<id>.meta.json sidecar written next to each
@@ -864,6 +1001,9 @@ const sessionSummarySelect = `
 	       c.input_tokens, c.output_tokens, c.cache_creation_tokens, c.cache_read_tokens,
 	       c.cache_creation_5m_tokens, c.cache_creation_1h_tokens,
 	       c.git_branch, c.model, c.cwd, c.native_title, c.ai_title,
+	       c.agent_name, c.permission_mode, c.mode, c.relocated_cwd,
+	       c.worktree_name, c.worktree_branch, c.original_branch,
+	       c.compaction_count, c.dropped_tokens,
 	       COALESCE(sa.n, 0), COALESCE(sa.it, 0), COALESCE(sa.ot, 0),
 	       COALESCE(sa.cct, 0), COALESCE(sa.crt, 0),
 	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0)
@@ -905,6 +1045,9 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
 			&s.Usage.CacheCreation5mTokens, &s.Usage.CacheCreation1hTokens,
 			&s.GitBranch, &s.Model, &s.CWD, &s.NativeTitle, &s.AITitle,
+			&s.AgentName, &s.PermissionMode, &s.Mode, &s.RelocatedCWD,
+			&s.WorktreeName, &s.WorktreeBranch, &s.OriginalBranch,
+			&s.CompactionCount, &s.DroppedTokens,
 			&s.SubagentCount, &s.SubagentUsage.InputTokens, &s.SubagentUsage.OutputTokens,
 			&s.SubagentUsage.CacheCreationTokens, &s.SubagentUsage.CacheReadTokens,
 			&s.SubagentUsage.CacheCreation5mTokens, &s.SubagentUsage.CacheCreation1hTokens,
@@ -914,7 +1057,49 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 		s.DisplayTitle = s.ResolveDisplayTitle()
 		sessions = append(sessions, s)
 	}
-	return sessions, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	attachPRs(db, logger, sessions)
+	return sessions, nil
+}
+
+// attachPRs fills in each session's linked pull requests with a single query
+// over the whole table, rather than one query per session.
+func attachPRs(db *sql.DB, logger *slog.Logger, sessions []ClaudeSessionSummary) {
+	if len(sessions) == 0 {
+		return
+	}
+	rows, err := db.QueryContext(context.Background(), `
+		SELECT session_id, pr_number, pr_url, pr_repository, first_seen_at
+		FROM claude_session_pr ORDER BY first_seen_at, pr_url`)
+	if err != nil {
+		logger.Warn("claude sessions: failed to load linked PRs", "error", err)
+		return
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			logger.Warn("failed to close rows", "error", cerr)
+		}
+	}()
+
+	bySession := make(map[string][]ClaudeSessionPR)
+	for rows.Next() {
+		var sessionID string
+		var pr ClaudeSessionPR
+		if err := rows.Scan(&sessionID, &pr.PRNumber, &pr.PRURL, &pr.PRRepository, &pr.FirstSeenAt); err != nil {
+			logger.Warn("claude sessions: failed to scan linked PR", "error", err)
+			return
+		}
+		bySession[sessionID] = append(bySession[sessionID], pr)
+	}
+	if err := rows.Err(); err != nil {
+		logger.Warn("claude sessions: failed to read linked PRs", "error", err)
+		return
+	}
+	for i := range sessions {
+		sessions[i].PRs = bySession[sessions[i].SessionID]
+	}
 }
 
 func loadAllSessions(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, error) {
@@ -1035,16 +1220,22 @@ func readSummaryFile(
 // start/last-activity range.
 //
 // This is a denylist rather than an allowlist on purpose. Many event types
-// carry timestamps and legitimately bound the range — `pr-link`,
-// `queue-operation` and `file-history-delta` among them — so enumerating the
-// ones that count would silently shrink the range for existing sessions as
-// Claude Code adds types. Only the title events are excluded: they describe the
-// session rather than occurring within it, and although they carry no timestamp
-// today (making this a no-op that timeRange's zero check already handles), a
-// future release adding one must not drag start_time backwards.
+// carry timestamps and legitimately bound the range — `queue-operation` and
+// `file-history-delta` among them — so enumerating the ones that count would
+// silently shrink the range for existing sessions as Claude Code adds types.
+//
+// Excluded are the events that *describe* the session rather than occur within
+// it. The title and metadata events carry no timestamp today, so excluding them
+// is a no-op that timeRange's zero check already handles — but a future release
+// adding one must not drag start_time backwards. `pr-link` is the exception
+// that matters today: it carries a real timestamp which can post-date the last
+// conversation event, and letting it extend last_activity would reorder the
+// sessions list by something that is not conversation.
 func boundsSessionTimeRange(eventType string) bool {
 	switch eventType {
-	case "custom-title", "ai-title":
+	case "custom-title", "ai-title",
+		"pr-link",
+		"agent-name", "permission-mode", "mode", "relocated", "worktree-state":
 		return false
 	default:
 		return true
@@ -1053,13 +1244,6 @@ func boundsSessionTimeRange(eventType string) bool {
 
 func processSummaryEvent(summary *ClaudeSessionSummary, ev rawEvent, countSidechainUsers bool) {
 	switch ev.Type {
-	// Both title events are re-appended on every session resume, so the last
-	// occurrence in the file wins — which a sequential read gives for free
-	// through unconditional assignment.
-	case "custom-title":
-		summary.NativeTitle = ev.CustomTitle
-	case "ai-title":
-		summary.AITitle = ev.AITitle
 	case "user":
 		if ev.IsSidechain && !countSidechainUsers {
 			return
@@ -1067,6 +1251,85 @@ func processSummaryEvent(summary *ClaudeSessionSummary, ev rawEvent, countSidech
 		addSummaryUserEvent(summary, ev)
 	case "assistant":
 		addSummaryAssistantEvent(summary, ev)
+	case "pr-link":
+		addSummaryPRLink(summary, ev)
+	case "system":
+		addSummaryCompaction(summary, ev)
+	default:
+		applySessionMetadata(summary, ev)
+	}
+}
+
+// applySessionMetadata records the events that describe the session rather than
+// occurring within it. Claude Code re-appends every one of them on each resume,
+// so unconditional assignment during a sequential read gives last-wins for free
+// — which is the correct rule, since the final value is the current one.
+func applySessionMetadata(summary *ClaudeSessionSummary, ev rawEvent) {
+	switch ev.Type {
+	case "custom-title":
+		summary.NativeTitle = ev.CustomTitle
+	case "ai-title":
+		summary.AITitle = ev.AITitle
+	case "agent-name":
+		summary.AgentName = ev.AgentName
+	case "permission-mode":
+		summary.PermissionMode = ev.PermissionMode
+	case "mode":
+		summary.Mode = ev.Mode
+	case "relocated":
+		summary.RelocatedCWD = ev.RelocatedCWD
+	case "worktree-state":
+		if ev.WorktreeSession != nil {
+			summary.WorktreeName = ev.WorktreeSession.WorktreeName
+			summary.WorktreeBranch = ev.WorktreeSession.WorktreeBranch
+			summary.OriginalBranch = ev.WorktreeSession.OriginalBranch
+		}
+	}
+}
+
+// addSummaryPRLink records a linked pull request, deduplicated by URL. Claude
+// Code re-emits the event on every resume, so the same PR appears many times in
+// one file; the earliest sighting keeps its timestamp.
+func addSummaryPRLink(summary *ClaudeSessionSummary, ev rawEvent) {
+	if ev.PRUrl == "" {
+		return
+	}
+	for _, pr := range summary.PRs {
+		if pr.PRURL == ev.PRUrl {
+			return
+		}
+	}
+	summary.PRs = append(summary.PRs, ClaudeSessionPR{
+		PRNumber:     ev.PRNumber,
+		PRURL:        ev.PRUrl,
+		PRRepository: ev.PRRepository,
+		FirstSeenAt:  ev.Timestamp,
+	})
+}
+
+// addSummaryCompaction records a conversation compaction. Only the
+// compact_boundary subtype carries compaction metadata; every other system
+// subtype is ignored here.
+//
+// CumulativeDroppedTokens is a running total across the session, so the largest
+// value seen is the session's figure — summing would multiply-count.
+func addSummaryCompaction(summary *ClaudeSessionSummary, ev rawEvent) {
+	if ev.Subtype != "compact_boundary" || ev.CompactMetadata == nil {
+		return
+	}
+	summary.CompactionCount++
+	if d := ev.CompactMetadata.CumulativeDroppedTokens; d > 0 {
+		if d > summary.DroppedTokens {
+			summary.DroppedTokens = d
+		}
+		return
+	}
+	// Older Claude Code releases omit cumulativeDroppedTokens while still
+	// reporting preTokens/postTokens. Reporting zero there would be a visibly
+	// wrong headline number — one real transcript compacts 1,000,563 tokens
+	// down to 26,087 — so this boundary's own drop is accumulated instead.
+	if dropped := ev.CompactMetadata.PreTokens - ev.CompactMetadata.PostTokens; dropped > 0 {
+		summary.DroppedTokens += dropped
 	}
 }
 
@@ -1158,7 +1421,11 @@ func readSessionDetail(sessionID, projectPath, filePath string, logger *slog.Log
 		if ev.Type == "file-history-snapshot" {
 			continue
 		}
-		tr.update(ev.Timestamp)
+		// Same denylist as the summary read, so the detail view's start/end
+		// cannot disagree with the list's for the same session.
+		if boundsSessionTimeRange(ev.Type) {
+			tr.update(ev.Timestamp)
+		}
 		updateMetadataFromEvent(&detail.CWD, &detail.GitBranch, ev)
 		topLevel = processDetailEvent(detail, ev, progressMap, topLevel)
 	}
@@ -1190,6 +1457,16 @@ func processDetailEvent(
 		return processDetailAssistantEvent(detail, ev, topLevel)
 	case "progress":
 		processDetailProgressEvent(ev, progressMap)
+	// The detail reader walks the same file as the summary reader, so it
+	// collects the session's own metadata directly rather than reading it back
+	// from the cache. That keeps the two views in agreement by construction, and
+	// makes the detail correct even for a session the scanner has not reached.
+	case "pr-link":
+		addSummaryPRLink(&detail.ClaudeSessionSummary, ev)
+	case "system":
+		addSummaryCompaction(&detail.ClaudeSessionSummary, ev)
+	default:
+		applySessionMetadata(&detail.ClaudeSessionSummary, ev)
 	}
 	return topLevel
 }

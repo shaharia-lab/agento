@@ -29,6 +29,10 @@ import {
   Star,
   Activity,
   Bot,
+  Shield,
+  Scissors,
+  GitPullRequest,
+  Trees,
 } from 'lucide-react'
 import { formatTokens, shortPath } from '@/lib/format'
 
@@ -511,6 +515,47 @@ export default function ClaudeSessionDetailPage() {
                   <span className="font-mono">{detail.git_branch}</span>
                 </span>
               )}
+              {detail.worktree_branch && (
+                <span
+                  className="flex items-center gap-1 text-xs text-zinc-500 dark:text-zinc-400"
+                  title={
+                    detail.original_branch
+                      ? `Worktree ${detail.worktree_name || detail.worktree_branch}, branched from ${detail.original_branch}`
+                      : `Worktree ${detail.worktree_name || detail.worktree_branch}`
+                  }
+                >
+                  <Trees className="h-3 w-3" />
+                  <span className="font-mono">{detail.worktree_branch}</span>
+                </span>
+              )}
+              {detail.permission_mode && (
+                <span className="flex items-center gap-1 text-xs text-zinc-500 dark:text-zinc-400">
+                  <Shield className="h-3 w-3" />
+                  <span className="font-mono">{detail.permission_mode}</span>
+                </span>
+              )}
+              {detail.compaction_count > 0 && (
+                <span
+                  className="flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400"
+                  title={`${detail.dropped_tokens.toLocaleString()} tokens dropped by compaction`}
+                >
+                  <Scissors className="h-3 w-3" />
+                  {detail.compaction_count} compaction
+                  {detail.compaction_count === 1 ? '' : 's'}
+                </span>
+              )}
+              {detail.prs?.map(pr => (
+                <a
+                  key={pr.pr_url}
+                  href={pr.pr_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400 hover:underline"
+                  title={pr.pr_repository ? `${pr.pr_repository}#${pr.pr_number}` : pr.pr_url}
+                >
+                  <GitPullRequest className="h-3 w-3" />#{pr.pr_number}
+                </a>
+              ))}
               {detail.model && (
                 <Badge
                   variant="secondary"
