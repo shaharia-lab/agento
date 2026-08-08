@@ -7,10 +7,15 @@ import (
 
 // TokenUsage represents API token consumption for a session or message turn.
 type TokenUsage struct {
-	InputTokens         int `json:"input_tokens"`
-	OutputTokens        int `json:"output_tokens"`
-	CacheCreationTokens int `json:"cache_creation_tokens"`
-	CacheReadTokens     int `json:"cache_read_tokens"`
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	// CacheCreationTokens is the authoritative total of cache writes. The 5m/1h
+	// fields below split it by cache TTL, which bill at different multiples of
+	// the input rate (1.25× and 2×); they always sum to this value.
+	CacheCreationTokens   int `json:"cache_creation_tokens"`
+	CacheCreation5mTokens int `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens int `json:"cache_creation_1h_tokens"`
+	CacheReadTokens       int `json:"cache_read_tokens"`
 }
 
 // ClaudeProject represents a project directory containing Claude Code sessions.
@@ -49,10 +54,12 @@ type ClaudeSessionSummary struct {
 // this rather than Usage, which deliberately excludes delegated work.
 func (s ClaudeSessionSummary) TotalUsage() TokenUsage {
 	return TokenUsage{
-		InputTokens:         s.Usage.InputTokens + s.SubagentUsage.InputTokens,
-		OutputTokens:        s.Usage.OutputTokens + s.SubagentUsage.OutputTokens,
-		CacheCreationTokens: s.Usage.CacheCreationTokens + s.SubagentUsage.CacheCreationTokens,
-		CacheReadTokens:     s.Usage.CacheReadTokens + s.SubagentUsage.CacheReadTokens,
+		InputTokens:           s.Usage.InputTokens + s.SubagentUsage.InputTokens,
+		OutputTokens:          s.Usage.OutputTokens + s.SubagentUsage.OutputTokens,
+		CacheCreationTokens:   s.Usage.CacheCreationTokens + s.SubagentUsage.CacheCreationTokens,
+		CacheCreation5mTokens: s.Usage.CacheCreation5mTokens + s.SubagentUsage.CacheCreation5mTokens,
+		CacheCreation1hTokens: s.Usage.CacheCreation1hTokens + s.SubagentUsage.CacheCreation1hTokens,
+		CacheReadTokens:       s.Usage.CacheReadTokens + s.SubagentUsage.CacheReadTokens,
 	}
 }
 

@@ -17,6 +17,16 @@ import (
 const (
 	previewMaxRunes = 120
 	jsonlExt        = ".jsonl"
+
+	// CurrentScannerVersion is bumped whenever the scanner extracts something
+	// new from a transcript that already-cached rows would be missing. Cached
+	// rows carry the version that produced them; when this constant is ahead of
+	// the stored one, the next incremental scan re-reads every file even though
+	// no mtime changed, then records the new version.
+	//
+	// v1: cache-creation tokens are split by cache TTL (5m vs 1h), which bill at
+	// different rates — rows written before the split have both columns at zero.
+	CurrentScannerVersion = 1
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -41,10 +51,51 @@ type rawMessage struct {
 }
 
 type rawUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	InputTokens              int               `json:"input_tokens"`
+	OutputTokens             int               `json:"output_tokens"`
+	CacheCreationInputTokens int               `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     int               `json:"cache_read_input_tokens"`
+	CacheCreation            *rawCacheCreation `json:"cache_creation,omitempty"`
+}
+
+// rawCacheCreation is the nested split of cache_creation_input_tokens by cache
+// TTL. Absent on transcripts written before Claude Code emitted it.
+type rawCacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+}
+
+// splitCacheCreation attributes a flat cache-creation total across the 5m and
+// 1h buckets. See splitCacheTiers for the rules.
+func splitCacheCreation(u *rawUsage) (fiveMin, oneHour int) {
+	if u.CacheCreation == nil {
+		return splitCacheTiers(u.CacheCreationInputTokens, 0)
+	}
+	return splitCacheTiers(u.CacheCreationInputTokens, u.CacheCreation.Ephemeral1hInputTokens)
+}
+
+// splitCacheTiers divides a cache-creation total between the two billing tiers.
+//
+// The flat total is authoritative — the acceptance criterion for #180 is that
+// the buckets sum to it for every session — so only the 1-hour count is taken
+// from the nested object and the 5-minute bucket is derived as the remainder.
+// On consistent input that reproduces the nested 5m value exactly; on
+// inconsistent input the invariant still holds, whereas adding the two nested
+// fields could exceed the total and overcharge.
+//
+// A transcript with no nested object (written before Claude Code emitted the
+// split) yields nested1h == 0, putting the whole total in the 5m bucket — what
+// the cost model assumed before the split existed, so those files keep costing
+// exactly what they did.
+func splitCacheTiers(total, nested1h int) (fiveMin, oneHour int) {
+	oneHour = nested1h
+	if oneHour > total {
+		oneHour = total
+	}
+	if oneHour < 0 {
+		oneHour = 0
+	}
+	return total - oneHour, oneHour
 }
 
 type rawContentBlock struct {
@@ -287,11 +338,63 @@ func IncrementalScanWithNotify(
 		return nil, err
 	}
 
+	// A scanner-version bump means the cached rows are missing data the current
+	// reader extracts, so mtime comparison would wrongly report them unchanged.
+	// Dropping the cached set makes every file look new for exactly one scan.
+	staleReader := storedScannerVersion(db) < CurrentScannerVersion
+	if staleReader {
+		invalidateCachedMtimes(cached, logger)
+	}
+
 	diff := diffDiskAndCache(onDisk, cached)
 	applyChangesWithNotify(db, logger, onDisk, diff, notify)
 
 	updateLastScanned(db, logger)
+	if staleReader {
+		recordScannerVersion(db, logger)
+	}
 	return loadAllSessions(db, logger)
+}
+
+// invalidateCachedMtimes zeroes every cached mtime so the next diff treats all
+// files as modified, forcing a re-read after a scanner-version bump.
+//
+// The entries are invalidated rather than dropped: the files themselves are
+// unchanged — only the rows are incomplete — so they must re-read as updates to
+// existing sessions rather than as newly discovered ones, and a row whose file
+// is gone must still be detected as a deletion.
+func invalidateCachedMtimes(cached map[string]cachedEntry, logger *slog.Logger) {
+	if len(cached) == 0 {
+		return
+	}
+	logger.Info("claude sessions: scanner version bumped, re-reading all transcripts",
+		"current", CurrentScannerVersion, "rows", len(cached))
+	for path, ce := range cached {
+		ce.mtime = time.Time{}
+		cached[path] = ce
+	}
+}
+
+// storedScannerVersion returns the scanner version the cached rows were written
+// by, or 0 when the cache is empty or the value is unreadable — both of which
+// correctly trigger a full re-read.
+func storedScannerVersion(db *sql.DB) int {
+	var v int
+	row := db.QueryRowContext(context.Background(),
+		"SELECT scanner_version FROM claude_cache_metadata WHERE id = 1")
+	if row.Scan(&v) != nil {
+		return 0
+	}
+	return v
+}
+
+func recordScannerVersion(db *sql.DB, logger *slog.Logger) {
+	if _, err := db.ExecContext(context.Background(),
+		"UPDATE claude_cache_metadata SET scanner_version = ? WHERE id = 1",
+		CurrentScannerVersion,
+	); err != nil {
+		logger.Warn("claude sessions: failed to record scanner version", "error", err)
+	}
 }
 
 func walkDiskFiles(projectsDir string) (map[string]diskFile, error) {
@@ -548,8 +651,9 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 			session_id, project_path, file_path, file_mtime,
 			preview, start_time, last_activity, message_count,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+			cache_creation_5m_tokens, cache_creation_1h_tokens,
 			git_branch, model, cwd
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, project_path) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -561,6 +665,8 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 			output_tokens = excluded.output_tokens,
 			cache_creation_tokens = excluded.cache_creation_tokens,
 			cache_read_tokens = excluded.cache_read_tokens,
+			cache_creation_5m_tokens = excluded.cache_creation_5m_tokens,
+			cache_creation_1h_tokens = excluded.cache_creation_1h_tokens,
 			git_branch = excluded.git_branch,
 			model = excluded.model,
 			cwd = excluded.cwd`,
@@ -570,6 +676,7 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 		s.Preview, s.StartTime, s.LastActivity, s.MessageCount,
 		s.Usage.InputTokens, s.Usage.OutputTokens,
 		s.Usage.CacheCreationTokens, s.Usage.CacheReadTokens,
+		s.Usage.CacheCreation5mTokens, s.Usage.CacheCreation1hTokens,
 		s.GitBranch, s.Model, s.CWD,
 	)
 	return err
@@ -628,8 +735,9 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 			agent_type, description, tool_use_id,
 			start_time, last_activity, message_count,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+			cache_creation_5m_tokens, cache_creation_1h_tokens,
 			model
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(parent_session_id, agent_id) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -643,12 +751,15 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 			output_tokens = excluded.output_tokens,
 			cache_creation_tokens = excluded.cache_creation_tokens,
 			cache_read_tokens = excluded.cache_read_tokens,
+			cache_creation_5m_tokens = excluded.cache_creation_5m_tokens,
+			cache_creation_1h_tokens = excluded.cache_creation_1h_tokens,
 			model = excluded.model`,
 		df.sessionID, df.agentID, df.filePath, df.mtime,
 		meta.AgentType, meta.Description, meta.ToolUseID,
 		s.StartTime, s.LastActivity, s.MessageCount,
 		s.Usage.InputTokens, s.Usage.OutputTokens,
 		s.Usage.CacheCreationTokens, s.Usage.CacheReadTokens,
+		s.Usage.CacheCreation5mTokens, s.Usage.CacheCreation1hTokens,
 		s.Model,
 	)
 	return err
@@ -660,7 +771,8 @@ func ListSubagents(db *sql.DB, logger *slog.Logger, sessionID string) ([]ClaudeS
 	rows, err := db.QueryContext(context.Background(), `
 		SELECT agent_id, agent_type, description, tool_use_id,
 		       start_time, last_activity, message_count,
-		       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, model
+		       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+		       cache_creation_5m_tokens, cache_creation_1h_tokens, model
 		FROM claude_subagent_cache
 		WHERE parent_session_id = ?
 		ORDER BY start_time`, sessionID)
@@ -680,7 +792,8 @@ func ListSubagents(db *sql.DB, logger *slog.Logger, sessionID string) ([]ClaudeS
 			&sa.AgentID, &sa.AgentType, &sa.Description, &sa.ToolUseID,
 			&sa.StartTime, &sa.LastActivity, &sa.MessageCount,
 			&sa.Usage.InputTokens, &sa.Usage.OutputTokens,
-			&sa.Usage.CacheCreationTokens, &sa.Usage.CacheReadTokens, &sa.Model,
+			&sa.Usage.CacheCreationTokens, &sa.Usage.CacheReadTokens,
+			&sa.Usage.CacheCreation5mTokens, &sa.Usage.CacheCreation1hTokens, &sa.Model,
 		); err != nil {
 			return nil, err
 		}
@@ -731,9 +844,11 @@ const sessionSummarySelect = `
 	SELECT c.session_id, c.project_path, c.preview, c.custom_title, c.is_favorite,
 	       c.start_time, c.last_activity, c.message_count,
 	       c.input_tokens, c.output_tokens, c.cache_creation_tokens, c.cache_read_tokens,
+	       c.cache_creation_5m_tokens, c.cache_creation_1h_tokens,
 	       c.git_branch, c.model, c.cwd,
 	       COALESCE(sa.n, 0), COALESCE(sa.it, 0), COALESCE(sa.ot, 0),
-	       COALESCE(sa.cct, 0), COALESCE(sa.crt, 0)
+	       COALESCE(sa.cct, 0), COALESCE(sa.crt, 0),
+	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0)
 	FROM claude_session_cache c
 	LEFT JOIN (
 		SELECT parent_session_id,
@@ -741,7 +856,9 @@ const sessionSummarySelect = `
 		       SUM(input_tokens) AS it,
 		       SUM(output_tokens) AS ot,
 		       SUM(cache_creation_tokens) AS cct,
-		       SUM(cache_read_tokens) AS crt
+		       SUM(cache_read_tokens) AS crt,
+		       SUM(cache_creation_5m_tokens) AS c5m,
+		       SUM(cache_creation_1h_tokens) AS c1h
 		FROM claude_subagent_cache
 		GROUP BY parent_session_id
 	) sa ON sa.parent_session_id = c.session_id
@@ -768,9 +885,11 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 			&s.StartTime, &s.LastActivity, &s.MessageCount,
 			&s.Usage.InputTokens, &s.Usage.OutputTokens,
 			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
+			&s.Usage.CacheCreation5mTokens, &s.Usage.CacheCreation1hTokens,
 			&s.GitBranch, &s.Model, &s.CWD,
 			&s.SubagentCount, &s.SubagentUsage.InputTokens, &s.SubagentUsage.OutputTokens,
 			&s.SubagentUsage.CacheCreationTokens, &s.SubagentUsage.CacheReadTokens,
+			&s.SubagentUsage.CacheCreation5mTokens, &s.SubagentUsage.CacheCreation1hTokens,
 		); err != nil {
 			return nil, err
 		}
@@ -816,9 +935,12 @@ func addAssistantUsage(usage *TokenUsage, msg *rawMessage) {
 	if msg == nil || msg.Usage == nil {
 		return
 	}
+	fiveMin, oneHour := splitCacheCreation(msg.Usage)
 	usage.InputTokens += msg.Usage.InputTokens
 	usage.OutputTokens += msg.Usage.OutputTokens
 	usage.CacheCreationTokens += msg.Usage.CacheCreationInputTokens
+	usage.CacheCreation5mTokens += fiveMin
+	usage.CacheCreation1hTokens += oneHour
 	usage.CacheReadTokens += msg.Usage.CacheReadInputTokens
 }
 
@@ -1034,16 +1156,21 @@ func populateAssistantUsage(msg *ClaudeMessage, detail *ClaudeSessionDetail, raw
 	if rawMsg.Usage == nil {
 		return
 	}
+	fiveMin, oneHour := splitCacheCreation(rawMsg.Usage)
 	u := TokenUsage{
-		InputTokens:         rawMsg.Usage.InputTokens,
-		OutputTokens:        rawMsg.Usage.OutputTokens,
-		CacheCreationTokens: rawMsg.Usage.CacheCreationInputTokens,
-		CacheReadTokens:     rawMsg.Usage.CacheReadInputTokens,
+		InputTokens:           rawMsg.Usage.InputTokens,
+		OutputTokens:          rawMsg.Usage.OutputTokens,
+		CacheCreationTokens:   rawMsg.Usage.CacheCreationInputTokens,
+		CacheCreation5mTokens: fiveMin,
+		CacheCreation1hTokens: oneHour,
+		CacheReadTokens:       rawMsg.Usage.CacheReadInputTokens,
 	}
 	msg.Usage = &u
 	detail.Usage.InputTokens += u.InputTokens
 	detail.Usage.OutputTokens += u.OutputTokens
 	detail.Usage.CacheCreationTokens += u.CacheCreationTokens
+	detail.Usage.CacheCreation5mTokens += u.CacheCreation5mTokens
+	detail.Usage.CacheCreation1hTokens += u.CacheCreation1hTokens
 	detail.Usage.CacheReadTokens += u.CacheReadTokens
 }
 

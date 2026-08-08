@@ -413,6 +413,8 @@ export default function TokenUsagePage() {
     most_used_model: '',
     avg_tokens_per_session: 0,
     estimated_cost_usd: 0,
+    unknown_pricing_tokens: 0,
+    unknown_pricing_models: [],
   }
 
   return (
@@ -506,6 +508,17 @@ export default function TokenUsagePage() {
                 color="text-emerald-600 dark:text-emerald-400"
               />
             </div>
+
+            {/* Models with no published rates contribute no cost — say so
+                rather than letting the estimate look complete. */}
+            {summary.unknown_pricing_tokens > 0 && (
+              <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                Est. cost excludes {formatTokens(summary.unknown_pricing_tokens)} tokens on{' '}
+                {summary.unknown_pricing_models.length} model
+                {summary.unknown_pricing_models.length === 1 ? '' : 's'} with no published pricing (
+                {summary.unknown_pricing_models.join(', ')}).
+              </p>
+            )}
 
             {/* Token time series + Cache efficiency */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">

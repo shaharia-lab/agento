@@ -10,35 +10,140 @@ import (
 // ─── Pricing ──────────────────────────────────────────────────────────────────
 
 type modelPricing struct {
-	InputPerMTok      float64
-	OutputPerMTok     float64
-	CacheWritePerMTok float64
-	CacheReadPerMTok  float64
+	InputPerMTok  float64
+	OutputPerMTok float64
+	// Prompt-cache writes are billed by time-to-live: 1.25× input for the
+	// 5-minute tier, 2× input for the 1-hour tier. Claude Code writes almost
+	// exclusively 1-hour cache, so charging everything at the 5m rate — as this
+	// table did until #180 — understates cache cost by ~37%.
+	CacheWrite5mPerMTok float64
+	CacheWrite1hPerMTok float64
+	CacheReadPerMTok    float64 // 0.1× input
 }
 
-// pricingTable maps a lowercase tier keyword to its USD per-million-token rates.
-// Source: Anthropic API pricing page (February 2026).
-// Rates shown are for 5-minute prompt cache writes; cache reads are 0.1× base input.
-// Opus 4.5/4.6: $5 input / $25 output (down from $15/$75 for older Opus models).
-// Haiku 4.5: $1 input / $5 output (up from $0.80/$4 for Haiku 3.5).
+// syntheticModel is the placeholder Claude Code records for locally generated
+// events that never hit the API. It is billed at zero and excluded from the
+// model breakdown rather than being priced as a real model.
+const syntheticModel = "<synthetic>"
+
+// pricingTable maps a model-family key to its USD per-million-token rates.
+// Rates checked against the published Anthropic pricing on 2026-08-08:
+//
+//	family  input  output  cache-write 5m (1.25×)  cache-write 1h (2×)  cache-read (0.1×)
+//	fable   10.00   50.00                  12.50                20.00               1.00
+//	opus     5.00   25.00                   6.25                10.00               0.50
+//	sonnet   3.00   15.00                   3.75                 6.00               0.30
+//	haiku    1.00    5.00                   1.25                 2.00               0.10
+//
+// Sonnet 5 carries a promotional $2/$10 rate through 2026-08-31; the list rate
+// is used here because these figures are a cost estimate, not a bill, and a
+// date-dependent table would silently change historical numbers.
 var pricingTable = map[string]modelPricing{
-	"opus":   {5.00, 25.00, 6.25, 0.50},
-	"sonnet": {3.00, 15.00, 3.75, 0.30},
-	"haiku":  {1.00, 5.00, 1.25, 0.10},
+	"fable":  {10.00, 50.00, 12.50, 20.00, 1.00},
+	"opus":   {5.00, 25.00, 6.25, 10.00, 0.50},
+	"sonnet": {3.00, 15.00, 3.75, 6.00, 0.30},
+	"haiku":  {1.00, 5.00, 1.25, 2.00, 0.10},
 }
 
-var defaultPricing = pricingTable["sonnet"]
-
-// pricingForModel resolves the pricing tier from a model string like
-// "claude-sonnet-4-6". Falls back to sonnet pricing for unknown models.
-func pricingForModel(model string) modelPricing {
-	lower := strings.ToLower(model)
-	for key, p := range pricingTable {
-		if strings.Contains(lower, key) {
-			return p
+// pricingForModel resolves the pricing for a model string such as
+// "claude-opus-4-8". The second return value is false when the model has no
+// known rates — a non-Anthropic model routed through Claude Code (`k3`,
+// `glm-5.2`), an embedding model, or `<synthetic>`. Unknown models contribute
+// no cost rather than being silently billed at another family's rates.
+//
+// Matching is deliberately anchored rather than a substring scan: a bare family
+// name ("opus") and the "claude-<family>-..." form both resolve, but an
+// arbitrary string that merely contains "opus" does not.
+func pricingForModel(model string) (modelPricing, bool) {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if lower == "" || lower == syntheticModel {
+		return modelPricing{}, false
+	}
+	for family, p := range pricingTable {
+		if lower == family || strings.HasPrefix(lower, "claude-"+family+"-") {
+			return p, true
 		}
 	}
-	return defaultPricing
+	return modelPricing{}, false
+}
+
+// costForUsage prices one session's token usage. Returns false for a model with
+// no known rates, so callers can account those tokens separately instead of
+// folding an invented cost into the total.
+func costForUsage(model string, u TokenUsage) (CostSummary, bool) {
+	p, ok := pricingForModel(model)
+	if !ok {
+		return CostSummary{}, false
+	}
+	c := CostSummary{
+		InputCostUSD:     float64(u.InputTokens) / 1_000_000 * p.InputPerMTok,
+		OutputCostUSD:    float64(u.OutputTokens) / 1_000_000 * p.OutputPerMTok,
+		CacheReadCostUSD: float64(u.CacheReadTokens) / 1_000_000 * p.CacheReadPerMTok,
+		CacheWriteCostUSD: float64(u.CacheCreation5mTokens)/1_000_000*p.CacheWrite5mPerMTok +
+			float64(u.CacheCreation1hTokens)/1_000_000*p.CacheWrite1hPerMTok,
+	}
+	c.TotalCostUSD = c.InputCostUSD + c.OutputCostUSD + c.CacheReadCostUSD + c.CacheWriteCostUSD
+	return c, true
+}
+
+// unknownPricingAccumulator tallies the tokens and model names that carry no
+// published rates, so the reported cost can state what it left out.
+type unknownPricingAccumulator struct {
+	seen   map[string]struct{}
+	tokens int
+}
+
+func (a *unknownPricingAccumulator) add(model string, u TokenUsage) {
+	if a.seen == nil {
+		a.seen = map[string]struct{}{}
+	}
+	a.seen[model] = struct{}{}
+	a.tokens += u.InputTokens + u.OutputTokens
+}
+
+// models returns the distinct unpriced model identifiers, sorted.
+func (a *unknownPricingAccumulator) models() []string {
+	out := make([]string, 0, len(a.seen))
+	for m := range a.seen {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// displayModel is the label used for a session whose model string may be empty.
+func displayModel(model string) string {
+	if model == "" {
+		return "unknown"
+	}
+	return model
+}
+
+// accumulateCost adds one session's cost to the running total, routing sessions
+// on unpriced models to the unknown accumulator instead.
+func accumulateCost(
+	cost *CostSummary, unknown *unknownPricingAccumulator, model, label string, u TokenUsage,
+) {
+	c, priced := costForUsage(model, u)
+	if !priced {
+		unknown.add(label, u)
+		return
+	}
+	cost.InputCostUSD += c.InputCostUSD
+	cost.OutputCostUSD += c.OutputCostUSD
+	cost.CacheReadCostUSD += c.CacheReadCostUSD
+	cost.CacheWriteCostUSD += c.CacheWriteCostUSD
+}
+
+// mostFrequent returns the key with the highest count, or "" when empty.
+func mostFrequent(counts map[string]int) string {
+	best, maxCount := "", 0
+	for k, c := range counts {
+		if c > maxCount {
+			best, maxCount = k, c
+		}
+	}
+	return best
 }
 
 // ─── Output types ─────────────────────────────────────────────────────────────
@@ -69,6 +174,13 @@ type AnalyticsSummary struct {
 	MostUsedModel            string  `json:"most_used_model"`
 	AvgTokensPerSession      float64 `json:"avg_tokens_per_session"`
 	EstimatedCostUSD         float64 `json:"estimated_cost_usd"`
+	// UnknownPricingTokens counts tokens belonging to models with no published
+	// rates (non-Anthropic models routed through Claude Code, `<synthetic>`).
+	// They contribute nothing to EstimatedCostUSD; surfacing the count keeps
+	// that omission visible rather than making the total look complete.
+	UnknownPricingTokens int `json:"unknown_pricing_tokens"`
+	// UnknownPricingModels lists those model identifiers, sorted.
+	UnknownPricingModels []string `json:"unknown_pricing_models"`
 }
 
 // TimeSeriesPoint is one time bucket in the token usage over time chart.
@@ -229,6 +341,8 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 	modelCount := make(map[string]int)
 	var cost CostSummary
 
+	var unknown unknownPricingAccumulator
+
 	for _, s := range sessions {
 		u := s.TotalUsage()
 		totalInput += u.InputTokens
@@ -236,28 +350,17 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 		totalCacheRead += u.CacheReadTokens
 		totalCacheWrite += u.CacheCreationTokens
 
-		m := s.Model
-		if m == "" {
-			m = "unknown"
+		m := displayModel(s.Model)
+		if m != syntheticModel {
+			// Kept out of MostUsedModel for the same reason it is kept out of
+			// the model breakdowns — it is not a model anyone ran.
+			modelCount[m]++
 		}
-		modelCount[m]++
-
-		p := pricingForModel(s.Model)
-		cost.InputCostUSD += float64(u.InputTokens) / 1_000_000 * p.InputPerMTok
-		cost.OutputCostUSD += float64(u.OutputTokens) / 1_000_000 * p.OutputPerMTok
-		cost.CacheReadCostUSD += float64(u.CacheReadTokens) / 1_000_000 * p.CacheReadPerMTok
-		cost.CacheWriteCostUSD += float64(u.CacheCreationTokens) / 1_000_000 * p.CacheWritePerMTok
+		accumulateCost(&cost, &unknown, s.Model, m, u)
 	}
 	cost.TotalCostUSD = cost.InputCostUSD + cost.OutputCostUSD + cost.CacheReadCostUSD + cost.CacheWriteCostUSD
 
-	mostUsed := ""
-	maxCount := 0
-	for m, c := range modelCount {
-		if c > maxCount {
-			maxCount = c
-			mostUsed = m
-		}
-	}
+	mostUsed := mostFrequent(modelCount)
 
 	total := totalInput + totalOutput
 	avg := 0.0
@@ -275,6 +378,8 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 		MostUsedModel:            mostUsed,
 		AvgTokensPerSession:      avg,
 		EstimatedCostUSD:         cost.TotalCostUSD,
+		UnknownPricingTokens:     unknown.tokens,
+		UnknownPricingModels:     unknown.models(),
 	}, cost
 }
 
@@ -321,6 +426,9 @@ func buildModelBreakdown(sessions []ClaudeSessionSummary) []ModelStat {
 	tokensByModel := make(map[string]int)
 	total := 0
 	for _, s := range sessions {
+		if s.Model == syntheticModel {
+			continue // locally generated, never billed — not a real model
+		}
 		m := s.Model
 		if m == "" {
 			m = "unknown"
@@ -345,6 +453,9 @@ func buildModelBreakdown(sessions []ClaudeSessionSummary) []ModelStat {
 func buildSessionsPerModel(sessions []ClaudeSessionSummary) []ModelSessionStat {
 	countByModel := make(map[string]int)
 	for _, s := range sessions {
+		if s.Model == syntheticModel {
+			continue // see buildModelBreakdown
+		}
 		m := s.Model
 		if m == "" {
 			m = "unknown"
@@ -429,13 +540,9 @@ func buildCostOverTime(sessions []ClaudeSessionSummary, from, to time.Time, gran
 		if buckets[key] == nil {
 			buckets[key] = &CostPoint{Date: bucketLabel(s.LastActivity, granularity)}
 		}
-		p := pricingForModel(s.Model)
-		u := s.TotalUsage()
-		buckets[key].EstimatedCostUSD +=
-			float64(u.InputTokens)/1_000_000*p.InputPerMTok +
-				float64(u.OutputTokens)/1_000_000*p.OutputPerMTok +
-				float64(u.CacheReadTokens)/1_000_000*p.CacheReadPerMTok +
-				float64(u.CacheCreationTokens)/1_000_000*p.CacheWritePerMTok
+		if c, priced := costForUsage(s.Model, s.TotalUsage()); priced {
+			buckets[key].EstimatedCostUSD += c.TotalCostUSD
+		}
 	}
 
 	step := 24 * time.Hour

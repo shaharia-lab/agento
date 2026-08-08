@@ -12,7 +12,9 @@ import (
 // v2: sub-agent transcripts under <session-id>/subagents/ are fed through the
 // pipeline alongside the parent, so tool counts, cost and error rates include
 // delegated work.
-const CurrentProcessorVersion = 2
+// v3: cost estimates price cache writes by cache TTL and no longer bill unknown
+// models at Sonnet rates, so every stored cost_estimate_usd is out of date.
+const CurrentProcessorVersion = 3
 
 // ProcessableEvent is a single decoded line from a Claude Code session JSONL file,
 // passed to each SessionProcessor in chronological order.
@@ -40,6 +42,25 @@ type EventUsage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	// CacheCreation splits the cache-creation total by cache TTL. Absent on
+	// transcripts written before Claude Code emitted it — see EventCacheCreation.
+	CacheCreation *EventCacheCreation `json:"cache_creation,omitempty"`
+}
+
+// EventCacheCreation is the nested cache-TTL split of CacheCreationInputTokens.
+// The two tiers bill at different multiples of the input rate (1.25× and 2×).
+type EventCacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+}
+
+// Split attributes the cache-creation total across the 5m and 1h buckets. It
+// shares splitCacheTiers with the scanner so the two decoders cannot drift.
+func (u *EventUsage) Split() (fiveMin, oneHour int) {
+	if u.CacheCreation == nil {
+		return splitCacheTiers(u.CacheCreationInputTokens, 0)
+	}
+	return splitCacheTiers(u.CacheCreationInputTokens, u.CacheCreation.Ephemeral1hInputTokens)
 }
 
 // SessionInsight holds all computed static-analysis metrics for a single
