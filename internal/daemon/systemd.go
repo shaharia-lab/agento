@@ -49,8 +49,13 @@ func (s *systemd) unitPath() (string, error) {
 // and enables lingering (best effort) so the unit survives logout on
 // headless/SSH machines. Re-installing over a running service is supported,
 // so the port check only refuses when the occupant is NOT our own service.
+// When the service was already running, install finishes with an explicit
+// restart: enable --now is a start, which is a no-op on an active unit, so
+// without it the new unit content (e.g. a moved binary path) never applies —
+// this mirrors the launchd bootout+bootstrap swap.
 func (s *systemd) Install(ctx context.Context, opts Options) error {
-	if st, err := s.Status(ctx); err != nil || !st.Running {
+	st, statusErr := s.Status(ctx)
+	if statusErr != nil || !st.Running {
 		// Our service is not the one answering on the port — anything else
 		// there (e.g. a foreground `agento web`) would crash-loop the install.
 		if err := checkPortFree(opts.Port); err != nil {
@@ -61,7 +66,30 @@ func (s *systemd) Install(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
-	content, err := render("agento.service.tmpl", opts)
+	if err := writeUnit(unit, "agento.service.tmpl", opts); err != nil {
+		return err
+	}
+	if _, err := s.runner.Run(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
+		return fmt.Errorf("systemctl daemon-reload: %w", err)
+	}
+	if _, err := s.runner.Run(ctx, "systemctl", "--user", "enable", "--now", systemdUnitName); err != nil {
+		return fmt.Errorf("enabling service: %w", err)
+	}
+	if statusErr == nil && st.Running {
+		// Re-install over a running service: start was a no-op, so restart to
+		// pick up the freshly written unit.
+		if _, err := s.runner.Run(ctx, "systemctl", "--user", "restart", systemdUnitName); err != nil {
+			return fmt.Errorf("restarting service to apply new unit: %w", err)
+		}
+	}
+	s.enableLinger(ctx)
+	return nil
+}
+
+// writeUnit renders the unit template and writes it (plus the log directory
+// the unit writes to) with service-file permissions.
+func writeUnit(unit, tmpl string, opts Options) error {
+	content, err := render(tmpl, opts)
 	if err != nil {
 		return err
 	}
@@ -74,13 +102,6 @@ func (s *systemd) Install(ctx context.Context, opts Options) error {
 	if err := os.WriteFile(unit, content, 0o600); err != nil {
 		return fmt.Errorf("writing unit %s: %w", unit, err)
 	}
-	if _, err := s.runner.Run(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
-		return fmt.Errorf("systemctl daemon-reload: %w", err)
-	}
-	if _, err := s.runner.Run(ctx, "systemctl", "--user", "enable", "--now", systemdUnitName); err != nil {
-		return fmt.Errorf("enabling service: %w", err)
-	}
-	s.enableLinger(ctx)
 	return nil
 }
 

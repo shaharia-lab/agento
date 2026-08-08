@@ -451,7 +451,10 @@ func TestLaunchdStatusNotLoaded(t *testing.T) {
 func TestSystemdInstallWhileManagedServiceRuns(t *testing.T) {
 	// Regression: install must stay idempotent when the port's occupant is
 	// our own already-running service — the port check may only refuse
-	// foreign listeners.
+	// foreign listeners. And because enable --now is a no-op on an active
+	// unit, install must end with an explicit restart so the freshly written
+	// unit (e.g. a moved binary path) actually takes effect — mirroring the
+	// launchd bootout+bootstrap swap.
 	stubPortFree(t, true) // port busy because the service itself is running
 	home := t.TempDir()
 	runner := newFakeRunner()
@@ -464,6 +467,11 @@ func TestSystemdInstallWhileManagedServiceRuns(t *testing.T) {
 
 	if err := mgr.Install(context.Background(), testOptionsIn(home)); err != nil {
 		t.Fatalf("install over own running service must succeed, got %v", err)
+	}
+	seqs := runner.argSeqs()
+	last := seqs[len(seqs)-2] // final call is enable-linger
+	if last != "systemctl --user restart agento.service" {
+		t.Errorf("install over running service must restart to apply the new unit; got calls %v", seqs)
 	}
 }
 
