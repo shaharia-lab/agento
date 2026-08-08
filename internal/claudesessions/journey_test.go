@@ -1,10 +1,12 @@
 package claudesessions
 
 import (
+	"bytes"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -359,6 +361,264 @@ func TestGetSessionJourney_ValidSessionID(t *testing.T) {
 		}
 		if result != nil {
 			t.Errorf("expected nil result for non-existent session %q", id)
+		}
+	}
+}
+
+// ── Sub-agent nesting (issue #185) ──────────────────────────────────────────
+
+// subagentSidechainEvent builds a sidechain (delegated) event as written to a
+// sub-agent's own transcript, where every event carries isSidechain:true.
+func subagentSidechainEvent(kind, uuid, ts_ string, contentBlocks []map[string]any) string {
+	ev := map[string]any{
+		"type":        kind,
+		"uuid":        uuid,
+		"sessionId":   "test-session",
+		"timestamp":   ts_,
+		"isSidechain": true,
+	}
+	if kind == "assistant" {
+		ev["message"] = map[string]any{
+			"role":    "assistant",
+			"content": contentBlocks,
+			"usage":   map[string]any{"input_tokens": 40, "output_tokens": 20},
+		}
+	} else {
+		ev["message"] = map[string]any{"role": "user", "content": "delegated task"}
+	}
+	return mustMarshal(ev)
+}
+
+// writeSubagentFixture lays a parent transcript and its sub-agent transcripts
+// out the way Claude Code does, and returns the parent path.
+func writeSubagentFixture(t *testing.T, parentLines []string, subagents map[string]subagentFixture) string {
+	t.Helper()
+	sessionID := "sess-185"
+	projectDir := t.TempDir()
+	parentPath := filepath.Join(projectDir, sessionID+jsonlExt)
+
+	var parent bytes.Buffer
+	for _, l := range parentLines {
+		parent.WriteString(l + "\n")
+	}
+	if err := os.WriteFile(parentPath, parent.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	subagentsDir := filepath.Join(projectDir, sessionID, "subagents")
+	for agentID, sa := range subagents {
+		if err := os.MkdirAll(subagentsDir, 0750); err != nil {
+			t.Fatal(err)
+		}
+		base := filepath.Join(subagentsDir, agentID)
+		var buf bytes.Buffer
+		for _, l := range sa.lines {
+			buf.WriteString(l + "\n")
+		}
+		if err := os.WriteFile(base+jsonlExt, buf.Bytes(), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(base+".meta.json", []byte(sa.meta), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return parentPath
+}
+
+type subagentFixture struct {
+	meta  string
+	lines []string
+}
+
+func subagentMetaJSON(toolUseID, agentType, description string) string {
+	return mustMarshal(map[string]any{
+		"agentType": agentType, "description": description, "toolUseId": toolUseID,
+	})
+}
+
+// A Task tool_use whose id matches a sub-agent's toolUseId must nest that
+// agent's steps under it — not at top level, and carrying identity + usage.
+func TestBuildJourney_SubagentNestedUnderToolCall(t *testing.T) {
+	parentLines := []string{
+		userInputEvent("u1", ts(t0), "Explore the repo"),
+		assistantEvent("a1", "u1", ts(t1), []map[string]any{
+			{"type": "tool_use", "id": "toolu_1", "name": "Task", "input": map[string]any{"description": "explore"}},
+		}),
+	}
+	subagents := map[string]subagentFixture{
+		"agent-x": {
+			meta: subagentMetaJSON("toolu_1", "general-purpose", "explore the repo"),
+			lines: []string{
+				subagentSidechainEvent("user", "su1", ts(t1.Add(time.Second)), nil),
+				subagentSidechainEvent("assistant", "sa1", ts(t1.Add(2*time.Second)), []map[string]any{
+					{"type": "text", "text": "agent working"},
+					{"type": "tool_use", "id": "st1", "name": "Read", "input": map[string]any{"path": "a.go"}},
+				}),
+			},
+		},
+	}
+
+	journey, err := buildJourney("sess-185", writeSubagentFixture(t, parentLines, subagents), testLogger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if journey == nil || len(journey.Turns) != 1 {
+		t.Fatalf("expected 1 turn, got %+v", journey)
+	}
+
+	var toolCall *JourneyStep
+	for i := range journey.Turns[0].Steps {
+		if journey.Turns[0].Steps[i].Type == "tool_call" {
+			toolCall = &journey.Turns[0].Steps[i]
+		}
+		if journey.Turns[0].Steps[i].Type == "sub_agent" {
+			t.Error("sub-agent leaked to top level; it must be nested under its tool_call")
+		}
+	}
+	if toolCall == nil {
+		t.Fatal("expected a tool_call step")
+	}
+
+	var td ToolCallData
+	if err := json.Unmarshal(toolCall.Data, &td); err != nil {
+		t.Fatalf("decode tool_call data: %v", err)
+	}
+	if td.AgentType != "general-purpose" || td.Description != "explore the repo" {
+		t.Errorf("agent identity = type %q desc %q", td.AgentType, td.Description)
+	}
+	if td.AgentUsage == nil {
+		t.Fatal("expected agent_usage on the spawning tool_call")
+	}
+	if td.AgentUsage.InputTokens != 40 || td.AgentUsage.OutputTokens != 20 {
+		t.Errorf("agent_usage = %+v", td.AgentUsage)
+	}
+
+	// Nested steps are the sub-agent's own, sidechain-guard defeated.
+	types := make([]string, 0, len(toolCall.Steps))
+	for _, s := range toolCall.Steps {
+		types = append(types, s.Type)
+	}
+	want := []string{"user_input", "text_response", "tool_call"}
+	if len(types) != len(want) {
+		t.Fatalf("nested steps = %v, want %v", types, want)
+	}
+	for i := range want {
+		if types[i] != want[i] {
+			t.Errorf("nested step[%d] = %q, want %q", i, types[i], want[i])
+		}
+	}
+}
+
+// A sub-agent whose toolUseId matches no tool_use in the rendered parent must
+// still appear, appended at the end of its turn rather than silently dropped.
+func TestBuildJourney_OrphanSubagentAppended(t *testing.T) {
+	parentLines := []string{
+		userInputEvent("u1", ts(t0), "Do it"),
+		assistantEvent("a1", "u1", ts(t1), []map[string]any{
+			{"type": "text", "text": "the task result is hidden"},
+		}),
+	}
+	subagents := map[string]subagentFixture{
+		"agent-y": {
+			meta: subagentMetaJSON("toolu_gone", "general-purpose", "orphan task"),
+			lines: []string{
+				subagentSidechainEvent("assistant", "oa1", ts(t1.Add(time.Second)), []map[string]any{
+					{"type": "text", "text": "orphan work"},
+				}),
+			},
+		},
+	}
+
+	journey, err := buildJourney("sess-185", writeSubagentFixture(t, parentLines, subagents), testLogger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	steps := journey.Turns[0].Steps
+	last := steps[len(steps)-1]
+	if last.Type != "sub_agent" {
+		t.Fatalf("last step = %q, want sub_agent appended", last.Type)
+	}
+	var sd SubAgentData
+	if err := json.Unmarshal(last.Data, &sd); err != nil {
+		t.Fatalf("decode sub_agent data: %v", err)
+	}
+	if sd.AgentID != "agent-y" || sd.Description != "orphan task" {
+		t.Errorf("sub_agent = %+v", sd)
+	}
+	if sd.Usage == nil {
+		t.Error("expected usage on the orphan sub_agent step")
+	}
+	if len(last.Steps) == 0 {
+		t.Error("orphan sub_agent should carry its own steps")
+	}
+}
+
+// A session with no subagents/ directory must produce exactly the journey it
+// produced before this feature: flat, no nesting, no extra steps.
+func TestBuildJourney_NoSubagentsUnchanged(t *testing.T) {
+	parentLines := []string{
+		userInputEvent("u1", ts(t0), "Read a file"),
+		assistantEvent("a1", "u1", ts(t1), []map[string]any{
+			{"type": "text", "text": "reading"},
+			{"type": "tool_use", "id": "toolu_1", "name": "Read", "input": map[string]any{"path": "a.go"}},
+		}),
+		toolResultEvent("u2", ts(t2), "toolu_1", "contents", false),
+	}
+
+	journey, err := buildJourney("sess-185", writeSubagentFixture(t, parentLines, nil), testLogger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if journey.TotalTurns != 1 {
+		t.Fatalf("want 1 turn, got %d", journey.TotalTurns)
+	}
+	types := make([]string, 0, len(journey.Turns[0].Steps))
+	for _, s := range journey.Turns[0].Steps {
+		types = append(types, s.Type)
+		if len(s.Steps) > 0 {
+			t.Errorf("step %q has unexpected nested steps", s.Type)
+		}
+	}
+	want := []string{"user_input", "text_response", "tool_call", "tool_result"}
+	if len(types) != len(want) {
+		t.Fatalf("steps = %v, want %v", types, want)
+	}
+	for i := range want {
+		if types[i] != want[i] {
+			t.Errorf("step[%d] = %q, want %q", i, types[i], want[i])
+		}
+	}
+
+	// No agent identity or usage may leak onto an ordinary tool_call.
+	var td ToolCallData
+	for _, s := range journey.Turns[0].Steps {
+		if s.Type == "tool_call" {
+			_ = json.Unmarshal(s.Data, &td)
+		}
+	}
+	if td.AgentType != "" || td.Description != "" || td.AgentUsage != nil {
+		t.Errorf("ordinary tool_call carries agent data: %+v", td)
+	}
+}
+
+// Criterion 4: no executing code path may still render "progress" events.
+func TestNoProgressCaseRemains(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		content, err := os.ReadFile(name) //nolint:gosec
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(content), `"progress"`) {
+			t.Errorf("%s still contains an executing \"progress\" path", name)
 		}
 	}
 }

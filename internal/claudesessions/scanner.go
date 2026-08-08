@@ -1389,8 +1389,9 @@ func GetSessionDetail(sessionID string, logger *slog.Logger) (*ClaudeSessionDeta
 	return nil, nil
 }
 
-// readSessionDetail reads a session JSONL file and builds the full detail including
-// message tree with progress events nested under their parent assistant turns.
+// readSessionDetail reads a session JSONL file and builds the full message
+// detail. Sidechain (sub-agent) events are skipped here — sub-agents are read
+// from <session-id>/subagents/ and reported separately (see ClaudeSubagent).
 func readSessionDetail(sessionID, projectPath, filePath string, logger *slog.Logger) (*ClaudeSessionDetail, error) {
 	f, err := os.Open(filePath) //nolint:gosec
 	if err != nil {
@@ -1411,7 +1412,6 @@ func readSessionDetail(sessionID, projectPath, filePath string, logger *slog.Log
 
 	var tr timeRange
 	var topLevel []ClaudeMessage
-	progressMap := make(map[string][]ClaudeMessage)
 
 	for sc.Scan() {
 		var ev rawEvent
@@ -1427,12 +1427,11 @@ func readSessionDetail(sessionID, projectPath, filePath string, logger *slog.Log
 			tr.update(ev.Timestamp)
 		}
 		updateMetadataFromEvent(&detail.CWD, &detail.GitBranch, ev)
-		topLevel = processDetailEvent(detail, ev, progressMap, topLevel)
+		topLevel = processDetailEvent(detail, ev, topLevel)
 	}
 
 	detail.StartTime = tr.start
 	detail.LastActivity = tr.last
-	attachProgressChildren(topLevel, progressMap)
 	detail.Messages = topLevel
 	if detail.Messages == nil {
 		detail.Messages = []ClaudeMessage{}
@@ -1447,7 +1446,6 @@ func readSessionDetail(sessionID, projectPath, filePath string, logger *slog.Log
 
 func processDetailEvent(
 	detail *ClaudeSessionDetail, ev rawEvent,
-	progressMap map[string][]ClaudeMessage,
 	topLevel []ClaudeMessage,
 ) []ClaudeMessage {
 	switch ev.Type {
@@ -1455,8 +1453,6 @@ func processDetailEvent(
 		return processDetailUserEvent(detail, ev, topLevel)
 	case "assistant":
 		return processDetailAssistantEvent(detail, ev, topLevel)
-	case "progress":
-		processDetailProgressEvent(ev, progressMap)
 	// The detail reader walks the same file as the summary reader, so it
 	// collects the session's own metadata directly rather than reading it back
 	// from the cache. That keeps the two views in agreement by construction, and
@@ -1544,24 +1540,6 @@ func populateAssistantBlocks(msg *ClaudeMessage, rawMsg *rawMessage) {
 	for _, b := range blocks {
 		if nb := normalizeBlock(b); nb.Type != "" {
 			msg.Blocks = append(msg.Blocks, nb)
-		}
-	}
-}
-
-func processDetailProgressEvent(ev rawEvent, progressMap map[string][]ClaudeMessage) {
-	if ev.ParentUUID == "" {
-		return
-	}
-	progressMap[ev.ParentUUID] = append(progressMap[ev.ParentUUID], ClaudeMessage{
-		UUID: ev.UUID, ParentUUID: ev.ParentUUID,
-		Type: "progress", Timestamp: ev.Timestamp, IsSidechain: ev.IsSidechain,
-	})
-}
-
-func attachProgressChildren(topLevel []ClaudeMessage, progressMap map[string][]ClaudeMessage) {
-	for i := range topLevel {
-		if children, ok := progressMap[topLevel[i].UUID]; ok {
-			topLevel[i].Children = children
 		}
 	}
 }

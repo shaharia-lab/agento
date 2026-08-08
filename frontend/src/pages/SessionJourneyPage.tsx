@@ -14,14 +14,10 @@ import {
   MessageSquare,
   Brain,
   MessageCircle,
-  Terminal,
-  FileText,
-  Globe,
   Wrench,
   XCircle,
   CheckCircle,
   Bot,
-  Plug,
   Scissors,
 } from 'lucide-react'
 import { formatTokens, shortPath, formatDuration } from '@/lib/format'
@@ -70,8 +66,13 @@ function getStepStyle(step: JourneyStep): StepStyle {
         bg: 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-900/50',
       }
     case 'tool_call': {
-      const toolName = (data?.tool_name as string) || ''
-      return getToolCallStyle(toolName)
+      const hasAgent = !!(data?.agent_type || data?.description)
+      return {
+        icon: hasAgent ? <Bot className="h-3.5 w-3.5" /> : <Wrench className="h-3.5 w-3.5" />,
+        label: hasAgent ? 'Sub-Agent Task' : 'Tool Call',
+        color: 'text-indigo-600 dark:text-indigo-400',
+        bg: 'bg-indigo-50 dark:bg-indigo-950/30 border-indigo-200 dark:border-indigo-900/50',
+      }
     }
     case 'tool_result': {
       const isErr = !!data?.is_error
@@ -84,33 +85,12 @@ function getStepStyle(step: JourneyStep): StepStyle {
           : 'bg-green-50 dark:bg-green-950/30 border-green-200 dark:border-green-900/50',
       }
     }
-    case 'bash_output':
-      return {
-        icon: <Terminal className="h-3.5 w-3.5" />,
-        label: 'Bash Output',
-        color: 'text-orange-600 dark:text-orange-400',
-        bg: 'bg-orange-50 dark:bg-orange-950/30 border-orange-200 dark:border-orange-900/50',
-      }
     case 'sub_agent':
       return {
         icon: <Bot className="h-3.5 w-3.5" />,
         label: 'Sub-Agent',
         color: 'text-indigo-600 dark:text-indigo-400',
         bg: 'bg-indigo-50 dark:bg-indigo-950/30 border-indigo-200 dark:border-indigo-900/50',
-      }
-    case 'skill':
-      return {
-        icon: <Zap className="h-3.5 w-3.5" />,
-        label: 'Skill',
-        color: 'text-violet-600 dark:text-violet-400',
-        bg: 'bg-violet-50 dark:bg-violet-950/30 border-violet-200 dark:border-violet-900/50',
-      }
-    case 'mcp_tool':
-      return {
-        icon: <Plug className="h-3.5 w-3.5" />,
-        label: 'MCP Tool',
-        color: 'text-slate-600 dark:text-slate-400',
-        bg: 'bg-slate-50 dark:bg-slate-950/30 border-slate-200 dark:border-slate-800/50',
       }
     case 'thinking_duration':
       return {
@@ -133,39 +113,6 @@ function getStepStyle(step: JourneyStep): StepStyle {
         color: 'text-zinc-500 dark:text-zinc-400',
         bg: 'bg-zinc-50 dark:bg-zinc-800/50 border-zinc-200 dark:border-zinc-700/50',
       }
-  }
-}
-
-function getToolCallStyle(toolName: string): StepStyle {
-  if (toolName === 'Bash') {
-    return {
-      icon: <Terminal className="h-3.5 w-3.5" />,
-      label: 'Bash',
-      color: 'text-orange-600 dark:text-orange-400',
-      bg: 'bg-orange-50 dark:bg-orange-950/30 border-orange-200 dark:border-orange-900/50',
-    }
-  }
-  if (['Read', 'Write', 'Edit', 'Glob', 'Grep', 'NotebookEdit'].includes(toolName)) {
-    return {
-      icon: <FileText className="h-3.5 w-3.5" />,
-      label: toolName,
-      color: 'text-yellow-600 dark:text-yellow-400',
-      bg: 'bg-yellow-50 dark:bg-yellow-950/30 border-yellow-200 dark:border-yellow-900/50',
-    }
-  }
-  if (['WebFetch', 'WebSearch'].includes(toolName)) {
-    return {
-      icon: <Globe className="h-3.5 w-3.5" />,
-      label: toolName,
-      color: 'text-teal-600 dark:text-teal-400',
-      bg: 'bg-teal-50 dark:bg-teal-950/30 border-teal-200 dark:border-teal-900/50',
-    }
-  }
-  return {
-    icon: <Wrench className="h-3.5 w-3.5" />,
-    label: toolName || 'Tool',
-    color: 'text-zinc-500 dark:text-zinc-400',
-    bg: 'bg-zinc-50 dark:bg-zinc-800/50 border-zinc-200 dark:border-zinc-700/50',
   }
 }
 
@@ -220,28 +167,104 @@ function ThinkingContent({ data }: Readonly<{ data: Record<string, unknown> }>) 
   )
 }
 
-function ToolCallContent({ data }: Readonly<{ data: Record<string, unknown> }>) {
-  const toolName = (data?.tool_name as string) || 'unknown'
-  const input = data?.input ? JSON.stringify(data.input, null, 2) : ''
+// AgentUsageBadge renders a sub-agent's token cost in the "in+out" form the
+// turn header already uses.
+function AgentUsageBadge({ usage }: Readonly<{ usage: Record<string, unknown> }>) {
+  const inTokens = (usage.input_tokens as number) || 0
+  const outTokens = (usage.output_tokens as number) || 0
   return (
-    <div>
-      <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300">{toolName}</span>
-      {input && <ExpandableCode label="input" content={input} />}
+    <span className="inline-flex items-center gap-0.5 text-[10px] text-indigo-500 dark:text-indigo-400 font-mono">
+      <Zap className="h-2.5 w-2.5" />
+      {formatTokens(inTokens)}+{formatTokens(outTokens)}
+    </span>
+  )
+}
+
+// AgentStepsSummary renders a nested sub-agent's steps, collapsed by default
+// behind an "N steps · M tokens" summary line — the same collapse pattern tool
+// calls use.
+function AgentStepsSummary({ step }: Readonly<{ step: JourneyStep }>) {
+  const [expanded, setExpanded] = useState(false)
+  const steps = step.steps ?? []
+  if (steps.length === 0) return null
+  return (
+    <div className="mt-1">
+      <button
+        className="flex items-center gap-1 text-xs text-indigo-600 dark:text-indigo-400 hover:underline"
+        onClick={() => setExpanded(e => !e)}
+      >
+        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        {steps.length} step{steps.length === 1 ? '' : 's'}
+      </button>
+      {expanded && (
+        <div className="mt-1 pl-3 border-l border-indigo-200 dark:border-indigo-800/50 flex flex-col gap-1">
+          {steps.map((s, i) => (
+            <StepRow key={`${s.type}-${s.timestamp}-${i}`} step={s} depth={1} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
 
-function MCPToolContent({ data }: Readonly<{ data: Record<string, unknown> }>) {
-  const server = (data?.server_name as string) || ''
-  const tool = (data?.tool_name as string) || ''
-  const status = (data?.status as string) || ''
+function ToolCallContent({ step }: Readonly<{ step: JourneyStep }>) {
+  const data = step.data
+  const toolName = (data?.tool_name as string) || 'unknown'
+  const input = data?.input ? JSON.stringify(data.input, null, 2) : ''
+  const agentType = (data?.agent_type as string) || ''
+  const description = (data?.description as string) || ''
+  const agentUsage = data?.agent_usage as Record<string, unknown> | undefined
+  const isAgent = !!agentType || !!description
   return (
-    <p className="text-xs text-zinc-500 dark:text-zinc-400">
-      {server && <span className="font-mono">{server}</span>}
-      {server && tool && <span className="mx-1">/</span>}
-      {tool && <span className="font-mono font-medium">{tool}</span>}
-      {status && <span className="ml-2 text-zinc-400">({status})</span>}
-    </p>
+    <div>
+      <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300">{toolName}</span>
+      {input && <ExpandableCode label="input" content={input} />}
+      {isAgent && (
+        <div className="mt-0.5 flex flex-wrap items-center gap-2">
+          {agentType && (
+            <Badge
+              variant="secondary"
+              className="text-[10px] py-0 h-4 bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 border-0 font-normal"
+            >
+              {agentType}
+            </Badge>
+          )}
+          {description && (
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">{description}</span>
+          )}
+          {agentUsage && <AgentUsageBadge usage={agentUsage} />}
+        </div>
+      )}
+      <AgentStepsSummary step={step} />
+    </div>
+  )
+}
+
+// SubAgentGroup renders a sub-agent whose originating tool_use is not in the
+// rendered transcript (compacted away, or no toolUseId in its sidecar).
+function SubAgentGroup({ step }: Readonly<{ step: JourneyStep }>) {
+  const data = step.data
+  const agentType = (data?.agent_type as string) || ''
+  const description = (data?.description as string) || ''
+  const usage = data?.usage as Record<string, unknown> | undefined
+  return (
+    <div>
+      <div className="flex flex-wrap items-center gap-2">
+        {agentType && (
+          <Badge
+            variant="secondary"
+            className="text-[10px] py-0 h-4 bg-indigo-100 dark:bg-indigo-900/40 text-indigo-600 dark:text-indigo-400 border-0 font-normal"
+          >
+            {agentType}
+          </Badge>
+        )}
+        <span className="text-xs text-zinc-600 dark:text-zinc-300">
+          {description || 'Sub-agent'}
+        </span>
+        {usage && <AgentUsageBadge usage={usage} />}
+      </div>
+      <AgentStepsSummary step={step} />
+    </div>
   )
 }
 
@@ -259,7 +282,7 @@ function StepContent({ step }: Readonly<{ step: JourneyStep }>) {
     case 'thinking':
       return <ThinkingContent data={data} />
     case 'tool_call':
-      return <ToolCallContent data={data} />
+      return <ToolCallContent step={step} />
     case 'tool_result':
       return (
         <ExpandableCode
@@ -268,22 +291,8 @@ function StepContent({ step }: Readonly<{ step: JourneyStep }>) {
           errorStyle={!!data?.is_error}
         />
       )
-    case 'bash_output':
-      return <ExpandableCode label="output" content={(data?.output as string) || ''} />
     case 'sub_agent':
-      return (
-        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          {(data?.prompt as string) || 'Sub-agent invocation'}
-        </p>
-      )
-    case 'skill':
-      return (
-        <p className="text-xs text-zinc-500 dark:text-zinc-400">
-          {(data?.prompt as string) || 'Skill invocation'}
-        </p>
-      )
-    case 'mcp_tool':
-      return <MCPToolContent data={data} />
+      return <SubAgentGroup step={step} />
     case 'compaction':
       return (
         <p className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -307,8 +316,21 @@ function StepContent({ step }: Readonly<{ step: JourneyStep }>) {
 
 // ── Step row ──────────────────────────────────────────────────────────────────
 
-function StepRow({ step }: Readonly<{ step: JourneyStep }>) {
+function StepRow({ step, depth = 0 }: Readonly<{ step: JourneyStep; depth?: number }>) {
   const style = getStepStyle(step)
+
+  // Nested (sub-agent) steps render compactly, without a timeline dot — the
+  // parent's dot and connecting line already anchor the group.
+  if (depth > 0) {
+    return (
+      <div className="flex items-baseline gap-2">
+        <span className={`text-[10px] font-medium shrink-0 ${style.color}`}>{style.label}</span>
+        <div className="flex-1 min-w-0">
+          <StepContent step={step} />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex gap-3 group">

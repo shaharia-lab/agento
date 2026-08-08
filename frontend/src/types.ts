@@ -604,7 +604,7 @@ export interface ClaudeNormalizedBlock {
 export interface ClaudeMessage {
   uuid: string
   parent_uuid?: string
-  type: 'user' | 'assistant' | 'progress'
+  type: 'user' | 'assistant'
   timestamp: string
   role?: string
   content?: string
@@ -658,6 +658,11 @@ export interface JourneyStep {
   timestamp: string
   duration_ms: number
   data: Record<string, unknown>
+  /**
+   * Nested steps for a step that spawned a sub-agent (a Task tool_call whose id
+   * matches a sub-agent transcript). One level deep; empty for all other steps.
+   */
+  steps?: JourneyStep[]
 }
 
 export type JourneyStepType =
@@ -666,11 +671,8 @@ export type JourneyStepType =
   | 'text_response'
   | 'tool_call'
   | 'tool_result'
-  | 'bash_output'
   | 'thinking_duration'
   | 'sub_agent'
-  | 'skill'
-  | 'mcp_tool'
   | 'compaction'
 
 // ── Notifications ─────────────────────────────────────────────────────────────
