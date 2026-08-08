@@ -12,7 +12,9 @@ import (
 // v2: sub-agent transcripts under <session-id>/subagents/ are fed through the
 // pipeline alongside the parent, so tool counts, cost and error rates include
 // delegated work.
-const CurrentProcessorVersion = 2
+// v3: cost estimates price cache writes by cache TTL and no longer bill unknown
+// models at Sonnet rates, so every stored cost_estimate_usd is out of date.
+const CurrentProcessorVersion = 3
 
 // ProcessableEvent is a single decoded line from a Claude Code session JSONL file,
 // passed to each SessionProcessor in chronological order.
@@ -52,19 +54,13 @@ type EventCacheCreation struct {
 	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
 }
 
-// Split attributes the cache-creation total across the 5m and 1h buckets,
-// falling back to 5m-only when the nested object is absent so pre-split
-// transcripts cost exactly what they did before. Mirrors splitCacheCreation.
+// Split attributes the cache-creation total across the 5m and 1h buckets. It
+// shares splitCacheTiers with the scanner so the two decoders cannot drift.
 func (u *EventUsage) Split() (fiveMin, oneHour int) {
 	if u.CacheCreation == nil {
-		return u.CacheCreationInputTokens, 0
+		return splitCacheTiers(u.CacheCreationInputTokens, 0)
 	}
-	oneHour = u.CacheCreation.Ephemeral1hInputTokens
-	fiveMin = u.CacheCreation.Ephemeral5mInputTokens
-	if remainder := u.CacheCreationInputTokens - (fiveMin + oneHour); remainder > 0 {
-		fiveMin += remainder
-	}
-	return fiveMin, oneHour
+	return splitCacheTiers(u.CacheCreationInputTokens, u.CacheCreation.Ephemeral1hInputTokens)
 }
 
 // SessionInsight holds all computed static-analysis metrics for a single

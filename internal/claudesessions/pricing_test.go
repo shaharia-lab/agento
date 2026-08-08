@@ -235,7 +235,7 @@ func TestEventUsageSplit_MatchesScannerSplit(t *testing.T) {
 
 // writeJSONLWithCacheTTL writes a session whose assistant turn carries a nested
 // cache_creation split.
-func writeJSONLWithCacheTTL(t *testing.T, dir, sessionID, model string, ts time.Time, c5m, c1h int) {
+func writeJSONLWithCacheTTL(t *testing.T, dir, sessionID string, ts time.Time, c5m, c1h int) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -247,7 +247,7 @@ func writeJSONLWithCacheTTL(t *testing.T, dir, sessionID, model string, ts time.
 	assistant, _ := json.Marshal(rawEvent{
 		Type: "assistant", SessionID: sessionID, Timestamp: ts.Add(time.Second),
 		Message: &rawMessage{
-			Role: "assistant", Model: model,
+			Role: "assistant", Model: "claude-opus-4-8",
 			Content: json.RawMessage(`[{"type":"text","text":"ok"}]`),
 			Usage: &rawUsage{
 				InputTokens:              10,
@@ -276,7 +276,7 @@ func TestIncrementalScan_PersistsCacheTTLSplit(t *testing.T) {
 	projectDir := filepath.Join(home, ".claude", "projects", "test-project")
 
 	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
-	writeJSONLWithCacheTTL(t, projectDir, "session-ttl", "claude-opus-4-8", ts, 40, 960)
+	writeJSONLWithCacheTTL(t, projectDir, "session-ttl", ts, 40, 960)
 
 	sessions, err := IncrementalScan(db, logger)
 	if err != nil {
@@ -411,7 +411,7 @@ func TestIncrementalScan_ScannerVersionForcesReread(t *testing.T) {
 	projectDir := filepath.Join(home, ".claude", "projects", "test-project")
 
 	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
-	writeJSONLWithCacheTTL(t, projectDir, "session-rescan", "claude-opus-4-8", ts, 0, 1000)
+	writeJSONLWithCacheTTL(t, projectDir, "session-rescan", ts, 0, 1000)
 
 	if _, err := IncrementalScan(db, logger); err != nil {
 		t.Fatalf("first scan: %v", err)
@@ -456,7 +456,7 @@ func TestIncrementalScan_ScannerVersionCurrentSkipsReread(t *testing.T) {
 	projectDir := filepath.Join(home, ".claude", "projects", "test-project")
 
 	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
-	writeJSONLWithCacheTTL(t, projectDir, "session-stable", "claude-opus-4-8", ts, 0, 1000)
+	writeJSONLWithCacheTTL(t, projectDir, "session-stable", ts, 0, 1000)
 
 	if _, err := IncrementalScan(db, logger); err != nil {
 		t.Fatalf("first scan: %v", err)
@@ -477,5 +477,110 @@ func TestIncrementalScan_ScannerVersionCurrentSkipsReread(t *testing.T) {
 	s := findSession(t, sessions, "session-stable")
 	if s.Usage.CacheCreation1hTokens != 0 {
 		t.Errorf("unchanged file was re-read despite a current scanner version")
+	}
+}
+
+// TestSplitCacheTiers_BucketsAlwaysSumToTotal is the acceptance criterion that
+// the two buckets sum to the flat total for every session — including when the
+// nested object disagrees with it, where naively adding both nested fields
+// would exceed the total and overcharge.
+func TestSplitCacheTiers_BucketsAlwaysSumToTotal(t *testing.T) {
+	cases := []struct {
+		total, nested1h int
+		want5m, want1h  int
+	}{
+		{total: 0, nested1h: 0, want5m: 0, want1h: 0},
+		{total: 500, nested1h: 0, want5m: 500, want1h: 0},
+		{total: 1000, nested1h: 1000, want5m: 0, want1h: 1000},
+		{total: 300, nested1h: 200, want5m: 100, want1h: 200},
+		// Nested claims more 1h than the total: clamp rather than overcharge.
+		{total: 500, nested1h: 600, want5m: 0, want1h: 500},
+		// Defensive: a negative count must not invert the split.
+		{total: 500, nested1h: -10, want5m: 500, want1h: 0},
+	}
+	for _, tc := range cases {
+		got5m, got1h := splitCacheTiers(tc.total, tc.nested1h)
+		if got5m != tc.want5m || got1h != tc.want1h {
+			t.Errorf("splitCacheTiers(%d, %d) = (%d, %d), want (%d, %d)",
+				tc.total, tc.nested1h, got5m, got1h, tc.want5m, tc.want1h)
+		}
+		if got5m+got1h != tc.total {
+			t.Errorf("splitCacheTiers(%d, %d): buckets sum to %d, want %d",
+				tc.total, tc.nested1h, got5m+got1h, tc.total)
+		}
+	}
+}
+
+// TestIncrementalScan_ForcedRescanReportsUpdatesNotDiscoveries guards the
+// forced re-read: the files are unchanged, so their sessions must be notified
+// as updated, and a transcript deleted meanwhile must still be reaped.
+func TestIncrementalScan_ForcedRescanReportsUpdatesNotDiscoveries(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projectDir := filepath.Join(home, ".claude", "projects", "test-project")
+
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	writeJSONLWithCacheTTL(t, projectDir, "session-keep", ts, 0, 1000)
+	writeJSONLWithCacheTTL(t, projectDir, "session-gone", ts, 0, 1000)
+
+	if _, err := IncrementalScan(db, logger); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+
+	// Rewind the reader version and delete one transcript.
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE claude_cache_metadata SET scanner_version = 0 WHERE id = 1`); err != nil {
+		t.Fatalf("rewind version: %v", err)
+	}
+	if err := os.Remove(filepath.Join(projectDir, "session-gone.jsonl")); err != nil {
+		t.Fatalf("remove transcript: %v", err)
+	}
+
+	var newIDs, updatedIDs []string
+	sessions, err := IncrementalScanWithNotify(db, logger,
+		func(sessionID, _ string, isNew bool) {
+			if isNew {
+				newIDs = append(newIDs, sessionID)
+			} else {
+				updatedIDs = append(updatedIDs, sessionID)
+			}
+		})
+	if err != nil {
+		t.Fatalf("forced rescan: %v", err)
+	}
+
+	if len(newIDs) != 0 {
+		t.Errorf("existing sessions reported as newly discovered: %v", newIDs)
+	}
+	if len(updatedIDs) != 1 || updatedIDs[0] != "session-keep" {
+		t.Errorf("expected one update for session-keep, got %v", updatedIDs)
+	}
+	// The deleted transcript must not survive the forced rescan.
+	for _, s := range sessions {
+		if s.SessionID == "session-gone" {
+			t.Error("deleted session was not reaped during the forced rescan")
+		}
+	}
+}
+
+// TestBuildSummary_SyntheticNeverTopModel keeps the placeholder out of the
+// headline KPI, consistent with its exclusion from the breakdowns.
+func TestBuildSummary_SyntheticNeverTopModel(t *testing.T) {
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	sessions := []ClaudeSessionSummary{
+		{Model: syntheticModel, StartTime: ts, LastActivity: ts},
+		{Model: syntheticModel, StartTime: ts, LastActivity: ts},
+		{Model: syntheticModel, StartTime: ts, LastActivity: ts},
+		{Model: "claude-opus-4-8", StartTime: ts, LastActivity: ts},
+	}
+	summary, _ := buildSummary(sessions)
+	if summary.MostUsedModel == syntheticModel {
+		t.Error("<synthetic> reported as the most used model")
+	}
+	if summary.MostUsedModel != "claude-opus-4-8" {
+		t.Errorf("most used model = %q, want claude-opus-4-8", summary.MostUsedModel)
 	}
 }

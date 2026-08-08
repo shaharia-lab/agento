@@ -66,23 +66,36 @@ type rawCacheCreation struct {
 }
 
 // splitCacheCreation attributes a flat cache-creation total across the 5m and
-// 1h buckets. When the nested object is missing (older transcripts) the whole
-// value is attributed to 5m, which is what the cost model assumed before the
-// split existed — so pre-split files keep costing exactly what they did.
-//
-// The nested values are authoritative when present, but the flat field remains
-// the total: if the two disagree, any unattributed remainder falls to 5m so the
-// buckets always sum to it.
+// 1h buckets. See splitCacheTiers for the rules.
 func splitCacheCreation(u *rawUsage) (fiveMin, oneHour int) {
 	if u.CacheCreation == nil {
-		return u.CacheCreationInputTokens, 0
+		return splitCacheTiers(u.CacheCreationInputTokens, 0)
 	}
-	oneHour = u.CacheCreation.Ephemeral1hInputTokens
-	fiveMin = u.CacheCreation.Ephemeral5mInputTokens
-	if remainder := u.CacheCreationInputTokens - (fiveMin + oneHour); remainder > 0 {
-		fiveMin += remainder
+	return splitCacheTiers(u.CacheCreationInputTokens, u.CacheCreation.Ephemeral1hInputTokens)
+}
+
+// splitCacheTiers divides a cache-creation total between the two billing tiers.
+//
+// The flat total is authoritative — the acceptance criterion for #180 is that
+// the buckets sum to it for every session — so only the 1-hour count is taken
+// from the nested object and the 5-minute bucket is derived as the remainder.
+// On consistent input that reproduces the nested 5m value exactly; on
+// inconsistent input the invariant still holds, whereas adding the two nested
+// fields could exceed the total and overcharge.
+//
+// A transcript with no nested object (written before Claude Code emitted the
+// split) yields nested1h == 0, putting the whole total in the 5m bucket — what
+// the cost model assumed before the split existed, so those files keep costing
+// exactly what they did.
+func splitCacheTiers(total, nested1h int) (fiveMin, oneHour int) {
+	oneHour = nested1h
+	if oneHour > total {
+		oneHour = total
 	}
-	return fiveMin, oneHour
+	if oneHour < 0 {
+		oneHour = 0
+	}
+	return total - oneHour, oneHour
 }
 
 type rawContentBlock struct {
@@ -328,12 +341,9 @@ func IncrementalScanWithNotify(
 	// A scanner-version bump means the cached rows are missing data the current
 	// reader extracts, so mtime comparison would wrongly report them unchanged.
 	// Dropping the cached set makes every file look new for exactly one scan.
-	storedVersion := storedScannerVersion(db)
-	staleReader := storedVersion < CurrentScannerVersion
-	if staleReader && len(cached) > 0 {
-		logger.Info("claude sessions: scanner version bumped, re-reading all transcripts",
-			"stored", storedVersion, "current", CurrentScannerVersion, "rows", len(cached))
-		cached = map[string]cachedEntry{}
+	staleReader := storedScannerVersion(db) < CurrentScannerVersion
+	if staleReader {
+		invalidateCachedMtimes(cached, logger)
 	}
 
 	diff := diffDiskAndCache(onDisk, cached)
@@ -344,6 +354,25 @@ func IncrementalScanWithNotify(
 		recordScannerVersion(db, logger)
 	}
 	return loadAllSessions(db, logger)
+}
+
+// invalidateCachedMtimes zeroes every cached mtime so the next diff treats all
+// files as modified, forcing a re-read after a scanner-version bump.
+//
+// The entries are invalidated rather than dropped: the files themselves are
+// unchanged — only the rows are incomplete — so they must re-read as updates to
+// existing sessions rather than as newly discovered ones, and a row whose file
+// is gone must still be detected as a deletion.
+func invalidateCachedMtimes(cached map[string]cachedEntry, logger *slog.Logger) {
+	if len(cached) == 0 {
+		return
+	}
+	logger.Info("claude sessions: scanner version bumped, re-reading all transcripts",
+		"current", CurrentScannerVersion, "rows", len(cached))
+	for path, ce := range cached {
+		ce.mtime = time.Time{}
+		cached[path] = ce
+	}
 }
 
 // storedScannerVersion returns the scanner version the cached rows were written

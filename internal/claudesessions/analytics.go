@@ -111,6 +111,41 @@ func (a *unknownPricingAccumulator) models() []string {
 	return out
 }
 
+// displayModel is the label used for a session whose model string may be empty.
+func displayModel(model string) string {
+	if model == "" {
+		return "unknown"
+	}
+	return model
+}
+
+// accumulateCost adds one session's cost to the running total, routing sessions
+// on unpriced models to the unknown accumulator instead.
+func accumulateCost(
+	cost *CostSummary, unknown *unknownPricingAccumulator, model, label string, u TokenUsage,
+) {
+	c, priced := costForUsage(model, u)
+	if !priced {
+		unknown.add(label, u)
+		return
+	}
+	cost.InputCostUSD += c.InputCostUSD
+	cost.OutputCostUSD += c.OutputCostUSD
+	cost.CacheReadCostUSD += c.CacheReadCostUSD
+	cost.CacheWriteCostUSD += c.CacheWriteCostUSD
+}
+
+// mostFrequent returns the key with the highest count, or "" when empty.
+func mostFrequent(counts map[string]int) string {
+	best, maxCount := "", 0
+	for k, c := range counts {
+		if c > maxCount {
+			best, maxCount = k, c
+		}
+	}
+	return best
+}
+
 // ─── Output types ─────────────────────────────────────────────────────────────
 
 // AnalyticsReport is the complete response payload for GET /api/claude-analytics.
@@ -315,32 +350,17 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 		totalCacheRead += u.CacheReadTokens
 		totalCacheWrite += u.CacheCreationTokens
 
-		m := s.Model
-		if m == "" {
-			m = "unknown"
+		m := displayModel(s.Model)
+		if m != syntheticModel {
+			// Kept out of MostUsedModel for the same reason it is kept out of
+			// the model breakdowns — it is not a model anyone ran.
+			modelCount[m]++
 		}
-		modelCount[m]++
-
-		c, priced := costForUsage(s.Model, u)
-		if !priced {
-			unknown.add(m, u)
-			continue
-		}
-		cost.InputCostUSD += c.InputCostUSD
-		cost.OutputCostUSD += c.OutputCostUSD
-		cost.CacheReadCostUSD += c.CacheReadCostUSD
-		cost.CacheWriteCostUSD += c.CacheWriteCostUSD
+		accumulateCost(&cost, &unknown, s.Model, m, u)
 	}
 	cost.TotalCostUSD = cost.InputCostUSD + cost.OutputCostUSD + cost.CacheReadCostUSD + cost.CacheWriteCostUSD
 
-	mostUsed := ""
-	maxCount := 0
-	for m, c := range modelCount {
-		if c > maxCount {
-			maxCount = c
-			mostUsed = m
-		}
-	}
+	mostUsed := mostFrequent(modelCount)
 
 	total := totalInput + totalOutput
 	avg := 0.0
