@@ -27,11 +27,19 @@ type ClaudeProject struct {
 
 // ClaudeSessionSummary contains lightweight metadata for list views.
 type ClaudeSessionSummary struct {
-	SessionID    string     `json:"session_id"`
-	ProjectPath  string     `json:"project_path"`
-	Preview      string     `json:"preview"`                // first user message text, truncated
-	CustomTitle  string     `json:"custom_title,omitempty"` // user-defined label, preserved across rescans
-	IsFavorite   bool       `json:"is_favorite,omitempty"`  // user-starred, preserved across rescans
+	SessionID   string `json:"session_id"`
+	ProjectPath string `json:"project_path"`
+	Preview     string `json:"preview"`                // first user message text, truncated
+	CustomTitle string `json:"custom_title,omitempty"` // user-defined label, preserved across rescans
+	IsFavorite  bool   `json:"is_favorite,omitempty"`  // user-starred, preserved across rescans
+	// NativeTitle and AITitle come from Claude Code's own `custom-title` and
+	// `ai-title` transcript events. Unlike CustomTitle they are refreshed on
+	// every rescan, so an Agento rename and a native rename never fight.
+	NativeTitle string `json:"native_title,omitempty"`
+	AITitle     string `json:"ai_title,omitempty"`
+	// DisplayTitle is the resolved label the UI should render — see
+	// ResolveDisplayTitle for the precedence.
+	DisplayTitle string     `json:"display_title"`
 	StartTime    time.Time  `json:"start_time"`
 	LastActivity time.Time  `json:"last_activity"`
 	MessageCount int        `json:"message_count"` // user + assistant top-level messages
@@ -47,6 +55,19 @@ type ClaudeSessionSummary struct {
 	// reported separately from Usage so the existing per-session numbers keep
 	// meaning "main thread" rather than silently changing definition.
 	SubagentUsage TokenUsage `json:"subagent_usage"`
+}
+
+// ResolveDisplayTitle picks the label to show for a session, most specific
+// first: an explicit Agento rename, then Claude Code's own `/rename`, then its
+// auto-generated title, and only then the first-message preview — which is
+// frequently an injected system prompt and so nearly useless as a label.
+func (s *ClaudeSessionSummary) ResolveDisplayTitle() string {
+	for _, candidate := range []string{s.CustomTitle, s.NativeTitle, s.AITitle, s.Preview} {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
 }
 
 // TotalUsage returns the session's main-thread usage plus the usage of every

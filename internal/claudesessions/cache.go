@@ -175,6 +175,21 @@ func (c *Cache) GetCustomTitle(sessionID string) string {
 	return title
 }
 
+// GetTitles returns the cached native and AI titles for a session. Both are
+// empty when the session is not cached or Claude Code recorded no title.
+func (c *Cache) GetTitles(sessionID string) (nativeTitle, aiTitle string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	row := c.db.QueryRowContext(context.Background(),
+		`SELECT native_title, ai_title FROM claude_session_cache WHERE session_id = ?`,
+		sessionID,
+	)
+	if row.Scan(&nativeTitle, &aiTitle) != nil {
+		return "", ""
+	}
+	return nativeTitle, aiTitle
+}
+
 // UpdateFavorite sets the is_favorite flag for the given session. The value is
 // preserved across incremental rescans (same pattern as custom_title).
 func (c *Cache) UpdateFavorite(sessionID string, isFavorite bool) error {
