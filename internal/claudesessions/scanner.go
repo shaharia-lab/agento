@@ -1007,11 +1007,7 @@ func readSummaryFile(
 			continue
 		}
 
-		// Only conversation events carry a timestamp and bound the session's
-		// time range. Title events have no timestamp today, so feeding them to
-		// timeRange is harmless — but if a future Claude Code release adds one,
-		// an unguarded update would drag start_time backwards.
-		if isTimestampedEvent(ev.Type) {
+		if boundsSessionTimeRange(ev.Type) {
 			tr.update(ev.Timestamp)
 		}
 		updateMetadataFromEvent(&summary.CWD, &summary.GitBranch, ev)
@@ -1027,15 +1023,23 @@ func readSummaryFile(
 	return summary, sc.Err()
 }
 
-// isTimestampedEvent reports whether an event type bounds the session's time
-// range. Metadata events such as the title events are excluded: they describe
-// the session rather than occurring within it.
-func isTimestampedEvent(eventType string) bool {
+// boundsSessionTimeRange reports whether an event type may extend the session's
+// start/last-activity range.
+//
+// This is a denylist rather than an allowlist on purpose. Many event types
+// carry timestamps and legitimately bound the range — `pr-link`,
+// `queue-operation` and `file-history-delta` among them — so enumerating the
+// ones that count would silently shrink the range for existing sessions as
+// Claude Code adds types. Only the title events are excluded: they describe the
+// session rather than occurring within it, and although they carry no timestamp
+// today (making this a no-op that timeRange's zero check already handles), a
+// future release adding one must not drag start_time backwards.
+func boundsSessionTimeRange(eventType string) bool {
 	switch eventType {
-	case "user", "assistant", "system", "progress", "attachment":
-		return true
-	default:
+	case "custom-title", "ai-title":
 		return false
+	default:
+		return true
 	}
 }
 

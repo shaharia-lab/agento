@@ -392,7 +392,18 @@ export default function ClaudeSessionDetailPage() {
     if (trimmed === (detail.custom_title ?? '')) return
     try {
       await claudeSessionsApi.updateTitle(id, trimmed)
-      setDetail(prev => (prev ? { ...prev, custom_title: trimmed } : prev))
+      // The heading renders display_title, so re-resolve it here (same
+      // precedence as the backend) — otherwise it keeps the old label until
+      // the next reload, including when the override is cleared.
+      setDetail(prev =>
+        prev
+          ? {
+              ...prev,
+              custom_title: trimmed,
+              display_title: trimmed || prev.native_title || prev.ai_title || prev.preview,
+            }
+          : prev,
+      )
     } catch {
       // silently ignore — title stays as-is
     }

@@ -157,12 +157,20 @@ func TestIncrementalScan_TitleEventsDoNotAffectTimeRange(t *testing.T) {
 	}
 	// Also asserted at the unit level, so a future timestamp on a title event
 	// cannot silently start counting.
-	if isTimestampedEvent("custom-title") || isTimestampedEvent("ai-title") {
-		t.Error("title events must not bound the session time range")
+	for _, title := range []string{"custom-title", "ai-title"} {
+		if boundsSessionTimeRange(title) {
+			t.Errorf("%q must not bound the session time range", title)
+		}
 	}
-	for _, conversational := range []string{"user", "assistant", "system"} {
-		if !isTimestampedEvent(conversational) {
-			t.Errorf("%q should bound the time range", conversational)
+	// Everything else still bounds it. These all carry timestamps in real
+	// transcripts, and an allowlist that omitted them would silently shrink
+	// last_activity for existing sessions.
+	for _, other := range []string{
+		"user", "assistant", "system", "attachment",
+		"pr-link", "queue-operation", "file-history-delta",
+	} {
+		if !boundsSessionTimeRange(other) {
+			t.Errorf("%q should bound the time range", other)
 		}
 	}
 }
