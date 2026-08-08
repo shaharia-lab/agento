@@ -3,6 +3,8 @@ package claudesessions
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/shaharia-lab/agento/internal/pricing"
 )
 
 // TokenUsage represents API token consumption for a session or message turn.
@@ -16,6 +18,68 @@ type TokenUsage struct {
 	CacheCreation5mTokens int `json:"cache_creation_5m_tokens"`
 	CacheCreation1hTokens int `json:"cache_creation_1h_tokens"`
 	CacheReadTokens       int `json:"cache_read_tokens"`
+}
+
+// eventUsage converts a usage record to the pricing package's per-message
+// shape (same fields, no cache-total — pricing works off the TTL split).
+func (u TokenUsage) eventUsage() pricing.Usage {
+	return pricing.Usage{
+		InputTokens:           u.InputTokens,
+		OutputTokens:          u.OutputTokens,
+		CacheCreation5mTokens: u.CacheCreation5mTokens,
+		CacheCreation1hTokens: u.CacheCreation1hTokens,
+		CacheReadTokens:       u.CacheReadTokens,
+	}
+}
+
+// costAccumulator prices a transcript message-by-message. Each assistant
+// message is resolved against the catalog at its own timestamp with its own
+// model, which is what makes a session that spans a price change — or mixes
+// models — cost correctly. Messages on models with no known rate are tracked
+// by count so the reported total can state what it left out; cost stays at
+// zero when nothing was priced (indistinguishable from "no known rate", which
+// is exactly the semantic #180 established).
+type costAccumulator struct {
+	resolver       *pricing.Resolver
+	cost           pricing.Cost
+	pricedMessages int
+	unknownModels  map[string]int
+}
+
+func newCostAccumulator(resolver *pricing.Resolver) *costAccumulator {
+	return &costAccumulator{resolver: resolver}
+}
+
+// addAssistantMessage prices one assistant message. When resolver is nil the
+// accumulator is inert, so test fixtures need no pricing setup.
+func (a *costAccumulator) addAssistantMessage(model string, u TokenUsage, at time.Time) {
+	if a.resolver == nil || u.InputTokens+u.OutputTokens+u.CacheCreationTokens+u.CacheReadTokens == 0 {
+		return
+	}
+	// Messages on the synthetic placeholder carry no usage in practice; treat
+	// anything that slips through as unknown rather than pricing it.
+	res, ok := a.resolver.Resolve(model, at)
+	if !ok {
+		if model != "" && model != syntheticModel {
+			if a.unknownModels == nil {
+				a.unknownModels = map[string]int{}
+			}
+			a.unknownModels[model] += u.InputTokens + u.OutputTokens
+		}
+		return
+	}
+	a.cost.Add(res.Rate.Price(u.eventUsage()))
+	a.pricedMessages++
+}
+
+// UnknownPricingTokens returns the input+output tokens seen on models with no
+// known rate, so an aggregate can state what its cost total left out.
+func (a *costAccumulator) UnknownPricingTokens() int {
+	total := 0
+	for _, n := range a.unknownModels {
+		total += n
+	}
+	return total
 }
 
 // ClaudeProject represents a project directory containing Claude Code sessions.

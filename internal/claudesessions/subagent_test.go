@@ -219,7 +219,7 @@ func TestSubagentSummary_CountsSidechainUsers(t *testing.T) {
 	projectDir := setupSubagentProject(t, "session-count", ts)
 	fp := writeSubagentJSONL(t, projectDir, "session-count", "agent-x", ts, 1, 2)
 
-	sub, err := readSubagentSummary("session-count", "/tmp", fp, testLogger)
+	sub, _, err := readSubagentSummary("session-count", "/tmp", fp, testLogger)
 	if err != nil || sub == nil {
 		t.Fatalf("readSubagentSummary: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestSubagentSummary_CountsSidechainUsers(t *testing.T) {
 	}
 
 	// The parent-session reader must still drop sidechain user turns.
-	main, err := readSessionSummary("session-count", "/tmp", fp, testLogger)
+	main, _, err := readSessionSummary("session-count", "/tmp", fp, testLogger)
 	if err != nil || main == nil {
 		t.Fatalf("readSessionSummary: %v", err)
 	}

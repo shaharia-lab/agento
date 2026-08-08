@@ -3,7 +3,10 @@ package claudesessions
 // TokenProfileProcessor accumulates token usage across all assistant messages
 // and derives cache efficiency and cost estimates.
 //
-// Pricing tiers (per 1M tokens) are shared with analytics.go via pricingTable.
+// Cost is accumulated per assistant message against the pricing catalog, using
+// each message's own model and timestamp — the same resolver the session
+// scanner uses, so a session's insight cost and its analytics cost cannot
+// diverge over first-seen-model or price-boundary differences.
 type TokenProfileProcessor struct {
 	inputTokens     int
 	outputTokens    int
@@ -12,6 +15,7 @@ type TokenProfileProcessor struct {
 	cacheCreation1h int
 	cacheRead       int
 	model           string
+	costs           *costAccumulator
 }
 
 // Name returns the processor identifier.
@@ -36,6 +40,17 @@ func (p *TokenProfileProcessor) Process(ev ProcessableEvent) {
 	p.cacheCreation5m += fiveMin
 	p.cacheCreation1h += oneHour
 	p.cacheRead += u.CacheReadInputTokens
+	if p.costs == nil {
+		p.costs = newCostAccumulator(defaultPricingResolver())
+	}
+	p.costs.addAssistantMessage(ev.Message.Model, TokenUsage{
+		InputTokens:           u.InputTokens,
+		OutputTokens:          u.OutputTokens,
+		CacheCreationTokens:   u.CacheCreationInputTokens,
+		CacheCreation5mTokens: fiveMin,
+		CacheCreation1hTokens: oneHour,
+		CacheReadTokens:       u.CacheReadInputTokens,
+	}, ev.Timestamp)
 }
 
 // Finalize writes CacheHitRate, TokensPerTurnAvg, and CostEstimateUSD into the insight.
@@ -50,17 +65,11 @@ func (p *TokenProfileProcessor) Finalize(insight *SessionInsight) {
 		insight.TokensPerTurnAvg = float64(totalTokens) / float64(insight.TurnCount)
 	}
 
-	// An unpriced model (non-Anthropic, `<synthetic>`) leaves the estimate at
-	// zero rather than inventing a cost from another family's rates.
-	if c, priced := costForUsage(p.model, TokenUsage{
-		InputTokens:           p.inputTokens,
-		OutputTokens:          p.outputTokens,
-		CacheCreationTokens:   p.cacheCreation,
-		CacheCreation5mTokens: p.cacheCreation5m,
-		CacheCreation1hTokens: p.cacheCreation1h,
-		CacheReadTokens:       p.cacheRead,
-	}); priced {
-		insight.CostEstimateUSD = c.TotalCostUSD
+	// Sessions with no usage-bearing messages — or run without a pricing
+	// resolver — leave the estimate at zero, matching the pre-#186 semantics
+	// where an unpriced model contributes no cost.
+	if p.costs != nil && p.costs.pricedMessages > 0 {
+		insight.CostEstimateUSD = p.costs.cost.TotalCostUSD
 	}
 }
 
@@ -73,4 +82,5 @@ func (p *TokenProfileProcessor) Reset() {
 	p.cacheCreation1h = 0
 	p.cacheRead = 0
 	p.model = ""
+	p.costs = nil
 }

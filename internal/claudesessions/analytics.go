@@ -3,87 +3,50 @@ package claudesessions
 import (
 	"math"
 	"sort"
-	"strings"
 	"time"
+
+	"github.com/shaharia-lab/agento/internal/pricing"
 )
 
 // ─── Pricing ──────────────────────────────────────────────────────────────────
-
-type modelPricing struct {
-	InputPerMTok  float64
-	OutputPerMTok float64
-	// Prompt-cache writes are billed by time-to-live: 1.25× input for the
-	// 5-minute tier, 2× input for the 1-hour tier. Claude Code writes almost
-	// exclusively 1-hour cache, so charging everything at the 5m rate — as this
-	// table did until #180 — understates cache cost by ~37%.
-	CacheWrite5mPerMTok float64
-	CacheWrite1hPerMTok float64
-	CacheReadPerMTok    float64 // 0.1× input
-}
+//
+// Rates live in the persisted pricing catalog (internal/pricing), resolved per
+// model and — during transcript reads — per message timestamp, so historical
+// cost keeps the rate that was in force when the tokens were spent. Session
+// summaries carry tokens but not per-message timing, so the read-time paths
+// below resolve at the session's last activity; exact per-message pricing
+// happens at scan time (the cost accumulator) and in the insight pipeline
+// (TokenProfileProcessor), which re-read the transcript.
 
 // syntheticModel is the placeholder Claude Code records for locally generated
 // events that never hit the API. It is billed at zero and excluded from the
 // model breakdown rather than being priced as a real model.
 const syntheticModel = "<synthetic>"
 
-// pricingTable maps a model-family key to its USD per-million-token rates.
-// Rates checked against the published Anthropic pricing on 2026-08-08:
-//
-//	family  input  output  cache-write 5m (1.25×)  cache-write 1h (2×)  cache-read (0.1×)
-//	fable   10.00   50.00                  12.50                20.00               1.00
-//	opus     5.00   25.00                   6.25                10.00               0.50
-//	sonnet   3.00   15.00                   3.75                 6.00               0.30
-//	haiku    1.00    5.00                   1.25                 2.00               0.10
-//
-// Sonnet 5 carries a promotional $2/$10 rate through 2026-08-31; the list rate
-// is used here because these figures are a cost estimate, not a bill, and a
-// date-dependent table would silently change historical numbers.
-var pricingTable = map[string]modelPricing{
-	"fable":  {10.00, 50.00, 12.50, 20.00, 1.00},
-	"opus":   {5.00, 25.00, 6.25, 10.00, 0.50},
-	"sonnet": {3.00, 15.00, 3.75, 6.00, 0.30},
-	"haiku":  {1.00, 5.00, 1.25, 2.00, 0.10},
-}
-
-// pricingForModel resolves the pricing for a model string such as
-// "claude-opus-4-8". The second return value is false when the model has no
-// known rates — a non-Anthropic model routed through Claude Code (`k3`,
-// `glm-5.2`), an embedding model, or `<synthetic>`. Unknown models contribute
-// no cost rather than being silently billed at another family's rates.
-//
-// Matching is deliberately anchored rather than a substring scan: a bare family
-// name ("opus") and the "claude-<family>-..." form both resolve, but an
-// arbitrary string that merely contains "opus" does not.
-func pricingForModel(model string) (modelPricing, bool) {
-	lower := strings.ToLower(strings.TrimSpace(model))
-	if lower == "" || lower == syntheticModel {
-		return modelPricing{}, false
+// costForUsage prices one session's token usage at the rate in force at `at`.
+// Returns false for a model with no known rates, so callers can account those
+// tokens separately instead of folding an invented cost into the total.
+func costForUsage(model string, u TokenUsage, at time.Time) (CostSummary, bool) {
+	resolver := defaultPricingResolver()
+	if resolver == nil {
+		return CostSummary{}, false
 	}
-	for family, p := range pricingTable {
-		if lower == family || strings.HasPrefix(lower, "claude-"+family+"-") {
-			return p, true
-		}
-	}
-	return modelPricing{}, false
-}
-
-// costForUsage prices one session's token usage. Returns false for a model with
-// no known rates, so callers can account those tokens separately instead of
-// folding an invented cost into the total.
-func costForUsage(model string, u TokenUsage) (CostSummary, bool) {
-	p, ok := pricingForModel(model)
+	res, ok := resolver.Resolve(model, at)
 	if !ok {
 		return CostSummary{}, false
 	}
-	c := CostSummary{
-		InputCostUSD:     float64(u.InputTokens) / 1_000_000 * p.InputPerMTok,
-		OutputCostUSD:    float64(u.OutputTokens) / 1_000_000 * p.OutputPerMTok,
-		CacheReadCostUSD: float64(u.CacheReadTokens) / 1_000_000 * p.CacheReadPerMTok,
-		CacheWriteCostUSD: float64(u.CacheCreation5mTokens)/1_000_000*p.CacheWrite5mPerMTok +
-			float64(u.CacheCreation1hTokens)/1_000_000*p.CacheWrite1hPerMTok,
+	return costFromPricing(res.Rate.Price(u.eventUsage())), true
+}
+
+// costFromPricing converts a pricing.Cost to the analytics output shape.
+func costFromPricing(c pricing.Cost) CostSummary {
+	return CostSummary{
+		InputCostUSD:      c.InputCostUSD,
+		OutputCostUSD:     c.OutputCostUSD,
+		CacheReadCostUSD:  c.CacheReadCostUSD,
+		CacheWriteCostUSD: c.CacheWriteCostUSD,
+		TotalCostUSD:      c.TotalCostUSD,
 	}
-	c.TotalCostUSD = c.InputCostUSD + c.OutputCostUSD + c.CacheReadCostUSD + c.CacheWriteCostUSD
-	return c, true
 }
 
 // unknownPricingAccumulator tallies the tokens and model names that carry no
@@ -122,9 +85,9 @@ func displayModel(model string) string {
 // accumulateCost adds one session's cost to the running total, routing sessions
 // on unpriced models to the unknown accumulator instead.
 func accumulateCost(
-	cost *CostSummary, unknown *unknownPricingAccumulator, model, label string, u TokenUsage,
+	cost *CostSummary, unknown *unknownPricingAccumulator, model, label string, u TokenUsage, at time.Time,
 ) {
-	c, priced := costForUsage(model, u)
+	c, priced := costForUsage(model, u, at)
 	if !priced {
 		unknown.add(label, u)
 		return
@@ -356,7 +319,7 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 			// the model breakdowns — it is not a model anyone ran.
 			modelCount[m]++
 		}
-		accumulateCost(&cost, &unknown, s.Model, m, u)
+		accumulateCost(&cost, &unknown, s.Model, m, u, s.LastActivity)
 	}
 	cost.TotalCostUSD = cost.InputCostUSD + cost.OutputCostUSD + cost.CacheReadCostUSD + cost.CacheWriteCostUSD
 
@@ -540,7 +503,7 @@ func buildCostOverTime(sessions []ClaudeSessionSummary, from, to time.Time, gran
 		if buckets[key] == nil {
 			buckets[key] = &CostPoint{Date: bucketLabel(s.LastActivity, granularity)}
 		}
-		if c, priced := costForUsage(s.Model, s.TotalUsage()); priced {
+		if c, priced := costForUsage(s.Model, s.TotalUsage(), s.LastActivity); priced {
 			buckets[key].EstimatedCostUSD += c.TotalCostUSD
 		}
 	}

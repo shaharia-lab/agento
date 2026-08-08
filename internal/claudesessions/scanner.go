@@ -37,7 +37,12 @@ const (
 	// one of those columns empty and no claude_session_pr rows at all. The same
 	// bump also drops pr-link from the session time range, so last_activity is
 	// recomputed.
-	CurrentScannerVersion = 4
+	// v5: cost is accumulated per assistant message against the pricing catalog
+	// (#186), replacing first-seen-model whole-session pricing. Cost is not
+	// cached — it is recomputed at read time — but the bump is still required:
+	// it re-reads every transcript, and the resulting session events are what
+	// reprocess the insight rows that carry stored costs.
+	CurrentScannerVersion = 5
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -319,7 +324,7 @@ func scanProjectSessions(
 		}
 		sessionID := strings.TrimSuffix(f.Name(), jsonlExt)
 		filePath := filepath.Join(projectsDir, dirName, f.Name())
-		summary, err := readSessionSummary(sessionID, projectPath, filePath, logger)
+		summary, _, err := readSessionSummary(sessionID, projectPath, filePath, logger)
 		if err != nil || summary == nil {
 			continue
 		}
@@ -705,7 +710,7 @@ func applyOne(
 // applyUpsert reads the session summary and writes it to the cache.
 // Returns true on success.
 func applyUpsert(db *sql.DB, logger *slog.Logger, df diskFile) bool {
-	summary, err := readSessionSummary(df.sessionID, df.projectPath, df.filePath, logger)
+	summary, _, err := readSessionSummary(df.sessionID, df.projectPath, df.filePath, logger)
 	if err != nil || summary == nil {
 		return false
 	}
@@ -869,7 +874,7 @@ func readSubagentMeta(filePath string, logger *slog.Logger) subagentMeta {
 // applySubagentUpsert reads a sub-agent transcript and writes it to the
 // sub-agent cache. Returns true on success.
 func applySubagentUpsert(db *sql.DB, logger *slog.Logger, df diskFile) bool {
-	summary, err := readSubagentSummary(df.sessionID, df.projectPath, df.filePath, logger)
+	summary, _, err := readSubagentSummary(df.sessionID, df.projectPath, df.filePath, logger)
 	if err != nil || summary == nil {
 		return false
 	}
@@ -1148,8 +1153,11 @@ func addAssistantUsage(usage *TokenUsage, msg *rawMessage) {
 	usage.CacheReadTokens += msg.Usage.CacheReadInputTokens
 }
 
-// readSessionSummary reads a session JSONL file and extracts lightweight metadata.
-func readSessionSummary(sessionID, projectPath, filePath string, logger *slog.Logger) (*ClaudeSessionSummary, error) {
+// readSessionSummary reads a session JSONL file and extracts lightweight metadata,
+// along with the per-message cost accumulation over the pricing resolver.
+func readSessionSummary(
+	sessionID, projectPath, filePath string, logger *slog.Logger,
+) (*ClaudeSessionSummary, *costAccumulator, error) {
 	return readSummaryFile(sessionID, projectPath, filePath, false, logger)
 }
 
@@ -1165,16 +1173,16 @@ func readSessionSummary(sessionID, projectPath, filePath string, logger *slog.Lo
 // column in claude_subagent_cache, so it is not persisted — see #196.
 func readSubagentSummary(
 	sessionID, projectPath, filePath string, logger *slog.Logger,
-) (*ClaudeSessionSummary, error) {
+) (*ClaudeSessionSummary, *costAccumulator, error) {
 	return readSummaryFile(sessionID, projectPath, filePath, true, logger)
 }
 
 func readSummaryFile(
 	sessionID, projectPath, filePath string, countSidechainUsers bool, logger *slog.Logger,
-) (*ClaudeSessionSummary, error) {
+) (*ClaudeSessionSummary, *costAccumulator, error) {
 	f, err := os.Open(filePath) //nolint:gosec
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer func() {
 		if cerr := f.Close(); cerr != nil {
@@ -1188,6 +1196,7 @@ func readSummaryFile(
 	}
 
 	var tr timeRange
+	costs := newCostAccumulator(defaultPricingResolver())
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
 
@@ -1205,15 +1214,20 @@ func readSummaryFile(
 		}
 		updateMetadataFromEvent(&summary.CWD, &summary.GitBranch, ev)
 		processSummaryEvent(summary, ev, countSidechainUsers)
+		if ev.Type == "assistant" && ev.Message != nil && ev.Message.Usage != nil {
+			var u TokenUsage
+			addAssistantUsage(&u, ev.Message)
+			costs.addAssistantMessage(ev.Message.Model, u, ev.Timestamp)
+		}
 	}
 
 	summary.StartTime = tr.start
 	summary.LastActivity = tr.last
 
 	if summary.StartTime.IsZero() {
-		return nil, nil
+		return nil, nil, sc.Err()
 	}
-	return summary, sc.Err()
+	return summary, costs, sc.Err()
 }
 
 // boundsSessionTimeRange reports whether an event type may extend the session's

@@ -56,10 +56,14 @@ func TestCostForUsage_CacheWriteTiers(t *testing.T) {
 			wantPriced: true,
 		},
 		{
-			name:       "sonnet 1h cache write",
+			// Looked up at time.Now() (2026-08), the Sonnet 5 introductory rate
+			// applies: $2/$10 through 2026-08-31, so 1h cache write bills at
+			// 2 × $2/MTok — the flat-table $0.006 was the mispricing this issue
+			// removes.
+			name:       "sonnet 5 1h cache write bills at the introductory rate",
 			model:      "claude-sonnet-5",
 			usage:      TokenUsage{CacheCreationTokens: 1000, CacheCreation1hTokens: 1000},
-			wantWrite:  0.006,
+			wantWrite:  0.004,
 			wantPriced: true,
 		},
 		{
@@ -80,7 +84,7 @@ func TestCostForUsage_CacheWriteTiers(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c, priced := costForUsage(tc.model, tc.usage)
+			c, priced := costForUsage(tc.model, tc.usage, time.Now())
 			if priced != tc.wantPriced {
 				t.Fatalf("priced = %v, want %v", priced, tc.wantPriced)
 			}
@@ -90,29 +94,23 @@ func TestCostForUsage_CacheWriteTiers(t *testing.T) {
 	}
 }
 
-// TestPricingForModel_UnknownModelsAreNotGuessed pins the second half of #180:
-// models with no published rates must not be silently billed at Sonnet rates.
-func TestPricingForModel_UnknownModelsAreNotGuessed(t *testing.T) {
-	priced := []struct {
-		model  string
-		family string
-	}{
-		{"claude-opus-4-8", "opus"},
-		{"claude-opus-5", "opus"},
-		{"opus", "opus"},
-		{"claude-sonnet-4-6", "sonnet"},
-		{"claude-haiku-4-5", "haiku"},
-		{"claude-fable-5", "fable"},
-		{"CLAUDE-OPUS-5", "opus"},
+// TestResolver_UnknownModelsAreNotGuessed pins the second half of #180 through
+// the pricing catalog: models with no published rates must not be silently
+// billed at another model's rates. Catalog semantics are covered exhaustively
+// in internal/pricing; this guards the wiring the analytics paths depend on.
+func TestResolver_UnknownModelsAreNotGuessed(t *testing.T) {
+	resolver := defaultPricingResolver()
+	if resolver == nil {
+		t.Skip("no pricing resolver wired in this test binary")
 	}
-	for _, tc := range priced {
-		p, ok := pricingForModel(tc.model)
-		if !ok {
-			t.Errorf("%q: expected known pricing", tc.model)
-			continue
-		}
-		if p != pricingTable[tc.family] {
-			t.Errorf("%q: resolved to the wrong family (want %s)", tc.model, tc.family)
+	at := time.Now()
+
+	for _, model := range []string{
+		"claude-opus-4-8", "claude-opus-5", "opus",
+		"claude-sonnet-4-6", "claude-haiku-4-5", "claude-fable-5", "CLAUDE-OPUS-5",
+	} {
+		if _, ok := resolver.Resolve(model, at); !ok {
+			t.Errorf("%q: expected known pricing", model)
 		}
 	}
 
@@ -122,7 +120,7 @@ func TestPricingForModel_UnknownModelsAreNotGuessed(t *testing.T) {
 		"k3", "glm-5.2", "mixedbread-ai/mxbai-embed-large-v1", syntheticModel, "",
 		"some-opus-lookalike", "gpt-sonnet-clone",
 	} {
-		if _, ok := pricingForModel(model); ok {
+		if _, ok := resolver.Resolve(model, at); ok {
 			t.Errorf("%q: expected unknown pricing, got a rate", model)
 		}
 	}
@@ -133,7 +131,7 @@ func TestCostForUsage_UnknownModelCostsNothing(t *testing.T) {
 		c, priced := costForUsage(model, TokenUsage{
 			InputTokens: 1_000_000, OutputTokens: 1_000_000,
 			CacheCreationTokens: 1_000_000, CacheCreation1hTokens: 1_000_000,
-		})
+		}, time.Now())
 		if priced {
 			t.Errorf("%q: expected unpriced", model)
 		}
@@ -293,7 +291,7 @@ func TestIncrementalScan_PersistsCacheTTLSplit(t *testing.T) {
 	}
 
 	// 40 × $6.25/MTok + 960 × $10/MTok = $0.00025 + $0.0096
-	c, priced := costForUsage(s.Model, s.TotalUsage())
+	c, priced := costForUsage(s.Model, s.TotalUsage(), s.LastActivity)
 	if !priced {
 		t.Fatal("expected opus to be priced")
 	}

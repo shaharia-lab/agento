@@ -1,0 +1,197 @@
+[
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-fable-5",
+    "match_type": "prefix",
+    "display_name": "Claude Fable 5",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 10.00, "output": 50.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-mythos-5",
+    "match_type": "prefix",
+    "display_name": "Claude Mythos 5",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 10.00, "output": 50.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-opus-5",
+    "match_type": "prefix",
+    "display_name": "Claude Opus 5",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 5.00, "output": 25.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-opus-4-8",
+    "match_type": "prefix",
+    "display_name": "Claude Opus 4.8",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 5.00, "output": 25.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-opus-4-7",
+    "match_type": "prefix",
+    "display_name": "Claude Opus 4.7",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 5.00, "output": 25.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-opus-4-6",
+    "match_type": "prefix",
+    "display_name": "Claude Opus 4.6",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 5.00, "output": 25.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-opus-4-5",
+    "match_type": "prefix",
+    "display_name": "Claude Opus 4.5",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 5.00, "output": 25.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-opus-4-1",
+    "match_type": "prefix",
+    "display_name": "Claude Opus 4.1",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 15.00, "output": 75.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-opus-4",
+    "match_type": "prefix",
+    "display_name": "Claude Opus 4",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 15.00, "output": 75.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-3-opus",
+    "match_type": "prefix",
+    "display_name": "Claude 3 Opus",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 15.00, "output": 75.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-sonnet-5",
+    "match_type": "prefix",
+    "display_name": "Claude Sonnet 5",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08); introductory rate through 2026-08-31",
+    "rates": [
+      { "effective_from": "", "input": 2.00, "output": 10.00 },
+      { "effective_from": "2026-09-01T00:00:00Z", "input": 3.00, "output": 15.00 }
+    ]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-sonnet-4-6",
+    "match_type": "prefix",
+    "display_name": "Claude Sonnet 4.6",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 3.00, "output": 15.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-sonnet-4-5",
+    "match_type": "prefix",
+    "display_name": "Claude Sonnet 4.5",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 3.00, "output": 15.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-sonnet-4",
+    "match_type": "prefix",
+    "display_name": "Claude Sonnet 4",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 3.00, "output": 15.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-3-5-sonnet",
+    "match_type": "prefix",
+    "display_name": "Claude 3.5 Sonnet",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 3.00, "output": 15.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-3-7-sonnet",
+    "match_type": "prefix",
+    "display_name": "Claude 3.7 Sonnet",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 3.00, "output": 15.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-haiku-4-5",
+    "match_type": "prefix",
+    "display_name": "Claude Haiku 4.5",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 1.00, "output": 5.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-3-5-haiku",
+    "match_type": "prefix",
+    "display_name": "Claude 3.5 Haiku",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 0.80, "output": 4.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "claude-3-haiku",
+    "match_type": "prefix",
+    "display_name": "Claude 3 Haiku",
+    "source": "https://www.anthropic.com/pricing (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 0.25, "output": 1.25 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "opus",
+    "match_type": "exact",
+    "display_name": "Claude Opus (generic)",
+    "source": "derived: current Opus list rate (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 5.00, "output": 25.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "sonnet",
+    "match_type": "exact",
+    "display_name": "Claude Sonnet (generic)",
+    "source": "derived: current Sonnet list rate (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 3.00, "output": 15.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "haiku",
+    "match_type": "exact",
+    "display_name": "Claude Haiku (generic)",
+    "source": "derived: current Haiku list rate (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 1.00, "output": 5.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "fable",
+    "match_type": "exact",
+    "display_name": "Claude Fable (generic)",
+    "source": "derived: Fable 5 list rate (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 10.00, "output": 50.00 }]
+  },
+  {
+    "provider": "anthropic",
+    "model_pattern": "mythos",
+    "match_type": "exact",
+    "display_name": "Claude Mythos (generic)",
+    "source": "derived: Mythos 5 list rate (checked 2026-08-08)",
+    "rates": [{ "effective_from": "", "input": 10.00, "output": 50.00 }]
+  }
+]
