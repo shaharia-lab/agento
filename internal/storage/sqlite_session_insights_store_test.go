@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -386,5 +387,128 @@ func TestInsightRecord_NilBreakdownsStoreAsEmpty(t *testing.T) {
 	}
 	if got.UnattributedCalls != 0 {
 		t.Errorf("unattributed_calls = %d, want 0", got.UnattributedCalls)
+	}
+}
+
+// TestGetAggregateSummary_BreakdownColumnsNotCrossWired guards the column→field
+// table in GetAggregateSummary. The four breakdowns are fetched by name into
+// separate slices, so a swapped pair would permanently label the "Top Skills"
+// panel with plugin names — with a fully green CI, since nothing else reads
+// these slices.
+func TestGetAggregateSummary_BreakdownColumnsNotCrossWired(t *testing.T) {
+	store := setupInsightsTestDB(t)
+	ctx := context.Background()
+
+	// Deliberately disjoint key sets, so any cross-wiring is unambiguous.
+	r := sampleRecord("wiring")
+	r.ToolBreakdown = map[string]int{"TOOL_KEY": 1}
+	r.SkillBreakdown = map[string]int{"SKILL_KEY": 2}
+	r.PluginBreakdown = map[string]int{"PLUGIN_KEY": 3}
+	r.McpServerBreakdown = map[string]int{"SERVER_KEY": 4}
+	if err := store.Upsert(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		field string
+		blobs []string
+		want  string
+	}{
+		{"ToolBreakdowns", summary.ToolBreakdowns, "TOOL_KEY"},
+		{"SkillBreakdowns", summary.SkillBreakdowns, "SKILL_KEY"},
+		{"PluginBreakdowns", summary.PluginBreakdowns, "PLUGIN_KEY"},
+		{"McpServerBreakdowns", summary.McpServerBreakdowns, "SERVER_KEY"},
+	} {
+		if len(tc.blobs) != 1 {
+			t.Errorf("%s: got %d blobs, want 1", tc.field, len(tc.blobs))
+			continue
+		}
+		if !strings.Contains(tc.blobs[0], tc.want) {
+			t.Errorf("%s = %s, want it to contain %q — the columns are cross-wired",
+				tc.field, tc.blobs[0], tc.want)
+		}
+	}
+}
+
+// TestGetAggregateSummary_ToolCallTotals covers the denominator the skills
+// panel needs: a breakdown without the unattributed share overstates how much
+// of the work skills account for.
+func TestGetAggregateSummary_ToolCallTotals(t *testing.T) {
+	store := setupInsightsTestDB(t)
+	ctx := context.Background()
+
+	for i, id := range []string{"t1", "t2"} {
+		r := sampleRecord(id)
+		r.ToolCallsTotal = 10 * (i + 1) // 10, 20
+		r.UnattributedCalls = 4 * (i + 1)
+		if err := store.Upsert(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalToolCalls != 30 {
+		t.Errorf("TotalToolCalls = %d, want 30", summary.TotalToolCalls)
+	}
+	if summary.UnattributedCalls != 12 {
+		t.Errorf("UnattributedCalls = %d, want 12", summary.UnattributedCalls)
+	}
+}
+
+// TestNeedsProcessing_ReturnsRowsBelowCurrentVersion ties the processor-version
+// bump to reprocessing: a row one version behind must come back, which is what
+// makes an upgrade backfill the new columns.
+func TestNeedsProcessing_ReturnsRowsBelowCurrentVersion(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, _, err := storage.NewSQLiteDB(dbPath, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := storage.NewSQLiteSessionInsightsStore(db)
+	ctx := context.Background()
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO claude_session_cache
+			(session_id, project_path, file_path, file_mtime, start_time, last_activity)
+		VALUES ('stale', '/p', '/p/stale.jsonl', '2025-01-01', '2025-01-01', '2025-01-01')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	const current = 4 // CurrentProcessorVersion at the time of writing
+	r := sampleRecord("stale")
+	r.ProcessorVersion = current - 1
+	if err := store.Upsert(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := store.NeedsProcessing(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].SessionID != "stale" {
+		t.Fatalf("expected the stale session to need processing, got %+v", pending)
+	}
+
+	// Once reprocessed at the current version it must drop out.
+	r.ProcessorVersion = current
+	if err := store.Upsert(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+	pending, err = store.NeedsProcessing(ctx, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected no pending sessions after reprocessing, got %+v", pending)
 	}
 }

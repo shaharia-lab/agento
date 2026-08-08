@@ -118,9 +118,25 @@ func (p *AttributionProcessor) Reset() {
 }
 
 // ensureMaps allocates lazily, so the zero value is usable — the registry
-// constructs processors with pre-made maps, but tests use the zero value.
+// constructs processors through Reset, but tests use the zero value.
+//
+// Every map is checked rather than one sentinel: Reset allocates all five
+// together today, but a partially-initialized value would otherwise panic on a
+// nil-map write deep inside Process.
 func (p *AttributionProcessor) ensureMaps() {
 	if p.skills == nil {
-		p.Reset()
+		p.skills = make(map[string]int)
+	}
+	if p.plugins == nil {
+		p.plugins = make(map[string]int)
+	}
+	if p.mcpServers == nil {
+		p.mcpServers = make(map[string]int)
+	}
+	if p.mcpTools == nil {
+		p.mcpTools = make(map[string]int)
+	}
+	if p.efforts == nil {
+		p.efforts = make(map[string]int)
 	}
 }

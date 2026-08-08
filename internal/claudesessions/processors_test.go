@@ -825,3 +825,71 @@ func TestAttributionProcessor_UserEventsIgnored(t *testing.T) {
 		t.Errorf("a user event contributed to the breakdown: %+v", insight.SkillBreakdown)
 	}
 }
+
+// TestAttributionProcessor_DecodesRawJSONKeys feeds the real JSON key names
+// through the registry rather than setting struct fields directly. Every other
+// attribution test constructs ProcessableEvent in Go, so a typo in a `json:`
+// tag would zero every breakdown in production with a green suite.
+func TestAttributionProcessor_DecodesRawJSONKeys(t *testing.T) {
+	// Field names and nesting exactly as Claude Code writes them: attribution
+	// is top-level on the event, never inside message.
+	lines := []map[string]any{
+		{
+			"type":              "assistant",
+			"uuid":              "a1",
+			"timestamp":         "2026-01-01T10:00:00Z",
+			"attributionSkill":  "lab-workflow:review-pr",
+			"attributionPlugin": "lab-workflow",
+			"effort":            "high",
+			"message": map[string]any{
+				"role":  "assistant",
+				"model": "claude-opus-4-8",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "t1", "name": "Bash"},
+					{"type": "tool_use", "id": "t2", "name": "mcp__vibexp_io_vibexp_team__vibexp_io_search"},
+				},
+			},
+		},
+	}
+
+	registry := claudesessions.DefaultProcessorRegistry(nil)
+	insight, err := registry.RunSession("json-keys", writeJSONLFile(t, lines))
+	if err != nil {
+		t.Fatalf("run session: %v", err)
+	}
+
+	if got := insight.SkillBreakdown["lab-workflow:review-pr"]; got != 2 {
+		t.Errorf("skill_breakdown = %d, want 2 — the attributionSkill json tag is wrong", got)
+	}
+	if got := insight.PluginBreakdown["lab-workflow"]; got != 2 {
+		t.Errorf("plugin_breakdown = %d, want 2 — the attributionPlugin json tag is wrong", got)
+	}
+	if got := insight.EffortBreakdown["high"]; got != 2 {
+		t.Errorf("effort_breakdown = %d, want 2 — the effort json tag is wrong", got)
+	}
+	if got := insight.McpServerBreakdown["vibexp_io_vibexp_team"]; got != 1 {
+		t.Errorf("mcp_server_breakdown = %d, want 1", got)
+	}
+	if insight.UnattributedCalls != 0 {
+		t.Errorf("unattributed_calls = %d, want 0", insight.UnattributedCalls)
+	}
+	// And the invariant holds through the real registry.
+	sum := 0
+	for _, v := range insight.SkillBreakdown {
+		sum += v
+	}
+	if sum+insight.UnattributedCalls != insight.ToolCallsTotal {
+		t.Errorf("sum(skills)=%d + unattributed=%d != tool_calls_total=%d",
+			sum, insight.UnattributedCalls, insight.ToolCallsTotal)
+	}
+}
+
+// TestCurrentProcessorVersion_BumpedForAttribution ties the constant to this
+// feature: without the bump, NeedsProcessing never returns existing sessions
+// and the new columns stay empty forever on an upgrade.
+func TestCurrentProcessorVersion_BumpedForAttribution(t *testing.T) {
+	if claudesessions.CurrentProcessorVersion < 4 {
+		t.Errorf("CurrentProcessorVersion = %d, want >= 4 so attribution backfills existing rows",
+			claudesessions.CurrentProcessorVersion)
+	}
+}

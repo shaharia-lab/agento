@@ -72,6 +72,8 @@ func (a *insightStoreAdapter) GetSummary(
 		TopSkillTotals:       mergeBreakdowns(raw.SkillBreakdowns),
 		TopPluginTotals:      mergeBreakdowns(raw.PluginBreakdowns),
 		TopMcpServerTotals:   mergeBreakdowns(raw.McpServerBreakdowns),
+		TotalToolCalls:       raw.TotalToolCalls,
+		UnattributedCalls:    raw.UnattributedCalls,
 	}, nil
 }
 

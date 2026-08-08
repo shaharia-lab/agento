@@ -136,16 +136,18 @@ func marshalCounts(column string, counts map[string]int) (string, error) {
 	return string(b), nil
 }
 
-// unmarshalCounts is the inverse. An empty or malformed column yields a nil map
-// rather than an error: a breakdown is a derived convenience, and losing the
-// whole insight row over one bad blob would be worse than losing the blob.
+// unmarshalCounts is the inverse. It always returns a non-nil map, matching
+// what ToolBreakdown hands back, so the whole record uses one empty convention.
+// An empty or malformed column yields an empty map rather than an error: a
+// breakdown is a derived convenience, and losing the whole insight row over one
+// bad blob would be worse than losing the blob.
 func unmarshalCounts(raw string) map[string]int {
+	counts := make(map[string]int)
 	if raw == "" || raw == "{}" {
-		return nil
+		return counts
 	}
-	var counts map[string]int
 	if err := json.Unmarshal([]byte(raw), &counts); err != nil {
-		return nil
+		return make(map[string]int)
 	}
 	return counts
 }
@@ -258,7 +260,11 @@ type InsightAggregateSummary struct {
 	AvgCacheHitRate      float64
 	AvgTotalDurationMs   float64
 	SessionsWithErrors   int
-	ToolBreakdowns       []string // raw JSON per session for top-tool aggregation
+	// TotalToolCalls and UnattributedCalls give the breakdowns a denominator:
+	// without them a "top skills" panel silently omits every built-in call.
+	TotalToolCalls    int
+	UnattributedCalls int
+	ToolBreakdowns    []string // raw JSON per session for top-tool aggregation
 	// Raw JSON per session for the attribution breakdowns, merged by the caller
 	// exactly as ToolBreakdowns is.
 	SkillBreakdowns     []string
@@ -366,7 +372,9 @@ const insightAggregateSQL = `SELECT
 	COALESCE(SUM(cost_estimate_usd), 0),
 	COALESCE(AVG(cache_hit_rate), 0),
 	COALESCE(AVG(total_duration_ms), 0),
-	COALESCE(SUM(has_errors), 0)
+	COALESCE(SUM(has_errors), 0),
+	COALESCE(SUM(tool_calls_total), 0),
+	COALESCE(SUM(unattributed_calls), 0)
 FROM session_insights`
 
 func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
@@ -385,6 +393,8 @@ func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
 		&summary.AvgCacheHitRate,
 		&summary.AvgTotalDurationMs,
 		&summary.SessionsWithErrors,
+		&summary.TotalToolCalls,
+		&summary.UnattributedCalls,
 	)
 	return summary, err
 }

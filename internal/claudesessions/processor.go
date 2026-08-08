@@ -175,6 +175,11 @@ type InsightAggregateSummary struct {
 	TopSkillTotals     map[string]int
 	TopPluginTotals    map[string]int
 	TopMcpServerTotals map[string]int
+	// TotalToolCalls and UnattributedCalls are the denominator for those
+	// totals: roughly half of all tool calls are made with no skill in
+	// context, and a breakdown without that share is misleading.
+	TotalToolCalls    int
+	UnattributedCalls int
 }
 
 // InsightStorer persists and retrieves per-session insight records.

@@ -98,9 +98,13 @@ type insightsSummary struct {
 	TopTools             []toolCount `json:"top_tools"`
 	// Attribution breakdowns. Each counts tool calls, so they are directly
 	// comparable with TopTools.
-	TopSkills     []toolCount `json:"top_skills"`
-	TopPlugins    []toolCount `json:"top_plugins"`
-	TopMcpServers []toolCount `json:"top_mcp_servers"`
+	// TotalToolCalls and UnattributedCalls let the UI state what share of
+	// tool calls the skill breakdown actually accounts for.
+	TotalToolCalls    int         `json:"total_tool_calls"`
+	UnattributedCalls int         `json:"unattributed_calls"`
+	TopSkills         []toolCount `json:"top_skills"`
+	TopPlugins        []toolCount `json:"top_plugins"`
+	TopMcpServers     []toolCount `json:"top_mcp_servers"`
 }
 
 // toolCount pairs a tool name with its aggregate call count.
@@ -132,6 +136,8 @@ func buildInsightsSummaryFromAggregate(agg *claudesessions.InsightAggregateSumma
 		SessionsWithErrors:   agg.SessionsWithErrors,
 		AvgTotalDurationMs:   agg.AvgTotalDurationMs,
 		TopTools:             sortedToolCounts(agg.TopToolTotals),
+		TotalToolCalls:       agg.TotalToolCalls,
+		UnattributedCalls:    agg.UnattributedCalls,
 		TopSkills:            sortedToolCounts(agg.TopSkillTotals),
 		TopPlugins:           sortedToolCounts(agg.TopPluginTotals),
 		TopMcpServers:        sortedToolCounts(agg.TopMcpServerTotals),

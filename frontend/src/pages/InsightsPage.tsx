@@ -642,12 +642,24 @@ function InsightsContent({
 
       {/* Attribution: which skill, plugin and MCP server drove those tool calls */}
       {summary.top_skills.length > 0 && (
-        <TopToolsChart
-          title="Top 10 Skills by Tool Calls"
-          tools={summary.top_skills}
-          prevTools={prev?.top_skills ?? []}
-          hasComparison={hasComparison}
-        />
+        <>
+          <TopToolsChart
+            title="Top 10 Skills by Tool Calls"
+            tools={summary.top_skills}
+            prevTools={prev?.top_skills ?? []}
+            hasComparison={hasComparison}
+          />
+          {/* Without this the skills chart reads as the whole picture, when
+              roughly half of all tool calls are made with no skill in context. */}
+          {summary.total_tool_calls > 0 && (
+            <p className="text-xs text-zinc-400 dark:text-zinc-500 -mt-2 px-1">
+              {summary.unattributed_calls.toLocaleString()} of{' '}
+              {summary.total_tool_calls.toLocaleString()} tool calls (
+              {Math.round((summary.unattributed_calls / summary.total_tool_calls) * 100)}%) were
+              made with no skill in context — built-in tool use, not counted above.
+            </p>
+          )}
+        </>
       )}
       {summary.top_plugins.length > 0 && (
         <TopToolsChart
