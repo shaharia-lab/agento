@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -45,6 +46,11 @@ type JourneyStep struct {
 	Timestamp  time.Time       `json:"timestamp"`
 	DurationMs int64           `json:"duration_ms,omitempty"`
 	Data       json.RawMessage `json:"data"`
+	// Steps holds nested steps for a step that spawned a sub-agent — a Task
+	// tool_use whose id matches a sub-agent transcript. Only one level is
+	// nested; deeper delegation is flattened. Empty for every other step, so it
+	// adds nothing to a session that delegated no work.
+	Steps []JourneyStep `json:"steps,omitempty"`
 }
 
 // Step data types — serialized into JourneyStep.Data.
@@ -70,6 +76,11 @@ type ToolCallData struct {
 	ToolUseID string          `json:"tool_use_id"`
 	ToolName  string          `json:"tool_name"`
 	Input     json.RawMessage `json:"input,omitempty"`
+	// AgentType, Description and AgentUsage are set only when this tool call
+	// spawned a sub-agent whose transcript is nested under this step (Steps).
+	AgentType   string      `json:"agent_type,omitempty"`
+	Description string      `json:"description,omitempty"`
+	AgentUsage  *TokenUsage `json:"agent_usage,omitempty"`
 }
 
 // ToolResultData is the data for a tool_result step.
@@ -79,25 +90,20 @@ type ToolResultData struct {
 	IsError   bool   `json:"is_error"`
 }
 
-// BashOutputData is the data for a bash_output step.
-type BashOutputData struct {
-	Output string `json:"output"`
-}
-
 // ThinkingDurationData is the data for a thinking_duration step.
 type ThinkingDurationData struct {
 	DurationMs int64 `json:"duration_ms"`
 }
 
-// SubAgentData is the data for a sub_agent step.
+// SubAgentData is the data for a sub_agent step: a delegated agent whose work
+// is nested under this step (Steps). It is also used for sub-agents whose
+// originating tool_use is not in the rendered transcript — those are appended
+// at the end of their turn rather than silently dropped.
 type SubAgentData struct {
-	AgentID string `json:"agent_id,omitempty"`
-	Prompt  string `json:"prompt,omitempty"`
-}
-
-// SkillData is the data for a skill step.
-type SkillData struct {
-	Prompt string `json:"prompt,omitempty"`
+	AgentID     string      `json:"agent_id,omitempty"`
+	AgentType   string      `json:"agent_type,omitempty"`
+	Description string      `json:"description,omitempty"`
+	Usage       *TokenUsage `json:"usage,omitempty"`
 }
 
 // CompactionData is the data for a compaction step: the point where the
@@ -112,13 +118,6 @@ type CompactionData struct {
 	DroppedTokens int    `json:"dropped_tokens,omitempty"`
 }
 
-// MCPToolData is the data for an mcp_tool step.
-type MCPToolData struct {
-	ServerName string `json:"server_name,omitempty"`
-	ToolName   string `json:"tool_name,omitempty"`
-	Status     string `json:"status,omitempty"`
-}
-
 // ── Internal raw types for JSONL fields not covered by scanner.go ───────────
 
 // rawToolResultBlock represents a tool_result content block inside a user message.
@@ -127,18 +126,6 @@ type rawToolResultBlock struct {
 	ToolUseID string `json:"tool_use_id"`
 	Content   string `json:"content"`
 	IsError   bool   `json:"is_error"`
-}
-
-// rawProgressData is the data field in a progress event.
-type rawProgressData struct {
-	Type       string `json:"type"`
-	Output     string `json:"output,omitempty"`
-	FullOutput string `json:"fullOutput,omitempty"`
-	AgentID    string `json:"agentId,omitempty"`
-	Prompt     string `json:"prompt,omitempty"`
-	ServerName string `json:"serverName,omitempty"`
-	ToolName   string `json:"toolName,omitempty"`
-	Status     string `json:"status,omitempty"`
 }
 
 // rawJourneyEvent extends rawEvent with extra fields we need for journey parsing.
@@ -206,6 +193,8 @@ func buildJourney(sessionID, filePath string, logger *slog.Logger) (*SessionJour
 
 	journey := &SessionJourney{SessionID: sessionID}
 	var builder journeyBuilder
+	builder.logger = logger
+	builder.loadSubagents(sessionID, filePath)
 
 	for sc.Scan() {
 		var ev rawJourneyEvent
@@ -237,6 +226,26 @@ type journeyBuilder struct {
 	turnNumber    int
 	turnUsage     TokenUsage
 	turnToolCalls int
+
+	// subagents indexes the session's delegated sub-agents by the tool_use id
+	// that spawned them; subagentList keeps every entry so unmatched ones can
+	// still be surfaced. Both are empty for a session that delegated nothing.
+	subagents    map[string]*subagentEntry
+	subagentList []*subagentEntry
+	logger       *slog.Logger
+	// subagentMode is set when building a sub-agent's own steps: its transcript
+	// carries isSidechain on every event, which the parent builder skips.
+	subagentMode bool
+}
+
+// subagentEntry pairs a sub-agent transcript path with the metadata read from
+// its sidecar, and tracks whether a tool_use block has claimed it.
+type subagentEntry struct {
+	agentID     string
+	agentType   string
+	description string
+	filePath    string
+	matched     bool
 }
 
 func (b *journeyBuilder) processEvent(ev rawJourneyEvent, j *SessionJourney) {
@@ -253,8 +262,6 @@ func (b *journeyBuilder) processEvent(ev rawJourneyEvent, j *SessionJourney) {
 		b.processUserEvent(ev, j)
 	case "assistant":
 		b.processAssistantEvent(ev, j)
-	case "progress":
-		b.processProgressEvent(ev)
 	case "system":
 		b.processSystemEvent(ev)
 	}
@@ -313,9 +320,11 @@ func (b *journeyBuilder) addStep(step JourneyStep) {
 }
 
 func (b *journeyBuilder) processUserEvent(ev rawJourneyEvent, j *SessionJourney) {
-	// Sidechain user turns belong to delegated sub-agents; rendering them in the
-	// journey timeline is tracked separately (#185).
-	if ev.IsSidechain {
+	// In the parent transcript, sidechain user turns are echoes of delegated
+	// sub-agents and are skipped — those sub-agents are instead nested under
+	// the tool_use that spawned them. subagentMode is set only when building a
+	// sub-agent's own steps, where every event is sidechain-flagged.
+	if ev.IsSidechain && !b.subagentMode {
 		return
 	}
 
@@ -433,69 +442,23 @@ func (b *journeyBuilder) processContentBlock(blk rawContentBlock, ts time.Time) 
 	case "tool_use":
 		b.turnToolCalls++
 		data := ToolCallData{ToolUseID: blk.ID, ToolName: blk.Name, Input: blk.Input}
-		raw, _ := json.Marshal(data) //nolint:errcheck
-		b.addStep(JourneyStep{Type: "tool_call", Timestamp: ts, Data: raw})
-	}
-}
-
-func (b *journeyBuilder) processProgressEvent(ev rawJourneyEvent) {
-	if len(ev.Data) == 0 {
-		return
-	}
-	b.ensureTurn(ev.Timestamp)
-
-	var pd rawProgressData
-	if json.Unmarshal(ev.Data, &pd) != nil {
-		return
-	}
-
-	switch pd.Type {
-	case "bash_progress":
-		output := pd.FullOutput
-		if output == "" {
-			output = pd.Output
-		}
-		if output == "" {
-			return
-		}
-		data := BashOutputData{Output: truncateRunes(output, 2000)}
-		raw, _ := json.Marshal(data) //nolint:errcheck
-		b.addStep(JourneyStep{
-			Type:      "bash_output",
-			Timestamp: ev.Timestamp,
-			Data:      raw,
-		})
-	case "agent_progress":
-		data := SubAgentData{
-			AgentID: pd.AgentID,
-			Prompt:  truncateRunes(pd.Prompt, 500),
+		step := JourneyStep{Type: "tool_call", Timestamp: ts}
+		// A Task tool_use whose id matches a sub-agent transcript nests that
+		// agent's own steps here, joined exactly on toolUseId.
+		if entry, ok := b.subagents[blk.ID]; ok {
+			entry.matched = true
+			data.AgentType = entry.agentType
+			data.Description = entry.description
+			steps, usage := b.buildSubagentSteps(entry)
+			step.Steps = steps
+			if usage.InputTokens > 0 || usage.OutputTokens > 0 {
+				u := usage
+				data.AgentUsage = &u
+			}
 		}
 		raw, _ := json.Marshal(data) //nolint:errcheck
-		b.addStep(JourneyStep{
-			Type:      "sub_agent",
-			Timestamp: ev.Timestamp,
-			Data:      raw,
-		})
-	case "skill_progress":
-		data := SkillData{Prompt: truncateRunes(pd.Prompt, 500)}
-		raw, _ := json.Marshal(data) //nolint:errcheck
-		b.addStep(JourneyStep{
-			Type:      "skill",
-			Timestamp: ev.Timestamp,
-			Data:      raw,
-		})
-	case "mcp_progress":
-		data := MCPToolData{
-			ServerName: pd.ServerName,
-			ToolName:   pd.ToolName,
-			Status:     pd.Status,
-		}
-		raw, _ := json.Marshal(data) //nolint:errcheck
-		b.addStep(JourneyStep{
-			Type:      "mcp_tool",
-			Timestamp: ev.Timestamp,
-			Data:      raw,
-		})
+		step.Data = raw
+		b.addStep(step)
 	}
 }
 
@@ -554,6 +517,10 @@ func (b *journeyBuilder) finalize(j *SessionJourney) {
 	if b.currentTurn != nil {
 		b.closeTurn()
 	}
+	// Sub-agents whose tool_use isn't in the rendered transcript (it was
+	// compacted away, or the sidecar had no toolUseId) are still surfaced,
+	// appended to the last turn — never silently dropped.
+	b.appendUnmatchedSubagents()
 
 	j.StartTime = b.tr.start
 	j.EndTime = b.tr.last
@@ -612,5 +579,108 @@ func computeStepDurations(turn *JourneyTurn) {
 				steps[i].DurationMs = 0
 			}
 		}
+	}
+}
+
+// ── Sub-agent nesting ───────────────────────────────────────────────────────
+
+// loadSubagents reads the session's delegated sub-agent transcripts from disk
+// and indexes them by the tool_use id that spawned each one. A session with no
+// subagents/ directory contributes nothing, leaving the journey unchanged.
+func (b *journeyBuilder) loadSubagents(sessionID, filePath string) {
+	b.subagents = make(map[string]*subagentEntry)
+	for _, fp := range SubagentFiles(sessionID, filePath) {
+		meta := readSubagentMeta(fp, b.logger)
+		entry := &subagentEntry{
+			agentID:     strings.TrimSuffix(filepath.Base(fp), jsonlExt),
+			agentType:   meta.AgentType,
+			description: meta.Description,
+			filePath:    fp,
+		}
+		b.subagentList = append(b.subagentList, entry)
+		// Index by tool_use id; on collision the first-seen wins, matching the
+		// cache's deterministic start-time ordering.
+		if meta.ToolUseID != "" {
+			if _, exists := b.subagents[meta.ToolUseID]; !exists {
+				b.subagents[meta.ToolUseID] = entry
+			}
+		}
+	}
+}
+
+// buildSubagentSteps runs a journey pass over one sub-agent transcript and
+// returns its steps (flattened across turns) and total usage. It does not
+// recurse into the sub-agent's own subagents/ — deeper delegation is flattened.
+func (b *journeyBuilder) buildSubagentSteps(e *subagentEntry) ([]JourneyStep, TokenUsage) {
+	f, err := os.Open(e.filePath) //nolint:gosec
+	if err != nil {
+		return nil, TokenUsage{}
+	}
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			b.logger.Warn("failed to close sub-agent file", "file", e.filePath, "error", cerr)
+		}
+	}()
+
+	sub := &SessionJourney{}
+	var sb journeyBuilder
+	sb.logger = b.logger
+	sb.subagentMode = true
+	sb.subagents = map[string]*subagentEntry{}
+
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
+	for sc.Scan() {
+		var ev rawJourneyEvent
+		if json.Unmarshal(sc.Bytes(), &ev) != nil {
+			continue
+		}
+		if ev.Type == "file-history-snapshot" {
+			continue
+		}
+		sb.processEvent(ev, sub)
+	}
+	sb.finalize(sub)
+
+	var steps []JourneyStep
+	for _, t := range sub.Turns {
+		steps = append(steps, t.Steps...)
+	}
+	return steps, sub.Usage
+}
+
+// appendUnmatchedSubagents surfaces sub-agents whose tool_use is not in the
+// rendered transcript, attaching them to the last turn so delegated work is
+// never silently lost. With no turns to attach to, there is nowhere to put them.
+func (b *journeyBuilder) appendUnmatchedSubagents() {
+	if len(b.subagentList) == 0 || len(b.turns) == 0 {
+		return
+	}
+	last := &b.turns[len(b.turns)-1]
+	for _, e := range b.subagentList {
+		if e.matched {
+			continue
+		}
+		steps, usage := b.buildSubagentSteps(e)
+		data := SubAgentData{
+			AgentID:     e.agentID,
+			AgentType:   e.agentType,
+			Description: e.description,
+		}
+		if usage.InputTokens > 0 || usage.OutputTokens > 0 {
+			u := usage
+			data.Usage = &u
+		}
+		raw, _ := json.Marshal(data) //nolint:errcheck
+		stepTimestamp := last.EndTime
+		if len(steps) > 0 {
+			stepTimestamp = steps[0].Timestamp
+		}
+		last.Steps = append(last.Steps, JourneyStep{
+			Type:      "sub_agent",
+			Timestamp: stepTimestamp,
+			Data:      raw,
+			Steps:     steps,
+		})
 	}
 }

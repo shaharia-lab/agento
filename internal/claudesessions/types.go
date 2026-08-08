@@ -155,7 +155,7 @@ type ClaudeSessionDetail struct {
 type ClaudeMessage struct {
 	UUID        string            `json:"uuid"`
 	ParentUUID  string            `json:"parent_uuid,omitempty"`
-	Type        string            `json:"type"` // "user" | "assistant" | "progress"
+	Type        string            `json:"type"` // "user" | "assistant"
 	Timestamp   time.Time         `json:"timestamp"`
 	Role        string            `json:"role,omitempty"`
 	Content     string            `json:"content,omitempty"` // plain text for user messages
@@ -163,7 +163,9 @@ type ClaudeMessage struct {
 	Usage       *TokenUsage       `json:"usage,omitempty"`
 	GitBranch   string            `json:"git_branch,omitempty"`
 	IsSidechain bool              `json:"is_sidechain,omitempty"`
-	// Children holds progress/sub-agent events nested under this message.
+	// Children is reserved for events nested under this message. The progress
+	// events that once populated it no longer exist, so it is currently unused;
+	// sub-agent work is nested in the journey view instead (see journey.go).
 	Children []ClaudeMessage `json:"children,omitempty"`
 }
 
