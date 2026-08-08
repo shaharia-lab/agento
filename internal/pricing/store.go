@@ -9,6 +9,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -164,6 +165,9 @@ func (s *Store) Seed(ctx context.Context) (int, error) {
 // future re-seeds leave it alone. This is the write path the settings UI
 // (#189) will use; editing an existing rate in place is allowed here because
 // user intent overrides the append-only rule that governs the built-in seed.
+// The pattern is normalized to lowercase so the UNIQUE key collides with the
+// seed's rows (SQLite's default UNIQUE is case-sensitive) and the resolver's
+// lowercased comparison can find the row.
 func (s *Store) UpsertRate(ctx context.Context, r Rate) error {
 	if r.ModelPattern == "" {
 		return errors.New("pricing: model_pattern is required")
@@ -171,6 +175,7 @@ func (s *Store) UpsertRate(ctx context.Context, r Rate) error {
 	if r.EffectiveFrom.IsZero() {
 		return errors.New("pricing: effective_from is required")
 	}
+	r.ModelPattern = strings.ToLower(strings.TrimSpace(r.ModelPattern))
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO model_pricing (
@@ -203,11 +208,12 @@ func (s *Store) UpsertRate(ctx context.Context, r Rate) error {
 
 // DeleteRate removes the row with the given (model_pattern, effective_from)
 // key. Deleting a rate changes the revision and therefore triggers a re-cost
-// of the sessions that were priced with it.
+// of the sessions that were priced with it. The pattern is lowercased to match
+// how rows are stored.
 func (s *Store) DeleteRate(ctx context.Context, modelPattern string, effectiveFrom time.Time) error {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM model_pricing WHERE model_pattern = ? AND effective_from = ?`,
-		modelPattern, effectiveFrom.UTC().Format(time.RFC3339))
+		strings.ToLower(strings.TrimSpace(modelPattern)), effectiveFrom.UTC().Format(time.RFC3339))
 	if err != nil {
 		return err
 	}

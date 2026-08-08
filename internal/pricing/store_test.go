@@ -209,3 +209,47 @@ func TestUpsertRate_Validation(t *testing.T) {
 		t.Error("missing effective_from should fail")
 	}
 }
+
+func TestUpsertRate_NormalizesPattern(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	// Seed a lowercase row, then upsert the same rate with a mixed-case
+	// pattern: it must land on the same UNIQUE key (SQLite's default UNIQUE
+	// is case-sensitive) instead of sitting beside the seed row, and the
+	// resolver must find it either way.
+	from := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	seed := Rate{
+		Provider: "anthropic", ModelPattern: "claude-test-case",
+		MatchType: MatchPrefix, InputPerMTok: 1, OutputPerMTok: 5,
+		EffectiveFrom: from, Source: "test", IsBuiltin: true,
+	}
+	if err := s.UpsertRate(ctx, seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	mixed := seed
+	mixed.ModelPattern = "Claude-Test-CASE"
+	mixed.InputPerMTok = 2.5
+	mixed.OutputPerMTok = 12
+	if err := s.UpsertRate(ctx, mixed); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	after, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	if len(after) != 1 {
+		t.Fatalf("rows = %d, want 1 — mixed-case upsert must collide with the seed row, not sit beside it",
+			len(after))
+	}
+	res := NewResolver(after)
+	got, ok := res.Resolve("claude-test-case", from.Add(time.Hour))
+	if !ok || got.Rate.InputPerMTok != 2.5 {
+		t.Errorf("resolve after upsert = %+v ok=%v, want $2.50", got, ok)
+	}
+
+	if err := s.DeleteRate(ctx, "CLAUDE-TEST-CASE", from); err != nil {
+		t.Fatalf("delete by different-case spelling: %v", err)
+	}
+}
