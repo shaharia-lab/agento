@@ -1,7 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { claudeSessionsApi } from '@/lib/api'
-import type { ClaudeSessionDetail, ClaudeMessage, ClaudeNormalizedBlock, ClaudeTodo } from '@/types'
+import type {
+  ClaudeSessionDetail,
+  ClaudeMessage,
+  ClaudeNormalizedBlock,
+  ClaudeTodo,
+  ClaudeSubagent,
+} from '@/types'
 import { formatRelativeTime, formatDateTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -22,6 +28,7 @@ import {
   Pencil,
   Star,
   Activity,
+  Bot,
 } from 'lucide-react'
 import { formatTokens, shortPath } from '@/lib/format'
 
@@ -270,6 +277,80 @@ function TodosSection({ todos }: Readonly<{ todos: ClaudeTodo[] }>) {
   )
 }
 
+// ── Sub-agents ────────────────────────────────────────────────────────────────
+
+function SubagentRow({ subagent }: Readonly<{ subagent: ClaudeSubagent }>) {
+  const total = subagent.usage.input_tokens + subagent.usage.output_tokens
+  return (
+    <div className="flex items-start gap-2 px-4 py-2">
+      <Bot className="h-3 w-3 mt-0.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+            {subagent.agent_type || 'sub-agent'}
+          </span>
+          {subagent.model && (
+            <span className="text-xs text-zinc-400 dark:text-zinc-500">{subagent.model}</span>
+          )}
+        </div>
+        {subagent.description && (
+          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5 break-words">
+            {subagent.description}
+          </p>
+        )}
+        <div className="flex items-center gap-3 mt-1 text-xs text-zinc-400 dark:text-zinc-500">
+          <span>{subagent.message_count} messages</span>
+          {total > 0 && (
+            <span className="flex items-center gap-0.5">
+              <Zap className="h-2.5 w-2.5" />
+              {formatTokens(subagent.usage.input_tokens)}↑&nbsp;
+              {formatTokens(subagent.usage.output_tokens)}↓
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SubagentsSection({ subagents }: Readonly<{ subagents: ClaudeSubagent[] }>) {
+  const [open, setOpen] = useState(false)
+  if (!subagents || subagents.length === 0) return null
+
+  const totalTokens = subagents.reduce(
+    (sum, sa) => sum + sa.usage.input_tokens + sa.usage.output_tokens,
+    0,
+  )
+
+  return (
+    <div className="rounded-md border border-zinc-200 dark:border-zinc-700 overflow-hidden">
+      <button
+        className="flex w-full items-center gap-2 px-4 py-2.5 bg-zinc-50 dark:bg-zinc-800/50 hover:bg-zinc-100 dark:hover:bg-zinc-700/50 transition-colors text-left"
+        onClick={() => setOpen(o => !o)}
+      >
+        {open ? (
+          <ChevronDown className="h-3.5 w-3.5 text-zinc-400" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 text-zinc-400" />
+        )}
+        <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+          Sub-agents ({subagents.length})
+        </span>
+        <span className="text-xs text-zinc-400 dark:text-zinc-500">
+          {formatTokens(totalTokens)} tokens
+        </span>
+      </button>
+      {open && (
+        <div className="divide-y divide-zinc-100 dark:divide-zinc-700/50">
+          {subagents.map(sa => (
+            <SubagentRow key={sa.agent_id} subagent={sa} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function ClaudeSessionDetailPage() {
@@ -361,6 +442,9 @@ export default function ClaudeSessionDetailPage() {
   }
 
   const totalTokens = (detail.usage?.input_tokens ?? 0) + (detail.usage?.output_tokens ?? 0)
+  // Delegated work is reported additively — `usage` stays main-thread only.
+  const subagentTokens =
+    (detail.subagent_usage?.input_tokens ?? 0) + (detail.subagent_usage?.output_tokens ?? 0)
 
   return (
     <div className="flex flex-col h-full">
@@ -517,6 +601,15 @@ export default function ClaudeSessionDetailPage() {
                 cache read
               </span>
             )}
+            {subagentTokens > 0 && (
+              <span className="flex items-center gap-1">
+                <Bot className="h-3 w-3 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                  {formatTokens(subagentTokens)}
+                </span>{' '}
+                sub-agents
+              </span>
+            )}
           </div>
         </div>
       )}
@@ -525,6 +618,9 @@ export default function ClaudeSessionDetailPage() {
       <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4 flex flex-col gap-4">
         {/* Todos */}
         {detail.todos && detail.todos.length > 0 && <TodosSection todos={detail.todos} />}
+
+        {/* Sub-agents */}
+        <SubagentsSection subagents={detail.subagents} />
 
         {/* Conversation */}
         {detail.messages.length === 0 ? (

@@ -533,10 +533,28 @@ export interface ClaudeSessionSummary {
   start_time: string
   last_activity: string
   message_count: number
+  /** Main-thread usage only — delegated work is in `subagent_usage`. */
   usage: ClaudeTokenUsage
   git_branch?: string
   model?: string
   cwd?: string
+  /** Number of sub-agent transcripts under `<session-id>/subagents/`. */
+  subagent_count: number
+  /** Summed usage of those transcripts, reported additively to `usage`. */
+  subagent_usage: ClaudeTokenUsage
+}
+
+/** A sub-agent run delegated from a parent session via the Task/Agent tool. */
+export interface ClaudeSubagent {
+  agent_id: string
+  agent_type?: string
+  description?: string
+  tool_use_id?: string
+  start_time: string
+  last_activity: string
+  message_count: number
+  usage: ClaudeTokenUsage
+  model?: string
 }
 
 export interface ClaudeNormalizedBlock {
@@ -570,6 +588,7 @@ export interface ClaudeTodo {
 export interface ClaudeSessionDetail extends ClaudeSessionSummary {
   messages: ClaudeMessage[]
   todos: ClaudeTodo[]
+  subagents: ClaudeSubagent[]
 }
 
 // ── Session Journey ──────────────────────────────────────────────────────────

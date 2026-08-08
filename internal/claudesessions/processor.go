@@ -8,7 +8,11 @@ import (
 
 // CurrentProcessorVersion is bumped whenever any processor logic changes.
 // Sessions whose insight row has a lower processor_version are re-scanned automatically.
-const CurrentProcessorVersion = 1
+//
+// v2: sub-agent transcripts under <session-id>/subagents/ are fed through the
+// pipeline alongside the parent, so tool counts, cost and error rates include
+// delegated work.
+const CurrentProcessorVersion = 2
 
 // ProcessableEvent is a single decoded line from a Claude Code session JSONL file,
 // passed to each SessionProcessor in chronological order.

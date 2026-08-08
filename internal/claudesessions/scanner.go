@@ -224,18 +224,31 @@ func scanProjectSessions(
 	return sessions
 }
 
-// diskFile holds the metadata for a JSONL file found on disk.
+// diskFile holds the metadata for a JSONL file found on disk. It covers both
+// top-level session transcripts and the sub-agent transcripts nested under
+// <session-id>/subagents/, distinguished by isSubagent.
 type diskFile struct {
-	sessionID   string
+	sessionID   string // for a sub-agent file this is the PARENT session's id
 	projectPath string
 	filePath    string
 	mtime       time.Time
+
+	// Sub-agent files only.
+	isSubagent bool
+	agentID    string // filename stem, e.g. "agent-adb233f74d4331d56"
+	// parentFilePath is the parent session's own .jsonl. Insight processing is
+	// notified against this path so a changed sub-agent re-runs the whole
+	// session (parent + every sub-agent) rather than the fragment alone.
+	parentFilePath string
 }
 
-// cachedEntry holds a cached session's file path and modification time.
+// cachedEntry holds a cached file's path and modification time. isSubagent
+// records which table the row came from, so deletions — where the file is gone
+// and no diskFile survives — can still be routed to the right table.
 type cachedEntry struct {
-	filePath string
-	mtime    time.Time
+	filePath   string
+	mtime      time.Time
+	isSubagent bool
 }
 
 // IncrementalScan walks ~/.claude/projects/, compares files on disk with the
@@ -257,8 +270,11 @@ func IncrementalScanWithNotify(
 	onDisk, err := walkDiskFiles(projectsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			if _, execErr := db.ExecContext(context.Background(), "DELETE FROM claude_session_cache"); execErr != nil {
-				logger.Warn("failed to clear session cache", "error", execErr)
+			for _, table := range []string{"claude_session_cache", "claude_subagent_cache"} {
+				// #nosec G202 -- table is a package-internal constant, never user input.
+				if _, execErr := db.ExecContext(context.Background(), "DELETE FROM "+table); execErr != nil {
+					logger.Warn("failed to clear session cache", "table", table, "error", execErr)
+				}
 			}
 			updateLastScanned(db, logger)
 			return []ClaudeSessionSummary{}, nil
@@ -295,10 +311,15 @@ func walkDiskFiles(projectsDir string) (map[string]diskFile, error) {
 
 func collectProjectDiskFiles(projectsDir, dirName string, onDisk map[string]diskFile) {
 	projectPath := DecodeProjectPath(dirName)
-	files, err := os.ReadDir(filepath.Join(projectsDir, dirName))
+	projectDir := filepath.Join(projectsDir, dirName)
+	files, err := os.ReadDir(projectDir)
 	if err != nil {
 		return
 	}
+
+	// Session ids are needed before their sibling directories can be matched,
+	// and ReadDir gives no ordering guarantee, so collect the flat files first.
+	sessionIDs := make(map[string]struct{}, len(files))
 	for _, f := range files {
 		if f.IsDir() || !strings.HasSuffix(f.Name(), jsonlExt) {
 			continue
@@ -307,21 +328,81 @@ func collectProjectDiskFiles(projectsDir, dirName string, onDisk map[string]disk
 		if err != nil {
 			continue
 		}
-		fp := filepath.Join(projectsDir, dirName, f.Name())
+		sessionID := strings.TrimSuffix(f.Name(), jsonlExt)
+		sessionIDs[sessionID] = struct{}{}
+		fp := filepath.Join(projectDir, f.Name())
 		onDisk[fp] = diskFile{
-			sessionID:   strings.TrimSuffix(f.Name(), jsonlExt),
+			sessionID:   sessionID,
 			projectPath: projectPath,
 			filePath:    fp,
 			mtime:       info.ModTime().UTC(),
+		}
+	}
+
+	for _, f := range files {
+		if !f.IsDir() {
+			continue
+		}
+		if _, ok := sessionIDs[f.Name()]; !ok {
+			continue
+		}
+		collectSubagentDiskFiles(projectDir, f.Name(), projectPath, onDisk)
+	}
+}
+
+// collectSubagentDiskFiles emits one diskFile per sub-agent transcript under
+// <projectDir>/<sessionID>/subagents/. Claude Code moved delegated work out of
+// the parent JSONL into this directory; a session with no such directory simply
+// contributes nothing.
+func collectSubagentDiskFiles(projectDir, sessionID, projectPath string, onDisk map[string]diskFile) {
+	subagentsDir := filepath.Join(projectDir, sessionID, "subagents")
+	entries, err := os.ReadDir(subagentsDir)
+	if err != nil {
+		return
+	}
+	parentFilePath := filepath.Join(projectDir, sessionID+jsonlExt)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), jsonlExt) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		fp := filepath.Join(subagentsDir, e.Name())
+		onDisk[fp] = diskFile{
+			sessionID:      sessionID,
+			projectPath:    projectPath,
+			filePath:       fp,
+			mtime:          info.ModTime().UTC(),
+			isSubagent:     true,
+			agentID:        strings.TrimSuffix(e.Name(), jsonlExt),
+			parentFilePath: parentFilePath,
 		}
 	}
 }
 
 func loadCachedEntries(db *sql.DB, logger *slog.Logger) (map[string]cachedEntry, error) {
 	cached := make(map[string]cachedEntry)
-	rows, err := db.QueryContext(context.Background(), "SELECT file_path, file_mtime FROM claude_session_cache")
-	if err != nil {
+	if err := loadCachedEntriesFrom(db, logger, "claude_session_cache", false, cached); err != nil {
 		return nil, err
+	}
+	if err := loadCachedEntriesFrom(db, logger, "claude_subagent_cache", true, cached); err != nil {
+		return nil, err
+	}
+	return cached, nil
+}
+
+// loadCachedEntriesFrom reads the (file_path, file_mtime) pairs of one cache
+// table into cached. Both tables are keyed by distinct absolute paths, so they
+// share a single map and therefore a single mtime diff.
+func loadCachedEntriesFrom(
+	db *sql.DB, logger *slog.Logger, table string, isSubagent bool, cached map[string]cachedEntry,
+) error {
+	// #nosec G202 -- table is a package-internal constant, never user input.
+	rows, err := db.QueryContext(context.Background(), "SELECT file_path, file_mtime FROM "+table)
+	if err != nil {
+		return err
 	}
 	defer func() {
 		if cerr := rows.Close(); cerr != nil {
@@ -330,20 +411,20 @@ func loadCachedEntries(db *sql.DB, logger *slog.Logger) (map[string]cachedEntry,
 	}()
 
 	for rows.Next() {
-		var ce cachedEntry
+		ce := cachedEntry{isSubagent: isSubagent}
 		if err := rows.Scan(&ce.filePath, &ce.mtime); err != nil {
-			return nil, err
+			return err
 		}
 		cached[ce.filePath] = ce
 	}
-	return cached, rows.Err()
+	return rows.Err()
 }
 
 // diskDiff groups file paths by their change type.
 type diskDiff struct {
-	toInsert []string // file paths not present in the cache
-	toUpdate []string // file paths present in the cache but with a changed mtime
-	toDelete []string // file paths present in the cache but no longer on disk
+	toInsert []string      // file paths not present in the cache
+	toUpdate []string      // file paths present in the cache but with a changed mtime
+	toDelete []cachedEntry // cache rows whose file is no longer on disk
 }
 
 func diffDiskAndCache(onDisk map[string]diskFile, cached map[string]cachedEntry) diskDiff {
@@ -357,9 +438,9 @@ func diffDiskAndCache(onDisk map[string]diskFile, cached map[string]cachedEntry)
 			d.toUpdate = append(d.toUpdate, fp)
 		}
 	}
-	for fp := range cached {
+	for fp, ce := range cached {
 		if _, exists := onDisk[fp]; !exists {
-			d.toDelete = append(d.toDelete, fp)
+			d.toDelete = append(d.toDelete, ce)
 		}
 	}
 	return d
@@ -380,26 +461,69 @@ func applyChangesWithNotify(
 			"unchanged", len(onDisk)-total)
 	}
 
+	// Insights are computed per session over the parent transcript plus all of
+	// its sub-agent transcripts, so a session is worth notifying about at most
+	// once per scan however many of its files changed. Collect first, emit after:
+	// a session with N changed sub-agents would otherwise enqueue N+1 items that
+	// each re-read all N+1 files, and on a first scan the resulting fan-out
+	// overflows the worker queue.
+	pending := make(map[string]pendingNotify)
 	for _, fp := range diff.toInsert {
-		df := onDisk[fp]
-		if applyUpsert(db, logger, df) && notify != nil {
-			notify(df.sessionID, df.filePath, true)
-		}
+		applyOne(db, logger, onDisk[fp], true, pending)
 	}
 	for _, fp := range diff.toUpdate {
-		df := onDisk[fp]
-		if applyUpsert(db, logger, df) && notify != nil {
-			notify(df.sessionID, df.filePath, false)
+		applyOne(db, logger, onDisk[fp], false, pending)
+	}
+	if notify != nil {
+		for sessionID, p := range pending {
+			notify(sessionID, p.filePath, p.isNew)
 		}
 	}
 
-	for _, fp := range diff.toDelete {
-		deleteQuery := "DELETE FROM claude_session_cache WHERE file_path = ?"
-		if _, err := db.ExecContext(context.Background(), deleteQuery, fp); err != nil {
+	for _, ce := range diff.toDelete {
+		table := "claude_session_cache"
+		if ce.isSubagent {
+			table = "claude_subagent_cache"
+		}
+		// #nosec G202 -- table is a package-internal constant, never user input.
+		deleteQuery := "DELETE FROM " + table + " WHERE file_path = ?"
+		if _, err := db.ExecContext(context.Background(), deleteQuery, ce.filePath); err != nil {
 			logger.Warn("claude sessions: failed to delete cache row",
-				"file", fp, "error", err)
+				"file", ce.filePath, "error", err)
 		}
 	}
+}
+
+// pendingNotify is one session's queued insight notification for this scan.
+type pendingNotify struct {
+	filePath string
+	isNew    bool
+}
+
+// applyOne upserts a single changed file into the appropriate cache table and
+// records the session's insight notification in pending.
+//
+// A sub-agent file is recorded against its PARENT session id and file path,
+// because a changed fragment must re-run the whole session. It never marks the
+// session as new — the session already existed — and never overwrites an entry
+// the parent file recorded, so a genuinely new session still reports as new
+// regardless of the order the two are applied in.
+func applyOne(
+	db *sql.DB, logger *slog.Logger, df diskFile, isNew bool, pending map[string]pendingNotify,
+) {
+	if df.isSubagent {
+		if !applySubagentUpsert(db, logger, df) {
+			return
+		}
+		if _, exists := pending[df.sessionID]; !exists {
+			pending[df.sessionID] = pendingNotify{filePath: df.parentFilePath, isNew: false}
+		}
+		return
+	}
+	if !applyUpsert(db, logger, df) {
+		return
+	}
+	pending[df.sessionID] = pendingNotify{filePath: df.filePath, isNew: isNew}
 }
 
 // applyUpsert reads the session summary and writes it to the cache.
@@ -451,6 +575,143 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 	return err
 }
 
+// subagentMeta is the agent-<id>.meta.json sidecar written next to each
+// sub-agent transcript. Fields are best-effort: older transcripts omit some,
+// and a missing or malformed sidecar must not lose the transcript itself.
+type subagentMeta struct {
+	AgentType   string `json:"agentType"`
+	Description string `json:"description"`
+	ToolUseID   string `json:"toolUseId"`
+}
+
+// readSubagentMeta reads the sidecar next to a sub-agent transcript. A missing
+// or unreadable sidecar yields a zero value rather than an error — the token
+// usage in the transcript is the part that matters.
+func readSubagentMeta(filePath string, logger *slog.Logger) subagentMeta {
+	metaPath := strings.TrimSuffix(filePath, jsonlExt) + ".meta.json"
+	data, err := os.ReadFile(metaPath) //nolint:gosec // path derived from a scanned transcript
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Debug("claude sessions: failed to read sub-agent meta", "file", metaPath, "error", err)
+		}
+		return subagentMeta{}
+	}
+	var m subagentMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		logger.Debug("claude sessions: malformed sub-agent meta", "file", metaPath, "error", err)
+		return subagentMeta{}
+	}
+	return m
+}
+
+// applySubagentUpsert reads a sub-agent transcript and writes it to the
+// sub-agent cache. Returns true on success.
+func applySubagentUpsert(db *sql.DB, logger *slog.Logger, df diskFile) bool {
+	summary, err := readSubagentSummary(df.sessionID, df.projectPath, df.filePath, logger)
+	if err != nil || summary == nil {
+		return false
+	}
+	meta := readSubagentMeta(df.filePath, logger)
+	if err := upsertSubagentRow(db, df, summary, meta); err != nil {
+		logger.Warn("claude sessions: failed to upsert sub-agent cache row",
+			"file", df.filePath, "error", err)
+		return false
+	}
+	return true
+}
+
+func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta subagentMeta) error {
+	ctx := context.Background()
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO claude_subagent_cache (
+			parent_session_id, agent_id, file_path, file_mtime,
+			agent_type, description, tool_use_id,
+			start_time, last_activity, message_count,
+			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+			model
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(parent_session_id, agent_id) DO UPDATE SET
+			file_path = excluded.file_path,
+			file_mtime = excluded.file_mtime,
+			agent_type = excluded.agent_type,
+			description = excluded.description,
+			tool_use_id = excluded.tool_use_id,
+			start_time = excluded.start_time,
+			last_activity = excluded.last_activity,
+			message_count = excluded.message_count,
+			input_tokens = excluded.input_tokens,
+			output_tokens = excluded.output_tokens,
+			cache_creation_tokens = excluded.cache_creation_tokens,
+			cache_read_tokens = excluded.cache_read_tokens,
+			model = excluded.model`,
+		df.sessionID, df.agentID, df.filePath, df.mtime,
+		meta.AgentType, meta.Description, meta.ToolUseID,
+		s.StartTime, s.LastActivity, s.MessageCount,
+		s.Usage.InputTokens, s.Usage.OutputTokens,
+		s.Usage.CacheCreationTokens, s.Usage.CacheReadTokens,
+		s.Model,
+	)
+	return err
+}
+
+// ListSubagents returns the cached sub-agent transcripts of one session,
+// ordered by start time.
+func ListSubagents(db *sql.DB, logger *slog.Logger, sessionID string) ([]ClaudeSubagent, error) {
+	rows, err := db.QueryContext(context.Background(), `
+		SELECT agent_id, agent_type, description, tool_use_id,
+		       start_time, last_activity, message_count,
+		       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, model
+		FROM claude_subagent_cache
+		WHERE parent_session_id = ?
+		ORDER BY start_time`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			logger.Warn("failed to close rows", "error", cerr)
+		}
+	}()
+
+	subagents := []ClaudeSubagent{}
+	for rows.Next() {
+		var sa ClaudeSubagent
+		if err := rows.Scan(
+			&sa.AgentID, &sa.AgentType, &sa.Description, &sa.ToolUseID,
+			&sa.StartTime, &sa.LastActivity, &sa.MessageCount,
+			&sa.Usage.InputTokens, &sa.Usage.OutputTokens,
+			&sa.Usage.CacheCreationTokens, &sa.Usage.CacheReadTokens, &sa.Model,
+		); err != nil {
+			return nil, err
+		}
+		subagents = append(subagents, sa)
+	}
+	return subagents, rows.Err()
+}
+
+// SubagentFiles returns the sub-agent transcript paths belonging to the session
+// whose own transcript is at sessionFilePath. Returns nil when the session
+// delegated nothing.
+func SubagentFiles(sessionID, sessionFilePath string) []string {
+	subagentsDir := filepath.Join(filepath.Dir(sessionFilePath), sessionID, "subagents")
+	entries, err := os.ReadDir(subagentsDir)
+	if err != nil {
+		return nil
+	}
+	paths := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), jsonlExt) {
+			continue
+		}
+		paths = append(paths, filepath.Join(subagentsDir, e.Name()))
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	sort.Strings(paths)
+	return paths
+}
+
 func updateLastScanned(db *sql.DB, logger *slog.Logger) {
 	ctx := context.Background()
 	if _, err := db.ExecContext(ctx, `
@@ -462,14 +723,34 @@ func updateLastScanned(db *sql.DB, logger *slog.Logger) {
 	}
 }
 
-func loadAllSessions(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, error) {
-	ctx := context.Background()
-	rows, err := db.QueryContext(ctx, `
-		SELECT session_id, project_path, preview, custom_title, is_favorite, start_time, last_activity,
-		       message_count, input_tokens, output_tokens, cache_creation_tokens,
-		       cache_read_tokens, git_branch, model, cwd
-		FROM claude_session_cache
-		ORDER BY last_activity DESC`)
+// sessionSummarySelect loads every cached session with its sub-agent roll-up
+// folded in. The aggregate is a grouped sub-select rather than a join against
+// the raw rows so a session with several sub-agents is not multiplied out, and
+// COALESCE keeps the LEFT JOIN's NULLs from reaching the int scans.
+const sessionSummarySelect = `
+	SELECT c.session_id, c.project_path, c.preview, c.custom_title, c.is_favorite,
+	       c.start_time, c.last_activity, c.message_count,
+	       c.input_tokens, c.output_tokens, c.cache_creation_tokens, c.cache_read_tokens,
+	       c.git_branch, c.model, c.cwd,
+	       COALESCE(sa.n, 0), COALESCE(sa.it, 0), COALESCE(sa.ot, 0),
+	       COALESCE(sa.cct, 0), COALESCE(sa.crt, 0)
+	FROM claude_session_cache c
+	LEFT JOIN (
+		SELECT parent_session_id,
+		       COUNT(*) AS n,
+		       SUM(input_tokens) AS it,
+		       SUM(output_tokens) AS ot,
+		       SUM(cache_creation_tokens) AS cct,
+		       SUM(cache_read_tokens) AS crt
+		FROM claude_subagent_cache
+		GROUP BY parent_session_id
+	) sa ON sa.parent_session_id = c.session_id
+	ORDER BY c.last_activity DESC`
+
+// querySessionSummaries runs sessionSummarySelect and scans the result. Both
+// loadAllSessions and Cache.loadAll share it so the two paths cannot drift.
+func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, error) {
+	rows, err := db.QueryContext(context.Background(), sessionSummarySelect)
 	if err != nil {
 		return nil, err
 	}
@@ -479,7 +760,7 @@ func loadAllSessions(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 		}
 	}()
 
-	var sessions []ClaudeSessionSummary
+	sessions := []ClaudeSessionSummary{}
 	for rows.Next() {
 		var s ClaudeSessionSummary
 		if err := rows.Scan(
@@ -488,15 +769,18 @@ func loadAllSessions(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 			&s.Usage.InputTokens, &s.Usage.OutputTokens,
 			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
 			&s.GitBranch, &s.Model, &s.CWD,
+			&s.SubagentCount, &s.SubagentUsage.InputTokens, &s.SubagentUsage.OutputTokens,
+			&s.SubagentUsage.CacheCreationTokens, &s.SubagentUsage.CacheReadTokens,
 		); err != nil {
 			return nil, err
 		}
 		sessions = append(sessions, s)
 	}
-	if sessions == nil {
-		sessions = []ClaudeSessionSummary{}
-	}
 	return sessions, rows.Err()
+}
+
+func loadAllSessions(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, error) {
+	return querySessionSummaries(db, logger)
 }
 
 // timeRange tracks the earliest and latest timestamps seen.
@@ -540,6 +824,24 @@ func addAssistantUsage(usage *TokenUsage, msg *rawMessage) {
 
 // readSessionSummary reads a session JSONL file and extracts lightweight metadata.
 func readSessionSummary(sessionID, projectPath, filePath string, logger *slog.Logger) (*ClaudeSessionSummary, error) {
+	return readSummaryFile(sessionID, projectPath, filePath, false, logger)
+}
+
+// readSubagentSummary reads a sub-agent transcript. Sub-agent files use the
+// same event schema as a parent session, but every event in them is flagged
+// isSidechain — the marker a parent transcript uses for delegated turns it
+// should not count twice. Inside a sub-agent file that marker is universal and
+// carries no such meaning, so sidechain user turns are counted here; otherwise
+// message_count would silently degrade to assistant-only.
+func readSubagentSummary(
+	sessionID, projectPath, filePath string, logger *slog.Logger,
+) (*ClaudeSessionSummary, error) {
+	return readSummaryFile(sessionID, projectPath, filePath, true, logger)
+}
+
+func readSummaryFile(
+	sessionID, projectPath, filePath string, countSidechainUsers bool, logger *slog.Logger,
+) (*ClaudeSessionSummary, error) {
 	f, err := os.Open(filePath) //nolint:gosec
 	if err != nil {
 		return nil, err
@@ -570,7 +872,7 @@ func readSessionSummary(sessionID, projectPath, filePath string, logger *slog.Lo
 
 		tr.update(ev.Timestamp)
 		updateMetadataFromEvent(&summary.CWD, &summary.GitBranch, ev)
-		processSummaryEvent(summary, ev)
+		processSummaryEvent(summary, ev, countSidechainUsers)
 	}
 
 	summary.StartTime = tr.start
@@ -582,10 +884,10 @@ func readSessionSummary(sessionID, projectPath, filePath string, logger *slog.Lo
 	return summary, sc.Err()
 }
 
-func processSummaryEvent(summary *ClaudeSessionSummary, ev rawEvent) {
+func processSummaryEvent(summary *ClaudeSessionSummary, ev rawEvent, countSidechainUsers bool) {
 	switch ev.Type {
 	case "user":
-		if ev.IsSidechain {
+		if ev.IsSidechain && !countSidechainUsers {
 			return
 		}
 		summary.MessageCount++
@@ -694,6 +996,8 @@ func processDetailEvent(
 }
 
 func processDetailUserEvent(detail *ClaudeSessionDetail, ev rawEvent, topLevel []ClaudeMessage) []ClaudeMessage {
+	// Sidechain user turns belong to delegated sub-agents, which are read from
+	// <session-id>/subagents/ and reported separately — see ClaudeSubagent.
 	if ev.IsSidechain {
 		return topLevel
 	}

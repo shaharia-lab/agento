@@ -270,6 +270,31 @@ CREATE TABLE telegram_processed_updates (
 );
 `,
 	},
+	{
+		version: 11,
+		sql: `
+CREATE TABLE claude_subagent_cache (
+    parent_session_id     TEXT NOT NULL,
+    agent_id              TEXT NOT NULL,
+    file_path             TEXT NOT NULL,
+    file_mtime            DATETIME NOT NULL,
+    agent_type            TEXT NOT NULL DEFAULT '',
+    description           TEXT NOT NULL DEFAULT '',
+    tool_use_id           TEXT NOT NULL DEFAULT '',
+    start_time            DATETIME,
+    last_activity         DATETIME,
+    message_count         INTEGER NOT NULL DEFAULT 0,
+    input_tokens          INTEGER NOT NULL DEFAULT 0,
+    output_tokens         INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+    model                 TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (parent_session_id, agent_id)
+);
+CREATE INDEX idx_subagent_parent ON claude_subagent_cache(parent_session_id);
+CREATE INDEX idx_subagent_file_path ON claude_subagent_cache(file_path);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

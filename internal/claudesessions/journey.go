@@ -298,6 +298,8 @@ func (b *journeyBuilder) addStep(step JourneyStep) {
 }
 
 func (b *journeyBuilder) processUserEvent(ev rawJourneyEvent, j *SessionJourney) {
+	// Sidechain user turns belong to delegated sub-agents; rendering them in the
+	// journey timeline is tracked separately (#185).
 	if ev.IsSidechain {
 		return
 	}

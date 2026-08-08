@@ -126,42 +126,24 @@ func (c *Cache) isFresh() bool {
 	return time.Since(lastScanned) < CacheTTL
 }
 
-// loadAll queries all rows from claude_session_cache ordered by last_activity desc.
+// loadAll queries all cached sessions, with their sub-agent roll-up, ordered by
+// last_activity desc.
 func (c *Cache) loadAll() ([]ClaudeSessionSummary, error) {
-	ctx := context.Background()
-	rows, err := c.db.QueryContext(ctx, `
-		SELECT session_id, project_path, preview, custom_title, is_favorite, start_time, last_activity,
-		       message_count, input_tokens, output_tokens, cache_creation_tokens,
-		       cache_read_tokens, git_branch, model, cwd
-		FROM claude_session_cache
-		ORDER BY last_activity DESC`)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if cerr := rows.Close(); cerr != nil {
-			c.logger.Error("failed to close rows", "error", cerr)
-		}
-	}()
+	return querySessionSummaries(c.db, c.logger)
+}
 
-	var sessions []ClaudeSessionSummary
-	for rows.Next() {
-		var s ClaudeSessionSummary
-		if err := rows.Scan(
-			&s.SessionID, &s.ProjectPath, &s.Preview, &s.CustomTitle, &s.IsFavorite,
-			&s.StartTime, &s.LastActivity, &s.MessageCount,
-			&s.Usage.InputTokens, &s.Usage.OutputTokens,
-			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
-			&s.GitBranch, &s.Model, &s.CWD,
-		); err != nil {
-			return nil, err
-		}
-		sessions = append(sessions, s)
+// ListSubagents returns the cached sub-agent transcripts of one session.
+// It takes the cache mutex, so it must not be called from a method that
+// already holds it.
+func (c *Cache) ListSubagents(sessionID string) []ClaudeSubagent {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	subagents, err := ListSubagents(c.db, c.logger, sessionID)
+	if err != nil {
+		c.logger.Warn("claude sessions: failed to list sub-agents", "session_id", sessionID, "error", err)
+		return []ClaudeSubagent{}
 	}
-	if sessions == nil {
-		sessions = []ClaudeSessionSummary{}
-	}
-	return sessions, rows.Err()
+	return subagents
 }
 
 // UpdateCustomTitle sets a user-defined label for the given session. The title
