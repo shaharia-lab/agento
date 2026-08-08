@@ -3,9 +3,14 @@ agento
 agento-dev
 
 # Frontend build output (rebuilt by `make build-frontend`)
-# The placeholder frontend/dist/index.html IS committed so `go build` works out of the box.
-# Real build artifacts go here and should not be committed.
-frontend/dist/assets/
+# Nothing vite emits is committed: it rewrites index.html with fresh
+# content-hashed asset names on every build, so a tracked copy is permanent
+# churn and is stale the moment it lands. frontend/dist/favicon.svg IS
+# committed so `//go:embed frontend/dist` always has a file to embed and a
+# bare `go build` still compiles; release builds (.goreleaser.yaml) and
+# `make build` always run `npm run build` first.
+frontend/dist/*
+!frontend/dist/favicon.svg
 
 # Node modules
 frontend/node_modules/
