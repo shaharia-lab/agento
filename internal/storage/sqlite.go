@@ -374,6 +374,34 @@ ALTER TABLE session_insights ADD COLUMN effort_breakdown     TEXT    NOT NULL DE
 ALTER TABLE session_insights ADD COLUMN unattributed_calls   INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		version: 17,
+		sql: `
+-- The time-versioned pricing catalog (#186). Rates are effective-dated, so the
+-- uniqueness key is (model_pattern, effective_from): a price change is a new
+-- row, never an edit of the row history was priced against. Seeded from the
+-- built-in catalog on startup; user_modified rows are never re-seeded.
+CREATE TABLE model_pricing (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider TEXT NOT NULL DEFAULT '',
+    model_pattern TEXT NOT NULL,
+    match_type TEXT NOT NULL DEFAULT 'exact',
+    display_name TEXT NOT NULL DEFAULT '',
+    input_per_mtok REAL NOT NULL DEFAULT 0,
+    output_per_mtok REAL NOT NULL DEFAULT 0,
+    cache_write_5m_per_mtok REAL NOT NULL DEFAULT 0,
+    cache_write_1h_per_mtok REAL NOT NULL DEFAULT 0,
+    cache_read_per_mtok REAL NOT NULL DEFAULT 0,
+    effective_from DATETIME NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    user_modified INTEGER NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    UNIQUE(model_pattern, effective_from)
+);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

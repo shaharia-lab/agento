@@ -16,7 +16,10 @@ import (
 // models at Sonnet rates, so every stored cost_estimate_usd is out of date.
 // v4: tool calls are attributed to the skill, plugin and MCP server that made
 // them — every row written before v4 has empty attribution breakdowns.
-const CurrentProcessorVersion = 4
+// v5: cost is accumulated per assistant message against the pricing catalog
+// (#186) — rows written before v5 were priced whole-session at the first-seen
+// model's flat rate, so every stored cost_estimate_usd is out of date.
+const CurrentProcessorVersion = 5
 
 // ProcessableEvent is a single decoded line from a Claude Code session JSONL file,
 // passed to each SessionProcessor in chronological order.

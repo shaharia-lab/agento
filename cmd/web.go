@@ -33,6 +33,7 @@ import (
 	whatsappintegration "github.com/shaharia-lab/agento/internal/integrations/whatsapp"
 	"github.com/shaharia-lab/agento/internal/logger"
 	"github.com/shaharia-lab/agento/internal/notification"
+	"github.com/shaharia-lab/agento/internal/pricing"
 	"github.com/shaharia-lab/agento/internal/scheduler"
 	"github.com/shaharia-lab/agento/internal/server"
 	"github.com/shaharia-lab/agento/internal/service"
@@ -406,7 +407,8 @@ func buildChatService(deps appDeps) service.ChatService {
 func setupInsights(
 	ctx context.Context, db *sql.DB, logger *slog.Logger, bus eventbus.EventBus,
 ) (*claudesessions.Cache, claudesessions.InsightStorer, *claudesessions.InsightWorker) {
-	sessionCache := claudesessions.NewCache(db, logger).WithEventBus(bus)
+	pricingStore := pricing.NewStore(db, logger)
+	sessionCache := claudesessions.NewCache(db, logger).WithEventBus(bus).WithPricingStore(pricingStore)
 	sessionCache.StartBackgroundScan()
 
 	rawInsightStore := storage.NewSQLiteSessionInsightsStore(db)

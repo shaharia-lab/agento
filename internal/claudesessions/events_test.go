@@ -133,7 +133,7 @@ func TestScan_PRLinksDeduplicated(t *testing.T) {
 	// Assert the in-memory dedupe too: the unique index on claude_session_pr
 	// would collapse duplicates on its own, so reading only through the DB
 	// would not prove addSummaryPRLink does its job.
-	raw, err := readSessionSummary(
+	raw, _, err := readSessionSummary(
 		eventsSessionID, projectDir,
 		filepath.Join(projectDir, eventsSessionID+".jsonl"), testLogger,
 	)
