@@ -514,7 +514,10 @@ export const BUILT_IN_TOOLS = [
 export interface ClaudeTokenUsage {
   input_tokens: number
   output_tokens: number
+  /** Total cache writes; the 5m/1h fields below split it by cache TTL. */
   cache_creation_tokens: number
+  cache_creation_5m_tokens: number
+  cache_creation_1h_tokens: number
   cache_read_tokens: number
 }
 
@@ -820,6 +823,10 @@ export interface AnalyticsSummary {
   most_used_model: string
   avg_tokens_per_session: number
   estimated_cost_usd: number
+  /** Tokens on models with no published rates; excluded from estimated_cost_usd. */
+  unknown_pricing_tokens: number
+  /** Those model identifiers, sorted. */
+  unknown_pricing_models: string[]
 }
 
 export interface TimeSeriesPoint {

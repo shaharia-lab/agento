@@ -482,6 +482,8 @@ export default function GeneralUsagePage() {
     most_used_model: '',
     avg_tokens_per_session: 0,
     estimated_cost_usd: 0,
+    unknown_pricing_tokens: 0,
+    unknown_pricing_models: [],
   }
 
   return (

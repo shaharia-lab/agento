@@ -295,6 +295,22 @@ CREATE INDEX idx_subagent_parent ON claude_subagent_cache(parent_session_id);
 CREATE INDEX idx_subagent_file_path ON claude_subagent_cache(file_path);
 `,
 	},
+	{
+		version: 12,
+		sql: `
+ALTER TABLE claude_session_cache ADD COLUMN cache_creation_5m_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE claude_session_cache ADD COLUMN cache_creation_1h_tokens INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE claude_subagent_cache ADD COLUMN cache_creation_5m_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE claude_subagent_cache ADD COLUMN cache_creation_1h_tokens INTEGER NOT NULL DEFAULT 0;
+
+-- scanner_version records the reader version the cached rows were produced by.
+-- When the code's CurrentScannerVersion moves ahead of it, the next scan
+-- re-reads every transcript even though no file mtime changed. Existing rows
+-- predate the cache-TTL split, so version 0 forces exactly one re-read.
+ALTER TABLE claude_cache_metadata ADD COLUMN scanner_version INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

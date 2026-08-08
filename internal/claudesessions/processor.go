@@ -40,6 +40,31 @@ type EventUsage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	// CacheCreation splits the cache-creation total by cache TTL. Absent on
+	// transcripts written before Claude Code emitted it — see EventCacheCreation.
+	CacheCreation *EventCacheCreation `json:"cache_creation,omitempty"`
+}
+
+// EventCacheCreation is the nested cache-TTL split of CacheCreationInputTokens.
+// The two tiers bill at different multiples of the input rate (1.25× and 2×).
+type EventCacheCreation struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens"`
+}
+
+// Split attributes the cache-creation total across the 5m and 1h buckets,
+// falling back to 5m-only when the nested object is absent so pre-split
+// transcripts cost exactly what they did before. Mirrors splitCacheCreation.
+func (u *EventUsage) Split() (fiveMin, oneHour int) {
+	if u.CacheCreation == nil {
+		return u.CacheCreationInputTokens, 0
+	}
+	oneHour = u.CacheCreation.Ephemeral1hInputTokens
+	fiveMin = u.CacheCreation.Ephemeral5mInputTokens
+	if remainder := u.CacheCreationInputTokens - (fiveMin + oneHour); remainder > 0 {
+		fiveMin += remainder
+	}
+	return fiveMin, oneHour
 }
 
 // SessionInsight holds all computed static-analysis metrics for a single
