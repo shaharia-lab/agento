@@ -393,9 +393,25 @@ function SessionRow({
               <span className="text-xs text-zinc-400 dark:text-zinc-500">
                 {formatRelativeTime(session.last_activity)}
               </span>
-              <span className="text-xs text-zinc-400 dark:text-zinc-500">
-                {session.message_count} msg{session.message_count === 1 ? '' : 's'}
-              </span>
+              <Tooltip
+                side="top"
+                content={
+                  <div className="space-y-1">
+                    <div className="flex justify-between gap-4">
+                      <span className="text-zinc-400">Messages</span>
+                      <span>{session.message_count.toLocaleString()}</span>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <span className="text-zinc-400">Raw events</span>
+                      <span>{session.event_count.toLocaleString()}</span>
+                    </div>
+                  </div>
+                }
+              >
+                <span className="text-xs text-zinc-400 dark:text-zinc-500 cursor-default">
+                  {session.message_count} msg{session.message_count === 1 ? '' : 's'}
+                </span>
+              </Tooltip>
               {hasTokens && (
                 <Tooltip
                   side="top"

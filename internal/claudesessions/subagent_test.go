@@ -25,6 +25,16 @@ func writeSubagentJSONL(
 		Type: "user", SessionID: sessionID, Timestamp: ts, IsSidechain: true,
 		Message: &rawMessage{Role: "user", Content: json.RawMessage(`"delegate this"`)},
 	})
+	// A tool_result carrier: a user-typed event only in form. Sub-agent
+	// transcripts are full of these, and message_count must not count them even
+	// though the sidechain flag here is universal and meaningless.
+	carrierMsg, _ := json.Marshal(rawEvent{
+		Type: "user", SessionID: sessionID, Timestamp: ts.Add(500 * time.Millisecond), IsSidechain: true,
+		Message: &rawMessage{
+			Role:    "user",
+			Content: json.RawMessage(`[{"type":"tool_result","tool_use_id":"tu","content":"file body"}]`),
+		},
+	})
 	assistantMsg, _ := json.Marshal(rawEvent{
 		Type: "assistant", SessionID: sessionID, Timestamp: ts.Add(time.Second), IsSidechain: true,
 		Message: &rawMessage{
@@ -36,6 +46,8 @@ func writeSubagentJSONL(
 
 	var data []byte
 	data = append(data, userMsg...)
+	data = append(data, '\n')
+	data = append(data, carrierMsg...)
 	data = append(data, '\n')
 	data = append(data, assistantMsg...)
 	data = append(data, '\n')

@@ -39,14 +39,22 @@ type ClaudeSessionSummary struct {
 	AITitle     string `json:"ai_title,omitempty"`
 	// DisplayTitle is the resolved label the UI should render — see
 	// ResolveDisplayTitle for the precedence.
-	DisplayTitle string     `json:"display_title"`
-	StartTime    time.Time  `json:"start_time"`
-	LastActivity time.Time  `json:"last_activity"`
-	MessageCount int        `json:"message_count"` // user + assistant top-level messages
-	Usage        TokenUsage `json:"usage"`         // main thread only; see SubagentUsage
-	GitBranch    string     `json:"git_branch,omitempty"`
-	Model        string     `json:"model,omitempty"`
-	CWD          string     `json:"cwd,omitempty"`
+	DisplayTitle string    `json:"display_title"`
+	StartTime    time.Time `json:"start_time"`
+	LastActivity time.Time `json:"last_activity"`
+	// MessageCount counts conversational turns, not JSONL events: user events
+	// that carry genuine human input (not tool_result carriers) plus assistant
+	// events containing at least one text block. It is the number a person
+	// would arrive at reading the transcript. For raw event volume see
+	// EventCount.
+	MessageCount int `json:"message_count"`
+	// EventCount is the raw number of top-level user and assistant events —
+	// effectively API round-trips. This is what MessageCount used to hold.
+	EventCount int        `json:"event_count"`
+	Usage      TokenUsage `json:"usage"` // main thread only; see SubagentUsage
+	GitBranch  string     `json:"git_branch,omitempty"`
+	Model      string     `json:"model,omitempty"`
+	CWD        string     `json:"cwd,omitempty"`
 
 	// SubagentCount is the number of sub-agent transcripts found under
 	// <session-id>/subagents/ for this session.

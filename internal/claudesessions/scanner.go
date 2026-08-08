@@ -28,7 +28,10 @@ const (
 	// different rates — rows written before the split have both columns at zero.
 	// v2: Claude Code's own `custom-title` / `ai-title` events are read into
 	// native_title / ai_title — blank on every row written before v2.
-	CurrentScannerVersion = 2
+	// v3: message_count switched from raw event volume to conversational turns
+	// and event_count was added — rows written before v3 hold the old inflated
+	// number in message_count and zero in event_count.
+	CurrentScannerVersion = 3
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -655,11 +658,11 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO claude_session_cache (
 			session_id, project_path, file_path, file_mtime,
-			preview, start_time, last_activity, message_count,
+			preview, start_time, last_activity, message_count, event_count,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			cache_creation_5m_tokens, cache_creation_1h_tokens,
 			git_branch, model, cwd, native_title, ai_title
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, project_path) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -667,6 +670,7 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 			start_time = excluded.start_time,
 			last_activity = excluded.last_activity,
 			message_count = excluded.message_count,
+			event_count = excluded.event_count,
 			input_tokens = excluded.input_tokens,
 			output_tokens = excluded.output_tokens,
 			cache_creation_tokens = excluded.cache_creation_tokens,
@@ -687,7 +691,7 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 		// Agento rename because that lives in the separate custom_title column
 		// and wins the precedence in ResolveDisplayTitle.
 		s.SessionID, s.ProjectPath, df.filePath, df.mtime,
-		s.Preview, s.StartTime, s.LastActivity, s.MessageCount,
+		s.Preview, s.StartTime, s.LastActivity, s.MessageCount, s.EventCount,
 		s.Usage.InputTokens, s.Usage.OutputTokens,
 		s.Usage.CacheCreationTokens, s.Usage.CacheReadTokens,
 		s.Usage.CacheCreation5mTokens, s.Usage.CacheCreation1hTokens,
@@ -856,7 +860,7 @@ func updateLastScanned(db *sql.DB, logger *slog.Logger) {
 // COALESCE keeps the LEFT JOIN's NULLs from reaching the int scans.
 const sessionSummarySelect = `
 	SELECT c.session_id, c.project_path, c.preview, c.custom_title, c.is_favorite,
-	       c.start_time, c.last_activity, c.message_count,
+	       c.start_time, c.last_activity, c.message_count, c.event_count,
 	       c.input_tokens, c.output_tokens, c.cache_creation_tokens, c.cache_read_tokens,
 	       c.cache_creation_5m_tokens, c.cache_creation_1h_tokens,
 	       c.git_branch, c.model, c.cwd, c.native_title, c.ai_title,
@@ -896,7 +900,7 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 		var s ClaudeSessionSummary
 		if err := rows.Scan(
 			&s.SessionID, &s.ProjectPath, &s.Preview, &s.CustomTitle, &s.IsFavorite,
-			&s.StartTime, &s.LastActivity, &s.MessageCount,
+			&s.StartTime, &s.LastActivity, &s.MessageCount, &s.EventCount,
 			&s.Usage.InputTokens, &s.Usage.OutputTokens,
 			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
 			&s.Usage.CacheCreation5mTokens, &s.Usage.CacheCreation1hTokens,
@@ -970,6 +974,10 @@ func readSessionSummary(sessionID, projectPath, filePath string, logger *slog.Lo
 // should not count twice. Inside a sub-agent file that marker is universal and
 // carries no such meaning, so sidechain user turns are counted here; otherwise
 // message_count would silently degrade to assistant-only.
+//
+// The turn/event split applies here as well: a sub-agent's message_count counts
+// genuine turns, not tool_result carriers. Its EventCount is computed but has no
+// column in claude_subagent_cache, so it is not persisted — see #196.
 func readSubagentSummary(
 	sessionID, projectPath, filePath string, logger *slog.Logger,
 ) (*ClaudeSessionSummary, error) {
@@ -1056,17 +1064,42 @@ func processSummaryEvent(summary *ClaudeSessionSummary, ev rawEvent, countSidech
 		if ev.IsSidechain && !countSidechainUsers {
 			return
 		}
-		summary.MessageCount++
-		if summary.Preview == "" && ev.Message != nil {
-			summary.Preview = truncateRunes(extractTextContent(ev.Message.Content), previewMaxRunes)
-		}
+		addSummaryUserEvent(summary, ev)
 	case "assistant":
-		summary.MessageCount++
-		if ev.Message != nil && summary.Model == "" && ev.Message.Model != "" {
-			summary.Model = ev.Message.Model
-		}
-		addAssistantUsage(&summary.Usage, ev.Message)
+		addSummaryAssistantEvent(summary, ev)
 	}
+}
+
+// addSummaryUserEvent records one user event. Every event bumps EventCount, but
+// only genuine human input counts as a message — the bulk of user events merely
+// carry tool_result blocks back to the model.
+func addSummaryUserEvent(summary *ClaudeSessionSummary, ev rawEvent) {
+	summary.EventCount++
+	if ev.Message == nil || !isUserTurnContent(ev.Message.Content) {
+		return
+	}
+	summary.MessageCount++
+	// Seeding the preview is gated on the same predicate, so it can never be
+	// taken from a tool_result carrier.
+	if summary.Preview == "" {
+		summary.Preview = truncateRunes(extractTextContent(ev.Message.Content), previewMaxRunes)
+	}
+}
+
+// addSummaryAssistantEvent records one assistant event: always an event, but a
+// message only when it contains text the user actually saw.
+func addSummaryAssistantEvent(summary *ClaudeSessionSummary, ev rawEvent) {
+	summary.EventCount++
+	if ev.Message == nil {
+		return
+	}
+	if isAssistantReply(ev.Message.Content) {
+		summary.MessageCount++
+	}
+	if summary.Model == "" && ev.Message.Model != "" {
+		summary.Model = ev.Message.Model
+	}
+	addAssistantUsage(&summary.Usage, ev.Message)
 }
 
 // GetSessionDetail reads the full session JSONL and builds the complete message list.
@@ -1171,7 +1204,12 @@ func processDetailUserEvent(detail *ClaudeSessionDetail, ev rawEvent, topLevel [
 	if ev.Message != nil {
 		content = extractTextContent(ev.Message.Content)
 	}
-	detail.MessageCount++
+	// Every event stays in the rendered list; only the counters distinguish
+	// genuine turns from tool_result carriers — see ClaudeSessionSummary.
+	detail.EventCount++
+	if ev.Message != nil && isUserTurnContent(ev.Message.Content) {
+		detail.MessageCount++
+	}
 	return append(topLevel, ClaudeMessage{
 		UUID: ev.UUID, ParentUUID: ev.ParentUUID,
 		Type: "user", Timestamp: ev.Timestamp,
@@ -1192,7 +1230,10 @@ func processDetailAssistantEvent(detail *ClaudeSessionDetail, ev rawEvent, topLe
 		populateAssistantUsage(&msg, detail, ev.Message)
 		populateAssistantBlocks(&msg, ev.Message)
 	}
-	detail.MessageCount++
+	detail.EventCount++
+	if ev.Message != nil && isAssistantReply(ev.Message.Content) {
+		detail.MessageCount++
+	}
 	return append(topLevel, msg)
 }
 

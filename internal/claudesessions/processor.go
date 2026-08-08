@@ -187,16 +187,46 @@ func parseContentBlocks(raw json.RawMessage) []contentBlock {
 	return blocks
 }
 
+// isUserTurnContent reports whether a user message's content is genuine human
+// input rather than a carrier for tool_result blocks. The overwhelming majority
+// of user events in a transcript are the latter — they exist only to hand a
+// tool's output back to the model, and nobody typed them.
+//
+// The isSidechain check is deliberately left to the caller: the flag means
+// "delegated work, already counted elsewhere" in a parent transcript but is set
+// on every event of a sub-agent transcript, where it carries no such meaning.
+func isUserTurnContent(content json.RawMessage) bool {
+	for _, b := range parseContentBlocks(content) {
+		if b.Type == "tool_result" {
+			return false
+		}
+	}
+	return true
+}
+
+// isAssistantReply reports whether an assistant message contains something the
+// user actually saw — at least one text block. Turns that only issue tool calls
+// are round-trips, not messages.
+func isAssistantReply(content json.RawMessage) bool {
+	blocks := parseContentBlocks(content)
+	if blocks == nil {
+		// No decodable blocks: absent, null, or non-array content. Only a
+		// non-empty bare JSON string carries text the user saw.
+		return len(content) > 2 && content[0] == '"'
+	}
+	for _, b := range blocks {
+		if b.Type == "text" {
+			return true
+		}
+	}
+	return false
+}
+
 // isTurnStart returns true when ev represents genuine user input — i.e. the
 // event is a non-sidechain user message whose content is not a tool_result.
 func isTurnStart(ev ProcessableEvent) bool {
 	if ev.Type != "user" || ev.IsSidechain || ev.Message == nil {
 		return false
 	}
-	for _, b := range parseContentBlocks(ev.Message.Content) {
-		if b.Type == "tool_result" {
-			return false
-		}
-	}
-	return true
+	return isUserTurnContent(ev.Message.Content)
 }
