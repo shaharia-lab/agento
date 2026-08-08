@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -373,7 +374,9 @@ func IncrementalScanWithNotify(
 	onDisk, err := walkDiskFiles(projectsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			for _, table := range []string{"claude_session_cache", "claude_subagent_cache"} {
+			for _, table := range []string{
+				"claude_session_cache", "claude_subagent_cache", "claude_session_pr",
+			} {
 				// #nosec G202 -- table is a package-internal constant, never user input.
 				if _, execErr := db.ExecContext(context.Background(), "DELETE FROM "+table); execErr != nil {
 					logger.Warn("failed to clear session cache", "table", table, "error", execErr)
@@ -636,16 +639,34 @@ func applyChangesWithNotify(
 	}
 
 	for _, ce := range diff.toDelete {
-		table := "claude_session_cache"
-		if ce.isSubagent {
-			table = "claude_subagent_cache"
-		}
-		// #nosec G202 -- table is a package-internal constant, never user input.
-		deleteQuery := "DELETE FROM " + table + " WHERE file_path = ?"
-		if _, err := db.ExecContext(context.Background(), deleteQuery, ce.filePath); err != nil {
-			logger.Warn("claude sessions: failed to delete cache row",
+		deleteCachedFile(db, logger, ce)
+	}
+}
+
+// deleteCachedFile removes every cache row belonging to a transcript that is no
+// longer on disk.
+func deleteCachedFile(db *sql.DB, logger *slog.Logger, ce cachedEntry) {
+	table := "claude_session_cache"
+	if ce.isSubagent {
+		table = "claude_subagent_cache"
+	} else {
+		// Linked PRs hang off the session row with no foreign key, so they must
+		// be cleared here or they outlive the session forever — and attachPRs
+		// reads the whole table on every list. This runs before the session row
+		// is deleted, because it resolves the session through it.
+		if _, err := db.ExecContext(context.Background(),
+			`DELETE FROM claude_session_pr WHERE session_id IN (
+				SELECT session_id FROM claude_session_cache WHERE file_path = ?)`,
+			ce.filePath); err != nil {
+			logger.Warn("claude sessions: failed to delete linked PRs",
 				"file", ce.filePath, "error", err)
 		}
+	}
+	// #nosec G202 -- table is a package-internal constant, never user input.
+	deleteQuery := "DELETE FROM " + table + " WHERE file_path = ?"
+	if _, err := db.ExecContext(context.Background(), deleteQuery, ce.filePath); err != nil {
+		logger.Warn("claude sessions: failed to delete cache row",
+			"file", ce.filePath, "error", err)
 	}
 }
 
@@ -696,9 +717,41 @@ func applyUpsert(db *sql.DB, logger *slog.Logger, df diskFile) bool {
 	return true
 }
 
-func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
+// upsertCacheRow writes one session's cache row and its linked pull requests.
+//
+// Both happen in a single transaction: the row carries the file's mtime, so a
+// PR write failing after the row committed would leave the file looking
+// unchanged to diffDiskAndCache, and the PR rows would never be rebuilt — not
+// until an unrelated scanner-version bump or a touch of the file.
+func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) (err error) {
 	ctx := context.Background()
-	_, err := db.ExecContext(ctx, `
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+				err = errors.Join(err, rbErr)
+			}
+		}
+	}()
+
+	if err = insertCacheRow(ctx, tx, df, s); err != nil {
+		return err
+	}
+	if err = replacePRRows(ctx, tx, s.SessionID, s.PRs); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// insertCacheRow writes the session's own row. custom_title and is_favorite are
+// intentionally absent from both the INSERT and the UPDATE SET so user-defined
+// values survive a rescan; everything else is derived from the transcript and
+// must refresh.
+func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessionSummary) error {
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO claude_session_cache (
 			session_id, project_path, file_path, file_mtime,
 			preview, start_time, last_activity, message_count, event_count,
@@ -758,60 +811,30 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 		s.WorktreeName, s.WorktreeBranch, s.OriginalBranch,
 		s.CompactionCount, s.DroppedTokens,
 	)
-	if err != nil {
-		return err
-	}
-	return replacePRRows(ctx, db, s.SessionID, s.PRs)
+	return err
 }
 
 // replacePRRows rewrites a session's linked pull requests. The transcript is
 // the source of truth and a rescan re-reads it whole, so the rows are replaced
 // rather than merged — that way a PR link removed upstream disappears here too.
-func replacePRRows(ctx context.Context, db *sql.DB, sessionID string, prs []ClaudeSessionPR) error {
-	if _, err := db.ExecContext(ctx,
+//
+// The DELETE clears every row for this session first, and summary.PRs is
+// already deduplicated by URL, so the insert cannot conflict.
+func replacePRRows(ctx context.Context, tx *sql.Tx, sessionID string, prs []ClaudeSessionPR) error {
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM claude_session_pr WHERE session_id = ?`, sessionID); err != nil {
 		return err
 	}
 	for _, pr := range prs {
-		if _, err := db.ExecContext(ctx, `
+		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO claude_session_pr (session_id, pr_url, pr_number, pr_repository, first_seen_at)
-			VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT(session_id, pr_url) DO UPDATE SET
-				pr_number = excluded.pr_number,
-				pr_repository = excluded.pr_repository,
-				first_seen_at = excluded.first_seen_at`,
+			VALUES (?, ?, ?, ?, ?)`,
 			sessionID, pr.PRURL, pr.PRNumber, pr.PRRepository, pr.FirstSeenAt,
 		); err != nil {
 			return err
 		}
 	}
 	return nil
-}
-
-// ListPRs returns the pull requests linked to one session, oldest first.
-func ListPRs(db *sql.DB, logger *slog.Logger, sessionID string) ([]ClaudeSessionPR, error) {
-	rows, err := db.QueryContext(context.Background(), `
-		SELECT pr_number, pr_url, pr_repository, first_seen_at
-		FROM claude_session_pr WHERE session_id = ?
-		ORDER BY first_seen_at, pr_url`, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if cerr := rows.Close(); cerr != nil {
-			logger.Warn("failed to close rows", "error", cerr)
-		}
-	}()
-
-	prs := []ClaudeSessionPR{}
-	for rows.Next() {
-		var pr ClaudeSessionPR
-		if err := rows.Scan(&pr.PRNumber, &pr.PRURL, &pr.PRRepository, &pr.FirstSeenAt); err != nil {
-			return nil, err
-		}
-		prs = append(prs, pr)
-	}
-	return prs, rows.Err()
 }
 
 // subagentMeta is the agent-<id>.meta.json sidecar written next to each
@@ -1295,8 +1318,18 @@ func addSummaryCompaction(summary *ClaudeSessionSummary, ev rawEvent) {
 		return
 	}
 	summary.CompactionCount++
-	if d := ev.CompactMetadata.CumulativeDroppedTokens; d > summary.DroppedTokens {
-		summary.DroppedTokens = d
+	if d := ev.CompactMetadata.CumulativeDroppedTokens; d > 0 {
+		if d > summary.DroppedTokens {
+			summary.DroppedTokens = d
+		}
+		return
+	}
+	// Older Claude Code releases omit cumulativeDroppedTokens while still
+	// reporting preTokens/postTokens. Reporting zero there would be a visibly
+	// wrong headline number — one real transcript compacts 1,000,563 tokens
+	// down to 26,087 — so this boundary's own drop is accumulated instead.
+	if dropped := ev.CompactMetadata.PreTokens - ev.CompactMetadata.PostTokens; dropped > 0 {
+		summary.DroppedTokens += dropped
 	}
 }
 
@@ -1424,6 +1457,16 @@ func processDetailEvent(
 		return processDetailAssistantEvent(detail, ev, topLevel)
 	case "progress":
 		processDetailProgressEvent(ev, progressMap)
+	// The detail reader walks the same file as the summary reader, so it
+	// collects the session's own metadata directly rather than reading it back
+	// from the cache. That keeps the two views in agreement by construction, and
+	// makes the detail correct even for a session the scanner has not reached.
+	case "pr-link":
+		addSummaryPRLink(&detail.ClaudeSessionSummary, ev)
+	case "system":
+		addSummaryCompaction(&detail.ClaudeSessionSummary, ev)
+	default:
+		applySessionMetadata(&detail.ClaudeSessionSummary, ev)
 	}
 	return topLevel
 }

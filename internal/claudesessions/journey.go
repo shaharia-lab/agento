@@ -102,7 +102,9 @@ type SkillData struct {
 
 // CompactionData is the data for a compaction step: the point where the
 // conversation was summarized to fit the context window. Trigger is "auto" or
-// "manual"; DroppedTokens is a running total across the session, not a delta.
+// "manual". DroppedTokens is what THIS compaction dropped, derived from
+// pre/post — unlike ClaudeSessionSummary.DroppedTokens, which is the session's
+// running total.
 type CompactionData struct {
 	Trigger       string `json:"trigger,omitempty"`
 	PreTokens     int    `json:"pre_tokens,omitempty"`
@@ -532,10 +534,12 @@ func (b *journeyBuilder) addCompactionStep(ev rawJourneyEvent) {
 	b.ensureTurn(ev.Timestamp)
 
 	data := CompactionData{
-		Trigger:       ev.CompactMetadata.Trigger,
-		PreTokens:     ev.CompactMetadata.PreTokens,
-		PostTokens:    ev.CompactMetadata.PostTokens,
-		DroppedTokens: ev.CompactMetadata.CumulativeDroppedTokens,
+		Trigger:    ev.CompactMetadata.Trigger,
+		PreTokens:  ev.CompactMetadata.PreTokens,
+		PostTokens: ev.CompactMetadata.PostTokens,
+	}
+	if dropped := ev.CompactMetadata.PreTokens - ev.CompactMetadata.PostTokens; dropped > 0 {
+		data.DroppedTokens = dropped
 	}
 	raw, _ := json.Marshal(data) //nolint:errcheck
 	b.addStep(JourneyStep{

@@ -130,13 +130,18 @@ func TestScan_PRLinksDeduplicated(t *testing.T) {
 		t.Errorf("pr_repository = %q, want shaharia-lab/agento", first.PRRepository)
 	}
 
-	// And through the cache API the detail handler uses.
-	prs, err := ListPRs(db, testLogger, eventsSessionID)
+	// Assert the in-memory dedupe too: the unique index on claude_session_pr
+	// would collapse duplicates on its own, so reading only through the DB
+	// would not prove addSummaryPRLink does its job.
+	raw, err := readSessionSummary(
+		eventsSessionID, projectDir,
+		filepath.Join(projectDir, eventsSessionID+".jsonl"), testLogger,
+	)
 	if err != nil {
-		t.Fatalf("list prs: %v", err)
+		t.Fatalf("read summary: %v", err)
 	}
-	if len(prs) != 2 {
-		t.Errorf("ListPRs returned %d rows, want 2", len(prs))
+	if len(raw.PRs) != 2 {
+		t.Errorf("scanner produced %d PRs before persistence, want 2 — dedupe is not happening in Go", len(raw.PRs))
 	}
 }
 
@@ -322,5 +327,106 @@ func TestScan_RescanPreservesUserFieldsAndRefreshesEvents(t *testing.T) {
 	}
 	if len(s.PRs) != 2 {
 		t.Errorf("linked PRs = %d, want 2 after the rescan", len(s.PRs))
+	}
+}
+
+// TestDetail_CollectsSessionMetadata is the regression guard for the detail
+// view: it builds a message tree rather than a summary, so it has to collect
+// these fields itself. Without this the detail page's worktree, permission-mode
+// and compaction badges render for no session at all.
+func TestDetail_CollectsSessionMetadata(t *testing.T) {
+	db := setupTestDB(t)
+	projectDir := titleProjectDir(t)
+
+	eventsFixture(t, projectDir, time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC))
+
+	sessions, err := IncrementalScan(db, testLogger)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	summary := findSession(t, sessions, eventsSessionID)
+
+	detail, err := readSessionDetail(
+		eventsSessionID, projectDir,
+		filepath.Join(projectDir, eventsSessionID+".jsonl"), testLogger,
+	)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+
+	for _, tc := range []struct{ field, got, want string }{
+		{"agent_name", detail.AgentName, summary.AgentName},
+		{"permission_mode", detail.PermissionMode, summary.PermissionMode},
+		{"mode", detail.Mode, summary.Mode},
+		{"relocated_cwd", detail.RelocatedCWD, summary.RelocatedCWD},
+		{"worktree_name", detail.WorktreeName, summary.WorktreeName},
+		{"worktree_branch", detail.WorktreeBranch, summary.WorktreeBranch},
+		{"original_branch", detail.OriginalBranch, summary.OriginalBranch},
+	} {
+		if tc.got != tc.want {
+			t.Errorf("detail %s = %q, summary = %q — the two paths disagree", tc.field, tc.got, tc.want)
+		}
+		if tc.got == "" {
+			t.Errorf("detail %s is empty — the detail reader is not collecting it", tc.field)
+		}
+	}
+
+	if detail.CompactionCount != summary.CompactionCount {
+		t.Errorf("detail compaction_count = %d, summary = %d", detail.CompactionCount, summary.CompactionCount)
+	}
+	if detail.DroppedTokens != summary.DroppedTokens {
+		t.Errorf("detail dropped_tokens = %d, summary = %d", detail.DroppedTokens, summary.DroppedTokens)
+	}
+	if len(detail.PRs) != len(summary.PRs) {
+		t.Errorf("detail has %d PRs, summary has %d", len(detail.PRs), len(summary.PRs))
+	}
+}
+
+// TestScan_CompactionWithoutCumulativeTotal covers the older Claude Code
+// releases that report preTokens/postTokens but no cumulativeDroppedTokens.
+// Reporting zero there would state a plainly wrong number in the UI.
+func TestScan_CompactionWithoutCumulativeTotal(t *testing.T) {
+	db := setupTestDB(t)
+	projectDir := titleProjectDir(t)
+
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	if err := os.MkdirAll(projectDir, 0750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	var data []byte
+	appendEvent := func(ev rawEvent) {
+		b, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		data = append(data, b...)
+		data = append(data, '\n')
+	}
+	appendEvent(rawEvent{
+		Type: "user", SessionID: "session-nocum", Timestamp: ts, CWD: "/tmp",
+		Message: &rawMessage{Role: "user", Content: json.RawMessage(`"go"`)},
+	})
+	appendEvent(rawEvent{
+		Type: "system", SessionID: "session-nocum", Subtype: "compact_boundary",
+		Timestamp: ts.Add(time.Minute),
+		// No CumulativeDroppedTokens, exactly as Claude Code 2.1.186 writes it.
+		CompactMetadata: &rawCompactMetadata{Trigger: "auto", PreTokens: 1000563, PostTokens: 26087},
+	})
+	if err := os.WriteFile(filepath.Join(projectDir, "session-nocum.jsonl"), data, 0600); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+
+	sessions, err := IncrementalScan(db, testLogger)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	s := findSession(t, sessions, "session-nocum")
+
+	if s.CompactionCount != 1 {
+		t.Errorf("compaction_count = %d, want 1", s.CompactionCount)
+	}
+	if want := 1000563 - 26087; s.DroppedTokens != want {
+		t.Errorf("dropped_tokens = %d, want %d derived from pre/post", s.DroppedTokens, want)
 	}
 }
