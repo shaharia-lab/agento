@@ -461,11 +461,23 @@ func applyChangesWithNotify(
 			"unchanged", len(onDisk)-total)
 	}
 
+	// Insights are computed per session over the parent transcript plus all of
+	// its sub-agent transcripts, so a session is worth notifying about at most
+	// once per scan however many of its files changed. Collect first, emit after:
+	// a session with N changed sub-agents would otherwise enqueue N+1 items that
+	// each re-read all N+1 files, and on a first scan the resulting fan-out
+	// overflows the worker queue.
+	pending := make(map[string]pendingNotify)
 	for _, fp := range diff.toInsert {
-		applyOne(db, logger, onDisk[fp], true, notify)
+		applyOne(db, logger, onDisk[fp], true, pending)
 	}
 	for _, fp := range diff.toUpdate {
-		applyOne(db, logger, onDisk[fp], false, notify)
+		applyOne(db, logger, onDisk[fp], false, pending)
+	}
+	if notify != nil {
+		for sessionID, p := range pending {
+			notify(sessionID, p.filePath, p.isNew)
+		}
 	}
 
 	for _, ce := range diff.toDelete {
@@ -482,31 +494,36 @@ func applyChangesWithNotify(
 	}
 }
 
+// pendingNotify is one session's queued insight notification for this scan.
+type pendingNotify struct {
+	filePath string
+	isNew    bool
+}
+
 // applyOne upserts a single changed file into the appropriate cache table and
-// notifies the insight pipeline.
+// records the session's insight notification in pending.
 //
-// A sub-agent file always notifies against its PARENT session id and file path:
-// insights are computed per session from the parent transcript plus all of its
-// sub-agent transcripts, so a changed fragment must re-run the whole session.
-// It is likewise never reported as "new" — the session already existed.
+// A sub-agent file is recorded against its PARENT session id and file path,
+// because a changed fragment must re-run the whole session. It never marks the
+// session as new — the session already existed — and never overwrites an entry
+// the parent file recorded, so a genuinely new session still reports as new
+// regardless of the order the two are applied in.
 func applyOne(
-	db *sql.DB, logger *slog.Logger, df diskFile, isNew bool,
-	notify func(sessionID, filePath string, isNew bool),
+	db *sql.DB, logger *slog.Logger, df diskFile, isNew bool, pending map[string]pendingNotify,
 ) {
-	var ok bool
 	if df.isSubagent {
-		ok, isNew = applySubagentUpsert(db, logger, df), false
-	} else {
-		ok = applyUpsert(db, logger, df)
-	}
-	if !ok || notify == nil {
+		if !applySubagentUpsert(db, logger, df) {
+			return
+		}
+		if _, exists := pending[df.sessionID]; !exists {
+			pending[df.sessionID] = pendingNotify{filePath: df.parentFilePath, isNew: false}
+		}
 		return
 	}
-	if df.isSubagent {
-		notify(df.sessionID, df.parentFilePath, false)
+	if !applyUpsert(db, logger, df) {
 		return
 	}
-	notify(df.sessionID, df.filePath, isNew)
+	pending[df.sessionID] = pendingNotify{filePath: df.filePath, isNew: isNew}
 }
 
 // applyUpsert reads the session summary and writes it to the cache.

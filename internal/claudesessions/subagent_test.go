@@ -272,6 +272,20 @@ func TestIncrementalScan_SubagentIncremental(t *testing.T) {
 		}
 	}
 
+	// Stored mtimes alone only show the rows are stable; assert directly that
+	// the scan selected exactly one file to re-read.
+	onDisk, err := walkDiskFiles(filepath.Dir(projectDir))
+	if err != nil {
+		t.Fatalf("walkDiskFiles: %v", err)
+	}
+	d := diffDiskAndCache(onDisk, before)
+	if len(d.toInsert) != 0 {
+		t.Errorf("expected no inserts on rescan, got %v", d.toInsert)
+	}
+	if len(d.toUpdate) != 1 || d.toUpdate[0] != touched {
+		t.Errorf("expected exactly the touched file to be re-read, got %v", d.toUpdate)
+	}
+
 	// And the re-read actually picked up the new numbers.
 	sessions, err := loadAllSessions(db, logger)
 	if err != nil {
@@ -280,6 +294,50 @@ func TestIncrementalScan_SubagentIncremental(t *testing.T) {
 	s := findSession(t, sessions, "session-inc")
 	if s.SubagentUsage.InputTokens != 119 {
 		t.Errorf("expected subagent input 99+20=119, got %d", s.SubagentUsage.InputTokens)
+	}
+}
+
+// TestIncrementalScan_NotifiesSessionOnce guards against notification fan-out:
+// however many of a session's files changed, the insight pipeline is told about
+// the session once, against the PARENT transcript — insights are computed over
+// parent + all sub-agents, so N+1 notifications would each redo the same work.
+func TestIncrementalScan_NotifiesSessionOnce(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger
+
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	projectDir := setupSubagentProject(t, "session-notify", ts)
+	writeSubagentJSONL(t, projectDir, "session-notify", "agent-1", ts, 1, 1)
+	writeSubagentJSONL(t, projectDir, "session-notify", "agent-2", ts, 1, 1)
+	writeSubagentJSONL(t, projectDir, "session-notify", "agent-3", ts, 1, 1)
+
+	type call struct {
+		sessionID string
+		filePath  string
+		isNew     bool
+	}
+	var calls []call
+	if _, err := IncrementalScanWithNotify(db, logger,
+		func(sessionID, filePath string, isNew bool) {
+			calls = append(calls, call{sessionID, filePath, isNew})
+		}); err != nil {
+		t.Fatalf("IncrementalScanWithNotify: %v", err)
+	}
+
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 notification for 4 changed files, got %d: %+v", len(calls), calls)
+	}
+	if calls[0].sessionID != "session-notify" {
+		t.Errorf("expected parent session id, got %q", calls[0].sessionID)
+	}
+	// A brand-new session must still report as new even though sub-agent files
+	// were applied in the same scan (and possibly before the parent).
+	if !calls[0].isNew {
+		t.Error("expected a new session to be notified as new")
+	}
+	wantPath := filepath.Join(projectDir, "session-notify.jsonl")
+	if calls[0].filePath != wantPath {
+		t.Errorf("expected notification against the parent transcript %q, got %q", wantPath, calls[0].filePath)
 	}
 }
 
