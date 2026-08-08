@@ -376,10 +376,13 @@ func TestBuildJourney_CompactBoundaryStep(t *testing.T) {
 			"timestamp": ts(t1),
 			"content":   "Conversation compacted",
 			"compactMetadata": map[string]any{
-				"trigger":                 "auto",
-				"preTokens":               166513,
-				"postTokens":              29504,
-				"cumulativeDroppedTokens": 137009,
+				"trigger":    "auto",
+				"preTokens":  166513,
+				"postTokens": 29504,
+				// Deliberately NOT equal to preTokens-postTokens, so the test
+				// distinguishes this step's own drop from the session's
+				// running total.
+				"cumulativeDroppedTokens": 900000,
 				"durationMs":              145993,
 			},
 		}),
@@ -414,8 +417,11 @@ func TestBuildJourney_CompactBoundaryStep(t *testing.T) {
 	if data.Trigger != "auto" || data.PreTokens != 166513 || data.PostTokens != 29504 {
 		t.Errorf("compaction data = %+v", data)
 	}
-	if data.DroppedTokens != 137009 {
-		t.Errorf("dropped_tokens = %d, want 137009", data.DroppedTokens)
+	// A journey step describes itself, so dropped_tokens is this compaction's
+	// own drop — not the session-wide cumulative figure.
+	if want := 166513 - 29504; data.DroppedTokens != want {
+		t.Errorf("dropped_tokens = %d, want %d (this step's own drop, not the cumulative total)",
+			data.DroppedTokens, want)
 	}
 }
 

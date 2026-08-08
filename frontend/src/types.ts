@@ -566,7 +566,7 @@ export interface ClaudeSessionSummary {
   original_branch?: string
   /** How many times the conversation was compacted. */
   compaction_count: number
-  /** Highest cumulative dropped-token total reported by those compactions. */
+  /** Tokens discarded by compaction across the session. */
   dropped_tokens: number
   /** Pull requests this session was linked to, deduplicated by URL. */
   prs?: ClaudeSessionPR[]

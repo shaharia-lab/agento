@@ -77,13 +77,15 @@ func (s *Server) handleGetClaudeSession(w http.ResponseWriter, r *http.Request) 
 	// Attach user-defined fields from the SQLite cache (not present in JSONL).
 	detail.CustomTitle = s.claudeSessionCache.GetCustomTitle(id)
 	detail.IsFavorite = s.claudeSessionCache.GetFavorite(id)
-	// Claude Code's own titles come from the cache too: the detail reader builds
-	// the message tree rather than the summary, so it does not collect them.
-	detail.NativeTitle, detail.AITitle = s.claudeSessionCache.GetTitles(id)
+	// Claude Code's own titles, the linked PRs, the compaction counters and the
+	// session metadata events all come from the transcript GetSessionDetail just
+	// read. The cache is consulted for the titles only as a fallback, and only
+	// when the transcript carried none — reading it unconditionally would blank
+	// them for a session the scanner has not reached yet.
+	if detail.NativeTitle == "" && detail.AITitle == "" {
+		detail.NativeTitle, detail.AITitle = s.claudeSessionCache.GetTitles(id)
+	}
 	detail.DisplayTitle = detail.ResolveDisplayTitle()
-	// Linked PRs, compaction counters and the session metadata events are read
-	// straight from the transcript by GetSessionDetail — no cache attach needed.
-	//
 	// Sub-agent transcripts live in sibling files, so they come from the cache
 	// too rather than from the session JSONL this detail was read from.
 	detail.Subagents = s.claudeSessionCache.ListSubagents(id)

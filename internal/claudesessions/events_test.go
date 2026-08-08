@@ -430,3 +430,41 @@ func TestScan_CompactionWithoutCumulativeTotal(t *testing.T) {
 		t.Errorf("dropped_tokens = %d, want %d derived from pre/post", s.DroppedTokens, want)
 	}
 }
+
+// TestScan_DeletedSessionRemovesPRRows guards the cleanup path: claude_session_pr
+// has no foreign key onto the session, and attachPRs reads the whole table on
+// every list, so orphans would accumulate forever and follow a recycled ID.
+func TestScan_DeletedSessionRemovesPRRows(t *testing.T) {
+	db := setupTestDB(t)
+	projectDir := titleProjectDir(t)
+
+	eventsFixture(t, projectDir, time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC))
+	if _, err := IncrementalScan(db, testLogger); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+
+	countPRs := func() int {
+		t.Helper()
+		var n int
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM claude_session_pr`).Scan(&n); err != nil {
+			t.Fatalf("count prs: %v", err)
+		}
+		return n
+	}
+	if got := countPRs(); got != 2 {
+		t.Fatalf("expected 2 PR rows after the first scan, got %d", got)
+	}
+
+	// The transcript disappears — the session and everything hanging off it go.
+	if err := os.Remove(filepath.Join(projectDir, eventsSessionID+".jsonl")); err != nil {
+		t.Fatalf("remove transcript: %v", err)
+	}
+	if _, err := IncrementalScan(db, testLogger); err != nil {
+		t.Fatalf("rescan: %v", err)
+	}
+
+	if got := countPRs(); got != 0 {
+		t.Errorf("%d PR rows survived the session's deletion, want 0", got)
+	}
+}

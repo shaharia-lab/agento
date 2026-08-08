@@ -79,9 +79,11 @@ type ClaudeSessionSummary struct {
 	// CompactionCount is how many times the conversation was compacted, from
 	// `system` events with subtype compact_boundary.
 	CompactionCount int `json:"compaction_count"`
-	// DroppedTokens is the highest cumulativeDroppedTokens reported by those
-	// events — a running total, so the maximum is the session's figure rather
-	// than the sum.
+	// DroppedTokens is how many tokens compaction discarded. Claude Code
+	// normally reports cumulativeDroppedTokens, a running total, so the maximum
+	// seen is the session's figure rather than the sum. Older releases omit it
+	// and only report preTokens/postTokens; those boundaries contribute their
+	// own difference instead, accumulated on top.
 	DroppedTokens int `json:"dropped_tokens"`
 
 	// PRs are the pull requests this session was linked to, deduplicated by URL.
