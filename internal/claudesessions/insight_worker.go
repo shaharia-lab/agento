@@ -137,8 +137,11 @@ func (w *InsightWorker) tryProcess(ctx context.Context, sessionID, filePath stri
 }
 
 // processOne runs the processor pipeline for a single session and upserts the result.
+// The session's sub-agent transcripts are fed through the same run, so insights
+// account for delegated work rather than only the main thread.
 func (w *InsightWorker) processOne(ctx context.Context, sessionID, filePath string) {
-	insight, err := w.registry.RunSession(sessionID, filePath)
+	files := append([]string{filePath}, SubagentFiles(sessionID, filePath)...)
+	insight, err := w.registry.RunSessionFiles(sessionID, files...)
 	if err != nil {
 		w.logger.Warn("insight_worker: failed to process session",
 			"session_id", sessionID, "error", err)

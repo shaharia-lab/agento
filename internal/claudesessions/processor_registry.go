@@ -55,9 +55,31 @@ func DefaultProcessorRegistry(logger *slog.Logger) *ProcessorRegistry {
 // It is safe to call from multiple goroutines concurrently; each call creates
 // independent processor instances so no locking is required.
 func (r *ProcessorRegistry) RunSession(sessionID, filePath string) (*SessionInsight, error) {
+	return r.RunSessionFiles(sessionID, filePath)
+}
+
+// RunSessionFiles is RunSession over several transcripts that belong to one
+// session: the parent JSONL followed by each of its sub-agent transcripts.
+// All files feed a single set of processors, so the resulting insight covers
+// delegated work additively — tool calls, cost and error counts include what
+// sub-agents did. The parent must come first: turn-scoped processors derive
+// their structure from it, and every sub-agent event is flagged isSidechain,
+// which those processors deliberately do not treat as a new turn.
+//
+// A file that cannot be read is logged and skipped rather than failing the
+// whole session; only a failure on the first (parent) file is fatal.
+func (r *ProcessorRegistry) RunSessionFiles(sessionID string, filePaths ...string) (*SessionInsight, error) {
+	if len(filePaths) == 0 {
+		return nil, fmt.Errorf("no session files given for %q", sessionID)
+	}
 	processors := r.newProcessors()
-	if err := r.feedProcessors(filePath, processors); err != nil {
+	if err := r.feedProcessors(filePaths[0], processors); err != nil {
 		return nil, err
+	}
+	for _, fp := range filePaths[1:] {
+		if err := r.feedProcessors(fp, processors); err != nil && r.logger != nil {
+			r.logger.Warn("skipping unreadable sub-agent transcript", "file", fp, "error", err)
+		}
 	}
 	insight := &SessionInsight{
 		SessionID:        sessionID,

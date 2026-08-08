@@ -77,6 +77,17 @@ func (s *Server) handleGetClaudeSession(w http.ResponseWriter, r *http.Request) 
 	// Attach user-defined fields from the SQLite cache (not present in JSONL).
 	detail.CustomTitle = s.claudeSessionCache.GetCustomTitle(id)
 	detail.IsFavorite = s.claudeSessionCache.GetFavorite(id)
+	// Sub-agent transcripts live in sibling files, so they come from the cache
+	// too rather than from the session JSONL this detail was read from.
+	detail.Subagents = s.claudeSessionCache.ListSubagents(id)
+	detail.SubagentCount = len(detail.Subagents)
+	detail.SubagentUsage = claudesessions.TokenUsage{}
+	for _, sa := range detail.Subagents {
+		detail.SubagentUsage.InputTokens += sa.Usage.InputTokens
+		detail.SubagentUsage.OutputTokens += sa.Usage.OutputTokens
+		detail.SubagentUsage.CacheCreationTokens += sa.Usage.CacheCreationTokens
+		detail.SubagentUsage.CacheReadTokens += sa.Usage.CacheReadTokens
+	}
 	s.writeJSON(w, http.StatusOK, detail)
 }
 

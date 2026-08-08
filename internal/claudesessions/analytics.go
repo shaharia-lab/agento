@@ -230,10 +230,11 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 	var cost CostSummary
 
 	for _, s := range sessions {
-		totalInput += s.Usage.InputTokens
-		totalOutput += s.Usage.OutputTokens
-		totalCacheRead += s.Usage.CacheReadTokens
-		totalCacheWrite += s.Usage.CacheCreationTokens
+		u := s.TotalUsage()
+		totalInput += u.InputTokens
+		totalOutput += u.OutputTokens
+		totalCacheRead += u.CacheReadTokens
+		totalCacheWrite += u.CacheCreationTokens
 
 		m := s.Model
 		if m == "" {
@@ -242,10 +243,10 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 		modelCount[m]++
 
 		p := pricingForModel(s.Model)
-		cost.InputCostUSD += float64(s.Usage.InputTokens) / 1_000_000 * p.InputPerMTok
-		cost.OutputCostUSD += float64(s.Usage.OutputTokens) / 1_000_000 * p.OutputPerMTok
-		cost.CacheReadCostUSD += float64(s.Usage.CacheReadTokens) / 1_000_000 * p.CacheReadPerMTok
-		cost.CacheWriteCostUSD += float64(s.Usage.CacheCreationTokens) / 1_000_000 * p.CacheWritePerMTok
+		cost.InputCostUSD += float64(u.InputTokens) / 1_000_000 * p.InputPerMTok
+		cost.OutputCostUSD += float64(u.OutputTokens) / 1_000_000 * p.OutputPerMTok
+		cost.CacheReadCostUSD += float64(u.CacheReadTokens) / 1_000_000 * p.CacheReadPerMTok
+		cost.CacheWriteCostUSD += float64(u.CacheCreationTokens) / 1_000_000 * p.CacheWritePerMTok
 	}
 	cost.TotalCostUSD = cost.InputCostUSD + cost.OutputCostUSD + cost.CacheReadCostUSD + cost.CacheWriteCostUSD
 
@@ -286,11 +287,12 @@ func buildTimeSeries(sessions []ClaudeSessionSummary, from, to time.Time, granul
 			buckets[key] = &TimeSeriesPoint{Date: bucketLabel(s.LastActivity, granularity)}
 		}
 		b := buckets[key]
-		b.InputTokens += s.Usage.InputTokens
-		b.OutputTokens += s.Usage.OutputTokens
-		b.CacheReadTokens += s.Usage.CacheReadTokens
-		b.CacheWriteTokens += s.Usage.CacheCreationTokens
-		b.TotalTokens += s.Usage.InputTokens + s.Usage.OutputTokens
+		u := s.TotalUsage()
+		b.InputTokens += u.InputTokens
+		b.OutputTokens += u.OutputTokens
+		b.CacheReadTokens += u.CacheReadTokens
+		b.CacheWriteTokens += u.CacheCreationTokens
+		b.TotalTokens += u.InputTokens + u.OutputTokens
 		b.Sessions++
 	}
 
@@ -323,7 +325,8 @@ func buildModelBreakdown(sessions []ClaudeSessionSummary) []ModelStat {
 		if m == "" {
 			m = "unknown"
 		}
-		t := s.Usage.InputTokens + s.Usage.OutputTokens
+		u := s.TotalUsage()
+		t := u.InputTokens + u.OutputTokens
 		tokensByModel[m] += t
 		total += t
 	}
@@ -363,8 +366,9 @@ func buildMostActiveDays(sessions []ClaudeSessionSummary) []DayActivity {
 		if byDay[key] == nil {
 			byDay[key] = &DayActivity{Date: key}
 		}
+		u := s.TotalUsage()
 		byDay[key].Sessions++
-		byDay[key].Tokens += s.Usage.InputTokens + s.Usage.OutputTokens
+		byDay[key].Tokens += u.InputTokens + u.OutputTokens
 	}
 	out := make([]DayActivity, 0, len(byDay))
 	for _, d := range byDay {
@@ -385,8 +389,9 @@ func buildHeatmap(sessions []ClaudeSessionSummary) []HeatmapCell {
 		if cells[k] == nil {
 			cells[k] = &HeatmapCell{DayOfWeek: k.dow, Hour: k.hour}
 		}
+		u := s.TotalUsage()
 		cells[k].Sessions++
-		cells[k].Tokens += s.Usage.InputTokens + s.Usage.OutputTokens
+		cells[k].Tokens += u.InputTokens + u.OutputTokens
 	}
 	out := make([]HeatmapCell, 0, len(cells))
 	for _, c := range cells {
@@ -408,8 +413,9 @@ func buildHourlyActivity(sessions []ClaudeSessionSummary) []HourlyActivity {
 	}
 	for _, s := range sessions {
 		h := s.LastActivity.Hour()
+		u := s.TotalUsage()
 		hours[h].Sessions++
-		hours[h].Tokens += s.Usage.InputTokens + s.Usage.OutputTokens
+		hours[h].Tokens += u.InputTokens + u.OutputTokens
 	}
 	out := make([]HourlyActivity, 24)
 	copy(out, hours[:])
@@ -424,11 +430,12 @@ func buildCostOverTime(sessions []ClaudeSessionSummary, from, to time.Time, gran
 			buckets[key] = &CostPoint{Date: bucketLabel(s.LastActivity, granularity)}
 		}
 		p := pricingForModel(s.Model)
+		u := s.TotalUsage()
 		buckets[key].EstimatedCostUSD +=
-			float64(s.Usage.InputTokens)/1_000_000*p.InputPerMTok +
-				float64(s.Usage.OutputTokens)/1_000_000*p.OutputPerMTok +
-				float64(s.Usage.CacheReadTokens)/1_000_000*p.CacheReadPerMTok +
-				float64(s.Usage.CacheCreationTokens)/1_000_000*p.CacheWritePerMTok
+			float64(u.InputTokens)/1_000_000*p.InputPerMTok +
+				float64(u.OutputTokens)/1_000_000*p.OutputPerMTok +
+				float64(u.CacheReadTokens)/1_000_000*p.CacheReadPerMTok +
+				float64(u.CacheCreationTokens)/1_000_000*p.CacheWritePerMTok
 	}
 
 	step := 24 * time.Hour
