@@ -532,6 +532,12 @@ export interface ClaudeSessionSummary {
   project_path: string
   preview: string
   custom_title?: string
+  /** Claude Code's own `/rename`, refreshed on every scan. */
+  native_title?: string
+  /** Claude Code's auto-generated title, refreshed on every scan. */
+  ai_title?: string
+  /** Resolved label: custom_title || native_title || ai_title || preview. */
+  display_title?: string
   is_favorite?: boolean
   start_time: string
   last_activity: string

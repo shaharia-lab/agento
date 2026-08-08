@@ -26,7 +26,9 @@ const (
 	//
 	// v1: cache-creation tokens are split by cache TTL (5m vs 1h), which bill at
 	// different rates — rows written before the split have both columns at zero.
-	CurrentScannerVersion = 1
+	// v2: Claude Code's own `custom-title` / `ai-title` events are read into
+	// native_title / ai_title — blank on every row written before v2.
+	CurrentScannerVersion = 2
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -41,6 +43,10 @@ type rawEvent struct {
 	GitBranch   string      `json:"gitBranch"`
 	IsSidechain bool        `json:"isSidechain"`
 	Message     *rawMessage `json:"message,omitempty"`
+
+	// Title events carry no timestamp and no message — only these fields.
+	CustomTitle string `json:"customTitle,omitempty"` // native /rename
+	AITitle     string `json:"aiTitle,omitempty"`     // Claude Code's auto-title
 }
 
 type rawMessage struct {
@@ -652,8 +658,8 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 			preview, start_time, last_activity, message_count,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			cache_creation_5m_tokens, cache_creation_1h_tokens,
-			git_branch, model, cwd
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			git_branch, model, cwd, native_title, ai_title
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, project_path) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -669,15 +675,23 @@ func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) error {
 			cache_creation_1h_tokens = excluded.cache_creation_1h_tokens,
 			git_branch = excluded.git_branch,
 			model = excluded.model,
-			cwd = excluded.cwd`,
+			cwd = excluded.cwd,
+			native_title = excluded.native_title,
+			ai_title = excluded.ai_title`,
 		// custom_title and is_favorite are intentionally omitted from both INSERT and UPDATE SET
 		// so any user-defined values are preserved across rescans.
+		//
+		// native_title and ai_title are deliberately NOT excluded: they mirror
+		// Claude Code's own title events and must track them, including when a
+		// native rename changes or clears one. They cannot clobber a user's
+		// Agento rename because that lives in the separate custom_title column
+		// and wins the precedence in ResolveDisplayTitle.
 		s.SessionID, s.ProjectPath, df.filePath, df.mtime,
 		s.Preview, s.StartTime, s.LastActivity, s.MessageCount,
 		s.Usage.InputTokens, s.Usage.OutputTokens,
 		s.Usage.CacheCreationTokens, s.Usage.CacheReadTokens,
 		s.Usage.CacheCreation5mTokens, s.Usage.CacheCreation1hTokens,
-		s.GitBranch, s.Model, s.CWD,
+		s.GitBranch, s.Model, s.CWD, s.NativeTitle, s.AITitle,
 	)
 	return err
 }
@@ -845,7 +859,7 @@ const sessionSummarySelect = `
 	       c.start_time, c.last_activity, c.message_count,
 	       c.input_tokens, c.output_tokens, c.cache_creation_tokens, c.cache_read_tokens,
 	       c.cache_creation_5m_tokens, c.cache_creation_1h_tokens,
-	       c.git_branch, c.model, c.cwd,
+	       c.git_branch, c.model, c.cwd, c.native_title, c.ai_title,
 	       COALESCE(sa.n, 0), COALESCE(sa.it, 0), COALESCE(sa.ot, 0),
 	       COALESCE(sa.cct, 0), COALESCE(sa.crt, 0),
 	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0)
@@ -886,13 +900,14 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 			&s.Usage.InputTokens, &s.Usage.OutputTokens,
 			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
 			&s.Usage.CacheCreation5mTokens, &s.Usage.CacheCreation1hTokens,
-			&s.GitBranch, &s.Model, &s.CWD,
+			&s.GitBranch, &s.Model, &s.CWD, &s.NativeTitle, &s.AITitle,
 			&s.SubagentCount, &s.SubagentUsage.InputTokens, &s.SubagentUsage.OutputTokens,
 			&s.SubagentUsage.CacheCreationTokens, &s.SubagentUsage.CacheReadTokens,
 			&s.SubagentUsage.CacheCreation5mTokens, &s.SubagentUsage.CacheCreation1hTokens,
 		); err != nil {
 			return nil, err
 		}
+		s.DisplayTitle = s.ResolveDisplayTitle()
 		sessions = append(sessions, s)
 	}
 	return sessions, rows.Err()
@@ -992,7 +1007,9 @@ func readSummaryFile(
 			continue
 		}
 
-		tr.update(ev.Timestamp)
+		if boundsSessionTimeRange(ev.Type) {
+			tr.update(ev.Timestamp)
+		}
 		updateMetadataFromEvent(&summary.CWD, &summary.GitBranch, ev)
 		processSummaryEvent(summary, ev, countSidechainUsers)
 	}
@@ -1006,8 +1023,35 @@ func readSummaryFile(
 	return summary, sc.Err()
 }
 
+// boundsSessionTimeRange reports whether an event type may extend the session's
+// start/last-activity range.
+//
+// This is a denylist rather than an allowlist on purpose. Many event types
+// carry timestamps and legitimately bound the range — `pr-link`,
+// `queue-operation` and `file-history-delta` among them — so enumerating the
+// ones that count would silently shrink the range for existing sessions as
+// Claude Code adds types. Only the title events are excluded: they describe the
+// session rather than occurring within it, and although they carry no timestamp
+// today (making this a no-op that timeRange's zero check already handles), a
+// future release adding one must not drag start_time backwards.
+func boundsSessionTimeRange(eventType string) bool {
+	switch eventType {
+	case "custom-title", "ai-title":
+		return false
+	default:
+		return true
+	}
+}
+
 func processSummaryEvent(summary *ClaudeSessionSummary, ev rawEvent, countSidechainUsers bool) {
 	switch ev.Type {
+	// Both title events are re-appended on every session resume, so the last
+	// occurrence in the file wins — which a sequential read gives for free
+	// through unconditional assignment.
+	case "custom-title":
+		summary.NativeTitle = ev.CustomTitle
+	case "ai-title":
+		summary.AITitle = ev.AITitle
 	case "user":
 		if ev.IsSidechain && !countSidechainUsers {
 			return

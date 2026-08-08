@@ -378,7 +378,9 @@ export default function ClaudeSessionDetailPage() {
 
   const startEditingTitle = () => {
     if (!detail) return
-    setTitleDraft(detail.custom_title || detail.preview || '')
+    // Seed from custom_title alone: seeding from display_title would silently
+    // promote Claude Code's own title into an Agento override on first save.
+    setTitleDraft(detail.custom_title ?? '')
     setEditingTitle(true)
     setTimeout(() => titleInputRef.current?.select(), 0)
   }
@@ -390,7 +392,18 @@ export default function ClaudeSessionDetailPage() {
     if (trimmed === (detail.custom_title ?? '')) return
     try {
       await claudeSessionsApi.updateTitle(id, trimmed)
-      setDetail(prev => (prev ? { ...prev, custom_title: trimmed } : prev))
+      // The heading renders display_title, so re-resolve it here (same
+      // precedence as the backend) — otherwise it keeps the old label until
+      // the next reload, including when the override is cleared.
+      setDetail(prev =>
+        prev
+          ? {
+              ...prev,
+              custom_title: trimmed,
+              display_title: trimmed || prev.native_title || prev.ai_title || prev.preview,
+            }
+          : prev,
+      )
     } catch {
       // silently ignore — title stays as-is
     }
@@ -479,7 +492,7 @@ export default function ClaudeSessionDetailPage() {
                 className="group flex items-center gap-1.5 text-left w-full min-w-0"
               >
                 <p className="text-base font-semibold text-zinc-900 dark:text-zinc-100 truncate">
-                  {detail.custom_title || detail.preview || 'Session ' + (id ?? '').slice(0, 8)}
+                  {detail.display_title || detail.preview || 'Session ' + (id ?? '').slice(0, 8)}
                 </p>
                 <Pencil className="h-3 w-3 text-zinc-300 dark:text-zinc-600 group-hover:text-zinc-500 dark:group-hover:text-zinc-400 shrink-0 transition-colors" />
               </button>

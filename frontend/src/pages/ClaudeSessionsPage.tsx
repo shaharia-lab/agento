@@ -126,6 +126,7 @@ export default function ClaudeSessionsPage() {
       const matchesSearch =
         !q ||
         s.session_id.toLowerCase().includes(q) ||
+        (s.display_title ?? '').toLowerCase().includes(q) ||
         s.preview.toLowerCase().includes(q) ||
         s.project_path.toLowerCase().includes(q)
       const matchesFavorites = !filterFavorites || !!s.is_favorite
@@ -370,9 +371,9 @@ function SessionRow({
             <History className="h-3.5 w-3.5" />
           </div>
           <div className="flex-1 min-w-0">
-            {/* Custom title or preview / first message */}
+            {/* Resolved title: Agento rename › native rename › AI title › preview */}
             <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100 truncate leading-snug">
-              {session.custom_title || session.preview || (
+              {session.display_title || session.preview || (
                 <span className="italic text-zinc-400">No message content</span>
               )}
             </p>

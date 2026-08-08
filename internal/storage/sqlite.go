@@ -311,6 +311,16 @@ ALTER TABLE claude_subagent_cache ADD COLUMN cache_creation_1h_tokens INTEGER NO
 ALTER TABLE claude_cache_metadata ADD COLUMN scanner_version INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		version: 13,
+		sql: `
+-- Titles Claude Code records in the transcript itself. Unlike custom_title
+-- (set only through Agento's UI) these are refreshed on every rescan, so the
+-- two can never overwrite each other.
+ALTER TABLE claude_session_cache ADD COLUMN native_title TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_session_cache ADD COLUMN ai_title TEXT NOT NULL DEFAULT '';
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures
