@@ -26,6 +26,15 @@ type InsightRecord struct {
 	ToolBreakdown  map[string]int // stored as JSON in DB
 	ToolErrorRate  float64
 
+	// Attribution breakdowns, each stored as JSON. They count tool calls, so
+	// sum(SkillBreakdown) + UnattributedCalls == ToolCallsTotal.
+	SkillBreakdown     map[string]int
+	PluginBreakdown    map[string]int
+	McpServerBreakdown map[string]int
+	McpToolBreakdown   map[string]int
+	EffortBreakdown    map[string]int
+	UnattributedCalls  int
+
 	TotalDurationMs int64
 	ThinkingTimeMs  int64
 
@@ -72,9 +81,29 @@ func (s *SQLiteSessionInsightsStore) Upsert(ctx context.Context, r InsightRecord
 // insightArgs serializes an InsightRecord into the ordered SQL parameter slice
 // for insightUpsertSQL.
 func insightArgs(r InsightRecord) ([]any, error) {
-	breakdown, err := json.Marshal(r.ToolBreakdown)
+	breakdown, err := marshalCounts("tool_breakdown", r.ToolBreakdown)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling tool_breakdown: %w", err)
+		return nil, err
+	}
+	skills, err := marshalCounts("skill_breakdown", r.SkillBreakdown)
+	if err != nil {
+		return nil, err
+	}
+	plugins, err := marshalCounts("plugin_breakdown", r.PluginBreakdown)
+	if err != nil {
+		return nil, err
+	}
+	mcpServers, err := marshalCounts("mcp_server_breakdown", r.McpServerBreakdown)
+	if err != nil {
+		return nil, err
+	}
+	mcpTools, err := marshalCounts("mcp_tool_breakdown", r.McpToolBreakdown)
+	if err != nil {
+		return nil, err
+	}
+	efforts, err := marshalCounts("effort_breakdown", r.EffortBreakdown)
+	if err != nil {
+		return nil, err
 	}
 	hasErrors := 0
 	if r.HasErrors {
@@ -83,14 +112,44 @@ func insightArgs(r InsightRecord) ([]any, error) {
 	return []any{
 		r.SessionID, r.ProcessorVersion, r.ScannedAt.UTC().Format(time.RFC3339),
 		r.TurnCount, r.StepsPerTurnAvg, r.AutonomyScore,
-		r.ToolCallsTotal, string(breakdown), r.ToolErrorRate,
+		r.ToolCallsTotal, breakdown, r.ToolErrorRate,
 		r.TotalDurationMs, r.ThinkingTimeMs,
 		r.CacheHitRate, r.TokensPerTurnAvg, r.CostEstimateUSD,
 		r.ToolErrorCount, hasErrors,
 		r.MaxConsecutiveToolCalls, r.LongestAutonomousChain,
 		r.AvgUserResponseTimeMs, r.AvgClaudeResponseTimeMs,
 		r.SessionType,
+		skills, plugins, mcpServers, mcpTools, efforts, r.UnattributedCalls,
 	}, nil
+}
+
+// marshalCounts serializes a breakdown map for its TEXT column. A nil map
+// stores "{}" rather than "null", so readers never have to special-case it.
+func marshalCounts(column string, counts map[string]int) (string, error) {
+	if counts == nil {
+		return "{}", nil
+	}
+	b, err := json.Marshal(counts)
+	if err != nil {
+		return "", fmt.Errorf("marshaling %s: %w", column, err)
+	}
+	return string(b), nil
+}
+
+// unmarshalCounts is the inverse. It always returns a non-nil map, matching
+// what ToolBreakdown hands back, so the whole record uses one empty convention.
+// An empty or malformed column yields an empty map rather than an error: a
+// breakdown is a derived convenience, and losing the whole insight row over one
+// bad blob would be worse than losing the blob.
+func unmarshalCounts(raw string) map[string]int {
+	counts := make(map[string]int)
+	if raw == "" || raw == "{}" {
+		return counts
+	}
+	if err := json.Unmarshal([]byte(raw), &counts); err != nil {
+		return make(map[string]int)
+	}
+	return counts
 }
 
 const insightUpsertSQL = `
@@ -103,8 +162,10 @@ INSERT INTO session_insights (
     tool_error_count, has_errors,
     max_consecutive_tool_calls, longest_autonomous_chain,
     avg_user_response_time_ms, avg_claude_response_time_ms,
-    session_type
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    session_type,
+    skill_breakdown, plugin_breakdown, mcp_server_breakdown,
+    mcp_tool_breakdown, effort_breakdown, unattributed_calls
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(session_id) DO UPDATE SET
     processor_version           = excluded.processor_version,
     scanned_at                  = excluded.scanned_at,
@@ -125,7 +186,13 @@ ON CONFLICT(session_id) DO UPDATE SET
     longest_autonomous_chain    = excluded.longest_autonomous_chain,
     avg_user_response_time_ms   = excluded.avg_user_response_time_ms,
     avg_claude_response_time_ms = excluded.avg_claude_response_time_ms,
-    session_type                = excluded.session_type`
+    session_type                = excluded.session_type,
+    skill_breakdown             = excluded.skill_breakdown,
+    plugin_breakdown            = excluded.plugin_breakdown,
+    mcp_server_breakdown        = excluded.mcp_server_breakdown,
+    mcp_tool_breakdown          = excluded.mcp_tool_breakdown,
+    effort_breakdown            = excluded.effort_breakdown,
+    unattributed_calls          = excluded.unattributed_calls`
 
 // Get retrieves the insight for a single session. Returns nil, nil when not found.
 func (s *SQLiteSessionInsightsStore) Get(ctx context.Context, sessionID string) (*InsightRecord, error) {
@@ -193,7 +260,16 @@ type InsightAggregateSummary struct {
 	AvgCacheHitRate      float64
 	AvgTotalDurationMs   float64
 	SessionsWithErrors   int
-	ToolBreakdowns       []string // raw JSON per session for top-tool aggregation
+	// TotalToolCalls and UnattributedCalls give the breakdowns a denominator:
+	// without them a "top skills" panel silently omits every built-in call.
+	TotalToolCalls    int
+	UnattributedCalls int
+	ToolBreakdowns    []string // raw JSON per session for top-tool aggregation
+	// Raw JSON per session for the attribution breakdowns, merged by the caller
+	// exactly as ToolBreakdowns is.
+	SkillBreakdowns     []string
+	PluginBreakdowns    []string
+	McpServerBreakdowns []string
 }
 
 // GetAggregateSummary computes aggregated insight statistics using SQL aggregation
@@ -214,8 +290,23 @@ func (s *SQLiteSessionInsightsStore) GetAggregateSummary(
 		return summary, err
 	}
 
-	summary.ToolBreakdowns, err = s.queryToolBreakdowns(ctx, where, args)
-	return summary, err
+	for _, col := range []struct {
+		name string
+		into *[]string
+	}{
+		{"tool_breakdown", &summary.ToolBreakdowns},
+		{"skill_breakdown", &summary.SkillBreakdowns},
+		{"plugin_breakdown", &summary.PluginBreakdowns},
+		{"mcp_server_breakdown", &summary.McpServerBreakdowns},
+	} {
+		values, qErr := s.queryBreakdowns(ctx, col.name, where, args)
+		if qErr != nil {
+			err = qErr
+			return summary, err
+		}
+		*col.into = values
+	}
+	return summary, nil
 }
 
 // insightWhereClause builds a WHERE clause that optionally filters by session ID list
@@ -281,7 +372,9 @@ const insightAggregateSQL = `SELECT
 	COALESCE(SUM(cost_estimate_usd), 0),
 	COALESCE(AVG(cache_hit_rate), 0),
 	COALESCE(AVG(total_duration_ms), 0),
-	COALESCE(SUM(has_errors), 0)
+	COALESCE(SUM(has_errors), 0),
+	COALESCE(SUM(tool_calls_total), 0),
+	COALESCE(SUM(unattributed_calls), 0)
 FROM session_insights`
 
 func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
@@ -300,16 +393,20 @@ func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
 		&summary.AvgCacheHitRate,
 		&summary.AvgTotalDurationMs,
 		&summary.SessionsWithErrors,
+		&summary.TotalToolCalls,
+		&summary.UnattributedCalls,
 	)
 	return summary, err
 }
 
-func (s *SQLiteSessionInsightsStore) queryToolBreakdowns(
-	ctx context.Context, where string, args []any,
+// queryBreakdowns fetches one breakdown JSON column per matching session, for
+// the caller to merge. column is chosen from a fixed set by GetAggregateSummary
+// and is never user input.
+func (s *SQLiteSessionInsightsStore) queryBreakdowns(
+	ctx context.Context, column, where string, args []any,
 ) ([]string, error) {
-	// Fetch only the tool_breakdown column for top-tool aggregation.
-	//nolint:gosec // where clause uses parameterized placeholders only
-	rows, err := s.db.QueryContext(ctx, "SELECT tool_breakdown FROM session_insights"+where, args...)
+	//nolint:gosec // column comes from a fixed literal set; where uses placeholders only
+	rows, err := s.db.QueryContext(ctx, "SELECT "+column+" FROM session_insights"+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +480,9 @@ SELECT session_id, processor_version, scanned_at,
        tool_error_count, has_errors,
        max_consecutive_tool_calls, longest_autonomous_chain,
        avg_user_response_time_ms, avg_claude_response_time_ms,
-       session_type
+       session_type,
+       skill_breakdown, plugin_breakdown, mcp_server_breakdown,
+       mcp_tool_breakdown, effort_breakdown, unattributed_calls
 FROM session_insights`
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.
@@ -397,6 +496,7 @@ func scanInsightRecord(row rowScanner) (*InsightRecord, error) {
 		scannedAt     string
 		toolBreakdown string
 		hasErrors     int
+		b             attributionColumns
 	)
 
 	err := row.Scan(
@@ -421,6 +521,12 @@ func scanInsightRecord(row rowScanner) (*InsightRecord, error) {
 		&r.AvgUserResponseTimeMs,
 		&r.AvgClaudeResponseTimeMs,
 		&r.SessionType,
+		&b.skills,
+		&b.plugins,
+		&b.mcpServers,
+		&b.mcpTools,
+		&b.efforts,
+		&r.UnattributedCalls,
 	)
 	if err != nil {
 		return nil, err
@@ -438,6 +544,21 @@ func scanInsightRecord(row rowScanner) (*InsightRecord, error) {
 			r.ToolBreakdown = make(map[string]int)
 		}
 	}
+	r.SkillBreakdown = unmarshalCounts(b.skills)
+	r.PluginBreakdown = unmarshalCounts(b.plugins)
+	r.McpServerBreakdown = unmarshalCounts(b.mcpServers)
+	r.McpToolBreakdown = unmarshalCounts(b.mcpTools)
+	r.EffortBreakdown = unmarshalCounts(b.efforts)
 
 	return &r, nil
+}
+
+// attributionColumns holds the raw JSON of the attribution breakdown columns
+// between Scan and decoding, keeping the scan argument list manageable.
+type attributionColumns struct {
+	skills     string
+	plugins    string
+	mcpServers string
+	mcpTools   string
+	efforts    string
 }

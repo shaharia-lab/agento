@@ -42,6 +42,11 @@ func DefaultProcessorRegistry(logger *slog.Logger) *ProcessorRegistry {
 		func() SessionProcessor { return &TurnCountProcessor{} },
 		func() SessionProcessor { return &AutonomyScoreProcessor{} },
 		func() SessionProcessor { return &ToolUsageProcessor{toolBreakdown: make(map[string]int)} },
+		func() SessionProcessor {
+			p := &AttributionProcessor{}
+			p.Reset()
+			return p
+		},
 		func() SessionProcessor { return &TimeProfileProcessor{} },
 		func() SessionProcessor { return &TokenProfileProcessor{} },
 		func() SessionProcessor { return &ErrorRateProcessor{} },

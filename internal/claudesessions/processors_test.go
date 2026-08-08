@@ -640,3 +640,256 @@ func TestProcessorRegistry_FullPipeline(t *testing.T) {
 		t.Errorf("expected positive cost estimate, got %f", insight.CostEstimateUSD)
 	}
 }
+
+// ─── AttributionProcessor ─────────────────────────────────────────────────────
+
+// withAttribution stamps the attribution fields Claude Code puts at the top
+// level of an assistant event.
+func withAttribution(skill, plugin string) func(*claudesessions.ProcessableEvent) {
+	return func(ev *claudesessions.ProcessableEvent) {
+		ev.AttributionSkill = skill
+		ev.AttributionPlugin = plugin
+	}
+}
+
+// withEffort sets the reasoning-effort tier the turn ran at.
+func withEffort(effort string) func(*claudesessions.ProcessableEvent) {
+	return func(ev *claudesessions.ProcessableEvent) { ev.Effort = effort }
+}
+
+// TestAttributionProcessor_CountsSkillsAndReconciles is the issue's headline
+// case: attributed calls land under their skill, unattributed ones are counted
+// explicitly, and together they account for every tool call.
+func TestAttributionProcessor_CountsSkillsAndReconciles(t *testing.T) {
+	evs := make([]claudesessions.ProcessableEvent, 0, 15)
+	// 10 tool calls attributed to one skill.
+	for range 10 {
+		evs = append(evs, makeEvent("assistant",
+			withMessage("assistant", "", toolUseBlocks("Bash"), nil),
+			withAttribution("lab-workflow:review-pr", "lab-workflow"),
+			withEffort("high"),
+		))
+	}
+	// 5 with no attribution at all — plain built-in tool use.
+	for range 5 {
+		evs = append(evs, makeEvent("assistant",
+			withMessage("assistant", "", toolUseBlocks("Read"), nil)))
+	}
+
+	insight := runProcessors(evs,
+		&claudesessions.AttributionProcessor{}, &claudesessions.ToolUsageProcessor{})
+
+	if got := insight.SkillBreakdown["lab-workflow:review-pr"]; got != 10 {
+		t.Errorf("skill_breakdown[review-pr] = %d, want 10", got)
+	}
+	if insight.UnattributedCalls != 5 {
+		t.Errorf("unattributed_calls = %d, want 5", insight.UnattributedCalls)
+	}
+	if got := insight.PluginBreakdown["lab-workflow"]; got != 10 {
+		t.Errorf("plugin_breakdown[lab-workflow] = %d, want 10", got)
+	}
+	if got := insight.EffortBreakdown["high"]; got != 10 {
+		t.Errorf("effort_breakdown[high] = %d, want 10", got)
+	}
+
+	// The reconciliation the issue asks for: nothing double-counted, nothing lost.
+	sum := 0
+	for _, v := range insight.SkillBreakdown {
+		sum += v
+	}
+	if sum+insight.UnattributedCalls != insight.ToolCallsTotal {
+		t.Errorf("sum(skill_breakdown)=%d + unattributed=%d != tool_calls_total=%d",
+			sum, insight.UnattributedCalls, insight.ToolCallsTotal)
+	}
+}
+
+// TestAttributionProcessor_CountsPerToolCallNotPerEvent pins the deviation from
+// the issue's HOW. Claude Code splits one assistant message into several events
+// carrying identical attribution, so counting per event inflates every number.
+func TestAttributionProcessor_CountsPerToolCallNotPerEvent(t *testing.T) {
+	evs := []claudesessions.ProcessableEvent{
+		// Same turn, three events, same attribution — only one has tool calls.
+		makeEvent("assistant",
+			withMessage("assistant", "", textBlocks("thinking out loud"), nil),
+			withAttribution("vibexp:prime", "vibexp"), withEffort("low")),
+		makeEvent("assistant",
+			withMessage("assistant", "", toolUseBlocks("Bash", "Read"), nil),
+			withAttribution("vibexp:prime", "vibexp"), withEffort("low")),
+		makeEvent("assistant",
+			withMessage("assistant", "", textBlocks("done"), nil),
+			withAttribution("vibexp:prime", "vibexp"), withEffort("low")),
+	}
+
+	insight := runProcessors(evs,
+		&claudesessions.AttributionProcessor{}, &claudesessions.ToolUsageProcessor{})
+
+	if got := insight.SkillBreakdown["vibexp:prime"]; got != 2 {
+		t.Errorf("skill_breakdown = %d, want 2 — one per tool call, not one per event", got)
+	}
+	if insight.ToolCallsTotal != 2 {
+		t.Errorf("tool_calls_total = %d, want 2", insight.ToolCallsTotal)
+	}
+}
+
+// TestAttributionProcessor_MCPFromToolName covers the other deviation: MCP
+// attribution is parsed from the tool_use name, because the attributionMcp*
+// fields are sticky and mostly disagree with the call actually being made.
+func TestAttributionProcessor_MCPFromToolName(t *testing.T) {
+	ev := makeEvent("assistant",
+		withMessage("assistant", "", toolUseBlocks(
+			"mcp__vibexp_io_vibexp_team__vibexp_io_post_to_feed",
+			"mcp__vibexp_io_vibexp_team__vibexp_io_search",
+			"mcp__claude-in-chrome__navigate",
+			"Bash",
+		), nil))
+	// A stale field naming a completely different server, as real transcripts have.
+	ev.AttributionMcpServer = "claude.ai VibeXP"
+	ev.AttributionMcpTool = "vibexp_io_reply_to_feed_item"
+
+	insight := runProcessors([]claudesessions.ProcessableEvent{ev},
+		&claudesessions.AttributionProcessor{})
+
+	if got := insight.McpServerBreakdown["vibexp_io_vibexp_team"]; got != 2 {
+		t.Errorf("mcp_server_breakdown[vibexp_io_vibexp_team] = %d, want 2", got)
+	}
+	if got := insight.McpServerBreakdown["claude-in-chrome"]; got != 1 {
+		t.Errorf("mcp_server_breakdown[claude-in-chrome] = %d, want 1", got)
+	}
+	// The sticky field must not have been counted.
+	if _, ok := insight.McpServerBreakdown["claude.ai VibeXP"]; ok {
+		t.Error("the sticky attributionMcpServer field was counted; it must not be")
+	}
+	// Server and tool are countable independently.
+	if got := insight.McpToolBreakdown["vibexp_io_post_to_feed"]; got != 1 {
+		t.Errorf("mcp_tool_breakdown[vibexp_io_post_to_feed] = %d, want 1", got)
+	}
+	if _, ok := insight.McpToolBreakdown["vibexp_io_reply_to_feed_item"]; ok {
+		t.Error("the sticky attributionMcpTool field was counted; it must not be")
+	}
+	// A non-MCP tool contributes to neither MCP map.
+	if len(insight.McpServerBreakdown) != 2 {
+		t.Errorf("mcp_server_breakdown has %d entries, want 2", len(insight.McpServerBreakdown))
+	}
+}
+
+func TestAttributionProcessor_NoAttributionFieldsYieldsEmptyMaps(t *testing.T) {
+	evs := []claudesessions.ProcessableEvent{
+		makeEvent("assistant", withMessage("assistant", "", toolUseBlocks("Bash"), nil)),
+	}
+	insight := runProcessors(evs, &claudesessions.AttributionProcessor{})
+
+	// Empty, not nil — so the columns marshal to {} rather than null.
+	for name, m := range map[string]map[string]int{
+		"skill_breakdown":      insight.SkillBreakdown,
+		"plugin_breakdown":     insight.PluginBreakdown,
+		"mcp_server_breakdown": insight.McpServerBreakdown,
+		"mcp_tool_breakdown":   insight.McpToolBreakdown,
+		"effort_breakdown":     insight.EffortBreakdown,
+	} {
+		if m == nil {
+			t.Errorf("%s is nil, want an empty map", name)
+		}
+		if len(m) != 0 {
+			t.Errorf("%s has %d entries, want 0", name, len(m))
+		}
+	}
+	if insight.UnattributedCalls != 1 {
+		t.Errorf("unattributed_calls = %d, want 1", insight.UnattributedCalls)
+	}
+}
+
+func TestAttributionProcessor_Reset(t *testing.T) {
+	p := &claudesessions.AttributionProcessor{}
+	runProcessors([]claudesessions.ProcessableEvent{
+		makeEvent("assistant",
+			withMessage("assistant", "", toolUseBlocks("Bash"), nil),
+			withAttribution("s", "p"), withEffort("high")),
+	}, p)
+
+	insight := runProcessors(nil, p)
+	if len(insight.SkillBreakdown) != 0 || insight.UnattributedCalls != 0 {
+		t.Errorf("Reset did not clear state: %+v / %d", insight.SkillBreakdown, insight.UnattributedCalls)
+	}
+}
+
+// TestAttributionProcessor_UserEventsIgnored — attribution is only ever stamped
+// on assistant events; a user event must never contribute.
+func TestAttributionProcessor_UserEventsIgnored(t *testing.T) {
+	evs := []claudesessions.ProcessableEvent{
+		makeEvent("user",
+			withMessage("user", "", toolUseBlocks("Bash"), nil),
+			withAttribution("some:skill", "some"), withEffort("high")),
+	}
+	insight := runProcessors(evs, &claudesessions.AttributionProcessor{})
+	if len(insight.SkillBreakdown) != 0 || insight.UnattributedCalls != 0 {
+		t.Errorf("a user event contributed to the breakdown: %+v", insight.SkillBreakdown)
+	}
+}
+
+// TestAttributionProcessor_DecodesRawJSONKeys feeds the real JSON key names
+// through the registry rather than setting struct fields directly. Every other
+// attribution test constructs ProcessableEvent in Go, so a typo in a `json:`
+// tag would zero every breakdown in production with a green suite.
+func TestAttributionProcessor_DecodesRawJSONKeys(t *testing.T) {
+	// Field names and nesting exactly as Claude Code writes them: attribution
+	// is top-level on the event, never inside message.
+	lines := []map[string]any{
+		{
+			"type":              "assistant",
+			"uuid":              "a1",
+			"timestamp":         "2026-01-01T10:00:00Z",
+			"attributionSkill":  "lab-workflow:review-pr",
+			"attributionPlugin": "lab-workflow",
+			"effort":            "high",
+			"message": map[string]any{
+				"role":  "assistant",
+				"model": "claude-opus-4-8",
+				"content": []map[string]any{
+					{"type": "tool_use", "id": "t1", "name": "Bash"},
+					{"type": "tool_use", "id": "t2", "name": "mcp__vibexp_io_vibexp_team__vibexp_io_search"},
+				},
+			},
+		},
+	}
+
+	registry := claudesessions.DefaultProcessorRegistry(nil)
+	insight, err := registry.RunSession("json-keys", writeJSONLFile(t, lines))
+	if err != nil {
+		t.Fatalf("run session: %v", err)
+	}
+
+	if got := insight.SkillBreakdown["lab-workflow:review-pr"]; got != 2 {
+		t.Errorf("skill_breakdown = %d, want 2 — the attributionSkill json tag is wrong", got)
+	}
+	if got := insight.PluginBreakdown["lab-workflow"]; got != 2 {
+		t.Errorf("plugin_breakdown = %d, want 2 — the attributionPlugin json tag is wrong", got)
+	}
+	if got := insight.EffortBreakdown["high"]; got != 2 {
+		t.Errorf("effort_breakdown = %d, want 2 — the effort json tag is wrong", got)
+	}
+	if got := insight.McpServerBreakdown["vibexp_io_vibexp_team"]; got != 1 {
+		t.Errorf("mcp_server_breakdown = %d, want 1", got)
+	}
+	if insight.UnattributedCalls != 0 {
+		t.Errorf("unattributed_calls = %d, want 0", insight.UnattributedCalls)
+	}
+	// And the invariant holds through the real registry.
+	sum := 0
+	for _, v := range insight.SkillBreakdown {
+		sum += v
+	}
+	if sum+insight.UnattributedCalls != insight.ToolCallsTotal {
+		t.Errorf("sum(skills)=%d + unattributed=%d != tool_calls_total=%d",
+			sum, insight.UnattributedCalls, insight.ToolCallsTotal)
+	}
+}
+
+// TestCurrentProcessorVersion_BumpedForAttribution ties the constant to this
+// feature: without the bump, NeedsProcessing never returns existing sessions
+// and the new columns stay empty forever on an upgrade.
+func TestCurrentProcessorVersion_BumpedForAttribution(t *testing.T) {
+	if claudesessions.CurrentProcessorVersion < 4 {
+		t.Errorf("CurrentProcessorVersion = %d, want >= 4 so attribution backfills existing rows",
+			claudesessions.CurrentProcessorVersion)
+	}
+}

@@ -812,6 +812,18 @@ export interface SessionInsight {
   autonomy_score: number
   tool_calls_total: number
   tool_breakdown: Record<string, number>
+  /**
+   * Attribution breakdowns. All count tool calls, so
+   * `sum(skill_breakdown) + unattributed_calls === tool_calls_total`.
+   */
+  skill_breakdown: Record<string, number>
+  plugin_breakdown: Record<string, number>
+  /** Parsed from the `mcp__<server>__<tool>` tool name. */
+  mcp_server_breakdown: Record<string, number>
+  mcp_tool_breakdown: Record<string, number>
+  effort_breakdown: Record<string, number>
+  /** Tool calls made with no skill in context — built-in tool use. */
+  unattributed_calls: number
   total_duration_ms: number
   thinking_time_ms: number
   cache_hit_rate: number
@@ -843,6 +855,16 @@ export interface InsightSummary {
   sessions_with_errors: number
   avg_total_duration_ms: number
   top_tools: ToolUsageStat[]
+  /** Total tool calls across the period — the denominator for the breakdowns. */
+  total_tool_calls: number
+  /** Of those, how many were made with no skill in context. */
+  unattributed_calls: number
+  /** Tool calls grouped by the skill whose instructions were in context. */
+  top_skills: ToolUsageStat[]
+  /** Tool calls grouped by the plugin that shipped the skill. */
+  top_plugins: ToolUsageStat[]
+  /** Tool calls grouped by MCP server, parsed from `mcp__<server>__<tool>`. */
+  top_mcp_servers: ToolUsageStat[]
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

@@ -176,11 +176,20 @@ interface ToolCompareRow {
   previous: number
 }
 
+// TopToolsChart renders any tool-call breakdown — by tool, skill, plugin or MCP
+// server. All four count the same unit (tool calls), so one chart serves them
+// all and the numbers stay comparable across panels.
 function TopToolsChart({
   tools,
   prevTools,
   hasComparison,
-}: Readonly<{ tools: ToolUsageStat[]; prevTools?: ToolUsageStat[]; hasComparison: boolean }>) {
+  title = 'Top 10 Tools Used',
+}: Readonly<{
+  tools: ToolUsageStat[]
+  prevTools?: ToolUsageStat[]
+  hasComparison: boolean
+  title?: string
+}>) {
   // Merge current + previous into a single dataset, top 10 by current count
   const top = tools.slice(0, 10)
   const prevMap = new Map((prevTools ?? []).map(t => [t.tool, t.count]))
@@ -192,7 +201,7 @@ function TopToolsChart({
   }))
 
   return (
-    <ChartCard title="Top 10 Tools Used">
+    <ChartCard title={title}>
       <ResponsiveContainer width="100%" height={300}>
         <BarChart data={data} layout="vertical" margin={{ top: 4, right: 16, left: 8, bottom: 0 }}>
           <CartesianGrid
@@ -627,6 +636,44 @@ function InsightsContent({
         <TopToolsChart
           tools={summary.top_tools}
           prevTools={prev?.top_tools ?? []}
+          hasComparison={hasComparison}
+        />
+      )}
+
+      {/* Attribution: which skill, plugin and MCP server drove those tool calls */}
+      {summary.top_skills.length > 0 && (
+        <>
+          <TopToolsChart
+            title="Top 10 Skills by Tool Calls"
+            tools={summary.top_skills}
+            prevTools={prev?.top_skills ?? []}
+            hasComparison={hasComparison}
+          />
+          {/* Without this the skills chart reads as the whole picture, when
+              roughly half of all tool calls are made with no skill in context. */}
+          {summary.total_tool_calls > 0 && (
+            <p className="text-xs text-zinc-400 dark:text-zinc-500 -mt-2 px-1">
+              {summary.unattributed_calls.toLocaleString()} of{' '}
+              {summary.total_tool_calls.toLocaleString()} tool calls (
+              {Math.round((summary.unattributed_calls / summary.total_tool_calls) * 100)}%) were
+              made with no skill in context — built-in tool use, not counted above.
+            </p>
+          )}
+        </>
+      )}
+      {summary.top_plugins.length > 0 && (
+        <TopToolsChart
+          title="Top 10 Plugins by Tool Calls"
+          tools={summary.top_plugins}
+          prevTools={prev?.top_plugins ?? []}
+          hasComparison={hasComparison}
+        />
+      )}
+      {summary.top_mcp_servers.length > 0 && (
+        <TopToolsChart
+          title="Top 10 MCP Servers by Tool Calls"
+          tools={summary.top_mcp_servers}
+          prevTools={prev?.top_mcp_servers ?? []}
           hasComparison={hasComparison}
         />
       )}

@@ -359,6 +359,21 @@ CREATE TABLE claude_session_pr (
 CREATE INDEX idx_session_pr_session ON claude_session_pr(session_id);
 `,
 	},
+	{
+		version: 16,
+		sql: `
+-- Attribution of tool calls to the skill, plugin and MCP server that made them.
+-- Stored as JSON maps like tool_breakdown. Populated by the
+-- CurrentProcessorVersion 3 -> 4 bump, which makes NeedsProcessing return every
+-- existing session.
+ALTER TABLE session_insights ADD COLUMN skill_breakdown      TEXT    NOT NULL DEFAULT '{}';
+ALTER TABLE session_insights ADD COLUMN plugin_breakdown     TEXT    NOT NULL DEFAULT '{}';
+ALTER TABLE session_insights ADD COLUMN mcp_server_breakdown TEXT    NOT NULL DEFAULT '{}';
+ALTER TABLE session_insights ADD COLUMN mcp_tool_breakdown   TEXT    NOT NULL DEFAULT '{}';
+ALTER TABLE session_insights ADD COLUMN effort_breakdown     TEXT    NOT NULL DEFAULT '{}';
+ALTER TABLE session_insights ADD COLUMN unattributed_calls   INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures
