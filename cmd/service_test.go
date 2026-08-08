@@ -29,6 +29,23 @@ func TestServiceCmdRegistersSubcommands(t *testing.T) {
 	}
 }
 
+func TestServiceSubcommandsSilenceUsageAndErrors(t *testing.T) {
+	t.Parallel()
+	cfg := &config.AppConfig{DataDir: t.TempDir(), Port: 8990}
+	root := NewServiceCmd(cfg)
+
+	// Runtime failures (e.g. "service is not running") must not dump usage or
+	// print the error twice — the root Execute prints it once.
+	for _, sub := range root.Commands() {
+		if !sub.SilenceUsage {
+			t.Errorf("service %s: SilenceUsage must be true", sub.Name())
+		}
+		if !sub.SilenceErrors {
+			t.Errorf("service %s: SilenceErrors must be true", sub.Name())
+		}
+	}
+}
+
 func TestServiceLogsCmdFlags(t *testing.T) {
 	t.Parallel()
 	cfg := &config.AppConfig{DataDir: t.TempDir(), Port: 8990}

@@ -13,7 +13,7 @@ import (
 )
 
 // launchdLabel is the reverse-DNS label of the LaunchAgent.
-const launchdLabel = "io.shaharialab.agento"
+const launchdLabel = "com.shaharialab.agento"
 
 // launchd manages Agento as a macOS LaunchAgent. LaunchAgents start at user
 // login (not boot) and run with the user's environment — exactly what Agento
@@ -60,10 +60,15 @@ func (l *launchd) serviceTarget() string {
 
 // Install writes the plist and bootstraps the agent (which also starts it,
 // thanks to RunAtLoad). Re-installing over a running service is supported:
-// the old instance is booted out first.
+// the old instance is booted out first, so the port check only refuses when
+// the occupant is NOT our own service.
 func (l *launchd) Install(ctx context.Context, opts Options) error {
-	if err := checkPortFree(opts.Port); err != nil {
-		return err
+	if st, err := l.Status(ctx); err != nil || !st.Running {
+		// Our service is not the one answering on the port — anything else
+		// there (e.g. a foreground `agento web`) would crash-loop the install.
+		if err := checkPortFree(opts.Port); err != nil {
+			return err
+		}
 	}
 	plist, err := l.plistPath()
 	if err != nil {
@@ -138,9 +143,14 @@ func (l *launchd) Stop(ctx context.Context) error {
 	return nil
 }
 
-// Restart re-kicks the service in place via kickstart -k.
+// Restart re-kicks the service in place via kickstart -k. kickstart requires
+// a loaded service, so after a Stop (bootout) it falls back to Start —
+// matching systemd, where `restart` also starts a stopped unit.
 func (l *launchd) Restart(ctx context.Context) error {
 	if _, err := l.runner.Run(ctx, "launchctl", "kickstart", "-k", l.serviceTarget()); err != nil {
+		if strings.Contains(err.Error(), "Could not find service") {
+			return l.Start(ctx)
+		}
 		return fmt.Errorf("restarting service: %w", err)
 	}
 	return nil

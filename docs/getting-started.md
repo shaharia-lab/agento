@@ -83,7 +83,7 @@ AGENTO_DATA_DIR=/data/agento agento web
 agento service install
 ```
 
-- **macOS** — a LaunchAgent at `~/Library/LaunchAgents/io.shaharialab.agento.plist`. It starts at **login** (not at boot) and restarts automatically on crash.
+- **macOS** — a LaunchAgent at `~/Library/LaunchAgents/com.shaharialab.agento.plist`. It starts at **login** (not at boot) and restarts automatically on crash.
 - **Linux** — a systemd user unit at `~/.config/systemd/user/agento.service` with `Restart=on-failure`. `install` also runs `loginctl enable-linger $USER` so the service keeps running after you log out (required on headless/SSH machines).
 
 Manage it with:

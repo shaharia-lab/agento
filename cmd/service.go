@@ -38,6 +38,13 @@ the service keeps running after logout). Windows is not supported.`,
 	cmd.AddCommand(newServiceSimpleCmd(cfg, "restart", "Restart the Agento service"))
 	cmd.AddCommand(newServiceStatusCmd(cfg))
 	cmd.AddCommand(newServiceLogsCmd(cfg))
+	for _, sub := range cmd.Commands() {
+		// Failures are runtime conditions ("service is not running"), not
+		// usage errors — keep the output to the single error line the root
+		// Execute already prints; no usage dump, no cobra re-print.
+		sub.SilenceUsage = true
+		sub.SilenceErrors = true
+	}
 	return cmd
 }
 

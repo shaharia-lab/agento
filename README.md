@@ -454,7 +454,7 @@ Available Commands:
   logs         Print the service log (-f to follow, -n to set line count)
 ```
 
-macOS uses a LaunchAgent (`~/Library/LaunchAgents/io.shaharialab.agento.plist`, starts at login);
+macOS uses a LaunchAgent (`~/Library/LaunchAgents/com.shaharialab.agento.plist`, starts at login);
 Linux uses a systemd user unit (`~/.config/systemd/user/agento.service`, lingering enabled).
 See [Run Agento in the background](docs/getting-started.md#run-agento-in-the-background).
 

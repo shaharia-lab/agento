@@ -47,10 +47,15 @@ func (s *systemd) unitPath() (string, error) {
 
 // Install renders the unit, reloads systemd, enables + starts the service,
 // and enables lingering (best effort) so the unit survives logout on
-// headless/SSH machines.
+// headless/SSH machines. Re-installing over a running service is supported,
+// so the port check only refuses when the occupant is NOT our own service.
 func (s *systemd) Install(ctx context.Context, opts Options) error {
-	if err := checkPortFree(opts.Port); err != nil {
-		return err
+	if st, err := s.Status(ctx); err != nil || !st.Running {
+		// Our service is not the one answering on the port — anything else
+		// there (e.g. a foreground `agento web`) would crash-loop the install.
+		if err := checkPortFree(opts.Port); err != nil {
+			return err
+		}
 	}
 	unit, err := s.unitPath()
 	if err != nil {

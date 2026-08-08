@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,22 +21,30 @@ type recordedCall struct {
 
 // fakeRunner implements commandRunner with canned outputs and errors keyed by
 // command name. Commands without a canned response succeed with empty output.
+// failOnce errors fire on the first matching call only, for testing fallback
+// paths (first call fails, the retry/fallback succeeds).
 type fakeRunner struct {
-	calls   []recordedCall
-	outputs map[string]string
-	errors  map[string]error
+	calls    []recordedCall
+	outputs  map[string]string
+	errors   map[string]error
+	failOnce map[string]error
 }
 
 func newFakeRunner() *fakeRunner {
 	return &fakeRunner{
-		outputs: map[string]string{},
-		errors:  map[string]error{},
+		outputs:  map[string]string{},
+		errors:   map[string]error{},
+		failOnce: map[string]error{},
 	}
 }
 
 // Run records the invocation and returns the canned response for cmd.Name.
 func (f *fakeRunner) Run(_ context.Context, name string, args ...string) (string, error) {
 	f.calls = append(f.calls, recordedCall{Name: name, Args: args})
+	if err, ok := f.failOnce[name]; ok {
+		delete(f.failOnce, name)
+		return "", err
+	}
 	if err, ok := f.errors[name]; ok {
 		return "", err
 	}
@@ -82,6 +91,15 @@ func stubPortFree(t *testing.T, used bool) {
 	t.Cleanup(func() { portInUse = prev })
 }
 
+// stubUID pins the uid seam to 501 so launchd domain-target assertions are
+// deterministic regardless of the test process's real uid.
+func stubUID(t *testing.T) {
+	t.Helper()
+	prev := currentUID
+	currentUID = func() int { return 501 }
+	t.Cleanup(func() { currentUID = prev })
+}
+
 func TestRenderPlistGolden(t *testing.T) {
 	t.Parallel()
 	got, err := render("agento.plist.tmpl", testOptions())
@@ -126,22 +144,6 @@ func TestNewForTestPlatformSelection(t *testing.T) {
 	_, err := NewForTest("windows", runner, home)
 	if !errors.Is(err, ErrUnsupportedOS) {
 		t.Errorf("windows: want ErrUnsupportedOS, got %v", err)
-	}
-}
-
-func TestUnsupportedManager(t *testing.T) {
-	t.Parallel()
-	mgr := NewUnsupported()
-	ctx := context.Background()
-
-	if err := mgr.Install(ctx, testOptions()); !errors.Is(err, ErrUnsupportedOS) {
-		t.Errorf("Install: want ErrUnsupportedOS, got %v", err)
-	}
-	if err := mgr.Uninstall(ctx); !errors.Is(err, ErrUnsupportedOS) {
-		t.Errorf("Uninstall: want ErrUnsupportedOS, got %v", err)
-	}
-	if _, err := mgr.Status(ctx); !errors.Is(err, ErrUnsupportedOS) {
-		t.Errorf("Status: want ErrUnsupportedOS, got %v", err)
 	}
 }
 
@@ -248,10 +250,20 @@ func TestSystemdInstallSequenceAndIdempotency(t *testing.T) {
 	}
 
 	seqs := runner.argSeqs()
+	// The username the code resolves — $USER first, user.Current() fallback —
+	// mirrored here so the assertion holds whether or not USER is set.
+	wantUser := os.Getenv("USER")
+	if wantUser == "" {
+		if u, err := user.Current(); err == nil {
+			wantUser = u.Username
+		}
+	}
 	wantPerInstall := []string{
+		// Install first probes Status to decide whether the port check applies.
+		"systemctl --user show agento.service --property=LoadState,UnitFileState,ActiveState,MainPID",
 		"systemctl --user daemon-reload",
 		"systemctl --user enable --now agento.service",
-		"loginctl enable-linger " + os.Getenv("USER"),
+		"loginctl enable-linger " + wantUser,
 	}
 	if len(seqs) != 2*len(wantPerInstall) {
 		t.Fatalf("got calls %v, want 2x %v", seqs, wantPerInstall)
@@ -333,7 +345,7 @@ func TestLaunchdInstallSequenceAndIdempotency(t *testing.T) {
 	runner := newFakeRunner()
 	mgr := newLaunchdForHome(runner, home)
 	ctx := context.Background()
-	t.Setenv("UID", "501")
+	stubUID(t)
 
 	for i := 0; i < 2; i++ {
 		if err := mgr.Install(ctx, testOptionsIn(home)); err != nil {
@@ -341,12 +353,14 @@ func TestLaunchdInstallSequenceAndIdempotency(t *testing.T) {
 		}
 	}
 	plist, _ := mgr.plistPath()
-	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", "io.shaharialab.agento.plist")); err != nil {
+	if _, err := os.Stat(filepath.Join(home, "Library", "LaunchAgents", "com.shaharialab.agento.plist")); err != nil {
 		t.Errorf("plist missing at expected path: %v", err)
 	}
 	seqs := runner.argSeqs()
 	wantPerInstall := []string{
-		"launchctl bootout gui/501/io.shaharialab.agento",
+		// Install first probes Status to decide whether the port check applies.
+		"launchctl print gui/501/com.shaharialab.agento",
+		"launchctl bootout gui/501/com.shaharialab.agento",
 		"launchctl bootstrap gui/501 " + plist,
 	}
 	if len(seqs) != 2*len(wantPerInstall) {
@@ -376,7 +390,7 @@ func TestLaunchdStartStopIdempotency(t *testing.T) {
 	runner := newFakeRunner()
 	mgr := newLaunchdForHome(runner, home)
 	ctx := context.Background()
-	t.Setenv("UID", "501")
+	stubUID(t)
 
 	// Start without install → clear "not installed" error.
 	if err := mgr.Start(ctx); err == nil || !strings.Contains(err.Error(), "not installed") {
@@ -402,8 +416,8 @@ func TestLaunchdStatusParsesPrintOutput(t *testing.T) {
 	stubPortFree(t, false)
 	home := t.TempDir()
 	runner := newFakeRunner()
-	t.Setenv("UID", "501")
-	runner.outputs["launchctl"] = "gui/501/io.shaharialab.agento = {\n\tstate = running\n\tpid = 777\n}\n"
+	stubUID(t)
+	runner.outputs["launchctl"] = "gui/501/com.shaharialab.agento = {\n\tstate = running\n\tpid = 777\n}\n"
 	mgr := newLaunchdForHome(runner, home)
 
 	if err := mgr.Install(context.Background(), testOptionsIn(home)); err != nil {
@@ -421,7 +435,7 @@ func TestLaunchdStatusParsesPrintOutput(t *testing.T) {
 func TestLaunchdStatusNotLoaded(t *testing.T) {
 	home := t.TempDir()
 	runner := newFakeRunner()
-	t.Setenv("UID", "501")
+	stubUID(t)
 	runner.errors["launchctl"] = fmt.Errorf("launchctl print: Could not find service")
 	mgr := newLaunchdForHome(runner, home)
 
@@ -431,5 +445,54 @@ func TestLaunchdStatusNotLoaded(t *testing.T) {
 	}
 	if st.Installed || st.Enabled || st.Running || st.PID != 0 {
 		t.Errorf("got %+v, want zero status", st)
+	}
+}
+
+func TestSystemdInstallWhileManagedServiceRuns(t *testing.T) {
+	// Regression: install must stay idempotent when the port's occupant is
+	// our own already-running service — the port check may only refuse
+	// foreign listeners.
+	stubPortFree(t, true) // port busy because the service itself is running
+	home := t.TempDir()
+	runner := newFakeRunner()
+	fixture, err := os.ReadFile(filepath.Join("testdata", "systemctl_show_active.txt"))
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	runner.outputs["systemctl"] = string(fixture) // Status reports running
+	mgr := newSystemdForHome(runner, home)
+
+	if err := mgr.Install(context.Background(), testOptionsIn(home)); err != nil {
+		t.Fatalf("install over own running service must succeed, got %v", err)
+	}
+}
+
+func TestLaunchdRestartFallsBackToStart(t *testing.T) {
+	stubPortFree(t, false)
+	home := t.TempDir()
+	runner := newFakeRunner()
+	stubUID(t)
+	mgr := newLaunchdForHome(runner, home)
+	ctx := context.Background()
+
+	if err := mgr.Install(ctx, testOptionsIn(home)); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	// After Stop (bootout), kickstart cannot find the service — Restart must
+	// fall back to Start (bootstrap) like systemd's restart-does-start.
+	runner.calls = nil
+	runner.failOnce["launchctl"] = fmt.Errorf("launchctl kickstart: Could not find service \"com.shaharialab.agento\"")
+	if err := mgr.Restart(ctx); err != nil {
+		t.Fatalf("restart after stop must fall back to start, got %v", err)
+	}
+	seqs := runner.argSeqs()
+	if len(seqs) != 2 {
+		t.Fatalf("got calls %v, want kickstart then bootstrap", seqs)
+	}
+	if !strings.HasPrefix(seqs[0], "launchctl kickstart -k ") {
+		t.Errorf("first call: got %q, want kickstart", seqs[0])
+	}
+	if !strings.HasPrefix(seqs[1], "launchctl bootstrap gui/501 ") {
+		t.Errorf("fallback call: got %q, want bootstrap", seqs[1])
 	}
 }

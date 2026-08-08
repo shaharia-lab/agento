@@ -183,14 +183,7 @@ func isEphemeralPath(path string) bool {
 	return false
 }
 
-// currentUID returns the invoking user's numeric uid, used in launchd domain
-// targets (gui/<uid>). It prefers the UID environment variable and falls back
-// to os.Getuid so tests can steer it via t.Setenv.
-func currentUID() int {
-	if v := os.Getenv("UID"); v != "" {
-		if uid, err := strconv.Atoi(v); err == nil {
-			return uid
-		}
-	}
-	return os.Getuid()
-}
+// currentUID is a var seam so tests can steer the launchd domain target
+// (gui/<uid>) without depending on the test process's real uid. Production
+// uses os.Getuid — an inherited UID env var is not trustworthy.
+var currentUID = os.Getuid //nolint:gochecknoglobals

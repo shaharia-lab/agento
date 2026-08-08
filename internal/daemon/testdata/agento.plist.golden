@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>io.shaharialab.agento</string>
+	<string>com.shaharialab.agento</string>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/home/test/.local/bin/agento</string>
