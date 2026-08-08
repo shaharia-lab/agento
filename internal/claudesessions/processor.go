@@ -210,7 +210,8 @@ func isUserTurnContent(content json.RawMessage) bool {
 func isAssistantReply(content json.RawMessage) bool {
 	blocks := parseContentBlocks(content)
 	if blocks == nil {
-		// Non-array content is a bare JSON string: the message *is* the text.
+		// No decodable blocks: absent, null, or non-array content. Only a
+		// non-empty bare JSON string carries text the user saw.
 		return len(content) > 2 && content[0] == '"'
 	}
 	for _, b := range blocks {

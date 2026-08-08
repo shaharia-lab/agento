@@ -101,6 +101,47 @@ func TestScan_MessageCountIsTurnsNotEvents(t *testing.T) {
 	}
 }
 
+// TestDetail_CountersMatchSummary pins the two paths together. The list view
+// reads the summary and the detail view recounts from the message tree, so a
+// change to one set of counter sites must not silently desynchronize the other.
+func TestDetail_CountersMatchSummary(t *testing.T) {
+	db := setupTestDB(t)
+	projectDir := titleProjectDir(t)
+
+	countsFixture(t, projectDir, "session-detail-counts", time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC))
+
+	sessions, err := IncrementalScan(db, testLogger)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	summary := findSession(t, sessions, "session-detail-counts")
+
+	detail, err := readSessionDetail(
+		"session-detail-counts", projectDir,
+		filepath.Join(projectDir, "session-detail-counts.jsonl"), testLogger,
+	)
+	if err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+
+	if detail.MessageCount != summary.MessageCount {
+		t.Errorf("detail message_count = %d, summary = %d — the two paths disagree",
+			detail.MessageCount, summary.MessageCount)
+	}
+	if detail.EventCount != summary.EventCount {
+		t.Errorf("detail event_count = %d, summary = %d — the two paths disagree",
+			detail.EventCount, summary.EventCount)
+	}
+	if detail.MessageCount != 4 || detail.EventCount != 14 {
+		t.Errorf("detail counters = %d msgs / %d events, want 4 / 14",
+			detail.MessageCount, detail.EventCount)
+	}
+	// Every event still renders, regardless of how it is counted.
+	if len(detail.Messages) != 14 {
+		t.Errorf("rendered %d messages, want all 14 events", len(detail.Messages))
+	}
+}
+
 // TestScan_StringContentUserEventIsATurn guards parseContentBlocks' early return
 // on non-array content: a bare JSON string is a real prompt, not a carrier.
 func TestScan_StringContentUserEventIsATurn(t *testing.T) {
@@ -125,9 +166,11 @@ func TestScan_StringContentUserEventIsATurn(t *testing.T) {
 	}
 }
 
-// TestScan_SidechainExcludedFromBothCounters keeps delegated work out of the
-// parent's numbers — it is reported through the sub-agent roll-up instead.
-func TestScan_SidechainExcludedFromBothCounters(t *testing.T) {
+// TestScan_SidechainUserEventsExcluded keeps delegated user turns out of the
+// parent's numbers — they are reported through the sub-agent roll-up instead.
+// Only the user case is guarded: assistant events carry no sidechain check,
+// matching the counter this replaces, so event_count stays the old number.
+func TestScan_SidechainUserEventsExcluded(t *testing.T) {
 	db := setupTestDB(t)
 	projectDir := titleProjectDir(t)
 

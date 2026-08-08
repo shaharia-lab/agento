@@ -974,6 +974,10 @@ func readSessionSummary(sessionID, projectPath, filePath string, logger *slog.Lo
 // should not count twice. Inside a sub-agent file that marker is universal and
 // carries no such meaning, so sidechain user turns are counted here; otherwise
 // message_count would silently degrade to assistant-only.
+//
+// The turn/event split applies here as well: a sub-agent's message_count counts
+// genuine turns, not tool_result carriers. Its EventCount is computed but has no
+// column in claude_subagent_cache, so it is not persisted — see #196.
 func readSubagentSummary(
 	sessionID, projectPath, filePath string, logger *slog.Logger,
 ) (*ClaudeSessionSummary, error) {

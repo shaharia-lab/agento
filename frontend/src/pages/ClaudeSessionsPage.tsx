@@ -398,7 +398,7 @@ function SessionRow({
                 content={
                   <div className="space-y-1">
                     <div className="flex justify-between gap-4">
-                      <span className="text-zinc-400">Turns</span>
+                      <span className="text-zinc-400">Messages</span>
                       <span>{session.message_count.toLocaleString()}</span>
                     </div>
                     <div className="flex justify-between gap-4">
