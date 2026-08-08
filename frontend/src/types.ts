@@ -541,7 +541,10 @@ export interface ClaudeSessionSummary {
   is_favorite?: boolean
   start_time: string
   last_activity: string
+  /** Conversational turns: real user input plus assistant replies containing text. */
   message_count: number
+  /** Raw top-level user + assistant events, i.e. API round-trips. */
+  event_count: number
   /** Main-thread usage only — delegated work is in `subagent_usage`. */
   usage: ClaudeTokenUsage
   git_branch?: string

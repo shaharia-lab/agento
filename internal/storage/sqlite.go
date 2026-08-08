@@ -321,6 +321,15 @@ ALTER TABLE claude_session_cache ADD COLUMN native_title TEXT NOT NULL DEFAULT '
 ALTER TABLE claude_session_cache ADD COLUMN ai_title TEXT NOT NULL DEFAULT '';
 `,
 	},
+	{
+		version: 14,
+		sql: `
+-- message_count now holds conversational turns rather than raw JSONL events;
+-- event_count preserves the old meaning. Existing rows are recomputed by the
+-- CurrentScannerVersion 2 -> 3 bump, which forces one full re-read.
+ALTER TABLE claude_session_cache ADD COLUMN event_count INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures
