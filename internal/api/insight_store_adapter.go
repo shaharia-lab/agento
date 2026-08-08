@@ -59,17 +59,6 @@ func (a *insightStoreAdapter) GetSummary(
 		return nil, err
 	}
 
-	// Aggregate tool breakdowns from the per-session JSON strings.
-	toolTotals := make(map[string]int)
-	for _, tbJSON := range raw.ToolBreakdowns {
-		var breakdown map[string]int
-		if jsonErr := json.Unmarshal([]byte(tbJSON), &breakdown); jsonErr == nil {
-			for tool, count := range breakdown {
-				toolTotals[tool] += count
-			}
-		}
-	}
-
 	return &claudesessions.InsightAggregateSummary{
 		TotalSessions:        raw.TotalSessions,
 		AvgAutonomyScore:     raw.AvgAutonomyScore,
@@ -79,8 +68,28 @@ func (a *insightStoreAdapter) GetSummary(
 		AvgCacheHitRate:      raw.AvgCacheHitRate,
 		AvgTotalDurationMs:   raw.AvgTotalDurationMs,
 		SessionsWithErrors:   raw.SessionsWithErrors,
-		TopToolTotals:        toolTotals,
+		TopToolTotals:        mergeBreakdowns(raw.ToolBreakdowns),
+		TopSkillTotals:       mergeBreakdowns(raw.SkillBreakdowns),
+		TopPluginTotals:      mergeBreakdowns(raw.PluginBreakdowns),
+		TopMcpServerTotals:   mergeBreakdowns(raw.McpServerBreakdowns),
 	}, nil
+}
+
+// mergeBreakdowns sums the per-session breakdown JSON blobs into one total.
+// A blob that fails to parse is skipped rather than failing the summary — one
+// bad row should not blank the whole insights page.
+func mergeBreakdowns(blobs []string) map[string]int {
+	totals := make(map[string]int)
+	for _, blob := range blobs {
+		var breakdown map[string]int
+		if jsonErr := json.Unmarshal([]byte(blob), &breakdown); jsonErr != nil {
+			continue
+		}
+		for key, count := range breakdown {
+			totals[key] += count
+		}
+	}
+	return totals
 }
 
 func (a *insightStoreAdapter) NeedsProcessing(
@@ -115,6 +124,12 @@ func toInsightRecord(ins *claudesessions.SessionInsight) storage.InsightRecord {
 		AutonomyScore:           ins.AutonomyScore,
 		ToolCallsTotal:          ins.ToolCallsTotal,
 		ToolBreakdown:           breakdown,
+		SkillBreakdown:          copyCounts(ins.SkillBreakdown),
+		PluginBreakdown:         copyCounts(ins.PluginBreakdown),
+		McpServerBreakdown:      copyCounts(ins.McpServerBreakdown),
+		McpToolBreakdown:        copyCounts(ins.McpToolBreakdown),
+		EffortBreakdown:         copyCounts(ins.EffortBreakdown),
+		UnattributedCalls:       ins.UnattributedCalls,
 		ToolErrorRate:           ins.ToolErrorRate,
 		TotalDurationMs:         ins.TotalDurationMs,
 		ThinkingTimeMs:          ins.ThinkingTimeMs,
@@ -146,6 +161,12 @@ func fromInsightRecord(r *storage.InsightRecord) *claudesessions.SessionInsight 
 		AutonomyScore:           r.AutonomyScore,
 		ToolCallsTotal:          r.ToolCallsTotal,
 		ToolBreakdown:           breakdown,
+		SkillBreakdown:          copyCounts(r.SkillBreakdown),
+		PluginBreakdown:         copyCounts(r.PluginBreakdown),
+		McpServerBreakdown:      copyCounts(r.McpServerBreakdown),
+		McpToolBreakdown:        copyCounts(r.McpToolBreakdown),
+		EffortBreakdown:         copyCounts(r.EffortBreakdown),
+		UnattributedCalls:       r.UnattributedCalls,
 		ToolErrorRate:           r.ToolErrorRate,
 		TotalDurationMs:         r.TotalDurationMs,
 		ThinkingTimeMs:          r.ThinkingTimeMs,
@@ -160,4 +181,14 @@ func fromInsightRecord(r *storage.InsightRecord) *claudesessions.SessionInsight 
 		AvgClaudeResponseTimeMs: r.AvgClaudeResponseTimeMs,
 		SessionType:             r.SessionType,
 	}
+}
+
+// copyCounts returns a defensive copy of a breakdown map, always non-nil so the
+// JSON encoding is {} rather than null.
+func copyCounts(src map[string]int) map[string]int {
+	out := make(map[string]int, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
 }

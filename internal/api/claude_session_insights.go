@@ -96,6 +96,11 @@ type insightsSummary struct {
 	SessionsWithErrors   int         `json:"sessions_with_errors"`
 	AvgTotalDurationMs   float64     `json:"avg_total_duration_ms"`
 	TopTools             []toolCount `json:"top_tools"`
+	// Attribution breakdowns. Each counts tool calls, so they are directly
+	// comparable with TopTools.
+	TopSkills     []toolCount `json:"top_skills"`
+	TopPlugins    []toolCount `json:"top_plugins"`
+	TopMcpServers []toolCount `json:"top_mcp_servers"`
 }
 
 // toolCount pairs a tool name with its aggregate call count.
@@ -108,7 +113,12 @@ type toolCount struct {
 // the HTTP response type.
 func buildInsightsSummaryFromAggregate(agg *claudesessions.InsightAggregateSummary) *insightsSummary {
 	if agg == nil || agg.TotalSessions == 0 {
-		return &insightsSummary{TopTools: []toolCount{}}
+		return &insightsSummary{
+			TopTools:      []toolCount{},
+			TopSkills:     []toolCount{},
+			TopPlugins:    []toolCount{},
+			TopMcpServers: []toolCount{},
+		}
 	}
 	n := float64(agg.TotalSessions)
 	return &insightsSummary{
@@ -121,12 +131,18 @@ func buildInsightsSummaryFromAggregate(agg *claudesessions.InsightAggregateSumma
 		AvgCacheHitRate:      agg.AvgCacheHitRate,
 		SessionsWithErrors:   agg.SessionsWithErrors,
 		AvgTotalDurationMs:   agg.AvgTotalDurationMs,
-		TopTools:             sortedToolCounts(agg.TopToolTotals, 10),
+		TopTools:             sortedToolCounts(agg.TopToolTotals),
+		TopSkills:            sortedToolCounts(agg.TopSkillTotals),
+		TopPlugins:           sortedToolCounts(agg.TopPluginTotals),
+		TopMcpServers:        sortedToolCounts(agg.TopMcpServerTotals),
 	}
 }
 
-// sortedToolCounts returns at most limit toolCount entries sorted by count descending.
-func sortedToolCounts(totals map[string]int, limit int) []toolCount {
+// topBreakdownEntries is how many entries each breakdown panel shows.
+const topBreakdownEntries = 10
+
+// sortedToolCounts returns the top entries sorted by count descending.
+func sortedToolCounts(totals map[string]int) []toolCount {
 	counts := make([]toolCount, 0, len(totals))
 	for tool, count := range totals {
 		counts = append(counts, toolCount{Tool: tool, Count: count})
@@ -137,8 +153,8 @@ func sortedToolCounts(totals map[string]int, limit int) []toolCount {
 			counts[j], counts[j-1] = counts[j-1], counts[j]
 		}
 	}
-	if limit > 0 && len(counts) > limit {
-		counts = counts[:limit]
+	if len(counts) > topBreakdownEntries {
+		counts = counts[:topBreakdownEntries]
 	}
 	return counts
 }

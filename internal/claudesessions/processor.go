@@ -14,7 +14,9 @@ import (
 // delegated work.
 // v3: cost estimates price cache writes by cache TTL and no longer bill unknown
 // models at Sonnet rates, so every stored cost_estimate_usd is out of date.
-const CurrentProcessorVersion = 3
+// v4: tool calls are attributed to the skill, plugin and MCP server that made
+// them — every row written before v4 has empty attribution breakdowns.
+const CurrentProcessorVersion = 4
 
 // ProcessableEvent is a single decoded line from a Claude Code session JSONL file,
 // passed to each SessionProcessor in chronological order.
@@ -23,6 +25,27 @@ type ProcessableEvent struct {
 	Timestamp   time.Time     `json:"timestamp"`
 	IsSidechain bool          `json:"isSidechain"`
 	Message     *EventMessage `json:"message,omitempty"`
+
+	// Attribution fields are stamped by Claude Code at the top level of
+	// assistant events — never inside message, and never on user events. They
+	// describe which skill's instructions were in context when the turn ran, so
+	// on a Skill tool call they name the *caller*, not the skill being invoked.
+	//
+	// Claude Code emits one event per content block, all sharing a message id
+	// and therefore identical attribution, so counting these per event
+	// over-counts. See AttributionProcessor, which counts per tool_use block.
+	AttributionSkill  string `json:"attributionSkill,omitempty"`
+	AttributionPlugin string `json:"attributionPlugin,omitempty"`
+	AttributionAgent  string `json:"attributionAgent,omitempty"`
+	// AttributionMcpServer and AttributionMcpTool are recorded but deliberately
+	// NOT counted: they hold the last MCP tool touched and persist onto later,
+	// unrelated turns. MCP attribution is parsed from the tool_use block name
+	// (mcp__<server>__<tool>) instead, which is authoritative.
+	AttributionMcpServer string `json:"attributionMcpServer,omitempty"`
+	AttributionMcpTool   string `json:"attributionMcpTool,omitempty"`
+	// Effort is the reasoning-effort tier the turn ran at.
+	Effort string `json:"effort,omitempty"`
+
 	// Raw holds the original JSON bytes so processors can extract fields not
 	// present in the decoded struct (e.g. system event subtypes).
 	Raw json.RawMessage `json:"-"`
@@ -81,6 +104,18 @@ type SessionInsight struct {
 	ToolCallsTotal int            `json:"tool_calls_total"`
 	ToolBreakdown  map[string]int `json:"tool_breakdown"`
 
+	// AttributionProcessor. Every breakdown counts tool_use blocks, so they
+	// share ToolCallsTotal as their denominator:
+	// sum(SkillBreakdown) + UnattributedCalls == ToolCallsTotal.
+	SkillBreakdown     map[string]int `json:"skill_breakdown"`
+	PluginBreakdown    map[string]int `json:"plugin_breakdown"`
+	McpServerBreakdown map[string]int `json:"mcp_server_breakdown"`
+	McpToolBreakdown   map[string]int `json:"mcp_tool_breakdown"`
+	EffortBreakdown    map[string]int `json:"effort_breakdown"`
+	// UnattributedCalls is tool calls made with no skill in context — built-in
+	// tool use. Kept out of SkillBreakdown so the sum above reconciles.
+	UnattributedCalls int `json:"unattributed_calls"`
+
 	// TimeProfileProcessor
 	TotalDurationMs int64 `json:"total_duration_ms"`
 	ThinkingTimeMs  int64 `json:"thinking_time_ms"`
@@ -135,6 +170,11 @@ type InsightAggregateSummary struct {
 	AvgTotalDurationMs   float64
 	SessionsWithErrors   int
 	TopToolTotals        map[string]int
+	// Attribution totals, merged across sessions the same way TopToolTotals is.
+	// All three count tool calls, so they are directly comparable with it.
+	TopSkillTotals     map[string]int
+	TopPluginTotals    map[string]int
+	TopMcpServerTotals map[string]int
 }
 
 // InsightStorer persists and retrieves per-session insight records.

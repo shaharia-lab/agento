@@ -843,6 +843,12 @@ export interface InsightSummary {
   sessions_with_errors: number
   avg_total_duration_ms: number
   top_tools: ToolUsageStat[]
+  /** Tool calls grouped by the skill whose instructions were in context. */
+  top_skills: ToolUsageStat[]
+  /** Tool calls grouped by the plugin that shipped the skill. */
+  top_plugins: ToolUsageStat[]
+  /** Tool calls grouped by MCP server, parsed from `mcp__<server>__<tool>`. */
+  top_mcp_servers: ToolUsageStat[]
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

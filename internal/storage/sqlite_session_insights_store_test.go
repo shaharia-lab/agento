@@ -314,3 +314,77 @@ func TestSQLiteSessionInsightsStore_NeedsProcessing(t *testing.T) {
 		t.Errorf("expected 1 session needing version-2 processing, got %v", ids)
 	}
 }
+
+// TestInsightRecord_AttributionRoundTrip pins the new breakdown columns through
+// a real upsert and read-back. They are positional in both the INSERT and the
+// Scan, so a misalignment would be silent.
+func TestInsightRecord_AttributionRoundTrip(t *testing.T) {
+	store := setupInsightsTestDB(t)
+	ctx := context.Background()
+
+	r := sampleRecord("attr-session")
+	r.SkillBreakdown = map[string]int{"lab-workflow:review-pr": 10, "vibexp:prime": 3}
+	r.PluginBreakdown = map[string]int{"lab-workflow": 10}
+	r.McpServerBreakdown = map[string]int{"vibexp_io_vibexp_team": 4}
+	r.McpToolBreakdown = map[string]int{"vibexp_io_post_to_feed": 4}
+	r.EffortBreakdown = map[string]int{"high": 13}
+	r.UnattributedCalls = 7
+
+	if err := store.Upsert(ctx, r); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := store.Get(ctx, "attr-session")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected a record")
+	}
+
+	if got.SkillBreakdown["lab-workflow:review-pr"] != 10 || got.SkillBreakdown["vibexp:prime"] != 3 {
+		t.Errorf("skill_breakdown round-trip failed: %+v", got.SkillBreakdown)
+	}
+	if got.PluginBreakdown["lab-workflow"] != 10 {
+		t.Errorf("plugin_breakdown round-trip failed: %+v", got.PluginBreakdown)
+	}
+	if got.McpServerBreakdown["vibexp_io_vibexp_team"] != 4 {
+		t.Errorf("mcp_server_breakdown round-trip failed: %+v", got.McpServerBreakdown)
+	}
+	if got.McpToolBreakdown["vibexp_io_post_to_feed"] != 4 {
+		t.Errorf("mcp_tool_breakdown round-trip failed: %+v", got.McpToolBreakdown)
+	}
+	if got.EffortBreakdown["high"] != 13 {
+		t.Errorf("effort_breakdown round-trip failed: %+v", got.EffortBreakdown)
+	}
+	if got.UnattributedCalls != 7 {
+		t.Errorf("unattributed_calls = %d, want 7", got.UnattributedCalls)
+	}
+	// The pre-existing columns must still land in the right places.
+	if got.ToolCallsTotal != r.ToolCallsTotal || got.ToolBreakdown["bash"] != 10 {
+		t.Errorf("existing columns shifted: tool_calls_total=%d breakdown=%+v",
+			got.ToolCallsTotal, got.ToolBreakdown)
+	}
+}
+
+// TestInsightRecord_NilBreakdownsStoreAsEmpty covers a record written before
+// the attribution processor ran: the columns default to '{}' and must read back
+// without error.
+func TestInsightRecord_NilBreakdownsStoreAsEmpty(t *testing.T) {
+	store := setupInsightsTestDB(t)
+	ctx := context.Background()
+
+	r := sampleRecord("nil-attr-session") // leaves every attribution map nil
+	if err := store.Upsert(ctx, r); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := store.Get(ctx, "nil-attr-session")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if len(got.SkillBreakdown) != 0 || len(got.EffortBreakdown) != 0 {
+		t.Errorf("expected empty breakdowns, got %+v / %+v", got.SkillBreakdown, got.EffortBreakdown)
+	}
+	if got.UnattributedCalls != 0 {
+		t.Errorf("unattributed_calls = %d, want 0", got.UnattributedCalls)
+	}
+}
