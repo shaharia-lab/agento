@@ -22,6 +22,7 @@ import {
   CheckCircle,
   Bot,
   Plug,
+  Scissors,
 } from 'lucide-react'
 import { formatTokens, shortPath, formatDuration } from '@/lib/format'
 
@@ -117,6 +118,13 @@ function getStepStyle(step: JourneyStep): StepStyle {
         label: 'Turn Duration',
         color: 'text-zinc-500 dark:text-zinc-400',
         bg: 'bg-zinc-50 dark:bg-zinc-800/50 border-zinc-200 dark:border-zinc-700/50',
+      }
+    case 'compaction':
+      return {
+        icon: <Scissors className="h-3.5 w-3.5" />,
+        label: 'Compaction',
+        color: 'text-amber-600 dark:text-amber-400',
+        bg: 'bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-900/50',
       }
     default:
       return {
@@ -276,6 +284,16 @@ function StepContent({ step }: Readonly<{ step: JourneyStep }>) {
       )
     case 'mcp_tool':
       return <MCPToolContent data={data} />
+    case 'compaction':
+      return (
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Context compacted
+          {data?.trigger ? ` (${data.trigger as string})` : ''}
+          {typeof data?.pre_tokens === 'number' && typeof data?.post_tokens === 'number'
+            ? `: ${(data.pre_tokens as number).toLocaleString()} → ${(data.post_tokens as number).toLocaleString()} tokens`
+            : ''}
+        </p>
+      )
     case 'thinking_duration':
       return (
         <p className="text-xs text-zinc-400">

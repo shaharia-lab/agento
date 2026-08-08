@@ -146,6 +146,19 @@ func (c *Cache) ListSubagents(sessionID string) []ClaudeSubagent {
 	return subagents
 }
 
+// ListPRs returns the pull requests linked to one session. It takes the cache
+// mutex, so it must not be called from a method that already holds it.
+func (c *Cache) ListPRs(sessionID string) []ClaudeSessionPR {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	prs, err := ListPRs(c.db, c.logger, sessionID)
+	if err != nil {
+		c.logger.Warn("claude sessions: failed to list linked PRs", "session_id", sessionID, "error", err)
+		return []ClaudeSessionPR{}
+	}
+	return prs
+}
+
 // UpdateCustomTitle sets a user-defined label for the given session. The title
 // is preserved across incremental rescans and removed only when the underlying
 // JSONL file is deleted from ~/.claude/projects/.

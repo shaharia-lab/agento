@@ -362,3 +362,111 @@ func TestGetSessionJourney_ValidSessionID(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildJourney_CompactBoundaryStep covers the compaction step: a compacted
+// conversation is one of the most useful things to see on a timeline, since it
+// explains an abrupt loss of context.
+func TestBuildJourney_CompactBoundaryStep(t *testing.T) {
+	lines := []string{
+		userInputEvent("u1", ts(t0), "Keep going"),
+		mustMarshal(map[string]any{
+			"type":      "system",
+			"subtype":   "compact_boundary",
+			"uuid":      "s1",
+			"timestamp": ts(t1),
+			"content":   "Conversation compacted",
+			"compactMetadata": map[string]any{
+				"trigger":                 "auto",
+				"preTokens":               166513,
+				"postTokens":              29504,
+				"cumulativeDroppedTokens": 137009,
+				"durationMs":              145993,
+			},
+		}),
+	}
+
+	journey, err := buildJourney("test-session", writeJourneyJSONL(t, lines), testLogger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if journey == nil || len(journey.Turns) == 0 {
+		t.Fatal("expected a turn")
+	}
+
+	var step *JourneyStep
+	for i := range journey.Turns[0].Steps {
+		if journey.Turns[0].Steps[i].Type == "compaction" {
+			step = &journey.Turns[0].Steps[i]
+			break
+		}
+	}
+	if step == nil {
+		t.Fatal("expected a compaction step")
+	}
+	if step.DurationMs != 145993 {
+		t.Errorf("duration_ms = %d, want 145993", step.DurationMs)
+	}
+
+	var data CompactionData
+	if err := json.Unmarshal(step.Data, &data); err != nil {
+		t.Fatalf("decode compaction data: %v", err)
+	}
+	if data.Trigger != "auto" || data.PreTokens != 166513 || data.PostTokens != 29504 {
+		t.Errorf("compaction data = %+v", data)
+	}
+	if data.DroppedTokens != 137009 {
+		t.Errorf("dropped_tokens = %d, want 137009", data.DroppedTokens)
+	}
+}
+
+// TestBuildJourney_OtherSystemSubtypesProduceNoStep guards the negative case —
+// only compact_boundary and turn_duration are consumed.
+func TestBuildJourney_OtherSystemSubtypesProduceNoStep(t *testing.T) {
+	lines := []string{
+		userInputEvent("u1", ts(t0), "Hello"),
+		mustMarshal(map[string]any{
+			"type": "system", "subtype": "away_summary",
+			"uuid": "s1", "timestamp": ts(t1), "content": "You were away",
+		}),
+		mustMarshal(map[string]any{
+			"type": "system", "subtype": "local_command",
+			"uuid": "s2", "timestamp": ts(t2), "content": "/clear",
+		}),
+	}
+
+	journey, err := buildJourney("test-session", writeJourneyJSONL(t, lines), testLogger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, turn := range journey.Turns {
+		for _, s := range turn.Steps {
+			if s.Type == "compaction" || s.Type == "thinking_duration" {
+				t.Errorf("unexpected step %q from an unconsumed system subtype", s.Type)
+			}
+		}
+	}
+}
+
+// TestBuildJourney_CompactBoundaryWithoutMetadata must not emit a step — the
+// payload is what makes the step worth showing.
+func TestBuildJourney_CompactBoundaryWithoutMetadata(t *testing.T) {
+	lines := []string{
+		userInputEvent("u1", ts(t0), "Hello"),
+		mustMarshal(map[string]any{
+			"type": "system", "subtype": "compact_boundary",
+			"uuid": "s1", "timestamp": ts(t1),
+		}),
+	}
+
+	journey, err := buildJourney("test-session", writeJourneyJSONL(t, lines), testLogger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, turn := range journey.Turns {
+		for _, s := range turn.Steps {
+			if s.Type == "compaction" {
+				t.Error("expected no compaction step when compactMetadata is absent")
+			}
+		}
+	}
+}

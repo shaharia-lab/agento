@@ -81,6 +81,9 @@ func (s *Server) handleGetClaudeSession(w http.ResponseWriter, r *http.Request) 
 	// the message tree rather than the summary, so it does not collect them.
 	detail.NativeTitle, detail.AITitle = s.claudeSessionCache.GetTitles(id)
 	detail.DisplayTitle = detail.ResolveDisplayTitle()
+	// Linked PRs live in their own table, for the same reason as the titles:
+	// the detail reader builds the message tree, not the summary.
+	detail.PRs = s.claudeSessionCache.ListPRs(id)
 	// Sub-agent transcripts live in sibling files, so they come from the cache
 	// too rather than from the session JSONL this detail was read from.
 	detail.Subagents = s.claudeSessionCache.ListSubagents(id)

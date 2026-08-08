@@ -330,6 +330,35 @@ ALTER TABLE claude_session_cache ADD COLUMN ai_title TEXT NOT NULL DEFAULT '';
 ALTER TABLE claude_session_cache ADD COLUMN event_count INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		version: 15,
+		sql: `
+-- Session metadata Claude Code records in the transcript. All are derived from
+-- the JSONL, so unlike custom_title they refresh on every rescan. Populated by
+-- the CurrentScannerVersion 3 -> 4 bump, which forces one full re-read.
+ALTER TABLE claude_session_cache ADD COLUMN agent_name       TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_session_cache ADD COLUMN permission_mode  TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_session_cache ADD COLUMN mode             TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_session_cache ADD COLUMN relocated_cwd    TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_session_cache ADD COLUMN worktree_name    TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_session_cache ADD COLUMN worktree_branch  TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_session_cache ADD COLUMN original_branch  TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_session_cache ADD COLUMN compaction_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE claude_session_cache ADD COLUMN dropped_tokens   INTEGER NOT NULL DEFAULT 0;
+
+-- Pull requests a session produced. One session can link several, and the same
+-- pr-link event is re-emitted on every resume, so the URL is part of the key.
+CREATE TABLE claude_session_pr (
+    session_id    TEXT NOT NULL,
+    pr_url        TEXT NOT NULL,
+    pr_number     INTEGER NOT NULL DEFAULT 0,
+    pr_repository TEXT NOT NULL DEFAULT '',
+    first_seen_at DATETIME,
+    PRIMARY KEY (session_id, pr_url)
+);
+CREATE INDEX idx_session_pr_session ON claude_session_pr(session_id);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures
