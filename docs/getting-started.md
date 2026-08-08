@@ -75,6 +75,32 @@ AGENTO_DATA_DIR=/data/agento agento web
 
 ---
 
+## Run Agento in the background
+
+`agento web` runs in the foreground. To keep Agento running across logout, reboot, and crashes, install it as a user-level background service:
+
+```bash
+agento service install
+```
+
+- **macOS** — a LaunchAgent at `~/Library/LaunchAgents/com.shaharialab.agento.plist`. It starts at **login** (not at boot) and restarts automatically on crash.
+- **Linux** — a systemd user unit at `~/.config/systemd/user/agento.service` with `Restart=on-failure`. `install` also runs `loginctl enable-linger $USER` so the service keeps running after you log out (required on headless/SSH machines).
+
+Manage it with:
+
+```bash
+agento service status      # installed/enabled/running, PID, URL, log path (exit 1 when not running)
+agento service stop        # stop without removing
+agento service start       # start again
+agento service restart
+agento service logs -f     # tail the service log (~/.agento/logs/service.log)
+agento service uninstall   # stop, disable, and remove the unit — no residue
+```
+
+The unit runs `agento web --no-browser` with your install-time `PATH`, `PORT`, and `AGENTO_DATA_DIR` baked in, so the service can find the Claude Code CLI. Windows is not supported.
+
+---
+
 ## Update
 
 ```bash

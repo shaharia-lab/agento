@@ -93,6 +93,7 @@ One line per package — list files in a directory to see current contents.
 - **`internal/logger/`** — Structured `slog`: rotating system log (lumberjack) + per-session logs at `<logDir>/sessions/<id>.log`; `otelslog` bridge forwards logs to OTel when enabled.
 - **`internal/telemetry/`** — OTel providers (OTLP gRPC or Prometheus), config persisted to `<data_dir>/monitoring.json`, hot-reload via `Manager.Update()`, pre-built instruments (`agento.http.*`, `agento.agent.*`, `agento.chat.*`, `agento.storage.*`).
 - **`internal/updater/`** — Release checker (cached 1h, feeds the UI update banner) and in-place installer behind `agento update`.
+- **`internal/daemon/`** — `agento service` backend: installs and manages Agento as a user-level background service (launchd on macOS, systemd user units on Linux), with embedded unit/plist templates and a `commandRunner` seam for tests.
 - **`internal/build/`** — Version variables injected via `-ldflags`.
 
 **Import rule**: `config` ← `service` ← `api` (never reverse).
