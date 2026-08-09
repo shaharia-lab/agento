@@ -29,8 +29,14 @@ import {
 import { Tooltip } from '@/components/ui/tooltip'
 import { CopyableId } from '@/components/CopyableId'
 import { formatCost, formatTokens, shortPath } from '@/lib/format'
-import { overlapsRange, resolvePresetRange, type TimePreset } from '@/lib/timefilter'
-import { decodeWindows, overlapsAnyWindow } from '@/lib/drilldown'
+import { resolvePresetRange, type TimePreset } from '@/lib/timefilter'
+import { decodeWindows } from '@/lib/drilldown'
+import {
+  matchesFilters,
+  permissionModesOf,
+  hasPRs as sessionsHavePRs,
+  hasFavorites as hasFavoriteSessions,
+} from '@/lib/sessionFilters'
 
 const TIME_PRESET_LABELS: Record<TimePreset, string> = {
   all: 'All time',
@@ -111,14 +117,11 @@ export default function ClaudeSessionsPage() {
       .catch(() => setSessions(applyFavorite(sessionId, !next)))
   }
 
-  const hasFavorites = sessions.some(s => s.is_favorite)
-  const hasPRs = sessions.some(s => (s.prs?.length ?? 0) > 0)
+  const hasFavorites = hasFavoriteSessions(sessions)
+  const hasPRs = sessionsHavePRs(sessions)
   // Only offer the permission-mode filter once more than one mode is present —
   // a single-value dropdown filters nothing.
-  const permissionModes = useMemo(
-    () => [...new Set(sessions.map(s => s.permission_mode).filter((m): m is string => !!m))].sort(),
-    [sessions],
-  )
+  const permissionModes = useMemo(() => permissionModesOf(sessions), [sessions])
 
   const timeFilterActive = drilldownActive || timePreset !== 'all'
 
@@ -133,32 +136,19 @@ export default function ClaudeSessionsPage() {
 
   const filtered = useMemo(() => {
     const { from, to } = resolvePresetRange(timePreset, customFrom, customTo)
-    const result = sessions.filter(s => {
-      const matchesProject = filterProject === 'all' || s.project_path === filterProject
-      const q = search.toLowerCase()
-      const matchesSearch =
-        !q ||
-        s.session_id.toLowerCase().includes(q) ||
-        (s.display_title ?? '').toLowerCase().includes(q) ||
-        s.preview.toLowerCase().includes(q) ||
-        s.project_path.toLowerCase().includes(q)
-      const matchesFavorites = !filterFavorites || !!s.is_favorite
-      const matchesHasPR = !filterHasPR || (s.prs?.length ?? 0) > 0
-      const matchesPermissionMode =
-        filterPermissionMode === 'all' || s.permission_mode === filterPermissionMode
-      const matchesTime = drilldownActive
-        ? overlapsAnyWindow(s.start_time, s.last_activity, drilldownWindows)
-        : overlapsRange(s.start_time, s.last_activity, from, to)
-      return (
-        matchesProject &&
-        matchesSearch &&
-        matchesFavorites &&
-        matchesHasPR &&
-        matchesPermissionMode &&
-        matchesTime
-      )
-    })
-    return result
+    // Built once, not per session — the predicate is the same for every row.
+    const filters = {
+      project: filterProject,
+      search,
+      favorites: filterFavorites,
+      hasPR: filterHasPR,
+      permissionMode: filterPermissionMode,
+      from,
+      to,
+      drilldownActive,
+      drilldownWindows,
+    }
+    return sessions.filter(s => matchesFilters(s, filters))
   }, [
     sessions,
     search,
