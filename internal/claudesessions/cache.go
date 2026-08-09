@@ -17,6 +17,12 @@ import (
 // stale and an incremental rescan is triggered.
 const CacheTTL = 1 * time.Hour
 
+// coldStartScanWait bounds how long a read blocks when the cache holds nothing
+// to serve. Only the cold path waits: a first run has no rows, and handing back
+// an empty list would look like "no sessions" rather than "not scanned yet".
+// Every warm read returns immediately, however stale.
+const coldStartScanWait = 30 * time.Second
+
 // pricingRevUnknown marks a resolver snapshot whose revision could not be
 // read; it never matches a stored revision, so a degraded pricing store
 // behaves as "cost data may be stale" rather than asserting it is fresh.
@@ -60,7 +66,18 @@ func (c *Cache) pricingChanged() bool {
 // Cache is a SQLite-backed cache of Claude Code session summaries with
 // TTL-based invalidation and incremental scanning. It is safe for concurrent use.
 type Cache struct {
-	mu      sync.Mutex
+	// mu guards the fields below and the short metadata statements. It is
+	// deliberately NOT held across a scan: a full re-read is ~18s on a large
+	// corpus, and holding the lock for that long is the stall this design
+	// exists to avoid.
+	mu sync.Mutex
+	// scanning admits exactly one scan at a time, so overlapping triggers
+	// (two rate saves in a row) cannot queue a second full re-read.
+	scanning bool
+	// scanDone is closed when the in-flight scan finishes. Only the cold-cache
+	// path waits on it.
+	scanDone chan struct{}
+
 	db      *sql.DB
 	logger  *slog.Logger
 	bus     eventbus.EventBus // optional; publishes session events on scan
@@ -156,50 +173,121 @@ func (c *Cache) notify(sessionID, filePath string, isNew bool) {
 // StartBackgroundScan runs an incremental scan in a background goroutine so
 // the server starts immediately while the cache is being populated.
 func (c *Cache) StartBackgroundScan() {
-	go func() {
-		c.logger.Info("claude sessions: starting background scan")
-		c.mu.Lock()
-		defer c.mu.Unlock()
+	c.EnsureScan()
+}
 
+// EnsureScan starts a background scan unless one is already running, and
+// returns the channel closed when the running scan finishes.
+//
+// Admission is decided under c.mu but the scan itself runs outside it, which
+// is the whole point: readers stay unblocked for the scan's full duration.
+// Moving the scan into a goroutine without this would only unblock the
+// triggering request — the next reader would wait on the mutex just as long.
+func (c *Cache) EnsureScan() <-chan struct{} {
+	c.mu.Lock()
+	if c.scanning {
+		done := c.scanDone
+		c.mu.Unlock()
+		return done
+	}
+	c.scanning = true
+	done := make(chan struct{})
+	c.scanDone = done
+	c.mu.Unlock()
+
+	go func() {
+		defer func() {
+			c.mu.Lock()
+			c.scanning = false
+			c.mu.Unlock()
+			// Closed last, so a waiter that wakes on it never observes the
+			// scan as still running.
+			close(done)
+		}()
+		c.logger.Info("claude sessions: starting background scan")
 		if _, err := IncrementalScanWithNotify(c.db, c.logger, c.notify); err != nil {
+			// pricing_rev and scanner_version are advanced inside the scan and
+			// only after it applies its changes, so a failure leaves the drift
+			// recorded and the next read retries it.
 			c.logger.Warn("claude sessions: background scan failed", "error", err)
 			return
 		}
 		c.logger.Info("claude sessions: background scan complete")
 	}()
+	return done
 }
 
-// List returns all cached session summaries. If the cache has expired,
-// an incremental rescan is performed before returning.
-func (c *Cache) List() []ClaudeSessionSummary {
+// ScanInProgress reports whether a background scan is currently running.
+func (c *Cache) ScanInProgress() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.scanning
+}
 
-	// A rate edit must not wait for the hourly TTL to take effect in the cost
-	// figures: refresh the resolver snapshot first. Since #188 cost is stored on
-	// the row rather than recomputed here, so a changed catalog also has to skip
-	// the freshness short-circuit — the scan is what re-reads the transcripts
-	// and re-prices them, and cached rows would otherwise serve stale costs
-	// indefinitely.
+// CostsStale reports whether the cached costs were computed under a different
+// pricing catalog than the one now loaded — i.e. the figures being served are
+// correct for the old rates and a re-cost is pending.
+func (c *Cache) CostsStale() bool {
+	return c.pricingChanged()
+}
+
+// LastScannedAt returns when the cache was last fully scanned. The zero time
+// means never.
+func (c *Cache) LastScannedAt() time.Time {
+	var t time.Time
+	row := c.db.QueryRowContext(context.Background(),
+		"SELECT last_scanned_at FROM claude_cache_metadata WHERE id = 1")
+	if row.Scan(&t) != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// List returns all cached session summaries, always from the cache. When the
+// cache is stale — the TTL expired, or the pricing catalog moved since the
+// costs were computed — the rescan is started in the background and the
+// currently cached rows are returned immediately.
+//
+// Serving slightly stale figures beats blocking: since #188 a rate edit can no
+// longer re-cost cached rows in place (re-pricing needs each message's own
+// model and timestamp, which the row does not keep), so the only way to apply
+// one is to re-read every transcript. That is ~18s on a large corpus, and #189
+// made rate edits a routine UI action. Callers distinguish the two states via
+// CostsStale/ScanInProgress and label the figures rather than stalling on them.
+func (c *Cache) List() []ClaudeSessionSummary {
+	// A rate edit must not wait for the hourly TTL to reach the cost figures,
+	// so pick up a new catalog snapshot before deciding anything.
 	c.refreshPricingResolver()
 
-	if c.isFresh() && !c.pricingChanged() {
-		sessions, err := c.loadAll()
-		if err != nil {
-			c.logger.Warn("claude sessions: failed to load from cache", "error", err)
-			return []ClaudeSessionSummary{}
-		}
+	var done <-chan struct{}
+	if !c.isFresh() || c.pricingChanged() {
+		done = c.EnsureScan()
+	}
+
+	sessions := c.loadOrEmpty()
+	if len(sessions) > 0 || done == nil {
 		return sessions
 	}
 
-	sessions, err := IncrementalScanWithNotify(c.db, c.logger, c.notify)
+	// Cold cache: there is genuinely nothing to serve, and an empty list reads
+	// as "no sessions" rather than "not scanned yet". Wait for the scan that is
+	// already running, bounded so a pathological corpus cannot hang the request.
+	select {
+	case <-done:
+		return c.loadOrEmpty()
+	case <-time.After(coldStartScanWait):
+		c.logger.Warn("claude sessions: cold-start scan still running; returning an empty list",
+			"waited", coldStartScanWait)
+		return sessions
+	}
+}
+
+// loadOrEmpty reads the cached rows, degrading to an empty slice on error so
+// the handler always marshals an array.
+func (c *Cache) loadOrEmpty() []ClaudeSessionSummary {
+	sessions, err := c.loadAll()
 	if err != nil {
-		c.logger.Warn("claude sessions: refresh scan failed", "error", err)
-		// Try returning stale data.
-		stale, loadErr := c.loadAll()
-		if loadErr == nil && len(stale) > 0 {
-			return stale
-		}
+		c.logger.Warn("claude sessions: failed to load from cache", "error", err)
 		return []ClaudeSessionSummary{}
 	}
 	return sessions

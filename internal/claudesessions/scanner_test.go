@@ -255,12 +255,20 @@ func TestCache_ListAndInvalidate(t *testing.T) {
 		t.Fatalf("expected 1 session on cache hit, got %d", len(sessions))
 	}
 
-	// Invalidate and add a new file.
+	// Invalidate and add a new file. Since #208 the rescan runs in the
+	// background, so this List still serves the cached row rather than
+	// blocking on a full re-read — that non-blocking read is the point.
 	writeJSONL(t, projectDir, "session-002", ts.Add(time.Hour))
 	cache.Invalidate()
 
-	sessions = cache.List()
-	if len(sessions) != 2 {
-		t.Fatalf("expected 2 sessions after invalidate, got %d", len(sessions))
+	if got := len(cache.List()); got != 1 {
+		t.Fatalf("expected the 1 cached session while the rescan runs, got %d", got)
+	}
+
+	// Once the background scan finishes the new session appears, with no
+	// further user action.
+	<-cache.EnsureScan()
+	if got := len(cache.List()); got != 2 {
+		t.Fatalf("expected 2 sessions after the background scan, got %d", got)
 	}
 }

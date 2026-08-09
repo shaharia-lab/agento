@@ -20,6 +20,7 @@ import type {
   ClaudeSettingsProfile,
   ClaudeSettingsProfileDetail,
   ClaudeProject,
+  ClaudeSessionStatus,
   ClaudeSessionSummary,
   ClaudeSessionDetail,
   SessionJourney,
@@ -221,6 +222,13 @@ export const claudeSessionsApi = {
 
   /** List all projects (decoded paths) found in ~/.claude/projects/. */
   projects: () => request<ClaudeProject[]>('/claude-sessions/projects'),
+
+  /**
+   * Cache freshness. Since #208 the list is served from cache even when a
+   * re-cost is pending, so this is how a caller tells "these costs are
+   * current" from "these costs predate the catalog and are being recomputed".
+   */
+  status: () => request<ClaudeSessionStatus>('/claude-sessions/status'),
 
   /** Get the full detail of a single session including messages and todos. */
   get: (id: string) => request<ClaudeSessionDetail>(`/claude-sessions/${id}`),

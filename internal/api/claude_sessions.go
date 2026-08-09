@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -100,13 +101,43 @@ func (s *Server) handleGetClaudeSession(w http.ResponseWriter, r *http.Request) 
 	s.writeJSON(w, http.StatusOK, detail)
 }
 
-// handleRefreshClaudeSessionCache invalidates the in-memory session cache.
-// The next call to List() will trigger a fresh scan.
+// handleRefreshClaudeSessionCache invalidates the cached scan metadata and
+// starts a rescan in the background, returning 202 immediately.
 func (s *Server) handleRefreshClaudeSessionCache(w http.ResponseWriter, _ *http.Request) {
 	s.claudeSessionCache.Invalidate()
-	// Trigger rescan in background so the next list request gets fresh data.
-	go func() { s.claudeSessionCache.List() }()
+	// EnsureScan rather than `go List()`: it admits exactly one scan, so a
+	// double-click cannot start a second full re-read.
+	s.claudeSessionCache.EnsureScan()
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// claudeSessionStatus tells the UI whether the cost figures it is showing are
+// current. It is a separate endpoint rather than an envelope around
+// GET /claude-sessions, which returns a bare array — wrapping that would break
+// every existing client for no gain.
+type claudeSessionStatus struct {
+	// CostsStale means the served costs were computed under an older pricing
+	// catalog and a re-cost is pending. The figures are not wrong for the rates
+	// they were computed under, so they are labeled rather than withheld.
+	CostsStale bool `json:"costs_stale"`
+	// ScanInProgress means a background scan is running right now.
+	ScanInProgress bool `json:"scan_in_progress"`
+	// LastScannedAt is empty when the cache has never been scanned.
+	LastScannedAt string `json:"last_scanned_at"`
+}
+
+// handleGetClaudeSessionStatus reports cache freshness so the sessions list can
+// show a pending-refresh indicator instead of blocking on a re-cost.
+func (s *Server) handleGetClaudeSessionStatus(w http.ResponseWriter, _ *http.Request) {
+	var lastScanned string
+	if t := s.claudeSessionCache.LastScannedAt(); !t.IsZero() {
+		lastScanned = t.UTC().Format(time.RFC3339)
+	}
+	s.writeJSON(w, http.StatusOK, claudeSessionStatus{
+		CostsStale:     s.claudeSessionCache.CostsStale(),
+		ScanInProgress: s.claudeSessionCache.ScanInProgress(),
+		LastScannedAt:  lastScanned,
+	})
 }
 
 // handleUpdateClaudeSession updates mutable fields of a cached Claude Code session.

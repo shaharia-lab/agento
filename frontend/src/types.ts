@@ -596,6 +596,20 @@ export interface ClaudeSessionCost {
 }
 
 /** A pull request a session produced, from a `pr-link` event. */
+/** Cache freshness for the Claude sessions list (#208). */
+export interface ClaudeSessionStatus {
+  /**
+   * The served costs were computed under an older pricing catalog and a
+   * re-cost is pending. They are not wrong for the rates they were computed
+   * under, so the UI labels them rather than hiding them.
+   */
+  costs_stale: boolean
+  /** A background scan is running right now. */
+  scan_in_progress: boolean
+  /** RFC3339; empty when the cache has never been scanned. */
+  last_scanned_at: string
+}
+
 export interface ClaudeSessionPR {
   pr_number: number
   pr_url: string
