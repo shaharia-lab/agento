@@ -421,6 +421,26 @@ func (c *Cache) GetCustomTitle(sessionID string) string {
 	return title
 }
 
+// GetSummary returns the cached summary row for one session, or nil when the
+// scanner has not reached it yet.
+//
+// The detail endpoint reads the session's own JSONL, which carries token counts
+// but no cost: cost is accumulated per assistant message during a scan and
+// stored (#188), because a re-read has no per-message pricing context to work
+// from. Without this the detail page would report $0.00 for a session the list
+// prices correctly.
+func (c *Cache) GetSummary(sessionID string) *ClaudeSessionSummary {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s, err := querySessionSummary(c.db, c.logger, sessionID)
+	if err != nil {
+		c.logger.Warn("claude sessions: failed to read cached summary",
+			"session_id", sessionID, "error", err)
+		return nil
+	}
+	return s
+}
+
 // GetTitles returns the cached native and AI titles for a session. Both are
 // empty when the session is not cached or Claude Code recorded no title.
 func (c *Cache) GetTitles(sessionID string) (nativeTitle, aiTitle string) {

@@ -1125,7 +1125,7 @@ func updateLastScanned(db *sql.DB, logger *slog.Logger) {
 // folded in. The aggregate is a grouped sub-select rather than a join against
 // the raw rows so a session with several sub-agents is not multiplied out, and
 // COALESCE keeps the LEFT JOIN's NULLs from reaching the int scans.
-const sessionSummarySelect = `
+const sessionSummaryFrom = `
 	SELECT c.session_id, c.project_path, c.preview, c.custom_title, c.is_favorite,
 	       c.start_time, c.last_activity, c.message_count, c.event_count,
 	       c.input_tokens, c.output_tokens, c.cache_creation_tokens, c.cache_read_tokens,
@@ -1163,8 +1163,17 @@ const sessionSummarySelect = `
 		       GROUP_CONCAT(NULLIF(unpriced_models, ''), char(10)) AS um
 		FROM claude_subagent_cache
 		GROUP BY parent_session_id
-	) sa ON sa.parent_session_id = c.session_id
+	) sa ON sa.parent_session_id = c.session_id`
+
+const sessionSummarySelect = sessionSummaryFrom + `
 	ORDER BY c.last_activity DESC`
+
+// sessionSummaryByID is the same projection narrowed to one session, so the
+// detail endpoint reads back exactly the figures the list shows. It must stay
+// derived from sessionSummaryFrom: the costs are stored rather than recomputed
+// (#188), and a second hand-written projection would be free to drift.
+const sessionSummaryByID = sessionSummaryFrom + `
+	WHERE c.session_id = ?`
 
 // querySessionSummaries runs sessionSummarySelect and scans the result. Both
 // loadAllSessions and Cache.loadAll share it so the two paths cannot drift.
@@ -1181,37 +1190,10 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 
 	sessions := []ClaudeSessionSummary{}
 	for rows.Next() {
-		var s ClaudeSessionSummary
-		var unpriced, subagentUnpricedModels string
-		var subagentUnpriced int
-		if err := rows.Scan(
-			&s.SessionID, &s.ProjectPath, &s.Preview, &s.CustomTitle, &s.IsFavorite,
-			&s.StartTime, &s.LastActivity, &s.MessageCount, &s.EventCount,
-			&s.Usage.InputTokens, &s.Usage.OutputTokens,
-			&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
-			&s.Usage.CacheCreation5mTokens, &s.Usage.CacheCreation1hTokens,
-			&s.GitBranch, &s.Model, &s.CWD, &s.NativeTitle, &s.AITitle,
-			&s.AgentName, &s.PermissionMode, &s.Mode, &s.RelocatedCWD,
-			&s.WorktreeName, &s.WorktreeBranch, &s.OriginalBranch,
-			&s.CompactionCount, &s.DroppedTokens,
-			&s.Cost.InputUSD, &s.Cost.OutputUSD, &s.Cost.CacheReadUSD,
-			&s.Cost.CacheWriteUSD, &s.Cost.TotalUSD, &unpriced, &s.UnpricedTokens,
-			&s.SubagentCount, &s.SubagentUsage.InputTokens, &s.SubagentUsage.OutputTokens,
-			&s.SubagentUsage.CacheCreationTokens, &s.SubagentUsage.CacheReadTokens,
-			&s.SubagentUsage.CacheCreation5mTokens, &s.SubagentUsage.CacheCreation1hTokens,
-			&s.SubagentCost.InputUSD, &s.SubagentCost.OutputUSD, &s.SubagentCost.CacheReadUSD,
-			&s.SubagentCost.CacheWriteUSD, &s.SubagentCost.TotalUSD, &subagentUnpriced,
-			&subagentUnpricedModels,
-		); err != nil {
+		s, err := scanSessionSummary(rows)
+		if err != nil {
 			return nil, err
 		}
-		// Delegated work's unpriced models and tokens both count toward the
-		// session's disclosure. Reading one without the other would let a row
-		// report excluded tokens attributed to no model — or worse, show a
-		// confident total for a session that is only partly priced.
-		s.UnpricedModels = mergeUnpricedModels(unpriced, subagentUnpricedModels)
-		s.UnpricedTokens += subagentUnpriced
-		s.DisplayTitle = s.ResolveDisplayTitle()
 		sessions = append(sessions, s)
 	}
 	if err := rows.Err(); err != nil {
@@ -1277,6 +1259,70 @@ func attachSubagentUsageByModel(db *sql.DB, logger *slog.Logger, sessions []Clau
 			sessions[i].SubagentUsageByModel = m
 		}
 	}
+}
+
+// querySessionSummary returns the cached summary for one session, or nil when
+// the scanner has not reached it yet.
+//
+// Unlike querySessionSummaries this attaches neither the linked PRs nor the
+// per-model sub-agent breakdown: its caller (the detail endpoint) reads the
+// stored cost off this row and already has both from the transcript it parsed.
+// A future caller needing them must attach them explicitly.
+func querySessionSummary(db *sql.DB, logger *slog.Logger, sessionID string) (*ClaudeSessionSummary, error) {
+	rows, err := db.QueryContext(context.Background(), sessionSummaryByID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			logger.Warn("failed to close rows", "error", cerr)
+		}
+	}()
+
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	s, err := scanSessionSummary(rows)
+	if err != nil {
+		return nil, err
+	}
+	return &s, rows.Err()
+}
+
+// scanSessionSummary reads one row of the sessionSummaryFrom projection.
+func scanSessionSummary(rows *sql.Rows) (ClaudeSessionSummary, error) {
+	var s ClaudeSessionSummary
+	var unpriced, subagentUnpricedModels string
+	var subagentUnpriced int
+	if err := rows.Scan(
+		&s.SessionID, &s.ProjectPath, &s.Preview, &s.CustomTitle, &s.IsFavorite,
+		&s.StartTime, &s.LastActivity, &s.MessageCount, &s.EventCount,
+		&s.Usage.InputTokens, &s.Usage.OutputTokens,
+		&s.Usage.CacheCreationTokens, &s.Usage.CacheReadTokens,
+		&s.Usage.CacheCreation5mTokens, &s.Usage.CacheCreation1hTokens,
+		&s.GitBranch, &s.Model, &s.CWD, &s.NativeTitle, &s.AITitle,
+		&s.AgentName, &s.PermissionMode, &s.Mode, &s.RelocatedCWD,
+		&s.WorktreeName, &s.WorktreeBranch, &s.OriginalBranch,
+		&s.CompactionCount, &s.DroppedTokens,
+		&s.Cost.InputUSD, &s.Cost.OutputUSD, &s.Cost.CacheReadUSD,
+		&s.Cost.CacheWriteUSD, &s.Cost.TotalUSD, &unpriced, &s.UnpricedTokens,
+		&s.SubagentCount, &s.SubagentUsage.InputTokens, &s.SubagentUsage.OutputTokens,
+		&s.SubagentUsage.CacheCreationTokens, &s.SubagentUsage.CacheReadTokens,
+		&s.SubagentUsage.CacheCreation5mTokens, &s.SubagentUsage.CacheCreation1hTokens,
+		&s.SubagentCost.InputUSD, &s.SubagentCost.OutputUSD, &s.SubagentCost.CacheReadUSD,
+		&s.SubagentCost.CacheWriteUSD, &s.SubagentCost.TotalUSD, &subagentUnpriced,
+		&subagentUnpricedModels,
+	); err != nil {
+		return s, err
+	}
+	// Delegated work's unpriced models and tokens both count toward the
+	// session's disclosure. Reading one without the other would let a row
+	// report excluded tokens attributed to no model — or worse, show a
+	// confident total for a session that is only partly priced.
+	s.UnpricedModels = mergeUnpricedModels(unpriced, subagentUnpricedModels)
+	s.UnpricedTokens += subagentUnpriced
+	s.DisplayTitle = s.ResolveDisplayTitle()
+	return s, nil
 }
 
 // attachPRs fills in each session's linked pull requests with a single query

@@ -13,7 +13,14 @@ import (
 func TestChecker_Check_NotReleaseBuild(t *testing.T) {
 	t.Parallel()
 	c := &Checker{CacheDir: t.TempDir()}
-	for _, v := range []string{"dev", "unknown", "00f2331", ""} {
+	// The `git describe` forms are the ones a plain semver parse accepts: they
+	// are valid prereleases, and semver ranks them below the tag they are ahead
+	// of, so without the dev-build gate a local build reports an update to the
+	// release it already contains.
+	for _, v := range []string{
+		"dev", "unknown", "00f2331", "",
+		"v0.8.0-21-gc325de6-dirty", "v0.8.0-dirty", "v0.8.0-21-gc325de6",
+	} {
 		v := v
 		t.Run(v, func(t *testing.T) {
 			t.Parallel()

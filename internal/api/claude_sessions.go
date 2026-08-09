@@ -87,6 +87,17 @@ func (s *Server) handleGetClaudeSession(w http.ResponseWriter, r *http.Request) 
 		detail.NativeTitle, detail.AITitle = s.claudeSessionCache.GetTitles(id)
 	}
 	detail.DisplayTitle = detail.ResolveDisplayTitle()
+	// Cost is stored per session by the scanner, not derivable from a re-read of
+	// the transcript, so it comes from the cache along with the unpriced-model
+	// disclosure that qualifies it. A session the scanner has not reached yet
+	// keeps the zero value, which the UI shows as $0.00 rather than a wrong
+	// figure.
+	if cached := s.claudeSessionCache.GetSummary(id); cached != nil {
+		detail.Cost = cached.Cost
+		detail.SubagentCost = cached.SubagentCost
+		detail.UnpricedModels = cached.UnpricedModels
+		detail.UnpricedTokens = cached.UnpricedTokens
+	}
 	// Sub-agent transcripts live in sibling files, so they come from the cache
 	// too rather than from the session JSONL this detail was read from.
 	detail.Subagents = s.claudeSessionCache.ListSubagents(id)
