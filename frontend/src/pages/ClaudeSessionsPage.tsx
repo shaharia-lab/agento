@@ -1,7 +1,12 @@
-import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { claudeSessionsApi } from '@/lib/api'
-import type { ClaudeSessionSummary, ClaudeSessionCost, ClaudeProject } from '@/types'
+import type {
+  ClaudeSessionSummary,
+  ClaudeSessionCost,
+  ClaudeProject,
+  ClaudeSessionStatus,
+} from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -37,6 +42,10 @@ import {
   hasPRs as sessionsHavePRs,
   hasFavorites as hasFavoriteSessions,
 } from '@/lib/sessionFilters'
+
+// How often to re-check whether the background re-cost finished. Slow enough
+// to be free, fast enough that a ~18s corpus rescan is noticed promptly.
+const STATUS_POLL_MS = 3000
 
 const TIME_PRESET_LABELS: Record<TimePreset, string> = {
   all: 'All time',
@@ -90,6 +99,43 @@ export default function ClaudeSessionsPage() {
 
   useEffect(() => {
     load()
+  }, [load])
+
+  // Since #208 the list is served from cache even when the pricing catalog
+  // moved, so the costs on screen may predate it while a rescan runs. Poll the
+  // cheap status endpoint until that clears, then reload once so the figures
+  // update without the user having to do anything.
+  const [recosting, setRecosting] = useState(false)
+  const wasPending = useRef(false)
+  useEffect(() => {
+    let cancelled = false
+    let timer: ReturnType<typeof setTimeout>
+
+    const poll = async () => {
+      let status: ClaudeSessionStatus
+      try {
+        status = await claudeSessionsApi.status()
+      } catch {
+        // Status is an affordance, not the feature — a failure here must never
+        // break the list, so stop polling and leave the figures unlabelled.
+        return
+      }
+      if (cancelled) return
+
+      const pending = status.costs_stale || status.scan_in_progress
+      // Tracked in a ref, not read out of the state updater: an updater must
+      // stay pure, and React may invoke it twice in development.
+      if (wasPending.current && !pending) load()
+      wasPending.current = pending
+      setRecosting(pending)
+      if (pending) timer = setTimeout(poll, STATUS_POLL_MS)
+    }
+
+    poll()
+    return () => {
+      cancelled = true
+      clearTimeout(timer)
+    }
   }, [load])
 
   const handleRefresh = async () => {
@@ -245,6 +291,19 @@ export default function ClaudeSessionsPage() {
           Refresh
         </button>
       </div>
+
+      {/* Re-cost pending. Non-blocking by design: the figures below are correct
+          for the rates they were priced at, so they are labelled rather than
+          hidden or waited on. */}
+      {recosting && (
+        <div className="flex items-center gap-2 px-4 sm:px-6 py-2 border-b border-amber-100 dark:border-amber-900/50 bg-amber-50/60 dark:bg-amber-950/30 shrink-0">
+          <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-amber-600 dark:text-amber-400" />
+          <p className="text-xs text-amber-700 dark:text-amber-300">
+            Cost figures are being recalculated against updated pricing — the values shown are from
+            the previous rates and will refresh automatically.
+          </p>
+        </div>
+      )}
 
       {/* Drill-down banner (from analytics charts) */}
       {drilldownActive && (

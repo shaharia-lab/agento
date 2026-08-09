@@ -181,6 +181,7 @@ func (s *Server) mountClaudeSessionRoutes(r chi.Router) {
 	r.Get("/claude-sessions", s.handleListClaudeSessions)
 	r.Get("/claude-sessions/projects", s.handleListClaudeProjects)
 	r.Post("/claude-sessions/refresh", s.handleRefreshClaudeSessionCache)
+	r.Get("/claude-sessions/status", s.handleGetClaudeSessionStatus)
 	// Insights summary must come before /{id} to avoid chi routing conflicts.
 	r.Get("/claude-sessions/insights/summary", s.handleGetClaudeSessionInsightsSummary)
 	r.Get("/claude-sessions/{id}", s.handleGetClaudeSession)

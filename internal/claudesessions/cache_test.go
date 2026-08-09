@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -354,5 +355,150 @@ func TestCache_List_IncludesCustomTitle(t *testing.T) {
 	}
 	if sessions[0].CustomTitle != "List Title" {
 		t.Errorf("List() did not include custom_title: expected %q, got %q", "List Title", sessions[0].CustomTitle)
+	}
+}
+
+// setupPopulatedCache returns a cache with exactly one scanned session.
+func setupPopulatedCache(t *testing.T) *Cache {
+	t.Helper()
+	db := setupTestDB(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeJSONL(t, filepath.Join(home, ".claude", "projects", "test-project"),
+		"session-bg", time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC))
+
+	cache := NewCache(db, logger)
+	if got := len(cache.List()); got != 1 {
+		t.Fatalf("cold List returned %d sessions, want 1", got)
+	}
+	return cache
+}
+
+// markScanning fakes an in-flight scan without running one, so the read path
+// can be tested deterministically. Returns the func that finishes it.
+func markScanning(t *testing.T, c *Cache) func() {
+	t.Helper()
+	done := make(chan struct{})
+	c.mu.Lock()
+	c.scanning = true
+	c.scanDone = done
+	c.mu.Unlock()
+	return func() {
+		c.mu.Lock()
+		c.scanning = false
+		c.mu.Unlock()
+		close(done)
+	}
+}
+
+// TestCache_ListDoesNotBlockOnAnInFlightScan is the load-bearing criterion of
+// #208. A stale cache must serve its existing rows immediately rather than
+// waiting for the rescan — on a real corpus that wait is ~18s, and #189 made
+// the trigger (saving a rate) a routine UI action.
+func TestCache_ListDoesNotBlockOnAnInFlightScan(t *testing.T) {
+	cache := setupPopulatedCache(t)
+	finish := markScanning(t, cache)
+	defer finish()
+
+	// Force the freshness check to fail, so List takes the stale path.
+	cache.Invalidate()
+
+	start := time.Now()
+	sessions := cache.List()
+	elapsed := time.Since(start)
+
+	if len(sessions) != 1 {
+		t.Errorf("List returned %d sessions, want the 1 cached row", len(sessions))
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("List took %s while a scan was in flight; it must return cached rows at once", elapsed)
+	}
+	if !cache.ScanInProgress() {
+		t.Error("ScanInProgress() = false during an in-flight scan")
+	}
+}
+
+// TestCache_EnsureScanAdmitsOnlyOneScan covers the at-most-one-scan criterion:
+// two rate saves in quick succession must not queue a second full re-read.
+func TestCache_EnsureScanAdmitsOnlyOneScan(t *testing.T) {
+	cache := setupPopulatedCache(t)
+
+	t.Run("joins an in-flight scan", func(t *testing.T) {
+		finish := markScanning(t, cache)
+		defer finish()
+
+		cache.mu.Lock()
+		inFlight := cache.scanDone
+		cache.mu.Unlock()
+
+		if got := cache.EnsureScan(); got != (<-chan struct{})(inFlight) {
+			t.Error("EnsureScan started a second scan while one was already running")
+		}
+	})
+
+	t.Run("concurrent callers never start more than one at a time", func(t *testing.T) {
+		const callers = 8
+		var wg sync.WaitGroup
+		chans := make([]<-chan struct{}, callers)
+		for i := range callers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				chans[i] = cache.EnsureScan()
+			}()
+		}
+		wg.Wait()
+
+		// Callers either join the same scan or start a fresh one after the
+		// previous finished — never overlap. A distinct channel is therefore
+		// only legitimate if the one before it has already closed.
+		for _, ch := range chans {
+			if ch == nil {
+				t.Fatal("EnsureScan returned a nil channel")
+			}
+			<-ch // must complete; a leaked guard would hang here
+		}
+		if cache.ScanInProgress() {
+			t.Error("a scan is still marked in progress after every scan finished")
+		}
+	})
+}
+
+// TestCache_ColdCacheStillReturnsRows guards the carve-out. Everything else in
+// #208 is about not blocking, but a first run has nothing to serve and an empty
+// list reads as "no sessions" rather than "not scanned yet".
+func TestCache_ColdCacheStillReturnsRows(t *testing.T) {
+	db := setupTestDB(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeJSONL(t, filepath.Join(home, ".claude", "projects", "test-project"),
+		"session-cold", time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC))
+
+	// No prior scan at all — the very first request must not return [].
+	if got := len(NewCache(db, logger).List()); got != 1 {
+		t.Errorf("cold-cache List returned %d sessions, want 1", got)
+	}
+}
+
+// TestCache_ScanGuardClearsAfterScan pins the leak the issue flags as a risk: a
+// guard left set would mark the cache permanently "scanning" and it would never
+// re-cost again.
+func TestCache_ScanGuardClearsAfterScan(t *testing.T) {
+	cache := setupPopulatedCache(t)
+
+	<-cache.EnsureScan()
+
+	if cache.ScanInProgress() {
+		t.Error("ScanInProgress() = true after the scan completed; the guard leaked")
+	}
+	// And a later trigger is still admitted.
+	select {
+	case <-cache.EnsureScan():
+	case <-time.After(30 * time.Second):
+		t.Error("a scan after the first never completed; admission is stuck")
 	}
 }

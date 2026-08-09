@@ -470,7 +470,9 @@ export default function ModelPricingTab() {
       else await pricingApi.correctRate(form.input)
       setForm(null)
       await load()
-      showToast('Rate saved — session costs will be recalculated on the next refresh')
+      showToast(
+        'Rate saved — session costs recalculate in the background; the sessions list stays usable and updates itself',
+      )
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Failed to save the rate')
     } finally {
@@ -485,7 +487,9 @@ export default function ModelPricingTab() {
     try {
       await pricingApi.deleteRate(target.model_pattern, target.effective_from)
       await load()
-      showToast('Rate deleted — session costs will be recalculated on the next refresh')
+      showToast(
+        'Rate deleted — session costs recalculate in the background; the sessions list stays usable and updates itself',
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete the rate')
     }
