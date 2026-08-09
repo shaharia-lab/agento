@@ -44,8 +44,8 @@ func TestNewSQLiteDB_MigrationVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("querying version: %v", err)
 	}
-	if version != 21 {
-		t.Errorf("expected version 21, got %d", version)
+	if version != 22 {
+		t.Errorf("expected version 22, got %d", version)
 	}
 }
 

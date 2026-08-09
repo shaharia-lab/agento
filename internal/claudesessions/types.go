@@ -282,15 +282,20 @@ func (s ClaudeSessionSummary) TotalUsage() TokenUsage {
 // session, read from <session-id>/subagents/agent-<id>.jsonl plus its adjacent
 // agent-<id>.meta.json sidecar.
 type ClaudeSubagent struct {
-	AgentID      string     `json:"agent_id"`
-	AgentType    string     `json:"agent_type,omitempty"`
-	Description  string     `json:"description,omitempty"`
-	ToolUseID    string     `json:"tool_use_id,omitempty"`
-	StartTime    time.Time  `json:"start_time"`
-	LastActivity time.Time  `json:"last_activity"`
-	MessageCount int        `json:"message_count"`
-	Usage        TokenUsage `json:"usage"`
-	Model        string     `json:"model,omitempty"`
+	AgentID      string    `json:"agent_id"`
+	AgentType    string    `json:"agent_type,omitempty"`
+	Description  string    `json:"description,omitempty"`
+	ToolUseID    string    `json:"tool_use_id,omitempty"`
+	StartTime    time.Time `json:"start_time"`
+	LastActivity time.Time `json:"last_activity"`
+	MessageCount int       `json:"message_count"`
+	// EventCount is the raw number of top-level events in the sub-agent's
+	// transcript, the counterpart of ClaudeSessionSummary.EventCount: it is
+	// what MessageCount held before the turn/event split, and the context that
+	// makes a turn count readable.
+	EventCount int        `json:"event_count"`
+	Usage      TokenUsage `json:"usage"`
+	Model      string     `json:"model,omitempty"`
 }
 
 // ClaudeSessionDetail extends the summary with full message history and todos.
