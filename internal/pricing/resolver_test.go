@@ -1,6 +1,7 @@
 package pricing
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -316,4 +317,135 @@ func TestBuiltinCatalog_SeedRatesMatchAcceptanceCases(t *testing.T) {
 	if _, ok := r.Resolve("claude-opus-4-7[1m]", ts("2026-03-01T00:00:00Z")); !ok {
 		t.Error("claude-opus-4-7[1m] landed in the unknown bucket")
 	}
+}
+
+// TestBuiltinCatalog_Qwen37Generation covers the rows #206 seeded. The risk in
+// a data-only change is not a crash but a silent mis-resolution: a pattern that
+// shadows a neighbor prices one model at another's rate, and every test still
+// passes.
+func TestBuiltinCatalog_Qwen37Generation(t *testing.T) {
+	r := NewResolver(allBuiltinRates(t))
+	at := ts("2026-08-09T12:00:00Z")
+
+	for _, tc := range []struct {
+		modelID       string
+		input, output float64
+	}{
+		// Newly seeded, verified against the Model Studio pricing page.
+		{"qwen3.7-max", 2.5, 7.5},
+		{"qwen3.7-plus", 0.4, 1.6},
+		{"qwen3.6-flash", 0.25, 1.5},
+		// Pre-existing rows must be unaffected by the new prefixes. qwen3-max is
+		// the one that could plausibly capture qwen3.7-max, and qwen3.5-flash
+		// the one that could be captured by qwen3.6-flash.
+		{"qwen3-max", 1.2, 6.0},
+		{"qwen3.5-flash", 0.1, 0.4},
+		{"qwen3.5-plus", 0.4, 2.4},
+	} {
+		got, ok := r.Resolve(tc.modelID, at)
+		if !ok {
+			t.Errorf("%s landed in the unknown-pricing bucket", tc.modelID)
+			continue
+		}
+		if got.Rate.InputPerMTok != tc.input || got.Rate.OutputPerMTok != tc.output {
+			t.Errorf("%s = $%v/$%v, want $%v/$%v — check for a shadowing pattern",
+				tc.modelID, got.Rate.InputPerMTok, got.Rate.OutputPerMTok, tc.input, tc.output)
+		}
+		// These are concrete published prices, not family aliases.
+		if got.Estimated {
+			t.Errorf("%s resolved as estimated; it has a published rate", tc.modelID)
+		}
+	}
+
+	// A dated or suffixed ID must still land on its prefix rather than falling
+	// through to a coarser row.
+	suffixed, ok := r.Resolve("qwen3.7-max-2026-08-01", at)
+	if !ok || suffixed.Rate.InputPerMTok != 2.5 {
+		t.Errorf("qwen3.7-max-2026-08-01 = %+v ok=%v, want the qwen3.7-max rate", suffixed, ok)
+	}
+}
+
+// TestBuiltinCatalog_QwenPromoRatesHaveNoGuessedBoundary pins the decision
+// #206 made. qwen3.7-max and qwen3.7-plus are both limited-time discounts for
+// which Alibaba publishes no end date, so they are seeded as a single rate: a
+// guessed expiry would misprice a whole date range with nothing to signal it.
+// If a boundary is ever added it must come from a published date, and this test
+// is the reminder to check that the date is real.
+func TestBuiltinCatalog_QwenPromoRatesHaveNoGuessedBoundary(t *testing.T) {
+	for _, pattern := range []string{"qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash"} {
+		var found bool
+		for _, e := range BuiltinCatalog() {
+			if e.ModelPattern != pattern {
+				continue
+			}
+			found = true
+			if len(e.Rates) != 1 {
+				t.Errorf("%s has %d rate rows; a boundary must come from a published expiry date",
+					pattern, len(e.Rates))
+			}
+		}
+		if !found {
+			t.Errorf("%s is not in the built-in catalog", pattern)
+		}
+	}
+
+	// The effective-dated mechanism itself is exercised by claude-sonnet-5 in
+	// TestBuiltinCatalog_SeedRatesMatchAcceptanceCases — the only entry with a
+	// real published boundary.
+	r := NewResolver(allBuiltinRates(t))
+	early, ok1 := r.Resolve("qwen3.7-max", ts("2026-08-09T00:00:00Z"))
+	late, ok2 := r.Resolve("qwen3.7-max", ts("2027-08-09T00:00:00Z"))
+	if !ok1 || !ok2 || early.Rate.InputPerMTok != late.Rate.InputPerMTok {
+		t.Errorf("qwen3.7-max changed rate over time (%+v -> %+v) without a published boundary",
+			early.Rate, late.Rate)
+	}
+}
+
+// TestBuiltinCatalog_QwenCachePercentageRule checks the arithmetic behind the
+// cache columns. Alibaba publishes cache pricing as a percentage of input
+// rather than an absolute figure, so these are derived numbers and a slip is
+// invisible — nothing else in the catalog would disagree with it.
+func TestBuiltinCatalog_QwenCachePercentageRule(t *testing.T) {
+	const epsilon = 1e-9
+	for _, e := range BuiltinCatalog() {
+		if e.Provider != "alibaba" {
+			continue
+		}
+		rates, err := e.rates()
+		if err != nil {
+			t.Fatalf("entry %q: %v", e.ModelPattern, err)
+		}
+		for _, rate := range rates {
+			in := rate.InputPerMTok
+			checks := []struct {
+				name string
+				got  float64
+				want float64
+			}{
+				{"cache_read (10% of input)", rate.CacheReadPerMTok, in * 0.10},
+				{"cache_write_5m (125% of input)", rate.CacheWrite5mPerMTok, in * 1.25},
+				{"cache_write_1h (125% of input)", rate.CacheWrite1hPerMTok, in * 1.25},
+			}
+			for _, c := range checks {
+				if math.Abs(c.got-c.want) > epsilon {
+					t.Errorf("%s: %s = %v, want %v (input $%v)",
+						e.ModelPattern, c.name, c.got, c.want, in)
+				}
+			}
+		}
+	}
+}
+
+// allBuiltinRates flattens the embedded catalog into resolver input.
+func allBuiltinRates(t *testing.T) []Rate {
+	t.Helper()
+	var all []Rate
+	for _, e := range BuiltinCatalog() {
+		rates, err := e.rates()
+		if err != nil {
+			t.Fatalf("entry %q: %v", e.ModelPattern, err)
+		}
+		all = append(all, rates...)
+	}
+	return all
 }

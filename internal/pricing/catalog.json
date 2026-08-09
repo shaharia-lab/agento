@@ -253,6 +253,57 @@
   },
   {
     "provider": "alibaba",
+    "model_pattern": "qwen3.7-max",
+    "match_type": "prefix",
+    "display_name": "Qwen3.7 Max",
+    "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing · International (Singapore) endpoint · retrieved 2026-08-09. Flat 0-1M, no tier split. PROMOTIONAL: the page marks this a limited-time 50% discount and publishes NO expiry date, so no boundary row is seeded — a guessed expiry would misprice a whole date range invisibly. Add the list-price row once Alibaba publishes the end date. Cache per Alibaba's percentage rule: explicit creation 125% of input, hits 10%.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 2.5,
+        "output": 7.5,
+        "cache_read": 0.25,
+        "cache_write_5m": 3.125,
+        "cache_write_1h": 3.125
+      }
+    ]
+  },
+  {
+    "provider": "alibaba",
+    "model_pattern": "qwen3.7-plus",
+    "match_type": "prefix",
+    "display_name": "Qwen3.7 Plus",
+    "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing · International (Singapore) endpoint · retrieved 2026-08-09. Base 0-256K tier; Alibaba charges $1.20/$4.80 above 256K and the catalog has no context-length dimension, so long-context usage is under-reported by up to 200%. PROMOTIONAL: marked a limited-time 20% discount with NO published expiry, so no boundary row is seeded rather than guessing one. Cache per Alibaba's percentage rule: explicit creation 125% of input, hits 10%.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 0.4,
+        "output": 1.6,
+        "cache_read": 0.04,
+        "cache_write_5m": 0.5,
+        "cache_write_1h": 0.5
+      }
+    ]
+  },
+  {
+    "provider": "alibaba",
+    "model_pattern": "qwen3.6-flash",
+    "match_type": "prefix",
+    "display_name": "Qwen3.6 Flash",
+    "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing · International (Singapore) endpoint · retrieved 2026-08-09. Base 0-256K tier; Alibaba charges $1.00/$4.00 above 256K and the catalog has no context-length dimension, so long-context usage is under-reported by up to 300%. Not promotional. Cache per Alibaba's percentage rule: explicit creation 125% of input, hits 10%.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 0.25,
+        "output": 1.5,
+        "cache_read": 0.025,
+        "cache_write_5m": 0.3125,
+        "cache_write_1h": 0.3125
+      }
+    ]
+  },
+  {
+    "provider": "alibaba",
     "model_pattern": "qwen3.5-397b-a17b",
     "match_type": "prefix",
     "display_name": "Qwen3.5 397B A17B",
