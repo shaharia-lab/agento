@@ -25,3 +25,4 @@ packages:
       NotificationService:
       TaskService:
       TriggerService:
+      PricingService:

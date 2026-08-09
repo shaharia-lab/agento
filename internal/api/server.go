@@ -31,6 +31,7 @@ const (
 	routeTaskByID        = "/tasks/{id}"
 	routeJobHistoryBase  = "/job-history"
 	routeJobHistoryByID  = routeJobHistoryBase + "/{id}"
+	routePricingRates    = "/pricing/rates"
 )
 
 // ServerConfig bundles all dependencies needed to construct an API Server.
@@ -42,6 +43,7 @@ type ServerConfig struct {
 	TaskSvc            service.TaskService
 	TriggerSvc         service.TriggerService
 	ProfileSvc         service.ClaudeSettingsProfileService
+	PricingSvc         service.PricingService
 	SettingsMgr        *config.SettingsManager
 	AppConfig          *config.AppConfig
 	Logger             *slog.Logger
@@ -60,6 +62,7 @@ type Server struct {
 	taskSvc            service.TaskService
 	triggerSvc         service.TriggerService
 	profileSvc         service.ClaudeSettingsProfileService
+	pricingSvc         service.PricingService
 	settingsMgr        *config.SettingsManager
 	appConfig          *config.AppConfig
 	logger             *slog.Logger
@@ -84,6 +87,7 @@ func New(cfg ServerConfig) *Server {
 		taskSvc:            cfg.TaskSvc,
 		triggerSvc:         cfg.TriggerSvc,
 		profileSvc:         cfg.ProfileSvc,
+		pricingSvc:         cfg.PricingSvc,
 		settingsMgr:        cfg.SettingsMgr,
 		appConfig:          cfg.AppConfig,
 		logger:             cfg.Logger,
@@ -132,6 +136,9 @@ func (s *Server) Mount(r chi.Router) {
 	r.Delete(routeProfileByID, s.handleDeleteClaudeSettingsProfile)
 	r.Post(routeProfileByID+"/duplicate", s.handleDuplicateClaudeSettingsProfile)
 	r.Put(routeProfileByID+"/default", s.handleSetDefaultClaudeSettingsProfile)
+
+	// Model pricing catalog
+	s.mountPricingRoutes(r)
 
 	// Claude Code sessions and analytics
 	s.mountClaudeSessionRoutes(r)
@@ -237,6 +244,19 @@ func (s *Server) mountTaskRoutes(r chi.Router) {
 	r.Delete(routeJobHistoryBase, s.handleBulkDeleteJobHistory)
 	r.Get(routeJobHistoryByID, s.handleGetJobHistory)
 	r.Delete(routeJobHistoryByID, s.handleDeleteJobHistory)
+}
+
+// mountPricingRoutes registers the model pricing catalog endpoints.
+//
+// Adding and correcting a rate are deliberately separate endpoints rather than
+// one upsert: appending leaves history priced at what it was charged, while
+// correcting rewrites already-reported costs. A single endpoint could not tell
+// the two apart, and conflating them silently rewrites a user's own history.
+func (s *Server) mountPricingRoutes(r chi.Router) {
+	r.Get("/pricing/catalog", s.handleGetPricingCatalog)
+	r.Post(routePricingRates, s.handleAddPricingRate)
+	r.Put(routePricingRates, s.handleCorrectPricingRate)
+	r.Delete(routePricingRates, s.handleDeletePricingRate)
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────

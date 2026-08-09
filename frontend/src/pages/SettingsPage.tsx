@@ -17,11 +17,13 @@ import AppearanceTab from '@/components/AppearanceTab'
 import NotificationsTab from '@/components/NotificationsTab'
 import AdvancedTab from '@/components/AdvancedTab'
 import MonitoringTab from '@/components/MonitoringTab'
+import ModelPricingTab from '@/components/ModelPricingTab'
 import { settingsApi } from '@/lib/api'
 import type { SettingsResponse } from '@/types'
 import { MODELS } from '@/types'
 
-type Tab = 'general' | 'claude' | 'appearance' | 'notifications' | 'advanced' | 'monitoring'
+type Tab =
+  'general' | 'claude' | 'appearance' | 'notifications' | 'advanced' | 'monitoring' | 'pricing'
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<Tab>('general')
@@ -162,6 +164,16 @@ export default function SettingsPage() {
           >
             Monitoring
           </button>
+          <button
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
+              activeTab === 'pricing'
+                ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
+            }`}
+            onClick={() => setActiveTab('pricing')}
+          >
+            Model Pricing
+          </button>
         </nav>
 
         {/* Content */}
@@ -281,6 +293,8 @@ export default function SettingsPage() {
           {activeTab === 'advanced' && <AdvancedTab />}
 
           {activeTab === 'monitoring' && <MonitoringTab />}
+
+          {activeTab === 'pricing' && <ModelPricingTab />}
         </div>
       </div>
 

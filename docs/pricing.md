@@ -14,6 +14,36 @@ provider changes its prices (e.g. Claude Sonnet 5's introductory $2/$10 per
 MTok through 2026-08-31 reverting to $3/$15 on 2026-09-01: two rows, one
 boundary, both halves of the year correct).
 
+## Maintaining rates from the UI
+
+**Settings → Model Pricing** lists every model the catalog knows, grouped by
+provider, with the rate in force now. Expanding a model shows its full rate
+history — every rate with the date it took effect and the source it came from —
+so a past cost figure can be traced to the rate that produced it.
+
+Two actions, and the difference matters more than anything else on the page:
+
+- **Add rate** is what you want when a provider *changed its price*. It appends
+  a row with a new effective date and leaves every earlier rate untouched, so
+  usage already costed keeps the price it was charged at. The form states which
+  usage window the new rate will govern before you submit.
+- **Correct rate** is only for a value *entered in error*. It edits a row in
+  place and therefore rewrites costs already reported for that rate's window.
+
+These are separate endpoints, not one upsert: adding refuses to overwrite an
+existing rate (it returns the colliding row so the UI can offer to correct it
+instead), and correcting refuses to create one. Reaching for "correct" when the
+price merely changed is how a user silently rewrites their own history, and the
+API is shaped to make that hard.
+
+Models seen in your sessions with no rate at all appear at the top of the tab —
+their tokens are excluded from every cost total until priced, so that list is
+the tab's most useful starting point.
+
+Saving any change bumps the catalog revision, which invalidates the cached
+session costs; they recompute on the next scan. Rows you edit are marked
+user-modified and survive upgrades untouched.
+
 ## Maintaining rates
 
 - **Add a row when a price changes** — same `model_pattern`, new

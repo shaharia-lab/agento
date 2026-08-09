@@ -803,6 +803,72 @@ export interface UpdateCheckResponse {
   release_url: string
 }
 
+// ── Model Pricing ─────────────────────────────────────────────────────────────
+
+/** One effective-dated rate row from the pricing catalog. All prices are USD per million tokens. */
+export interface PricingRate {
+  id: number
+  provider: string
+  model_pattern: string
+  match_type: 'exact' | 'prefix'
+  display_name: string
+  input_per_mtok: number
+  output_per_mtok: number
+  cache_write_5m_per_mtok: number
+  cache_write_1h_per_mtok: number
+  cache_read_per_mtok: number
+  /** RFC3339. The rate governs usage from this instant until the next rate starts. */
+  effective_from: string
+  /** Where the rate came from — provider page, endpoint, and when it was checked. */
+  source: string
+  /** Shipped with Agento rather than entered by the user. */
+  is_builtin: boolean
+  /** Edited by the user; a startup re-seed leaves these rows alone. */
+  user_modified: boolean
+  /** False marks a deliberate zero (synthetic messages, embeddings), not an unfilled row. */
+  billable: boolean
+  /** A best-effort rate rather than a published one, e.g. the bare family aliases. */
+  estimated: boolean
+}
+
+/** A model with the rate in force now and every rate it has ever had. */
+export interface PricedModel {
+  model_pattern: string
+  provider: string
+  display_name: string
+  match_type: 'exact' | 'prefix'
+  /** Null only when every rate for this model is future-dated. */
+  current: PricingRate | null
+  /** Full history, newest first. */
+  rates: PricingRate[]
+}
+
+/** The Model Pricing tab's payload. */
+export interface PricingCatalog {
+  models: PricedModel[]
+  /** Model IDs seen in real sessions that match no rate — the tab's to-do list. */
+  unpriced_models: string[]
+  /** Catalog fingerprint the stored session costs were computed under. */
+  revision: number
+}
+
+/** Body for creating or correcting a rate. `effective_from` accepts YYYY-MM-DD or RFC3339. */
+export interface PricingRateInput {
+  provider: string
+  model_pattern: string
+  match_type: 'exact' | 'prefix'
+  display_name: string
+  input_per_mtok: number
+  output_per_mtok: number
+  cache_write_5m_per_mtok: number
+  cache_write_1h_per_mtok: number
+  cache_read_per_mtok: number
+  effective_from: string
+  source: string
+  billable: boolean
+  estimated: boolean
+}
+
 // ── Monitoring / OTel ─────────────────────────────────────────────────────────
 
 export interface MonitoringConfig {
