@@ -67,6 +67,7 @@ func (a *insightStoreAdapter) GetSummary(
 		AvgCacheHitRate:      raw.AvgCacheHitRate,
 		AvgTotalDurationMs:   raw.AvgTotalDurationMs,
 		SessionsWithErrors:   raw.SessionsWithErrors,
+		TotalToolErrors:      raw.TotalToolErrors,
 		TopToolTotals:        mergeBreakdowns(raw.ToolBreakdowns),
 		TopSkillTotals:       mergeBreakdowns(raw.SkillBreakdowns),
 		TopPluginTotals:      mergeBreakdowns(raw.PluginBreakdowns),

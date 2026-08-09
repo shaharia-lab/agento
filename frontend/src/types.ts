@@ -995,6 +995,8 @@ export interface InsightSummary {
   total_cost_estimate_usd: number
   avg_cache_hit_rate: number
   sessions_with_errors: number
+  /** Summed tool errors, the numerator for an errors-per-100-calls rate. */
+  total_tool_errors: number
   avg_total_duration_ms: number
   top_tools: ToolUsageStat[]
   /** Total tool calls across the period — the denominator for the breakdowns. */
@@ -1081,6 +1083,28 @@ export interface ModelCostStat {
   percentage: number
   /** How many sessions this model spent money in. */
   sessions: number
+}
+
+/**
+ * One actionable fact about the window, computed from stored data.
+ *
+ * The backend supplies the numbers and the frontend does the phrasing, so the
+ * arithmetic is testable in Go and the copy stays in the UI. Fields not
+ * relevant to a `kind` are absent.
+ */
+export interface InsightCard {
+  kind: 'cache_savings' | 'model_low_cache' | 'delegation_mix' | 'expensive_sessions'
+  amount_usd?: number
+  /** A share, 0–100. */
+  percent?: number
+  count?: number
+  model?: string
+  tokens?: number
+  avg_duration_ms?: number
+  /** What amount_usd should be read against — for savings, the actual bill. */
+  comparison_usd?: number
+  /** Derived from list rates rather than a stored total — say "about". */
+  estimated?: boolean
 }
 
 /** One project's activity over the window. */
@@ -1170,6 +1194,7 @@ export interface AnalyticsReport {
   model_breakdown: ModelStat[]
   sessions_per_model: ModelSessionStat[]
   cost_by_model: ModelCostStat[]
+  insight_cards: InsightCard[]
   cost_over_time_by_model: StackedCostPoint[]
   project_breakdown: ProjectStat[]
   project_activity: ProjectDayActivity[]

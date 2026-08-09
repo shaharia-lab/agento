@@ -346,6 +346,40 @@ func (s ClaudeSessionSummary) TotalCostByModel() map[string]SessionCost {
 	return out
 }
 
+// TotalUsageByModel returns the session's whole token usage keyed by the model
+// that spent it — the token counterpart of TotalCostByModel, and what lets a
+// per-model question about caching be asked at all.
+//
+// Main-thread usage is attributed to the session's own model, which is what the
+// scanner records for it; delegated usage comes from SubagentUsageByModel. A
+// session that delegated but has no per-model breakdown loaded falls back to
+// the parent's model rather than dropping the tokens, matching
+// buildModelBreakdown.
+func (s ClaudeSessionSummary) TotalUsageByModel() map[string]TokenUsage {
+	out := map[string]TokenUsage{}
+	add := func(model string, u TokenUsage) {
+		model = displayModel(model)
+		entry := out[model]
+		entry.InputTokens += u.InputTokens
+		entry.OutputTokens += u.OutputTokens
+		entry.CacheCreationTokens += u.CacheCreationTokens
+		entry.CacheCreation5mTokens += u.CacheCreation5mTokens
+		entry.CacheCreation1hTokens += u.CacheCreation1hTokens
+		entry.CacheReadTokens += u.CacheReadTokens
+		out[model] = entry
+	}
+
+	add(s.Model, s.Usage)
+	if len(s.SubagentUsageByModel) > 0 {
+		for model, u := range s.SubagentUsageByModel {
+			add(model, u)
+		}
+		return out
+	}
+	add(s.Model, s.SubagentUsage)
+	return out
+}
+
 // TotalUsage returns the session's main-thread usage plus the usage of every
 // sub-agent it delegated to. Aggregate reporting (analytics, cost) should use
 // this rather than Usage, which deliberately excludes delegated work.

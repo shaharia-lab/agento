@@ -189,7 +189,10 @@ type InsightAggregateSummary struct {
 	AvgCacheHitRate      float64
 	AvgTotalDurationMs   float64
 	SessionsWithErrors   int
-	TopToolTotals        map[string]int
+	// TotalToolErrors is the summed error count, so an errors-per-100-calls
+	// rate is expressible. SessionsWithErrors counts sessions and cannot be one.
+	TotalToolErrors int
+	TopToolTotals   map[string]int
 	// Attribution totals, merged across sessions the same way TopToolTotals is.
 	// All of them count tool calls, so they are directly comparable with it.
 	TopSkillTotals     map[string]int

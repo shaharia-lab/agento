@@ -765,11 +765,15 @@ export const insightsApi = {
     ids?: string[]
     from?: string
     to?: string
+    project?: string
   }): Promise<InsightSummary> => {
     const qs = new URLSearchParams()
     if (params?.ids && params.ids.length > 0) qs.set('ids', params.ids.join(','))
     if (params?.from) qs.set('from', params.from)
     if (params?.to) qs.set('to', params.to)
+    // Scoping this endpoint the way the other two dashboards scope theirs is
+    // what stops Insights being silently broader than the page beside it.
+    if (params?.project) qs.set('project', params.project)
     qs.set('tz', browserTimezone())
     const suffix = qs.toString() ? `?${qs.toString()}` : ''
     return request<InsightSummary>(`/claude-sessions/insights/summary${suffix}`)

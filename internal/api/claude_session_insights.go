@@ -110,6 +110,7 @@ type insightsSummary struct {
 	TotalCostEstimateUSD float64     `json:"total_cost_estimate_usd"`
 	AvgCacheHitRate      float64     `json:"avg_cache_hit_rate"`
 	SessionsWithErrors   int         `json:"sessions_with_errors"`
+	TotalToolErrors      int         `json:"total_tool_errors"`
 	AvgTotalDurationMs   float64     `json:"avg_total_duration_ms"`
 	TopTools             []toolCount `json:"top_tools"`
 	// Attribution breakdowns. Each counts tool calls, so they are directly
@@ -157,6 +158,7 @@ func buildInsightsSummaryFromAggregate(agg *claudesessions.InsightAggregateSumma
 		AvgCostEstimateUSD:   agg.TotalCostEstimateUSD / n,
 		AvgCacheHitRate:      agg.AvgCacheHitRate,
 		SessionsWithErrors:   agg.SessionsWithErrors,
+		TotalToolErrors:      agg.TotalToolErrors,
 		AvgTotalDurationMs:   agg.AvgTotalDurationMs,
 		TopTools:             sortedToolCounts(agg.TopToolTotals),
 		TotalToolCalls:       agg.TotalToolCalls,

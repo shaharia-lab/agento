@@ -103,6 +103,7 @@ type AnalyticsReport struct {
 	ModelBreakdown      []ModelStat            `json:"model_breakdown"`
 	SessionsPerModel    []ModelSessionStat     `json:"sessions_per_model"`
 	CostByModel         []ModelCostStat        `json:"cost_by_model"`
+	InsightCards        []InsightCard          `json:"insight_cards"`
 	ProjectBreakdown    []ProjectStat          `json:"project_breakdown"`
 	ProjectActivity     []ProjectDayActivity   `json:"project_activity"`
 	TopSessions         TopSessions            `json:"top_sessions"`
@@ -338,31 +339,13 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 	filtered := FilterSessions(sessions, p)
 
 	if len(filtered) == 0 {
-		return AnalyticsReport{
-			TimeSeries:          []TimeSeriesPoint{},
-			CacheEfficiency:     []CacheEfficiencyPoint{},
-			ModelBreakdown:      []ModelStat{},
-			CostByModel:         []ModelCostStat{},
-			CostOverTimeByModel: []StackedCostPoint{},
-			SessionsPerModel:    []ModelSessionStat{},
-			MostActiveDays:      []DayActivity{},
-			Heatmap:             []HeatmapCell{},
-			HourlyActivity:      buildHourlyActivity(nil, loc),
-			CostOverTime:        []CostPoint{},
-			ProjectBreakdown:    []ProjectStat{},
-			ProjectActivity:     []ProjectDayActivity{},
-			TopSessions: TopSessions{
-				ByCost:     []SessionRanking{},
-				ByDuration: []SessionRanking{},
-				ByTokens:   []SessionRanking{},
-			},
-			Projects: projects,
-		}
+		return emptyReport(projects, loc)
 	}
 
 	granularity := p.Granularity()
 	summary, costSummary := buildSummary(filtered)
 	projectBreakdown := buildProjectBreakdown(filtered)
+	costByModel := buildCostByModel(filtered)
 	timeSeries := buildTimeSeries(filtered, p.From, p.To, granularity, loc)
 
 	return AnalyticsReport{
@@ -370,7 +353,8 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 		TimeSeries:          timeSeries,
 		CacheEfficiency:     buildCacheEfficiency(timeSeries),
 		ModelBreakdown:      buildModelBreakdown(filtered),
-		CostByModel:         buildCostByModel(filtered),
+		CostByModel:         costByModel,
+		InsightCards:        buildInsightCards(filtered, costByModel),
 		CostOverTimeByModel: buildCostOverTimeByModel(filtered, p.From, p.To, granularity, loc),
 		ProjectBreakdown:    projectBreakdown,
 		ProjectActivity:     buildProjectActivity(filtered, projectBreakdown, loc),
@@ -382,6 +366,36 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 		CostOverTime:        buildCostOverTime(filtered, p.From, p.To, granularity, loc),
 		CostSummary:         costSummary,
 		Projects:            projects,
+	}
+}
+
+// emptyReport is what a window with no sessions returns.
+//
+// Every slice is empty rather than nil so the JSON carries [] and no consumer
+// has to distinguish "no data" from "field missing". Projects is still
+// populated: the picker must keep offering every project, or a user who filters
+// into an empty window cannot filter back out of it.
+func emptyReport(projects []string, loc *time.Location) AnalyticsReport {
+	return AnalyticsReport{
+		TimeSeries:          []TimeSeriesPoint{},
+		CacheEfficiency:     []CacheEfficiencyPoint{},
+		ModelBreakdown:      []ModelStat{},
+		CostByModel:         []ModelCostStat{},
+		InsightCards:        []InsightCard{},
+		CostOverTimeByModel: []StackedCostPoint{},
+		SessionsPerModel:    []ModelSessionStat{},
+		MostActiveDays:      []DayActivity{},
+		Heatmap:             []HeatmapCell{},
+		HourlyActivity:      buildHourlyActivity(nil, loc),
+		CostOverTime:        []CostPoint{},
+		ProjectBreakdown:    []ProjectStat{},
+		ProjectActivity:     []ProjectDayActivity{},
+		TopSessions: TopSessions{
+			ByCost:     []SessionRanking{},
+			ByDuration: []SessionRanking{},
+			ByTokens:   []SessionRanking{},
+		},
+		Projects: projects,
 	}
 }
 

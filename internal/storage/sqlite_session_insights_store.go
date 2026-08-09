@@ -268,6 +268,11 @@ type InsightAggregateSummary struct {
 	AvgCacheHitRate      float64
 	AvgTotalDurationMs   float64
 	SessionsWithErrors   int
+	// TotalToolErrors is the summed tool_error_count, the numerator for an
+	// errors-per-100-tool-calls rate. SessionsWithErrors alone cannot express
+	// one: it counts sessions, not errors, so a session with a single failing
+	// grep and one with fifty broken commands are the same number.
+	TotalToolErrors int
 	// TotalToolCalls and UnattributedCalls give the breakdowns a denominator:
 	// without them a "top skills" panel silently omits every built-in call.
 	TotalToolCalls    int
@@ -348,7 +353,8 @@ const insightAggregateSQL = `SELECT
 	COALESCE(AVG(total_duration_ms), 0),
 	COALESCE(SUM(has_errors), 0),
 	COALESCE(SUM(tool_calls_total), 0),
-	COALESCE(SUM(unattributed_calls), 0)
+	COALESCE(SUM(unattributed_calls), 0),
+	COALESCE(SUM(tool_error_count), 0)
 FROM session_insights`
 
 func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
@@ -369,6 +375,7 @@ func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
 		&summary.SessionsWithErrors,
 		&summary.TotalToolCalls,
 		&summary.UnattributedCalls,
+		&summary.TotalToolErrors,
 	)
 	return summary, err
 }
