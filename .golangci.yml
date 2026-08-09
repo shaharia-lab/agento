@@ -88,6 +88,12 @@ linters:
       excludes: []
 
   exclusions:
+    # Third-party Go files vendored inside npm packages. `frontend/node_modules`
+    # is gitignored, so CI never sees it — but any developer who has run
+    # `npm ci` has it on disk, where it fails the pre-commit hook with issues in
+    # code we neither wrote nor can fix.
+    paths:
+      - frontend/node_modules
     rules:
       - path: _test\.go
         linters:

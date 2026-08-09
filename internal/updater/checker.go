@@ -20,6 +20,8 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/creativeprojects/go-selfupdate"
+
+	"github.com/shaharia-lab/agento/internal/build"
 )
 
 // DefaultCacheTTL is the time the cached release-check result is considered fresh.
@@ -116,6 +118,12 @@ func (c *Checker) timeout() time.Duration {
 // return ErrNotReleaseBuild so callers can skip silently.
 func (c *Checker) Check(ctx context.Context, currentVersion string, forceFresh bool) (*CheckResult, error) {
 	currentTrimmed := strings.TrimPrefix(currentVersion, "v")
+	// A local `git describe` build ("v0.8.0-21-gc325de6-dirty") parses as valid
+	// semver, so the parse below cannot reject it — and semver ranks it below
+	// the release it is ahead of, which would report a downgrade as an update.
+	if build.IsDevBuild(currentVersion) {
+		return nil, ErrNotReleaseBuild
+	}
 	if _, err := semver.NewVersion(currentTrimmed); err != nil {
 		return nil, ErrNotReleaseBuild
 	}

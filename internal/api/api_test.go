@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/shaharia-lab/agento/internal/api"
+	"github.com/shaharia-lab/agento/internal/build"
 	"github.com/shaharia-lab/agento/internal/config"
 	cfgmocks "github.com/shaharia-lab/agento/internal/config/mocks"
 	"github.com/shaharia-lab/agento/internal/service"
@@ -1011,6 +1012,31 @@ func TestUpdateCheck_DevBuild(t *testing.T) {
 	assert.Equal(t, false, result["update_available"])
 	assert.Equal(t, "", result["latest_version"])
 	assert.Equal(t, "", result["release_url"])
+}
+
+// TestUpdateCheck_LocalGitDescribeBuild covers the version shape `make build`
+// stamps during development. It is valid semver, so the handler's parse accepts
+// it, and semver ranks a prerelease below its release — meaning the published
+// v0.8.0 looks newer than a tree 21 commits past that tag. Without the
+// dev-build gate this reaches GitHub and shows an update banner offering a
+// version the developer is already ahead of.
+func TestUpdateCheck_LocalGitDescribeBuild(t *testing.T) {
+	for _, v := range []string{"v0.8.0-21-gc325de6-dirty", "v0.8.0-21-gc325de6", "v0.8.0-dirty"} {
+		t.Run(v, func(t *testing.T) {
+			original := build.Version
+			build.Version = v
+			t.Cleanup(func() { build.Version = original })
+
+			h := newHarness(t)
+			w := h.do(httptest.NewRequest(http.MethodGet, "/version/update-check", nil))
+			assert.Equal(t, http.StatusOK, w.Code)
+
+			var result map[string]interface{}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
+			assert.Equal(t, false, result["update_available"])
+			assert.Equal(t, v, result["current_version"])
+		})
+	}
 }
 
 func TestUpdateCheck_ResponseShape(t *testing.T) {

@@ -45,9 +45,12 @@ func (s *Server) handleUpdateCheck(w http.ResponseWriter, r *http.Request) {
 	current := build.Version
 	currentTrimmed := strings.TrimPrefix(current, "v")
 
-	// Skip the update check for any build that is not a proper semver release
-	// (e.g. "dev", "unknown", or a bare git commit SHA like "00f2331").
-	if _, err := semver.NewVersion(currentTrimmed); err != nil {
+	// Skip the update check for any build that names no published release:
+	// "dev", "unknown", a bare git commit SHA like "00f2331", or a local
+	// `git describe` build such as "v0.8.0-21-gc325de6-dirty". The last one
+	// parses as valid semver but ranks *below* the release it is ahead of, so
+	// it needs the shape check rather than the parse.
+	if _, err := semver.NewVersion(currentTrimmed); err != nil || build.IsDevBuild(current) {
 		s.writeJSON(w, http.StatusOK, map[string]interface{}{
 			"current_version":  current,
 			"update_available": false,
