@@ -677,6 +677,34 @@ function InsightsContent({
           hasComparison={hasComparison}
         />
       )}
+      {/* Immediately after the servers chart: this is that chart's drill-down,
+          the same calls counted by tool rather than by server. */}
+      {summary.top_mcp_tools.length > 0 && (
+        <TopToolsChart
+          title="Top 10 MCP Tools by Tool Calls"
+          tools={summary.top_mcp_tools}
+          prevTools={prev?.top_mcp_tools ?? []}
+          hasComparison={hasComparison}
+        />
+      )}
+      {/* Delegation mix. Empty until a session delegates, since the agent is
+          stamped on sub-agent transcripts only. */}
+      {summary.top_agents.length > 0 && (
+        <TopToolsChart
+          title="Top 10 Sub-agents by Tool Calls"
+          tools={summary.top_agents}
+          prevTools={prev?.top_agents ?? []}
+          hasComparison={hasComparison}
+        />
+      )}
+      {summary.top_efforts.length > 0 && (
+        <TopToolsChart
+          title="Tool Calls by Reasoning Effort"
+          tools={summary.top_efforts}
+          prevTools={prev?.top_efforts ?? []}
+          hasComparison={hasComparison}
+        />
+      )}
 
       {/* Footer note */}
       <p className="text-xs text-zinc-400 dark:text-zinc-500 text-center pb-2">

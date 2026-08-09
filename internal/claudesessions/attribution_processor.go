@@ -6,9 +6,9 @@ import "strings"
 // mcp__<server>__<tool>.
 const mcpToolPrefix = "mcp__"
 
-// AttributionProcessor breaks tool usage down by the skill, plugin and MCP
-// server responsible for it, turning an anonymous "N tool calls" into something
-// a user can act on.
+// AttributionProcessor breaks tool usage down by the skill, plugin, MCP server
+// and sub-agent responsible for it, plus the reasoning-effort tier it ran at,
+// turning an anonymous "N tool calls" into something a user can act on.
 //
 // Counting is per tool_use block, not per event. Claude Code splits one
 // assistant message into several JSONL events — thinking, text, each tool call —
@@ -27,6 +27,7 @@ type AttributionProcessor struct {
 	mcpServers   map[string]int
 	mcpTools     map[string]int
 	efforts      map[string]int
+	agents       map[string]int
 	unattributed int
 }
 
@@ -34,7 +35,7 @@ type AttributionProcessor struct {
 func (p *AttributionProcessor) Name() string { return "attribution" }
 
 // Process attributes each tool_use block in an assistant message to the skill,
-// plugin, MCP server and effort tier of the event carrying it.
+// plugin, MCP server, sub-agent and effort tier of the event carrying it.
 func (p *AttributionProcessor) Process(ev ProcessableEvent) {
 	if ev.Message == nil || ev.Message.Role != "assistant" {
 		return
@@ -45,24 +46,38 @@ func (p *AttributionProcessor) Process(ev ProcessableEvent) {
 		if b.Type != "tool_use" || b.Name == "" {
 			continue
 		}
-		if ev.AttributionSkill != "" {
-			p.skills[ev.AttributionSkill]++
-		} else {
-			// Built-in tool use, with no skill's instructions in context.
-			p.unattributed++
-		}
-		// A skill can be user-level rather than shipped by a plugin, so the
-		// plugin is counted independently instead of nested under the skill.
-		if ev.AttributionPlugin != "" {
-			p.plugins[ev.AttributionPlugin]++
-		}
-		if ev.Effort != "" {
-			p.efforts[ev.Effort]++
-		}
-		if server, tool, ok := splitMCPToolName(b.Name); ok {
-			p.mcpServers[server]++
-			p.mcpTools[tool]++
-		}
+		p.attributeBlock(ev, b.Name)
+	}
+}
+
+// attributeBlock credits one tool_use block to every dimension the event names.
+// An empty field contributes nothing rather than creating a "" bucket — except
+// for the skill, whose absence is itself the signal that this was built-in tool
+// use and is counted as unattributed so the totals reconcile.
+func (p *AttributionProcessor) attributeBlock(ev ProcessableEvent, blockName string) {
+	if ev.AttributionSkill != "" {
+		p.skills[ev.AttributionSkill]++
+	} else {
+		// Built-in tool use, with no skill's instructions in context.
+		p.unattributed++
+	}
+	// A skill can be user-level rather than shipped by a plugin, so the
+	// plugin is counted independently instead of nested under the skill.
+	if ev.AttributionPlugin != "" {
+		p.plugins[ev.AttributionPlugin]++
+	}
+	if ev.Effort != "" {
+		p.efforts[ev.Effort]++
+	}
+	// Sub-agent transcripts carry the agent type that owns the turn; the
+	// parent transcript leaves it empty, so main-thread work contributes
+	// nothing here rather than landing in a catch-all bucket.
+	if ev.AttributionAgent != "" {
+		p.agents[ev.AttributionAgent]++
+	}
+	if server, tool, ok := splitMCPToolName(blockName); ok {
+		p.mcpServers[server]++
+		p.mcpTools[tool]++
 	}
 }
 
@@ -92,6 +107,7 @@ func (p *AttributionProcessor) Finalize(insight *SessionInsight) {
 	insight.McpServerBreakdown = mergeCounts(insight.McpServerBreakdown, p.mcpServers)
 	insight.McpToolBreakdown = mergeCounts(insight.McpToolBreakdown, p.mcpTools)
 	insight.EffortBreakdown = mergeCounts(insight.EffortBreakdown, p.efforts)
+	insight.AgentBreakdown = mergeCounts(insight.AgentBreakdown, p.agents)
 	insight.UnattributedCalls = p.unattributed
 }
 
@@ -114,13 +130,14 @@ func (p *AttributionProcessor) Reset() {
 	p.mcpServers = make(map[string]int)
 	p.mcpTools = make(map[string]int)
 	p.efforts = make(map[string]int)
+	p.agents = make(map[string]int)
 	p.unattributed = 0
 }
 
 // ensureMaps allocates lazily, so the zero value is usable — the registry
 // constructs processors through Reset, but tests use the zero value.
 //
-// Every map is checked rather than one sentinel: Reset allocates all five
+// Every map is checked rather than one sentinel: Reset allocates all six
 // together today, but a partially-initialized value would otherwise panic on a
 // nil-map write deep inside Process.
 func (p *AttributionProcessor) ensureMaps() {
@@ -138,5 +155,8 @@ func (p *AttributionProcessor) ensureMaps() {
 	}
 	if p.efforts == nil {
 		p.efforts = make(map[string]int)
+	}
+	if p.agents == nil {
+		p.agents = make(map[string]int)
 	}
 }

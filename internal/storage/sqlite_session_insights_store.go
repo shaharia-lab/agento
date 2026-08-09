@@ -33,6 +33,7 @@ type InsightRecord struct {
 	McpServerBreakdown map[string]int
 	McpToolBreakdown   map[string]int
 	EffortBreakdown    map[string]int
+	AgentBreakdown     map[string]int
 	UnattributedCalls  int
 
 	TotalDurationMs int64
@@ -105,6 +106,10 @@ func insightArgs(r InsightRecord) ([]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	agents, err := marshalCounts("agent_breakdown", r.AgentBreakdown)
+	if err != nil {
+		return nil, err
+	}
 	hasErrors := 0
 	if r.HasErrors {
 		hasErrors = 1
@@ -120,6 +125,7 @@ func insightArgs(r InsightRecord) ([]any, error) {
 		r.AvgUserResponseTimeMs, r.AvgClaudeResponseTimeMs,
 		r.SessionType,
 		skills, plugins, mcpServers, mcpTools, efforts, r.UnattributedCalls,
+		agents,
 	}, nil
 }
 
@@ -164,8 +170,9 @@ INSERT INTO session_insights (
     avg_user_response_time_ms, avg_claude_response_time_ms,
     session_type,
     skill_breakdown, plugin_breakdown, mcp_server_breakdown,
-    mcp_tool_breakdown, effort_breakdown, unattributed_calls
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    mcp_tool_breakdown, effort_breakdown, unattributed_calls,
+    agent_breakdown
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(session_id) DO UPDATE SET
     processor_version           = excluded.processor_version,
     scanned_at                  = excluded.scanned_at,
@@ -192,7 +199,8 @@ ON CONFLICT(session_id) DO UPDATE SET
     mcp_server_breakdown        = excluded.mcp_server_breakdown,
     mcp_tool_breakdown          = excluded.mcp_tool_breakdown,
     effort_breakdown            = excluded.effort_breakdown,
-    unattributed_calls          = excluded.unattributed_calls`
+    unattributed_calls          = excluded.unattributed_calls,
+    agent_breakdown             = excluded.agent_breakdown`
 
 // Get retrieves the insight for a single session. Returns nil, nil when not found.
 func (s *SQLiteSessionInsightsStore) Get(ctx context.Context, sessionID string) (*InsightRecord, error) {
@@ -270,6 +278,9 @@ type InsightAggregateSummary struct {
 	SkillBreakdowns     []string
 	PluginBreakdowns    []string
 	McpServerBreakdowns []string
+	McpToolBreakdowns   []string
+	EffortBreakdowns    []string
+	AgentBreakdowns     []string
 }
 
 // GetAggregateSummary computes aggregated insight statistics using SQL aggregation
@@ -386,7 +397,8 @@ func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
 	return summary, err
 }
 
-const insightBreakdownSQL = `SELECT tool_breakdown, skill_breakdown, plugin_breakdown, mcp_server_breakdown
+const insightBreakdownSQL = `SELECT tool_breakdown, skill_breakdown, plugin_breakdown,
+       mcp_server_breakdown, mcp_tool_breakdown, effort_breakdown, agent_breakdown
 FROM session_insights`
 
 // queryAllBreakdowns fetches every breakdown JSON column in a single scan and
@@ -414,14 +426,17 @@ func (s *SQLiteSessionInsightsStore) queryAllBreakdowns(
 	}()
 
 	for rows.Next() {
-		var tool, skill, plugin, mcpServer string
-		if scanErr := rows.Scan(&tool, &skill, &plugin, &mcpServer); scanErr != nil {
+		var tool, skill, plugin, mcpServer, mcpTool, effort, agent string
+		if scanErr := rows.Scan(&tool, &skill, &plugin, &mcpServer, &mcpTool, &effort, &agent); scanErr != nil {
 			return scanErr
 		}
 		summary.ToolBreakdowns = appendIfPresent(summary.ToolBreakdowns, tool)
 		summary.SkillBreakdowns = appendIfPresent(summary.SkillBreakdowns, skill)
 		summary.PluginBreakdowns = appendIfPresent(summary.PluginBreakdowns, plugin)
 		summary.McpServerBreakdowns = appendIfPresent(summary.McpServerBreakdowns, mcpServer)
+		summary.McpToolBreakdowns = appendIfPresent(summary.McpToolBreakdowns, mcpTool)
+		summary.EffortBreakdowns = appendIfPresent(summary.EffortBreakdowns, effort)
+		summary.AgentBreakdowns = appendIfPresent(summary.AgentBreakdowns, agent)
 	}
 	return rows.Err()
 }
@@ -488,7 +503,8 @@ SELECT session_id, processor_version, scanned_at,
        avg_user_response_time_ms, avg_claude_response_time_ms,
        session_type,
        skill_breakdown, plugin_breakdown, mcp_server_breakdown,
-       mcp_tool_breakdown, effort_breakdown, unattributed_calls
+       mcp_tool_breakdown, effort_breakdown, unattributed_calls,
+       agent_breakdown
 FROM session_insights`
 
 // rowScanner is satisfied by both *sql.Row and *sql.Rows.
@@ -533,6 +549,7 @@ func scanInsightRecord(row rowScanner) (*InsightRecord, error) {
 		&b.mcpTools,
 		&b.efforts,
 		&r.UnattributedCalls,
+		&b.agents,
 	)
 	if err != nil {
 		return nil, err
@@ -542,21 +559,37 @@ func scanInsightRecord(row rowScanner) (*InsightRecord, error) {
 	if t, parseErr := time.Parse(time.RFC3339, scannedAt); parseErr == nil {
 		r.ScannedAt = t
 	}
+	r.ToolBreakdown = decodeToolBreakdown(toolBreakdown)
+	b.decodeInto(&r)
 
-	r.ToolBreakdown = make(map[string]int)
-	if toolBreakdown != "" && toolBreakdown != "{}" {
-		if unmarshalErr := json.Unmarshal([]byte(toolBreakdown), &r.ToolBreakdown); unmarshalErr != nil {
-			// Non-fatal: leave breakdown as empty map if JSON is malformed.
-			r.ToolBreakdown = make(map[string]int)
-		}
+	return &r, nil
+}
+
+// decodeToolBreakdown decodes the tool_breakdown column. Malformed JSON yields
+// an empty map rather than an error: a breakdown is a derived convenience, and
+// losing the whole insight row over one bad blob would be worse.
+func decodeToolBreakdown(raw string) map[string]int {
+	counts := make(map[string]int)
+	if raw == "" || raw == "{}" {
+		return counts
 	}
+	if err := json.Unmarshal([]byte(raw), &counts); err != nil {
+		return make(map[string]int)
+	}
+	return counts
+}
+
+// decodeInto decodes every attribution column onto the record. Keeping this
+// beside the struct means a newly added column has exactly two places to touch
+// -- the scan list and here -- instead of being easy to scan and forget to
+// decode.
+func (b attributionColumns) decodeInto(r *InsightRecord) {
 	r.SkillBreakdown = unmarshalCounts(b.skills)
 	r.PluginBreakdown = unmarshalCounts(b.plugins)
 	r.McpServerBreakdown = unmarshalCounts(b.mcpServers)
 	r.McpToolBreakdown = unmarshalCounts(b.mcpTools)
 	r.EffortBreakdown = unmarshalCounts(b.efforts)
-
-	return &r, nil
+	r.AgentBreakdown = unmarshalCounts(b.agents)
 }
 
 // attributionColumns holds the raw JSON of the attribution breakdown columns
@@ -567,4 +600,5 @@ type attributionColumns struct {
 	mcpServers string
 	mcpTools   string
 	efforts    string
+	agents     string
 }

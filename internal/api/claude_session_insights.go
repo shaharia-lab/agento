@@ -110,6 +110,10 @@ type insightsSummary struct {
 	TopSkills         []toolCount `json:"top_skills"`
 	TopPlugins        []toolCount `json:"top_plugins"`
 	TopMcpServers     []toolCount `json:"top_mcp_servers"`
+	// TopMcpTools is the drill-down under TopMcpServers, not a peer dimension.
+	TopMcpTools []toolCount `json:"top_mcp_tools"`
+	TopEfforts  []toolCount `json:"top_efforts"`
+	TopAgents   []toolCount `json:"top_agents"`
 }
 
 // toolCount pairs a tool name with its aggregate call count.
@@ -127,6 +131,9 @@ func buildInsightsSummaryFromAggregate(agg *claudesessions.InsightAggregateSumma
 			TopSkills:     []toolCount{},
 			TopPlugins:    []toolCount{},
 			TopMcpServers: []toolCount{},
+			TopMcpTools:   []toolCount{},
+			TopEfforts:    []toolCount{},
+			TopAgents:     []toolCount{},
 		}
 	}
 	n := float64(agg.TotalSessions)
@@ -146,6 +153,9 @@ func buildInsightsSummaryFromAggregate(agg *claudesessions.InsightAggregateSumma
 		TopSkills:            sortedToolCounts(agg.TopSkillTotals),
 		TopPlugins:           sortedToolCounts(agg.TopPluginTotals),
 		TopMcpServers:        sortedToolCounts(agg.TopMcpServerTotals),
+		TopMcpTools:          sortedToolCounts(agg.TopMcpToolTotals),
+		TopEfforts:           sortedToolCounts(agg.TopEffortTotals),
+		TopAgents:            sortedToolCounts(agg.TopAgentTotals),
 	}
 }
 

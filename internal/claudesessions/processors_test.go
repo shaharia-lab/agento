@@ -657,6 +657,51 @@ func withEffort(effort string) func(*claudesessions.ProcessableEvent) {
 	return func(ev *claudesessions.ProcessableEvent) { ev.Effort = effort }
 }
 
+// withAgent sets the sub-agent type owning the turn. Claude Code stamps this on
+// sub-agent transcripts only, never on the parent.
+func withAgent(agent string) func(*claudesessions.ProcessableEvent) {
+	return func(ev *claudesessions.ProcessableEvent) { ev.AttributionAgent = agent }
+}
+
+// TestAttributionProcessor_CountsAgentsPerToolCall covers the dimension #202
+// added. attributionAgent was previously decoded and dropped, so the risk is
+// the same trap the sibling dimensions document: counting per event rather
+// than per tool_use block inflates every number by a variable factor.
+func TestAttributionProcessor_CountsAgentsPerToolCall(t *testing.T) {
+	evs := []claudesessions.ProcessableEvent{
+		// One message, three tool_use blocks -> 3, not 1.
+		makeEvent("assistant",
+			withMessage("assistant", "", toolUseBlocks("Bash", "Read", "Grep"), nil),
+			withAgent("Explore")),
+		// A second event of the same turn carrying no tool calls must add nothing.
+		makeEvent("assistant",
+			withMessage("assistant", "", textBlocks("thinking"), nil),
+			withAgent("Explore")),
+		// A different sub-agent type is tracked separately.
+		makeEvent("assistant",
+			withMessage("assistant", "", toolUseBlocks("Write"), nil),
+			withAgent("general-purpose")),
+		// Main-thread work carries no agent and must not land in a catch-all.
+		makeEvent("assistant",
+			withMessage("assistant", "", toolUseBlocks("Edit"), nil)),
+	}
+	insight := runProcessors(evs, &claudesessions.AttributionProcessor{})
+
+	if got := insight.AgentBreakdown["Explore"]; got != 3 {
+		t.Errorf("agent_breakdown[Explore] = %d, want 3 (per tool_use block, not per event)", got)
+	}
+	if got := insight.AgentBreakdown["general-purpose"]; got != 1 {
+		t.Errorf("agent_breakdown[general-purpose] = %d, want 1", got)
+	}
+	if len(insight.AgentBreakdown) != 2 {
+		t.Errorf("agent_breakdown = %v, want exactly 2 entries — unattributed work must not bucket",
+			insight.AgentBreakdown)
+	}
+	if _, ok := insight.AgentBreakdown[""]; ok {
+		t.Error(`agent_breakdown has an "" key; an absent agent must contribute nothing`)
+	}
+}
+
 // TestAttributionProcessor_CountsSkillsAndReconciles is the issue's headline
 // case: attributed calls land under their skill, unattributed ones are counted
 // explicitly, and together they account for every tool call.
@@ -785,6 +830,7 @@ func TestAttributionProcessor_NoAttributionFieldsYieldsEmptyMaps(t *testing.T) {
 		"mcp_server_breakdown": insight.McpServerBreakdown,
 		"mcp_tool_breakdown":   insight.McpToolBreakdown,
 		"effort_breakdown":     insight.EffortBreakdown,
+		"agent_breakdown":      insight.AgentBreakdown,
 	} {
 		if m == nil {
 			t.Errorf("%s is nil, want an empty map", name)
