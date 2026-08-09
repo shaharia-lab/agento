@@ -44,6 +44,14 @@ describe('parseRangeBounds', () => {
     expect(parseRangeBounds(TO, FROM)).toBeNull()
   })
 
+  it('measures the length guard in calendar days, not elapsed hours', () => {
+    // A local day is 23 or 25 hours across a DST transition, so an
+    // exactly-at-the-limit range that crosses a fall-back measures an hour over.
+    // Counting days keeps both directions symmetric.
+    expect(parseRangeBounds('2026-06-01', '2026-11-27')).not.toBeNull() // 180 days, fall-back
+    expect(parseRangeBounds('2026-02-09', '2026-08-07')).not.toBeNull() // 180 days, spring-forward
+  })
+
   it('rejects ranges beyond MAX_DRILLDOWN_DAYS (URL length guard)', () => {
     expect(parseRangeBounds('2020-01-01', '2026-08-07')).toBeNull() // all-time preset
     expect(parseRangeBounds('2026-02-08', '2026-08-07')).toBeNull() // 181 days

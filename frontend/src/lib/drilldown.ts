@@ -55,7 +55,10 @@ export function parseRangeBounds(
   const from = Date.parse(`${fromDate}T00:00:00`)
   const to = Date.parse(`${toDate}T00:00:00`) + 24 * 60 * 60 * 1000 // `to` date is inclusive
   if (Number.isNaN(from) || Number.isNaN(to) || from >= to) return null
-  if (to - from > MAX_DRILLDOWN_DAYS * 24 * 60 * 60 * 1000) return null
+  // Count calendar days rather than elapsed milliseconds. Local days are 23 or
+  // 25 hours long across a DST transition, so an exactly-at-the-limit range
+  // that crosses a fall-back measures an hour over and would be rejected.
+  if (Math.round((to - from) / (24 * 60 * 60 * 1000)) > MAX_DRILLDOWN_DAYS) return null
   return { from, to }
 }
 
