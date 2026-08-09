@@ -5,12 +5,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={{.BinaryPath}} web --no-browser
+ExecStart="{{ .BinaryPath | systemdArg }}" web --no-browser
 Restart=on-failure
 RestartSec=5
-Environment=PATH={{.ExtraPath}}
-Environment=PORT={{.Port}}
-Environment=AGENTO_DATA_DIR={{.DataDir}}
+Environment="PATH={{ .ExtraPath | systemdEnv }}"
+Environment="PORT={{ .Port | systemdEnv }}"
+Environment="AGENTO_DATA_DIR={{ .DataDir | systemdEnv }}"
 Environment=AGENTO_SKIP_UPDATE_CHECK=1
 StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}

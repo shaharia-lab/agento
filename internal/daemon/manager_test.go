@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -115,6 +117,19 @@ func TestRenderPlistGolden(t *testing.T) {
 	}
 }
 
+// hostileOptions returns Options whose every path value carries a space, a
+// double quote, a backslash, a percent, and XML metacharacters — the inputs
+// that broke unescaped unit/plist rendering.
+func hostileOptions() Options {
+	return Options{
+		BinaryPath: `/home/a "b"/bin\agento%i/agent&<>'".bin`,
+		DataDir:    `/home/a "b"/data\dir%i/data&<>'"`,
+		LogPath:    `/home/a "b"/data\dir%i/logs/service&<>'".log`,
+		Port:       8990,
+		ExtraPath:  `/opt/my tools/bin:/weird "q"\p%i/bin:/x&<>'"/bin`,
+	}
+}
+
 func TestRenderSystemdUnitGolden(t *testing.T) {
 	t.Parallel()
 	got, err := render("agento.service.tmpl", testOptions())
@@ -127,6 +142,154 @@ func TestRenderSystemdUnitGolden(t *testing.T) {
 	}
 	if string(got) != string(golden) {
 		t.Errorf("unit mismatch with golden file.\n--- got ---\n%s\n--- want ---\n%s", got, golden)
+	}
+}
+
+func TestRenderSystemdUnitSpacesGolden(t *testing.T) {
+	t.Parallel()
+	opts := testOptions()
+	opts.BinaryPath = "/home/test user/.local/bin/agento"
+	opts.DataDir = "/home/test user/.agento"
+	opts.LogPath = "/home/test user/.agento/logs/service.log"
+	opts.ExtraPath = "/home/test user/.local/bin:/opt/My Tools/bin:/usr/bin"
+	got, err := render("agento.service.tmpl", opts)
+	if err != nil {
+		t.Fatalf("render unit: %v", err)
+	}
+	golden, err := os.ReadFile(filepath.Join("testdata", "agento.service.spaces.golden"))
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(golden) {
+		t.Errorf("unit mismatch with spaces golden.\n--- got ---\n%s\n--- want ---\n%s", got, golden)
+	}
+}
+
+func TestRenderPlistEntitiesGolden(t *testing.T) {
+	t.Parallel()
+	opts := testOptions()
+	opts.BinaryPath = "/home/a&b/.local/bin/agento"
+	opts.DataDir = "/home/a&b/.agento"
+	opts.LogPath = "/home/a&b/.agento/logs/service.log"
+	opts.ExtraPath = "/home/a&b/.local/bin:/opt/A<B>/bin:/usr/bin"
+	got, err := render("agento.plist.tmpl", opts)
+	if err != nil {
+		t.Fatalf("render plist: %v", err)
+	}
+	golden, err := os.ReadFile(filepath.Join("testdata", "agento.plist.entities.golden"))
+	if err != nil {
+		t.Fatalf("read golden: %v", err)
+	}
+	if string(got) != string(golden) {
+		t.Errorf("plist mismatch with entities golden.\n--- got ---\n%s\n--- want ---\n%s", got, golden)
+	}
+}
+
+func TestRenderEscapesHostileValues(t *testing.T) {
+	t.Parallel()
+
+	t.Run("systemd unit", func(t *testing.T) {
+		t.Parallel()
+		got, err := render("agento.service.tmpl", hostileOptions())
+		if err != nil {
+			t.Fatalf("render unit: %v", err)
+		}
+		unit := string(got)
+		// Every Environment= assignment and the ExecStart binary path must be
+		// double-quoted as a whole, with \ " escaped and % doubled (systemd
+		// would otherwise consume %i as a specifier).
+		wants := []string{
+			`ExecStart="/home/a \"b\"/bin\\agento%%i/agent&<>'\".bin" web --no-browser`,
+			`Environment="PATH=/opt/my tools/bin:/weird \"q\"\\p%%i/bin:/x&<>'\"/bin"`,
+			`Environment="AGENTO_DATA_DIR=/home/a \"b\"/data\\dir%%i/data&<>'\""`,
+			`Environment="PORT=8990"`,
+		}
+		for _, want := range wants {
+			if !strings.Contains(unit, want) {
+				t.Errorf("unit missing %q:\n%s", want, unit)
+			}
+		}
+		// No raw % may survive on an Environment=/ExecStart= line outside a
+		// %% pair — a lone one would be expanded as a specifier at load time.
+		// StandardOutput/StandardError take the remainder of the line
+		// literally, so they are exempt (and out of scope per the issue).
+		for _, line := range strings.Split(unit, "\n") {
+			if !strings.HasPrefix(line, "Environment=") && !strings.HasPrefix(line, "ExecStart=") {
+				continue
+			}
+			if strings.Contains(strings.ReplaceAll(line, "%%", ""), "%") {
+				t.Errorf("line contains an unescaped %% specifier: %q", line)
+			}
+		}
+	})
+
+	t.Run("launchd plist", func(t *testing.T) {
+		t.Parallel()
+		got, err := render("agento.plist.tmpl", hostileOptions())
+		if err != nil {
+			t.Fatalf("render plist: %v", err)
+		}
+		plist := string(got)
+		// The rendered plist must be well-formed XML — strip the DOCTYPE
+		// because encoding/xml cannot resolve the external Apple DTD.
+		doc := plist[strings.Index(plist, "<plist"):]
+		if err := xml.Unmarshal([]byte(doc), new(any)); err != nil {
+			t.Fatalf("rendered plist is not valid XML: %v\n%s", err, plist)
+		}
+		// Raw input characters that only survive when escaping failed: the
+		// single quote of <>'" is never entity-escaped (xml.EscapeText emits
+		// &#39;), so a literal ' means the value went in raw. Escaped
+		// sequences (&amp;, &#34;) are present by design and not checked.
+		for _, bad := range []string{"<B>", "'"} {
+			if strings.Contains(plist, bad) {
+				t.Errorf("plist contains unescaped sequence %q:\n%s", bad, plist)
+			}
+		}
+	})
+}
+
+// TestRenderUnitVerifiedBySystemdAnalyze runs the real `systemd-analyze
+// verify` against the space-containing render — the acceptance-criterion
+// check that only a systemd host can perform. Skipped elsewhere (CI has no
+// systemd); TestSystemdInstallSequenceAndIdempotency exercises the same
+// verify hook through fakeRunner on every platform.
+func TestRenderUnitVerifiedBySystemdAnalyze(t *testing.T) {
+	if _, err := exec.LookPath("systemd-analyze"); err != nil {
+		t.Skip("systemd-analyze not available on this host")
+	}
+	// systemd-analyze verify insists the ExecStart binary exists and is
+	// executable, so use a real (script) binary inside a space-containing
+	// directory — also proving the quoted path is parsed as ONE command.
+	// /bin/sh is guaranteed on any host that has systemd-analyze.
+	tmp := t.TempDir()
+	binDir := filepath.Join(tmp, "test user", "bin")
+	if err := os.MkdirAll(binDir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	binary := filepath.Join(binDir, "agento")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatalf("write stub binary: %v", err)
+	}
+	logDir := filepath.Join(tmp, "test user", ".agento", "logs")
+	if err := os.MkdirAll(logDir, 0o750); err != nil {
+		t.Fatalf("mkdir logs: %v", err)
+	}
+	opts := testOptions()
+	opts.BinaryPath = binary
+	opts.DataDir = filepath.Join(tmp, "test user", ".agento")
+	opts.LogPath = filepath.Join(logDir, "service.log")
+	opts.ExtraPath = binDir + ":/opt/My Tools/bin:/usr/bin"
+	got, err := render("agento.service.tmpl", opts)
+	if err != nil {
+		t.Fatalf("render unit: %v", err)
+	}
+	unit := filepath.Join(tmp, "agento.service")
+	if err := os.WriteFile(unit, got, 0o600); err != nil {
+		t.Fatalf("write unit: %v", err)
+	}
+	cmd := exec.Command("systemd-analyze", "verify", unit) //nolint:gosec // fixed binary, test-rendered file
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("systemd-analyze verify rejected the spaced-value unit: %v\n%s\nunit:\n%s", err, out, got)
 	}
 }
 
@@ -261,6 +424,8 @@ func TestSystemdInstallSequenceAndIdempotency(t *testing.T) {
 	wantPerInstall := []string{
 		// Install first probes Status to decide whether the port check applies.
 		"systemctl --user show agento.service --property=LoadState,UnitFileState,ActiveState,MainPID",
+		"systemd-analyze --version",
+		"systemd-analyze verify " + unit,
 		"systemctl --user daemon-reload",
 		"systemctl --user enable --now agento.service",
 		"loginctl enable-linger " + wantUser,
