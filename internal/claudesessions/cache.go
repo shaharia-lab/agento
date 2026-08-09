@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -201,6 +203,48 @@ func (c *Cache) List() []ClaudeSessionSummary {
 		return []ClaudeSessionSummary{}
 	}
 	return sessions
+}
+
+// UnpricedModels returns the distinct model IDs seen in cached sessions that
+// matched no rate, sorted. #188 stores the per-session list, so this is a
+// cheap query rather than a corpus re-read; the pricing UI uses it to turn the
+// unknown-pricing bucket into a list of models waiting to be priced.
+func (c *Cache) UnpricedModels(ctx context.Context) ([]string, error) {
+	rows, err := c.db.QueryContext(ctx, `
+		SELECT unpriced_models FROM claude_session_cache WHERE unpriced_models != ''
+		UNION ALL
+		SELECT unpriced_models FROM claude_subagent_cache WHERE unpriced_models != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			c.logger.Warn("claude sessions: failed to close rows", "error", cerr)
+		}
+	}()
+
+	seen := map[string]struct{}{}
+	for rows.Next() {
+		var packed string
+		if err := rows.Scan(&packed); err != nil {
+			return nil, err
+		}
+		for _, m := range strings.Split(packed, "\n") {
+			if m != "" {
+				seen[m] = struct{}{}
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]string, 0, len(seen))
+	for m := range seen {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // Invalidate resets the cache metadata so the next List() call triggers a rescan.

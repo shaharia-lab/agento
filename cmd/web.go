@@ -363,7 +363,10 @@ func buildAPIServer(
 		return nil, err
 	}
 
-	sessionCache, insightStore, insightWorker := setupInsights(ctx, deps.db, deps.logger, bus)
+	pricingStore := pricing.NewStore(deps.db, deps.logger)
+	sessionCache, insightStore, insightWorker := setupInsights(
+		ctx, deps.db, deps.logger, bus, pricingStore,
+	)
 
 	dispatcher := buildTriggerDispatcher(ctx, deps, triggerStore)
 	webhookHandler := api.NewTelegramWebhookHandler(triggerStore, deps.integrationStore, dispatcher, deps.logger)
@@ -380,6 +383,7 @@ func buildAPIServer(
 			triggerStore, deps.integrationStore, deps.settingsMgr, deps.appConfig, deps.logger,
 		),
 		ProfileSvc:         service.NewClaudeSettingsProfileService(deps.logger),
+		PricingSvc:         service.NewPricingService(pricingStore, sessionCache, deps.logger),
 		SettingsMgr:        deps.settingsMgr,
 		AppConfig:          deps.appConfig,
 		Logger:             deps.logger,
@@ -406,8 +410,8 @@ func buildChatService(deps appDeps) service.ChatService {
 
 func setupInsights(
 	ctx context.Context, db *sql.DB, logger *slog.Logger, bus eventbus.EventBus,
+	pricingStore *pricing.Store,
 ) (*claudesessions.Cache, claudesessions.InsightStorer, *claudesessions.InsightWorker) {
-	pricingStore := pricing.NewStore(db, logger)
 	sessionCache := claudesessions.NewCache(db, logger).WithEventBus(bus).WithPricingStore(pricingStore)
 	sessionCache.StartBackgroundScan()
 

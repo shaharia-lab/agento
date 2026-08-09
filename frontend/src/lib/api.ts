@@ -37,6 +37,9 @@ import type {
   InsightSummary,
   TriggerRule,
   WebhookStatus,
+  PricingCatalog,
+  PricingRate,
+  PricingRateInput,
 } from '../types'
 
 const BASE = '/api'
@@ -654,6 +657,37 @@ export const jobHistoryApi = {
 
 export const versionApi = {
   checkUpdate: () => request<UpdateCheckResponse>('/version/update-check'),
+}
+
+// ── Model Pricing ─────────────────────────────────────────────────────────────
+
+export const pricingApi = {
+  catalog: (): Promise<PricingCatalog> => request<PricingCatalog>('/pricing/catalog'),
+
+  /**
+   * Appends a new effective-dated rate. Existing rates are untouched, so usage
+   * already costed keeps the price it was charged at. Rejects with the
+   * conflicting rate's message if one already exists for that model and date.
+   */
+  addRate: (data: PricingRateInput): Promise<PricingRate> =>
+    request<PricingRate>('/pricing/rates', { method: 'POST', body: JSON.stringify(data) }),
+
+  /**
+   * Edits a rate in place, for a value entered in error. Unlike addRate this
+   * rewrites already-reported costs for that rate's window.
+   */
+  correctRate: (data: PricingRateInput): Promise<PricingRate> =>
+    request<PricingRate>('/pricing/rates', { method: 'PUT', body: JSON.stringify(data) }),
+
+  deleteRate: (modelPattern: string, effectiveFrom: string) => {
+    const qs = new URLSearchParams({
+      model_pattern: modelPattern,
+      effective_from: effectiveFrom,
+    })
+    return fetch(`${BASE}/pricing/rates?${qs.toString()}`, { method: 'DELETE' }).then(res => {
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    })
+  },
 }
 
 // ── Monitoring / OTel ─────────────────────────────────────────────────────────
