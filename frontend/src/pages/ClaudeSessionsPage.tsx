@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { claudeSessionsApi } from '@/lib/api'
-import type { ClaudeSessionSummary, ClaudeProject } from '@/types'
+import type { ClaudeSessionSummary, ClaudeSessionCost, ClaudeProject } from '@/types'
 import { formatRelativeTime } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -24,10 +24,11 @@ import {
   Shield,
   GitPullRequest,
   Scissors,
+  DollarSign,
 } from 'lucide-react'
 import { Tooltip } from '@/components/ui/tooltip'
 import { CopyableId } from '@/components/CopyableId'
-import { formatTokens, shortPath } from '@/lib/format'
+import { formatCost, formatTokens, shortPath } from '@/lib/format'
 import { overlapsRange, resolvePresetRange, type TimePreset } from '@/lib/timefilter'
 import { decodeWindows, overlapsAnyWindow } from '@/lib/drilldown'
 
@@ -399,6 +400,65 @@ export default function ClaudeSessionsPage() {
   )
 }
 
+/** One labelled figure inside the cost tooltip. */
+function CostLine({ label, usd }: Readonly<{ label: string; usd: number }>) {
+  if (!usd) return null
+  return (
+    <div className="flex justify-between gap-4">
+      <span className="text-zinc-400">{label}</span>
+      <span>{formatCost(usd)}</span>
+    </div>
+  )
+}
+
+/**
+ * Cost badge for a session row, a sibling of the token badge above it.
+ *
+ * A session that used a model with no published rate is marked with `~` and
+ * names the offending models: its total is a floor, and presenting an
+ * understated figure as complete is the failure this disclosure prevents.
+ */
+function SessionCostBadge({ session }: Readonly<{ session: ClaudeSessionSummary }>) {
+  const main = session.cost
+  const sub = session.subagent_cost
+  const total = (main?.total_usd ?? 0) + (sub?.total_usd ?? 0)
+  const unpriced = session.unpriced_models ?? []
+  const partial = unpriced.length > 0
+
+  const sum = (pick: (c: ClaudeSessionCost) => number) =>
+    (main ? pick(main) : 0) + (sub ? pick(sub) : 0)
+
+  return (
+    <Tooltip
+      side="top"
+      content={
+        <div className="space-y-1">
+          <CostLine label="Input" usd={sum(c => c.input_usd)} />
+          <CostLine label="Output" usd={sum(c => c.output_usd)} />
+          <CostLine label="Cache read" usd={sum(c => c.cache_read_usd)} />
+          <CostLine label="Cache write" usd={sum(c => c.cache_write_usd)} />
+          <CostLine label="Sub-agents" usd={sub?.total_usd ?? 0} />
+          {partial && (
+            <div className="text-amber-300 pt-1">
+              Excludes {unpriced.join(', ')} — no published rate
+            </div>
+          )}
+        </div>
+      }
+    >
+      <span
+        className={`flex items-center gap-0.5 text-xs cursor-default ${
+          partial ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'
+        }`}
+      >
+        <DollarSign className="h-2.5 w-2.5" />
+        {partial && '~'}
+        {formatCost(total)}
+      </span>
+    </Tooltip>
+  )
+}
+
 function SessionRow({
   session,
   onClick,
@@ -536,6 +596,8 @@ function SessionRow({
                   </span>
                 </Tooltip>
               )}
+
+              {hasTokens && <SessionCostBadge session={session} />}
             </div>
           </div>
         </button>

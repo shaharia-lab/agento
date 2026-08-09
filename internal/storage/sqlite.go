@@ -416,6 +416,46 @@ ALTER TABLE model_pricing ADD COLUMN billable INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE model_pricing ADD COLUMN estimated INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		version: 19,
+		sql: `
+-- Per-session cost, stored rather than derived (#188). Cost was previously
+-- recomputed on every read, which is why a rate edit needed no re-scan. Storing
+-- it makes the session list, the detail page and the analytics totals read one
+-- number instead of three derivations -- but it also means a rate change no
+-- longer reaches cached rows on its own, which is what pricing_rev below is for.
+--
+-- Zero defaults are correct: a row that predates this migration has no cost yet,
+-- and the scanner-version bump re-reads every transcript to populate it.
+ALTER TABLE claude_session_cache ADD COLUMN input_cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE claude_session_cache ADD COLUMN output_cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE claude_session_cache ADD COLUMN cache_read_cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE claude_session_cache ADD COLUMN cache_write_cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE claude_session_cache ADD COLUMN total_cost_usd REAL NOT NULL DEFAULT 0;
+
+-- Newline-separated; empty means fully priced. A non-empty list makes the
+-- stored total a floor, which the UI has to disclose rather than round off.
+ALTER TABLE claude_session_cache ADD COLUMN unpriced_models TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_session_cache ADD COLUMN unpriced_tokens INTEGER NOT NULL DEFAULT 0;
+
+-- Delegated work is costed separately for the same reason its tokens are:
+-- claude_session_cache.* stays main-thread, and the sub-agent roll-up is summed
+-- back in at query time.
+ALTER TABLE claude_subagent_cache ADD COLUMN input_cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE claude_subagent_cache ADD COLUMN output_cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE claude_subagent_cache ADD COLUMN cache_read_cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE claude_subagent_cache ADD COLUMN cache_write_cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE claude_subagent_cache ADD COLUMN total_cost_usd REAL NOT NULL DEFAULT 0;
+ALTER TABLE claude_subagent_cache ADD COLUMN unpriced_models TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_subagent_cache ADD COLUMN unpriced_tokens INTEGER NOT NULL DEFAULT 0;
+
+-- The catalog fingerprint the cached costs were computed under. When it drifts
+-- from the live catalog the stored costs are stale, and the only way to redo
+-- them is to re-read the transcripts -- per-message model and timestamp are not
+-- retained on the row. Mirrors how scanner_version already forces a re-read.
+ALTER TABLE claude_cache_metadata ADD COLUMN pricing_rev INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

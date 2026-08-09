@@ -2,6 +2,7 @@ package claudesessions
 
 import (
 	"encoding/json"
+	"sort"
 	"time"
 
 	"github.com/shaharia-lab/agento/internal/pricing"
@@ -83,6 +84,61 @@ func (a *costAccumulator) UnknownPricingTokens() int {
 	return total
 }
 
+// UnpricedModels returns the distinct models this session used that carry no
+// known rate, sorted so the persisted list is deterministic and a re-scan that
+// changes nothing does not rewrite the row.
+func (a *costAccumulator) UnpricedModels() []string {
+	if a == nil || len(a.unknownModels) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(a.unknownModels))
+	for m := range a.unknownModels {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// SessionCost is a session's cost broken down by token category. It is stored
+// on the session cache rather than derived per request, so the list, the detail
+// page and the analytics totals cannot disagree about what a session cost.
+//
+// The breakdown is accumulated per assistant message at that message's own
+// model and timestamp, which is what lets a session that mixes models — or
+// spans a rate change — cost correctly.
+type SessionCost struct {
+	InputUSD      float64 `json:"input_usd"`
+	OutputUSD     float64 `json:"output_usd"`
+	CacheReadUSD  float64 `json:"cache_read_usd"`
+	CacheWriteUSD float64 `json:"cache_write_usd"`
+	TotalUSD      float64 `json:"total_usd"`
+}
+
+// sessionCostFromPricing converts the accumulator's running total. A nil
+// accumulator (a transcript that yielded no timestamps, or a process with no
+// pricing wired) yields a zero cost rather than a panic.
+func sessionCostFromPricing(a *costAccumulator) SessionCost {
+	if a == nil {
+		return SessionCost{}
+	}
+	return SessionCost{
+		InputUSD:      a.cost.InputCostUSD,
+		OutputUSD:     a.cost.OutputCostUSD,
+		CacheReadUSD:  a.cost.CacheReadCostUSD,
+		CacheWriteUSD: a.cost.CacheWriteCostUSD,
+		TotalUSD:      a.cost.TotalCostUSD,
+	}
+}
+
+// Add accumulates another breakdown into c.
+func (c *SessionCost) Add(o SessionCost) {
+	c.InputUSD += o.InputUSD
+	c.OutputUSD += o.OutputUSD
+	c.CacheReadUSD += o.CacheReadUSD
+	c.CacheWriteUSD += o.CacheWriteUSD
+	c.TotalUSD += o.TotalUSD
+}
+
 // ClaudeProject represents a project directory containing Claude Code sessions.
 type ClaudeProject struct {
 	EncodedName  string `json:"encoded_name"`
@@ -154,6 +210,22 @@ type ClaudeSessionSummary struct {
 	// PRs are the pull requests this session was linked to, deduplicated by URL.
 	// A session can produce several.
 	PRs []ClaudeSessionPR `json:"prs,omitempty"`
+
+	// Cost is the main-thread cost, accumulated per assistant message at that
+	// message's own model and timestamp during the scan. Like Usage it excludes
+	// delegated work; SubagentCost holds that, and TotalCost() sums them.
+	Cost SessionCost `json:"cost"`
+	// SubagentCost is the summed cost of this session's sub-agent transcripts,
+	// mirroring SubagentUsage.
+	SubagentCost SessionCost `json:"subagent_cost"`
+	// UnpricedModels names the models this session used that have no known rate.
+	// Non-empty means Cost is a floor rather than a total, and the UI must say
+	// so — an understated number presented as complete is the failure mode this
+	// field exists to prevent.
+	UnpricedModels []string `json:"unpriced_models,omitempty"`
+	// UnpricedTokens is how many input+output tokens those models accounted for,
+	// so an aggregate can state the size of what its total left out.
+	UnpricedTokens int `json:"unpriced_tokens,omitempty"`
 }
 
 // ClaudeSessionPR is one pull request a session was linked to, from a `pr-link`
@@ -177,6 +249,15 @@ func (s *ClaudeSessionSummary) ResolveDisplayTitle() string {
 		}
 	}
 	return ""
+}
+
+// TotalCost returns the session's main-thread cost plus the cost of every
+// sub-agent it delegated to — the counterpart of TotalUsage, and what aggregate
+// cost reporting must use so delegated spend is not silently dropped.
+func (s ClaudeSessionSummary) TotalCost() SessionCost {
+	total := s.Cost
+	total.Add(s.SubagentCost)
+	return total
 }
 
 // TotalUsage returns the session's main-thread usage plus the usage of every
