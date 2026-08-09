@@ -45,11 +45,15 @@ func TestSeed_InsertsBuiltinCatalog(t *testing.T) {
 		if r.UserModified {
 			t.Errorf("seeded row %q marked user_modified", r.ModelPattern)
 		}
-		// Cache columns must be derived from input, not hand-entered.
-		if r.CacheWrite5mPerMTok != r.InputPerMTok*1.25 ||
-			r.CacheWrite1hPerMTok != r.InputPerMTok*2 ||
-			r.CacheReadPerMTok != r.InputPerMTok*0.1 {
-			t.Errorf("seeded row %q has non-derived cache rates", r.ModelPattern)
+		// Anthropic rows derive their cache columns from input; third-party rows
+		// carry the provider's own published cache prices, so only the former
+		// are checked against the TTL multipliers.
+		if r.Provider == "anthropic" {
+			if r.CacheWrite5mPerMTok != r.InputPerMTok*1.25 ||
+				r.CacheWrite1hPerMTok != r.InputPerMTok*2 ||
+				r.CacheReadPerMTok != r.InputPerMTok*0.1 {
+				t.Errorf("seeded row %q has non-derived cache rates", r.ModelPattern)
+			}
 		}
 	}
 }

@@ -191,6 +191,104 @@ func TestBuiltinCatalog_Parses(t *testing.T) {
 			t.Errorf("missing seed row for %q", p)
 		}
 	}
+	// The third-party providers #187 seeded.
+	for _, p := range []string{
+		"k3", "kimi-k3", "glm-5.2",
+		"qwen3.5-397b-a17b", "qwen3.5-plus", "qwen3.5-flash", "qwen3-max",
+		"<synthetic>", "mixedbread-ai/",
+	} {
+		if seen[p] == 0 {
+			t.Errorf("missing seed row for %q", p)
+		}
+	}
+}
+
+// TestBuiltinCatalog_BillableMatchesZeroRates enforces the invariant that keeps
+// a $0.00 row meaningful: an entry is non-billable exactly when every one of
+// its rates is zero. A half-filled entry — a real model with a forgotten output
+// rate, or a placeholder still carrying a price — fails here rather than
+// silently mis-reporting a user's spend.
+func TestBuiltinCatalog_BillableMatchesZeroRates(t *testing.T) {
+	for _, e := range BuiltinCatalog() {
+		rates, err := e.rates()
+		if err != nil {
+			t.Fatalf("entry %q: %v", e.ModelPattern, err)
+		}
+		for _, r := range rates {
+			allZero := r.InputPerMTok == 0 && r.OutputPerMTok == 0 &&
+				r.CacheWrite5mPerMTok == 0 && r.CacheWrite1hPerMTok == 0 && r.CacheReadPerMTok == 0
+			if r.Billable == allZero {
+				t.Errorf("entry %q: billable=%v with allZero=%v — a deliberate zero must be "+
+					"marked non-billable, and a billable model must price every category",
+					e.ModelPattern, r.Billable, allZero)
+			}
+		}
+	}
+}
+
+// TestBuiltinCatalog_RejectsHalfFilledEntry proves the validation above is load
+// bearing rather than incidentally satisfied by the current data.
+func TestBuiltinCatalog_RejectsHalfFilledEntry(t *testing.T) {
+	no := false
+	tests := []struct {
+		name  string
+		entry builtinEntry
+	}{
+		{"billable entry missing its output rate", builtinEntry{
+			ModelPattern: "half-filled",
+			Rates:        []builtinPrice{{InputPerMTok: 1, OutputPerMTok: 0}},
+		}},
+		{"non-billable entry still carrying a price", builtinEntry{
+			ModelPattern: "not-really-free",
+			Billable:     &no,
+			Rates:        []builtinPrice{{InputPerMTok: 1, OutputPerMTok: 2}},
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := tt.entry.rates(); err == nil {
+				t.Error("expected an error, got nil")
+			}
+		})
+	}
+}
+
+// TestBuiltinCatalog_CacheOverridesRespected checks the seed format change
+// #187 needed: third-party providers publish their own cached-input price, so
+// Anthropic's 1.25×/2×/0.1× multipliers must be overridable per rate.
+func TestBuiltinCatalog_CacheOverridesRespected(t *testing.T) {
+	read, write := 0.26, 1.40
+	e := builtinEntry{
+		ModelPattern: "glm-test",
+		Rates: []builtinPrice{{
+			InputPerMTok: 1.40, OutputPerMTok: 4.40,
+			CacheRead: &read, CacheWrite5m: &write, CacheWrite1h: &write,
+		}},
+	}
+	rates, err := e.rates()
+	if err != nil {
+		t.Fatalf("rates: %v", err)
+	}
+	r := rates[0]
+	// Derived would be 0.14 / 1.75 / 2.80 — the published figures must win.
+	if r.CacheReadPerMTok != read || r.CacheWrite5mPerMTok != write || r.CacheWrite1hPerMTok != write {
+		t.Errorf("overrides ignored: read=%v write5m=%v write1h=%v",
+			r.CacheReadPerMTok, r.CacheWrite5mPerMTok, r.CacheWrite1hPerMTok)
+	}
+
+	// An entry that omits them still derives from input.
+	derived, err := builtinEntry{
+		ModelPattern: "anthropic-shaped",
+		Rates:        []builtinPrice{{InputPerMTok: 4, OutputPerMTok: 20}},
+	}.rates()
+	if err != nil {
+		t.Fatalf("rates: %v", err)
+	}
+	d := derived[0]
+	if d.CacheWrite5mPerMTok != 5 || d.CacheWrite1hPerMTok != 8 || d.CacheReadPerMTok != 0.4 {
+		t.Errorf("derivation broken: write5m=%v write1h=%v read=%v",
+			d.CacheWrite5mPerMTok, d.CacheWrite1hPerMTok, d.CacheReadPerMTok)
+	}
 }
 
 func TestBuiltinCatalog_SeedRatesMatchAcceptanceCases(t *testing.T) {

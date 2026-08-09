@@ -22,9 +22,12 @@ func NewResolver(rates []Rate) *Resolver {
 }
 
 // Resolved is a rate lookup result: the rate in force, plus whether the answer
-// was estimated rather than exact. Estimated is true when the spend predates
-// every row for the matched pattern (usage older than the catalog) — the
-// earliest rate is the best available answer but was not literally in force.
+// was estimated rather than exact. Estimated is true in two cases: the spend
+// predates every row for the matched pattern (usage older than the catalog, so
+// the earliest rate is the best available answer but was not literally in
+// force), or the matched rate is itself marked estimated (a bare family alias
+// such as "opus", which names no concrete model and is priced at that tier's
+// current flagship).
 type Resolved struct {
 	Rate      Rate
 	Estimated bool
@@ -110,5 +113,5 @@ func (r *Resolver) effectiveAt(best int, at time.Time) Resolved {
 	if winner == nil {
 		return Resolved{Rate: *earliest, Estimated: true}
 	}
-	return Resolved{Rate: *winner}
+	return Resolved{Rate: *winner, Estimated: winner.Estimated}
 }

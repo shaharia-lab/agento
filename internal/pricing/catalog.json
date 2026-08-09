@@ -159,6 +159,7 @@
     "model_pattern": "opus",
     "match_type": "exact",
     "display_name": "Claude Opus (generic)",
+    "estimated": true,
     "source": "derived: current Opus list rate (checked 2026-08-08)",
     "rates": [{ "effective_from": "", "input": 5.00, "output": 25.00 }]
   },
@@ -167,6 +168,7 @@
     "model_pattern": "sonnet",
     "match_type": "exact",
     "display_name": "Claude Sonnet (generic)",
+    "estimated": true,
     "source": "derived: current Sonnet list rate (checked 2026-08-08)",
     "rates": [{ "effective_from": "", "input": 3.00, "output": 15.00 }]
   },
@@ -175,6 +177,7 @@
     "model_pattern": "haiku",
     "match_type": "exact",
     "display_name": "Claude Haiku (generic)",
+    "estimated": true,
     "source": "derived: current Haiku list rate (checked 2026-08-08)",
     "rates": [{ "effective_from": "", "input": 1.00, "output": 5.00 }]
   },
@@ -183,6 +186,7 @@
     "model_pattern": "fable",
     "match_type": "exact",
     "display_name": "Claude Fable (generic)",
+    "estimated": true,
     "source": "derived: Fable 5 list rate (checked 2026-08-08)",
     "rates": [{ "effective_from": "", "input": 10.00, "output": 50.00 }]
   },
@@ -191,7 +195,165 @@
     "model_pattern": "mythos",
     "match_type": "exact",
     "display_name": "Claude Mythos (generic)",
+    "estimated": true,
     "source": "derived: Mythos 5 list rate (checked 2026-08-08)",
     "rates": [{ "effective_from": "", "input": 10.00, "output": 50.00 }]
+  },
+
+  {
+    "provider": "moonshot",
+    "model_pattern": "k3",
+    "match_type": "exact",
+    "display_name": "Kimi K3",
+    "source": "https://platform.kimi.ai/docs/pricing/chat-k3 · International endpoint · retrieved 2026-08-09. Claude Code records this model as the bare id \"k3\"; exact match is deliberate so it cannot swallow a future id merely starting k3. Cache write = cache-miss input: Moonshot publishes only Input (Cache Hit) / Input (Cache Miss) and no cache-storage fee, so creation is the miss path and there is no TTL split.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 3.00,
+        "output": 15.00,
+        "cache_read": 0.30,
+        "cache_write_5m": 3.00,
+        "cache_write_1h": 3.00
+      }
+    ]
+  },
+  {
+    "provider": "moonshot",
+    "model_pattern": "kimi-k3",
+    "match_type": "prefix",
+    "display_name": "Kimi K3",
+    "source": "https://platform.kimi.ai/docs/pricing/chat-k3 · International endpoint · retrieved 2026-08-09. Moonshot's canonical API id, carried alongside the bare \"k3\" that appears in transcripts so dated snapshots resolve too.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 3.00,
+        "output": 15.00,
+        "cache_read": 0.30,
+        "cache_write_5m": 3.00,
+        "cache_write_1h": 3.00
+      }
+    ]
+  },
+  {
+    "provider": "zhipu",
+    "model_pattern": "glm-5.2",
+    "match_type": "prefix",
+    "display_name": "GLM-5.2",
+    "source": "https://docs.z.ai/guides/overview/pricing · direct Z.ai endpoint, not OpenRouter · retrieved 2026-08-09. No cache-write column is published, so creation is seeded at the plain input rate. Cached-input storage is currently a limited-time promotional zero and is not modelled.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 1.40,
+        "output": 4.40,
+        "cache_read": 0.26,
+        "cache_write_5m": 1.40,
+        "cache_write_1h": 1.40
+      }
+    ]
+  },
+  {
+    "provider": "alibaba",
+    "model_pattern": "qwen3.5-397b-a17b",
+    "match_type": "prefix",
+    "display_name": "Qwen3.5 397B A17B",
+    "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing · International (Singapore) endpoint, 60-70% dearer than Mainland China · retrieved 2026-08-09. Alibaba prices caching as a percentage rule rather than per model: explicit-cache creation 125% of input, hits 10%.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 0.60,
+        "output": 3.60,
+        "cache_read": 0.06,
+        "cache_write_5m": 0.75,
+        "cache_write_1h": 0.75
+      }
+    ]
+  },
+  {
+    "provider": "alibaba",
+    "model_pattern": "qwen3.5-plus",
+    "match_type": "prefix",
+    "display_name": "Qwen3.5 Plus",
+    "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing · International (Singapore) endpoint · retrieved 2026-08-09. Base 0-256K tier; Alibaba charges $0.50/$3.00 above 256K and the catalog has no context-length dimension, so long-context usage is under-reported by 25%. Cache per Alibaba's percentage rule: explicit creation 125% of input, hits 10%.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 0.40,
+        "output": 2.40,
+        "cache_read": 0.04,
+        "cache_write_5m": 0.50,
+        "cache_write_1h": 0.50
+      }
+    ]
+  },
+  {
+    "provider": "alibaba",
+    "model_pattern": "qwen3.5-flash",
+    "match_type": "prefix",
+    "display_name": "Qwen3.5 Flash",
+    "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing · International (Singapore) endpoint · retrieved 2026-08-09. Flat to 1M, no tier split. Cache per Alibaba's percentage rule: explicit creation 125% of input, hits 10%.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 0.10,
+        "output": 0.40,
+        "cache_read": 0.01,
+        "cache_write_5m": 0.125,
+        "cache_write_1h": 0.125
+      }
+    ]
+  },
+  {
+    "provider": "alibaba",
+    "model_pattern": "qwen3-max",
+    "match_type": "prefix",
+    "display_name": "Qwen3 Max",
+    "source": "https://www.alibabacloud.com/help/en/model-studio/model-pricing · International (Singapore) endpoint · retrieved 2026-08-09. Base 0-32K tier; Alibaba charges $2.40/$12.00 above 32K and $3.00/$15.00 above 128K. Cache per Alibaba's percentage rule: explicit creation 125% of input, hits 10%.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 1.20,
+        "output": 6.00,
+        "cache_read": 0.12,
+        "cache_write_5m": 1.50,
+        "cache_write_1h": 1.50
+      }
+    ]
+  },
+
+  {
+    "provider": "",
+    "model_pattern": "<synthetic>",
+    "match_type": "exact",
+    "billable": false,
+    "display_name": "Claude Code synthetic message",
+    "source": "Not a model. Claude Code's placeholder for locally generated messages, which are never billed. A catalog row rather than a special case in the cost accumulator, so the rule lives in one place.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write_5m": 0,
+        "cache_write_1h": 0
+      }
+    ]
+  },
+  {
+    "provider": "mixedbread",
+    "model_pattern": "mixedbread-ai/",
+    "match_type": "prefix",
+    "billable": false,
+    "display_name": "mixedbread embeddings",
+    "source": "Embedding models, not chat usage. Deliberately zero-cost so they contribute nothing to totals without sitting permanently in the unknown-pricing bucket. Prefix covers the whole vendor namespace.",
+    "rates": [
+      {
+        "effective_from": "",
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write_5m": 0,
+        "cache_write_1h": 0
+      }
+    ]
   }
 ]

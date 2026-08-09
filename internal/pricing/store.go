@@ -29,17 +29,17 @@ func NewStore(db *sql.DB, logger *slog.Logger) *Store {
 const rateColumns = `id, provider, model_pattern, match_type, display_name,
 	input_per_mtok, output_per_mtok,
 	cache_write_5m_per_mtok, cache_write_1h_per_mtok, cache_read_per_mtok,
-	effective_from, source, is_builtin, user_modified`
+	effective_from, source, is_builtin, user_modified, billable, estimated`
 
 func (s *Store) scanRate(row interface{ Scan(...any) error }) (Rate, error) {
 	var r Rate
 	var effectiveFrom, source, displayName, provider string
-	var isBuiltin, userModified int
+	var isBuiltin, userModified, billable, estimated int
 	err := row.Scan(
 		&r.ID, &provider, &r.ModelPattern, &r.MatchType, &displayName,
 		&r.InputPerMTok, &r.OutputPerMTok,
 		&r.CacheWrite5mPerMTok, &r.CacheWrite1hPerMTok, &r.CacheReadPerMTok,
-		&effectiveFrom, &source, &isBuiltin, &userModified,
+		&effectiveFrom, &source, &isBuiltin, &userModified, &billable, &estimated,
 	)
 	if err != nil {
 		return Rate{}, err
@@ -50,7 +50,16 @@ func (s *Store) scanRate(row interface{ Scan(...any) error }) (Rate, error) {
 	}
 	r.Provider, r.DisplayName, r.EffectiveFrom, r.Source = provider, displayName, t, source
 	r.IsBuiltin, r.UserModified = isBuiltin == 1, userModified == 1
+	r.Billable, r.Estimated = billable == 1, estimated == 1
 	return r, nil
+}
+
+// boolToInt renders a Go bool as the INTEGER SQLite stores it as.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // Snapshot loads every rate row, ordered for deterministic downstream
@@ -107,6 +116,10 @@ func (s *Store) Revision(ctx context.Context) (int64, error) {
 		writeFloat(r.CacheWrite5mPerMTok)
 		writeFloat(r.CacheWrite1hPerMTok)
 		writeFloat(r.CacheReadPerMTok)
+		// Both flags change what a lookup means, not just how it displays:
+		// billable decides whether tokens land in the unknown bucket, and
+		// estimated qualifies the figure. Toggling either must re-cost.
+		_, _ = h.Write([]byte{byte(boolToInt(r.Billable)), byte(boolToInt(r.Estimated))})
 	}
 	// Keep the value non-negative so it survives SQLite integer round-trips.
 	// #nosec G115 -- the mask clears the sign bit before the conversion.
@@ -130,8 +143,9 @@ func (s *Store) Seed(ctx context.Context) (int, error) {
 					provider, model_pattern, match_type, display_name,
 					input_per_mtok, output_per_mtok,
 					cache_write_5m_per_mtok, cache_write_1h_per_mtok, cache_read_per_mtok,
-					effective_from, source, is_builtin, user_modified, created_at, updated_at
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)
+					effective_from, source, is_builtin, user_modified, billable, estimated,
+					created_at, updated_at
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?, ?, ?)
 				ON CONFLICT(model_pattern, effective_from) DO UPDATE SET
 					provider = excluded.provider,
 					match_type = excluded.match_type,
@@ -142,12 +156,15 @@ func (s *Store) Seed(ctx context.Context) (int, error) {
 					cache_write_1h_per_mtok = excluded.cache_write_1h_per_mtok,
 					cache_read_per_mtok = excluded.cache_read_per_mtok,
 					source = excluded.source,
+					billable = excluded.billable,
+					estimated = excluded.estimated,
 					updated_at = excluded.updated_at
 				WHERE model_pricing.user_modified = 0`,
 				r.Provider, r.ModelPattern, r.MatchType, r.DisplayName,
 				r.InputPerMTok, r.OutputPerMTok,
 				r.CacheWrite5mPerMTok, r.CacheWrite1hPerMTok, r.CacheReadPerMTok,
 				r.EffectiveFrom.UTC().Format(time.RFC3339), r.Source,
+				boolToInt(r.Billable), boolToInt(r.Estimated),
 				time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339),
 			)
 			if err != nil {
@@ -182,8 +199,9 @@ func (s *Store) UpsertRate(ctx context.Context, r Rate) error {
 			provider, model_pattern, match_type, display_name,
 			input_per_mtok, output_per_mtok,
 			cache_write_5m_per_mtok, cache_write_1h_per_mtok, cache_read_per_mtok,
-			effective_from, source, is_builtin, user_modified, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+			effective_from, source, is_builtin, user_modified, billable, estimated,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
 		ON CONFLICT(model_pattern, effective_from) DO UPDATE SET
 			provider = excluded.provider,
 			match_type = excluded.match_type,
@@ -196,11 +214,14 @@ func (s *Store) UpsertRate(ctx context.Context, r Rate) error {
 			source = excluded.source,
 			is_builtin = excluded.is_builtin,
 			user_modified = 1,
+			billable = excluded.billable,
+			estimated = excluded.estimated,
 			updated_at = excluded.updated_at`,
 		r.Provider, r.ModelPattern, r.MatchType, r.DisplayName,
 		r.InputPerMTok, r.OutputPerMTok,
 		r.CacheWrite5mPerMTok, r.CacheWrite1hPerMTok, r.CacheReadPerMTok,
 		r.EffectiveFrom.UTC().Format(time.RFC3339), r.Source, r.IsBuiltin,
+		boolToInt(r.Billable), boolToInt(r.Estimated),
 		now, now,
 	)
 	return err

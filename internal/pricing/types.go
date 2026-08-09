@@ -28,7 +28,8 @@ const (
 // Rate is one effective-dated price row for a model. All prices are USD per
 // million tokens. Prompt-cache writes are billed by time-to-live (1.25× input
 // for the 5-minute tier, 2× for the 1-hour tier); the built-in catalog derives
-// the cache columns from the input rate rather than hand-entering them.
+// the cache columns from the input rate unless the provider publishes its own,
+// which non-Anthropic providers generally do.
 type Rate struct {
 	ID                  int64     `json:"id"`
 	Provider            string    `json:"provider"`
@@ -48,6 +49,17 @@ type Rate struct {
 	// UserModified marks a row the user has edited; startup re-seeding never
 	// overwrites it.
 	UserModified bool `json:"user_modified"`
+	// Billable distinguishes a model that deliberately costs nothing — Claude
+	// Code's <synthetic> placeholder, embedding models — from one whose rates
+	// simply have not been filled in. Both price at $0.00, but only the latter
+	// is a gap; a non-billable model is resolved, so it never reaches the
+	// unknown-pricing bucket.
+	Billable bool `json:"billable"`
+	// Estimated marks a rate that is not the model's published price: the bare
+	// family aliases ("opus", "sonnet") name no concrete model, so they are
+	// priced at the current flagship of that tier as a best effort. Resolved
+	// reports this alongside the predates-the-catalog case.
+	Estimated bool `json:"estimated"`
 }
 
 // Usage is the token consumption of one assistant message, with cache
