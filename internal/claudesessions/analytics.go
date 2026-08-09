@@ -3,6 +3,7 @@ package claudesessions
 import (
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -96,17 +97,19 @@ func mostFrequent(counts map[string]int) string {
 
 // AnalyticsReport is the complete response payload for GET /api/claude-analytics.
 type AnalyticsReport struct {
-	Summary          AnalyticsSummary       `json:"summary"`
-	TimeSeries       []TimeSeriesPoint      `json:"time_series"`
-	CacheEfficiency  []CacheEfficiencyPoint `json:"cache_efficiency"`
-	ModelBreakdown   []ModelStat            `json:"model_breakdown"`
-	SessionsPerModel []ModelSessionStat     `json:"sessions_per_model"`
-	MostActiveDays   []DayActivity          `json:"most_active_days"`
-	Heatmap          []HeatmapCell          `json:"heatmap"`
-	HourlyActivity   []HourlyActivity       `json:"hourly_activity"`
-	CostOverTime     []CostPoint            `json:"cost_over_time"`
-	CostSummary      CostSummary            `json:"cost_summary"`
-	Projects         []string               `json:"projects"`
+	Summary             AnalyticsSummary       `json:"summary"`
+	TimeSeries          []TimeSeriesPoint      `json:"time_series"`
+	CacheEfficiency     []CacheEfficiencyPoint `json:"cache_efficiency"`
+	ModelBreakdown      []ModelStat            `json:"model_breakdown"`
+	SessionsPerModel    []ModelSessionStat     `json:"sessions_per_model"`
+	CostByModel         []ModelCostStat        `json:"cost_by_model"`
+	CostOverTimeByModel []StackedCostPoint     `json:"cost_over_time_by_model"`
+	MostActiveDays      []DayActivity          `json:"most_active_days"`
+	Heatmap             []HeatmapCell          `json:"heatmap"`
+	HourlyActivity      []HourlyActivity       `json:"hourly_activity"`
+	CostOverTime        []CostPoint            `json:"cost_over_time"`
+	CostSummary         CostSummary            `json:"cost_summary"`
+	Projects            []string               `json:"projects"`
 }
 
 // AnalyticsSummary holds the top-level KPI values.
@@ -163,6 +166,31 @@ type ModelStat struct {
 	Model      string  `json:"model"`
 	Tokens     int     `json:"tokens"`
 	Percentage float64 `json:"percentage"`
+}
+
+// ModelCostStat is one model's share of spend, the answer to the question the
+// token breakdown cannot answer. Cost is attributed to the model that spent it,
+// including for delegated work — see ClaudeSessionSummary.TotalCostByModel.
+type ModelCostStat struct {
+	Model string `json:"model"`
+	// Provider groups models for display ("Anthropic", "Moonshot"). Derived
+	// from the model id, so it needs no catalog lookup and stays correct for a
+	// model the catalog has no rate for.
+	Provider   string      `json:"provider"`
+	Cost       SessionCost `json:"cost"`
+	Percentage float64     `json:"percentage"`
+	// Sessions is how many sessions this model spent money in — context for a
+	// large total, which may be one runaway session or a hundred small ones.
+	Sessions int `json:"sessions"`
+}
+
+// StackedCostPoint is one time bucket's cost split by model, for the stacked
+// cost-over-time chart. The values sum to the same bucket's CostPoint.
+type StackedCostPoint struct {
+	Date string `json:"date"`
+	// CostByModel is keyed by model id. Buckets are independent: a model absent
+	// from one bucket spent nothing in it, which the chart renders as zero.
+	CostByModel map[string]float64 `json:"cost_by_model"`
 }
 
 // ModelSessionStat describes session count per model.
@@ -259,15 +287,17 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 
 	if len(filtered) == 0 {
 		return AnalyticsReport{
-			TimeSeries:       []TimeSeriesPoint{},
-			CacheEfficiency:  []CacheEfficiencyPoint{},
-			ModelBreakdown:   []ModelStat{},
-			SessionsPerModel: []ModelSessionStat{},
-			MostActiveDays:   []DayActivity{},
-			Heatmap:          []HeatmapCell{},
-			HourlyActivity:   buildHourlyActivity(nil, loc),
-			CostOverTime:     []CostPoint{},
-			Projects:         projects,
+			TimeSeries:          []TimeSeriesPoint{},
+			CacheEfficiency:     []CacheEfficiencyPoint{},
+			ModelBreakdown:      []ModelStat{},
+			CostByModel:         []ModelCostStat{},
+			CostOverTimeByModel: []StackedCostPoint{},
+			SessionsPerModel:    []ModelSessionStat{},
+			MostActiveDays:      []DayActivity{},
+			Heatmap:             []HeatmapCell{},
+			HourlyActivity:      buildHourlyActivity(nil, loc),
+			CostOverTime:        []CostPoint{},
+			Projects:            projects,
 		}
 	}
 
@@ -276,17 +306,19 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 	timeSeries := buildTimeSeries(filtered, p.From, p.To, granularity, loc)
 
 	return AnalyticsReport{
-		Summary:          summary,
-		TimeSeries:       timeSeries,
-		CacheEfficiency:  buildCacheEfficiency(timeSeries),
-		ModelBreakdown:   buildModelBreakdown(filtered),
-		SessionsPerModel: buildSessionsPerModel(filtered),
-		MostActiveDays:   buildMostActiveDays(filtered, loc),
-		Heatmap:          buildHeatmap(filtered, loc),
-		HourlyActivity:   buildHourlyActivity(filtered, loc),
-		CostOverTime:     buildCostOverTime(filtered, p.From, p.To, granularity, loc),
-		CostSummary:      costSummary,
-		Projects:         projects,
+		Summary:             summary,
+		TimeSeries:          timeSeries,
+		CacheEfficiency:     buildCacheEfficiency(timeSeries),
+		ModelBreakdown:      buildModelBreakdown(filtered),
+		CostByModel:         buildCostByModel(filtered),
+		CostOverTimeByModel: buildCostOverTimeByModel(filtered, p.From, p.To, granularity, loc),
+		SessionsPerModel:    buildSessionsPerModel(filtered),
+		MostActiveDays:      buildMostActiveDays(filtered, loc),
+		Heatmap:             buildHeatmap(filtered, loc),
+		HourlyActivity:      buildHourlyActivity(filtered, loc),
+		CostOverTime:        buildCostOverTime(filtered, p.From, p.To, granularity, loc),
+		CostSummary:         costSummary,
+		Projects:            projects,
 	}
 }
 
@@ -478,6 +510,115 @@ func buildModelBreakdown(sessions []ClaudeSessionSummary) []ModelStat {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Tokens > out[j].Tokens })
 	return out
+}
+
+// providerPrefixes maps a model-id prefix to the provider that publishes it.
+//
+// A prefix map rather than a catalog lookup: the provider is a property of the
+// identifier, and deriving it here keeps a model with no published rate — the
+// case the unpriced bucket exists for — grouped correctly instead of falling
+// into "unknown provider" precisely when a reader is trying to find it.
+var providerPrefixes = []struct{ prefix, provider string }{
+	{"claude-", "Anthropic"},
+	{"glm-", "Z.ai"},
+	{"qwen", "Alibaba"},
+	{"k", "Moonshot"},
+}
+
+// providerFor names the provider behind a model id, or "Other" when no prefix
+// matches. Matching is longest-prefix-first by declaration order, so the
+// single-letter Moonshot prefix is checked last and cannot swallow another
+// vendor's id.
+func providerFor(model string) string {
+	for _, p := range providerPrefixes {
+		if strings.HasPrefix(model, p.prefix) {
+			return p.provider
+		}
+	}
+	return "Other"
+}
+
+// buildCostByModel attributes spend to the model that spent it.
+//
+// This is the chart the dashboards were missing. The token breakdown beside it
+// answers a different question and, on any corpus mixing a caching backend with
+// a non-caching one, answers it in a way a reader will misread as spend: cache
+// reads and writes are most of the money and none of the tokens that chart
+// plots.
+//
+// Sessions whose rows predate the cost_by_model column contribute nothing here
+// until the scanner re-reads them. That is visible as a total below the cost
+// summary rather than as a wrong attribution, which is the right way round —
+// and it resolves itself on the next scan.
+func buildCostByModel(sessions []ClaudeSessionSummary) []ModelCostStat {
+	costs := map[string]*SessionCost{}
+	sessionCount := map[string]int{}
+	total := 0.0
+
+	for _, s := range sessions {
+		for model, c := range s.TotalCostByModel() {
+			if model == syntheticModel {
+				continue // never billed; see buildModelBreakdown
+			}
+			if costs[model] == nil {
+				costs[model] = &SessionCost{}
+			}
+			costs[model].Add(c)
+			sessionCount[model]++
+			total += c.TotalUSD
+		}
+	}
+
+	out := make([]ModelCostStat, 0, len(costs))
+	for model, c := range costs {
+		pct := 0.0
+		if total > 0 {
+			pct = math.Round(c.TotalUSD/total*1000) / 10
+		}
+		out = append(out, ModelCostStat{
+			Model:      model,
+			Provider:   providerFor(model),
+			Cost:       *c,
+			Percentage: pct,
+			Sessions:   sessionCount[model],
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Cost.TotalUSD > out[j].Cost.TotalUSD })
+	return out
+}
+
+// buildCostOverTimeByModel splits the cost series by model, so "did switching
+// models actually change what I spend" is legible over a period rather than
+// only in a single-period total.
+//
+// Buckets follow buildCostOverTime exactly — same key, same walk — so the
+// stacked chart and the plain one line up bar for bar.
+func buildCostOverTimeByModel(
+	sessions []ClaudeSessionSummary, from, to time.Time, granularity string, loc *time.Location,
+) []StackedCostPoint {
+	buckets := map[string]map[string]float64{}
+	for _, s := range sessions {
+		key := bucketKey(s.LastActivity, granularity, loc)
+		if buckets[key] == nil {
+			buckets[key] = map[string]float64{}
+		}
+		for model, c := range s.TotalCostByModel() {
+			if model == syntheticModel {
+				continue
+			}
+			buckets[key][model] += c.TotalUSD
+		}
+	}
+
+	var result []StackedCostPoint
+	walkBuckets(from, to, granularity, loc, func(key string, cur time.Time) {
+		costs := buckets[key]
+		if costs == nil {
+			costs = map[string]float64{}
+		}
+		result = append(result, StackedCostPoint{Date: bucketLabel(cur, granularity, loc), CostByModel: costs})
+	})
+	return result
 }
 
 func buildSessionsPerModel(sessions []ClaudeSessionSummary) []ModelSessionStat {

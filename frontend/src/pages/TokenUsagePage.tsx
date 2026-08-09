@@ -20,6 +20,8 @@ import type {
   TimeSeriesPoint,
   CacheEfficiencyPoint,
   ModelStat,
+  ModelCostStat,
+  StackedCostPoint,
   CostPoint,
   CostSummary,
 } from '@/types'
@@ -41,6 +43,16 @@ import { LivePricingTable } from './LivePricingTable'
 // Cost is formatted by the shared helper so this page and the session list can
 // never disagree about what a given figure looks like.
 import { formatCost } from '@/lib/format'
+
+/**
+ * How many models the stacked cost chart draws as their own series.
+ *
+ * The palette has eight colours and a stripe below a percent or so is invisible
+ * anyway; models past this point are simply not drawn, which the chart's note
+ * states rather than leaving a reader to wonder why the stack is short of the
+ * total.
+ */
+const MAX_STACKED_MODELS = 6
 
 // ─── Charts ───────────────────────────────────────────────────────────────────
 
@@ -216,6 +228,144 @@ function CostSummaryCards({ cost }: Readonly<{ cost: CostSummary }>) {
 }
 
 /**
+ * Cost by model — the chart the dashboards were missing.
+ *
+ * It sits above the token breakdown because it answers the question users
+ * actually ask ("where is my money going?"), and because the token chart
+ * answers it wrongly if read that way.
+ */
+function ModelCostDonut({ data }: Readonly<{ data: ModelCostStat[] }>) {
+  const slices = data.map(m => ({
+    name: `${formatModelName(m.model)} · ${m.provider}`,
+    value: m.cost.total_usd,
+    percentage: m.percentage,
+  }))
+  return (
+    <ChartCard
+      title="Cost by Model"
+      subtitle="Every dollar attributed to the model that spent it, delegated work included. Priced per message at its own model and timestamp."
+    >
+      <DonutWithLegend data={slices} formatValue={formatCost} />
+    </ChartCard>
+  )
+}
+
+/** Spend rolled up to the provider behind each model. */
+function ProviderCostBars({ data }: Readonly<{ data: ModelCostStat[] }>) {
+  const byProvider = new Map<string, { provider: string; cost: number; models: number }>()
+  for (const m of data) {
+    const entry = byProvider.get(m.provider) ?? { provider: m.provider, cost: 0, models: 0 }
+    entry.cost += m.cost.total_usd
+    entry.models += 1
+    byProvider.set(m.provider, entry)
+  }
+  const rows = [...byProvider.values()].sort((a, b) => b.cost - a.cost)
+  // One provider is not a comparison — the panel would spend its height
+  // restating the total tile.
+  if (rows.length < 2) return null
+
+  const max = rows[0].cost || 1
+  return (
+    <ChartCard title="Cost by Provider">
+      <ul className="space-y-2">
+        {rows.map((row, i) => (
+          <li key={row.provider} className="text-xs">
+            <div className="flex items-baseline justify-between mb-1">
+              <span className="text-zinc-700 dark:text-zinc-300">
+                {row.provider}
+                <span className="text-zinc-400 dark:text-zinc-500">
+                  {' '}
+                  · {row.models} model{row.models === 1 ? '' : 's'}
+                </span>
+              </span>
+              <span className="tabular-nums font-medium text-zinc-900 dark:text-zinc-100">
+                {formatCost(row.cost)}
+              </span>
+            </div>
+            <div className="h-2 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${(row.cost / max) * 100}%`,
+                  backgroundColor: MODEL_COLORS[i % MODEL_COLORS.length],
+                }}
+              />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </ChartCard>
+  )
+}
+
+/**
+ * Cost over time, stacked by model.
+ *
+ * The backend ships one map per bucket; recharts needs one flat row per bucket
+ * with a key per series, so the map is spread here. Only models that actually
+ * spent something in the window get a series, which keeps the legend honest on
+ * a corpus with a long tail of one-off models.
+ */
+function StackedCostChart({
+  data,
+  models,
+  hiddenModels,
+}: Readonly<{ data: StackedCostPoint[]; models: string[]; hiddenModels: number }>) {
+  const rows = data.map(point => ({
+    date: formatDateLabel(point.date),
+    ...Object.fromEntries(models.map(m => [m, point.cost_by_model[m] ?? 0])),
+  }))
+
+  // A dropped series is stated, not silently missing: a stack that does not
+  // reach the total it is supposed to decompose is a defect a reader cannot
+  // distinguish from one.
+  const note =
+    hiddenModels > 0
+      ? `Same buckets as the cost chart above, split by the model that spent it. The ${hiddenModels} smallest-spending model${hiddenModels === 1 ? '' : 's'} are not drawn, so the stack is slightly below the total.`
+      : 'Same buckets and same total as the cost chart above, split by the model that spent it.'
+
+  return (
+    <ChartCard title="Cost Over Time by Model" subtitle={note}>
+      <ResponsiveContainer width="100%" height={260}>
+        <BarChart data={rows} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" strokeOpacity={0.5} />
+          <XAxis
+            dataKey="date"
+            tick={{ fontSize: 11 }}
+            tickLine={false}
+            interval="preserveStartEnd"
+          />
+          <YAxis
+            tickFormatter={v => formatCost(v as number)}
+            tick={{ fontSize: 11 }}
+            tickLine={false}
+            axisLine={false}
+            width={64}
+          />
+          <Tooltip
+            formatter={(v, name) => [
+              formatCost(Number(v ?? 0)),
+              formatModelName(String(name ?? '')),
+            ]}
+            contentStyle={{ fontSize: 12, borderRadius: 6 }}
+          />
+          <Legend wrapperStyle={{ fontSize: 12 }} formatter={v => formatModelName(String(v))} />
+          {models.map((model, i) => (
+            <Bar
+              key={model}
+              dataKey={model}
+              name={model}
+              stackId="cost"
+              fill={MODEL_COLORS[i % MODEL_COLORS.length]}
+            />
+          ))}
+        </BarChart>
+      </ResponsiveContainer>
+    </ChartCard>
+  )
+}
+
+/**
  * Conversation tokens by model.
  *
  * Deliberately *not* titled as a spend chart. It plots input+output only, and a
@@ -288,6 +438,12 @@ export default function TokenUsagePage() {
     setRefreshing(true)
     load(from, to, project)
   }
+
+  // Series for the stacked cost chart, ordered by spend so the largest sits at
+  // the bottom of each bar and the legend reads top-spender first. Capped
+  // because a long tail of near-zero models produces stripes too thin to see
+  // and a legend that dwarfs the chart.
+  const costModels = (report?.cost_by_model ?? []).slice(0, MAX_STACKED_MODELS).map(m => m.model)
 
   const summary: AnalyticsSummary = report?.summary ?? {
     total_sessions: 0,
@@ -448,7 +604,15 @@ export default function TokenUsagePage() {
               <CacheEfficiencyChart data={report?.cache_efficiency ?? []} />
             </div>
 
-            {/* Conversation tokens by model */}
+            {/* Spend first, volume second: the two charts disagree by design,
+                and the money one is the question being asked. */}
+            {(report?.cost_by_model?.length ?? 0) > 0 && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                <ModelCostDonut data={report!.cost_by_model} />
+                <ProviderCostBars data={report!.cost_by_model} />
+              </div>
+            )}
+
             {(report?.model_breakdown?.length ?? 0) > 0 && (
               <ModelTokenDonut data={report!.model_breakdown} />
             )}
@@ -470,7 +634,18 @@ export default function TokenUsagePage() {
                   }
                 }
               />
-              <CostOverTimeChart data={report?.cost_over_time ?? []} />
+              {costModels.length > 0 ? (
+                <StackedCostChart
+                  data={report?.cost_over_time_by_model ?? []}
+                  models={costModels}
+                  hiddenModels={Math.max(
+                    0,
+                    (report?.cost_by_model?.length ?? 0) - costModels.length,
+                  )}
+                />
+              ) : (
+                <CostOverTimeChart data={report?.cost_over_time ?? []} />
+              )}
             </div>
           </>
         )}

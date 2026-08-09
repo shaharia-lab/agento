@@ -1067,6 +1067,28 @@ export interface ModelSessionStat {
   sessions: number
 }
 
+/**
+ * One model's share of spend. Unlike ModelStat this is money, attributed to the
+ * model that spent it including for delegated work — the two answer different
+ * questions and, on a corpus mixing a caching backend with a non-caching one,
+ * give nearly opposite pictures.
+ */
+export interface ModelCostStat {
+  model: string
+  /** Display grouping derived from the model id: Anthropic, Moonshot, Z.ai, … */
+  provider: string
+  cost: ClaudeSessionCost
+  percentage: number
+  /** How many sessions this model spent money in. */
+  sessions: number
+}
+
+/** One time bucket's cost split by model; the values sum to the plain series. */
+export interface StackedCostPoint {
+  date: string
+  cost_by_model: Record<string, number>
+}
+
 export interface DayActivity {
   date: string
   sessions: number
@@ -1105,6 +1127,8 @@ export interface AnalyticsReport {
   cache_efficiency: CacheEfficiencyPoint[]
   model_breakdown: ModelStat[]
   sessions_per_model: ModelSessionStat[]
+  cost_by_model: ModelCostStat[]
+  cost_over_time_by_model: StackedCostPoint[]
   most_active_days: DayActivity[]
   heatmap: HeatmapCell[]
   hourly_activity: HourlyActivity[]

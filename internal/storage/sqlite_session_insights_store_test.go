@@ -638,6 +638,7 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 		"ALTER TABLE session_insights DROP COLUMN agent_breakdown",
 		"DROP TABLE IF EXISTS model_pricing_tier",
 		"ALTER TABLE claude_subagent_cache DROP COLUMN event_count",
+		"ALTER TABLE claude_session_cache DROP COLUMN cost_by_model",
 		"DELETE FROM schema_migrations WHERE version >= 20",
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -658,13 +659,26 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 		t.Error("an existing database was reported as fresh")
 	}
 
-	var version int
+	// Compared against a freshly created database rather than a literal: what
+	// this asserts is that the rollback replayed all the way back to head, not
+	// that head is any particular number. Pinning the number here made every
+	// new migration fail this test for a reason unrelated to what it covers.
+	var version, head int
 	if err := db2.QueryRowContext(ctx,
 		"SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 22 {
-		t.Fatalf("schema version = %d, want 22 — every migration from 20 up must re-apply", version)
+	freshDB, _, err := storage.NewSQLiteDB(filepath.Join(t.TempDir(), "head.db"), slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = freshDB.Close() })
+	if err := freshDB.QueryRowContext(ctx,
+		"SELECT MAX(version) FROM schema_migrations").Scan(&head); err != nil {
+		t.Fatal(err)
+	}
+	if version != head {
+		t.Fatalf("schema version = %d, want %d — every migration from 20 up must re-apply", version, head)
 	}
 
 	got, err := storage.NewSQLiteSessionInsightsStore(db2).Get(ctx, "pre-migration")
