@@ -2,8 +2,12 @@ import { describe, it, expect } from 'vitest'
 import {
   matchesFilters,
   permissionModesOf,
+  modelsOf,
   hasPRs,
   hasFavorites,
+  inRange,
+  isBounded,
+  UNBOUNDED,
   type SessionFilters,
 } from './sessionFilters'
 import type {
@@ -67,14 +71,33 @@ function noFilters(overrides: Partial<SessionFilters> = {}): SessionFilters {
     project: 'all',
     search: '',
     favorites: false,
-    hasPR: false,
+    links: 'all',
     permissionMode: 'all',
+    model: 'all',
+    messages: UNBOUNDED,
+    durationMinutes: UNBOUNDED,
+    tokensIn: UNBOUNDED,
+    tokensOut: UNBOUNDED,
+    cost: UNBOUNDED,
     from: null,
     to: null,
     drilldownActive: false,
     drilldownWindows: [],
     ...overrides,
   }
+}
+
+/** A session whose in/out tokens and cost span the main thread and a sub-agent. */
+function withMetrics(
+  main: { in: number; out: number; usd: number },
+  sub: { in: number; out: number; usd: number } = { in: 0, out: 0, usd: 0 },
+): ClaudeSessionSummary {
+  return makeSession({
+    usage: { ...emptyUsage, input_tokens: main.in, output_tokens: main.out },
+    subagent_usage: { ...emptyUsage, input_tokens: sub.in, output_tokens: sub.out },
+    cost: { ...zeroCost, total_usd: main.usd },
+    subagent_cost: { ...zeroCost, total_usd: sub.usd },
+  })
 }
 
 describe('matchesFilters — each predicate in isolation', () => {
@@ -122,14 +145,99 @@ describe('matchesFilters — each predicate in isolation', () => {
     expect(matchesFilters(absent, noFilters({ favorites: true }))).toBe(false)
   })
 
-  it('has-PR treats a missing and an empty prs array alike', () => {
+  it('links treats a missing and an empty prs array alike', () => {
     const withPR = makeSession()
     const emptyPRs = makeSession({ prs: [] })
     const noPRs = makeSession({ prs: undefined })
-    expect(matchesFilters(emptyPRs, noFilters({ hasPR: false }))).toBe(true)
-    expect(matchesFilters(withPR, noFilters({ hasPR: true }))).toBe(true)
-    expect(matchesFilters(emptyPRs, noFilters({ hasPR: true }))).toBe(false)
-    expect(matchesFilters(noPRs, noFilters({ hasPR: true }))).toBe(false)
+
+    // 'all' is the match-everything value.
+    for (const s of [withPR, emptyPRs, noPRs]) {
+      expect(matchesFilters(s, noFilters({ links: 'all' }))).toBe(true)
+    }
+    expect(matchesFilters(withPR, noFilters({ links: 'with' }))).toBe(true)
+    expect(matchesFilters(emptyPRs, noFilters({ links: 'with' }))).toBe(false)
+    expect(matchesFilters(noPRs, noFilters({ links: 'with' }))).toBe(false)
+    // 'without' is the exact complement of 'with', not merely "not with".
+    expect(matchesFilters(withPR, noFilters({ links: 'without' }))).toBe(false)
+    expect(matchesFilters(emptyPRs, noFilters({ links: 'without' }))).toBe(true)
+    expect(matchesFilters(noPRs, noFilters({ links: 'without' }))).toBe(true)
+  })
+
+  it('message count honours a min, a max and both together', () => {
+    const s = makeSession({ message_count: 10 })
+    expect(matchesFilters(s, noFilters({ messages: { min: 10, max: null } }))).toBe(true)
+    expect(matchesFilters(s, noFilters({ messages: { min: 11, max: null } }))).toBe(false)
+    expect(matchesFilters(s, noFilters({ messages: { min: null, max: 10 } }))).toBe(true)
+    expect(matchesFilters(s, noFilters({ messages: { min: null, max: 9 } }))).toBe(false)
+    expect(matchesFilters(s, noFilters({ messages: { min: 5, max: 15 } }))).toBe(true)
+    expect(matchesFilters(s, noFilters({ messages: { min: 11, max: 15 } }))).toBe(false)
+  })
+
+  it('model matches "all" and the exact id only', () => {
+    const s = makeSession({ model: 'claude-opus-5' })
+    expect(matchesFilters(s, noFilters({ model: 'all' }))).toBe(true)
+    expect(matchesFilters(s, noFilters({ model: 'claude-opus-5' }))).toBe(true)
+    expect(matchesFilters(s, noFilters({ model: 'claude-sonnet-5' }))).toBe(false)
+    // Not a prefix match — "claude-opus-5" must not be matched by "claude-opus".
+    expect(matchesFilters(s, noFilters({ model: 'claude-opus' }))).toBe(false)
+    // A session with no recorded model is excluded by any specific model.
+    const unset = makeSession({ model: undefined })
+    expect(matchesFilters(unset, noFilters({ model: 'claude-opus-5' }))).toBe(false)
+    expect(matchesFilters(unset, noFilters({ model: 'all' }))).toBe(true)
+  })
+
+  it('duration is measured in minutes from start to last activity', () => {
+    // 10:00 → 11:00 is 60 minutes.
+    const s = makeSession()
+    expect(matchesFilters(s, noFilters({ durationMinutes: { min: 60, max: 60 } }))).toBe(true)
+    expect(matchesFilters(s, noFilters({ durationMinutes: { min: 61, max: null } }))).toBe(false)
+    expect(matchesFilters(s, noFilters({ durationMinutes: { min: null, max: 59 } }))).toBe(false)
+    expect(matchesFilters(s, noFilters({ durationMinutes: { min: 30, max: 90 } }))).toBe(true)
+  })
+
+  it('a reversed timestamp pair reads as zero duration, not a negative', () => {
+    // A negative would pass every "at most" bound, so a corrupt row would show
+    // up in exactly the searches meant to find the short sessions.
+    const reversed = makeSession({
+      start_time: '2026-08-07T11:00:00.000Z',
+      last_activity: '2026-08-07T10:00:00.000Z',
+    })
+    expect(matchesFilters(reversed, noFilters({ durationMinutes: { min: null, max: 5 } }))).toBe(
+      true,
+    )
+    expect(matchesFilters(reversed, noFilters({ durationMinutes: { min: 1, max: null } }))).toBe(
+      false,
+    )
+  })
+
+  it('an unparseable timestamp is dropped by the time predicate, before duration', () => {
+    // Documented rather than asserted on duration alone: overlapsRange already
+    // rejects NaN timestamps outright, so such a row never reaches the list at
+    // all — no duration bound can bring it back.
+    const broken = makeSession({ start_time: 'nonsense', last_activity: 'nonsense' })
+    expect(matchesFilters(broken, noFilters())).toBe(false)
+  })
+
+  it('token and cost ranges include sub-agent work, matching the columns shown', () => {
+    // Main thread alone would fail every one of these; the displayed figure is
+    // the total, so the filter must use the total too.
+    const s = withMetrics({ in: 100, out: 20, usd: 1 }, { in: 400, out: 80, usd: 4 })
+    expect(matchesFilters(s, noFilters({ tokensIn: { min: 500, max: null } }))).toBe(true)
+    expect(matchesFilters(s, noFilters({ tokensIn: { min: 501, max: null } }))).toBe(false)
+    expect(matchesFilters(s, noFilters({ tokensOut: { min: 100, max: null } }))).toBe(true)
+    expect(matchesFilters(s, noFilters({ tokensOut: { min: null, max: 99 } }))).toBe(false)
+    expect(matchesFilters(s, noFilters({ cost: { min: 5, max: 5 } }))).toBe(true)
+    expect(matchesFilters(s, noFilters({ cost: { min: null, max: 4.99 } }))).toBe(false)
+  })
+
+  it('a zero bound filters, where an absent bound does not', () => {
+    const zero = withMetrics({ in: 0, out: 0, usd: 0 })
+    // max: 0 is a real constraint that this session satisfies...
+    expect(matchesFilters(zero, noFilters({ cost: { min: null, max: 0 } }))).toBe(true)
+    // ...and one that a paid session fails, rather than 0 reading as "unset".
+    const paid = withMetrics({ in: 0, out: 0, usd: 2 })
+    expect(matchesFilters(paid, noFilters({ cost: { min: null, max: 0 } }))).toBe(false)
+    expect(matchesFilters(paid, noFilters({ cost: { min: 0, max: null } }))).toBe(true)
   })
 
   it('permission mode matches "all" and the exact mode only', () => {
@@ -170,26 +278,46 @@ describe('matchesFilters — the && chain', () => {
    * five. A dropped clause makes exactly one of these return true, which no
    * single-filter test can catch.
    */
-  const allSix = noFilters({
+  const allFilters = noFilters({
     project: '/home/dev/alpha',
     search: 'login',
     favorites: true,
-    hasPR: true,
+    links: 'with',
     permissionMode: 'bypassPermissions',
+    model: 'claude-opus-5',
+    messages: { min: 2, max: 8 },
+    durationMinutes: { min: 30, max: 90 },
+    tokensIn: { min: 10, max: 1000 },
+    tokensOut: { min: 5, max: 500 },
+    cost: { min: 0.5, max: 50 },
     from: new Date('2026-08-07T09:00:00Z'),
     to: new Date('2026-08-07T12:00:00Z'),
   })
 
+  /** Satisfies every clause of `allFilters`. */
+  const passing = (): ClaudeSessionSummary =>
+    makeSession({
+      model: 'claude-opus-5',
+      usage: { ...emptyUsage, input_tokens: 100, output_tokens: 50 },
+      cost: { ...zeroCost, total_usd: 5 },
+    })
+
   it('passes a session satisfying every filter', () => {
-    expect(matchesFilters(makeSession(), allSix)).toBe(true)
+    expect(matchesFilters(passing(), allFilters)).toBe(true)
   })
 
   it.each([
     ['project', { project_path: '/home/dev/beta' }],
     ['search', { preview: 'unrelated', display_title: 'unrelated', session_id: 'zzz' }],
     ['favorites', { is_favorite: false }],
-    ['has-PR', { prs: [] }],
+    ['links', { prs: [] }],
     ['permission mode', { permission_mode: 'plan' }],
+    ['messages', { message_count: 99 }],
+    ['model', { model: 'claude-sonnet-5' }],
+    ['duration', { last_activity: '2026-08-07T10:05:00.000Z' }],
+    ['tokens in', { usage: { ...emptyUsage, input_tokens: 5, output_tokens: 50 } }],
+    ['tokens out', { usage: { ...emptyUsage, input_tokens: 100, output_tokens: 1 } }],
+    ['cost', { cost: { ...zeroCost, total_usd: 0.1 } }],
     [
       'time range',
       { start_time: '2026-08-01T00:00:00.000Z', last_activity: '2026-08-01T01:00:00.000Z' },
@@ -197,7 +325,7 @@ describe('matchesFilters — the && chain', () => {
   ] as [string, Partial<ClaudeSessionSummary>][])(
     'rejects a session failing only the %s filter',
     (_name, overrides) => {
-      expect(matchesFilters(makeSession(overrides), allSix)).toBe(false)
+      expect(matchesFilters({ ...passing(), ...overrides }, allFilters)).toBe(false)
     },
   )
 })
@@ -268,6 +396,31 @@ describe('matchesFilters — drill-down branch', () => {
   })
 })
 
+describe('numeric range helpers', () => {
+  it('inRange is inclusive on both ends', () => {
+    expect(inRange(5, { min: 5, max: 5 })).toBe(true)
+    expect(inRange(4, { min: 5, max: 10 })).toBe(false)
+    expect(inRange(11, { min: 5, max: 10 })).toBe(false)
+  })
+
+  it('a null side is unbounded, not zero', () => {
+    expect(inRange(-100, UNBOUNDED)).toBe(true)
+    expect(inRange(1e9, UNBOUNDED)).toBe(true)
+    expect(inRange(1e9, { min: 5, max: null })).toBe(true)
+    expect(inRange(-100, { min: null, max: 5 })).toBe(true)
+  })
+
+  it('an inverted range matches nothing rather than silently swapping', () => {
+    expect(inRange(7, { min: 10, max: 5 })).toBe(false)
+  })
+
+  it('isBounded drives the active-filter count', () => {
+    expect(isBounded(UNBOUNDED)).toBe(false)
+    expect(isBounded({ min: 0, max: null })).toBe(true)
+    expect(isBounded({ min: null, max: 0 })).toBe(true)
+  })
+})
+
 describe('control-visibility gates', () => {
   it('permissionModesOf de-duplicates, drops empty and missing, and sorts', () => {
     const sessions = [
@@ -278,6 +431,18 @@ describe('control-visibility gates', () => {
       makeSession({ permission_mode: undefined }),
     ]
     expect(permissionModesOf(sessions)).toEqual(['bypassPermissions', 'plan'])
+  })
+
+  it('modelsOf de-duplicates, drops empty and missing, and sorts', () => {
+    const sessions = [
+      makeSession({ model: 'claude-sonnet-5' }),
+      makeSession({ model: 'claude-opus-5' }),
+      makeSession({ model: 'claude-sonnet-5' }),
+      makeSession({ model: '' }),
+      makeSession({ model: undefined }),
+    ]
+    expect(modelsOf(sessions)).toEqual(['claude-opus-5', 'claude-sonnet-5'])
+    expect(modelsOf([])).toEqual([])
   })
 
   it('permissionModesOf returns empty for no sessions, so the control stays hidden', () => {
