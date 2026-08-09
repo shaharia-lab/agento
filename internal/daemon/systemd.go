@@ -118,8 +118,17 @@ func (s *systemd) verifyUnit(ctx context.Context, unit string) error {
 	if _, err := s.runner.Run(ctx, "systemd-analyze", "--version"); err != nil {
 		return nil
 	}
-	if _, err := s.runner.Run(ctx, "systemd-analyze", "verify", unit); err != nil {
+	// verify exits 0 on findings it considers warnings (e.g. an unterminated
+	// quote is reported as "Invalid syntax, ignoring" yet does not fail the
+	// run), so the output must be treated as the signal, not just the exit
+	// code. Any diagnostic mentioning the unit means systemd could not parse
+	// it cleanly — surface it rather than let a dropped line pass silently.
+	out, err := s.runner.Run(ctx, "systemd-analyze", "verify", unit)
+	if err != nil {
 		return fmt.Errorf("systemd-analyze verify %s: %w", unit, err)
+	}
+	if strings.Contains(out, filepath.Base(unit)) {
+		return fmt.Errorf("systemd-analyze verify %s reported problems:\n%s", unit, strings.TrimSpace(out))
 	}
 	return nil
 }

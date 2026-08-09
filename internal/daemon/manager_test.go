@@ -232,8 +232,11 @@ func TestRenderEscapesHostileValues(t *testing.T) {
 		plist := string(got)
 		// The rendered plist must be well-formed XML — strip the DOCTYPE
 		// because encoding/xml cannot resolve the external Apple DTD.
-		doc := plist[strings.Index(plist, "<plist"):]
-		if err := xml.Unmarshal([]byte(doc), new(any)); err != nil {
+		idx := strings.Index(plist, "<plist")
+		if idx < 0 {
+			t.Fatalf("rendered plist lacks a <plist> element:\n%s", plist)
+		}
+		if err := xml.Unmarshal([]byte(plist[idx:]), new(any)); err != nil {
 			t.Fatalf("rendered plist is not valid XML: %v\n%s", err, plist)
 		}
 		// Raw input characters that only survive when escaping failed: the
@@ -253,6 +256,39 @@ func TestRenderEscapesHostileValues(t *testing.T) {
 // check that only a systemd host can perform. Skipped elsewhere (CI has no
 // systemd); TestSystemdInstallSequenceAndIdempotency exercises the same
 // verify hook through fakeRunner on every platform.
+func TestSystemdInstallVerifyFailureAbortsInstall(t *testing.T) {
+	stubPortFree(t, false)
+	home := t.TempDir()
+	runner := newFakeRunner()
+	// systemd-analyze exits 0 but reports a parse problem in its output — the
+	// case a bare exit-code check would wave through.
+	runner.outputs["systemd-analyze"] = "agento.service:6: Invalid syntax, ignoring: \"UNTERM=abc"
+	mgr := newSystemdForHome(runner, home)
+
+	err := mgr.Install(context.Background(), testOptionsIn(home))
+	if err == nil || !strings.Contains(err.Error(), "reported problems") {
+		t.Fatalf("want verify-reported-problems error, got %v", err)
+	}
+	// The unit must not be enabled when verification fails.
+	for _, seq := range runner.argSeqs() {
+		if strings.Contains(seq, "enable --now") {
+			t.Errorf("service must not be enabled after failed verify; calls %v", runner.argSeqs())
+		}
+	}
+}
+
+func TestSystemdInstallVerifyCleanOutputProceeds(t *testing.T) {
+	stubPortFree(t, false)
+	home := t.TempDir()
+	runner := newFakeRunner()
+	runner.outputs["systemd-analyze"] = "" // clean verify: no findings
+	mgr := newSystemdForHome(runner, home)
+
+	if err := mgr.Install(context.Background(), testOptionsIn(home)); err != nil {
+		t.Fatalf("clean verify must not block install, got %v", err)
+	}
+}
+
 func TestRenderUnitVerifiedBySystemdAnalyze(t *testing.T) {
 	if _, err := exec.LookPath("systemd-analyze"); err != nil {
 		t.Skip("systemd-analyze not available on this host")
