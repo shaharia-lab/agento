@@ -918,18 +918,31 @@ func walkSessionHours(s ClaudeSessionSummary, loc *time.Location, fn func(at tim
 
 	total := end.Sub(start)
 	for cur := start; cur.Before(end); {
-		next := cur.Truncate(time.Hour).Add(time.Hour)
-		// Truncate works in UTC, so in a zone with a sub-hour offset it can
-		// land before cur; stepping a whole hour from cur is the safe floor.
-		if !next.After(cur) {
-			next = cur.Add(time.Hour)
-		}
+		next := nextLocalHour(cur, loc)
 		if next.After(end) {
 			next = end
 		}
 		fn(cur, float64(next.Sub(cur))/float64(total))
 		cur = next
 	}
+}
+
+// nextLocalHour is the start of the hour after t, on t's own wall clock.
+//
+// Built with time.Date rather than Truncate because Truncate works in UTC: in a
+// zone offset by a half or quarter hour (Asia/Kolkata, Asia/Kathmandu) it puts
+// the cell boundary at :30 or :45 local, which splits one local hour into two
+// cells and counts the session in it twice. time.Date also normalizes a DST
+// transition to a real instant, and always advances, so the walk terminates.
+func nextLocalHour(t time.Time, loc *time.Location) time.Time {
+	local := t.In(loc)
+	next := time.Date(local.Year(), local.Month(), local.Day(), local.Hour()+1, 0, 0, 0, loc)
+	if !next.After(t) {
+		// Only reachable if a zone transition maps the next wall-clock hour to
+		// an instant at or before t; stepping an hour keeps the walk moving.
+		return t.Add(time.Hour)
+	}
+	return next
 }
 
 func buildHeatmap(sessions []ClaudeSessionSummary, loc *time.Location) []HeatmapCell {

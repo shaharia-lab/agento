@@ -20,6 +20,17 @@ export function ScanStatusNotice({ onSettled }: Readonly<{ onSettled?: () => voi
   const [scanning, setScanning] = useState(false)
   const wasPending = useRef(false)
 
+  // Held in a ref, not listed as a dependency: callers pass a plain arrow
+  // recreated on every render, so depending on it would tear down and restart
+  // the poll each render — cancelling the scheduled timer and firing a request
+  // immediately, turning a 3s interval into one request per render while a scan
+  // is running. The ref keeps the latest callback without owning the schedule,
+  // and is written in an effect because a render must not mutate a ref.
+  const settled = useRef(onSettled)
+  useEffect(() => {
+    settled.current = onSettled
+  }, [onSettled])
+
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
@@ -32,7 +43,7 @@ export function ScanStatusNotice({ onSettled }: Readonly<{ onSettled?: () => voi
         const busy = status.costs_stale || status.scan_in_progress
         // Reload the page's data once the scan finishes, so the figures the
         // notice was hedging get replaced rather than left hedged.
-        if (wasPending.current && !busy) onSettled?.()
+        if (wasPending.current && !busy) settled.current?.()
         wasPending.current = busy
         setPending(busy)
         setScanning(status.scan_in_progress)
@@ -48,7 +59,9 @@ export function ScanStatusNotice({ onSettled }: Readonly<{ onSettled?: () => voi
       cancelled = true
       clearTimeout(timer)
     }
-  }, [onSettled])
+    // Deliberately empty: the poll owns its own schedule for the component's
+    // lifetime, and the only changing input is read through a ref.
+  }, [])
 
   if (!pending) return null
 

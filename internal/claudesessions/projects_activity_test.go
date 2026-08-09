@@ -203,3 +203,42 @@ func TestBuildProjectActivity(t *testing.T) {
 		t.Errorf("the strip charted %d projects, want %d", len(charted), topProjectsCharted)
 	}
 }
+
+// TestHourlyActivity_HalfHourOffsetZone guards the cell boundary against the
+// zones where a UTC-based truncation goes wrong.
+//
+// time.Truncate works in UTC, so at +05:30 it puts the boundary at :30 local,
+// splitting one local hour across two cells and counting the session in it
+// twice. India, Nepal and Iran are all in this class.
+func TestHourlyActivity_HalfHourOffsetZone(t *testing.T) {
+	for _, zone := range []string{"Asia/Kolkata", "Asia/Kathmandu"} {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Skipf("%s unavailable: %v", zone, err)
+		}
+		t.Run(zone, func(t *testing.T) {
+			// 09:00 → 11:00 local is exactly two hours of work.
+			start := time.Date(2026, 8, 3, 9, 0, 0, 0, loc)
+			hours := buildHourlyActivity([]ClaudeSessionSummary{
+				spanSession("s", "/p", start, start.Add(2*time.Hour), 200, 2),
+			}, loc)
+
+			for hour, want := range map[int]int{9: 1, 10: 1} {
+				if hours[hour].Sessions != want {
+					t.Errorf("hour %d: sessions = %d, want %d", hour, hours[hour].Sessions, want)
+				}
+			}
+			cells, tokens := 0, 0
+			for _, h := range hours {
+				cells += h.Sessions
+				tokens += h.Tokens
+			}
+			if cells != 2 {
+				t.Errorf("session counted in %d hour cells, want 2", cells)
+			}
+			if tokens != 200 {
+				t.Errorf("tokens across the day = %d, want the session's 200", tokens)
+			}
+		})
+	}
+}

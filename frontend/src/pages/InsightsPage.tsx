@@ -24,15 +24,8 @@ import {
   MessageSquare,
   Zap,
 } from 'lucide-react'
-import {
-  KPICard,
-  ChartCard,
-  DateRangePicker,
-  DatePreset,
-  presetToRange,
-  subDays,
-  fmt,
-} from './analyticsShared'
+import { KPICard, ChartCard, DateRangePicker, DatePreset, presetToRange } from './analyticsShared'
+import { previousRange } from '@/lib/analyticsMetrics'
 import { InsightCardGrid } from './InsightCards'
 import { ScanStatusNotice } from './ScanStatusNotice'
 
@@ -296,18 +289,6 @@ function KPIWithDelta({
   )
 }
 
-// ─── Previous period date calculation ────────────────────────────────────────
-
-/** Calculates the previous period of the same length as [from, to]. */
-function previousPeriod(from: string, to: string): { from: string; to: string } {
-  const f = new Date(from + 'T00:00:00')
-  const t = new Date(to + 'T00:00:00')
-  const diffDays = Math.round((t.getTime() - f.getTime()) / 86_400_000)
-  const prevTo = subDays(f, 1)
-  const prevFrom = subDays(f, diffDays + 1)
-  return { from: fmt(prevFrom), to: fmt(prevTo) }
-}
-
 // ─── Populated content (extracted to keep InsightsPage complexity low) ────────
 
 interface InsightsContentProps {
@@ -547,18 +528,19 @@ export default function InsightsPage() {
   // picker. Both endpoints now take the same window and project parameters and
   // filter through the same code, so the two halves of the page describe one
   // set of sessions.
+  // The window is always sent, including for "All time" — which presetToRange
+  // expresses as 2020-01-01 onward, the same convention the other two
+  // dashboards use. Omitting the dates used to mean "unbounded" but now means
+  // "the last 30 days", the endpoint's default, which would have silently
+  // narrowed this page's KPIs while its cards still covered everything.
   const load = useCallback(async (f: string, t: string, allTime: boolean, proj: string) => {
     const scope = proj === 'all' ? undefined : proj
     try {
       const [curr, prev, analytics] = await Promise.all([
-        insightsApi.getSummary({
-          from: allTime ? undefined : f,
-          to: allTime ? undefined : t,
-          project: scope,
-        }),
+        insightsApi.getSummary({ from: f, to: t, project: scope }),
         allTime
           ? Promise.resolve(null)
-          : insightsApi.getSummary({ ...previousPeriod(f, t), project: scope }),
+          : insightsApi.getSummary({ ...previousRange(f, t), project: scope }),
         analyticsApi.get({ from: f, to: t, project: scope }),
       ])
       setSummary(curr)

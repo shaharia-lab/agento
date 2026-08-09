@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -226,16 +225,16 @@ func (s *SQLiteSessionInsightsStore) GetMany(ctx context.Context, sessionIDs []s
 	var err error
 	defer func() { end(err) }()
 
-	placeholders := make([]string, len(sessionIDs))
-	args := make([]any, len(sessionIDs))
-	for i, id := range sessionIDs {
-		placeholders[i] = "?"
-		args[i] = id
+	// The same json_each binding GetAggregateSummary uses, for the same reason:
+	// one placeholder per ID overflows SQLite's variable limit on a large set,
+	// and one idiom per file beats two answers to one question.
+	where, args, err := insightWhereClause(sessionIDs)
+	if err != nil {
+		return nil, err
 	}
 
-	//nolint:gosec // placeholders are generated from fixed pattern, not user input
-	query := insightSelectCols + ` WHERE session_id IN (` + strings.Join(placeholders, ",") + `)`
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	//nolint:gosec // the clause is a fixed string; IDs travel as one bound parameter
+	rows, err := s.db.QueryContext(ctx, insightSelectCols+where, args...)
 	if err != nil {
 		return nil, err
 	}
