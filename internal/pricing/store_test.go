@@ -45,11 +45,15 @@ func TestSeed_InsertsBuiltinCatalog(t *testing.T) {
 		if r.UserModified {
 			t.Errorf("seeded row %q marked user_modified", r.ModelPattern)
 		}
-		// Cache columns must be derived from input, not hand-entered.
-		if r.CacheWrite5mPerMTok != r.InputPerMTok*1.25 ||
-			r.CacheWrite1hPerMTok != r.InputPerMTok*2 ||
-			r.CacheReadPerMTok != r.InputPerMTok*0.1 {
-			t.Errorf("seeded row %q has non-derived cache rates", r.ModelPattern)
+		// Anthropic rows derive their cache columns from input; third-party rows
+		// carry the provider's own published cache prices, so only the former
+		// are checked against the TTL multipliers.
+		if r.Provider == "anthropic" {
+			if r.CacheWrite5mPerMTok != r.InputPerMTok*1.25 ||
+				r.CacheWrite1hPerMTok != r.InputPerMTok*2 ||
+				r.CacheReadPerMTok != r.InputPerMTok*0.1 {
+				t.Errorf("seeded row %q has non-derived cache rates", r.ModelPattern)
+			}
 		}
 	}
 }
@@ -114,6 +118,7 @@ func TestSeed_NeverClobbersUserModifiedRow(t *testing.T) {
 		CacheReadPerMTok:    9.99 * 0.1,
 		EffectiveFrom:       time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC),
 		Source:              "user override",
+		Billable:            true,
 	}
 	if err := s.UpsertRate(ctx, custom); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -153,6 +158,7 @@ func TestRevision_ChangesOnInsertUpdateDelete(t *testing.T) {
 	r := Rate{
 		Provider: "anthropic", ModelPattern: "claude-test-model", MatchType: MatchPrefix,
 		InputPerMTok: 1, OutputPerMTok: 2, EffectiveFrom: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+		Billable: true,
 	}
 	if err := s.UpsertRate(ctx, r); err != nil {
 		t.Fatalf("insert: %v", err)
@@ -208,6 +214,22 @@ func TestUpsertRate_Validation(t *testing.T) {
 	if err := s.UpsertRate(ctx, Rate{ModelPattern: "x"}); err == nil {
 		t.Error("missing effective_from should fail")
 	}
+
+	// The write path obeys the same coherence rule as the seed, so the settings
+	// UI cannot store a row that prices at $0.00 without saying it means to.
+	// Billable's Go zero value is false, which makes the second case the one a
+	// caller hits by accident.
+	now := time.Now()
+	if err := s.UpsertRate(ctx, Rate{
+		ModelPattern: "x", EffectiveFrom: now, Billable: true,
+	}); err == nil {
+		t.Error("billable row with no rates should fail")
+	}
+	if err := s.UpsertRate(ctx, Rate{
+		ModelPattern: "x", EffectiveFrom: now, InputPerMTok: 1, OutputPerMTok: 5,
+	}); err == nil {
+		t.Error("priced row left non-billable should fail")
+	}
 }
 
 func TestUpsertRate_NormalizesPattern(t *testing.T) {
@@ -223,6 +245,7 @@ func TestUpsertRate_NormalizesPattern(t *testing.T) {
 		Provider: "anthropic", ModelPattern: "claude-test-case",
 		MatchType: MatchPrefix, InputPerMTok: 1, OutputPerMTok: 5,
 		EffectiveFrom: from, Source: "test", IsBuiltin: true,
+		Billable: true,
 	}
 	if err := s.UpsertRate(ctx, seed); err != nil {
 		t.Fatalf("seed: %v", err)

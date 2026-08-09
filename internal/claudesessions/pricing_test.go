@@ -108,17 +108,20 @@ func TestResolver_UnknownModelsAreNotGuessed(t *testing.T) {
 	for _, model := range []string{
 		"claude-opus-4-8", "claude-opus-5", "opus",
 		"claude-sonnet-4-6", "claude-haiku-4-5", "claude-fable-5", "CLAUDE-OPUS-5",
+		// Third-party backends, priced from their providers' published rates
+		// as of #187 — every one of these appears in the reference corpus.
+		"k3", "glm-5.2", "mixedbread-ai/mxbai-embed-large-v1", syntheticModel,
 	} {
 		if _, ok := resolver.Resolve(model, at); !ok {
 			t.Errorf("%q: expected known pricing", model)
 		}
 	}
 
-	// Every one of these appears in the reference corpus and previously priced
-	// as Sonnet.
+	// A model ID that names no real model must still resolve to nothing rather
+	// than being billed at a lookalike's rate — anchored matching is what makes
+	// "some-opus-lookalike" miss the "opus" alias.
 	for _, model := range []string{
-		"k3", "glm-5.2", "mixedbread-ai/mxbai-embed-large-v1", syntheticModel, "",
-		"some-opus-lookalike", "gpt-sonnet-clone",
+		"", "any", "some-opus-lookalike", "gpt-sonnet-clone",
 	} {
 		if _, ok := resolver.Resolve(model, at); ok {
 			t.Errorf("%q: expected unknown pricing, got a rate", model)
@@ -126,8 +129,110 @@ func TestResolver_UnknownModelsAreNotGuessed(t *testing.T) {
 	}
 }
 
+// TestResolver_NonBillableModelsCostNothingWithoutBeingUnknown separates the
+// two ways a model can price at $0.00: a deliberate zero (the synthetic
+// placeholder, embeddings) resolves and contributes nothing, while an unpriced
+// model does not resolve at all and is reported as a gap. Conflating them is
+// how a $0 row becomes an invisible bug.
+func TestResolver_NonBillableModelsCostNothingWithoutBeingUnknown(t *testing.T) {
+	resolver := defaultPricingResolver()
+	if resolver == nil {
+		t.Skip("no pricing resolver wired in this test binary")
+	}
+	usage := TokenUsage{InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000}
+
+	for _, model := range []string{syntheticModel, "mixedbread-ai/mxbai-embed-large-v1"} {
+		res, ok := resolver.Resolve(model, time.Now())
+		if !ok {
+			t.Fatalf("%q: expected a catalog row, got unknown", model)
+		}
+		if res.Rate.Billable {
+			t.Errorf("%q: expected non-billable", model)
+		}
+		if got := res.Rate.Price(usage.eventUsage()).TotalCostUSD; got != 0 {
+			t.Errorf("%q: expected $0, got $%.4f", model, got)
+		}
+	}
+}
+
+// TestResolver_ThirdPartyRatesMatchPublished pins the seeded provider rates to
+// the figures verified against each provider's pricing page, so a careless
+// catalog edit shows up here rather than in a user's cost total.
+func TestResolver_ThirdPartyRatesMatchPublished(t *testing.T) {
+	resolver := defaultPricingResolver()
+	if resolver == nil {
+		t.Skip("no pricing resolver wired in this test binary")
+	}
+	tests := []struct {
+		name                      string
+		model                     string
+		wantIn, wantOut, wantRead float64
+		wantWrite5m, wantWrite1h  float64
+	}{
+		{"kimi k3 bare id from transcripts", "k3", 3.00, 15.00, 0.30, 3.00, 3.00},
+		{"kimi k3 canonical id", "kimi-k3-20260801", 3.00, 15.00, 0.30, 3.00, 3.00},
+		{"glm 5.2", "glm-5.2", 1.40, 4.40, 0.26, 1.40, 1.40},
+		{"qwen3.5 397b", "qwen3.5-397b-a17b", 0.60, 3.60, 0.06, 0.75, 0.75},
+		{"qwen3.5 plus", "qwen3.5-plus", 0.40, 2.40, 0.04, 0.50, 0.50},
+		{"qwen3.5 flash", "qwen3.5-flash", 0.10, 0.40, 0.01, 0.125, 0.125},
+		{"qwen3 max", "qwen3-max", 1.20, 6.00, 0.12, 1.50, 1.50},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res, ok := resolver.Resolve(tt.model, time.Now())
+			if !ok {
+				t.Fatalf("%q: expected a rate", tt.model)
+			}
+			r := res.Rate
+			assertUSD(t, "input", r.InputPerMTok, tt.wantIn)
+			assertUSD(t, "output", r.OutputPerMTok, tt.wantOut)
+			assertUSD(t, "cache read", r.CacheReadPerMTok, tt.wantRead)
+			assertUSD(t, "cache write 5m", r.CacheWrite5mPerMTok, tt.wantWrite5m)
+			assertUSD(t, "cache write 1h", r.CacheWrite1hPerMTok, tt.wantWrite1h)
+			if !r.Billable {
+				t.Error("expected billable")
+			}
+		})
+	}
+}
+
+// TestResolver_AliasesAndContextVariants covers the model IDs that name no
+// concrete model: the bare family aliases price at that tier's flagship and say
+// so via Estimated, "any" names nothing at all and stays unknown, and a 1M
+// context variant rides its family's prefix rather than falling off the catalog.
+func TestResolver_AliasesAndContextVariants(t *testing.T) {
+	resolver := defaultPricingResolver()
+	if resolver == nil {
+		t.Skip("no pricing resolver wired in this test binary")
+	}
+	at := time.Now()
+
+	res, ok := resolver.Resolve("opus", at)
+	if !ok {
+		t.Fatal(`"opus": expected the generic Opus alias to resolve`)
+	}
+	if !res.Estimated {
+		t.Error(`"opus": expected Estimated — the bare alias names no concrete model`)
+	}
+
+	if _, ok := resolver.Resolve("any", at); ok {
+		t.Error(`"any": expected unknown — it names no family, so any price is invented`)
+	}
+
+	base, ok := resolver.Resolve("claude-opus-4-7", at)
+	if !ok {
+		t.Fatal(`"claude-opus-4-7": expected a rate`)
+	}
+	variant, ok := resolver.Resolve("claude-opus-4-7[1m]", at)
+	if !ok {
+		t.Fatal(`"claude-opus-4-7[1m]": expected the family prefix to match`)
+	}
+	assertUSD(t, "1m variant input", variant.Rate.InputPerMTok, base.Rate.InputPerMTok)
+	assertUSD(t, "1m variant output", variant.Rate.OutputPerMTok, base.Rate.OutputPerMTok)
+}
+
 func TestCostForUsage_UnknownModelCostsNothing(t *testing.T) {
-	for _, model := range []string{"k3", syntheticModel} {
+	for _, model := range []string{"any", "gpt-sonnet-clone"} {
 		c, priced := costForUsage(model, TokenUsage{
 			InputTokens: 1_000_000, OutputTokens: 1_000_000,
 			CacheCreationTokens: 1_000_000, CacheCreation1hTokens: 1_000_000,
@@ -139,6 +244,23 @@ func TestCostForUsage_UnknownModelCostsNothing(t *testing.T) {
 			t.Errorf("%q: expected $0, got $%.4f", model, c.TotalCostUSD)
 		}
 	}
+}
+
+// TestCostForUsage_ThirdPartyModelIsPriced is the headline of #187: the
+// third-most-used model in the reference corpus must report real spend rather
+// than the $0.00 an absent catalog row produced.
+func TestCostForUsage_ThirdPartyModelIsPriced(t *testing.T) {
+	c, priced := costForUsage("k3", TokenUsage{
+		InputTokens: 1_000_000, OutputTokens: 1_000_000, CacheReadTokens: 1_000_000,
+	}, time.Now())
+	if !priced {
+		t.Fatal(`"k3": expected priced`)
+	}
+	// 1 MTok each at Moonshot's published $3.00 / $15.00 / $0.30.
+	assertUSD(t, "input", c.InputCostUSD, 3.00)
+	assertUSD(t, "output", c.OutputCostUSD, 15.00)
+	assertUSD(t, "cache read", c.CacheReadCostUSD, 0.30)
+	assertUSD(t, "total", c.TotalCostUSD, 18.30)
 }
 
 // TestSplitCacheCreation covers the fallback rule that keeps pre-split
@@ -328,7 +450,9 @@ func TestIncrementalScan_NoNestedSplitCostsAsBefore(t *testing.T) {
 }
 
 // TestBuildSummary_UnknownModelsExcludedFromCost asserts unknown-model tokens
-// are counted and surfaced but contribute no invented cost.
+// are counted and surfaced but contribute no invented cost, while the two other
+// kinds of $0.00 stay out of that bucket: a priced third-party model now adds
+// real spend, and a non-billable one adds nothing without being a gap.
 func TestBuildSummary_UnknownModelsExcludedFromCost(t *testing.T) {
 	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
 	sessions := []ClaudeSessionSummary{
@@ -344,18 +468,24 @@ func TestBuildSummary_UnknownModelsExcludedFromCost(t *testing.T) {
 			SessionID: "syn", Model: syntheticModel, StartTime: ts, LastActivity: ts,
 			Usage: TokenUsage{InputTokens: 1_000},
 		},
+		{
+			SessionID: "alias", Model: "any", StartTime: ts, LastActivity: ts,
+			Usage: TokenUsage{InputTokens: 7_000, OutputTokens: 3_000},
+		},
 	}
 
 	summary, cost := buildSummary(sessions)
 
-	// Only the Opus session contributes: 1M input × $5/MTok.
-	assertUSD(t, "total cost", cost.TotalCostUSD, 5.00)
-	assertUSD(t, "summary cost", summary.EstimatedCostUSD, 5.00)
+	// Opus 1M input × $5/MTok, plus K3's 0.5M × $3 + 0.1M × $15 = $3.00.
+	assertUSD(t, "total cost", cost.TotalCostUSD, 8.00)
+	assertUSD(t, "summary cost", summary.EstimatedCostUSD, 8.00)
 
-	if summary.UnknownPricingTokens != 500_000+100_000+1_000 {
-		t.Errorf("unknown token count = %d", summary.UnknownPricingTokens)
+	// Only "any" is a genuine gap — the synthetic placeholder resolves to a
+	// non-billable row and K3 is priced.
+	if summary.UnknownPricingTokens != 7_000+3_000 {
+		t.Errorf("unknown token count = %d, want 10000", summary.UnknownPricingTokens)
 	}
-	want := []string{"<synthetic>", "k3"}
+	want := []string{"any"}
 	if len(summary.UnknownPricingModels) != len(want) {
 		t.Fatalf("unknown models = %v, want %v", summary.UnknownPricingModels, want)
 	}
@@ -366,8 +496,8 @@ func TestBuildSummary_UnknownModelsExcludedFromCost(t *testing.T) {
 	}
 
 	// Token totals still include every session — only cost is withheld.
-	if summary.TotalInputTokens != 1_501_000 {
-		t.Errorf("total input = %d, want 1501000", summary.TotalInputTokens)
+	if summary.TotalInputTokens != 1_508_000 {
+		t.Errorf("total input = %d, want 1508000", summary.TotalInputTokens)
 	}
 }
 

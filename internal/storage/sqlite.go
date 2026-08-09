@@ -402,6 +402,20 @@ CREATE TABLE model_pricing (
 );
 `,
 	},
+	{
+		version: 18,
+		sql: `
+-- Non-Anthropic model pricing (#187). billable separates a model that
+-- deliberately costs nothing (Claude Code's <synthetic> placeholder, embedding
+-- models) from one whose rates were never filled in: both price at $0.00, but
+-- only the latter belongs in the unknown-pricing bucket. estimated marks a rate
+-- that is a best effort rather than a published price, such as the bare family
+-- aliases ("opus") that name no concrete model. Existing rows are real,
+-- published Anthropic rates, so the defaults are correct for them.
+ALTER TABLE model_pricing ADD COLUMN billable INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE model_pricing ADD COLUMN estimated INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

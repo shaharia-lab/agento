@@ -146,20 +146,25 @@ func TestPerMessageCost_UnknownModelsTracked(t *testing.T) {
 		ts    time.Time
 		usage rawUsage
 	}{
-		{"claude-opus-5", ts, rawUsage{InputTokens: 1_000_000}},                        // $5
-		{"k3", ts.Add(time.Minute), rawUsage{InputTokens: 500_000, OutputTokens: 500}}, // unpriced
-		{syntheticModel, ts.Add(2 * time.Minute), rawUsage{InputTokens: 100}},          // ignored entirely
+		{"claude-opus-5", ts, rawUsage{InputTokens: 1_000_000}},                         // $5
+		{"k3", ts.Add(time.Minute), rawUsage{InputTokens: 500_000, OutputTokens: 500}},  // $1.5075
+		{syntheticModel, ts.Add(2 * time.Minute), rawUsage{InputTokens: 100}},           // non-billable
+		{"any", ts.Add(3 * time.Minute), rawUsage{InputTokens: 400, OutputTokens: 100}}, // unpriced
 	})
 
-	if costs.pricedMessages != 1 {
-		t.Fatalf("priced messages = %d, want 1", costs.pricedMessages)
+	// Opus, K3 and the synthetic placeholder all resolve; only "any" does not.
+	if costs.pricedMessages != 3 {
+		t.Fatalf("priced messages = %d, want 3", costs.pricedMessages)
 	}
-	assertUSD(t, "total", costs.cost.TotalCostUSD, 5.00)
-	if got := costs.UnknownPricingTokens(); got != 500_500 {
-		t.Errorf("unknown tokens = %d, want 500500", got)
+	assertUSD(t, "total", costs.cost.TotalCostUSD, 5.00+1.5075)
+	if got := costs.UnknownPricingTokens(); got != 500 {
+		t.Errorf("unknown tokens = %d, want 500", got)
 	}
 	if _, tracked := costs.unknownModels[syntheticModel]; tracked {
 		t.Error("<synthetic> must not be tracked as an unknown model")
+	}
+	if _, tracked := costs.unknownModels["k3"]; tracked {
+		t.Error("k3 is priced as of #187 and must not be tracked as unknown")
 	}
 }
 
@@ -180,6 +185,7 @@ func TestIncrementalScan_PricingRefreshRePrices(t *testing.T) {
 		InputPerMTok: 2.00, OutputPerMTok: 10.00,
 		CacheWrite5mPerMTok: 2.50, CacheWrite1hPerMTok: 4.00, CacheReadPerMTok: 0.20,
 		EffectiveFrom: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		Billable:      true,
 	}); err != nil {
 		t.Fatalf("insert test rate: %v", err)
 	}

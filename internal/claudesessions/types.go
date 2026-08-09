@@ -56,11 +56,12 @@ func (a *costAccumulator) addAssistantMessage(model string, u TokenUsage, at tim
 	if a.resolver == nil || u.InputTokens+u.OutputTokens+u.CacheCreationTokens+u.CacheReadTokens == 0 {
 		return
 	}
-	// Messages on the synthetic placeholder carry no usage in practice; treat
-	// anything that slips through as unknown rather than pricing it.
+	// The synthetic placeholder and embedding models resolve to non-billable
+	// catalog rows, so they price at $0.00 without being mistaken for a gap in
+	// the catalog — no special case is needed here for them.
 	res, ok := a.resolver.Resolve(model, at)
 	if !ok {
-		if model != "" && model != syntheticModel {
+		if model != "" {
 			if a.unknownModels == nil {
 				a.unknownModels = map[string]int{}
 			}

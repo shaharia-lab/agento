@@ -7,8 +7,11 @@
 // Adding a rate always beats editing one: a new effective_from row leaves
 // history priced at the rate that was in force when the tokens were spent.
 //
-// Rates checked against Anthropic's published pricing on 2026-08-08. Cache
-// rates are derived from input at seed time (5m = 1.25×, 1h = 2×, read = 0.1×).
+// Anthropic rates checked against published pricing on 2026-08-08; third-party
+// rates on 2026-08-09. Cache rates default to Anthropic's TTL multipliers
+// (5m = 1.25×, 1h = 2×, read = 0.1×) and are overridable per rate, because
+// other providers publish their own cached-input price and do not split cache
+// writes by time-to-live at all.
 package pricing
 
 import (
@@ -30,13 +33,39 @@ type builtinEntry struct {
 	DisplayName  string         `json:"display_name"`
 	Source       string         `json:"source"`
 	Rates        []builtinPrice `json:"rates"`
+	// Billable defaults to true when absent. Setting it false marks a model
+	// that genuinely costs nothing, which is the only way to seed all-zero
+	// rates — otherwise a zero is treated as an unfilled entry and rejected.
+	Billable *bool `json:"billable"`
+	// Estimated marks an entry whose rates are a best effort rather than the
+	// model's published price, e.g. the bare family aliases.
+	Estimated bool `json:"estimated"`
 }
 
-// builtinPrice carries only input/output; the cache columns are derived.
+// billable reports the entry's billable flag, defaulting to true when the JSON
+// omits it — every real model is billable, so only the exceptions say so.
+func (e builtinEntry) billable() bool {
+	return e.Billable == nil || *e.Billable
+}
+
+// builtinPrice carries input/output plus optional cache overrides. When a cache
+// field is absent the Anthropic TTL multipliers are derived from input; a
+// provider that publishes its own cached-input price states it here.
 type builtinPrice struct {
-	EffectiveFrom string  `json:"effective_from"`
-	InputPerMTok  float64 `json:"input"`
-	OutputPerMTok float64 `json:"output"`
+	EffectiveFrom string   `json:"effective_from"`
+	InputPerMTok  float64  `json:"input"`
+	OutputPerMTok float64  `json:"output"`
+	CacheWrite5m  *float64 `json:"cache_write_5m,omitempty"`
+	CacheWrite1h  *float64 `json:"cache_write_1h,omitempty"`
+	CacheRead     *float64 `json:"cache_read,omitempty"`
+}
+
+// orDerive returns the explicit override when present, else input × mult.
+func orDerive(override *float64, input, mult float64) float64 {
+	if override != nil {
+		return *override
+	}
+	return input * mult
 }
 
 // farPast stamps models with a single, never-changed rate.
@@ -53,6 +82,43 @@ func BuiltinCatalog() []builtinEntry {
 	return entries
 }
 
+// match defaults an unset match type to exact.
+func match(mt MatchType) MatchType {
+	if mt == "" {
+		return MatchExact
+	}
+	return mt
+}
+
+// validateRate enforces the invariant that makes a $0.00 row meaningful: a
+// billable model must price every token category above zero, and a
+// non-billable one must price them all at exactly zero. Without this a
+// half-filled entry — say an output rate someone forgot — would silently
+// under-report cost instead of failing the build.
+func validateRate(pattern string, r Rate) error {
+	cols := []float64{
+		r.InputPerMTok, r.OutputPerMTok,
+		r.CacheWrite5mPerMTok, r.CacheWrite1hPerMTok, r.CacheReadPerMTok,
+	}
+	if !r.Billable {
+		for _, v := range cols {
+			if v != 0 {
+				return fmt.Errorf("pricing: rate %q: non-billable rates must all be zero", pattern)
+			}
+		}
+		return nil
+	}
+	if r.InputPerMTok <= 0 || r.OutputPerMTok <= 0 {
+		return fmt.Errorf("pricing: rate %q: rates must be positive", pattern)
+	}
+	for _, v := range cols {
+		if v < 0 {
+			return fmt.Errorf("pricing: rate %q: cache rates must not be negative", pattern)
+		}
+	}
+	return nil
+}
+
 // rates flattens an entry into seed rows ready for the store.
 func (e builtinEntry) rates() ([]Rate, error) {
 	out := make([]Rate, 0, len(e.Rates))
@@ -66,27 +132,26 @@ func (e builtinEntry) rates() ([]Rate, error) {
 			return nil, fmt.Errorf("pricing: catalog entry %q: bad effective_from %q: %w",
 				e.ModelPattern, from, err)
 		}
-		if p.InputPerMTok <= 0 || p.OutputPerMTok <= 0 {
-			return nil, fmt.Errorf("pricing: catalog entry %q: rates must be positive", e.ModelPattern)
-		}
-		match := e.MatchType
-		if match == "" {
-			match = MatchExact
-		}
-		out = append(out, Rate{
+		r := Rate{
 			Provider:            e.Provider,
 			ModelPattern:        strings.ToLower(e.ModelPattern),
-			MatchType:           match,
+			MatchType:           match(e.MatchType),
 			DisplayName:         e.DisplayName,
 			InputPerMTok:        p.InputPerMTok,
 			OutputPerMTok:       p.OutputPerMTok,
-			CacheWrite5mPerMTok: p.InputPerMTok * 1.25,
-			CacheWrite1hPerMTok: p.InputPerMTok * 2,
-			CacheReadPerMTok:    p.InputPerMTok * 0.1,
+			CacheWrite5mPerMTok: orDerive(p.CacheWrite5m, p.InputPerMTok, 1.25),
+			CacheWrite1hPerMTok: orDerive(p.CacheWrite1h, p.InputPerMTok, 2),
+			CacheReadPerMTok:    orDerive(p.CacheRead, p.InputPerMTok, 0.1),
 			EffectiveFrom:       t,
 			Source:              e.Source,
 			IsBuiltin:           true,
-		})
+			Billable:            e.billable(),
+			Estimated:           e.Estimated,
+		}
+		if err := validateRate(e.ModelPattern, r); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
 	}
 	return out, nil
 }
