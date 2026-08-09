@@ -12,6 +12,32 @@ import (
 
 const floatTolerance = 1e-9
 
+// costForUsage prices token usage at the rate in force at `at`, the way the
+// scanner's accumulator does per message.
+//
+// This lived in analytics.go until #188 made the aggregates read each session's
+// stored cost instead of re-deriving it. It survives here because these tests
+// are about the pricing wiring itself — resolver lookup through Rate.Price —
+// which no longer has a production caller outside the scan.
+func costForUsage(model string, u TokenUsage, at time.Time) (CostSummary, bool) {
+	resolver := defaultPricingResolver()
+	if resolver == nil {
+		return CostSummary{}, false
+	}
+	res, ok := resolver.Resolve(model, at)
+	if !ok {
+		return CostSummary{}, false
+	}
+	c := res.Rate.Price(u.eventUsage())
+	return CostSummary{
+		InputCostUSD:      c.InputCostUSD,
+		OutputCostUSD:     c.OutputCostUSD,
+		CacheReadCostUSD:  c.CacheReadCostUSD,
+		CacheWriteCostUSD: c.CacheWriteCostUSD,
+		TotalCostUSD:      c.TotalCostUSD,
+	}, true
+}
+
 func assertUSD(t *testing.T, label string, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > floatTolerance {
@@ -451,32 +477,43 @@ func TestIncrementalScan_NoNestedSplitCostsAsBefore(t *testing.T) {
 
 // TestBuildSummary_UnknownModelsExcludedFromCost asserts unknown-model tokens
 // are counted and surfaced but contribute no invented cost, while the two other
-// kinds of $0.00 stay out of that bucket: a priced third-party model now adds
-// real spend, and a non-billable one adds nothing without being a gap.
+// kinds of $0.00 stay out of that bucket: a priced third-party model adds real
+// spend, and a non-billable one adds nothing without being a gap.
+//
+// Since #188 the aggregate reads each session's stored cost rather than
+// re-pricing its aggregate tokens, so the fixtures carry the cost the scanner
+// would have persisted.
 func TestBuildSummary_UnknownModelsExcludedFromCost(t *testing.T) {
 	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
 	sessions := []ClaudeSessionSummary{
 		{
 			SessionID: "opus", Model: "claude-opus-4-8", StartTime: ts, LastActivity: ts,
 			Usage: TokenUsage{InputTokens: 1_000_000},
+			// 1M input × $5/MTok.
+			Cost: SessionCost{InputUSD: 5.00, TotalUSD: 5.00},
 		},
 		{
 			SessionID: "k3", Model: "k3", StartTime: ts, LastActivity: ts,
 			Usage: TokenUsage{InputTokens: 500_000, OutputTokens: 100_000},
+			// 0.5M × $3 + 0.1M × $15.
+			Cost: SessionCost{InputUSD: 1.50, OutputUSD: 1.50, TotalUSD: 3.00},
 		},
 		{
 			SessionID: "syn", Model: syntheticModel, StartTime: ts, LastActivity: ts,
 			Usage: TokenUsage{InputTokens: 1_000},
+			// Non-billable: resolves, costs nothing, and is not a gap.
+			Cost: SessionCost{},
 		},
 		{
 			SessionID: "alias", Model: "any", StartTime: ts, LastActivity: ts,
-			Usage: TokenUsage{InputTokens: 7_000, OutputTokens: 3_000},
+			Usage:          TokenUsage{InputTokens: 7_000, OutputTokens: 3_000},
+			UnpricedModels: []string{"any"},
+			UnpricedTokens: 10_000,
 		},
 	}
 
 	summary, cost := buildSummary(sessions)
 
-	// Opus 1M input × $5/MTok, plus K3's 0.5M × $3 + 0.1M × $15 = $3.00.
 	assertUSD(t, "total cost", cost.TotalCostUSD, 8.00)
 	assertUSD(t, "summary cost", summary.EstimatedCostUSD, 8.00)
 

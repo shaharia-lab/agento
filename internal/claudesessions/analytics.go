@@ -4,50 +4,25 @@ import (
 	"math"
 	"sort"
 	"time"
-
-	"github.com/shaharia-lab/agento/internal/pricing"
 )
 
 // ─── Pricing ──────────────────────────────────────────────────────────────────
 //
 // Rates live in the persisted pricing catalog (internal/pricing), resolved per
-// model and — during transcript reads — per message timestamp, so historical
-// cost keeps the rate that was in force when the tokens were spent. Session
-// summaries carry tokens but not per-message timing, so the read-time paths
-// below resolve at the session's last activity; exact per-message pricing
-// happens at scan time (the cost accumulator) and in the insight pipeline
-// (TokenProfileProcessor), which re-read the transcript.
+// model and per message timestamp, so historical cost keeps the rate that was
+// in force when the tokens were spent.
+//
+// Nothing here prices anything. Since #188 the scan stores each session's cost
+// on its cache row, and these aggregates read it — a session summary carries no
+// per-message timing, so re-deriving cost here could only approximate it by
+// picking one model and one instant for the whole session. That approximation
+// was the second, divergent cost path; reading the stored value is what makes
+// the session list and these totals agree by construction.
 
 // syntheticModel is the placeholder Claude Code records for locally generated
 // events that never hit the API. It is billed at zero and excluded from the
 // model breakdown rather than being priced as a real model.
 const syntheticModel = "<synthetic>"
-
-// costForUsage prices one session's token usage at the rate in force at `at`.
-// Returns false for a model with no known rates, so callers can account those
-// tokens separately instead of folding an invented cost into the total.
-func costForUsage(model string, u TokenUsage, at time.Time) (CostSummary, bool) {
-	resolver := defaultPricingResolver()
-	if resolver == nil {
-		return CostSummary{}, false
-	}
-	res, ok := resolver.Resolve(model, at)
-	if !ok {
-		return CostSummary{}, false
-	}
-	return costFromPricing(res.Rate.Price(u.eventUsage())), true
-}
-
-// costFromPricing converts a pricing.Cost to the analytics output shape.
-func costFromPricing(c pricing.Cost) CostSummary {
-	return CostSummary{
-		InputCostUSD:      c.InputCostUSD,
-		OutputCostUSD:     c.OutputCostUSD,
-		CacheReadCostUSD:  c.CacheReadCostUSD,
-		CacheWriteCostUSD: c.CacheWriteCostUSD,
-		TotalCostUSD:      c.TotalCostUSD,
-	}
-}
 
 // unknownPricingAccumulator tallies the tokens and model names that carry no
 // published rates, so the reported cost can state what it left out.
@@ -56,12 +31,13 @@ type unknownPricingAccumulator struct {
 	tokens int
 }
 
-func (a *unknownPricingAccumulator) add(model string, u TokenUsage) {
+// addModel records an unpriced model. Token counts come from the session's
+// own stored tally rather than being attributed here.
+func (a *unknownPricingAccumulator) addModel(model string) {
 	if a.seen == nil {
 		a.seen = map[string]struct{}{}
 	}
 	a.seen[model] = struct{}{}
-	a.tokens += u.InputTokens + u.OutputTokens
 }
 
 // models returns the distinct unpriced model identifiers, sorted.
@@ -82,20 +58,27 @@ func displayModel(model string) string {
 	return model
 }
 
-// accumulateCost adds one session's cost to the running total, routing sessions
-// on unpriced models to the unknown accumulator instead.
-func accumulateCost(
-	cost *CostSummary, unknown *unknownPricingAccumulator, model, label string, u TokenUsage, at time.Time,
-) {
-	c, priced := costForUsage(model, u, at)
-	if !priced {
-		unknown.add(label, u)
-		return
+// addStoredCost folds one session's stored cost into the running total.
+//
+// The figure is read rather than re-derived: the scanner already priced every
+// assistant message at its own model and timestamp, which aggregate re-pricing
+// here could only approximate — it would have to pick one model and one instant
+// for the whole session. Reading the stored value is what makes the session
+// list, the detail page and this total the same number by construction.
+//
+// A session that used a model with no known rate reports it in UnpricedModels;
+// those tokens are tallied separately so the total can state what it left out.
+func addStoredCost(cost *CostSummary, unknown *unknownPricingAccumulator, s ClaudeSessionSummary) {
+	c := s.TotalCost()
+	cost.InputCostUSD += c.InputUSD
+	cost.OutputCostUSD += c.OutputUSD
+	cost.CacheReadCostUSD += c.CacheReadUSD
+	cost.CacheWriteCostUSD += c.CacheWriteUSD
+
+	for _, m := range s.UnpricedModels {
+		unknown.addModel(m)
 	}
-	cost.InputCostUSD += c.InputCostUSD
-	cost.OutputCostUSD += c.OutputCostUSD
-	cost.CacheReadCostUSD += c.CacheReadCostUSD
-	cost.CacheWriteCostUSD += c.CacheWriteCostUSD
+	unknown.tokens += s.UnpricedTokens
 }
 
 // mostFrequent returns the key with the highest count, or "" when empty.
@@ -319,7 +302,7 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 			// the model breakdowns — it is not a model anyone ran.
 			modelCount[m]++
 		}
-		accumulateCost(&cost, &unknown, s.Model, m, u, s.LastActivity)
+		addStoredCost(&cost, &unknown, s)
 	}
 	cost.TotalCostUSD = cost.InputCostUSD + cost.OutputCostUSD + cost.CacheReadCostUSD + cost.CacheWriteCostUSD
 
@@ -503,9 +486,9 @@ func buildCostOverTime(sessions []ClaudeSessionSummary, from, to time.Time, gran
 		if buckets[key] == nil {
 			buckets[key] = &CostPoint{Date: bucketLabel(s.LastActivity, granularity)}
 		}
-		if c, priced := costForUsage(s.Model, s.TotalUsage(), s.LastActivity); priced {
-			buckets[key].EstimatedCostUSD += c.TotalCostUSD
-		}
+		// Stored cost, for the same reason buildSummary reads it — the two must
+		// add up to the same money.
+		buckets[key].EstimatedCostUSD += s.TotalCost().TotalUSD
 	}
 
 	step := 24 * time.Hour

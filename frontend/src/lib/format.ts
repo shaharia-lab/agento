@@ -10,6 +10,33 @@ export function formatTokens(n: number): string {
   return String(n)
 }
 
+const usdFmt2 = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+})
+const usdFmt4 = new Intl.NumberFormat('en-US', {
+  style: 'currency',
+  currency: 'USD',
+  minimumFractionDigits: 4,
+  maximumFractionDigits: 4,
+})
+
+/**
+ * Formats a USD cost: 1234.5 → "$1,234.56", 0.0042 → "$0.0042", 0.00001 → "< $0.0001".
+ *
+ * Precision widens below a dollar because per-session costs live there — rounding
+ * a real session to "$0.00" would read as free. Only an exactly-zero cost, which a
+ * session of purely non-billable models genuinely has, prints as $0.00.
+ */
+export function formatCost(n: number): string {
+  if (n <= 0) return usdFmt2.format(0)
+  if (n < 0.0001) return `< ${usdFmt4.format(0.0001)}`
+  if (n < 1) return usdFmt4.format(n)
+  return usdFmt2.format(n)
+}
+
 /** Formats a millisecond duration into a human-readable string: "1h 23m", "45s", "320ms". */
 export function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`

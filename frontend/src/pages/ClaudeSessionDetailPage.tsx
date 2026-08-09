@@ -33,8 +33,9 @@ import {
   Scissors,
   GitPullRequest,
   Trees,
+  DollarSign,
 } from 'lucide-react'
-import { formatTokens, shortPath } from '@/lib/format'
+import { formatCost, formatTokens, shortPath } from '@/lib/format'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -462,6 +463,10 @@ export default function ClaudeSessionDetailPage() {
   // Delegated work is reported additively — `usage` stays main-thread only.
   const subagentTokens =
     (detail.subagent_usage?.input_tokens ?? 0) + (detail.subagent_usage?.output_tokens ?? 0)
+  // Cost mirrors usage: main-thread plus delegated, as one figure.
+  const totalCost = (detail.cost?.total_usd ?? 0) + (detail.subagent_cost?.total_usd ?? 0)
+  const unpricedModels = detail.unpriced_models ?? []
+  const partiallyPriced = unpricedModels.length > 0
 
   return (
     <div className="flex flex-col h-full">
@@ -666,6 +671,27 @@ export default function ClaudeSessionDetailPage() {
                   {formatTokens(subagentTokens)}
                 </span>{' '}
                 sub-agents
+              </span>
+            )}
+            <span className="flex items-center gap-1">
+              <DollarSign
+                className={`h-3 w-3 shrink-0 ${
+                  partiallyPriced
+                    ? 'text-amber-600 dark:text-amber-400'
+                    : 'text-emerald-600 dark:text-emerald-400'
+                }`}
+              />
+              <span className="font-medium text-zinc-700 dark:text-zinc-300">
+                {partiallyPriced && '~'}
+                {formatCost(totalCost)}
+              </span>{' '}
+              cost
+            </span>
+            {partiallyPriced && (
+              // The total is a floor, so say which models it left out rather
+              // than letting an understated figure read as complete.
+              <span className="text-amber-600 dark:text-amber-400">
+                excludes {unpricedModels.join(', ')} — no published rate
               </span>
             )}
           </div>

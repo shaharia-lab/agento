@@ -570,6 +570,29 @@ export interface ClaudeSessionSummary {
   dropped_tokens: number
   /** Pull requests this session was linked to, deduplicated by URL. */
   prs?: ClaudeSessionPR[]
+  /**
+   * Main-thread cost, priced per assistant message during the scan. Like
+   * `usage` it excludes delegated work — that is in `subagent_cost`.
+   */
+  cost: ClaudeSessionCost
+  /** Summed cost of this session's sub-agent transcripts. */
+  subagent_cost: ClaudeSessionCost
+  /**
+   * Models used here that have no known rate. Non-empty means `cost` is a
+   * floor, not a total, and the UI must say so.
+   */
+  unpriced_models?: string[]
+  /** Input+output tokens those unpriced models accounted for. */
+  unpriced_tokens?: number
+}
+
+/** A session's cost broken down by token category, in USD. */
+export interface ClaudeSessionCost {
+  input_usd: number
+  output_usd: number
+  cache_read_usd: number
+  cache_write_usd: number
+  total_usd: number
 }
 
 /** A pull request a session produced, from a `pr-link` event. */

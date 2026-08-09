@@ -39,6 +39,22 @@ func defaultPricingResolver() *pricing.Resolver {
 	return packagePricing.resolver
 }
 
+// currentPricingRevision returns the fingerprint of the catalog this process
+// last loaded, or pricingRevUnknown when no pricing store is wired.
+func currentPricingRevision() int64 {
+	packagePricing.RLock()
+	defer packagePricing.RUnlock()
+	return packagePricing.revision
+}
+
+// pricingChanged reports whether the stored costs were computed under a
+// different catalog than the one now loaded. Unknown (no pricing wired) is
+// never a change — an unpriced process must not force an endless re-scan.
+func (c *Cache) pricingChanged() bool {
+	live := currentPricingRevision()
+	return live != pricingRevUnknown && storedPricingRevision(c.db) != live
+}
+
 // Cache is a SQLite-backed cache of Claude Code session summaries with
 // TTL-based invalidation and incremental scanning. It is safe for concurrent use.
 type Cache struct {
@@ -158,11 +174,14 @@ func (c *Cache) List() []ClaudeSessionSummary {
 	defer c.mu.Unlock()
 
 	// A rate edit must not wait for the hourly TTL to take effect in the cost
-	// figures: refresh the resolver snapshot first. Costs are computed at read
-	// time, so the summaries loaded below already reflect the new rates.
+	// figures: refresh the resolver snapshot first. Since #188 cost is stored on
+	// the row rather than recomputed here, so a changed catalog also has to skip
+	// the freshness short-circuit — the scan is what re-reads the transcripts
+	// and re-prices them, and cached rows would otherwise serve stale costs
+	// indefinitely.
 	c.refreshPricingResolver()
 
-	if c.isFresh() {
+	if c.isFresh() && !c.pricingChanged() {
 		sessions, err := c.loadAll()
 		if err != nil {
 			c.logger.Warn("claude sessions: failed to load from cache", "error", err)

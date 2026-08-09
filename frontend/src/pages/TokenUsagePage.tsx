@@ -47,28 +47,9 @@ import {
   ChartCard,
   DateRangePicker,
 } from './analyticsShared'
-
-// ─── USD formatting ────────────────────────────────────────────────────────────
-
-const usdFmt2 = new Intl.NumberFormat('en-US', {
-  style: 'currency',
-  currency: 'USD',
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-})
-const usdFmt4 = new Intl.NumberFormat('en-US', {
-  style: 'currency',
-  currency: 'USD',
-  minimumFractionDigits: 4,
-  maximumFractionDigits: 4,
-})
-
-function formatCost(n: number): string {
-  if (n < 0.0001) return usdFmt2.format(0) // $0.00
-  if (n < 0.01) return `< ${usdFmt2.format(0.01)}` // < $0.01
-  if (n < 1) return usdFmt4.format(n) // $0.0123 — extra precision for sub-dollar amounts
-  return usdFmt2.format(n) // $1.23 / $1,234.56
-}
+// Cost is formatted by the shared helper so this page and the session list can
+// never disagree about what a given figure looks like.
+import { formatCost } from '@/lib/format'
 
 // ─── Charts ───────────────────────────────────────────────────────────────────
 

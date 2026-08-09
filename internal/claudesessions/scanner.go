@@ -42,7 +42,11 @@ const (
 	// cached — it is recomputed at read time — but the bump is still required:
 	// it re-reads every transcript, and the resulting session events are what
 	// reprocess the insight rows that carry stored costs.
-	CurrentScannerVersion = 5
+	// v6: that per-message cost is now *stored* on the row (#188) so the list,
+	// the detail page and the analytics totals read one number. Rows written
+	// before v6 have zeros in every cost column, which is indistinguishable from
+	// a genuinely free session, so they must be re-read rather than left alone.
+	CurrentScannerVersion = 6
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -402,8 +406,10 @@ func IncrementalScanWithNotify(
 	// reader extracts, so mtime comparison would wrongly report them unchanged.
 	// Dropping the cached set makes every file look new for exactly one scan.
 	staleReader := storedScannerVersion(db) < CurrentScannerVersion
-	if staleReader {
-		invalidateCachedMtimes(cached, logger)
+	liveRev, stalePricing := pricingStaleness(db)
+
+	if staleReader || stalePricing {
+		invalidateCachedMtimes(cached, logger, staleReader, stalePricing)
 	}
 
 	diff := diffDiskAndCache(onDisk, cached)
@@ -412,6 +418,9 @@ func IncrementalScanWithNotify(
 	updateLastScanned(db, logger)
 	if staleReader {
 		recordScannerVersion(db, logger)
+	}
+	if stalePricing {
+		recordPricingRevision(db, logger, liveRev)
 	}
 	return loadAllSessions(db, logger)
 }
@@ -423,11 +432,14 @@ func IncrementalScanWithNotify(
 // unchanged — only the rows are incomplete — so they must re-read as updates to
 // existing sessions rather than as newly discovered ones, and a row whose file
 // is gone must still be detected as a deletion.
-func invalidateCachedMtimes(cached map[string]cachedEntry, logger *slog.Logger) {
+func invalidateCachedMtimes(
+	cached map[string]cachedEntry, logger *slog.Logger, staleReader, stalePricing bool,
+) {
 	if len(cached) == 0 {
 		return
 	}
-	logger.Info("claude sessions: scanner version bumped, re-reading all transcripts",
+	logger.Info("claude sessions: re-reading all transcripts",
+		"scanner_version_bumped", staleReader, "pricing_changed", stalePricing,
 		"current", CurrentScannerVersion, "rows", len(cached))
 	for path, ce := range cached {
 		ce.mtime = time.Time{}
@@ -446,6 +458,43 @@ func storedScannerVersion(db *sql.DB) int {
 		return 0
 	}
 	return v
+}
+
+// pricingStaleness reports the live catalog fingerprint and whether the cached
+// costs were computed under a different one.
+//
+// Since #188 cost is stored on the row rather than recomputed per read, so a
+// catalog edit no longer reaches cached sessions by itself. Re-pricing needs
+// each message's own model and timestamp, which the row does not keep — so the
+// only correct response is to re-read the transcripts, exactly as a scanner
+// bump does. Rate edits are rare; a silently stale cost is not.
+func pricingStaleness(db *sql.DB) (live int64, stale bool) {
+	live = currentPricingRevision()
+	if live == pricingRevUnknown {
+		return live, false
+	}
+	return live, storedPricingRevision(db) != live
+}
+
+// storedPricingRevision returns the catalog fingerprint the cached costs were
+// computed under, or 0 when unreadable — which differs from any real revision
+// and so correctly forces a re-cost.
+func storedPricingRevision(db *sql.DB) int64 {
+	var v int64
+	row := db.QueryRowContext(context.Background(),
+		"SELECT pricing_rev FROM claude_cache_metadata WHERE id = 1")
+	if row.Scan(&v) != nil {
+		return 0
+	}
+	return v
+}
+
+func recordPricingRevision(db *sql.DB, logger *slog.Logger, rev int64) {
+	if _, err := db.ExecContext(context.Background(),
+		"UPDATE claude_cache_metadata SET pricing_rev = ? WHERE id = 1", rev,
+	); err != nil {
+		logger.Warn("claude sessions: failed to record pricing revision", "error", err)
+	}
 }
 
 func recordScannerVersion(db *sql.DB, logger *slog.Logger) {
@@ -765,9 +814,11 @@ func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessi
 			git_branch, model, cwd, native_title, ai_title,
 			agent_name, permission_mode, mode, relocated_cwd,
 			worktree_name, worktree_branch, original_branch,
-			compaction_count, dropped_tokens
+			compaction_count, dropped_tokens,
+			input_cost_usd, output_cost_usd, cache_read_cost_usd,
+			cache_write_cost_usd, total_cost_usd, unpriced_models, unpriced_tokens
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		          ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, project_path) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -795,15 +846,31 @@ func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessi
 			worktree_branch = excluded.worktree_branch,
 			original_branch = excluded.original_branch,
 			compaction_count = excluded.compaction_count,
-			dropped_tokens = excluded.dropped_tokens`,
-		// custom_title and is_favorite are intentionally omitted from both INSERT and UPDATE SET
-		// so any user-defined values are preserved across rescans.
-		//
-		// native_title and ai_title are deliberately NOT excluded: they mirror
-		// Claude Code's own title events and must track them, including when a
-		// native rename changes or clears one. They cannot clobber a user's
-		// Agento rename because that lives in the separate custom_title column
-		// and wins the precedence in ResolveDisplayTitle.
+			dropped_tokens = excluded.dropped_tokens,
+			input_cost_usd = excluded.input_cost_usd,
+			output_cost_usd = excluded.output_cost_usd,
+			cache_read_cost_usd = excluded.cache_read_cost_usd,
+			cache_write_cost_usd = excluded.cache_write_cost_usd,
+			total_cost_usd = excluded.total_cost_usd,
+			unpriced_models = excluded.unpriced_models,
+			unpriced_tokens = excluded.unpriced_tokens`,
+		cacheRowArgs(df, s)...,
+	)
+	return err
+}
+
+// cacheRowArgs lays out the cache row's bind values in column order.
+//
+// custom_title and is_favorite are intentionally absent from both the INSERT
+// and the UPDATE SET so any user-defined values are preserved across rescans.
+//
+// native_title and ai_title are deliberately NOT excluded: they mirror Claude
+// Code's own title events and must track them, including when a native rename
+// changes or clears one. They cannot clobber a user's Agento rename because
+// that lives in the separate custom_title column and wins the precedence in
+// ResolveDisplayTitle.
+func cacheRowArgs(df diskFile, s *ClaudeSessionSummary) []any {
+	return []any{
 		s.SessionID, s.ProjectPath, df.filePath, df.mtime,
 		s.Preview, s.StartTime, s.LastActivity, s.MessageCount, s.EventCount,
 		s.Usage.InputTokens, s.Usage.OutputTokens,
@@ -815,8 +882,44 @@ func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessi
 		s.AgentName, s.PermissionMode, s.Mode, s.RelocatedCWD,
 		s.WorktreeName, s.WorktreeBranch, s.OriginalBranch,
 		s.CompactionCount, s.DroppedTokens,
-	)
-	return err
+		s.Cost.InputUSD, s.Cost.OutputUSD, s.Cost.CacheReadUSD,
+		s.Cost.CacheWriteUSD, s.Cost.TotalUSD,
+		encodeUnpricedModels(s.UnpricedModels), s.UnpricedTokens,
+	}
+}
+
+// encodeUnpricedModels joins the list for storage. Newline-separated because a
+// model ID may contain almost anything else — "mixedbread-ai/mxbai-embed-large-v1"
+// already carries a slash — but never a newline.
+func encodeUnpricedModels(models []string) string {
+	return strings.Join(models, "\n")
+}
+
+// mergeUnpricedModels combines the session's own unpriced models with those of
+// its sub-agents, deduplicated and sorted. The sub-agent side arrives from a
+// GROUP_CONCAT, so the same model can appear once per delegating sub-agent.
+// Returns nil when fully priced, so the JSON key is omitted entirely.
+func mergeUnpricedModels(own, delegated string) []string {
+	seen := map[string]struct{}{}
+	for _, group := range []string{own, delegated} {
+		if group == "" {
+			continue
+		}
+		for _, m := range strings.Split(group, "\n") {
+			if m != "" {
+				seen[m] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(seen))
+	for m := range seen {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // replacePRRows rewrites a session's linked pull requests. The transcript is
@@ -896,8 +999,10 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 			start_time, last_activity, message_count,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			cache_creation_5m_tokens, cache_creation_1h_tokens,
-			model
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			model,
+			input_cost_usd, output_cost_usd, cache_read_cost_usd,
+			cache_write_cost_usd, total_cost_usd, unpriced_models, unpriced_tokens
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(parent_session_id, agent_id) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -913,7 +1018,14 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 			cache_read_tokens = excluded.cache_read_tokens,
 			cache_creation_5m_tokens = excluded.cache_creation_5m_tokens,
 			cache_creation_1h_tokens = excluded.cache_creation_1h_tokens,
-			model = excluded.model`,
+			model = excluded.model,
+			input_cost_usd = excluded.input_cost_usd,
+			output_cost_usd = excluded.output_cost_usd,
+			cache_read_cost_usd = excluded.cache_read_cost_usd,
+			cache_write_cost_usd = excluded.cache_write_cost_usd,
+			total_cost_usd = excluded.total_cost_usd,
+			unpriced_models = excluded.unpriced_models,
+			unpriced_tokens = excluded.unpriced_tokens`,
 		df.sessionID, df.agentID, df.filePath, df.mtime,
 		meta.AgentType, meta.Description, meta.ToolUseID,
 		s.StartTime, s.LastActivity, s.MessageCount,
@@ -921,6 +1033,9 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 		s.Usage.CacheCreationTokens, s.Usage.CacheReadTokens,
 		s.Usage.CacheCreation5mTokens, s.Usage.CacheCreation1hTokens,
 		s.Model,
+		s.Cost.InputUSD, s.Cost.OutputUSD, s.Cost.CacheReadUSD,
+		s.Cost.CacheWriteUSD, s.Cost.TotalUSD,
+		encodeUnpricedModels(s.UnpricedModels), s.UnpricedTokens,
 	)
 	return err
 }
@@ -1009,9 +1124,14 @@ const sessionSummarySelect = `
 	       c.agent_name, c.permission_mode, c.mode, c.relocated_cwd,
 	       c.worktree_name, c.worktree_branch, c.original_branch,
 	       c.compaction_count, c.dropped_tokens,
+	       c.input_cost_usd, c.output_cost_usd, c.cache_read_cost_usd,
+	       c.cache_write_cost_usd, c.total_cost_usd, c.unpriced_models, c.unpriced_tokens,
 	       COALESCE(sa.n, 0), COALESCE(sa.it, 0), COALESCE(sa.ot, 0),
 	       COALESCE(sa.cct, 0), COALESCE(sa.crt, 0),
-	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0)
+	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0),
+	       COALESCE(sa.ic, 0), COALESCE(sa.oc, 0), COALESCE(sa.crc, 0),
+	       COALESCE(sa.cwc, 0), COALESCE(sa.tc, 0), COALESCE(sa.ut, 0),
+	       COALESCE(sa.um, '')
 	FROM claude_session_cache c
 	LEFT JOIN (
 		SELECT parent_session_id,
@@ -1021,7 +1141,16 @@ const sessionSummarySelect = `
 		       SUM(cache_creation_tokens) AS cct,
 		       SUM(cache_read_tokens) AS crt,
 		       SUM(cache_creation_5m_tokens) AS c5m,
-		       SUM(cache_creation_1h_tokens) AS c1h
+		       SUM(cache_creation_1h_tokens) AS c1h,
+		       SUM(input_cost_usd) AS ic,
+		       SUM(output_cost_usd) AS oc,
+		       SUM(cache_read_cost_usd) AS crc,
+		       SUM(cache_write_cost_usd) AS cwc,
+		       SUM(total_cost_usd) AS tc,
+		       SUM(unpriced_tokens) AS ut,
+		       -- NULLIF keeps fully-priced sub-agents from contributing blank
+		       -- entries; duplicates across sub-agents are deduped in Go.
+		       GROUP_CONCAT(NULLIF(unpriced_models, ''), char(10)) AS um
 		FROM claude_subagent_cache
 		GROUP BY parent_session_id
 	) sa ON sa.parent_session_id = c.session_id
@@ -1043,6 +1172,8 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 	sessions := []ClaudeSessionSummary{}
 	for rows.Next() {
 		var s ClaudeSessionSummary
+		var unpriced, subagentUnpricedModels string
+		var subagentUnpriced int
 		if err := rows.Scan(
 			&s.SessionID, &s.ProjectPath, &s.Preview, &s.CustomTitle, &s.IsFavorite,
 			&s.StartTime, &s.LastActivity, &s.MessageCount, &s.EventCount,
@@ -1053,12 +1184,23 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 			&s.AgentName, &s.PermissionMode, &s.Mode, &s.RelocatedCWD,
 			&s.WorktreeName, &s.WorktreeBranch, &s.OriginalBranch,
 			&s.CompactionCount, &s.DroppedTokens,
+			&s.Cost.InputUSD, &s.Cost.OutputUSD, &s.Cost.CacheReadUSD,
+			&s.Cost.CacheWriteUSD, &s.Cost.TotalUSD, &unpriced, &s.UnpricedTokens,
 			&s.SubagentCount, &s.SubagentUsage.InputTokens, &s.SubagentUsage.OutputTokens,
 			&s.SubagentUsage.CacheCreationTokens, &s.SubagentUsage.CacheReadTokens,
 			&s.SubagentUsage.CacheCreation5mTokens, &s.SubagentUsage.CacheCreation1hTokens,
+			&s.SubagentCost.InputUSD, &s.SubagentCost.OutputUSD, &s.SubagentCost.CacheReadUSD,
+			&s.SubagentCost.CacheWriteUSD, &s.SubagentCost.TotalUSD, &subagentUnpriced,
+			&subagentUnpricedModels,
 		); err != nil {
 			return nil, err
 		}
+		// Delegated work's unpriced models and tokens both count toward the
+		// session's disclosure. Reading one without the other would let a row
+		// report excluded tokens attributed to no model — or worse, show a
+		// confident total for a session that is only partly priced.
+		s.UnpricedModels = mergeUnpricedModels(unpriced, subagentUnpricedModels)
+		s.UnpricedTokens += subagentUnpriced
 		s.DisplayTitle = s.ResolveDisplayTitle()
 		sessions = append(sessions, s)
 	}
@@ -1223,6 +1365,13 @@ func readSummaryFile(
 
 	summary.StartTime = tr.start
 	summary.LastActivity = tr.last
+	// Carry the accumulated cost on the summary so every persistence path — the
+	// session cache and the sub-agent cache alike — stores it without having to
+	// thread the accumulator through. The accumulator is still returned for
+	// callers that need the per-model detail behind the total.
+	summary.Cost = sessionCostFromPricing(costs)
+	summary.UnpricedModels = costs.UnpricedModels()
+	summary.UnpricedTokens = costs.UnknownPricingTokens()
 
 	if summary.StartTime.IsZero() {
 		return nil, nil, sc.Err()
