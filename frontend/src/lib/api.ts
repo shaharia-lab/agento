@@ -710,12 +710,22 @@ export const monitoringApi = {
 
 // ── Analytics ─────────────────────────────────────────────────────────────────
 
+/**
+ * The browser's IANA timezone, sent so the backend buckets days, hours and
+ * weekdays the way the user experiences them. Timestamps stay UTC on the wire;
+ * only aggregation moves. An unset or unrecognised value means UTC server-side.
+ */
+export function browserTimezone(): string {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone
+}
+
 export const analyticsApi = {
   get: (params?: { from?: string; to?: string; project?: string }): Promise<AnalyticsReport> => {
     const qs = new URLSearchParams()
     if (params?.from) qs.set('from', params.from)
     if (params?.to) qs.set('to', params.to)
     if (params?.project) qs.set('project', params.project)
+    qs.set('tz', browserTimezone())
     const query = qs.toString()
     const suffix = query ? `?${query}` : ''
     return request<AnalyticsReport>(`/claude-analytics${suffix}`)
@@ -735,6 +745,7 @@ export const insightsApi = {
     if (params?.ids && params.ids.length > 0) qs.set('ids', params.ids.join(','))
     if (params?.from) qs.set('from', params.from)
     if (params?.to) qs.set('to', params.to)
+    qs.set('tz', browserTimezone())
     const suffix = qs.toString() ? `?${qs.toString()}` : ''
     return request<InsightSummary>(`/claude-sessions/insights/summary${suffix}`)
   },

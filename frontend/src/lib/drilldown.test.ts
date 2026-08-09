@@ -9,15 +9,29 @@ import {
   parseRangeBounds,
 } from './drilldown'
 
-// 2026-08-03 is a Monday, 2026-08-09 a Sunday (local time).
+// 2026-08-03 is a Monday, 2026-08-09 a Sunday.
+//
+// Every expectation below is expressed in LOCAL time, matching what the backend
+// now buckets in. Anchoring these with an explicit `Z` is what made the old
+// suite pass while the feature was wrong for everyone outside UTC, so the
+// assertions deliberately parse without one and read local Date fields.
 const FROM = '2026-08-03'
 const TO = '2026-08-09'
 
 describe('parseRangeBounds', () => {
-  it('spans the inclusive `to` date, anchored to UTC', () => {
+  it('spans the inclusive `to` date, anchored to local midnight', () => {
     const bounds = parseRangeBounds(FROM, TO)!
-    expect(bounds.from).toBe(Date.parse('2026-08-03T00:00:00Z'))
-    expect(bounds.to).toBe(Date.parse('2026-08-10T00:00:00Z')) // one day past `to`
+    expect(bounds.from).toBe(Date.parse('2026-08-03T00:00:00'))
+    expect(bounds.to).toBe(Date.parse('2026-08-10T00:00:00')) // one day past `to`
+  })
+
+  it('starts at local midnight, not UTC midnight', () => {
+    // The bug this fixes: a range edge landing on the wrong local day for
+    // anyone whose offset is not zero.
+    const bounds = parseRangeBounds(FROM, TO)!
+    const start = new Date(bounds.from)
+    expect(start.getHours()).toBe(0)
+    expect(start.getDate()).toBe(3)
   })
 
   it('rejects invalid dates', () => {
@@ -38,14 +52,14 @@ describe('parseRangeBounds', () => {
 })
 
 describe('heatmapCellTarget', () => {
-  it('produces one window per occurrence of the weekday+hour in range (UTC)', () => {
-    // Monday (1) 14:00 UTC within Mon 3rd – Sun 9th → exactly one occurrence.
+  it('produces one window per occurrence of the local weekday+hour in range', () => {
+    // Monday (1) 14:00 local within Mon 3rd – Sun 9th → exactly one occurrence.
     const target = heatmapCellTarget(FROM, TO, 1, 14)!
     expect(target.windows).toHaveLength(1)
     const w = target.windows[0]
-    expect(w.from).toBe(Date.parse('2026-08-03T14:00:00Z'))
-    expect(new Date(w.from).getUTCDay()).toBe(1)
-    expect(new Date(w.from).getUTCHours()).toBe(14)
+    expect(w.from).toBe(Date.parse('2026-08-03T14:00:00'))
+    expect(new Date(w.from).getDay()).toBe(1)
+    expect(new Date(w.from).getHours()).toBe(14)
     expect(w.to - w.from).toBe(60 * 60 * 1000)
   })
 
@@ -54,14 +68,14 @@ describe('heatmapCellTarget', () => {
     const target = heatmapCellTarget('2026-08-03', '2026-08-23', 1, 9)!
     expect(target.windows).toHaveLength(3)
     for (const w of target.windows) {
-      expect(new Date(w.from).getUTCDay()).toBe(1)
-      expect(new Date(w.from).getUTCHours()).toBe(9)
+      expect(new Date(w.from).getDay()).toBe(1)
+      expect(new Date(w.from).getHours()).toBe(9)
     }
   })
 
   it('describes the bucket in the label', () => {
-    expect(heatmapCellTarget(FROM, TO, 2, 5)!.label).toBe('Tuesdays 05:00–06:00 UTC')
-    expect(heatmapCellTarget(FROM, TO, 6, 23)!.label).toBe('Saturdays 23:00–00:00 UTC')
+    expect(heatmapCellTarget(FROM, TO, 2, 5)!.label).toBe('Tuesdays 05:00–06:00')
+    expect(heatmapCellTarget(FROM, TO, 6, 23)!.label).toBe('Saturdays 23:00–00:00')
   })
 
   it('returns null for an invalid range', () => {
@@ -70,18 +84,18 @@ describe('heatmapCellTarget', () => {
 })
 
 describe('hourlyBarTarget', () => {
-  it('produces one window per day in range (UTC)', () => {
+  it('produces one window per day in range, at the local hour', () => {
     const target = hourlyBarTarget(FROM, TO, 8)! // 7 days
     expect(target.windows).toHaveLength(7)
-    expect(target.windows[0].from).toBe(Date.parse('2026-08-03T08:00:00Z'))
+    expect(target.windows[0].from).toBe(Date.parse('2026-08-03T08:00:00'))
     for (const w of target.windows) {
-      expect(new Date(w.from).getUTCHours()).toBe(8)
+      expect(new Date(w.from).getHours()).toBe(8)
       expect(w.to - w.from).toBe(60 * 60 * 1000)
     }
   })
 
   it('describes the bucket in the label', () => {
-    expect(hourlyBarTarget(FROM, TO, 14)!.label).toBe('every day 14:00–15:00 UTC')
+    expect(hourlyBarTarget(FROM, TO, 14)!.label).toBe('every day 14:00–15:00')
   })
 })
 
@@ -111,7 +125,7 @@ describe('drilldownUrl', () => {
     expect(url.startsWith('/claude-sessions?')).toBe(true)
     const params = new URLSearchParams(url.split('?')[1])
     expect(decodeWindows(params.get('windows'))).toEqual(target.windows)
-    expect(params.get('label')).toBe('Mondays 14:00–15:00 UTC · 2026-08-03 → 2026-08-09')
+    expect(params.get('label')).toBe('Mondays 14:00–15:00 · 2026-08-03 → 2026-08-09')
     expect(params.get('project')).toBeNull()
   })
 

@@ -37,8 +37,18 @@ export const PRESETS: { label: string; value: DatePreset }[] = [
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
+/**
+ * Formats a Date as the YYYY-MM-DD the analytics API expects, using its **local**
+ * calendar fields.
+ *
+ * toISOString would render the UTC day, and every caller here builds its Date
+ * from local arithmetic (`new Date(y, m, 1)`, `setDate(...)`). Mixing the two
+ * shifted every range edge by a day for anyone whose offset crosses midnight —
+ * "this month" starting on the last day of the previous one.
+ */
 export function fmt(d: Date) {
-  return d.toISOString().slice(0, 10)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
 }
 
 export function subDays(d: Date, n: number): Date {
@@ -90,6 +100,14 @@ export function formatModelName(model: string): string {
   return model
 }
 
+/**
+ * Renders a backend bucket key ("2026-08-08" or "2026-08-08T14") for display.
+ *
+ * The key is already in the browser's timezone — it is bucketed there — so the
+ * date part is parsed without a `Z` (local) and the hour is printed verbatim.
+ * Both halves therefore describe the same wall clock; before the backend took a
+ * `tz`, the hour was UTC while the date was parsed locally.
+ */
 export function formatDateLabel(date: string): string {
   if (date.includes('T')) {
     const [d, h] = date.split('T')
