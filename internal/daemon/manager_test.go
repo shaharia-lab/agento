@@ -303,8 +303,13 @@ func TestRenderUnitVerifiedBySystemdAnalyze(t *testing.T) {
 		t.Fatalf("mkdir: %v", err)
 	}
 	binary := filepath.Join(binDir, "agento")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+	// Write with the default 0o600 (gosec) then mark executable — systemd-analyze
+	// verify insists ExecStart points at an executable file.
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 0\n"), 0o600); err != nil {
 		t.Fatalf("write stub binary: %v", err)
+	}
+	if err := os.Chmod(binary, 0o700); err != nil { //nolint:gosec // owner-exec stub binary is required for verify
+		t.Fatalf("chmod stub binary: %v", err)
 	}
 	logDir := filepath.Join(tmp, "test user", ".agento", "logs")
 	if err := os.MkdirAll(logDir, 0o750); err != nil {
@@ -323,7 +328,7 @@ func TestRenderUnitVerifiedBySystemdAnalyze(t *testing.T) {
 	if err := os.WriteFile(unit, got, 0o600); err != nil {
 		t.Fatalf("write unit: %v", err)
 	}
-	cmd := exec.Command("systemd-analyze", "verify", unit) //nolint:gosec // fixed binary, test-rendered file
+	cmd := exec.CommandContext(context.Background(), "systemd-analyze", "verify", unit) //nolint:gosec // fixed binary, test-rendered file
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("systemd-analyze verify rejected the spaced-value unit: %v\n%s\nunit:\n%s", err, out, got)
 	}
