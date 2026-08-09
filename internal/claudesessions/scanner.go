@@ -1218,7 +1218,65 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 		return nil, err
 	}
 	attachPRs(db, logger, sessions)
+	attachSubagentUsageByModel(db, logger, sessions)
 	return sessions, nil
+}
+
+// attachSubagentUsageByModel fills in each session's delegated token usage
+// broken down by the sub-agent's own model.
+//
+// The summary select's sub-agent roll-up is grouped by parent_session_id alone
+// — deliberately, so a session with several sub-agents is not multiplied out —
+// which collapses the model dimension before analytics can see it. This is a
+// second grouped read that keeps it, run once for the whole load rather than
+// per session, in the same shape as attachPRs above.
+func attachSubagentUsageByModel(db *sql.DB, logger *slog.Logger, sessions []ClaudeSessionSummary) {
+	if len(sessions) == 0 {
+		return
+	}
+	rows, err := db.QueryContext(context.Background(), `
+		SELECT parent_session_id, model,
+		       SUM(input_tokens), SUM(output_tokens),
+		       SUM(cache_creation_tokens), SUM(cache_read_tokens),
+		       SUM(cache_creation_5m_tokens), SUM(cache_creation_1h_tokens)
+		FROM claude_subagent_cache
+		GROUP BY parent_session_id, model`)
+	if err != nil {
+		logger.Warn("claude sessions: failed to load sub-agent usage by model", "error", err)
+		return
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			logger.Warn("failed to close rows", "error", cerr)
+		}
+	}()
+
+	bySession := map[string]map[string]TokenUsage{}
+	for rows.Next() {
+		var sessionID, model string
+		var u TokenUsage
+		if err := rows.Scan(&sessionID, &model,
+			&u.InputTokens, &u.OutputTokens,
+			&u.CacheCreationTokens, &u.CacheReadTokens,
+			&u.CacheCreation5mTokens, &u.CacheCreation1hTokens); err != nil {
+			logger.Warn("claude sessions: failed to scan sub-agent usage by model", "error", err)
+			return
+		}
+		if bySession[sessionID] == nil {
+			bySession[sessionID] = map[string]TokenUsage{}
+		}
+		bySession[sessionID][model] = u
+	}
+	if err := rows.Err(); err != nil {
+		logger.Warn("claude sessions: failed to read sub-agent usage by model", "error", err)
+		return
+	}
+
+	for i := range sessions {
+		if m, ok := bySession[sessions[i].SessionID]; ok {
+			sessions[i].SubagentUsageByModel = m
+		}
+	}
 }
 
 // attachPRs fills in each session's linked pull requests with a single query
