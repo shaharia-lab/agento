@@ -684,7 +684,11 @@ export interface SessionJourney {
   end_time: string
   total_duration_ms: number
   total_turns: number
+  /** Main-thread only, like ClaudeSessionSummary.usage. */
   usage: ClaudeTokenUsage
+  /** Delegated work — reported separately so the header can label it, not hide it. */
+  subagent_usage: ClaudeTokenUsage
+  subagent_count: number
   summary?: string
   turns: JourneyTurn[]
 }
@@ -1015,6 +1019,12 @@ export interface InsightSummary {
 
 export interface AnalyticsSummary {
   total_sessions: number
+  /**
+   * Projects the *filtered* sessions belong to. `AnalyticsReport.projects` is
+   * built before filtering because it populates the project picker, so its
+   * length is the whole corpus's project count regardless of the window.
+   */
+  unique_projects: number
   total_tokens: number
   total_input_tokens: number
   total_output_tokens: number

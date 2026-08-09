@@ -14,6 +14,7 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { analyticsApi } from '@/lib/api'
+import { avgSessionsPerDay, observedDaySpan } from '@/lib/analyticsMetrics'
 import {
   drilldownUrl,
   heatmapCellTarget,
@@ -396,17 +397,6 @@ function HourlyActivityChart({
   )
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function avgSessionsPerDay(totalSessions: number, fromDate: string, toDate: string): string {
-  const days = Math.max(
-    1,
-    Math.round((new Date(toDate).getTime() - new Date(fromDate).getTime()) / 86_400_000) + 1,
-  )
-  const avg = totalSessions / days
-  return avg < 1 ? avg.toFixed(2) : avg.toFixed(1)
-}
-
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function GeneralUsagePage() {
@@ -472,8 +462,11 @@ export default function GeneralUsagePage() {
     [from, to, project, navigate],
   )
 
+  const observedSpan = observedDaySpan(report?.time_series ?? [])
+
   const summary: AnalyticsSummary = report?.summary ?? {
     total_sessions: 0,
+    unique_projects: 0,
     total_tokens: 0,
     total_input_tokens: 0,
     total_output_tokens: 0,
@@ -552,17 +545,26 @@ export default function GeneralUsagePage() {
               <KPICard
                 icon={CalendarDays}
                 label="Avg Sessions / Day"
-                value={avgSessionsPerDay(summary.total_sessions, from, to)}
+                value={avgSessionsPerDay(summary.total_sessions, report?.time_series ?? [])}
+                sub={
+                  observedSpan > 0
+                    ? `over ${observedSpan} day${observedSpan === 1 ? '' : 's'} with activity`
+                    : undefined
+                }
               />
               <KPICard
                 icon={Clock}
                 label="Top Model"
                 value={formatModelName(summary.most_used_model)}
               />
+              {/* summary.unique_projects, not report.projects.length: the
+                  latter is the picker's option list and is built before
+                  filtering, so it ignored both the window and the project
+                  filter. */}
               <KPICard
                 icon={Activity}
                 label="Unique Projects"
-                value={String((report?.projects?.length ?? 0) || '—')}
+                value={String(summary.unique_projects || '—')}
               />
             </div>
 

@@ -111,7 +111,13 @@ type AnalyticsReport struct {
 
 // AnalyticsSummary holds the top-level KPI values.
 type AnalyticsSummary struct {
-	TotalSessions            int     `json:"total_sessions"`
+	TotalSessions int `json:"total_sessions"`
+	// UniqueProjects counts the projects the *filtered* sessions belong to.
+	// AnalyticsReport.Projects is deliberately built before filtering because it
+	// populates the project picker, which must keep offering every project; a
+	// KPI reading its length reported the whole corpus's project count no matter
+	// what the window or the project filter said.
+	UniqueProjects           int     `json:"unique_projects"`
 	TotalTokens              int     `json:"total_tokens"`
 	TotalInputTokens         int     `json:"total_input_tokens"`
 	TotalOutputTokens        int     `json:"total_output_tokens"`
@@ -322,11 +328,13 @@ func SessionIDs(sessions []ClaudeSessionSummary) []string {
 func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummary) {
 	var totalInput, totalOutput, totalCacheRead, totalCacheWrite int
 	modelCount := make(map[string]int)
+	projects := make(map[string]struct{})
 	var cost CostSummary
 
 	var unknown unknownPricingAccumulator
 
 	for _, s := range sessions {
+		projects[s.ProjectPath] = struct{}{}
 		u := s.TotalUsage()
 		totalInput += u.InputTokens
 		totalOutput += u.OutputTokens
@@ -353,6 +361,7 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 
 	return AnalyticsSummary{
 		TotalSessions:            len(sessions),
+		UniqueProjects:           len(projects),
 		TotalTokens:              total,
 		TotalInputTokens:         totalInput,
 		TotalOutputTokens:        totalOutput,

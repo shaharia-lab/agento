@@ -44,3 +44,13 @@ describe('formatTokens', () => {
     expect(formatTokens(1_200_000)).toBe('1.2M')
   })
 })
+
+describe('formatTokens at billions', () => {
+  it('uses B rather than a four-digit M', () => {
+    // A month of cache reads reaches this magnitude; "21274.5M" is both
+    // unreadable and wide enough to clip the chart axis it labels.
+    expect(formatTokens(21_274_518_062)).toBe('21.3B')
+    expect(formatTokens(1_000_000_000)).toBe('1.0B')
+    expect(formatTokens(999_999_999)).toBe('1000.0M')
+  })
+})
