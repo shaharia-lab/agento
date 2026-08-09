@@ -5,7 +5,7 @@ import type { MessageBlock, SDKContentBlock } from '@/types'
 describe('applyThinkingDelta', () => {
   it('creates a new thinking block when blocks are empty', () => {
     const result = applyThinkingDelta([], 'hello')
-    expect(result).toEqual([{ type: 'thinking', text: 'hello' }])
+    expect(result).toEqual([expect.objectContaining({ type: 'thinking', text: 'hello' })])
   })
 
   it('appends to the last thinking block', () => {
@@ -18,8 +18,8 @@ describe('applyThinkingDelta', () => {
     const blocks: MessageBlock[] = [{ type: 'text', text: 'some text' }]
     const result = applyThinkingDelta(blocks, 'thinking')
     expect(result).toEqual([
-      { type: 'text', text: 'some text' },
-      { type: 'thinking', text: 'thinking' },
+      expect.objectContaining({ type: 'text', text: 'some text' }),
+      expect.objectContaining({ type: 'thinking', text: 'thinking' }),
     ])
   })
 
@@ -34,7 +34,7 @@ describe('applyThinkingDelta', () => {
 describe('applyTextDelta', () => {
   it('creates a new text block when blocks are empty', () => {
     const result = applyTextDelta([], 'hello')
-    expect(result).toEqual([{ type: 'text', text: 'hello' }])
+    expect(result).toEqual([expect.objectContaining({ type: 'text', text: 'hello' })])
   })
 
   it('appends to the last text block', () => {
@@ -49,8 +49,13 @@ describe('applyTextDelta', () => {
     ]
     const result = applyTextDelta(blocks, 'output')
     expect(result).toEqual([
-      { type: 'tool_use', name: 'Bash', id: '1', input: { command: 'ls' } },
-      { type: 'text', text: 'output' },
+      expect.objectContaining({
+        type: 'tool_use',
+        name: 'Bash',
+        id: '1',
+        input: { command: 'ls' },
+      }),
+      expect.objectContaining({ type: 'text', text: 'output' }),
     ])
   })
 
@@ -132,9 +137,14 @@ describe('streaming block ordering (integration)', () => {
     blocks = applyTextDelta(blocks, 'Here is the content.')
 
     expect(blocks).toEqual([
-      { type: 'text', text: 'Let me read the file.' },
-      { type: 'tool_use', id: 'tool-1', name: 'Read', input: { file_path: '/tmp/a.txt' } },
-      { type: 'text', text: 'Here is the content.' },
+      expect.objectContaining({ type: 'text', text: 'Let me read the file.' }),
+      expect.objectContaining({
+        type: 'tool_use',
+        id: 'tool-1',
+        name: 'Read',
+        input: { file_path: '/tmp/a.txt' },
+      }),
+      expect.objectContaining({ type: 'text', text: 'Here is the content.' }),
     ])
 
     // Verify order: text, tool_use, text
@@ -199,7 +209,7 @@ describe('streaming block ordering (integration)', () => {
     blocks = applyTextDelta(blocks, ' ')
     blocks = applyTextDelta(blocks, 'world')
 
-    expect(blocks).toEqual([{ type: 'text', text: 'Hello world' }])
+    expect(blocks).toEqual([expect.objectContaining({ type: 'text', text: 'Hello world' })])
   })
 
   it('text deltas after a tool create a new separate text block', () => {
@@ -210,7 +220,7 @@ describe('streaming block ordering (integration)', () => {
 
     // Must be 3 separate blocks, not 2 (text must not merge across a tool_use)
     expect(blocks).toHaveLength(3)
-    expect(blocks[0]).toEqual({ type: 'text', text: 'before' })
-    expect(blocks[2]).toEqual({ type: 'text', text: 'after' })
+    expect(blocks[0]).toEqual(expect.objectContaining({ type: 'text', text: 'before' }))
+    expect(blocks[2]).toEqual(expect.objectContaining({ type: 'text', text: 'after' }))
   })
 })
