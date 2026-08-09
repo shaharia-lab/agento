@@ -3,21 +3,21 @@
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>{{ .Label | xmlEscape }}</string>
+	<string>com.shaharialab.agento</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>{{ .BinaryPath | xmlEscape }}</string>
+		<string>/home/a&amp;b/.local/bin/agento</string>
 		<string>web</string>
 		<string>--no-browser</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
-		<string>{{ .ExtraPath | xmlEscape }}</string>
+		<string>/home/a&amp;b/.local/bin:/opt/A&lt;B&gt;/bin:/usr/bin</string>
 		<key>PORT</key>
-		<string>{{ .Port | xmlEscape }}</string>
+		<string>8990</string>
 		<key>AGENTO_DATA_DIR</key>
-		<string>{{ .DataDir | xmlEscape }}</string>
+		<string>/home/a&amp;b/.agento</string>
 		<key>AGENTO_SKIP_UPDATE_CHECK</key>
 		<string>1</string>
 	</dict>
@@ -28,8 +28,8 @@
 	<key>ThrottleInterval</key>
 	<integer>5</integer>
 	<key>StandardOutPath</key>
-	<string>{{ .LogPath | xmlEscape }}</string>
+	<string>/home/a&amp;b/.agento/logs/service.log</string>
 	<key>StandardErrorPath</key>
-	<string>{{ .LogPath | xmlEscape }}</string>
+	<string>/home/a&amp;b/.agento/logs/service.log</string>
 </dict>
 </plist>

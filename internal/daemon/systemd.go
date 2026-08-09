@@ -69,6 +69,9 @@ func (s *systemd) Install(ctx context.Context, opts Options) error {
 	if err := writeUnit(unit, "agento.service.tmpl", opts); err != nil {
 		return err
 	}
+	if err := s.verifyUnit(ctx, unit); err != nil {
+		return err
+	}
 	if _, err := s.runner.Run(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
 		return fmt.Errorf("systemctl daemon-reload: %w", err)
 	}
@@ -101,6 +104,31 @@ func writeUnit(unit, tmpl string, opts Options) error {
 	}
 	if err := os.WriteFile(unit, content, 0o600); err != nil {
 		return fmt.Errorf("writing unit %s: %w", unit, err)
+	}
+	return nil
+}
+
+// verifyUnit asks systemd to validate the freshly written unit before it is
+// loaded, so a malformed definition (e.g. an unparseable Environment= line)
+// fails the install with a clear error instead of a service that will not
+// start. It is skipped when systemd-analyze is not installed — non-systemd
+// Linux hosts can still manage the unit file, they just get no upfront
+// validation.
+func (s *systemd) verifyUnit(ctx context.Context, unit string) error {
+	if _, err := s.runner.Run(ctx, "systemd-analyze", "--version"); err != nil {
+		return nil
+	}
+	// verify exits 0 on findings it considers warnings (e.g. an unterminated
+	// quote is reported as "Invalid syntax, ignoring" yet does not fail the
+	// run), so the output must be treated as the signal, not just the exit
+	// code. Any diagnostic mentioning the unit means systemd could not parse
+	// it cleanly — surface it rather than let a dropped line pass silently.
+	out, err := s.runner.Run(ctx, "systemd-analyze", "verify", unit)
+	if err != nil {
+		return fmt.Errorf("systemd-analyze verify %s: %w", unit, err)
+	}
+	if strings.Contains(out, filepath.Base(unit)) {
+		return fmt.Errorf("systemd-analyze verify %s reported problems:\n%s", unit, strings.TrimSpace(out))
 	}
 	return nil
 }
