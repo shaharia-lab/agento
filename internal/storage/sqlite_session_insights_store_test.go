@@ -686,7 +686,7 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	if version != 22 {
-		t.Fatalf("schema version = %d, want 22 — migration 20 did not re-apply", version)
+		t.Fatalf("schema version = %d, want 22 — every migration from 20 up must re-apply", version)
 	}
 
 	got, err := storage.NewSQLiteSessionInsightsStore(db2).Get(ctx, "pre-migration")
