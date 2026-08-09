@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"time"
 
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/storage"
@@ -52,9 +51,9 @@ func (a *insightStoreAdapter) GetMany(
 }
 
 func (a *insightStoreAdapter) GetSummary(
-	ctx context.Context, sessionIDs []string, from, to *time.Time,
+	ctx context.Context, sessionIDs []string,
 ) (*claudesessions.InsightAggregateSummary, error) {
-	raw, err := a.store.GetAggregateSummary(ctx, sessionIDs, from, to)
+	raw, err := a.store.GetAggregateSummary(ctx, sessionIDs)
 	if err != nil {
 		return nil, err
 	}

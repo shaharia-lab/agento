@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -164,8 +165,7 @@ func TestSQLiteSessionInsightsStore_GetAggregateSummary(t *testing.T) {
 		}
 	}
 
-	// All sessions (empty filter).
-	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	summary, err := store.GetAggregateSummary(ctx, []string{"a1", "a2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestSQLiteSessionInsightsStore_GetAggregateSummary(t *testing.T) {
 	}
 
 	// Filtered to one session.
-	filtered, err := store.GetAggregateSummary(ctx, []string{"a1"}, nil, nil)
+	filtered, err := store.GetAggregateSummary(ctx, []string{"a1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,78 +183,56 @@ func TestSQLiteSessionInsightsStore_GetAggregateSummary(t *testing.T) {
 	}
 }
 
-func TestSQLiteSessionInsightsStore_GetAggregateSummary_DateFilter(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db, _, err := storage.NewSQLiteDB(dbPath, slog.Default())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	store := storage.NewSQLiteSessionInsightsStore(db)
+// TestGetAggregateSummary_EmptySetIsEmptyNotEverything pins the contract that
+// makes windowing safe to do outside SQL: the ID set is complete, so a window
+// that matched nothing must aggregate nothing. Treating empty as "no filter"
+// would turn an empty range into a full-corpus total — the most misleading
+// possible answer, and silently plausible.
+func TestGetAggregateSummary_EmptySetIsEmptyNotEverything(t *testing.T) {
+	store := setupInsightsTestDB(t)
 	ctx := context.Background()
 
-	// Seed three sessions at known timestamps in claude_session_cache.
-	sessions := []struct {
-		id        string
-		startTime time.Time
-	}{
-		{"old-session", time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC)},
-		{"mid-session", time.Date(2024, 3, 15, 12, 0, 0, 0, time.UTC)},
-		{"new-session", time.Date(2024, 6, 20, 12, 0, 0, 0, time.UTC)},
+	for _, id := range []string{"a1", "a2"} {
+		if err := store.Upsert(ctx, sampleRecord(id)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	for _, s := range sessions {
-		_, err := db.ExecContext(ctx, `
-			INSERT INTO claude_session_cache (
-				session_id, project_path, file_path, file_mtime, start_time, last_activity
-			) VALUES (?, '/proj', '/proj/file.jsonl', ?, ?, ?)`,
-			s.id, s.startTime, s.startTime, s.startTime,
-		)
+
+	for name, ids := range map[string][]string{"nil": nil, "empty": {}} {
+		summary, err := store.GetAggregateSummary(ctx, ids)
 		if err != nil {
-			t.Fatalf("inserting cache row for %s: %v", s.id, err)
+			t.Fatalf("%s: %v", name, err)
 		}
-		if err := store.Upsert(ctx, sampleRecord(s.id)); err != nil {
-			t.Fatalf("Upsert %s: %v", s.id, err)
+		if summary.TotalSessions != 0 {
+			t.Errorf("%s id set: TotalSessions = %d, want 0", name, summary.TotalSessions)
+		}
+	}
+}
+
+// TestGetAggregateSummary_LargeIDSet covers the corpora this feature exists for.
+// The set travels as one JSON parameter precisely so a few thousand sessions in
+// a window do not exceed SQLite's bound-variable limit, which a placeholder per
+// ID would.
+func TestGetAggregateSummary_LargeIDSet(t *testing.T) {
+	store := setupInsightsTestDB(t)
+	ctx := context.Background()
+
+	const n = 2500
+	ids := make([]string, 0, n)
+	for i := range n {
+		id := fmt.Sprintf("session-%04d", i)
+		ids = append(ids, id)
+		if err := store.Upsert(ctx, sampleRecord(id)); err != nil {
+			t.Fatal(err)
 		}
 	}
 
-	// Filter with from only — should return mid and new sessions.
-	from := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
-	summary, err := store.GetAggregateSummary(ctx, nil, &from, nil)
+	summary, err := store.GetAggregateSummary(ctx, ids)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("aggregating %d sessions: %v", n, err)
 	}
-	if summary.TotalSessions != 2 {
-		t.Errorf("from-only filter: expected TotalSessions=2, got %d", summary.TotalSessions)
-	}
-
-	// Filter with from and to — should return only mid-session.
-	to := time.Date(2024, 4, 1, 0, 0, 0, 0, time.UTC)
-	summary, err = store.GetAggregateSummary(ctx, nil, &from, &to)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.TotalSessions != 1 {
-		t.Errorf("from+to filter: expected TotalSessions=1, got %d", summary.TotalSessions)
-	}
-
-	// Filter with to only — should return only old and mid sessions.
-	summary, err = store.GetAggregateSummary(ctx, nil, nil, &to)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.TotalSessions != 2 {
-		t.Errorf("to-only filter: expected TotalSessions=2, got %d", summary.TotalSessions)
-	}
-
-	// No sessions in range — should return zero count.
-	future := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	summary, err = store.GetAggregateSummary(ctx, nil, &future, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.TotalSessions != 0 {
-		t.Errorf("empty range filter: expected TotalSessions=0, got %d", summary.TotalSessions)
+	if summary.TotalSessions != n {
+		t.Errorf("TotalSessions = %d, want %d", summary.TotalSessions, n)
 	}
 }
 
@@ -413,7 +391,7 @@ func TestGetAggregateSummary_BreakdownColumnsNotCrossWired(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	summary, err := store.GetAggregateSummary(ctx, []string{"wiring"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +461,7 @@ func TestGetAggregateSummary_BreakdownsFilteredPerColumn(t *testing.T) {
 		}
 	}
 
-	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	summary, err := store.GetAggregateSummary(ctx, []string{"tools-only", "skills-and-servers", "all-empty"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +517,7 @@ VALUES ('defaults-only', 1, '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 
-	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	summary, err := store.GetAggregateSummary(ctx, []string{"defaults-only"})
 	if err != nil {
 		t.Fatalf("GetAggregateSummary: %v — breakdown columns must scan into string", err)
 	}
@@ -570,7 +548,7 @@ func TestGetAggregateSummary_ToolCallTotals(t *testing.T) {
 		}
 	}
 
-	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	summary, err := store.GetAggregateSummary(ctx, []string{"t1", "t2"})
 	if err != nil {
 		t.Fatal(err)
 	}

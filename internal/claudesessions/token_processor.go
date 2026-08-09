@@ -55,10 +55,9 @@ func (p *TokenProfileProcessor) Process(ev ProcessableEvent) {
 
 // Finalize writes CacheHitRate, TokensPerTurnAvg, and CostEstimateUSD into the insight.
 func (p *TokenProfileProcessor) Finalize(insight *SessionInsight) {
-	cacheTotal := p.cacheCreation + p.cacheRead
-	if cacheTotal > 0 {
-		insight.CacheHitRate = float64(p.cacheRead) / float64(cacheTotal)
-	}
+	// Via the shared definition, so this and the analytics dashboard cannot
+	// report two different numbers under the same name again.
+	insight.CacheHitRate = CacheHitRate(p.inputTokens, p.cacheRead, p.cacheCreation)
 
 	totalTokens := p.inputTokens + p.outputTokens
 	if insight.TurnCount > 0 {

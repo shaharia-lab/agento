@@ -27,7 +27,12 @@ import (
 // from it — steps_per_turn_avg, autonomy_score, tokens_per_turn_avg,
 // longest_autonomous_chain and the response-time averages — are lower and more
 // accurate than every row written before v7.
-const CurrentProcessorVersion = 7
+// v8: cache_hit_rate is the read share of every input-side token (fresh input +
+// cache writes + cache reads) rather than of cache traffic alone, so it matches
+// the analytics dashboard and a model that never caches now scores 0 instead of
+// being excluded from its own denominator. Every row written before v8 holds
+// the old, higher figure.
+const CurrentProcessorVersion = 8
 
 // ProcessableEvent is a single decoded line from a Claude Code session JSONL file,
 // passed to each SessionProcessor in chronological order.
@@ -209,12 +214,13 @@ type InsightStorer interface {
 	Upsert(ctx context.Context, insight *SessionInsight) error
 	Get(ctx context.Context, sessionID string) (*SessionInsight, error)
 	GetMany(ctx context.Context, sessionIDs []string) ([]*SessionInsight, error)
-	// GetSummary returns aggregated statistics across the given sessions,
-	// optionally filtered to sessions whose start_time falls within [from, to].
-	// If sessionIDs is empty, all sessions are included. Scalar stats are
-	// computed in SQL to avoid loading all rows into memory.
-	// from and to are inclusive date boundaries; nil means unbounded.
-	GetSummary(ctx context.Context, sessionIDs []string, from, to *time.Time) (*InsightAggregateSummary, error)
+	// GetSummary returns aggregated statistics over exactly the given sessions.
+	// The set is complete, not a hint: an empty set yields a zero summary, not
+	// every session. Callers window with FilterSessions and pass the resulting
+	// IDs, so this and the analytics report cannot disagree about which sessions
+	// a date range contains. Scalar stats are computed in SQL to avoid loading
+	// all rows into memory.
+	GetSummary(ctx context.Context, sessionIDs []string) (*InsightAggregateSummary, error)
 	// NeedsProcessing returns sessions present in the scanner cache that have
 	// no insight row or whose insight has processor_version < version.
 	// The FilePath is included so callers avoid a separate filesystem walk.

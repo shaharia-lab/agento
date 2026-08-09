@@ -142,10 +142,14 @@ type TimeSeriesPoint struct {
 
 // CacheEfficiencyPoint holds per-bucket cache hit rate data.
 type CacheEfficiencyPoint struct {
-	Date             string  `json:"date"`
-	CacheHitRate     float64 `json:"cache_hit_rate"` // 0–100 %
-	CachedTokens     int     `json:"cached_tokens"`
-	TotalInputTokens int     `json:"total_input_tokens"`
+	Date         string  `json:"date"`
+	CacheHitRate float64 `json:"cache_hit_rate"` // 0–100 %
+	CachedTokens int     `json:"cached_tokens"`
+	// TotalInputTokens is every input-side token in the bucket — fresh input,
+	// cache reads and cache writes — which is the denominator CacheHitRate is
+	// taken over. It is not the fresh-input count; that is TimeSeriesPoint's
+	// InputTokens.
+	TotalInputTokens int `json:"total_input_tokens"`
 }
 
 // ModelStat describes token distribution across models.
@@ -245,7 +249,7 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 	sort.Strings(projects)
 
 	loc := p.location()
-	filtered := filterSessions(sessions, p)
+	filtered := FilterSessions(sessions, p)
 
 	if len(filtered) == 0 {
 		return AnalyticsReport{
@@ -282,7 +286,17 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-func filterSessions(sessions []ClaudeSessionSummary, p AnalyticsParams) []ClaudeSessionSummary {
+// FilterSessions selects the sessions a window covers: last activity within
+// [From, To] inclusive, and — when set — matching Project.
+//
+// It is exported because it is the single definition of "which sessions does
+// this window contain", and more than one endpoint needs to agree on that. The
+// insights summary used to answer it with its own SQL predicate over a
+// different column (start_time), so the same range produced a different session
+// count and a different total cost on two dashboards showing the same window.
+// Callers that cannot aggregate in memory take the IDs this returns rather than
+// re-implementing the predicate.
+func FilterSessions(sessions []ClaudeSessionSummary, p AnalyticsParams) []ClaudeSessionSummary {
 	out := make([]ClaudeSessionSummary, 0, len(sessions))
 	for _, s := range sessions {
 		if s.LastActivity.Before(p.From) || s.LastActivity.After(p.To) {
@@ -294,6 +308,15 @@ func filterSessions(sessions []ClaudeSessionSummary, p AnalyticsParams) []Claude
 		out = append(out, s)
 	}
 	return out
+}
+
+// SessionIDs returns the session IDs of the given summaries, in order.
+func SessionIDs(sessions []ClaudeSessionSummary) []string {
+	ids := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		ids = append(ids, s.SessionID)
+	}
+	return ids
 }
 
 func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummary) {
@@ -366,19 +389,20 @@ func buildTimeSeries(
 	return fillTimeSeries(buckets, from, to, granularity, loc)
 }
 
+// buildCacheEfficiency derives the per-bucket hit rate from the token series.
+//
+// The rate comes from CacheHitRate, the single definition this and the insight
+// pipeline now share — see that function for why the denominator is every
+// input-side token rather than just fresh input.
 func buildCacheEfficiency(ts []TimeSeriesPoint) []CacheEfficiencyPoint {
 	out := make([]CacheEfficiencyPoint, 0, len(ts))
 	for _, p := range ts {
-		rate := 0.0
-		denom := p.InputTokens + p.CacheReadTokens
-		if denom > 0 {
-			rate = math.Round(float64(p.CacheReadTokens)/float64(denom)*10000) / 100
-		}
+		rate := CacheHitRate(p.InputTokens, p.CacheReadTokens, p.CacheWriteTokens)
 		out = append(out, CacheEfficiencyPoint{
 			Date:             p.Date,
-			CacheHitRate:     rate,
+			CacheHitRate:     math.Round(rate*10000) / 100,
 			CachedTokens:     p.CacheReadTokens,
-			TotalInputTokens: p.InputTokens,
+			TotalInputTokens: p.InputTokens + p.CacheReadTokens + p.CacheWriteTokens,
 		})
 	}
 	return out
