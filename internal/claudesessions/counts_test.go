@@ -166,7 +166,7 @@ func TestScan_TypedStringContentUserEventIsATurn(t *testing.T) {
 
 	// writeJSONL emits a string-content user event and a text-block assistant event.
 	if s.MessageCount != 2 {
-		t.Errorf("message_count = %d, want 2 — string content must count as a turn", s.MessageCount)
+		t.Errorf("message_count = %d, want 2 — typed string content must count as a turn", s.MessageCount)
 	}
 	if s.EventCount != 2 {
 		t.Errorf("event_count = %d, want 2", s.EventCount)
@@ -458,5 +458,47 @@ func TestScan_InjectedUserEventIsNotATurn(t *testing.T) {
 	}
 	if s.Preview != "the real prompt" {
 		t.Errorf("preview = %q, want the typed prompt — a wrapper must never seed the preview", s.Preview)
+	}
+}
+
+// TestScan_WrapperOnlySessionKeepsALabel covers the one place turn filtering
+// must NOT reach: Preview is the last fallback in ResolveDisplayTitle, so a
+// transcript that is nothing but a slash command and its expansion would
+// otherwise render as a blank row in the sessions list.
+func TestScan_WrapperOnlySessionKeepsALabel(t *testing.T) {
+	db := setupTestDB(t)
+	projectDir := titleProjectDir(t)
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	if err := os.MkdirAll(projectDir, 0750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	writeRawEvents(t, projectDir, "session-wrapper-only", []rawEvent{
+		{
+			Type: "user", SessionID: "session-wrapper-only", Timestamp: ts, CWD: "/tmp",
+			Message: &rawMessage{Role: "user", Content: json.RawMessage(
+				`"<command-name>/plugin</command-name>"`)},
+		},
+		{
+			Type: "user", SessionID: "session-wrapper-only", Timestamp: ts.Add(time.Second), CWD: "/tmp",
+			Message: &rawMessage{Role: "user", Content: json.RawMessage(
+				`"<local-command-stdout>(no content)</local-command-stdout>"`)},
+		},
+	})
+
+	sessions, err := IncrementalScan(db, testLogger)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	s := findSession(t, sessions, "session-wrapper-only")
+
+	if s.MessageCount != 0 {
+		t.Errorf("message_count = %d, want 0 — nobody typed anything here", s.MessageCount)
+	}
+	if s.Preview == "" {
+		t.Error("preview is empty — the session would render as a blank row")
+	}
+	if s.ResolveDisplayTitle() == "" {
+		t.Error("display title is empty — the session is unidentifiable in the list")
 	}
 }

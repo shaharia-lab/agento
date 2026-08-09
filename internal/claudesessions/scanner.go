@@ -1504,16 +1504,38 @@ func addSummaryCompaction(summary *ClaudeSessionSummary, ev rawEvent) {
 // addSummaryUserEvent records one user event. Every event bumps EventCount, but
 // only genuine human input counts as a message — the bulk of user events merely
 // carry tool_result blocks back to the model.
+//
+// Preview is seeded on a deliberately weaker rule than the message counter. A
+// real prompt always wins, but a session that never contains one — a transcript
+// consisting only of a slash command and its expansion — still needs a label,
+// because Preview is the last fallback in ResolveDisplayTitle and an empty
+// string there renders as a blank row in the sessions list. Showing the wrapper
+// text is what those sessions displayed before turn filtering existed, and a
+// noisy label beats an unidentifiable one.
 func addSummaryUserEvent(summary *ClaudeSessionSummary, ev rawEvent) {
 	summary.EventCount++
-	if ev.Message == nil || !isUserTurnContent(ev.Message.Content) {
+	if ev.Message == nil {
 		return
 	}
+	if !isUserTurnContent(ev.Message.Content) {
+		// Still a preview candidate if nothing better ever arrives — but never
+		// a tool_result carrier, which is unreadable machine payload.
+		if summary.Preview == "" && !isInjectedUserContent(ev.Message.Content) {
+			return
+		}
+		if summary.Preview == "" {
+			summary.Preview = truncateRunes(extractTextContent(ev.Message.Content), previewMaxRunes)
+			summary.previewIsFallback = true
+		}
+		return
+	}
+
 	summary.MessageCount++
-	// Seeding the preview is gated on the same predicate, so it can never be
-	// taken from a tool_result carrier.
-	if summary.Preview == "" {
+	// A genuine turn replaces a wrapper-sourced preview, so the label prefers
+	// what the person actually typed even when a wrapper came first.
+	if summary.Preview == "" || summary.previewIsFallback {
 		summary.Preview = truncateRunes(extractTextContent(ev.Message.Content), previewMaxRunes)
+		summary.previewIsFallback = false
 	}
 }
 

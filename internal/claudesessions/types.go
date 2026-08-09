@@ -150,9 +150,13 @@ type ClaudeProject struct {
 type ClaudeSessionSummary struct {
 	SessionID   string `json:"session_id"`
 	ProjectPath string `json:"project_path"`
-	Preview     string `json:"preview"`                // first user message text, truncated
-	CustomTitle string `json:"custom_title,omitempty"` // user-defined label, preserved across rescans
-	IsFavorite  bool   `json:"is_favorite,omitempty"`  // user-starred, preserved across rescans
+	Preview     string `json:"preview"` // first user message text, truncated
+	// previewIsFallback marks a Preview taken from an injected wrapper because
+	// no genuine prompt had been seen yet. Scan-local only (never stored or
+	// serialized): it lets a later real prompt replace the placeholder.
+	previewIsFallback bool
+	CustomTitle       string `json:"custom_title,omitempty"` // user-defined label, preserved across rescans
+	IsFavorite        bool   `json:"is_favorite,omitempty"`  // user-starred, preserved across rescans
 	// NativeTitle and AITitle come from Claude Code's own `custom-title` and
 	// `ai-title` transcript events. Unlike CustomTitle they are refreshed on
 	// every rescan, so an Agento rename and a native rename never fight.
