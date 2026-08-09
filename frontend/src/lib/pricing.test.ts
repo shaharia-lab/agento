@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { PricedModel, PricingRate } from '@/types'
 import {
   describeRateWindow,
+  formatRateDate,
   emptyRateInput,
   groupByProvider,
   hasRateOn,
@@ -103,6 +104,29 @@ describe('rateToInput', () => {
 describe('toDateInputValue', () => {
   it('returns empty for an unparseable value rather than throwing', () => {
     expect(toDateInputValue('nonsense')).toBe('')
+  })
+})
+
+describe('formatRateDate', () => {
+  // A rate is keyed to a day and stored as midnight UTC. Rendering it in local
+  // time shows the previous day to anyone west of UTC, which would make the
+  // history read shifted and the add-form promise a window the server will not
+  // honour. Pinning to UTC also keeps it in step with toDateInputValue.
+  it('renders the stored UTC day regardless of the viewer timezone', () => {
+    expect(formatRateDate('2026-06-01T00:00:00Z')).toContain('2026')
+    expect(formatRateDate('2026-06-01T00:00:00Z')).toContain('Jun')
+    expect(formatRateDate('2026-06-01T00:00:00Z')).toContain('1')
+    expect(formatRateDate('2026-06-01T00:00:00Z')).not.toContain('May')
+  })
+
+  it('agrees with the value the date input round-trips', () => {
+    const iso = '2026-06-01T00:00:00Z'
+    expect(toDateInputValue(iso)).toBe('2026-06-01')
+    expect(formatRateDate(toDateInputValue(iso))).toBe(formatRateDate(iso))
+  })
+
+  it('passes an unparseable value through untouched', () => {
+    expect(formatRateDate('nonsense')).toBe('nonsense')
   })
 })
 

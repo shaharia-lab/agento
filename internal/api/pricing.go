@@ -179,9 +179,13 @@ func (s *Server) handleDeletePricingRate(w http.ResponseWriter, r *http.Request)
 }
 
 // afterRateChange invalidates the session cache so the next read re-prices
-// against the edited catalog instead of serving costs computed under the old
-// one. Since #188 costs are stored per session, so without this the change
-// would not surface until the hourly TTL expired.
+// against the edited catalog.
+//
+// On the happy path this is belt and braces: since #188 Cache.List already
+// skips its freshness check when the catalog revision has drifted. It earns its
+// place in the degraded path — if the revision cannot be read, the drift check
+// cannot fire, and without this the stale costs would be served until the
+// hourly TTL expired.
 func (s *Server) afterRateChange() {
 	if s.claudeSessionCache != nil {
 		s.claudeSessionCache.Invalidate()

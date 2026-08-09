@@ -1,10 +1,23 @@
 import type { PricedModel, PricingRate, PricingRateInput } from '@/types'
 
-/** Formats an RFC3339 or YYYY-MM-DD instant as a readable date: "9 Aug 2026". */
+/**
+ * Formats an RFC3339 or YYYY-MM-DD instant as a readable date: "9 Aug 2026".
+ *
+ * Rendered in UTC on purpose. A rate is keyed to a day and stored as midnight
+ * UTC, so formatting it in the viewer's timezone shows the previous day to
+ * anyone west of UTC — and would make the add-form promise a window the server
+ * will not honour. It also keeps this in step with toDateInputValue, which
+ * reads the same value back through toISOString.
+ */
 export function formatRateDate(iso: string): string {
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+  return d.toLocaleDateString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'UTC',
+  })
 }
 
 /** Converts an RFC3339 instant to the YYYY-MM-DD an `<input type="date">` expects. */
