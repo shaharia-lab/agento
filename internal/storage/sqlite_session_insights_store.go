@@ -290,21 +290,8 @@ func (s *SQLiteSessionInsightsStore) GetAggregateSummary(
 		return summary, err
 	}
 
-	for _, col := range []struct {
-		name string
-		into *[]string
-	}{
-		{"tool_breakdown", &summary.ToolBreakdowns},
-		{"skill_breakdown", &summary.SkillBreakdowns},
-		{"plugin_breakdown", &summary.PluginBreakdowns},
-		{"mcp_server_breakdown", &summary.McpServerBreakdowns},
-	} {
-		values, qErr := s.queryBreakdowns(ctx, col.name, where, args)
-		if qErr != nil {
-			err = qErr
-			return summary, err
-		}
-		*col.into = values
+	if err = s.queryAllBreakdowns(ctx, where, args, summary); err != nil {
+		return summary, err
 	}
 	return summary, nil
 }
@@ -399,34 +386,53 @@ func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
 	return summary, err
 }
 
-// queryBreakdowns fetches one breakdown JSON column per matching session, for
-// the caller to merge. column is chosen from a fixed set by GetAggregateSummary
-// and is never user input.
-func (s *SQLiteSessionInsightsStore) queryBreakdowns(
-	ctx context.Context, column, where string, args []any,
-) ([]string, error) {
-	//nolint:gosec // column comes from a fixed literal set; where uses placeholders only
-	rows, err := s.db.QueryContext(ctx, "SELECT "+column+" FROM session_insights"+where, args...)
+const insightBreakdownSQL = `SELECT tool_breakdown, skill_breakdown, plugin_breakdown, mcp_server_breakdown
+FROM session_insights`
+
+// queryAllBreakdowns fetches every breakdown JSON column in a single scan and
+// fills the summary's four slices, for the caller to merge. One query rather
+// than one per column: the row-scan cost then grows with the corpus only, not
+// with how many breakdown dimensions the feature has accumulated.
+//
+// Each column is filtered independently — a row with tools but no skills
+// contributes to ToolBreakdowns alone. Skipping the whole row when any column
+// is empty would silently drop real data from the merged totals.
+func (s *SQLiteSessionInsightsStore) queryAllBreakdowns(
+	ctx context.Context, where string, args []any, summary *InsightAggregateSummary,
+) (err error) {
+	//nolint:gosec // where clause uses parameterized placeholders only
+	rows, err := s.db.QueryContext(ctx, insightBreakdownSQL+where, args...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() {
-		if cerr := rows.Close(); cerr != nil {
+		// Named return, so this actually reaches the caller — but never at the
+		// cost of a scan/iteration error, which is the more informative one.
+		if cerr := rows.Close(); cerr != nil && err == nil {
 			err = cerr
 		}
 	}()
 
-	var breakdowns []string
 	for rows.Next() {
-		var tb string
-		if scanErr := rows.Scan(&tb); scanErr != nil {
-			return nil, scanErr
+		var tool, skill, plugin, mcpServer string
+		if scanErr := rows.Scan(&tool, &skill, &plugin, &mcpServer); scanErr != nil {
+			return scanErr
 		}
-		if tb != "" && tb != "{}" {
-			breakdowns = append(breakdowns, tb)
-		}
+		summary.ToolBreakdowns = appendIfPresent(summary.ToolBreakdowns, tool)
+		summary.SkillBreakdowns = appendIfPresent(summary.SkillBreakdowns, skill)
+		summary.PluginBreakdowns = appendIfPresent(summary.PluginBreakdowns, plugin)
+		summary.McpServerBreakdowns = appendIfPresent(summary.McpServerBreakdowns, mcpServer)
 	}
-	return breakdowns, rows.Err()
+	return rows.Err()
+}
+
+// appendIfPresent appends v unless it carries no breakdown data. An empty
+// string and "{}" are both "nothing attributed" — the columns default to '{}'.
+func appendIfPresent(dst []string, v string) []string {
+	if v == "" || v == "{}" {
+		return dst
+	}
+	return append(dst, v)
 }
 
 // SessionToProcess pairs a session ID with its JSONL file path for processing.
