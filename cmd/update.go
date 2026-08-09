@@ -11,6 +11,7 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/build"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/daemon"
 	"github.com/shaharia-lab/agento/internal/updater"
 )
 
@@ -21,21 +22,27 @@ import (
 // cache so the next auto-check can rely on it.
 func NewUpdateCmd(cfg *config.AppConfig) *cobra.Command {
 	var yes bool
+	var noRestart bool
 
 	cmd := &cobra.Command{
 		Use:   "update",
 		Short: "Update agento to the latest release",
 		Long:  "Check GitHub releases for a newer version of agento and update the binary in place.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdate(cmd.Context(), cfg, yes)
+			return runUpdate(cmd.Context(), cfg, yes, noRestart)
 		},
 	}
 
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
+	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "Do not restart a managed agento service after updating")
 	return cmd
 }
 
-func runUpdate(ctx context.Context, cfg *config.AppConfig, skipConfirm bool) error {
+// newServiceManager is a seam over daemon.New so tests can substitute a stub
+// Manager without touching a real init system.
+var newServiceManager = daemon.New
+
+func runUpdate(ctx context.Context, cfg *config.AppConfig, skipConfirm, noRestart bool) error {
 	current := strings.TrimPrefix(build.Version, "v")
 	if current == "dev" || current == "unknown" {
 		return fmt.Errorf("cannot update a dev build; install a tagged release first")
@@ -90,10 +97,58 @@ func runUpdate(ctx context.Context, cfg *config.AppConfig, skipConfirm bool) err
 		return fmt.Errorf("updating: %w", err)
 	}
 
-	fmt.Printf("Updated to %s. Restart agento to use the new version.\n", result.LatestVersion)
+	fmt.Printf("Updated to %s.\n", result.LatestVersion)
+	maybeRestartService(ctx, cfg, noRestart)
 
 	// Belt-and-suspenders: ensure stdout is flushed before the process exits in
 	// any embedded environment that may not auto-flush.
 	_ = os.Stdout.Sync() //nolint:errcheck
 	return nil
+}
+
+// maybeRestartService restarts a managed agento service after a successful
+// update so the new binary takes effect without manual intervention. It never
+// influences the command's exit code — the update itself already succeeded, so
+// every outcome here is informational: restarted, installed-but-stopped, no
+// managed service (manual hint), or a non-fatal warning.
+func maybeRestartService(ctx context.Context, cfg *config.AppConfig, noRestart bool) {
+	if noRestart {
+		fmt.Println("Restart agento to use the new version.")
+		return
+	}
+	mgr, err := newServiceManager(cfg)
+	if err != nil {
+		// Unsupported OS (e.g. Windows) or any daemon-layer error: there is no
+		// managed service we can restart — fall back to the manual hint.
+		fmt.Println("Restart agento to use the new version.")
+		return
+	}
+	restarted, status, err := restartManagedService(ctx, mgr)
+	switch {
+	case err != nil:
+		fmt.Printf("warning: restarting the agento service failed (%v) — run 'agento service restart' manually\n", err)
+	case restarted:
+		fmt.Println("Restarted the agento service — the new version is live.")
+	case status.Installed:
+		fmt.Println("The agento service is installed but not running; start it with 'agento service start'.")
+	default:
+		fmt.Println("Restart agento to use the new version.")
+	}
+}
+
+// restartManagedService restarts the managed service when it is both installed
+// and running. It reports the observed Status so the caller can word the
+// outcome; a Status error is returned as-is (treated as non-fatal upstream).
+func restartManagedService(ctx context.Context, mgr daemon.Manager) (restarted bool, status daemon.Status, err error) {
+	status, err = mgr.Status(ctx)
+	if err != nil {
+		return false, status, err
+	}
+	if !status.Installed || !status.Running {
+		return false, status, nil
+	}
+	if err := mgr.Restart(ctx); err != nil {
+		return false, status, err
+	}
+	return true, status, nil
 }

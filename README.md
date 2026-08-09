@@ -431,8 +431,15 @@ Usage:
   agento update [flags]
 
 Flags:
-  -y, --yes    Skip confirmation prompt
+  -y, --yes          Skip confirmation prompt
+      --no-restart   Do not restart a managed agento service after updating
 ```
+
+If Agento is installed as a background service (`agento service install`) and
+running, `agento update` restarts it automatically after a successful update so
+the new version takes effect — no manual `agento service restart` needed. Pass
+`--no-restart` to leave the running service on the old version until you restart
+it yourself.
 
 </details>
 

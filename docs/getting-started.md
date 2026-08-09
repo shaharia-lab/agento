@@ -109,6 +109,8 @@ agento update
 
 This checks GitHub for a newer release and replaces the binary in place. Add `--yes` to skip the confirmation prompt.
 
+When Agento runs as a background service (see above), a successful `agento update` also restarts the service so the new version goes live immediately. Use `--no-restart` to skip that and restart it later with `agento service restart`.
+
 ---
 
 ## Version
