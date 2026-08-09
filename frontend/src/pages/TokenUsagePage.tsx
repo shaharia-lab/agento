@@ -4,6 +4,7 @@ import {
   Area,
   BarChart,
   Bar,
+  ComposedChart,
   LineChart,
   Line,
   XAxis,
@@ -38,11 +39,13 @@ import {
   DateRangePicker,
   DonutWithLegend,
   StackedComposition,
+  CompareToggle,
 } from './analyticsShared'
 import { LivePricingTable } from './LivePricingTable'
 // Cost is formatted by the shared helper so this page and the session list can
 // never disagree about what a given figure looks like.
 import { formatCost } from '@/lib/format'
+import { previousRange } from '@/lib/analyticsMetrics'
 
 /**
  * How many models the stacked cost chart draws as their own series.
@@ -310,24 +313,40 @@ function StackedCostChart({
   data,
   models,
   hiddenModels,
-}: Readonly<{ data: StackedCostPoint[]; models: string[]; hiddenModels: number }>) {
-  const rows = data.map(point => ({
+  previous,
+}: Readonly<{
+  data: StackedCostPoint[]
+  models: string[]
+  hiddenModels: number
+  previous?: CostPoint[]
+}>) {
+  // The ghost is the previous window's *total* cost, not its per-model split:
+  // one dashed line against a stack reads as "then vs now", where six ghost
+  // series would be unreadable.
+  const rows = data.map((point, i) => ({
     date: formatDateLabel(point.date),
     ...Object.fromEntries(models.map(m => [m, point.cost_by_model[m] ?? 0])),
+    // Aligned by bucket position — the first day of this window against the
+    // first day of the previous one.
+    previous: previous?.[i]?.estimated_cost_usd,
   }))
 
   // A dropped series is stated, not silently missing: a stack that does not
   // reach the total it is supposed to decompose is a defect a reader cannot
   // distinguish from one.
-  const note =
+  const note = [
     hiddenModels > 0
       ? `Same buckets as the cost chart above, split by the model that spent it. The ${hiddenModels} smallest-spending model${hiddenModels === 1 ? '' : 's'} are not drawn, so the stack is slightly below the total.`
-      : 'Same buckets and same total as the cost chart above, split by the model that spent it.'
+      : 'Same buckets and same total as the cost chart above, split by the model that spent it.',
+    previous ? 'The dashed line is total spend in the equally-sized window before this one.' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
 
   return (
     <ChartCard title="Cost Over Time by Model" subtitle={note}>
       <ResponsiveContainer width="100%" height={260}>
-        <BarChart data={rows} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <ComposedChart data={rows} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" strokeOpacity={0.5} />
           <XAxis
             dataKey="date"
@@ -359,7 +378,18 @@ function StackedCostChart({
               fill={MODEL_COLORS[i % MODEL_COLORS.length]}
             />
           ))}
-        </BarChart>
+          {previous && (
+            <Line
+              type="monotone"
+              dataKey="previous"
+              name="Previous period total"
+              stroke="#a1a1aa"
+              strokeDasharray="4 3"
+              strokeWidth={1.5}
+              dot={false}
+            />
+          )}
+        </ComposedChart>
       </ResponsiveContainer>
     </ChartCard>
   )
@@ -395,6 +425,7 @@ function ModelTokenDonut({ data }: Readonly<{ data: ModelStat[] }>) {
 
 export default function TokenUsagePage() {
   const [report, setReport] = useState<AnalyticsReport | null>(null)
+  const [prevReport, setPrevReport] = useState<AnalyticsReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -403,15 +434,20 @@ export default function TokenUsagePage() {
   const [from, setFrom] = useState(() => presetToRange('30d').from)
   const [to, setTo] = useState(() => presetToRange('30d').to)
   const [project, setProject] = useState('all')
+  const [compare, setCompare] = useState(false)
 
-  const load = useCallback(async (f: string, t: string, proj: string) => {
+  const load = useCallback(async (f: string, t: string, proj: string, withPrevious: boolean) => {
     try {
-      const data = await analyticsApi.get({
-        from: f,
-        to: t,
-        project: proj === 'all' ? undefined : proj,
-      })
+      const scope = proj === 'all' ? undefined : proj
+      const prevRange = previousRange(f, t)
+      const [data, prior] = await Promise.all([
+        analyticsApi.get({ from: f, to: t, project: scope }),
+        withPrevious
+          ? analyticsApi.get({ from: prevRange.from, to: prevRange.to, project: scope })
+          : Promise.resolve(null),
+      ])
       setReport(data)
+      setPrevReport(prior)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load analytics')
@@ -422,8 +458,8 @@ export default function TokenUsagePage() {
   }, [])
 
   useEffect(() => {
-    load(from, to, project)
-  }, [load, from, to, project])
+    load(from, to, project, compare)
+  }, [load, from, to, project, compare])
 
   const handlePreset = (p: DatePreset) => {
     setPreset(p)
@@ -436,7 +472,7 @@ export default function TokenUsagePage() {
 
   const handleRefresh = () => {
     setRefreshing(true)
-    load(from, to, project)
+    load(from, to, project, compare)
   }
 
   // Series for the stacked cost chart, ordered by spend so the largest sits at
@@ -500,6 +536,13 @@ export default function TokenUsagePage() {
           project={project}
           onProject={setProject}
         />
+        <div className="mt-2">
+          <CompareToggle
+            enabled={compare}
+            onChange={setCompare}
+            label="Overlay the equally-sized window immediately before this one"
+          />
+        </div>
       </div>
 
       {/* Content */}
@@ -642,6 +685,7 @@ export default function TokenUsagePage() {
                     0,
                     (report?.cost_by_model?.length ?? 0) - costModels.length,
                   )}
+                  previous={compare && prevReport ? prevReport.cost_over_time : undefined}
                 />
               ) : (
                 <CostOverTimeChart data={report?.cost_over_time ?? []} />

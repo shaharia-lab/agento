@@ -173,6 +173,33 @@ export function ChartCard({
   )
 }
 
+/**
+ * Toggle for the previous-period ghost series.
+ *
+ * Off by default: the comparison doubles the request and only matters when a
+ * reader is actually asking "versus last time", which the Insights page's Δ
+ * badges answer for scalars but nothing answered for the time charts.
+ */
+export function CompareToggle({
+  enabled,
+  onChange,
+  label,
+}: Readonly<{ enabled: boolean; onChange: (v: boolean) => void; label: string }>) {
+  return (
+    <button
+      onClick={() => onChange(!enabled)}
+      className={`px-2.5 py-1 rounded-md text-xs font-medium transition-colors ${
+        enabled
+          ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+          : 'bg-zinc-100 dark:bg-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-200 dark:hover:bg-zinc-700'
+      }`}
+      title={label}
+    >
+      Compare to previous period
+    </button>
+  )
+}
+
 /** One slice of a DonutWithLegend: a labeled value with its share of the total. */
 export interface DonutSlice {
   name: string

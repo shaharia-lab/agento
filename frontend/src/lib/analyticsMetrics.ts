@@ -62,6 +62,57 @@ export function avgSessionsPerDay(totalSessions: number, series: TimeSeriesPoint
 }
 
 /**
+ * The equally-sized window immediately before [from, to].
+ *
+ * Both bounds are YYYY-MM-DD local days, the form the analytics API takes, and
+ * the previous window ends the day before this one starts — so the two never
+ * overlap and "the same length of time, just before" is literally true.
+ */
+export function previousRange(from: string, to: string): { from: string; to: string } {
+  const start = parseLocalDay(from)
+  const end = parseLocalDay(to)
+  if (!start || !end) return { from, to }
+
+  const days = inclusiveDaySpan(start, end)
+  const prevEnd = new Date(start)
+  prevEnd.setDate(prevEnd.getDate() - 1)
+  const prevStart = new Date(prevEnd)
+  prevStart.setDate(prevStart.getDate() - (days - 1))
+
+  return { from: formatLocalDay(prevStart), to: formatLocalDay(prevEnd) }
+}
+
+/** Formats a Date as the YYYY-MM-DD the analytics API expects, in local time. */
+function formatLocalDay(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+}
+
+/**
+ * Pairs each bucket of the current series with the same-numbered bucket of the
+ * previous one, for a ghost overlay.
+ *
+ * Aligned by position rather than by date, because that is the comparison being
+ * made: the first day of this window against the first day of the last one. The
+ * two series have the same length whenever the windows do; a previous series
+ * that is shorter simply leaves later buckets without a ghost value rather than
+ * wrapping around.
+ */
+export function withPreviousSeries<T, R extends Record<string, unknown>>(
+  current: T[],
+  previous: T[] | undefined,
+  project: (point: T) => R,
+  value: (point: T) => number,
+): (R & { previous?: number })[] {
+  return current.map((point, i) => {
+    const row = project(point) as R & { previous?: number }
+    const prior = previous?.[i]
+    if (prior !== undefined) row.previous = value(prior)
+    return row
+  })
+}
+
+/**
  * The observed extent as a human-readable hint for the tile that uses it, so a
  * reader can see which denominator produced the average.
  */

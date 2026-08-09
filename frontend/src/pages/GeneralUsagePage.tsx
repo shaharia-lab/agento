@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  AreaChart,
   Area,
   BarChart,
   Bar,
+  ComposedChart,
+  Line,
   Cell,
   XAxis,
   YAxis,
@@ -14,7 +15,12 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { analyticsApi } from '@/lib/api'
-import { avgSessionsPerDay, observedDaySpan } from '@/lib/analyticsMetrics'
+import {
+  avgSessionsPerDay,
+  observedDaySpan,
+  previousRange,
+  withPreviousSeries,
+} from '@/lib/analyticsMetrics'
 import { ProjectAnalytics } from './ProjectAnalytics'
 import { TopSessionsCard } from './TopSessionsCard'
 import {
@@ -44,16 +50,37 @@ import {
   KPICard,
   ChartCard,
   DateRangePicker,
+  CompareToggle,
 } from './analyticsShared'
 
 // ─── Charts ───────────────────────────────────────────────────────────────────
 
-function SessionsTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>) {
-  const formatted = data.map(d => ({ ...d, date: formatDateLabel(d.date) }))
+function SessionsTimeSeriesChart({
+  data,
+  previous,
+}: Readonly<{ data: TimeSeriesPoint[]; previous?: TimeSeriesPoint[] }>) {
+  // Aligned by bucket position: the first day of this window against the first
+  // day of the previous one, which is the comparison being asked for.
+  const hasGhost = (previous?.length ?? 0) > 0
+  const formatted = withPreviousSeries(
+    data,
+    previous,
+    d => ({ ...d, date: formatDateLabel(d.date) }),
+    d => d.sessions,
+  )
   return (
-    <ChartCard title="Sessions Over Time">
+    <ChartCard
+      title="Sessions Over Time"
+      subtitle={
+        hasGhost
+          ? 'Dashed line is the equally-sized window immediately before this one.'
+          : undefined
+      }
+    >
+      {/* ComposedChart rather than AreaChart: the ghost is a line over an area,
+          and an <Area> with no fill does not reliably render as one. */}
       <ResponsiveContainer width="100%" height={280}>
-        <AreaChart data={formatted} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <ComposedChart data={formatted} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" strokeOpacity={0.5} />
           <XAxis
             dataKey="date"
@@ -82,7 +109,18 @@ function SessionsTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>
             fillOpacity={0.15}
             strokeWidth={1.5}
           />
-        </AreaChart>
+          {hasGhost && (
+            <Line
+              type="monotone"
+              dataKey="previous"
+              name="Previous period"
+              stroke="#a1a1aa"
+              strokeDasharray="4 3"
+              strokeWidth={1.5}
+              dot={false}
+            />
+          )}
+        </ComposedChart>
       </ResponsiveContainer>
     </ChartCard>
   )
@@ -410,6 +448,7 @@ function HourlyActivityChart({
 export default function GeneralUsagePage() {
   const navigate = useNavigate()
   const [report, setReport] = useState<AnalyticsReport | null>(null)
+  const [prevReport, setPrevReport] = useState<AnalyticsReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -418,15 +457,20 @@ export default function GeneralUsagePage() {
   const [from, setFrom] = useState(() => presetToRange('30d').from)
   const [to, setTo] = useState(() => presetToRange('30d').to)
   const [project, setProject] = useState('all')
+  const [compare, setCompare] = useState(false)
 
-  const load = useCallback(async (f: string, t: string, proj: string) => {
+  const load = useCallback(async (f: string, t: string, proj: string, withPrevious: boolean) => {
     try {
-      const data = await analyticsApi.get({
-        from: f,
-        to: t,
-        project: proj === 'all' ? undefined : proj,
-      })
+      const scope = proj === 'all' ? undefined : proj
+      const prevRange = previousRange(f, t)
+      const [data, prior] = await Promise.all([
+        analyticsApi.get({ from: f, to: t, project: scope }),
+        withPrevious
+          ? analyticsApi.get({ from: prevRange.from, to: prevRange.to, project: scope })
+          : Promise.resolve(null),
+      ])
       setReport(data)
+      setPrevReport(prior)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load analytics')
@@ -437,8 +481,8 @@ export default function GeneralUsagePage() {
   }, [])
 
   useEffect(() => {
-    load(from, to, project)
-  }, [load, from, to, project])
+    load(from, to, project, compare)
+  }, [load, from, to, project, compare])
 
   const handlePreset = (p: DatePreset) => {
     setPreset(p)
@@ -451,7 +495,7 @@ export default function GeneralUsagePage() {
 
   const handleRefresh = () => {
     setRefreshing(true)
-    load(from, to, project)
+    load(from, to, project, compare)
   }
 
   // Beyond MAX_DRILLDOWN_DAYS the serialized window list would exceed URL
@@ -527,6 +571,13 @@ export default function GeneralUsagePage() {
           project={project}
           onProject={setProject}
         />
+        <div className="mt-2">
+          <CompareToggle
+            enabled={compare}
+            onChange={setCompare}
+            label="Overlay the equally-sized window immediately before this one"
+          />
+        </div>
       </div>
 
       {/* Content */}
@@ -577,7 +628,10 @@ export default function GeneralUsagePage() {
             </div>
 
             {/* Sessions over time */}
-            <SessionsTimeSeriesChart data={report?.time_series ?? []} />
+            <SessionsTimeSeriesChart
+              data={report?.time_series ?? []}
+              previous={compare && prevReport ? prevReport.time_series : undefined}
+            />
 
             {/* Sessions per model */}
             {(report?.sessions_per_model?.length ?? 0) > 0 && (
