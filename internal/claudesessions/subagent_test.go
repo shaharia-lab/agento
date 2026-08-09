@@ -568,3 +568,54 @@ func TestSubagent_EventCountBackfillsOnVersionBump(t *testing.T) {
 		t.Errorf("event_count = %d, want 3 after the version bump backfilled it", got)
 	}
 }
+
+// TestIncrementalScan_SubagentUsageByModel is #192's integration case: the
+// per-model roll-up must arrive through the real load path, and it must agree
+// with the session-level SubagentUsage the summary select produces. The two
+// reads hit the same rows by different groupings, so a disagreement would mean
+// the model chart and every other panel describe different corpora.
+func TestIncrementalScan_SubagentUsageByModel(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger
+
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	projectDir := setupSubagentProject(t, "session-bymodel", ts)
+	writeSubagentJSONL(t, projectDir, "session-bymodel", "agent-a", ts.Add(time.Minute), 100, 20)
+	writeSubagentJSONL(t, projectDir, "session-bymodel", "agent-b", ts.Add(2*time.Minute), 30, 7)
+
+	sessions, err := IncrementalScan(db, logger)
+	if err != nil {
+		t.Fatalf("IncrementalScan: %v", err)
+	}
+	s := findSession(t, sessions, "session-bymodel")
+
+	if len(s.SubagentUsageByModel) == 0 {
+		t.Fatal("SubagentUsageByModel is empty — the per-model read never reached the summary")
+	}
+
+	// The fixture's sub-agents run a different model from the parent, which is
+	// the whole point: those tokens must not be charted under the parent.
+	if _, ok := s.SubagentUsageByModel[s.Model]; ok && len(s.SubagentUsageByModel) == 1 {
+		t.Errorf("delegated tokens are keyed on the parent model %q: %+v", s.Model, s.SubagentUsageByModel)
+	}
+
+	var sum TokenUsage
+	for _, u := range s.SubagentUsageByModel {
+		sum.InputTokens += u.InputTokens
+		sum.OutputTokens += u.OutputTokens
+		sum.CacheCreationTokens += u.CacheCreationTokens
+		sum.CacheReadTokens += u.CacheReadTokens
+		sum.CacheCreation5mTokens += u.CacheCreation5mTokens
+		sum.CacheCreation1hTokens += u.CacheCreation1hTokens
+	}
+	if sum != s.SubagentUsage {
+		t.Errorf("per-model sum %+v != SubagentUsage %+v — the two sub-agent reads disagree",
+			sum, s.SubagentUsage)
+	}
+
+	// Both sub-agents ran the same model here, so they must be merged into one
+	// key rather than overwriting each other.
+	if got := sum.InputTokens; got != 130 {
+		t.Errorf("delegated input = %d, want 130 (both sub-agents summed)", got)
+	}
+}

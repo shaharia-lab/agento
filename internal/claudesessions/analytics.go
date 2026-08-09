@@ -384,21 +384,56 @@ func buildCacheEfficiency(ts []TimeSeriesPoint) []CacheEfficiencyPoint {
 	return out
 }
 
+// buildModelBreakdown is the one builder that deliberately does NOT read
+// TotalUsage(). Every other aggregate wants "this session's tokens" and does
+// not care which model spent them; this one answers "which model did the
+// work", so crediting delegated tokens to the delegating parent would make it
+// the single chart that cannot answer the question it exists for — whether
+// delegation is actually routing work to cheaper models.
+//
+// So main-thread tokens are attributed to the session's own model and each
+// sub-agent's tokens to the model that sub-agent ran. The two together are
+// exactly TotalUsage(), so totals and percentages are unchanged; only the
+// attribution moves.
 func buildModelBreakdown(sessions []ClaudeSessionSummary) []ModelStat {
 	tokensByModel := make(map[string]int)
 	total := 0
-	for _, s := range sessions {
-		if s.Model == syntheticModel {
-			continue // locally generated, never billed — not a real model
+	// add attributes one model's tokens, applying the same synthetic skip and
+	// unknown fallback to delegated models as to a session's own.
+	//
+	// Note the skip is now per model rather than per session. A session whose
+	// own model is <synthetic> used to have its delegated tokens dropped along
+	// with it; they are real work by a real model and are now counted under
+	// that model. No session in the reference corpus is in that position, but
+	// the case is reachable, so it is deliberate rather than incidental.
+	add := func(model string, u TokenUsage) {
+		if model == syntheticModel {
+			return // locally generated, never billed — not a real model
 		}
-		m := s.Model
-		if m == "" {
-			m = "unknown"
+		if model == "" {
+			model = "unknown"
 		}
-		u := s.TotalUsage()
 		t := u.InputTokens + u.OutputTokens
-		tokensByModel[m] += t
+		tokensByModel[model] += t
 		total += t
+	}
+	for _, s := range sessions {
+		// Main thread only — the delegated half is attributed per model below,
+		// so reading TotalUsage() here would count it twice.
+		add(s.Model, s.Usage)
+
+		if len(s.SubagentUsageByModel) > 0 {
+			for model, u := range s.SubagentUsageByModel {
+				add(model, u)
+			}
+			continue
+		}
+		// No per-model breakdown loaded, but the session did delegate: fall
+		// back to the parent's model, which is what this builder did before
+		// the breakdown existed. Misattributing those tokens is the bug being
+		// fixed, but dropping them would be worse — the chart's total would
+		// silently stop matching every other total on the dashboard.
+		add(s.Model, s.SubagentUsage)
 	}
 	out := make([]ModelStat, 0, len(tokensByModel))
 	for m, t := range tokensByModel {

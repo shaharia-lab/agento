@@ -554,6 +554,13 @@ export interface ClaudeSessionSummary {
   subagent_count: number
   /** Summed usage of those transcripts, reported additively to `usage`. */
   subagent_usage: ClaudeTokenUsage
+  /**
+   * `subagent_usage` keyed by the model each sub-agent actually ran. Summing
+   * its values reproduces `subagent_usage`; it exists so model attribution can
+   * credit delegated tokens to the model that spent them. Omitted when the
+   * session delegated nothing.
+   */
+  subagent_usage_by_model?: Record<string, ClaudeTokenUsage>
   /** Sub-agent label from an `agent-name` event; last occurrence wins. */
   agent_name?: string
   /** e.g. `bypassPermissions`; last occurrence wins. */

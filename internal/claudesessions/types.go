@@ -188,6 +188,14 @@ type ClaudeSessionSummary struct {
 	// reported separately from Usage so the existing per-session numbers keep
 	// meaning "main thread" rather than silently changing definition.
 	SubagentUsage TokenUsage `json:"subagent_usage"`
+	// SubagentUsageByModel breaks SubagentUsage down by the model each sub-agent
+	// actually ran, so model attribution can credit delegated tokens to the
+	// model that spent them rather than to the delegating parent. Summing its
+	// values reproduces SubagentUsage exactly — it is the same tokens, keyed.
+	//
+	// Only model attribution needs this; every other aggregate reads
+	// TotalUsage(), whose value is unaffected.
+	SubagentUsageByModel map[string]TokenUsage `json:"subagent_usage_by_model,omitempty"`
 
 	// The fields below come from metadata events Claude Code re-appends on every
 	// session resume. Like the title events they carry no timestamp, so the last
