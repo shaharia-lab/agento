@@ -136,19 +136,19 @@ export default function ClaudeSessionsPage() {
 
   const filtered = useMemo(() => {
     const { from, to } = resolvePresetRange(timePreset, customFrom, customTo)
-    return sessions.filter(s =>
-      matchesFilters(s, {
-        project: filterProject,
-        search,
-        favorites: filterFavorites,
-        hasPR: filterHasPR,
-        permissionMode: filterPermissionMode,
-        from,
-        to,
-        drilldownActive,
-        drilldownWindows,
-      }),
-    )
+    // Built once, not per session — the predicate is the same for every row.
+    const filters = {
+      project: filterProject,
+      search,
+      favorites: filterFavorites,
+      hasPR: filterHasPR,
+      permissionMode: filterPermissionMode,
+      from,
+      to,
+      drilldownActive,
+      drilldownWindows,
+    }
+    return sessions.filter(s => matchesFilters(s, filters))
   }, [
     sessions,
     search,
