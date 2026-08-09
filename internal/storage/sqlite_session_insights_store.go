@@ -335,6 +335,14 @@ func (s *SQLiteSessionInsightsStore) GetAggregateSummary(
 // exactly the corpora this feature exists for — while the bind stays fully
 // parameterised, so no ID is ever interpolated into SQL.
 func insightWhereClause(sessionIDs []string) (string, []any, error) {
+	if sessionIDs == nil {
+		// Marshaling a nil slice yields "null", and json_each('null') produces a
+		// single NULL row that matches nothing only because NULL comparisons are
+		// never true. Both callers already refuse an empty set before getting
+		// here; encoding "[]" makes the clause correct on its own rather than by
+		// their good behavior.
+		sessionIDs = []string{}
+	}
 	ids, err := json.Marshal(sessionIDs)
 	if err != nil {
 		return "", nil, fmt.Errorf("marshaling session id filter: %w", err)

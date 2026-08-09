@@ -144,6 +144,32 @@ func TestSQLiteSessionInsightsStore_GetMany(t *testing.T) {
 	}
 }
 
+// TestGetMany_LargeIDSet covers the binding GetMany now shares with
+// GetAggregateSummary: one placeholder per ID would exceed SQLite's variable
+// limit at this size.
+func TestGetMany_LargeIDSet(t *testing.T) {
+	store := setupInsightsTestDB(t)
+	ctx := context.Background()
+
+	const n = 2500
+	ids := make([]string, 0, n)
+	for i := range n {
+		id := fmt.Sprintf("many-%04d", i)
+		ids = append(ids, id)
+		if err := store.Upsert(ctx, sampleRecord(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, err := store.GetMany(ctx, ids)
+	if err != nil {
+		t.Fatalf("fetching %d records: %v", n, err)
+	}
+	if len(results) != n {
+		t.Errorf("got %d records, want %d", len(results), n)
+	}
+}
+
 func TestSQLiteSessionInsightsStore_GetManyEmpty(t *testing.T) {
 	store := setupInsightsTestDB(t)
 	results, err := store.GetMany(context.Background(), nil)
