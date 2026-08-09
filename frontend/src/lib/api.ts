@@ -36,6 +36,7 @@ import type {
   MonitoringResponse,
   MonitoringTestResult,
   InsightSummary,
+  SessionInsight,
   TriggerRule,
   WebhookStatus,
   PricingCatalog,
@@ -743,6 +744,22 @@ export const analyticsApi = {
 // ── Session Insights ─────────────────────────────────────────────────────────
 
 export const insightsApi = {
+  /**
+   * The computed insight for one session, or null when the pipeline has not
+   * reached it yet.
+   *
+   * A missing insight is an ordinary state, not an error: the worker processes
+   * sessions in the background and reprocesses everything after a version bump,
+   * so a freshly discovered session legitimately has no row for a while. The
+   * caller renders nothing rather than an error banner.
+   */
+  getSession: async (id: string): Promise<SessionInsight | null> => {
+    const res = await fetch(`${BASE}/claude-sessions/${encodeURIComponent(id)}/insights`)
+    if (res.status === 404) return null
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return (await res.json()) as SessionInsight
+  },
+
   /** Aggregate insights across multiple (or all) sessions, optionally filtered by date range. */
   getSummary: (params?: {
     ids?: string[]
