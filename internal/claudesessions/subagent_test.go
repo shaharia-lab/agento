@@ -1,6 +1,7 @@
 package claudesessions
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -482,5 +483,88 @@ func TestBuildAnalytics_IncludesSubagentTokens(t *testing.T) {
 	}
 	if summary.TotalTokens != 165 {
 		t.Errorf("expected total tokens 165, got %d", summary.TotalTokens)
+	}
+}
+
+// TestSubagent_EventCountPersists is #196's acceptance case. writeSubagentJSONL
+// emits 3 events — a typed prompt, a tool_result carrier and one assistant
+// reply — so a correct row separates 2 turns from 3 raw events. Before the
+// column existed this read back as zero, indistinguishable from an empty
+// transcript.
+func TestSubagent_EventCountPersists(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger
+
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	projectDir := setupSubagentProject(t, "session-events", ts)
+	writeSubagentJSONL(t, projectDir, "session-events", "agent-one", ts.Add(time.Minute), 5, 5)
+
+	if _, err := IncrementalScan(db, logger); err != nil {
+		t.Fatalf("IncrementalScan: %v", err)
+	}
+
+	subagents, err := ListSubagents(db, logger, "session-events")
+	if err != nil {
+		t.Fatalf("ListSubagents: %v", err)
+	}
+	if len(subagents) != 1 {
+		t.Fatalf("expected 1 sub-agent, got %d", len(subagents))
+	}
+	sa := subagents[0]
+
+	if sa.EventCount != 3 {
+		t.Errorf("event_count = %d, want 3 raw events", sa.EventCount)
+	}
+	if sa.MessageCount != 2 {
+		t.Errorf("message_count = %d, want 2 turns (the tool_result carrier is not one)", sa.MessageCount)
+	}
+	// The invariant that makes the pair meaningful: every event is at most one
+	// turn, so the raw total can never be the smaller number.
+	if sa.EventCount < sa.MessageCount {
+		t.Errorf("event_count (%d) < message_count (%d)", sa.EventCount, sa.MessageCount)
+	}
+}
+
+// TestSubagent_EventCountBackfillsOnVersionBump covers the upgrade path, which
+// is the only way existing rows get the value: the column defaults to 0 and a
+// sub-agent transcript's mtime does not change just because Agento learned to
+// store another number about it.
+func TestSubagent_EventCountBackfillsOnVersionBump(t *testing.T) {
+	db := setupTestDB(t)
+	logger := testLogger
+
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	projectDir := setupSubagentProject(t, "session-backfill", ts)
+	writeSubagentJSONL(t, projectDir, "session-backfill", "agent-one", ts.Add(time.Minute), 5, 5)
+
+	if _, err := IncrementalScan(db, logger); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+
+	// Simulate a row written before the column existed: the value is zero and
+	// the file is untouched, so only the scanner-version bump can fix it.
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx,
+		`UPDATE claude_subagent_cache SET event_count = 0`); err != nil {
+		t.Fatalf("blank the column: %v", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		`UPDATE claude_cache_metadata SET scanner_version = 7 WHERE id = 1`); err != nil {
+		t.Fatalf("rewind version: %v", err)
+	}
+
+	if _, err := IncrementalScan(db, logger); err != nil {
+		t.Fatalf("backfill scan: %v", err)
+	}
+
+	subagents, err := ListSubagents(db, logger, "session-backfill")
+	if err != nil {
+		t.Fatalf("ListSubagents: %v", err)
+	}
+	if len(subagents) != 1 {
+		t.Fatalf("expected 1 sub-agent, got %d", len(subagents))
+	}
+	if got := subagents[0].EventCount; got != 3 {
+		t.Errorf("event_count = %d, want 3 after the version bump backfilled it", got)
 	}
 }

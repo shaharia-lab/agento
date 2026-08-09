@@ -626,6 +626,8 @@ export interface ClaudeSubagent {
   start_time: string
   last_activity: string
   message_count: number
+  /** Raw top-level event total — what message_count meant before the turn/event split. */
+  event_count: number
   usage: ClaudeTokenUsage
   model?: string
 }

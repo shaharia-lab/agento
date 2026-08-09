@@ -659,6 +659,7 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 	for _, stmt := range []string{
 		"ALTER TABLE session_insights DROP COLUMN agent_breakdown",
 		"DROP TABLE IF EXISTS model_pricing_tier",
+		"ALTER TABLE claude_subagent_cache DROP COLUMN event_count",
 		"DELETE FROM schema_migrations WHERE version >= 20",
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -684,8 +685,8 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 		"SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 21 {
-		t.Fatalf("schema version = %d, want 21 — migration 20 did not re-apply", version)
+	if version != 22 {
+		t.Fatalf("schema version = %d, want 22 — every migration from 20 up must re-apply", version)
 	}
 
 	got, err := storage.NewSQLiteSessionInsightsStore(db2).Get(ctx, "pre-migration")

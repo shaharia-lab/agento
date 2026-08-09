@@ -51,7 +51,11 @@ const (
 	// local-command-caveat, local-command-stdout, system-reminder) no longer
 	// count as messages (#197) — rows written before v7 count that machine
 	// chatter as human turns, and may also have taken their preview from it.
-	CurrentScannerVersion = 7
+	// v8: a sub-agent's event_count is persisted (#196) — the value was always
+	// computed and then dropped for want of a column, so every sub-agent row
+	// written before v8 reads back zero, which is indistinguishable from an
+	// empty transcript.
+	CurrentScannerVersion = 8
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -1001,13 +1005,13 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 		INSERT INTO claude_subagent_cache (
 			parent_session_id, agent_id, file_path, file_mtime,
 			agent_type, description, tool_use_id,
-			start_time, last_activity, message_count,
+			start_time, last_activity, message_count, event_count,
 			input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 			cache_creation_5m_tokens, cache_creation_1h_tokens,
 			model,
 			input_cost_usd, output_cost_usd, cache_read_cost_usd,
 			cache_write_cost_usd, total_cost_usd, unpriced_models, unpriced_tokens
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(parent_session_id, agent_id) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -1017,6 +1021,7 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 			start_time = excluded.start_time,
 			last_activity = excluded.last_activity,
 			message_count = excluded.message_count,
+			event_count = excluded.event_count,
 			input_tokens = excluded.input_tokens,
 			output_tokens = excluded.output_tokens,
 			cache_creation_tokens = excluded.cache_creation_tokens,
@@ -1033,7 +1038,7 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 			unpriced_tokens = excluded.unpriced_tokens`,
 		df.sessionID, df.agentID, df.filePath, df.mtime,
 		meta.AgentType, meta.Description, meta.ToolUseID,
-		s.StartTime, s.LastActivity, s.MessageCount,
+		s.StartTime, s.LastActivity, s.MessageCount, s.EventCount,
 		s.Usage.InputTokens, s.Usage.OutputTokens,
 		s.Usage.CacheCreationTokens, s.Usage.CacheReadTokens,
 		s.Usage.CacheCreation5mTokens, s.Usage.CacheCreation1hTokens,
@@ -1050,7 +1055,7 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 func ListSubagents(db *sql.DB, logger *slog.Logger, sessionID string) ([]ClaudeSubagent, error) {
 	rows, err := db.QueryContext(context.Background(), `
 		SELECT agent_id, agent_type, description, tool_use_id,
-		       start_time, last_activity, message_count,
+		       start_time, last_activity, message_count, event_count,
 		       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
 		       cache_creation_5m_tokens, cache_creation_1h_tokens, model
 		FROM claude_subagent_cache
@@ -1070,7 +1075,7 @@ func ListSubagents(db *sql.DB, logger *slog.Logger, sessionID string) ([]ClaudeS
 		var sa ClaudeSubagent
 		if err := rows.Scan(
 			&sa.AgentID, &sa.AgentType, &sa.Description, &sa.ToolUseID,
-			&sa.StartTime, &sa.LastActivity, &sa.MessageCount,
+			&sa.StartTime, &sa.LastActivity, &sa.MessageCount, &sa.EventCount,
 			&sa.Usage.InputTokens, &sa.Usage.OutputTokens,
 			&sa.Usage.CacheCreationTokens, &sa.Usage.CacheReadTokens,
 			&sa.Usage.CacheCreation5mTokens, &sa.Usage.CacheCreation1hTokens, &sa.Model,
@@ -1316,8 +1321,8 @@ func readSessionSummary(
 // message_count would silently degrade to assistant-only.
 //
 // The turn/event split applies here as well: a sub-agent's message_count counts
-// genuine turns, not tool_result carriers. Its EventCount is computed but has no
-// column in claude_subagent_cache, so it is not persisted — see #196.
+// genuine turns, not tool_result carriers, and its EventCount carries the raw
+// top-level event total — both persisted, exactly as for a parent session.
 func readSubagentSummary(
 	sessionID, projectPath, filePath string, logger *slog.Logger,
 ) (*ClaudeSessionSummary, *costAccumulator, error) {

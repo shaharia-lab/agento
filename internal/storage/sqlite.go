@@ -497,6 +497,22 @@ CREATE TABLE model_pricing_tier (
 CREATE INDEX idx_model_pricing_tier_rate ON model_pricing_tier(rate_id);
 `,
 	},
+	{
+		version: 22,
+		sql: `
+-- Sub-agents keep the turn/event split sessions have had since migration 14
+-- (#196). readSummaryFile already computes EventCount for every sub-agent
+-- transcript — the same code path the parent uses — and upsertSubagentRow was
+-- dropping it for want of a column, so message_count meant turns while the raw
+-- total that gives it context was simply gone.
+--
+-- Zero defaults are correct and are not a backfill: existing rows are
+-- recomputed by the CurrentScannerVersion 7 -> 8 bump, since a sub-agent
+-- transcript's mtime does not change just because Agento learned to store
+-- another number about it.
+ALTER TABLE claude_subagent_cache ADD COLUMN event_count INTEGER NOT NULL DEFAULT 0;
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures
