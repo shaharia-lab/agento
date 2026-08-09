@@ -157,6 +157,62 @@ func TestSessionCost_SubagentCostRolledUpSeparately(t *testing.T) {
 		got.TotalCost().TotalUSD, got.Cost.TotalUSD+got.SubagentCost.TotalUSD)
 }
 
+// TestSessionCost_SubagentUnpricedModelSurfaces guards a pairing that is easy
+// to half-implement: unpriced tokens and unpriced model names are written
+// together and must be read together. Rolling up only the tokens leaves a
+// session reporting excluded tokens attributed to no model, and — because the
+// UI keys its disclosure off the model list — rendering a confident total for a
+// session that is only partly priced.
+func TestSessionCost_SubagentUnpricedModelSurfaces(t *testing.T) {
+	db := setupTestDB(t)
+	logger := costTestLogger()
+	ts := time.Date(2026, 6, 1, 10, 0, 0, 0, time.UTC)
+	projectDir := setupSubagentProject(t, "parent-unpriced", ts)
+
+	// The parent is fully priced; only the delegated transcript is not.
+	writeJSONLPricedTurns(t, filepath.Join(projectDir, "parent-unpriced", "subagents"),
+		"agent-1", []struct {
+			model string
+			ts    time.Time
+			usage rawUsage
+		}{
+			{"any", ts, rawUsage{InputTokens: 300, OutputTokens: 200}},
+		})
+	writeSubagentMeta(t, projectDir, "parent-unpriced", "agent-1", "Explore", "look around", "tool-1")
+
+	sessions, err := IncrementalScan(db, logger)
+	if err != nil {
+		t.Fatalf("IncrementalScan: %v", err)
+	}
+	got := findSession(t, sessions, "parent-unpriced")
+
+	if got.UnpricedTokens != 500 {
+		t.Errorf("unpriced tokens = %d, want 500 from the sub-agent", got.UnpricedTokens)
+	}
+	if len(got.UnpricedModels) != 1 || got.UnpricedModels[0] != "any" {
+		t.Errorf("unpriced models = %v, want [any] — a delegated unpriced model must "+
+			"reach the disclosure, not just its token count", got.UnpricedModels)
+	}
+}
+
+// TestMergeUnpricedModels_DedupesAcrossSubagents covers the GROUP_CONCAT shape
+// directly: several sub-agents on the same unpriced model must name it once.
+func TestMergeUnpricedModels_DedupesAcrossSubagents(t *testing.T) {
+	got := mergeUnpricedModels("any", "any\nzeta\nany")
+	want := []string{"any", "zeta"}
+	if len(got) != len(want) {
+		t.Fatalf("merged = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("merged = %v, want %v (sorted, deduped)", got, want)
+		}
+	}
+	if mergeUnpricedModels("", "") != nil {
+		t.Error("a fully-priced session must yield nil so the JSON key is omitted")
+	}
+}
+
 // TestPricingRevision_ChangeForcesRecost is the mechanism that makes storing
 // cost safe. Cost used to be recomputed on every read, so a rate edit took
 // effect immediately; now that it is persisted, a changed catalog has to

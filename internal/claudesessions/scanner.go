@@ -895,13 +895,31 @@ func encodeUnpricedModels(models []string) string {
 	return strings.Join(models, "\n")
 }
 
-// decodeUnpricedModels reverses encodeUnpricedModels, mapping the empty column
-// to a nil slice so a fully-priced session marshals without the JSON key.
-func decodeUnpricedModels(s string) []string {
-	if s == "" {
+// mergeUnpricedModels combines the session's own unpriced models with those of
+// its sub-agents, deduplicated and sorted. The sub-agent side arrives from a
+// GROUP_CONCAT, so the same model can appear once per delegating sub-agent.
+// Returns nil when fully priced, so the JSON key is omitted entirely.
+func mergeUnpricedModels(own, delegated string) []string {
+	seen := map[string]struct{}{}
+	for _, group := range []string{own, delegated} {
+		if group == "" {
+			continue
+		}
+		for _, m := range strings.Split(group, "\n") {
+			if m != "" {
+				seen[m] = struct{}{}
+			}
+		}
+	}
+	if len(seen) == 0 {
 		return nil
 	}
-	return strings.Split(s, "\n")
+	out := make([]string, 0, len(seen))
+	for m := range seen {
+		out = append(out, m)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // replacePRRows rewrites a session's linked pull requests. The transcript is
@@ -1112,7 +1130,8 @@ const sessionSummarySelect = `
 	       COALESCE(sa.cct, 0), COALESCE(sa.crt, 0),
 	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0),
 	       COALESCE(sa.ic, 0), COALESCE(sa.oc, 0), COALESCE(sa.crc, 0),
-	       COALESCE(sa.cwc, 0), COALESCE(sa.tc, 0), COALESCE(sa.ut, 0)
+	       COALESCE(sa.cwc, 0), COALESCE(sa.tc, 0), COALESCE(sa.ut, 0),
+	       COALESCE(sa.um, '')
 	FROM claude_session_cache c
 	LEFT JOIN (
 		SELECT parent_session_id,
@@ -1128,7 +1147,10 @@ const sessionSummarySelect = `
 		       SUM(cache_read_cost_usd) AS crc,
 		       SUM(cache_write_cost_usd) AS cwc,
 		       SUM(total_cost_usd) AS tc,
-		       SUM(unpriced_tokens) AS ut
+		       SUM(unpriced_tokens) AS ut,
+		       -- NULLIF keeps fully-priced sub-agents from contributing blank
+		       -- entries; duplicates across sub-agents are deduped in Go.
+		       GROUP_CONCAT(NULLIF(unpriced_models, ''), char(10)) AS um
 		FROM claude_subagent_cache
 		GROUP BY parent_session_id
 	) sa ON sa.parent_session_id = c.session_id
@@ -1150,7 +1172,7 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 	sessions := []ClaudeSessionSummary{}
 	for rows.Next() {
 		var s ClaudeSessionSummary
-		var unpriced string
+		var unpriced, subagentUnpricedModels string
 		var subagentUnpriced int
 		if err := rows.Scan(
 			&s.SessionID, &s.ProjectPath, &s.Preview, &s.CustomTitle, &s.IsFavorite,
@@ -1169,12 +1191,15 @@ func querySessionSummaries(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSumm
 			&s.SubagentUsage.CacheCreation5mTokens, &s.SubagentUsage.CacheCreation1hTokens,
 			&s.SubagentCost.InputUSD, &s.SubagentCost.OutputUSD, &s.SubagentCost.CacheReadUSD,
 			&s.SubagentCost.CacheWriteUSD, &s.SubagentCost.TotalUSD, &subagentUnpriced,
+			&subagentUnpricedModels,
 		); err != nil {
 			return nil, err
 		}
-		s.UnpricedModels = decodeUnpricedModels(unpriced)
-		// Delegated work's unpriced tokens count toward the session's total, the
-		// same way its usage and cost do.
+		// Delegated work's unpriced models and tokens both count toward the
+		// session's disclosure. Reading one without the other would let a row
+		// report excluded tokens attributed to no model — or worse, show a
+		// confident total for a session that is only partly priced.
+		s.UnpricedModels = mergeUnpricedModels(unpriced, subagentUnpricedModels)
 		s.UnpricedTokens += subagentUnpriced
 		s.DisplayTitle = s.ResolveDisplayTitle()
 		sessions = append(sessions, s)
