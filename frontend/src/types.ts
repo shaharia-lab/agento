@@ -843,6 +843,28 @@ export interface PricingRate {
   billable: boolean
   /** A best-effort rate rather than a published one, e.g. the bare family aliases. */
   estimated: boolean
+  /**
+   * Context-length bands, ascending by `max_input_tokens`. Absent or empty
+   * means the rate is flat, which is every Anthropic model — only providers
+   * that price by input length (Alibaba) carry bands. The rate's own five
+   * price columns are its lowest band.
+   */
+  tiers?: PricingTier[]
+}
+
+/**
+ * One context-length band. `max_input_tokens` is an inclusive upper bound on a
+ * request's input tokens; the highest band also covers everything above it.
+ * All of a request's tokens bill at the selected band — bands are chosen, not
+ * accumulated across.
+ */
+export interface PricingTier {
+  max_input_tokens: number
+  input_per_mtok: number
+  output_per_mtok: number
+  cache_write_5m_per_mtok: number
+  cache_write_1h_per_mtok: number
+  cache_read_per_mtok: number
 }
 
 /** A model with the rate in force now and every rate it has ever had. */

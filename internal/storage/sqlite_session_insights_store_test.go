@@ -652,10 +652,14 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Roll the schema back to 19, with the row still in place.
+	// Roll the schema back to 19, with the row still in place. Everything
+	// above 19 has to go, not just 20: the runner replays by MAX(version), so
+	// leaving a later migration recorded would make it skip 20 entirely and
+	// this test would assert nothing.
 	for _, stmt := range []string{
 		"ALTER TABLE session_insights DROP COLUMN agent_breakdown",
-		"DELETE FROM schema_migrations WHERE version = 20",
+		"DROP TABLE IF EXISTS model_pricing_tier",
+		"DELETE FROM schema_migrations WHERE version >= 20",
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			t.Fatalf("rolling back (%s): %v", stmt, err)
@@ -680,8 +684,8 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 		"SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 20 {
-		t.Fatalf("schema version = %d, want 20 — migration 20 did not re-apply", version)
+	if version != 21 {
+		t.Fatalf("schema version = %d, want 21 — migration 20 did not re-apply", version)
 	}
 
 	got, err := storage.NewSQLiteSessionInsightsStore(db2).Get(ctx, "pre-migration")

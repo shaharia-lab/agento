@@ -18,11 +18,14 @@ import { pricingApi } from '@/lib/api'
 import type { PricedModel, PricingCatalog, PricingRate, PricingRateInput } from '@/types'
 import {
   describeRateWindow,
+  describeTierBands,
   emptyRateInput,
   formatRateDate,
   groupByProvider,
   hasRateOn,
+  isTiered,
   rateToInput,
+  summarizeRatePrices,
   validateRateInput,
 } from '@/lib/pricing'
 
@@ -85,6 +88,12 @@ function RateForm({
   const { mode, input, existing } = form
   const set = (patch: Partial<PricingRateInput>) => onChange({ ...input, ...patch })
   const collision = mode === 'add' && hasRateOn(existing, input.effective_from)
+  // Bands come from the seeded catalog and are not editable here. Saying so
+  // matters: the fields below are the lowest band only, so on a tiered model
+  // an edit leaves long-context requests priced by the untouched bands.
+  const correctingTiered =
+    mode === 'correct' &&
+    existing.some(r => r.effective_from === input.effective_from && isTiered(r))
 
   return (
     <fieldset className="flex flex-col gap-4 rounded-md border border-zinc-200 dark:border-zinc-700 p-4">
@@ -97,6 +106,14 @@ function RateForm({
           Correcting a rate rewrites costs already reported for the window it covers. If the
           provider changed its price, add a new rate instead so past usage keeps what it was
           charged.
+        </div>
+      )}
+
+      {correctingTiered && (
+        <div className="rounded-md border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
+          This model prices by context length. The rates below are its lowest band only — the higher
+          bands ship with the catalog and are not editable here, so requests above the first bound
+          keep their existing prices.
         </div>
       )}
 
@@ -275,7 +292,20 @@ function HistoryRow({
           in ${rate.input_per_mtok} · out ${rate.output_per_mtok} · read ${rate.cache_read_per_mtok}{' '}
           · write ${rate.cache_write_5m_per_mtok}/$
           {rate.cache_write_1h_per_mtok}
+          {isTiered(rate) && ' (lowest band)'}
         </div>
+        {isTiered(rate) && (
+          <div className="mt-1 space-y-0.5 border-l-2 border-zinc-200 pl-2 dark:border-zinc-700">
+            <div className="text-[10px] uppercase tracking-wide text-zinc-400">
+              by input length · all of a request bills at its band
+            </div>
+            {describeTierBands(rate).map(band => (
+              <div key={band} className="font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                {band}
+              </div>
+            ))}
+          </div>
+        )}
         {rate.source && (
           <div className="mt-0.5 text-[11px] text-zinc-400 break-words">{rate.source}</div>
         )}
@@ -342,9 +372,7 @@ function ModelRow({
             {model.rates.length} rate{model.rates.length === 1 ? '' : 's'}
           </span>
           <span className="ml-auto shrink-0 font-mono text-xs text-zinc-500 dark:text-zinc-400">
-            {current
-              ? `$${current.input_per_mtok} / $${current.output_per_mtok}`
-              : 'not yet in effect'}
+            {current ? summarizeRatePrices(current) : 'not yet in effect'}
           </span>
         </button>
         <Button variant="outline" size="sm" onClick={onAdd} className="shrink-0 gap-1 text-xs">

@@ -467,6 +467,36 @@ ALTER TABLE claude_cache_metadata ADD COLUMN pricing_rev INTEGER NOT NULL DEFAUL
 ALTER TABLE session_insights ADD COLUMN agent_breakdown TEXT NOT NULL DEFAULT '{}';
 `,
 	},
+	{
+		version: 21,
+		sql: `
+-- Context-length rate bands (#218). Alibaba prices by the number of input
+-- tokens in a request, so one model at one effective_from has several prices
+-- and the flat five columns on model_pricing cannot express it.
+--
+-- A child table rather than more model_pricing rows on purpose: model_pricing's
+-- UNIQUE(model_pattern, effective_from) is what makes AddRate's collision
+-- detection and CorrectRate's history-preserving semantics work, and a per-band
+-- row would collide on that key. An untiered rate simply has zero rows here, so
+-- every existing row, constraint and query is untouched.
+--
+-- ON DELETE CASCADE ties bands to their rate: deleting a rate through the
+-- settings UI must not strand its bands, which would then re-attach to whatever
+-- row later reused the id.
+CREATE TABLE model_pricing_tier (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rate_id INTEGER NOT NULL REFERENCES model_pricing(id) ON DELETE CASCADE,
+    max_input_tokens INTEGER NOT NULL,
+    input_per_mtok REAL NOT NULL,
+    output_per_mtok REAL NOT NULL,
+    cache_write_5m_per_mtok REAL NOT NULL,
+    cache_write_1h_per_mtok REAL NOT NULL,
+    cache_read_per_mtok REAL NOT NULL,
+    UNIQUE(rate_id, max_input_tokens)
+);
+CREATE INDEX idx_model_pricing_tier_rate ON model_pricing_tier(rate_id);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

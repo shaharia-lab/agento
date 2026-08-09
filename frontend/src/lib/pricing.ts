@@ -153,3 +153,58 @@ export function groupByProvider(models: PricedModel[]): [string, PricedModel[]][
     return a.localeCompare(b)
   })
 }
+
+/** True when the rate prices by context length rather than at one flat rate. */
+export function isTiered(rate: Pick<PricingRate, 'tiers'>): boolean {
+  return (rate.tiers?.length ?? 0) > 0
+}
+
+/**
+ * Renders a token bound the way the provider's pricing page writes it — 256000
+ * as "256K", 1000000 as "1M" — falling back to a grouped number for a bound
+ * that is not a round multiple.
+ */
+export function formatTokenBound(tokens: number): string {
+  if (tokens >= 1_000_000 && tokens % 1_000_000 === 0) return `${tokens / 1_000_000}M`
+  if (tokens >= 1_000 && tokens % 1_000 === 0) return `${tokens / 1_000}K`
+  return tokens.toLocaleString('en-US')
+}
+
+/**
+ * Describes each context-length band as "range: $in/$out".
+ *
+ * The last band is written as an open range ("> 256K") rather than closed at
+ * its declared bound, because that is what actually happens: a request larger
+ * than every bound bills at the highest band.
+ */
+export function describeTierBands(rate: Pick<PricingRate, 'tiers'>): string[] {
+  const tiers = rate.tiers ?? []
+  return tiers.map((t, i) => {
+    const lower = i === 0 ? 0 : tiers[i - 1].max_input_tokens
+    const last = i === tiers.length - 1
+    let range: string
+    if (last) {
+      range = lower === 0 ? 'any size' : `> ${formatTokenBound(lower)}`
+    } else if (lower === 0) {
+      range = `≤ ${formatTokenBound(t.max_input_tokens)}`
+    } else {
+      range = `${formatTokenBound(lower)}–${formatTokenBound(t.max_input_tokens)}`
+    }
+    return `${range}: $${t.input_per_mtok}/$${t.output_per_mtok}`
+  })
+}
+
+/**
+ * The input/output prices to show for a rate at a glance. A tiered rate spans
+ * a range, and showing only its lowest band would present the cheapest price
+ * as if it were the whole price — the exact misreading #218 exists to end.
+ */
+export function summarizeRatePrices(rate: PricingRate): string {
+  const tiers = rate.tiers ?? []
+  if (tiers.length === 0) return `$${rate.input_per_mtok} / $${rate.output_per_mtok}`
+  const ins = tiers.map(t => t.input_per_mtok)
+  const outs = tiers.map(t => t.output_per_mtok)
+  const lo = `$${Math.min(...ins)} / $${Math.min(...outs)}`
+  const hi = `$${Math.max(...ins)} / $${Math.max(...outs)}`
+  return lo === hi ? lo : `${lo} – ${hi}`
+}
