@@ -16,7 +16,8 @@ import (
 // text-bearing assistant turns are messages anybody would count.
 //
 // Layout: 1 real user prompt + 8 assistant events (3 with a text block, 5
-// tool-call-only) + 5 tool_result carrier user events = 14 raw events, 4 turns.
+// tool-call-only) + 5 tool_result carrier user events + 1 injected wrapper
+// event = 15 raw events, 4 turns.
 func countsFixture(t *testing.T, dir, sessionID string, ts time.Time) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0750); err != nil {
@@ -69,6 +70,10 @@ func countsFixture(t *testing.T, dir, sessionID string, ts time.Time) {
 		appendEvent(assistantEvent(`[{"type":"text","text":"here is what I changed"}]`))
 	}
 
+	// A wrapper Claude Code injected as a user event (#197). It is a raw event
+	// like any other, but nobody typed it, so it is not a turn.
+	appendEvent(userEvent(`"<task-notification>\n<status>completed</status>\n</task-notification>"`))
+
 	if err := os.WriteFile(filepath.Join(dir, sessionID+".jsonl"), data, 0600); err != nil {
 		t.Fatalf("write jsonl: %v", err)
 	}
@@ -92,8 +97,8 @@ func TestScan_MessageCountIsTurnsNotEvents(t *testing.T) {
 	if s.MessageCount != 4 {
 		t.Errorf("message_count = %d, want 4 (1 user prompt + 3 assistant replies)", s.MessageCount)
 	}
-	if s.EventCount != 14 {
-		t.Errorf("event_count = %d, want 14 raw events", s.EventCount)
+	if s.EventCount != 15 {
+		t.Errorf("event_count = %d, want 15 raw events — the injected wrapper is still an event", s.EventCount)
 	}
 	// The preview must come from the typed prompt, never a tool_result carrier.
 	if s.Preview != "please refactor this" {
@@ -132,19 +137,21 @@ func TestDetail_CountersMatchSummary(t *testing.T) {
 		t.Errorf("detail event_count = %d, summary = %d — the two paths disagree",
 			detail.EventCount, summary.EventCount)
 	}
-	if detail.MessageCount != 4 || detail.EventCount != 14 {
-		t.Errorf("detail counters = %d msgs / %d events, want 4 / 14",
+	if detail.MessageCount != 4 || detail.EventCount != 15 {
+		t.Errorf("detail counters = %d msgs / %d events, want 4 / 15",
 			detail.MessageCount, detail.EventCount)
 	}
 	// Every event still renders, regardless of how it is counted.
-	if len(detail.Messages) != 14 {
-		t.Errorf("rendered %d messages, want all 14 events", len(detail.Messages))
+	if len(detail.Messages) != 15 {
+		t.Errorf("rendered %d messages, want all 15 events", len(detail.Messages))
 	}
 }
 
-// TestScan_StringContentUserEventIsATurn guards parseContentBlocks' early return
-// on non-array content: a bare JSON string is a real prompt, not a carrier.
-func TestScan_StringContentUserEventIsATurn(t *testing.T) {
+// TestScan_TypedStringContentUserEventIsATurn guards parseContentBlocks' early
+// return on non-array content: a bare JSON string a person typed is a real
+// prompt, not a carrier. Injected string content is the other half of that
+// rule and is covered by TestScan_InjectedUserEventIsNotATurn.
+func TestScan_TypedStringContentUserEventIsATurn(t *testing.T) {
 	db := setupTestDB(t)
 	projectDir := titleProjectDir(t)
 
@@ -159,7 +166,7 @@ func TestScan_StringContentUserEventIsATurn(t *testing.T) {
 
 	// writeJSONL emits a string-content user event and a text-block assistant event.
 	if s.MessageCount != 2 {
-		t.Errorf("message_count = %d, want 2 — string content must count as a turn", s.MessageCount)
+		t.Errorf("message_count = %d, want 2 — typed string content must count as a turn", s.MessageCount)
 	}
 	if s.EventCount != 2 {
 		t.Errorf("event_count = %d, want 2", s.EventCount)
@@ -313,7 +320,185 @@ func TestIncrementalScan_ScannerVersionRecomputesCounts(t *testing.T) {
 	if s.MessageCount != 4 {
 		t.Errorf("message_count = %d, want 4 after the version bump recomputed it", s.MessageCount)
 	}
-	if s.EventCount != 14 {
-		t.Errorf("event_count = %d, want 14 after the version bump backfilled it", s.EventCount)
+	if s.EventCount != 15 {
+		t.Errorf("event_count = %d, want 15 after the version bump backfilled it", s.EventCount)
+	}
+}
+
+// TestVersionConstants_BumpedTogetherForInjectedTurns pins #197's central risk.
+// isUserTurnContent feeds both message_count (scanner) and turn_count (insight
+// pipeline), so bumping only one constant would leave the two recomputed at
+// different times and disagreeing — exactly the drift #182 existed to remove.
+func TestVersionConstants_BumpedTogetherForInjectedTurns(t *testing.T) {
+	if CurrentScannerVersion < 7 {
+		t.Errorf("CurrentScannerVersion = %d, want >= 7 so cached message_count is recomputed",
+			CurrentScannerVersion)
+	}
+	if CurrentProcessorVersion < 7 {
+		t.Errorf("CurrentProcessorVersion = %d, want >= 7 so stored turn_count is reprocessed",
+			CurrentProcessorVersion)
+	}
+}
+
+// writeRawEvents marshals events to a session JSONL file, one per line.
+func writeRawEvents(t *testing.T, dir, sessionID string, events []rawEvent) {
+	t.Helper()
+	data := make([]byte, 0, len(events)*256)
+	for _, ev := range events {
+		b, err := json.Marshal(ev)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		data = append(data, b...)
+		data = append(data, '\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, sessionID+".jsonl"), data, 0600); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+}
+
+// TestIsUserTurnContent covers the shared predicate directly — it is the single
+// definition of "turn" for both message_count and the insight pipeline, so its
+// edges are worth pinning independently of any scan.
+func TestIsUserTurnContent(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"typed prose", `"please refactor this"`, true},
+		{"empty string", `""`, true},
+
+		// One case per injected wrapper Claude Code writes.
+		{"task notification", `"<task-notification>\n<task-id>abc</task-id>\n"`, false},
+		{"command message", `"<command-message>lab-workflow:review-pr</command-message>"`, false},
+		{"command name", `"<command-name>/review-pr</command-name>"`, false},
+		{"local command caveat", `"<local-command-caveat>Caveat: the messages below</local-command-caveat>"`, false},
+		{"local command stdout", `"<local-command-stdout>(no content)</local-command-stdout>"`, false},
+		{"system reminder", `"<system-reminder>\nThe user named this session\n</system-reminder>"`, false},
+
+		// Leading whitespace must not smuggle a wrapper past the check.
+		{"wrapper behind a newline", `"\n  <system-reminder>hi</system-reminder>"`, false},
+
+		// ...but a person writing *about* a marker is still a turn. The real
+		// corpus contains such a prompt, so this is the false positive the
+		// prefix anchor exists to prevent.
+		{
+			"prose mentioning a marker mid-text",
+			`"fix the bug where <system-reminder> events count as human turns"`,
+			true,
+		},
+		{"prose ending with a marker", `"the wrapper is called <command-message>"`, true},
+
+		// A marker-like tag that is not one of ours stays a turn.
+		{"unrelated leading tag", `"<div>hello</div>"`, true},
+
+		// Array content is unaffected by the wrapper rule.
+		{"array with tool_result", `[{"type":"tool_result","tool_use_id":"t1"}]`, false},
+		{"array with text", `[{"type":"text","text":"hello"}]`, true},
+		{
+			"array whose text opens with a marker is still a turn",
+			`[{"type":"text","text":"<system-reminder>x</system-reminder>"}]`,
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isUserTurnContent(json.RawMessage(tt.content)); got != tt.want {
+				t.Errorf("isUserTurnContent(%s) = %v, want %v", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestScan_InjectedUserEventIsNotATurn is the acceptance case: the wrapper is
+// still a raw event, but it is not a message, and it must not become the
+// session preview either — preview is gated on the same predicate and is the
+// last fallback in the display-title chain.
+func TestScan_InjectedUserEventIsNotATurn(t *testing.T) {
+	db := setupTestDB(t)
+	projectDir := titleProjectDir(t)
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	if err := os.MkdirAll(projectDir, 0750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	events := []rawEvent{
+		{
+			Type: "user", SessionID: "session-injected", Timestamp: ts, CWD: "/tmp",
+			Message: &rawMessage{Role: "user", Content: json.RawMessage(
+				`"<command-message>lab-workflow:github-issue-to-pr</command-message>"`)},
+		},
+		{
+			Type: "user", SessionID: "session-injected", Timestamp: ts.Add(time.Second), CWD: "/tmp",
+			Message: &rawMessage{Role: "user", Content: json.RawMessage(`"the real prompt"`)},
+		},
+		{
+			Type: "user", SessionID: "session-injected", Timestamp: ts.Add(2 * time.Second), CWD: "/tmp",
+			Message: &rawMessage{Role: "user", Content: json.RawMessage(
+				`"<task-notification>\n<status>completed</status>\n</task-notification>"`)},
+		},
+	}
+	writeRawEvents(t, projectDir, "session-injected", events)
+
+	sessions, err := IncrementalScan(db, testLogger)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	s := findSession(t, sessions, "session-injected")
+
+	if s.MessageCount != 1 {
+		t.Errorf("message_count = %d, want 1 — only the typed prompt is a turn", s.MessageCount)
+	}
+	// event_count is deliberately untouched by this change: it is the raw
+	// top-level event total, and the wrappers really are events.
+	if s.EventCount != 3 {
+		t.Errorf("event_count = %d, want 3 — filtering turns must not drop raw events", s.EventCount)
+	}
+	if s.Preview != "the real prompt" {
+		t.Errorf("preview = %q, want the typed prompt — a wrapper must never seed the preview", s.Preview)
+	}
+}
+
+// TestScan_WrapperOnlySessionKeepsALabel covers the one place turn filtering
+// must NOT reach: Preview is the last fallback in ResolveDisplayTitle, so a
+// transcript that is nothing but a slash command and its expansion would
+// otherwise render as a blank row in the sessions list.
+func TestScan_WrapperOnlySessionKeepsALabel(t *testing.T) {
+	db := setupTestDB(t)
+	projectDir := titleProjectDir(t)
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	if err := os.MkdirAll(projectDir, 0750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	writeRawEvents(t, projectDir, "session-wrapper-only", []rawEvent{
+		{
+			Type: "user", SessionID: "session-wrapper-only", Timestamp: ts, CWD: "/tmp",
+			Message: &rawMessage{Role: "user", Content: json.RawMessage(
+				`"<command-name>/plugin</command-name>"`)},
+		},
+		{
+			Type: "user", SessionID: "session-wrapper-only", Timestamp: ts.Add(time.Second), CWD: "/tmp",
+			Message: &rawMessage{Role: "user", Content: json.RawMessage(
+				`"<local-command-stdout>(no content)</local-command-stdout>"`)},
+		},
+	})
+
+	sessions, err := IncrementalScan(db, testLogger)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	s := findSession(t, sessions, "session-wrapper-only")
+
+	if s.MessageCount != 0 {
+		t.Errorf("message_count = %d, want 0 — nobody typed anything here", s.MessageCount)
+	}
+	if s.Preview == "" {
+		t.Error("preview is empty — the session would render as a blank row")
+	}
+	if s.ResolveDisplayTitle() == "" {
+		t.Error("display title is empty — the session is unidentifiable in the list")
 	}
 }
