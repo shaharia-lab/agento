@@ -323,8 +323,8 @@ function ActivityHeatmap({
           </div>
           {onCellClick && (
             <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1.5 ml-8">
-              Click a cell to view the sessions from that day and hour (UTC). Keyboard: tab to the
-              grid, arrow keys to move, Enter to open.
+              Click a cell to view the sessions from that day and hour. Keyboard: tab to the grid,
+              arrow keys to move, Enter to open.
             </p>
           )}
         </div>
@@ -389,7 +389,7 @@ function HourlyActivityChart({
       </ResponsiveContainer>
       {onBarClick && (
         <p className="text-[11px] text-zinc-400 dark:text-zinc-500 mt-1.5">
-          Click a bar to view the sessions from that hour (UTC).
+          Click a bar to view the sessions from that hour.
         </p>
       )}
     </ChartCard>

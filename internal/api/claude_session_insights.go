@@ -56,9 +56,14 @@ func (s *Server) handleGetClaudeSessionInsightsSummary(w http.ResponseWriter, r 
 		}
 	}
 
+	// A bare YYYY-MM-DD names a day, not an instant, so it is resolved in the
+	// requesting timezone. The store turns `to` into an exclusive next-midnight,
+	// which then covers the whole local day rather than the whole UTC one.
+	loc := parseTimezone(r.URL.Query().Get("tz"))
+
 	var from, to *time.Time
 	if raw := r.URL.Query().Get("from"); raw != "" {
-		t, err := time.Parse("2006-01-02", raw)
+		t, err := time.ParseInLocation("2006-01-02", raw, loc)
 		if err != nil {
 			s.writeError(w, http.StatusBadRequest, "invalid 'from' date: expected YYYY-MM-DD")
 			return
@@ -66,7 +71,7 @@ func (s *Server) handleGetClaudeSessionInsightsSummary(w http.ResponseWriter, r 
 		from = &t
 	}
 	if raw := r.URL.Query().Get("to"); raw != "" {
-		t, err := time.Parse("2006-01-02", raw)
+		t, err := time.ParseInLocation("2006-01-02", raw, loc)
 		if err != nil {
 			s.writeError(w, http.StatusBadRequest, "invalid 'to' date: expected YYYY-MM-DD")
 			return

@@ -205,6 +205,19 @@ type AnalyticsParams struct {
 	From    time.Time
 	To      time.Time
 	Project string // empty = all projects
+	// Loc is the timezone the day, hour and weekday buckets are derived in.
+	// Storage and transport stay UTC; only aggregation and labeling move, so
+	// "when do I work?" is answered in the hours the user actually worked.
+	// Nil means UTC, which keeps callers that predate this working unchanged.
+	Loc *time.Location
+}
+
+// location returns the bucketing timezone, defaulting to UTC.
+func (p AnalyticsParams) location() *time.Location {
+	if p.Loc == nil {
+		return time.UTC
+	}
+	return p.Loc
 }
 
 // Granularity returns "hourly" when the range is ≤7 days, "daily" otherwise.
@@ -231,6 +244,7 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 	}
 	sort.Strings(projects)
 
+	loc := p.location()
 	filtered := filterSessions(sessions, p)
 
 	if len(filtered) == 0 {
@@ -241,7 +255,7 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 			SessionsPerModel: []ModelSessionStat{},
 			MostActiveDays:   []DayActivity{},
 			Heatmap:          []HeatmapCell{},
-			HourlyActivity:   buildHourlyActivity(nil),
+			HourlyActivity:   buildHourlyActivity(nil, loc),
 			CostOverTime:     []CostPoint{},
 			Projects:         projects,
 		}
@@ -249,7 +263,7 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 
 	granularity := p.Granularity()
 	summary, costSummary := buildSummary(filtered)
-	timeSeries := buildTimeSeries(filtered, p.From, p.To, granularity)
+	timeSeries := buildTimeSeries(filtered, p.From, p.To, granularity, loc)
 
 	return AnalyticsReport{
 		Summary:          summary,
@@ -257,10 +271,10 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 		CacheEfficiency:  buildCacheEfficiency(timeSeries),
 		ModelBreakdown:   buildModelBreakdown(filtered),
 		SessionsPerModel: buildSessionsPerModel(filtered),
-		MostActiveDays:   buildMostActiveDays(filtered),
-		Heatmap:          buildHeatmap(filtered),
-		HourlyActivity:   buildHourlyActivity(filtered),
-		CostOverTime:     buildCostOverTime(filtered, p.From, p.To, granularity),
+		MostActiveDays:   buildMostActiveDays(filtered, loc),
+		Heatmap:          buildHeatmap(filtered, loc),
+		HourlyActivity:   buildHourlyActivity(filtered, loc),
+		CostOverTime:     buildCostOverTime(filtered, p.From, p.To, granularity, loc),
 		CostSummary:      costSummary,
 		Projects:         projects,
 	}
@@ -329,13 +343,15 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 	}, cost
 }
 
-func buildTimeSeries(sessions []ClaudeSessionSummary, from, to time.Time, granularity string) []TimeSeriesPoint {
+func buildTimeSeries(
+	sessions []ClaudeSessionSummary, from, to time.Time, granularity string, loc *time.Location,
+) []TimeSeriesPoint {
 	buckets := make(map[string]*TimeSeriesPoint)
 
 	for _, s := range sessions {
-		key := bucketKey(s.LastActivity, granularity)
+		key := bucketKey(s.LastActivity, granularity, loc)
 		if buckets[key] == nil {
-			buckets[key] = &TimeSeriesPoint{Date: bucketLabel(s.LastActivity, granularity)}
+			buckets[key] = &TimeSeriesPoint{Date: bucketLabel(s.LastActivity, granularity, loc)}
 		}
 		b := buckets[key]
 		u := s.TotalUsage()
@@ -347,7 +363,7 @@ func buildTimeSeries(sessions []ClaudeSessionSummary, from, to time.Time, granul
 		b.Sessions++
 	}
 
-	return fillTimeSeries(buckets, from, to, granularity)
+	return fillTimeSeries(buckets, from, to, granularity, loc)
 }
 
 func buildCacheEfficiency(ts []TimeSeriesPoint) []CacheEfficiencyPoint {
@@ -416,10 +432,11 @@ func buildSessionsPerModel(sessions []ClaudeSessionSummary) []ModelSessionStat {
 	return out
 }
 
-func buildMostActiveDays(sessions []ClaudeSessionSummary) []DayActivity {
+func buildMostActiveDays(sessions []ClaudeSessionSummary, loc *time.Location) []DayActivity {
 	byDay := make(map[string]*DayActivity)
 	for _, s := range sessions {
-		key := s.LastActivity.Format("2006-01-02")
+		// Via bucketKey so there is exactly one place that formats a day.
+		key := bucketKey(s.LastActivity, "daily", loc)
 		if byDay[key] == nil {
 			byDay[key] = &DayActivity{Date: key}
 		}
@@ -438,11 +455,12 @@ func buildMostActiveDays(sessions []ClaudeSessionSummary) []DayActivity {
 	return out
 }
 
-func buildHeatmap(sessions []ClaudeSessionSummary) []HeatmapCell {
+func buildHeatmap(sessions []ClaudeSessionSummary, loc *time.Location) []HeatmapCell {
 	type cellKey struct{ dow, hour int }
 	cells := make(map[cellKey]*HeatmapCell)
 	for _, s := range sessions {
-		k := cellKey{int(s.LastActivity.Weekday()), s.LastActivity.Hour()}
+		at := s.LastActivity.In(loc)
+		k := cellKey{int(at.Weekday()), at.Hour()}
 		if cells[k] == nil {
 			cells[k] = &HeatmapCell{DayOfWeek: k.dow, Hour: k.hour}
 		}
@@ -463,13 +481,13 @@ func buildHeatmap(sessions []ClaudeSessionSummary) []HeatmapCell {
 	return out
 }
 
-func buildHourlyActivity(sessions []ClaudeSessionSummary) []HourlyActivity {
+func buildHourlyActivity(sessions []ClaudeSessionSummary, loc *time.Location) []HourlyActivity {
 	var hours [24]HourlyActivity
 	for i := range hours {
 		hours[i] = HourlyActivity{Hour: i}
 	}
 	for _, s := range sessions {
-		h := s.LastActivity.Hour()
+		h := s.LastActivity.In(loc).Hour()
 		u := s.TotalUsage()
 		hours[h].Sessions++
 		hours[h].Tokens += u.InputTokens + u.OutputTokens
@@ -479,60 +497,77 @@ func buildHourlyActivity(sessions []ClaudeSessionSummary) []HourlyActivity {
 	return out
 }
 
-func buildCostOverTime(sessions []ClaudeSessionSummary, from, to time.Time, granularity string) []CostPoint {
+func buildCostOverTime(
+	sessions []ClaudeSessionSummary, from, to time.Time, granularity string, loc *time.Location,
+) []CostPoint {
 	buckets := make(map[string]*CostPoint)
 	for _, s := range sessions {
-		key := bucketKey(s.LastActivity, granularity)
+		key := bucketKey(s.LastActivity, granularity, loc)
 		if buckets[key] == nil {
-			buckets[key] = &CostPoint{Date: bucketLabel(s.LastActivity, granularity)}
+			buckets[key] = &CostPoint{Date: bucketLabel(s.LastActivity, granularity, loc)}
 		}
 		// Stored cost, for the same reason buildSummary reads it — the two must
 		// add up to the same money.
 		buckets[key].EstimatedCostUSD += s.TotalCost().TotalUSD
 	}
 
-	step := 24 * time.Hour
-	if granularity == "hourly" {
-		step = time.Hour
-	}
 	var result []CostPoint
-	for cur := from; !cur.After(to); cur = cur.Add(step) {
-		key := bucketKey(cur, granularity)
+	walkBuckets(from, to, granularity, loc, func(key string, cur time.Time) {
 		if b, ok := buckets[key]; ok {
 			result = append(result, *b)
-		} else {
-			result = append(result, CostPoint{Date: bucketLabel(cur, granularity)})
+			return
 		}
-	}
+		result = append(result, CostPoint{Date: bucketLabel(cur, granularity, loc)})
+	})
 	return result
 }
 
 // ─── Time bucket helpers ──────────────────────────────────────────────────────
 
-func bucketKey(t time.Time, granularity string) string {
+// bucketKey derives a session's bucket in loc. Format renders in the time's own
+// location, so the conversion has to happen here rather than at the edges — an
+// instant is only a day or an hour once you say whose day you mean.
+func bucketKey(t time.Time, granularity string, loc *time.Location) string {
+	t = t.In(loc)
 	if granularity == "hourly" {
 		return t.Format("2006-01-02T15")
 	}
 	return t.Format("2006-01-02")
 }
 
-func bucketLabel(t time.Time, granularity string) string {
-	return bucketKey(t, granularity)
+func bucketLabel(t time.Time, granularity string, loc *time.Location) string {
+	return bucketKey(t, granularity, loc)
 }
 
-func fillTimeSeries(buckets map[string]*TimeSeriesPoint, from, to time.Time, granularity string) []TimeSeriesPoint {
-	step := 24 * time.Hour
-	if granularity == "hourly" {
-		step = time.Hour
+// walkBuckets calls fn once per bucket from `from` to `to` inclusive, stepping
+// in loc.
+//
+// Daily steps advance the calendar day rather than adding 24 hours: across a
+// DST transition a local day is 23 or 25 hours long, and a fixed 24h step drifts
+// off the wall clock, duplicating one day key and skipping another.
+func walkBuckets(from, to time.Time, granularity string, loc *time.Location, fn func(string, time.Time)) {
+	cur := from.In(loc)
+	end := to.In(loc)
+	for !cur.After(end) {
+		fn(bucketKey(cur, granularity, loc), cur)
+		if granularity == "hourly" {
+			cur = cur.Add(time.Hour)
+			continue
+		}
+		cur = cur.AddDate(0, 0, 1)
 	}
+}
+
+func fillTimeSeries(
+	buckets map[string]*TimeSeriesPoint, from, to time.Time, granularity string, loc *time.Location,
+) []TimeSeriesPoint {
 	var result []TimeSeriesPoint
-	for cur := from; !cur.After(to); cur = cur.Add(step) {
-		key := bucketKey(cur, granularity)
+	walkBuckets(from, to, granularity, loc, func(key string, cur time.Time) {
 		if b, ok := buckets[key]; ok {
 			result = append(result, *b)
-		} else {
-			result = append(result, TimeSeriesPoint{Date: bucketLabel(cur, granularity)})
+			return
 		}
-	}
+		result = append(result, TimeSeriesPoint{Date: bucketLabel(cur, granularity, loc)})
+	})
 	return result
 }

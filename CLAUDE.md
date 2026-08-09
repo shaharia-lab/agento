@@ -97,6 +97,8 @@ One line per package — list files in a directory to see current contents.
 - **`internal/daemon/`** — `agento service` backend: installs and manages Agento as a user-level background service (launchd on macOS, systemd user units on Linux), with embedded unit/plist templates and a `commandRunner` seam for tests.
 - **`internal/build/`** — Version variables injected via `-ldflags`.
 
+**Timezones**: UTC end to end in storage and transport; **aggregation and display follow the browser** (#190). The analytics and insights endpoints take a `tz` IANA name (the frontend sends `Intl.DateTimeFormat().resolvedOptions().timeZone`), and `AnalyticsParams.Loc` is applied via `.In(loc)` before any bucket key is derived — a day, hour or weekday is meaningless until you say whose it is. A bare `YYYY-MM-DD` `from`/`to` is a **local** day boundary (`time.ParseInLocation`), not a UTC one. Missing or unrecognized `tz` falls back to UTC rather than erroring, so pre-`tz` callers are unchanged. `main.go` imports `_ "time/tzdata"` because a distroless container has no `/usr/share/zoneinfo` and every `LoadLocation` would silently degrade the dashboard to UTC. Daily bucket walks (`walkBuckets`) step the **calendar day**, not 24 hours — a local day is 23 or 25 hours across a DST transition, and a fixed step duplicates one key while skipping another. One deliberate UTC exception on the frontend: `formatRateDate` (`lib/pricing.ts`), because a pricing rate is keyed to a day rather than an instant.
+
 **Import rule**: `config` ← `service` ← `api` (never reverse).
 
 ### Frontend

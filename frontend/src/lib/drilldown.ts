@@ -13,10 +13,10 @@ const DAY_NAMES_PLURAL = [
 /**
  * Drill-down helpers for the analytics → Claude Sessions navigation.
  *
- * The backend buckets sessions by the UTC weekday/hour of their last activity
- * (session timestamps are parsed from JSONL `Z` timestamps and never converted,
- * and the analytics `from`/`to` params are UTC midnights). So a click must
- * expand back into every matching concrete UTC hour window inside the range.
+ * The backend buckets sessions by the weekday/hour of their last activity in
+ * the browser's timezone (it is sent as `tz` and applied before bucketing; the
+ * `from`/`to` params are local day boundaries). So a click must expand back
+ * into every matching concrete local hour window inside the range.
  * The sessions page then keeps the sessions whose activity window overlaps any
  * of those windows.
  */
@@ -38,9 +38,9 @@ export interface DrilldownTarget {
 }
 
 /**
- * Parses the analytics date range ("YYYY-MM-DD" strings, inclusive) into UTC
- * millisecond bounds, matching how the backend parses the same params
- * (`time.Parse("2006-01-02", …)` → UTC midnight). Returns null when either
+ * Parses the analytics date range ("YYYY-MM-DD" strings, inclusive) into
+ * millisecond bounds at local midnight, matching how the backend now parses the
+ * same params (`time.ParseInLocation("2006-01-02", …, tz)`). Returns null when either
  * bound is invalid, or when the range exceeds MAX_DRILLDOWN_DAYS — the
  * serialized window list would otherwise exceed URL length limits.
  */
@@ -50,10 +50,15 @@ export function parseRangeBounds(
 ): { from: number; to: number } | null {
   const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
   if (!DATE_RE.test(fromDate) || !DATE_RE.test(toDate)) return null
-  const from = Date.parse(`${fromDate}T00:00:00Z`)
-  const to = Date.parse(`${toDate}T00:00:00Z`) + 24 * 60 * 60 * 1000 // `to` date is inclusive
+  // No `Z`: a bare date-time string is parsed in the browser's zone, which is
+  // the zone the backend was asked to bucket in.
+  const from = Date.parse(`${fromDate}T00:00:00`)
+  const to = Date.parse(`${toDate}T00:00:00`) + 24 * 60 * 60 * 1000 // `to` date is inclusive
   if (Number.isNaN(from) || Number.isNaN(to) || from >= to) return null
-  if (to - from > MAX_DRILLDOWN_DAYS * 24 * 60 * 60 * 1000) return null
+  // Count calendar days rather than elapsed milliseconds. Local days are 23 or
+  // 25 hours long across a DST transition, so an exactly-at-the-limit range
+  // that crosses a fall-back measures an hour over and would be rejected.
+  if (Math.round((to - from) / (24 * 60 * 60 * 1000)) > MAX_DRILLDOWN_DAYS) return null
   return { from, to }
 }
 
@@ -68,16 +73,23 @@ function collectWindows(
   bounds: { from: number; to: number },
   matches: (start: Date) => boolean,
 ): DrilldownWindow[] {
+  const HOUR_MS = 60 * 60 * 1000
   const windows: DrilldownWindow[] = []
   // Walk hour-by-hour from the range start; ranges are capped at
   // MAX_DRILLDOWN_DAYS so this stays cheap (≤ ~4400 iterations) and avoids
   // day/hour juggling edge cases.
-  const cursor = new Date(bounds.from)
-  while (cursor.getTime() < bounds.to) {
-    if (matches(cursor)) {
-      windows.push({ from: cursor.getTime(), to: cursor.getTime() + 60 * 60 * 1000 })
+  //
+  // Stepping by a real hour rather than setHours(getHours() + 1) keeps this
+  // correct across DST: the wall clock skips an hour in spring and repeats one
+  // in autumn, so incrementing the local hour field can jump two hours or stall.
+  // Walking absolute time visits every hour that actually elapsed exactly once,
+  // and `matches` reads the local fields off each one — a repeated 02:00 legitimately
+  // yields two windows, and a skipped one yields none.
+  for (let ms = bounds.from; ms < bounds.to; ms += HOUR_MS) {
+    const start = new Date(ms)
+    if (matches(start)) {
+      windows.push({ from: ms, to: ms + HOUR_MS })
     }
-    cursor.setUTCHours(cursor.getUTCHours() + 1)
   }
   return windows
 }
@@ -92,13 +104,13 @@ export function heatmapCellTarget(
   const bounds = parseRangeBounds(fromDate, toDate)
   if (!bounds) return null
   return {
-    windows: collectWindows(bounds, d => d.getUTCDay() === dayOfWeek && d.getUTCHours() === hour),
-    label: `${DAY_NAMES_PLURAL[dayOfWeek] ?? DAY_NAMES[dayOfWeek]} ${padHour(hour)}:00–${padHour((hour + 1) % 24)}:00 UTC`,
+    windows: collectWindows(bounds, d => d.getDay() === dayOfWeek && d.getHours() === hour),
+    label: `${DAY_NAMES_PLURAL[dayOfWeek] ?? DAY_NAMES[dayOfWeek]} ${padHour(hour)}:00–${padHour((hour + 1) % 24)}:00`,
     rangeLabel: `${fromDate} → ${toDate}`,
   }
 }
 
-/** Windows for an hourly bar: the given UTC hour of every day in the range. */
+/** Windows for an hourly bar: the given local hour of every day in the range. */
 export function hourlyBarTarget(
   fromDate: string,
   toDate: string,
@@ -107,8 +119,8 @@ export function hourlyBarTarget(
   const bounds = parseRangeBounds(fromDate, toDate)
   if (!bounds) return null
   return {
-    windows: collectWindows(bounds, d => d.getUTCHours() === hour),
-    label: `every day ${padHour(hour)}:00–${padHour((hour + 1) % 24)}:00 UTC`,
+    windows: collectWindows(bounds, d => d.getHours() === hour),
+    label: `every day ${padHour(hour)}:00–${padHour((hour + 1) % 24)}:00`,
     rangeLabel: `${fromDate} → ${toDate}`,
   }
 }
