@@ -192,3 +192,36 @@ func TestBuildSessionsPerModel_StillCountsUnderTheParent(t *testing.T) {
 		t.Errorf("session count total = %d, want 4 — one per session", total)
 	}
 }
+
+// TestBuildModelBreakdown_SyntheticParentKeepsRealDelegatedTokens documents a
+// deliberate consequence of moving the <synthetic> skip from per-session to
+// per-model: a session whose own model is the placeholder used to have its
+// delegated tokens dropped with it. Those tokens are real work by a real
+// model, so they are now counted under that model — and only the placeholder's
+// own tokens are excluded.
+func TestBuildModelBreakdown_SyntheticParentKeepsRealDelegatedTokens(t *testing.T) {
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	sessions := []ClaudeSessionSummary{{
+		Model: syntheticModel, StartTime: ts, LastActivity: ts,
+		Usage:         TokenUsage{InputTokens: 500},
+		SubagentUsage: TokenUsage{InputTokens: 300},
+		SubagentUsageByModel: map[string]TokenUsage{
+			"claude-haiku-4-5": {InputTokens: 300},
+		},
+	}}
+
+	got := buildModelBreakdown(sessions)
+	if len(got) != 1 {
+		t.Fatalf("expected only the delegated model, got %+v", got)
+	}
+	if got[0].Model != "claude-haiku-4-5" || got[0].Tokens != 300 {
+		t.Errorf("got %+v, want haiku with its 300 delegated tokens", got[0])
+	}
+	// The placeholder's own 500 tokens stay excluded — that is the rule that
+	// has not changed.
+	for _, s := range got {
+		if s.Model == syntheticModel {
+			t.Error("<synthetic> leaked into the breakdown")
+		}
+	}
+}

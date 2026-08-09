@@ -400,6 +400,12 @@ func buildModelBreakdown(sessions []ClaudeSessionSummary) []ModelStat {
 	total := 0
 	// add attributes one model's tokens, applying the same synthetic skip and
 	// unknown fallback to delegated models as to a session's own.
+	//
+	// Note the skip is now per model rather than per session. A session whose
+	// own model is <synthetic> used to have its delegated tokens dropped along
+	// with it; they are real work by a real model and are now counted under
+	// that model. No session in the reference corpus is in that position, but
+	// the case is reachable, so it is deliberate rather than incidental.
 	add := func(model string, u TokenUsage) {
 		if model == syntheticModel {
 			return // locally generated, never billed — not a real model
