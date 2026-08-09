@@ -502,3 +502,48 @@ func TestCache_ScanGuardClearsAfterScan(t *testing.T) {
 		t.Error("a scan after the first never completed; admission is stuck")
 	}
 }
+
+// TestCacheGetSummary covers the read the detail endpoint depends on: cost is
+// stored by the scanner and cannot be recovered from a re-read of the
+// transcript, so a detail view that could not read this row would report $0.00
+// for a session the list prices correctly.
+func TestCacheGetSummary(t *testing.T) {
+	db := setupTestDB(t)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projectDir := filepath.Join(home, ".claude", "projects", "test-project")
+	writeJSONL(t, projectDir, "session-abc", time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC))
+
+	listed, err := IncrementalScan(db, logger)
+	if err != nil {
+		t.Fatalf("IncrementalScan: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("expected 1 session, got %d", len(listed))
+	}
+
+	cache := NewCache(db, logger)
+	got := cache.GetSummary("session-abc")
+	if got == nil {
+		t.Fatal("GetSummary returned nil for a scanned session")
+	}
+	if got.SessionID != listed[0].SessionID {
+		t.Errorf("session id: got %q, want %q", got.SessionID, listed[0].SessionID)
+	}
+	// The whole point of the row: the same figures the list serves.
+	if got.Cost != listed[0].Cost {
+		t.Errorf("cost: got %+v, want %+v", got.Cost, listed[0].Cost)
+	}
+	if got.SubagentCost != listed[0].SubagentCost {
+		t.Errorf("subagent cost: got %+v, want %+v", got.SubagentCost, listed[0].SubagentCost)
+	}
+	if got.Usage != listed[0].Usage {
+		t.Errorf("usage: got %+v, want %+v", got.Usage, listed[0].Usage)
+	}
+
+	if missing := cache.GetSummary("no-such-session"); missing != nil {
+		t.Errorf("GetSummary for an unknown session: got %+v, want nil", missing)
+	}
+}
