@@ -1083,6 +1083,48 @@ export interface ModelCostStat {
   sessions: number
 }
 
+/** One project's activity over the window. */
+export interface ProjectStat {
+  project: string
+  sessions: number
+  /** Conversation tokens (input+output). */
+  tokens: number
+  /** Every token including cache traffic. */
+  total_tokens: number
+  cost: ClaudeSessionCost
+  /** Share of the window's cost. */
+  percentage: number
+  last_activity: string
+}
+
+/** One project's activity on one local day, for the project×day strip. */
+export interface ProjectDayActivity {
+  project: string
+  date: string
+  sessions: number
+  cost_usd: number
+}
+
+/** One leaderboard row; session_id deep-links to the session. */
+export interface SessionRanking {
+  session_id: string
+  title: string
+  project: string
+  model: string
+  cost_usd: number
+  duration_ms: number
+  tokens: number
+  subagent_count: number
+  last_activity: string
+}
+
+/** The same sessions ranked three ways — they pick out different sessions. */
+export interface TopSessions {
+  by_cost: SessionRanking[]
+  by_duration: SessionRanking[]
+  by_tokens: SessionRanking[]
+}
+
 /** One time bucket's cost split by model; the values sum to the plain series. */
 export interface StackedCostPoint {
   date: string
@@ -1129,6 +1171,9 @@ export interface AnalyticsReport {
   sessions_per_model: ModelSessionStat[]
   cost_by_model: ModelCostStat[]
   cost_over_time_by_model: StackedCostPoint[]
+  project_breakdown: ProjectStat[]
+  project_activity: ProjectDayActivity[]
+  top_sessions: TopSessions
   most_active_days: DayActivity[]
   heatmap: HeatmapCell[]
   hourly_activity: HourlyActivity[]

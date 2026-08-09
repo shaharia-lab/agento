@@ -15,6 +15,8 @@ import {
 } from 'recharts'
 import { analyticsApi } from '@/lib/api'
 import { avgSessionsPerDay, observedDaySpan } from '@/lib/analyticsMetrics'
+import { ProjectAnalytics } from './ProjectAnalytics'
+import { TopSessionsCard } from './TopSessionsCard'
 import {
   drilldownUrl,
   heatmapCellTarget,
@@ -260,7 +262,10 @@ function ActivityHeatmap({
   }, [])
 
   return (
-    <ChartCard title="Activity Heatmap (Day × Hour)">
+    <ChartCard
+      title="Activity Heatmap (Day × Hour)"
+      subtitle="A session counts in every hour between its start and last activity, so an eight-hour session shades eight cells — it used to shade only the hour it ended, making this a map of when work stopped. A session resumed after a break counts the gap too."
+    >
       <div className="overflow-x-auto">
         <div
           className="min-w-[560px]"
@@ -351,7 +356,10 @@ function HourlyActivityChart({
     : undefined
 
   return (
-    <ChartCard title="Activity by Hour of Day">
+    <ChartCard
+      title="Activity by Hour of Day"
+      subtitle="Sessions counted in every hour between their start and last activity. Totals exceed the session count because one session spans several hours, and a session resumed after a break counts the gap."
+    >
       <ResponsiveContainer width="100%" height={240}>
         <BarChart
           data={data}
@@ -589,6 +597,15 @@ export default function GeneralUsagePage() {
                 onBarClick={drilldownEnabled ? hour => drillIntoSessions(null, hour) : undefined}
               />
             </div>
+            {/* Projects and leaderboards: the two questions the dashboards
+                could not answer at all, rather than answered wrongly. */}
+            <ProjectAnalytics
+              projects={report?.project_breakdown ?? []}
+              activity={report?.project_activity ?? []}
+            />
+
+            {report?.top_sessions && <TopSessionsCard top={report.top_sessions} />}
+
             {!drilldownEnabled && (
               <p className="text-[11px] text-zinc-400 dark:text-zinc-500 -mt-3">
                 Session drill-down is available for ranges up to {MAX_DRILLDOWN_DAYS} days — pick a
