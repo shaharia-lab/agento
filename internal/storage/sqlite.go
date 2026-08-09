@@ -456,6 +456,17 @@ ALTER TABLE claude_subagent_cache ADD COLUMN unpriced_tokens INTEGER NOT NULL DE
 ALTER TABLE claude_cache_metadata ADD COLUMN pricing_rev INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		version: 20,
+		sql: `
+-- Attribution of tool calls to the sub-agent that made them (#202). Stored as a
+-- JSON map like the other breakdowns. Populated by the CurrentProcessorVersion
+-- 5 -> 6 bump, which makes NeedsProcessing return every existing session, so
+-- the '{}' default is what a pre-v6 row correctly reads as until it is
+-- reprocessed.
+ALTER TABLE session_insights ADD COLUMN agent_breakdown TEXT NOT NULL DEFAULT '{}';
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

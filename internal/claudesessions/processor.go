@@ -19,7 +19,9 @@ import (
 // v5: cost is accumulated per assistant message against the pricing catalog
 // (#186) — rows written before v5 were priced whole-session at the first-seen
 // model's flat rate, so every stored cost_estimate_usd is out of date.
-const CurrentProcessorVersion = 5
+// v6: tool calls are also attributed to the sub-agent that made them (#202) —
+// every row written before v6 has an empty agent_breakdown.
+const CurrentProcessorVersion = 6
 
 // ProcessableEvent is a single decoded line from a Claude Code session JSONL file,
 // passed to each SessionProcessor in chronological order.
@@ -115,6 +117,10 @@ type SessionInsight struct {
 	McpServerBreakdown map[string]int `json:"mcp_server_breakdown"`
 	McpToolBreakdown   map[string]int `json:"mcp_tool_breakdown"`
 	EffortBreakdown    map[string]int `json:"effort_breakdown"`
+	// AgentBreakdown counts calls by the sub-agent type that made them, which
+	// is what makes delegation visible now that sub-agent transcripts run
+	// through the same registry.
+	AgentBreakdown map[string]int `json:"agent_breakdown"`
 	// UnattributedCalls is tool calls made with no skill in context — built-in
 	// tool use. Kept out of SkillBreakdown so the sum above reconciles.
 	UnattributedCalls int `json:"unattributed_calls"`
@@ -174,10 +180,17 @@ type InsightAggregateSummary struct {
 	SessionsWithErrors   int
 	TopToolTotals        map[string]int
 	// Attribution totals, merged across sessions the same way TopToolTotals is.
-	// All three count tool calls, so they are directly comparable with it.
+	// All of them count tool calls, so they are directly comparable with it.
 	TopSkillTotals     map[string]int
 	TopPluginTotals    map[string]int
 	TopMcpServerTotals map[string]int
+	// TopMcpToolTotals breaks TopMcpServerTotals down one level further, so a
+	// busy server can be read as the specific tools driving it.
+	TopMcpToolTotals map[string]int
+	// TopEffortTotals is the reasoning-effort tier mix; TopAgentTotals is the
+	// delegation mix by sub-agent type, empty for main-thread-only work.
+	TopEffortTotals map[string]int
+	TopAgentTotals  map[string]int
 	// TotalToolCalls and UnattributedCalls are the denominator for those
 	// totals: roughly half of all tool calls are made with no skill in
 	// context, and a breakdown without that share is misleading.

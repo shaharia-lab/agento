@@ -956,6 +956,12 @@ export interface InsightSummary {
   top_plugins: ToolUsageStat[]
   /** Tool calls grouped by MCP server, parsed from `mcp__<server>__<tool>`. */
   top_mcp_servers: ToolUsageStat[]
+  /** The MCP-server breakdown one level deeper — the specific tools called. */
+  top_mcp_tools: ToolUsageStat[]
+  /** Tool calls grouped by the reasoning-effort tier the turn ran at. */
+  top_efforts: ToolUsageStat[]
+  /** Tool calls grouped by sub-agent type; empty for main-thread-only work. */
+  top_agents: ToolUsageStat[]
 }
 
 // ── Analytics ─────────────────────────────────────────────────────────────────

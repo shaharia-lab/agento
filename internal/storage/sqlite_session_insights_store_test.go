@@ -329,6 +329,7 @@ func TestInsightRecord_AttributionRoundTrip(t *testing.T) {
 	r.McpServerBreakdown = map[string]int{"vibexp_io_vibexp_team": 4}
 	r.McpToolBreakdown = map[string]int{"vibexp_io_post_to_feed": 4}
 	r.EffortBreakdown = map[string]int{"high": 13}
+	r.AgentBreakdown = map[string]int{"Explore": 6, "general-purpose": 2}
 	r.UnattributedCalls = 7
 
 	if err := store.Upsert(ctx, r); err != nil {
@@ -356,6 +357,9 @@ func TestInsightRecord_AttributionRoundTrip(t *testing.T) {
 	}
 	if got.EffortBreakdown["high"] != 13 {
 		t.Errorf("effort_breakdown round-trip failed: %+v", got.EffortBreakdown)
+	}
+	if got.AgentBreakdown["Explore"] != 6 || got.AgentBreakdown["general-purpose"] != 2 {
+		t.Errorf("agent_breakdown round-trip failed: %+v", got.AgentBreakdown)
 	}
 	if got.UnattributedCalls != 7 {
 		t.Errorf("unattributed_calls = %d, want 7", got.UnattributedCalls)
@@ -451,18 +455,27 @@ func TestGetAggregateSummary_BreakdownsFilteredPerColumn(t *testing.T) {
 	toolsOnly.SkillBreakdown = nil
 	toolsOnly.PluginBreakdown = nil
 	toolsOnly.McpServerBreakdown = nil
+	toolsOnly.McpToolBreakdown = nil
+	toolsOnly.EffortBreakdown = nil
+	toolsOnly.AgentBreakdown = nil
 
 	skillsAndServers := sampleRecord("skills-and-servers")
 	skillsAndServers.ToolBreakdown = nil
 	skillsAndServers.SkillBreakdown = map[string]int{"SKILL_KEY": 2}
 	skillsAndServers.PluginBreakdown = map[string]int{}
 	skillsAndServers.McpServerBreakdown = map[string]int{"SERVER_KEY": 4}
+	skillsAndServers.McpToolBreakdown = map[string]int{"MCPTOOL_KEY": 5}
+	skillsAndServers.EffortBreakdown = nil
+	skillsAndServers.AgentBreakdown = map[string]int{"AGENT_KEY": 6}
 
 	allEmpty := sampleRecord("all-empty")
 	allEmpty.ToolBreakdown = nil
 	allEmpty.SkillBreakdown = nil
 	allEmpty.PluginBreakdown = nil
 	allEmpty.McpServerBreakdown = nil
+	allEmpty.McpToolBreakdown = nil
+	allEmpty.EffortBreakdown = nil
+	allEmpty.AgentBreakdown = nil
 
 	for _, r := range []storage.InsightRecord{toolsOnly, skillsAndServers, allEmpty} {
 		if err := store.Upsert(ctx, r); err != nil {
@@ -487,6 +500,9 @@ func TestGetAggregateSummary_BreakdownsFilteredPerColumn(t *testing.T) {
 		{"SkillBreakdowns", summary.SkillBreakdowns, []string{"SKILL_KEY"}},
 		{"PluginBreakdowns", summary.PluginBreakdowns, nil},
 		{"McpServerBreakdowns", summary.McpServerBreakdowns, []string{"SERVER_KEY"}},
+		{"McpToolBreakdowns", summary.McpToolBreakdowns, []string{"MCPTOOL_KEY"}},
+		{"EffortBreakdowns", summary.EffortBreakdowns, nil},
+		{"AgentBreakdowns", summary.AgentBreakdowns, []string{"AGENT_KEY"}},
 	} {
 		if len(tc.blobs) != len(tc.want) {
 			t.Errorf("%s: got %d blobs %v, want %d — empty columns must be skipped per column, not per row",
@@ -531,7 +547,9 @@ VALUES ('defaults-only', 1, '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatalf("TotalSessions = %d, want 1", summary.TotalSessions)
 	}
 	if len(summary.ToolBreakdowns)+len(summary.SkillBreakdowns)+
-		len(summary.PluginBreakdowns)+len(summary.McpServerBreakdowns) != 0 {
+		len(summary.PluginBreakdowns)+len(summary.McpServerBreakdowns)+
+		len(summary.McpToolBreakdowns)+len(summary.EffortBreakdowns)+
+		len(summary.AgentBreakdowns) != 0 {
 		t.Errorf("default '{}' columns must contribute nothing, got %+v", summary)
 	}
 }
@@ -611,5 +629,74 @@ func TestNeedsProcessing_ReturnsRowsBelowCurrentVersion(t *testing.T) {
 	}
 	if len(pending) != 0 {
 		t.Errorf("expected no pending sessions after reprocessing, got %+v", pending)
+	}
+}
+
+// TestMigration20_AppliesToExistingDatabaseWithRows covers the upgrade path for
+// agent_breakdown (#202) rather than just the fresh-schema path: an existing
+// database with insight rows must gain the column with its '{}' default, so a
+// pre-v6 row reads as "nothing attributed" until the processor-version bump
+// reprocesses it. A nullable column here would fail Scan on real data only.
+func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, _, err := storage.NewSQLiteDB(dbPath, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	store := storage.NewSQLiteSessionInsightsStore(db)
+	r := sampleRecord("pre-migration")
+	r.AgentBreakdown = map[string]int{"Explore": 4}
+	if err := store.Upsert(ctx, r); err != nil {
+		t.Fatal(err)
+	}
+
+	// Roll the schema back to 19, with the row still in place.
+	for _, stmt := range []string{
+		"ALTER TABLE session_insights DROP COLUMN agent_breakdown",
+		"DELETE FROM schema_migrations WHERE version = 20",
+	} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("rolling back (%s): %v", stmt, err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-open: migration 20 must re-apply over the existing row.
+	db2, fresh, err := storage.NewSQLiteDB(dbPath, slog.Default())
+	if err != nil {
+		t.Fatalf("re-opening a version-19 database: %v", err)
+	}
+	t.Cleanup(func() { _ = db2.Close() })
+	if fresh {
+		t.Error("an existing database was reported as fresh")
+	}
+
+	var version int
+	if err := db2.QueryRowContext(ctx,
+		"SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 20 {
+		t.Fatalf("schema version = %d, want 20 — migration 20 did not re-apply", version)
+	}
+
+	got, err := storage.NewSQLiteSessionInsightsStore(db2).Get(ctx, "pre-migration")
+	if err != nil {
+		t.Fatalf("reading the pre-migration row: %v — agent_breakdown must scan as a string", err)
+	}
+	if got == nil {
+		t.Fatal("the pre-migration row went missing")
+	}
+	// Empty, not nil: the column defaulted, and unmarshalCounts keeps the
+	// empty convention so callers never special-case a backfilled row.
+	if got.AgentBreakdown == nil {
+		t.Error("AgentBreakdown is nil, want an empty map")
+	}
+	if len(got.AgentBreakdown) != 0 {
+		t.Errorf("AgentBreakdown = %v, want empty — the column was dropped and re-added", got.AgentBreakdown)
 	}
 }
