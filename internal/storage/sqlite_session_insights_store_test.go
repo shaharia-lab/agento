@@ -435,6 +435,107 @@ func TestGetAggregateSummary_BreakdownColumnsNotCrossWired(t *testing.T) {
 	}
 }
 
+// TestGetAggregateSummary_BreakdownsFilteredPerColumn pins the one behavior a
+// single-scan rewrite can silently break: the four columns are filtered
+// independently, so a row with tools but no skills must contribute to
+// ToolBreakdowns alone. Discarding such a row wholesale would drop real data
+// from the merged totals with every other test still green.
+func TestGetAggregateSummary_BreakdownsFilteredPerColumn(t *testing.T) {
+	store := setupInsightsTestDB(t)
+	ctx := context.Background()
+
+	// Three rows, each empty in a different place; "empty" reaches SQLite as the
+	// column's '{}' default because an empty map marshals to "{}".
+	toolsOnly := sampleRecord("tools-only")
+	toolsOnly.ToolBreakdown = map[string]int{"TOOL_KEY": 1}
+	toolsOnly.SkillBreakdown = nil
+	toolsOnly.PluginBreakdown = nil
+	toolsOnly.McpServerBreakdown = nil
+
+	skillsAndServers := sampleRecord("skills-and-servers")
+	skillsAndServers.ToolBreakdown = nil
+	skillsAndServers.SkillBreakdown = map[string]int{"SKILL_KEY": 2}
+	skillsAndServers.PluginBreakdown = map[string]int{}
+	skillsAndServers.McpServerBreakdown = map[string]int{"SERVER_KEY": 4}
+
+	allEmpty := sampleRecord("all-empty")
+	allEmpty.ToolBreakdown = nil
+	allEmpty.SkillBreakdown = nil
+	allEmpty.PluginBreakdown = nil
+	allEmpty.McpServerBreakdown = nil
+
+	for _, r := range []storage.InsightRecord{toolsOnly, skillsAndServers, allEmpty} {
+		if err := store.Upsert(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalSessions != 3 {
+		t.Fatalf("TotalSessions = %d, want 3", summary.TotalSessions)
+	}
+
+	for _, tc := range []struct {
+		field string
+		blobs []string
+		want  []string
+	}{
+		{"ToolBreakdowns", summary.ToolBreakdowns, []string{"TOOL_KEY"}},
+		{"SkillBreakdowns", summary.SkillBreakdowns, []string{"SKILL_KEY"}},
+		{"PluginBreakdowns", summary.PluginBreakdowns, nil},
+		{"McpServerBreakdowns", summary.McpServerBreakdowns, []string{"SERVER_KEY"}},
+	} {
+		if len(tc.blobs) != len(tc.want) {
+			t.Errorf("%s: got %d blobs %v, want %d — empty columns must be skipped per column, not per row",
+				tc.field, len(tc.blobs), tc.blobs, len(tc.want))
+			continue
+		}
+		for i, want := range tc.want {
+			if !strings.Contains(tc.blobs[i], want) {
+				t.Errorf("%s[%d] = %s, want it to contain %q", tc.field, i, tc.blobs[i], want)
+			}
+		}
+	}
+}
+
+// TestGetAggregateSummary_BreakdownColumnsScanAsPlainString pins the schema
+// guarantee the single-scan query relies on: the breakdown columns are
+// NOT NULL DEFAULT '{}', so a row written without them still scans into a
+// plain string. Were any of them nullable, Scan would fail at runtime and only
+// on real, pre-migration data.
+func TestGetAggregateSummary_BreakdownColumnsScanAsPlainString(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, _, err := storage.NewSQLiteDB(dbPath, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := storage.NewSQLiteSessionInsightsStore(db)
+	ctx := context.Background()
+
+	// Insert bypassing Upsert so the breakdown columns fall to their defaults.
+	if _, err := db.ExecContext(ctx, `
+INSERT INTO session_insights (session_id, processor_version, scanned_at)
+VALUES ('defaults-only', 1, '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("GetAggregateSummary: %v — breakdown columns must scan into string", err)
+	}
+	if summary.TotalSessions != 1 {
+		t.Fatalf("TotalSessions = %d, want 1", summary.TotalSessions)
+	}
+	if len(summary.ToolBreakdowns)+len(summary.SkillBreakdowns)+
+		len(summary.PluginBreakdowns)+len(summary.McpServerBreakdowns) != 0 {
+		t.Errorf("default '{}' columns must contribute nothing, got %+v", summary)
+	}
+}
+
 // TestGetAggregateSummary_ToolCallTotals covers the denominator the skills
 // panel needs: a breakdown without the unattributed share overstates how much
 // of the work skills account for.
