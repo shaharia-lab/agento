@@ -23,6 +23,7 @@ import {
 } from '@/lib/analyticsMetrics'
 import { ProjectAnalytics } from './ProjectAnalytics'
 import { TopSessionsCard } from './TopSessionsCard'
+import { ScanStatusNotice } from './ScanStatusNotice'
 import {
   drilldownUrl,
   heatmapCellTarget,
@@ -37,6 +38,7 @@ import type {
   ModelSessionStat,
   HeatmapCell,
   HourlyActivity,
+  DayActivity,
 } from '@/types'
 import { RefreshCw, Hash, Clock, Activity, CalendarDays } from 'lucide-react'
 import {
@@ -443,6 +445,148 @@ function HourlyActivityChart({
   )
 }
 
+/**
+ * The busiest days in the window.
+ *
+ * most_active_days has shipped in every analytics response since the endpoint
+ * existed and was never rendered — computed, sorted and thrown away. It answers
+ * "when did the work actually happen" at a glance, which the heatmap answers
+ * only by shape.
+ */
+function MostActiveDays({ days }: Readonly<{ days: DayActivity[] }>) {
+  if (days.length === 0) return null
+  const top = days.slice(0, 10)
+  const max = top[0]?.tokens || 1
+
+  return (
+    <ChartCard title="Busiest Days" subtitle="Ranked by conversation tokens.">
+      <ul className="space-y-2">
+        {top.map((day, i) => (
+          <li key={day.date} className="text-xs">
+            <div className="flex items-baseline justify-between mb-1">
+              <span className="text-zinc-700 dark:text-zinc-300">
+                {formatDateLabel(day.date)}
+                <span className="text-zinc-400 dark:text-zinc-500">
+                  {' '}
+                  · {day.sessions} session{day.sessions === 1 ? '' : 's'}
+                </span>
+              </span>
+              <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
+                {formatTokens(day.tokens)}
+              </span>
+            </div>
+            <div className="h-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${(day.tokens / max) * 100}%`,
+                  backgroundColor: MODEL_COLORS[i % MODEL_COLORS.length],
+                }}
+              />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </ChartCard>
+  )
+}
+
+/**
+ * The populated page body, extracted so the page component stays readable —
+ * the same split InsightsPage uses for the same reason.
+ */
+function GeneralUsageContent({
+  report,
+  summary,
+  observedSpan,
+  compare,
+  prevReport,
+  drilldownEnabled,
+  onDrill,
+}: Readonly<{
+  report: AnalyticsReport | null
+  summary: AnalyticsSummary
+  observedSpan: number
+  compare: boolean
+  prevReport: AnalyticsReport | null
+  drilldownEnabled: boolean
+  onDrill: (dayOfWeek: number | null, hour: number) => void
+}>) {
+  return (
+    <>
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <KPICard
+          icon={Hash}
+          label="Total Sessions"
+          value={summary.total_sessions.toLocaleString()}
+        />
+        <KPICard
+          icon={CalendarDays}
+          label="Avg Sessions / Day"
+          value={avgSessionsPerDay(summary.total_sessions, report?.time_series ?? [])}
+          sub={
+            observedSpan > 0
+              ? `over ${observedSpan} day${observedSpan === 1 ? '' : 's'} with activity`
+              : undefined
+          }
+        />
+        <KPICard icon={Clock} label="Top Model" value={formatModelName(summary.most_used_model)} />
+        {/* summary.unique_projects, not report.projects.length: the
+                  latter is the picker's option list and is built before
+                  filtering, so it ignored both the window and the project
+                  filter. */}
+        <KPICard
+          icon={Activity}
+          label="Unique Projects"
+          value={String(summary.unique_projects || '—')}
+        />
+      </div>
+
+      {/* Sessions over time */}
+      <SessionsTimeSeriesChart
+        data={report?.time_series ?? []}
+        previous={compare && prevReport ? prevReport.time_series : undefined}
+      />
+
+      {/* Sessions per model */}
+      {(report?.sessions_per_model?.length ?? 0) > 0 && (
+        <SessionsPerModelChart data={report!.sessions_per_model} />
+      )}
+
+      {/* Heatmap + Hourly */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <ActivityHeatmap
+          data={report?.heatmap ?? []}
+          onCellClick={drilldownEnabled ? (dow, hour) => onDrill(dow, hour) : undefined}
+        />
+        <HourlyActivityChart
+          data={report?.hourly_activity ?? []}
+          onBarClick={drilldownEnabled ? hour => onDrill(null, hour) : undefined}
+        />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <MostActiveDays days={report?.most_active_days ?? []} />
+        {report?.top_sessions && <TopSessionsCard top={report.top_sessions} />}
+      </div>
+
+      {/* Projects and leaderboards: the two questions the dashboards
+                could not answer at all, rather than answered wrongly. */}
+      <ProjectAnalytics
+        projects={report?.project_breakdown ?? []}
+        activity={report?.project_activity ?? []}
+      />
+
+      {!drilldownEnabled && (
+        <p className="text-[11px] text-zinc-400 dark:text-zinc-500 -mt-3">
+          Session drill-down is available for ranges up to {MAX_DRILLDOWN_DAYS} days — pick a
+          narrower date range to click through to sessions.
+        </p>
+      )}
+    </>
+  )
+}
+
 // ─── Main Page ────────────────────────────────────────────────────────────────
 
 export default function GeneralUsagePage() {
@@ -582,6 +726,8 @@ export default function GeneralUsagePage() {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-5">
+        <ScanStatusNotice onSettled={handleRefresh} />
+
         {error && (
           <div className="rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
             {error}
@@ -593,80 +739,15 @@ export default function GeneralUsagePage() {
             <p className="text-sm text-zinc-400">Loading analytics…</p>
           </div>
         ) : (
-          <>
-            {/* KPI Cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <KPICard
-                icon={Hash}
-                label="Total Sessions"
-                value={summary.total_sessions.toLocaleString()}
-              />
-              <KPICard
-                icon={CalendarDays}
-                label="Avg Sessions / Day"
-                value={avgSessionsPerDay(summary.total_sessions, report?.time_series ?? [])}
-                sub={
-                  observedSpan > 0
-                    ? `over ${observedSpan} day${observedSpan === 1 ? '' : 's'} with activity`
-                    : undefined
-                }
-              />
-              <KPICard
-                icon={Clock}
-                label="Top Model"
-                value={formatModelName(summary.most_used_model)}
-              />
-              {/* summary.unique_projects, not report.projects.length: the
-                  latter is the picker's option list and is built before
-                  filtering, so it ignored both the window and the project
-                  filter. */}
-              <KPICard
-                icon={Activity}
-                label="Unique Projects"
-                value={String(summary.unique_projects || '—')}
-              />
-            </div>
-
-            {/* Sessions over time */}
-            <SessionsTimeSeriesChart
-              data={report?.time_series ?? []}
-              previous={compare && prevReport ? prevReport.time_series : undefined}
-            />
-
-            {/* Sessions per model */}
-            {(report?.sessions_per_model?.length ?? 0) > 0 && (
-              <SessionsPerModelChart data={report!.sessions_per_model} />
-            )}
-
-            {/* Heatmap + Hourly */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <ActivityHeatmap
-                data={report?.heatmap ?? []}
-                onCellClick={
-                  drilldownEnabled ? (dow, hour) => drillIntoSessions(dow, hour) : undefined
-                }
-              />
-              <HourlyActivityChart
-                data={report?.hourly_activity ?? []}
-                onBarClick={drilldownEnabled ? hour => drillIntoSessions(null, hour) : undefined}
-              />
-            </div>
-            {/* Projects and leaderboards: the two questions the dashboards
-                could not answer at all, rather than answered wrongly. */}
-            <ProjectAnalytics
-              projects={report?.project_breakdown ?? []}
-              activity={report?.project_activity ?? []}
-            />
-
-            {report?.top_sessions && <TopSessionsCard top={report.top_sessions} />}
-
-            {!drilldownEnabled && (
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 -mt-3">
-                Session drill-down is available for ranges up to {MAX_DRILLDOWN_DAYS} days — pick a
-                narrower date range to click through to sessions.
-              </p>
-            )}
-          </>
+          <GeneralUsageContent
+            report={report}
+            summary={summary}
+            observedSpan={observedSpan}
+            compare={compare}
+            prevReport={prevReport}
+            drilldownEnabled={drilldownEnabled}
+            onDrill={drillIntoSessions}
+          />
         )}
       </div>
     </div>

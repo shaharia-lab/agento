@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -55,12 +56,16 @@ const (
 	// computed and then dropped for want of a column, so every sub-agent row
 	// written before v8 reads back zero, which is indistinguishable from an
 	// empty transcript.
+	// v10: a session whose only user content is an injected wrapper takes its
+	// preview from the command or skill name inside it rather than the raw
+	// wrapper text, so rows stop reading "Base directory for this skill: …".
+	// Stored previews written before v10 hold the raw text.
 	// v9: each session's cost is also stored keyed by the model that spent it
 	// (cost_by_model). It can only be produced while the transcript is being
 	// priced — a stored total carries neither the model nor the timestamp of the
 	// messages behind it — so rows written before v9 have an empty breakdown
 	// that no later pass could fill in.
-	CurrentScannerVersion = 9
+	CurrentScannerVersion = 10
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -1688,7 +1693,8 @@ func addSummaryUserEvent(summary *ClaudeSessionSummary, ev rawEvent) {
 			return
 		}
 		if summary.Preview == "" {
-			summary.Preview = truncateRunes(extractTextContent(ev.Message.Content), previewMaxRunes)
+			raw := extractTextContent(ev.Message.Content)
+			summary.Preview = truncateRunes(fallbackPreviewLabel(raw), previewMaxRunes)
 			summary.previewIsFallback = true
 		}
 		return
@@ -1697,10 +1703,68 @@ func addSummaryUserEvent(summary *ClaudeSessionSummary, ev rawEvent) {
 	summary.MessageCount++
 	// A genuine turn replaces a wrapper-sourced preview, so the label prefers
 	// what the person actually typed even when a wrapper came first.
+	//
+	// Still passed through fallbackPreviewLabel, because two injected classes
+	// reach this branch by design: a skill preamble and an interruption arrive
+	// as *array* content rather than a string, so isUserTurnContent counts them
+	// as turns (see CLAUDE.md). Their previews are exactly the unreadable rows
+	// worth labeling, and a real prompt matches neither wrapper shape.
 	if summary.Preview == "" || summary.previewIsFallback {
-		summary.Preview = truncateRunes(extractTextContent(ev.Message.Content), previewMaxRunes)
+		raw := extractTextContent(ev.Message.Content)
+		summary.Preview = truncateRunes(fallbackPreviewLabel(raw), previewMaxRunes)
 		summary.previewIsFallback = false
 	}
+}
+
+// commandNamePattern captures the slash command Claude Code records when a
+// session was started by one.
+var commandNamePattern = regexp.MustCompile(`<command-name>([^<]+)</command-name>`)
+
+// skillPreamblePattern captures the skill path from the preamble Claude Code
+// injects when a skill is invoked.
+var skillPreamblePattern = regexp.MustCompile(`^Base directory for this skill:\s*(\S+)`)
+
+// fallbackPreviewLabel turns an injected wrapper into something a person can
+// recognize in a list.
+//
+// These previews are the last resort in ResolveDisplayTitle, and for a session
+// that is only a slash command they are all there is. Unprocessed, they render
+// as rows reading "<command-message>lab-workflow:github-issue-to-pr</command-
+// message><command-name>…" or "Base directory for this skill: /home/user/
+// .claude/plugins/cache/…" — three of nine rows on the reference corpus. The
+// command or skill name was in there the whole time; this pulls it out.
+//
+// Anything that matches neither shape is returned unchanged, so a wrapper form
+// this does not know about is still shown rather than blanked.
+func fallbackPreviewLabel(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+
+	if m := commandNamePattern.FindStringSubmatch(trimmed); m != nil {
+		return "/" + strings.TrimSpace(m[1])
+	}
+	if m := skillPreamblePattern.FindStringSubmatch(trimmed); m != nil {
+		if name := skillNameFromPath(m[1]); name != "" {
+			return "skill: " + name
+		}
+	}
+	return raw
+}
+
+// skillNameFromPath reads the skill's name out of its directory path. Claude
+// Code lays these out as …/skills/<name>, so the segment after "skills" is the
+// name; a path that does not contain one falls back to its last segment, which
+// is the same thing for a bare skill directory.
+func skillNameFromPath(path string) string {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	for i, seg := range segments {
+		if seg == "skills" && i+1 < len(segments) {
+			return segments[i+1]
+		}
+	}
+	if len(segments) > 0 {
+		return segments[len(segments)-1]
+	}
+	return ""
 }
 
 // addSummaryAssistantEvent records one assistant event: always an event, but a
