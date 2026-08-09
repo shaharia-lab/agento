@@ -913,6 +913,8 @@ export interface SessionInsight {
   mcp_server_breakdown: Record<string, number>
   mcp_tool_breakdown: Record<string, number>
   effort_breakdown: Record<string, number>
+  /** Sub-agent type that made the call; empty for main-thread work. */
+  agent_breakdown: Record<string, number>
   /** Tool calls made with no skill in context — built-in tool use. */
   unattributed_calls: number
   total_duration_ms: number
