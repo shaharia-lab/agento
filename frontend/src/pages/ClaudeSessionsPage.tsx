@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, type ReactNode } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, type ReactNode } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { claudeSessionsApi } from '@/lib/api'
 import type {
@@ -106,6 +106,7 @@ export default function ClaudeSessionsPage() {
   // cheap status endpoint until that clears, then reload once so the figures
   // update without the user having to do anything.
   const [recosting, setRecosting] = useState(false)
+  const wasPending = useRef(false)
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
@@ -122,11 +123,11 @@ export default function ClaudeSessionsPage() {
       if (cancelled) return
 
       const pending = status.costs_stale || status.scan_in_progress
-      setRecosting(wasPending => {
-        // Finished: pull the re-priced rows in.
-        if (wasPending && !pending) load()
-        return pending
-      })
+      // Tracked in a ref, not read out of the state updater: an updater must
+      // stay pure, and React may invoke it twice in development.
+      if (wasPending.current && !pending) load()
+      wasPending.current = pending
+      setRecosting(pending)
       if (pending) timer = setTimeout(poll, STATUS_POLL_MS)
     }
 

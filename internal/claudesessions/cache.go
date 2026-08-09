@@ -118,6 +118,14 @@ func (c *Cache) WithPricingStore(store *pricing.Store) *Cache {
 	return c
 }
 
+// pricingRefreshMu serializes refreshPricingResolver's read-compare-snapshot-
+// store sequence. packagePricing's own RWMutex only makes each access atomic,
+// not the sequence: two concurrent refreshes could both observe the old
+// revision, both snapshot, and the later-finishing one could store an older
+// resolver under the newer revision. That used to be prevented incidentally by
+// c.mu, which List no longer holds (#208).
+var pricingRefreshMu sync.Mutex
+
 // refreshPricingResolver reloads the in-memory resolver snapshot when the
 // catalog's revision moved. A rate edit changes the revision; the next cache
 // List (hourly at worst) picks the new snapshot up, and read-time cost
@@ -126,6 +134,8 @@ func (c *Cache) refreshPricingResolver() {
 	if c.pricing == nil {
 		return
 	}
+	pricingRefreshMu.Lock()
+	defer pricingRefreshMu.Unlock()
 	ctx := context.Background()
 	rev, err := c.pricing.Revision(ctx)
 	if err != nil {
