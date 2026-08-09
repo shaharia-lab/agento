@@ -46,7 +46,12 @@ const (
 	// the detail page and the analytics totals read one number. Rows written
 	// before v6 have zeros in every cost column, which is indistinguishable from
 	// a genuinely free session, so they must be re-read rather than left alone.
-	CurrentScannerVersion = 6
+	// v7: user events whose string content opens with a Claude Code injection
+	// wrapper (task-notification, command-message, command-name,
+	// local-command-caveat, local-command-stdout, system-reminder) no longer
+	// count as messages (#197) — rows written before v7 count that machine
+	// chatter as human turns, and may also have taken their preview from it.
+	CurrentScannerVersion = 7
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.

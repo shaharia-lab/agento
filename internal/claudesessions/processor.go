@@ -3,6 +3,7 @@ package claudesessions
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 )
 
@@ -21,7 +22,12 @@ import (
 // model's flat rate, so every stored cost_estimate_usd is out of date.
 // v6: tool calls are also attributed to the sub-agent that made them (#202) —
 // every row written before v6 has an empty agent_breakdown.
-const CurrentProcessorVersion = 6
+// v7: user events whose string content opens with a Claude Code injection
+// wrapper no longer start a turn (#197), so turn_count and everything derived
+// from it — steps_per_turn_avg, autonomy_score, tokens_per_turn_avg,
+// longest_autonomous_chain and the response-time averages — are lower and more
+// accurate than every row written before v7.
+const CurrentProcessorVersion = 7
 
 // ProcessableEvent is a single decoded line from a Claude Code session JSONL file,
 // passed to each SessionProcessor in chronological order.
@@ -248,10 +254,58 @@ func parseContentBlocks(raw json.RawMessage) []contentBlock {
 	return blocks
 }
 
+// injectedTurnMarkers are the wrappers Claude Code writes into the transcript
+// as user-role events that nobody typed: slash-command expansions, the output
+// of a local command, sub-agent completion notices, and injected reminders.
+//
+// The list is empirical — it was read off the local corpus, and a new Claude
+// Code release can add a form that is not here. That failure mode is benign:
+// a missed marker leaves the count where it already is rather than making it
+// worse, so re-sampling is periodic maintenance, not a correctness dependency.
+var injectedTurnMarkers = []string{
+	"<task-notification>",
+	"<command-message>",
+	"<command-name>",
+	"<local-command-caveat>",
+	"<local-command-stdout>",
+	"<system-reminder>",
+}
+
+// isInjectedUserContent reports whether string content is one of Claude Code's
+// own injection wrappers rather than something a person typed.
+//
+// The match is anchored to the start, after trimming leading whitespace, and
+// that is deliberate: a person can legitimately write about these markers, and
+// a substring test would silently stop counting their message as a turn. The
+// corpus already contains such a prompt — a genuine human instruction that
+// quotes "system-reminder" mid-sentence — so this is a real case, not a
+// hypothetical one. Only content that *opens* with a wrapper is rejected.
+func isInjectedUserContent(content json.RawMessage) bool {
+	// Only bare JSON strings reach here as candidates; array content is
+	// classified by its blocks.
+	if len(content) == 0 || content[0] != '"' {
+		return false
+	}
+	var s string
+	if err := json.Unmarshal(content, &s); err != nil {
+		return false
+	}
+	s = strings.TrimSpace(s)
+	for _, marker := range injectedTurnMarkers {
+		if strings.HasPrefix(s, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // isUserTurnContent reports whether a user message's content is genuine human
-// input rather than a carrier for tool_result blocks. The overwhelming majority
-// of user events in a transcript are the latter — they exist only to hand a
-// tool's output back to the model, and nobody typed them.
+// input. Two classes of user event are not:
+//
+//   - carriers for tool_result blocks, which exist only to hand a tool's output
+//     back to the model — the overwhelming majority of user events; and
+//   - string content that opens with one of Claude Code's injection wrappers
+//     (see injectedTurnMarkers), which the harness wrote, not the user.
 //
 // The isSidechain check is deliberately left to the caller: the flag means
 // "delegated work, already counted elsewhere" in a parent transcript but is set
@@ -262,7 +316,7 @@ func isUserTurnContent(content json.RawMessage) bool {
 			return false
 		}
 	}
-	return true
+	return !isInjectedUserContent(content)
 }
 
 // isAssistantReply reports whether an assistant message contains something the
