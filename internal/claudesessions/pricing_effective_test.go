@@ -185,6 +185,7 @@ func TestIncrementalScan_PricingRefreshRePrices(t *testing.T) {
 		InputPerMTok: 2.00, OutputPerMTok: 10.00,
 		CacheWrite5mPerMTok: 2.50, CacheWrite1hPerMTok: 4.00, CacheReadPerMTok: 0.20,
 		EffectiveFrom: time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
+		Billable:      true,
 	}); err != nil {
 		t.Fatalf("insert test rate: %v", err)
 	}

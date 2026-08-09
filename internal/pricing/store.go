@@ -54,8 +54,10 @@ func (s *Store) scanRate(row interface{ Scan(...any) error }) (Rate, error) {
 	return r, nil
 }
 
-// boolToInt renders a Go bool as the INTEGER SQLite stores it as.
-func boolToInt(b bool) int {
+// boolToByte renders a flag as the single hash byte the revision fingerprint
+// mixes in. Writes pass bools straight to the driver, which stores them as
+// INTEGER — this exists only because the hash needs raw bytes.
+func boolToByte(b bool) byte {
 	if b {
 		return 1
 	}
@@ -119,7 +121,7 @@ func (s *Store) Revision(ctx context.Context) (int64, error) {
 		// Both flags change what a lookup means, not just how it displays:
 		// billable decides whether tokens land in the unknown bucket, and
 		// estimated qualifies the figure. Toggling either must re-cost.
-		_, _ = h.Write([]byte{byte(boolToInt(r.Billable)), byte(boolToInt(r.Estimated))})
+		_, _ = h.Write([]byte{boolToByte(r.Billable), boolToByte(r.Estimated)})
 	}
 	// Keep the value non-negative so it survives SQLite integer round-trips.
 	// #nosec G115 -- the mask clears the sign bit before the conversion.
@@ -164,7 +166,7 @@ func (s *Store) Seed(ctx context.Context) (int, error) {
 				r.InputPerMTok, r.OutputPerMTok,
 				r.CacheWrite5mPerMTok, r.CacheWrite1hPerMTok, r.CacheReadPerMTok,
 				r.EffectiveFrom.UTC().Format(time.RFC3339), r.Source,
-				boolToInt(r.Billable), boolToInt(r.Estimated),
+				r.Billable, r.Estimated,
 				time.Now().UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339),
 			)
 			if err != nil {
@@ -193,6 +195,13 @@ func (s *Store) UpsertRate(ctx context.Context, r Rate) error {
 		return errors.New("pricing: effective_from is required")
 	}
 	r.ModelPattern = strings.ToLower(strings.TrimSpace(r.ModelPattern))
+	// The same coherence rule the built-in seed obeys. Without it this path —
+	// the one the settings UI writes through — could store a billable row with
+	// no rates, or a non-billable row that still carries prices, which is
+	// precisely the silent $0 the Billable flag exists to rule out.
+	if err := validateRate(r.ModelPattern, r); err != nil {
+		return err
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO model_pricing (
@@ -221,7 +230,7 @@ func (s *Store) UpsertRate(ctx context.Context, r Rate) error {
 		r.InputPerMTok, r.OutputPerMTok,
 		r.CacheWrite5mPerMTok, r.CacheWrite1hPerMTok, r.CacheReadPerMTok,
 		r.EffectiveFrom.UTC().Format(time.RFC3339), r.Source, r.IsBuiltin,
-		boolToInt(r.Billable), boolToInt(r.Estimated),
+		r.Billable, r.Estimated,
 		now, now,
 	)
 	return err

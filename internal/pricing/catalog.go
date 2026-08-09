@@ -103,17 +103,17 @@ func validateRate(pattern string, r Rate) error {
 	if !r.Billable {
 		for _, v := range cols {
 			if v != 0 {
-				return fmt.Errorf("pricing: catalog entry %q: non-billable rates must all be zero", pattern)
+				return fmt.Errorf("pricing: rate %q: non-billable rates must all be zero", pattern)
 			}
 		}
 		return nil
 	}
 	if r.InputPerMTok <= 0 || r.OutputPerMTok <= 0 {
-		return fmt.Errorf("pricing: catalog entry %q: rates must be positive", pattern)
+		return fmt.Errorf("pricing: rate %q: rates must be positive", pattern)
 	}
 	for _, v := range cols {
 		if v < 0 {
-			return fmt.Errorf("pricing: catalog entry %q: cache rates must not be negative", pattern)
+			return fmt.Errorf("pricing: rate %q: cache rates must not be negative", pattern)
 		}
 	}
 	return nil
