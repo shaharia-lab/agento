@@ -2,9 +2,16 @@
  * Shared formatting utilities used across session-related pages.
  */
 
-/** Abbreviates large token counts: 1,200,000 → "1.2M", 15,000 → "15K". */
+/**
+ * Abbreviates large token counts: 21,274,518,062 → "21.3B", 1,200,000 → "1.2M",
+ * 15,000 → "15K".
+ *
+ * Billions are a real magnitude here — a month of cache reads reaches them —
+ * and rendering one as "21274.5M" is unreadable.
+ */
 export function formatTokens(n: number): string {
   if (!n) return '—'
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`
   return String(n)

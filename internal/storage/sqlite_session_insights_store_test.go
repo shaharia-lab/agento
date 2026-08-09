@@ -2,6 +2,7 @@ package storage_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -143,6 +144,32 @@ func TestSQLiteSessionInsightsStore_GetMany(t *testing.T) {
 	}
 }
 
+// TestGetMany_LargeIDSet covers the binding GetMany now shares with
+// GetAggregateSummary: one placeholder per ID would exceed SQLite's variable
+// limit at this size.
+func TestGetMany_LargeIDSet(t *testing.T) {
+	store := setupInsightsTestDB(t)
+	ctx := context.Background()
+
+	const n = 2500
+	ids := make([]string, 0, n)
+	for i := range n {
+		id := fmt.Sprintf("many-%04d", i)
+		ids = append(ids, id)
+		if err := store.Upsert(ctx, sampleRecord(id)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	results, err := store.GetMany(ctx, ids)
+	if err != nil {
+		t.Fatalf("fetching %d records: %v", n, err)
+	}
+	if len(results) != n {
+		t.Errorf("got %d records, want %d", len(results), n)
+	}
+}
+
 func TestSQLiteSessionInsightsStore_GetManyEmpty(t *testing.T) {
 	store := setupInsightsTestDB(t)
 	results, err := store.GetMany(context.Background(), nil)
@@ -164,8 +191,7 @@ func TestSQLiteSessionInsightsStore_GetAggregateSummary(t *testing.T) {
 		}
 	}
 
-	// All sessions (empty filter).
-	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	summary, err := store.GetAggregateSummary(ctx, []string{"a1", "a2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +200,7 @@ func TestSQLiteSessionInsightsStore_GetAggregateSummary(t *testing.T) {
 	}
 
 	// Filtered to one session.
-	filtered, err := store.GetAggregateSummary(ctx, []string{"a1"}, nil, nil)
+	filtered, err := store.GetAggregateSummary(ctx, []string{"a1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,78 +209,56 @@ func TestSQLiteSessionInsightsStore_GetAggregateSummary(t *testing.T) {
 	}
 }
 
-func TestSQLiteSessionInsightsStore_GetAggregateSummary_DateFilter(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db, _, err := storage.NewSQLiteDB(dbPath, slog.Default())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	store := storage.NewSQLiteSessionInsightsStore(db)
+// TestGetAggregateSummary_EmptySetIsEmptyNotEverything pins the contract that
+// makes windowing safe to do outside SQL: the ID set is complete, so a window
+// that matched nothing must aggregate nothing. Treating empty as "no filter"
+// would turn an empty range into a full-corpus total — the most misleading
+// possible answer, and silently plausible.
+func TestGetAggregateSummary_EmptySetIsEmptyNotEverything(t *testing.T) {
+	store := setupInsightsTestDB(t)
 	ctx := context.Background()
 
-	// Seed three sessions at known timestamps in claude_session_cache.
-	sessions := []struct {
-		id        string
-		startTime time.Time
-	}{
-		{"old-session", time.Date(2024, 1, 10, 12, 0, 0, 0, time.UTC)},
-		{"mid-session", time.Date(2024, 3, 15, 12, 0, 0, 0, time.UTC)},
-		{"new-session", time.Date(2024, 6, 20, 12, 0, 0, 0, time.UTC)},
+	for _, id := range []string{"a1", "a2"} {
+		if err := store.Upsert(ctx, sampleRecord(id)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	for _, s := range sessions {
-		_, err := db.ExecContext(ctx, `
-			INSERT INTO claude_session_cache (
-				session_id, project_path, file_path, file_mtime, start_time, last_activity
-			) VALUES (?, '/proj', '/proj/file.jsonl', ?, ?, ?)`,
-			s.id, s.startTime, s.startTime, s.startTime,
-		)
+
+	for name, ids := range map[string][]string{"nil": nil, "empty": {}} {
+		summary, err := store.GetAggregateSummary(ctx, ids)
 		if err != nil {
-			t.Fatalf("inserting cache row for %s: %v", s.id, err)
+			t.Fatalf("%s: %v", name, err)
 		}
-		if err := store.Upsert(ctx, sampleRecord(s.id)); err != nil {
-			t.Fatalf("Upsert %s: %v", s.id, err)
+		if summary.TotalSessions != 0 {
+			t.Errorf("%s id set: TotalSessions = %d, want 0", name, summary.TotalSessions)
+		}
+	}
+}
+
+// TestGetAggregateSummary_LargeIDSet covers the corpora this feature exists for.
+// The set travels as one JSON parameter precisely so a few thousand sessions in
+// a window do not exceed SQLite's bound-variable limit, which a placeholder per
+// ID would.
+func TestGetAggregateSummary_LargeIDSet(t *testing.T) {
+	store := setupInsightsTestDB(t)
+	ctx := context.Background()
+
+	const n = 2500
+	ids := make([]string, 0, n)
+	for i := range n {
+		id := fmt.Sprintf("session-%04d", i)
+		ids = append(ids, id)
+		if err := store.Upsert(ctx, sampleRecord(id)); err != nil {
+			t.Fatal(err)
 		}
 	}
 
-	// Filter with from only — should return mid and new sessions.
-	from := time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)
-	summary, err := store.GetAggregateSummary(ctx, nil, &from, nil)
+	summary, err := store.GetAggregateSummary(ctx, ids)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("aggregating %d sessions: %v", n, err)
 	}
-	if summary.TotalSessions != 2 {
-		t.Errorf("from-only filter: expected TotalSessions=2, got %d", summary.TotalSessions)
-	}
-
-	// Filter with from and to — should return only mid-session.
-	to := time.Date(2024, 4, 1, 0, 0, 0, 0, time.UTC)
-	summary, err = store.GetAggregateSummary(ctx, nil, &from, &to)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.TotalSessions != 1 {
-		t.Errorf("from+to filter: expected TotalSessions=1, got %d", summary.TotalSessions)
-	}
-
-	// Filter with to only — should return only old and mid sessions.
-	summary, err = store.GetAggregateSummary(ctx, nil, nil, &to)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.TotalSessions != 2 {
-		t.Errorf("to-only filter: expected TotalSessions=2, got %d", summary.TotalSessions)
-	}
-
-	// No sessions in range — should return zero count.
-	future := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	summary, err = store.GetAggregateSummary(ctx, nil, &future, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if summary.TotalSessions != 0 {
-		t.Errorf("empty range filter: expected TotalSessions=0, got %d", summary.TotalSessions)
+	if summary.TotalSessions != n {
+		t.Errorf("TotalSessions = %d, want %d", summary.TotalSessions, n)
 	}
 }
 
@@ -413,7 +417,7 @@ func TestGetAggregateSummary_BreakdownColumnsNotCrossWired(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	summary, err := store.GetAggregateSummary(ctx, []string{"wiring"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +487,7 @@ func TestGetAggregateSummary_BreakdownsFilteredPerColumn(t *testing.T) {
 		}
 	}
 
-	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	summary, err := store.GetAggregateSummary(ctx, []string{"tools-only", "skills-and-servers", "all-empty"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +543,7 @@ VALUES ('defaults-only', 1, '2026-01-01T00:00:00Z')`); err != nil {
 		t.Fatal(err)
 	}
 
-	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	summary, err := store.GetAggregateSummary(ctx, []string{"defaults-only"})
 	if err != nil {
 		t.Fatalf("GetAggregateSummary: %v — breakdown columns must scan into string", err)
 	}
@@ -570,7 +574,7 @@ func TestGetAggregateSummary_ToolCallTotals(t *testing.T) {
 		}
 	}
 
-	summary, err := store.GetAggregateSummary(ctx, nil, nil, nil)
+	summary, err := store.GetAggregateSummary(ctx, []string{"t1", "t2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -660,6 +664,7 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 		"ALTER TABLE session_insights DROP COLUMN agent_breakdown",
 		"DROP TABLE IF EXISTS model_pricing_tier",
 		"ALTER TABLE claude_subagent_cache DROP COLUMN event_count",
+		"ALTER TABLE claude_session_cache DROP COLUMN cost_by_model",
 		"DELETE FROM schema_migrations WHERE version >= 20",
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
@@ -680,13 +685,26 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 		t.Error("an existing database was reported as fresh")
 	}
 
-	var version int
+	// Compared against a freshly created database rather than a literal: what
+	// this asserts is that the rollback replayed all the way back to head, not
+	// that head is any particular number. Pinning the number here made every
+	// new migration fail this test for a reason unrelated to what it covers.
+	var version, head int
 	if err := db2.QueryRowContext(ctx,
 		"SELECT MAX(version) FROM schema_migrations").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 22 {
-		t.Fatalf("schema version = %d, want 22 — every migration from 20 up must re-apply", version)
+	freshDB, _, err := storage.NewSQLiteDB(filepath.Join(t.TempDir(), "head.db"), slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = freshDB.Close() })
+	if err := freshDB.QueryRowContext(ctx,
+		"SELECT MAX(version) FROM schema_migrations").Scan(&head); err != nil {
+		t.Fatal(err)
+	}
+	if version != head {
+		t.Fatalf("schema version = %d, want %d — every migration from 20 up must re-apply", version, head)
 	}
 
 	got, err := storage.NewSQLiteSessionInsightsStore(db2).Get(ctx, "pre-migration")

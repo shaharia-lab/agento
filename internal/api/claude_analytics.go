@@ -18,6 +18,25 @@ import (
 //	tz      IANA timezone the buckets and day boundaries are derived in
 //	        (default: UTC). Timestamps stay UTC on the wire either way.
 func (s *Server) handleGetClaudeAnalytics(w http.ResponseWriter, r *http.Request) {
+	params := parseAnalyticsParams(r)
+	sessions := s.claudeSessionCache.List()
+	report := claudesessions.AggregateAnalytics(sessions, params)
+	s.writeJSON(w, http.StatusOK, report)
+}
+
+// parseAnalyticsParams reads the window, project and timezone every
+// analytics-shaped endpoint accepts.
+//
+// It is shared rather than duplicated because two endpoints reading the same
+// query string differently is exactly how the dashboards came to disagree: the
+// insights summary resolved its own dates, against its own column, with its own
+// inclusivity rule. One parser and one filter (claudesessions.FilterSessions)
+// mean one answer to "which sessions are in this window".
+//
+// An unparseable from/to falls back to the default window rather than erroring,
+// matching how parseTimezone treats a bad zone — a read-only dashboard is more
+// useful rendered over a default range than refused.
+func parseAnalyticsParams(r *http.Request) claudesessions.AnalyticsParams {
 	q := r.URL.Query()
 	loc := parseTimezone(q.Get("tz"))
 
@@ -33,22 +52,17 @@ func (s *Server) handleGetClaudeAnalytics(w http.ResponseWriter, r *http.Request
 		}
 	}
 	if raw := q.Get("to"); raw != "" {
-		if t, err := parseAnalyticsDate(raw, loc); err == nil {
-			// Make the end date inclusive by advancing to end of local day.
-			to = time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, loc)
+		if t, err := parseRangeEnd(raw, loc); err == nil {
+			to = t
 		}
 	}
 
-	params := claudesessions.AnalyticsParams{
+	return claudesessions.AnalyticsParams{
 		From:    from,
 		To:      to,
 		Project: q.Get("project"),
 		Loc:     loc,
 	}
-
-	sessions := s.claudeSessionCache.List()
-	report := claudesessions.AggregateAnalytics(sessions, params)
-	s.writeJSON(w, http.StatusOK, report)
 }
 
 // parseAnalyticsDate tries RFC3339 first, then YYYY-MM-DD in loc.
@@ -61,6 +75,28 @@ func parseAnalyticsDate(s string, loc *time.Location) (time.Time, error) {
 		return t, nil
 	}
 	return time.ParseInLocation("2006-01-02", s, loc)
+}
+
+// parseRangeEnd parses an inclusive window end.
+//
+// A bare YYYY-MM-DD names a whole local day, so it resolves to that day's final
+// second rather than its first — otherwise "to: today" would exclude everything
+// that happened today. An RFC3339 value states its own instant and is taken at
+// its word, matching parseAnalyticsDate.
+//
+// Every analytics-shaped endpoint resolves its window through this and
+// parseAnalyticsDate, so the same from/to pair selects the same sessions
+// wherever it is sent. The insights summary drifting off that basis is what
+// made two dashboards report different totals for one window.
+func parseRangeEnd(raw string, loc *time.Location) (time.Time, error) {
+	t, err := parseAnalyticsDate(raw, loc)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if _, rfcErr := time.Parse(time.RFC3339, raw); rfcErr == nil {
+		return t, nil
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, loc), nil
 }
 
 // parseTimezone resolves an IANA timezone name, falling back to UTC.

@@ -38,6 +38,7 @@ import {
   type ToolUsage,
   type FileTouch,
 } from '@/lib/transcript'
+import { SessionInsightsCard } from './SessionInsightsCard'
 
 /**
  * How recently the transcript must have been written to for the header to call
@@ -475,16 +476,21 @@ function SessionSidebar({
   files,
   todos,
   subagents,
+  sessionId,
 }: Readonly<{
   timeline: OutlineEntry[]
   tools: ToolUsage[]
   files: FileTouch[]
   todos: ClaudeTodo[]
   subagents: ClaudeSubagent[]
+  sessionId?: string
 }>) {
   const maxToolCount = tools[0]?.count ?? 0
   return (
     <div className="flex flex-col gap-4">
+      {/* First card in the sidebar: these are the measurements of the run, and
+          the endpoint behind them had no caller at all until now. */}
+      {sessionId && <SessionInsightsCard sessionId={sessionId} />}
       {timeline.length > 0 && (
         <SidebarCard title="Timeline">
           <div className="flex flex-col">
@@ -734,6 +740,11 @@ export default function ClaudeSessionDetailPage() {
   const totalCost = (detail.cost?.total_usd ?? 0) + (detail.subagent_cost?.total_usd ?? 0)
   const unpricedModels = detail.unpriced_models ?? []
   const partiallyPriced = unpricedModels.length > 0
+  const delegatedTokens =
+    (sub?.input_tokens ?? 0) +
+    (sub?.output_tokens ?? 0) +
+    (sub?.cache_creation_tokens ?? 0) +
+    (sub?.cache_read_tokens ?? 0)
 
   const durationMs =
     new Date(detail.last_activity).getTime() - new Date(detail.start_time).getTime()
@@ -853,6 +864,30 @@ export default function ClaudeSessionDetailPage() {
             Cost excludes {unpricedModels.join(', ')} — no published rate.
           </p>
         )}
+        {/* The strip's figures include delegated work and survive compaction,
+            but nothing said so: a session with 35 sub-agents looked exactly
+            like one that ran everything on the main thread. */}
+        {(delegatedTokens > 0 || (detail.compaction_count ?? 0) > 0) && (
+          <p className="text-[11.5px] text-zinc-500 dark:text-zinc-400">
+            {delegatedTokens > 0 && (
+              <>
+                Includes {formatTokens(delegatedTokens)} tokens and{' '}
+                {formatCost(detail.subagent_cost?.total_usd ?? 0)} from {detail.subagent_count}{' '}
+                delegated sub-agent
+                {detail.subagent_count === 1 ? '' : 's'}.
+              </>
+            )}
+            {delegatedTokens > 0 && (detail.compaction_count ?? 0) > 0 && ' '}
+            {(detail.compaction_count ?? 0) > 0 && (
+              <>
+                Compacted {detail.compaction_count}×
+                {(detail.dropped_tokens ?? 0) > 0 &&
+                  `, dropping ${formatTokens(detail.dropped_tokens ?? 0)} tokens`}
+                .
+              </>
+            )}
+          </p>
+        )}
       </div>
 
       {/* Body. Side by side the two columns are independent scroll panes rather
@@ -872,6 +907,7 @@ export default function ClaudeSessionDetailPage() {
             files={files}
             todos={detail.todos}
             subagents={detail.subagents}
+            sessionId={id}
           />
         </div>
       </div>

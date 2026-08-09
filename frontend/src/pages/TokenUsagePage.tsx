@@ -4,11 +4,9 @@ import {
   Area,
   BarChart,
   Bar,
+  ComposedChart,
   LineChart,
   Line,
-  PieChart,
-  Pie,
-  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -23,19 +21,12 @@ import type {
   TimeSeriesPoint,
   CacheEfficiencyPoint,
   ModelStat,
+  ModelCostStat,
+  StackedCostPoint,
   CostPoint,
   CostSummary,
 } from '@/types'
-import {
-  RefreshCw,
-  TrendingUp,
-  Zap,
-  DollarSign,
-  Hash,
-  Clock,
-  Layers,
-  ChevronDown,
-} from 'lucide-react'
+import { RefreshCw, TrendingUp, Zap, DollarSign, Hash, Layers } from 'lucide-react'
 import {
   MODEL_COLORS,
   DatePreset,
@@ -46,10 +37,26 @@ import {
   KPICard,
   ChartCard,
   DateRangePicker,
+  DonutWithLegend,
+  StackedComposition,
+  CompareToggle,
 } from './analyticsShared'
+import { LivePricingTable } from './LivePricingTable'
+import { ScanStatusNotice } from './ScanStatusNotice'
 // Cost is formatted by the shared helper so this page and the session list can
 // never disagree about what a given figure looks like.
 import { formatCost } from '@/lib/format'
+import { previousRange } from '@/lib/analyticsMetrics'
+
+/**
+ * How many models the stacked cost chart draws as their own series.
+ *
+ * The palette has eight colours and a stripe below a percent or so is invisible
+ * anyway; models past this point are simply not drawn, which the chart's note
+ * states rather than leaving a reader to wonder why the stack is short of the
+ * total.
+ */
+const MAX_STACKED_MODELS = 6
 
 // ─── Charts ───────────────────────────────────────────────────────────────────
 
@@ -71,7 +78,7 @@ function TokenTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>) {
             tick={{ fontSize: 11 }}
             tickLine={false}
             axisLine={false}
-            width={48}
+            width={56}
           />
           <Tooltip
             formatter={(v, name) => [
@@ -117,7 +124,10 @@ function TokenTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>) {
 function CacheEfficiencyChart({ data }: Readonly<{ data: CacheEfficiencyPoint[] }>) {
   const formatted = data.map(d => ({ ...d, date: formatDateLabel(d.date) }))
   return (
-    <ChartCard title="Cache Hit Rate (%)">
+    <ChartCard
+      title="Cache Hit Rate (%)"
+      subtitle="Cache reads as a share of every input-side token — fresh input, cache writes and cache reads. A model with no prompt caching scores 0 rather than being left out of its own denominator."
+    >
       <ResponsiveContainer width="100%" height={280}>
         <LineChart data={formatted} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" strokeOpacity={0.5} />
@@ -186,153 +196,229 @@ function CostOverTimeChart({ data }: Readonly<{ data: CostPoint[] }>) {
 
 function CostSummaryCards({ cost }: Readonly<{ cost: CostSummary }>) {
   const items = [
-    { label: 'Input Cost', value: formatCost(cost.input_cost_usd) },
-    { label: 'Output Cost', value: formatCost(cost.output_cost_usd) },
-    { label: 'Cache Read Cost', value: formatCost(cost.cache_read_cost_usd) },
-    { label: 'Cache Write Cost', value: formatCost(cost.cache_write_cost_usd) },
+    { label: 'Input Cost', value: formatCost(cost.input_cost_usd), strong: false },
+    { label: 'Output Cost', value: formatCost(cost.output_cost_usd), strong: false },
+    { label: 'Cache Read Cost', value: formatCost(cost.cache_read_cost_usd), strong: false },
+    { label: 'Cache Write Cost', value: formatCost(cost.cache_write_cost_usd), strong: false },
+    // The total shipped in every response but was never rendered, leaving the
+    // reader to add four figures to answer the page's headline question.
+    { label: 'Total Cost', value: formatCost(cost.total_cost_usd), strong: true },
   ]
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mb-4">
       {items.map(item => (
         <div
           key={item.label}
-          className="rounded-md border border-zinc-200 dark:border-zinc-700/50 bg-zinc-50 dark:bg-zinc-800/50 px-3 py-2.5"
+          className={`rounded-md border px-3 py-2.5 ${
+            item.strong
+              ? 'border-emerald-200 dark:border-emerald-800/60 bg-emerald-50 dark:bg-emerald-900/20'
+              : 'border-zinc-200 dark:border-zinc-700/50 bg-zinc-50 dark:bg-zinc-800/50'
+          }`}
         >
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-1">{item.label}</p>
-          <p className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{item.value}</p>
+          <p
+            className={`text-base font-semibold ${
+              item.strong
+                ? 'text-emerald-700 dark:text-emerald-400'
+                : 'text-zinc-900 dark:text-zinc-100'
+            }`}
+          >
+            {item.value}
+          </p>
         </div>
       ))}
     </div>
   )
 }
 
-function ModelPieChart({ data }: Readonly<{ data: ModelStat[] }>) {
+/**
+ * Cost by model — the chart the dashboards were missing.
+ *
+ * It sits above the token breakdown because it answers the question users
+ * actually ask ("where is my money going?"), and because the token chart
+ * answers it wrongly if read that way.
+ */
+function ModelCostDonut({ data }: Readonly<{ data: ModelCostStat[] }>) {
+  const slices = data.map(m => ({
+    name: `${formatModelName(m.model)} · ${m.provider}`,
+    value: m.cost.total_usd,
+    percentage: m.percentage,
+  }))
   return (
-    <ChartCard title="Token Distribution by Model">
-      <ResponsiveContainer width="100%" height={280}>
-        <PieChart>
-          <Pie
-            data={data}
-            dataKey="tokens"
-            nameKey="model"
-            cx="50%"
-            cy="45%"
-            outerRadius={90}
-            label={({ name, percent }) =>
-              `${formatModelName(name as string)} ${((percent as number) * 100).toFixed(1)}%`
-            }
-            labelLine={true}
-          >
-            {data.map((entry, i) => (
-              <Cell key={`model-${entry.model}`} fill={MODEL_COLORS[i % MODEL_COLORS.length]} />
-            ))}
-          </Pie>
+    <ChartCard
+      title="Cost by Model"
+      subtitle="Every dollar attributed to the model that spent it, delegated work included. Priced per message at its own model and timestamp."
+    >
+      <DonutWithLegend data={slices} formatValue={formatCost} />
+    </ChartCard>
+  )
+}
+
+/** Spend rolled up to the provider behind each model. */
+function ProviderCostBars({ data }: Readonly<{ data: ModelCostStat[] }>) {
+  const byProvider = new Map<string, { provider: string; cost: number; models: number }>()
+  for (const m of data) {
+    const entry = byProvider.get(m.provider) ?? { provider: m.provider, cost: 0, models: 0 }
+    entry.cost += m.cost.total_usd
+    entry.models += 1
+    byProvider.set(m.provider, entry)
+  }
+  const rows = [...byProvider.values()].sort((a, b) => b.cost - a.cost)
+  // One provider is not a comparison — the panel would spend its height
+  // restating the total tile.
+  if (rows.length < 2) return null
+
+  const max = rows[0].cost || 1
+  return (
+    <ChartCard title="Cost by Provider">
+      <ul className="space-y-2">
+        {rows.map((row, i) => (
+          <li key={row.provider} className="text-xs">
+            <div className="flex items-baseline justify-between mb-1">
+              <span className="text-zinc-700 dark:text-zinc-300">
+                {row.provider}
+                <span className="text-zinc-400 dark:text-zinc-500">
+                  {' '}
+                  · {row.models} model{row.models === 1 ? '' : 's'}
+                </span>
+              </span>
+              <span className="tabular-nums font-medium text-zinc-900 dark:text-zinc-100">
+                {formatCost(row.cost)}
+              </span>
+            </div>
+            <div className="h-2 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${(row.cost / max) * 100}%`,
+                  backgroundColor: MODEL_COLORS[i % MODEL_COLORS.length],
+                }}
+              />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </ChartCard>
+  )
+}
+
+/**
+ * Cost over time, stacked by model.
+ *
+ * The backend ships one map per bucket; recharts needs one flat row per bucket
+ * with a key per series, so the map is spread here. Only models that actually
+ * spent something in the window get a series, which keeps the legend honest on
+ * a corpus with a long tail of one-off models.
+ */
+function StackedCostChart({
+  data,
+  models,
+  hiddenModels,
+  previous,
+}: Readonly<{
+  data: StackedCostPoint[]
+  models: string[]
+  hiddenModels: number
+  previous?: CostPoint[]
+}>) {
+  // The ghost is the previous window's *total* cost, not its per-model split:
+  // one dashed line against a stack reads as "then vs now", where six ghost
+  // series would be unreadable.
+  const rows = data.map((point, i) => ({
+    date: formatDateLabel(point.date),
+    ...Object.fromEntries(models.map(m => [m, point.cost_by_model[m] ?? 0])),
+    // Aligned by bucket position — the first day of this window against the
+    // first day of the previous one.
+    previous: previous?.[i]?.estimated_cost_usd,
+  }))
+
+  // A dropped series is stated, not silently missing: a stack that does not
+  // reach the total it is supposed to decompose is a defect a reader cannot
+  // distinguish from one.
+  const note = [
+    hiddenModels > 0
+      ? `Same buckets as the cost chart above, split by the model that spent it. The ${hiddenModels} smallest-spending model${hiddenModels === 1 ? '' : 's'} are not drawn, so the stack is slightly below the total.`
+      : 'Same buckets and same total as the cost chart above, split by the model that spent it.',
+    previous ? 'The dashed line is total spend in the equally-sized window before this one.' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+
+  return (
+    <ChartCard title="Cost Over Time by Model" subtitle={note}>
+      <ResponsiveContainer width="100%" height={260}>
+        <ComposedChart data={rows} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#27272a" strokeOpacity={0.5} />
+          <XAxis
+            dataKey="date"
+            tick={{ fontSize: 11 }}
+            tickLine={false}
+            interval="preserveStartEnd"
+          />
+          <YAxis
+            tickFormatter={v => formatCost(v as number)}
+            tick={{ fontSize: 11 }}
+            tickLine={false}
+            axisLine={false}
+            width={64}
+          />
           <Tooltip
             formatter={(v, name) => [
-              formatTokens(Number(v ?? 0)),
+              formatCost(Number(v ?? 0)),
               formatModelName(String(name ?? '')),
             ]}
             contentStyle={{ fontSize: 12, borderRadius: 6 }}
           />
-        </PieChart>
+          <Legend wrapperStyle={{ fontSize: 12 }} formatter={v => formatModelName(String(v))} />
+          {models.map((model, i) => (
+            <Bar
+              key={model}
+              dataKey={model}
+              name={model}
+              stackId="cost"
+              fill={MODEL_COLORS[i % MODEL_COLORS.length]}
+            />
+          ))}
+          {previous && (
+            <Line
+              type="monotone"
+              dataKey="previous"
+              name="Previous period total"
+              stroke="#a1a1aa"
+              strokeDasharray="4 3"
+              strokeWidth={1.5}
+              dot={false}
+            />
+          )}
+        </ComposedChart>
       </ResponsiveContainer>
     </ChartCard>
   )
 }
 
-// ─── Pricing Disclaimer ───────────────────────────────────────────────────────
-
-function PricingDisclaimer() {
-  const [open, setOpen] = useState(false)
+/**
+ * Conversation tokens by model.
+ *
+ * Deliberately *not* titled as a spend chart. It plots input+output only, and a
+ * backend with no prompt caching re-bills its whole context as fresh input
+ * every turn while the Anthropic models push theirs through cache read — so on
+ * the reference corpus one model held 89.2% of this chart and 13.6% of the
+ * money. "Cost by Model" answers the spend question; this one answers where
+ * conversation volume went, and says so.
+ */
+function ModelTokenDonut({ data }: Readonly<{ data: ModelStat[] }>) {
+  const slices = data.map(m => ({
+    name: formatModelName(m.model),
+    value: m.tokens,
+    percentage: m.percentage,
+  }))
   return (
-    <div className="rounded-md border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/20 mb-4">
-      <button
-        onClick={() => setOpen(o => !o)}
-        className="flex w-full items-center justify-between px-3 py-2 text-xs font-medium text-amber-800 dark:text-amber-300 cursor-pointer"
-      >
-        <span>⚠ Estimates only — these figures may be outdated</span>
-        <ChevronDown
-          className={`h-3.5 w-3.5 shrink-0 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
-        />
-      </button>
-      {open && (
-        <div className="px-3 pb-2.5 border-t border-amber-200 dark:border-amber-700/50 pt-2">
-          <p className="text-xs text-amber-700 dark:text-amber-400 mb-2">
-            Rates below were sourced from the{' '}
-            <a
-              href="https://platform.claude.com/docs/en/about-claude/pricing"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline hover:text-amber-900 dark:hover:text-amber-200"
-            >
-              Anthropic API pricing page
-            </a>{' '}
-            in February 2026. Anthropic updates pricing periodically — always verify against the{' '}
-            <a
-              href="https://platform.claude.com/docs/en/about-claude/pricing"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="underline hover:text-amber-900 dark:hover:text-amber-200"
-            >
-              official pricing page
-            </a>{' '}
-            before relying on these numbers. Model tier is detected from the model name; unknown
-            models fall back to Sonnet pricing.
-          </p>
-          <table className="w-full text-[12px] text-amber-800 dark:text-amber-300 border-collapse">
-            <thead>
-              <tr className="border-b border-amber-200 dark:border-amber-700/50">
-                <th className="text-left font-medium pb-1 pr-4">Model</th>
-                <th className="text-right font-medium pb-1 pr-4">Input</th>
-                <th className="text-right font-medium pb-1 pr-4">Output</th>
-                <th className="text-right font-medium pb-1 pr-4">Cache write</th>
-                <th className="text-right font-medium pb-1">Cache read</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-amber-100 dark:divide-amber-800/30">
-              {[
-                {
-                  model: 'Claude Opus 4.5/4.6',
-                  input: '$5',
-                  output: '$25',
-                  cacheWrite: '$6.25',
-                  cacheRead: '$0.50',
-                },
-                {
-                  model: 'Claude Sonnet 4.x',
-                  input: '$3',
-                  output: '$15',
-                  cacheWrite: '$3.75',
-                  cacheRead: '$0.30',
-                },
-                {
-                  model: 'Claude Haiku 4.5',
-                  input: '$1',
-                  output: '$5',
-                  cacheWrite: '$1.25',
-                  cacheRead: '$0.10',
-                },
-              ].map(row => (
-                <tr key={row.model}>
-                  <td className="py-0.5 pr-4 font-medium">{row.model}</td>
-                  <td className="py-0.5 pr-4 text-right">{row.input}</td>
-                  <td className="py-0.5 pr-4 text-right">{row.output}</td>
-                  <td className="py-0.5 pr-4 text-right">{row.cacheWrite}</td>
-                  <td className="py-0.5 text-right">{row.cacheRead}</td>
-                </tr>
-              ))}
-            </tbody>
-            <tfoot>
-              <tr>
-                <td colSpan={5} className="pt-1.5 text-amber-600 dark:text-amber-500 italic">
-                  All rates are per million tokens (MTok).
-                </td>
-              </tr>
-            </tfoot>
-          </table>
-        </div>
-      )}
-    </div>
+    <ChartCard
+      title="Conversation Tokens by Model"
+      subtitle="Input + output only. Cache reads and writes are excluded, so this is not a picture of spend — see Cost by Model for that."
+    >
+      <DonutWithLegend data={slices} formatValue={formatTokens} />
+    </ChartCard>
   )
 }
 
@@ -340,6 +426,7 @@ function PricingDisclaimer() {
 
 export default function TokenUsagePage() {
   const [report, setReport] = useState<AnalyticsReport | null>(null)
+  const [prevReport, setPrevReport] = useState<AnalyticsReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -348,15 +435,20 @@ export default function TokenUsagePage() {
   const [from, setFrom] = useState(() => presetToRange('30d').from)
   const [to, setTo] = useState(() => presetToRange('30d').to)
   const [project, setProject] = useState('all')
+  const [compare, setCompare] = useState(false)
 
-  const load = useCallback(async (f: string, t: string, proj: string) => {
+  const load = useCallback(async (f: string, t: string, proj: string, withPrevious: boolean) => {
     try {
-      const data = await analyticsApi.get({
-        from: f,
-        to: t,
-        project: proj === 'all' ? undefined : proj,
-      })
+      const scope = proj === 'all' ? undefined : proj
+      const prevRange = previousRange(f, t)
+      const [data, prior] = await Promise.all([
+        analyticsApi.get({ from: f, to: t, project: scope }),
+        withPrevious
+          ? analyticsApi.get({ from: prevRange.from, to: prevRange.to, project: scope })
+          : Promise.resolve(null),
+      ])
       setReport(data)
+      setPrevReport(prior)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load analytics')
@@ -367,8 +459,8 @@ export default function TokenUsagePage() {
   }, [])
 
   useEffect(() => {
-    load(from, to, project)
-  }, [load, from, to, project])
+    load(from, to, project, compare)
+  }, [load, from, to, project, compare])
 
   const handlePreset = (p: DatePreset) => {
     setPreset(p)
@@ -381,11 +473,18 @@ export default function TokenUsagePage() {
 
   const handleRefresh = () => {
     setRefreshing(true)
-    load(from, to, project)
+    load(from, to, project, compare)
   }
+
+  // Series for the stacked cost chart, ordered by spend so the largest sits at
+  // the bottom of each bar and the legend reads top-spender first. Capped
+  // because a long tail of near-zero models produces stripes too thin to see
+  // and a legend that dwarfs the chart.
+  const costModels = (report?.cost_by_model ?? []).slice(0, MAX_STACKED_MODELS).map(m => m.model)
 
   const summary: AnalyticsSummary = report?.summary ?? {
     total_sessions: 0,
+    unique_projects: 0,
     total_tokens: 0,
     total_input_tokens: 0,
     total_output_tokens: 0,
@@ -438,10 +537,19 @@ export default function TokenUsagePage() {
           project={project}
           onProject={setProject}
         />
+        <div className="mt-2">
+          <CompareToggle
+            enabled={compare}
+            onChange={setCompare}
+            label="Overlay the equally-sized window immediately before this one"
+          />
+        </div>
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-5">
+        <ScanStatusNotice onSettled={handleRefresh} />
+
         {error && (
           <div className="rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
             {error}
@@ -454,7 +562,13 @@ export default function TokenUsagePage() {
           </div>
         ) : (
           <>
-            {/* KPI Cards */}
+            {/* KPI Cards.
+
+                "Total Tokens" used to sit beside "Est. Cost" while counting a
+                different universe: it excluded cache reads and writes, which
+                the cost included and which were most of the money. The tile is
+                now named for what it counts, and the two cache tiers each get
+                their own tile so nothing large is invisible. */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
               <KPICard
                 icon={Hash}
@@ -463,9 +577,9 @@ export default function TokenUsagePage() {
               />
               <KPICard
                 icon={Zap}
-                label="Total Tokens"
+                label="Conversation Tokens"
                 value={formatTokens(summary.total_tokens)}
-                sub={`${formatTokens(summary.total_input_tokens)}↑ ${formatTokens(summary.total_output_tokens)}↓`}
+                sub={`${formatTokens(summary.total_input_tokens)}↑ ${formatTokens(summary.total_output_tokens)}↓ · excludes cache`}
               />
               <KPICard
                 icon={Layers}
@@ -473,22 +587,51 @@ export default function TokenUsagePage() {
                 value={formatTokens(summary.total_cache_read_tokens)}
               />
               <KPICard
+                icon={Layers}
+                label="Cache Write"
+                value={formatTokens(summary.total_cache_creation_tokens)}
+              />
+              <KPICard
                 icon={TrendingUp}
                 label="Avg / Session"
                 value={formatTokens(Math.round(summary.avg_tokens_per_session))}
-              />
-              <KPICard
-                icon={Clock}
-                label="Top Model"
-                value={formatModelName(summary.most_used_model)}
+                sub="conversation tokens"
               />
               <KPICard
                 icon={DollarSign}
                 label="Est. Cost"
                 value={formatCost(summary.estimated_cost_usd)}
+                sub={`all four token types · top model ${formatModelName(summary.most_used_model)}`}
                 color="text-emerald-600 dark:text-emerald-400"
               />
             </div>
+
+            {/* The composition the KPI row cannot show: cache traffic dwarfs
+                conversation tokens, and the cost tile is priced over all of it. */}
+            <ChartCard
+              title="Token Composition"
+              subtitle="Every token the estimated cost was computed over. Conversation tokens are the two left-hand segments."
+            >
+              <StackedComposition
+                parts={[
+                  { label: 'Input', value: summary.total_input_tokens, color: MODEL_COLORS[0] },
+                  { label: 'Output', value: summary.total_output_tokens, color: MODEL_COLORS[1] },
+                  {
+                    label: 'Cache Read',
+                    value: summary.total_cache_read_tokens,
+                    color: MODEL_COLORS[2],
+                    hint: 'billed at ~10% of input',
+                  },
+                  {
+                    label: 'Cache Write',
+                    value: summary.total_cache_creation_tokens,
+                    color: MODEL_COLORS[3],
+                    hint: 'billed above input',
+                  },
+                ]}
+                formatValue={formatTokens}
+              />
+            </ChartCard>
 
             {/* Models with no published rates contribute no cost — say so
                 rather than letting the estimate look complete. */}
@@ -507,9 +650,17 @@ export default function TokenUsagePage() {
               <CacheEfficiencyChart data={report?.cache_efficiency ?? []} />
             </div>
 
-            {/* Token distribution by model */}
+            {/* Spend first, volume second: the two charts disagree by design,
+                and the money one is the question being asked. */}
+            {(report?.cost_by_model?.length ?? 0) > 0 && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+                <ModelCostDonut data={report!.cost_by_model} />
+                <ProviderCostBars data={report!.cost_by_model} />
+              </div>
+            )}
+
             {(report?.model_breakdown?.length ?? 0) > 0 && (
-              <ModelPieChart data={report!.model_breakdown} />
+              <ModelTokenDonut data={report!.model_breakdown} />
             )}
 
             {/* Cost estimation section */}
@@ -517,7 +668,7 @@ export default function TokenUsagePage() {
               <h3 className="text-base font-semibold text-zinc-900 dark:text-zinc-100 mb-3">
                 Estimated Cost (USD)
               </h3>
-              <PricingDisclaimer />
+              <LivePricingTable />
               <CostSummaryCards
                 cost={
                   report?.cost_summary ?? {
@@ -529,7 +680,19 @@ export default function TokenUsagePage() {
                   }
                 }
               />
-              <CostOverTimeChart data={report?.cost_over_time ?? []} />
+              {costModels.length > 0 ? (
+                <StackedCostChart
+                  data={report?.cost_over_time_by_model ?? []}
+                  models={costModels}
+                  hiddenModels={Math.max(
+                    0,
+                    (report?.cost_by_model?.length ?? 0) - costModels.length,
+                  )}
+                  previous={compare && prevReport ? prevReport.cost_over_time : undefined}
+                />
+              ) : (
+                <CostOverTimeChart data={report?.cost_over_time ?? []} />
+              )}
             </div>
           </>
         )}

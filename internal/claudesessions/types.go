@@ -45,6 +45,12 @@ type costAccumulator struct {
 	cost           pricing.Cost
 	pricedMessages int
 	unknownModels  map[string]int
+	// byModel keys the same money by the model that spent it. It is filled at
+	// the one point a message is priced, which is the only place that knows
+	// both the model and the amount — a session's stored total carries neither
+	// per-message timing nor per-message model, so no later pass could
+	// reconstruct this without re-reading the transcript.
+	byModel map[string]SessionCost
 }
 
 func newCostAccumulator(resolver *pricing.Resolver) *costAccumulator {
@@ -70,8 +76,36 @@ func (a *costAccumulator) addAssistantMessage(model string, u TokenUsage, at tim
 		}
 		return
 	}
-	a.cost.Add(res.Rate.Price(u.eventUsage()))
+	priced := res.Rate.Price(u.eventUsage())
+	a.cost.Add(priced)
 	a.pricedMessages++
+
+	if a.byModel == nil {
+		a.byModel = map[string]SessionCost{}
+	}
+	entry := a.byModel[displayModel(model)]
+	entry.Add(SessionCost{
+		InputUSD:      priced.InputCostUSD,
+		OutputUSD:     priced.OutputCostUSD,
+		CacheReadUSD:  priced.CacheReadCostUSD,
+		CacheWriteUSD: priced.CacheWriteCostUSD,
+		TotalUSD:      priced.TotalCostUSD,
+	})
+	a.byModel[displayModel(model)] = entry
+}
+
+// CostByModel returns the session's cost keyed by the model that spent it.
+// The values sum to the accumulator's total exactly — it re-keys money, it
+// never changes an amount. Nil when nothing was priced.
+func (a *costAccumulator) CostByModel() map[string]SessionCost {
+	if a == nil || len(a.byModel) == 0 {
+		return nil
+	}
+	out := make(map[string]SessionCost, len(a.byModel))
+	for m, c := range a.byModel {
+		out[m] = c
+	}
+	return out
 }
 
 // UnknownPricingTokens returns the input+output tokens seen on models with no
@@ -230,6 +264,21 @@ type ClaudeSessionSummary struct {
 	// SubagentCost is the summed cost of this session's sub-agent transcripts,
 	// mirroring SubagentUsage.
 	SubagentCost SessionCost `json:"subagent_cost"`
+	// CostByModel breaks Cost down by the model each assistant message ran, and
+	// SubagentCostByModel does the same for delegated work. Together they are
+	// TotalCostByModel().
+	//
+	// They exist because "which model is my money going to" had no correct
+	// answer anywhere: the only per-model chart plotted input+output tokens,
+	// which inverts spend when one model has no prompt caching and re-bills its
+	// context every turn (89.2% of tokens, 13.6% of cost on the reference
+	// corpus). Cost cannot be split after the fact — a stored total carries
+	// neither per-message model nor timestamp — so it is accumulated during the
+	// scan at the point each message is priced, exactly like Cost itself.
+	//
+	// Re-keying only: these values sum to TotalCost() and never change it.
+	CostByModel         map[string]SessionCost `json:"cost_by_model,omitempty"`
+	SubagentCostByModel map[string]SessionCost `json:"subagent_cost_by_model,omitempty"`
 	// UnpricedModels names the models this session used that have no known rate.
 	// Non-empty means Cost is a floor rather than a total, and the UI must say
 	// so — an understated number presented as complete is the failure mode this
@@ -270,6 +319,65 @@ func (s ClaudeSessionSummary) TotalCost() SessionCost {
 	total := s.Cost
 	total.Add(s.SubagentCost)
 	return total
+}
+
+// TotalCostByModel returns the session's whole cost keyed by the model that
+// spent it — main-thread and delegated together.
+//
+// It is the cost counterpart of the attribution rule buildModelBreakdown
+// follows for tokens: a sub-agent routinely runs a different model from its
+// parent, and crediting delegated spend to the delegating model would make the
+// one chart that should answer "is delegation routing work to cheaper models?"
+// incapable of answering it.
+//
+// Summing the values reproduces TotalCost() whenever every message was priced.
+// A session that used a model with no known rate contributes nothing for that
+// model here and nothing to TotalCost() either, so the two stay consistent;
+// UnpricedModels is what discloses the gap.
+func (s ClaudeSessionSummary) TotalCostByModel() map[string]SessionCost {
+	out := make(map[string]SessionCost, len(s.CostByModel)+len(s.SubagentCostByModel))
+	for _, breakdown := range []map[string]SessionCost{s.CostByModel, s.SubagentCostByModel} {
+		for model, cost := range breakdown {
+			entry := out[model]
+			entry.Add(cost)
+			out[model] = entry
+		}
+	}
+	return out
+}
+
+// TotalUsageByModel returns the session's whole token usage keyed by the model
+// that spent it — the token counterpart of TotalCostByModel, and what lets a
+// per-model question about caching be asked at all.
+//
+// Main-thread usage is attributed to the session's own model, which is what the
+// scanner records for it; delegated usage comes from SubagentUsageByModel. A
+// session that delegated but has no per-model breakdown loaded falls back to
+// the parent's model rather than dropping the tokens, matching
+// buildModelBreakdown.
+func (s ClaudeSessionSummary) TotalUsageByModel() map[string]TokenUsage {
+	out := map[string]TokenUsage{}
+	add := func(model string, u TokenUsage) {
+		model = displayModel(model)
+		entry := out[model]
+		entry.InputTokens += u.InputTokens
+		entry.OutputTokens += u.OutputTokens
+		entry.CacheCreationTokens += u.CacheCreationTokens
+		entry.CacheCreation5mTokens += u.CacheCreation5mTokens
+		entry.CacheCreation1hTokens += u.CacheCreation1hTokens
+		entry.CacheReadTokens += u.CacheReadTokens
+		out[model] = entry
+	}
+
+	add(s.Model, s.Usage)
+	if len(s.SubagentUsageByModel) > 0 {
+		for model, u := range s.SubagentUsageByModel {
+			add(model, u)
+		}
+		return out
+	}
+	add(s.Model, s.SubagentUsage)
+	return out
 }
 
 // TotalUsage returns the session's main-thread usage plus the usage of every

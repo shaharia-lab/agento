@@ -201,7 +201,7 @@ func TestFilterSessions_UsesLocalDayBoundaries(t *testing.T) {
 	berlin := mustLoad(t, "Europe/Berlin")
 	sessions := []ClaudeSessionSummary{lateNightSession()}
 
-	inLocalDay := filterSessions(sessions, AnalyticsParams{
+	inLocalDay := FilterSessions(sessions, AnalyticsParams{
 		From: time.Date(2026, 8, 8, 0, 0, 0, 0, berlin),
 		To:   time.Date(2026, 8, 8, 23, 59, 59, 0, berlin),
 		Loc:  berlin,
@@ -211,7 +211,7 @@ func TestFilterSessions_UsesLocalDayBoundaries(t *testing.T) {
 	}
 
 	// The same range expressed as UTC days excludes it, which is the old bug.
-	inUTCDay := filterSessions(sessions, AnalyticsParams{
+	inUTCDay := FilterSessions(sessions, AnalyticsParams{
 		From: time.Date(2026, 8, 8, 0, 0, 0, 0, time.UTC),
 		To:   time.Date(2026, 8, 8, 23, 59, 59, 0, time.UTC),
 	})

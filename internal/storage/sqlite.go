@@ -513,6 +513,25 @@ CREATE INDEX idx_model_pricing_tier_rate ON model_pricing_tier(rate_id);
 ALTER TABLE claude_subagent_cache ADD COLUMN event_count INTEGER NOT NULL DEFAULT 0;
 `,
 	},
+	{
+		version: 23,
+		sql: `
+-- Per-session cost keyed by the model that spent it, as a JSON object of
+-- {"model": {"input_usd": …, …}}.
+--
+-- A column rather than a child table because it is only ever read and written
+-- with its row: nothing queries costs by model in SQL, and the delegated half
+-- already comes from claude_subagent_cache's own per-model rows. The precedent
+-- on this table is unpriced_models, which is likewise a serialized list.
+--
+-- Cost cannot be split after the fact — a stored total carries neither the
+-- model nor the timestamp of the messages behind it — so this is accumulated
+-- during the scan beside total_cost_usd. Existing rows are therefore empty
+-- until the CurrentScannerVersion 8 -> 9 bump re-reads every transcript; an
+-- empty value is read as "not yet known", never as "no cost".
+ALTER TABLE claude_session_cache ADD COLUMN cost_by_model TEXT NOT NULL DEFAULT '';
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

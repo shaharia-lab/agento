@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -55,7 +56,16 @@ const (
 	// computed and then dropped for want of a column, so every sub-agent row
 	// written before v8 reads back zero, which is indistinguishable from an
 	// empty transcript.
-	CurrentScannerVersion = 8
+	// v10: a session whose only user content is an injected wrapper takes its
+	// preview from the command or skill name inside it rather than the raw
+	// wrapper text, so rows stop reading "Base directory for this skill: …".
+	// Stored previews written before v10 hold the raw text.
+	// v9: each session's cost is also stored keyed by the model that spent it
+	// (cost_by_model). It can only be produced while the transcript is being
+	// priced — a stored total carries neither the model nor the timestamp of the
+	// messages behind it — so rows written before v9 have an empty breakdown
+	// that no later pass could fill in.
+	CurrentScannerVersion = 10
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -825,9 +835,10 @@ func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessi
 			worktree_name, worktree_branch, original_branch,
 			compaction_count, dropped_tokens,
 			input_cost_usd, output_cost_usd, cache_read_cost_usd,
-			cache_write_cost_usd, total_cost_usd, unpriced_models, unpriced_tokens
+			cache_write_cost_usd, total_cost_usd, unpriced_models, unpriced_tokens,
+			cost_by_model
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, project_path) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -862,7 +873,8 @@ func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessi
 			cache_write_cost_usd = excluded.cache_write_cost_usd,
 			total_cost_usd = excluded.total_cost_usd,
 			unpriced_models = excluded.unpriced_models,
-			unpriced_tokens = excluded.unpriced_tokens`,
+			unpriced_tokens = excluded.unpriced_tokens,
+			cost_by_model = excluded.cost_by_model`,
 		cacheRowArgs(df, s)...,
 	)
 	return err
@@ -894,7 +906,41 @@ func cacheRowArgs(df diskFile, s *ClaudeSessionSummary) []any {
 		s.Cost.InputUSD, s.Cost.OutputUSD, s.Cost.CacheReadUSD,
 		s.Cost.CacheWriteUSD, s.Cost.TotalUSD,
 		encodeUnpricedModels(s.UnpricedModels), s.UnpricedTokens,
+		encodeCostByModel(s.CostByModel),
 	}
+}
+
+// encodeCostByModel serializes the per-model cost breakdown for its column.
+//
+// An empty breakdown stores "" rather than "{}" so the column's default and a
+// scanned-but-costless session are the same value, and neither is mistaken for
+// data. Marshaling a map of plain float structs cannot fail, but the error is
+// still handled rather than ignored — silently storing "" would turn a
+// serialization bug into a chart that is quietly missing a session.
+func encodeCostByModel(byModel map[string]SessionCost) string {
+	if len(byModel) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(byModel)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// decodeCostByModel is the inverse. Malformed or empty JSON yields nil: the
+// breakdown re-keys a total that is stored independently, so losing it costs a
+// chart's detail rather than any money — dropping the whole session row over
+// one bad blob would be the worse failure.
+func decodeCostByModel(raw string) map[string]SessionCost {
+	if raw == "" || raw == "{}" {
+		return nil
+	}
+	var out map[string]SessionCost
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // encodeUnpricedModels joins the list for storage. Newline-separated because a
@@ -1136,6 +1182,7 @@ const sessionSummaryFrom = `
 	       c.compaction_count, c.dropped_tokens,
 	       c.input_cost_usd, c.output_cost_usd, c.cache_read_cost_usd,
 	       c.cache_write_cost_usd, c.total_cost_usd, c.unpriced_models, c.unpriced_tokens,
+	       c.cost_by_model,
 	       COALESCE(sa.n, 0), COALESCE(sa.it, 0), COALESCE(sa.ot, 0),
 	       COALESCE(sa.cct, 0), COALESCE(sa.crt, 0),
 	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0),
@@ -1220,7 +1267,9 @@ func attachSubagentUsageByModel(db *sql.DB, logger *slog.Logger, sessions []Clau
 		SELECT parent_session_id, model,
 		       SUM(input_tokens), SUM(output_tokens),
 		       SUM(cache_creation_tokens), SUM(cache_read_tokens),
-		       SUM(cache_creation_5m_tokens), SUM(cache_creation_1h_tokens)
+		       SUM(cache_creation_5m_tokens), SUM(cache_creation_1h_tokens),
+		       SUM(input_cost_usd), SUM(output_cost_usd),
+		       SUM(cache_read_cost_usd), SUM(cache_write_cost_usd), SUM(total_cost_usd)
 		FROM claude_subagent_cache
 		GROUP BY parent_session_id, model`)
 	if err != nil {
@@ -1233,21 +1282,28 @@ func attachSubagentUsageByModel(db *sql.DB, logger *slog.Logger, sessions []Clau
 		}
 	}()
 
-	bySession := map[string]map[string]TokenUsage{}
+	usage := map[string]map[string]TokenUsage{}
+	cost := map[string]map[string]SessionCost{}
 	for rows.Next() {
 		var sessionID, model string
 		var u TokenUsage
+		var c SessionCost
 		if err := rows.Scan(&sessionID, &model,
 			&u.InputTokens, &u.OutputTokens,
 			&u.CacheCreationTokens, &u.CacheReadTokens,
-			&u.CacheCreation5mTokens, &u.CacheCreation1hTokens); err != nil {
+			&u.CacheCreation5mTokens, &u.CacheCreation1hTokens,
+			&c.InputUSD, &c.OutputUSD,
+			&c.CacheReadUSD, &c.CacheWriteUSD, &c.TotalUSD); err != nil {
 			logger.Warn("claude sessions: failed to scan sub-agent usage by model", "error", err)
 			return
 		}
-		if bySession[sessionID] == nil {
-			bySession[sessionID] = map[string]TokenUsage{}
+		model = displayModel(model)
+		if usage[sessionID] == nil {
+			usage[sessionID] = map[string]TokenUsage{}
+			cost[sessionID] = map[string]SessionCost{}
 		}
-		bySession[sessionID][model] = u
+		usage[sessionID][model] = u
+		cost[sessionID][model] = c
 	}
 	if err := rows.Err(); err != nil {
 		logger.Warn("claude sessions: failed to read sub-agent usage by model", "error", err)
@@ -1255,8 +1311,9 @@ func attachSubagentUsageByModel(db *sql.DB, logger *slog.Logger, sessions []Clau
 	}
 
 	for i := range sessions {
-		if m, ok := bySession[sessions[i].SessionID]; ok {
+		if m, ok := usage[sessions[i].SessionID]; ok {
 			sessions[i].SubagentUsageByModel = m
+			sessions[i].SubagentCostByModel = cost[sessions[i].SessionID]
 		}
 	}
 }
@@ -1292,7 +1349,7 @@ func querySessionSummary(db *sql.DB, logger *slog.Logger, sessionID string) (*Cl
 // scanSessionSummary reads one row of the sessionSummaryFrom projection.
 func scanSessionSummary(rows *sql.Rows) (ClaudeSessionSummary, error) {
 	var s ClaudeSessionSummary
-	var unpriced, subagentUnpricedModels string
+	var unpriced, subagentUnpricedModels, costByModel string
 	var subagentUnpriced int
 	if err := rows.Scan(
 		&s.SessionID, &s.ProjectPath, &s.Preview, &s.CustomTitle, &s.IsFavorite,
@@ -1306,6 +1363,7 @@ func scanSessionSummary(rows *sql.Rows) (ClaudeSessionSummary, error) {
 		&s.CompactionCount, &s.DroppedTokens,
 		&s.Cost.InputUSD, &s.Cost.OutputUSD, &s.Cost.CacheReadUSD,
 		&s.Cost.CacheWriteUSD, &s.Cost.TotalUSD, &unpriced, &s.UnpricedTokens,
+		&costByModel,
 		&s.SubagentCount, &s.SubagentUsage.InputTokens, &s.SubagentUsage.OutputTokens,
 		&s.SubagentUsage.CacheCreationTokens, &s.SubagentUsage.CacheReadTokens,
 		&s.SubagentUsage.CacheCreation5mTokens, &s.SubagentUsage.CacheCreation1hTokens,
@@ -1319,6 +1377,7 @@ func scanSessionSummary(rows *sql.Rows) (ClaudeSessionSummary, error) {
 	// session's disclosure. Reading one without the other would let a row
 	// report excluded tokens attributed to no model — or worse, show a
 	// confident total for a session that is only partly priced.
+	s.CostByModel = decodeCostByModel(costByModel)
 	s.UnpricedModels = mergeUnpricedModels(unpriced, subagentUnpricedModels)
 	s.UnpricedTokens += subagentUnpriced
 	s.DisplayTitle = s.ResolveDisplayTitle()
@@ -1484,6 +1543,7 @@ func readSummaryFile(
 	// thread the accumulator through. The accumulator is still returned for
 	// callers that need the per-model detail behind the total.
 	summary.Cost = sessionCostFromPricing(costs)
+	summary.CostByModel = costs.CostByModel()
 	summary.UnpricedModels = costs.UnpricedModels()
 	summary.UnpricedTokens = costs.UnknownPricingTokens()
 
@@ -1633,7 +1693,8 @@ func addSummaryUserEvent(summary *ClaudeSessionSummary, ev rawEvent) {
 			return
 		}
 		if summary.Preview == "" {
-			summary.Preview = truncateRunes(extractTextContent(ev.Message.Content), previewMaxRunes)
+			raw := extractTextContent(ev.Message.Content)
+			summary.Preview = truncateRunes(fallbackPreviewLabel(raw), previewMaxRunes)
 			summary.previewIsFallback = true
 		}
 		return
@@ -1642,10 +1703,68 @@ func addSummaryUserEvent(summary *ClaudeSessionSummary, ev rawEvent) {
 	summary.MessageCount++
 	// A genuine turn replaces a wrapper-sourced preview, so the label prefers
 	// what the person actually typed even when a wrapper came first.
+	//
+	// Still passed through fallbackPreviewLabel, because two injected classes
+	// reach this branch by design: a skill preamble and an interruption arrive
+	// as *array* content rather than a string, so isUserTurnContent counts them
+	// as turns (see CLAUDE.md). Their previews are exactly the unreadable rows
+	// worth labeling, and a real prompt matches neither wrapper shape.
 	if summary.Preview == "" || summary.previewIsFallback {
-		summary.Preview = truncateRunes(extractTextContent(ev.Message.Content), previewMaxRunes)
+		raw := extractTextContent(ev.Message.Content)
+		summary.Preview = truncateRunes(fallbackPreviewLabel(raw), previewMaxRunes)
 		summary.previewIsFallback = false
 	}
+}
+
+// commandNamePattern captures the slash command Claude Code records when a
+// session was started by one.
+var commandNamePattern = regexp.MustCompile(`<command-name>([^<]+)</command-name>`)
+
+// skillPreamblePattern captures the skill path from the preamble Claude Code
+// injects when a skill is invoked.
+var skillPreamblePattern = regexp.MustCompile(`^Base directory for this skill:\s*(\S+)`)
+
+// fallbackPreviewLabel turns an injected wrapper into something a person can
+// recognize in a list.
+//
+// These previews are the last resort in ResolveDisplayTitle, and for a session
+// that is only a slash command they are all there is. Unprocessed, they render
+// as rows reading "<command-message>lab-workflow:github-issue-to-pr</command-
+// message><command-name>…" or "Base directory for this skill: /home/user/
+// .claude/plugins/cache/…" — three of nine rows on the reference corpus. The
+// command or skill name was in there the whole time; this pulls it out.
+//
+// Anything that matches neither shape is returned unchanged, so a wrapper form
+// this does not know about is still shown rather than blanked.
+func fallbackPreviewLabel(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+
+	if m := commandNamePattern.FindStringSubmatch(trimmed); m != nil {
+		return "/" + strings.TrimSpace(m[1])
+	}
+	if m := skillPreamblePattern.FindStringSubmatch(trimmed); m != nil {
+		if name := skillNameFromPath(m[1]); name != "" {
+			return "skill: " + name
+		}
+	}
+	return raw
+}
+
+// skillNameFromPath reads the skill's name out of its directory path. Claude
+// Code lays these out as …/skills/<name>, so the segment after "skills" is the
+// name; a path that does not contain one falls back to its last segment, which
+// is the same thing for a bare skill directory.
+func skillNameFromPath(path string) string {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	for i, seg := range segments {
+		if seg == "skills" && i+1 < len(segments) {
+			return segments[i+1]
+		}
+	}
+	if len(segments) > 0 {
+		return segments[len(segments)-1]
+	}
+	return ""
 }
 
 // addSummaryAssistantEvent records one assistant event: always an event, but a

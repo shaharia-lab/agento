@@ -3,7 +3,6 @@ package api
 import (
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -44,42 +43,24 @@ func (s *Server) handleGetClaudeSessionInsights(w http.ResponseWriter, r *http.R
 // Query params:
 //
 //	ids   comma-separated list of session IDs to include (empty = all sessions)
-//	from  inclusive start date (YYYY-MM-DD); filters by session start_time
-//	to    inclusive end date   (YYYY-MM-DD); filters by session start_time
+//	from  inclusive start (YYYY-MM-DD or RFC3339); filters by last_activity
+//	to    inclusive end   (YYYY-MM-DD or RFC3339); filters by last_activity
+//	tz    IANA timezone a bare date's day boundaries are resolved in
 func (s *Server) handleGetClaudeSessionInsightsSummary(w http.ResponseWriter, r *http.Request) {
-	var sessionIDs []string
-	if raw := r.URL.Query().Get("ids"); raw != "" {
-		for _, id := range strings.Split(raw, ",") {
-			if trimmed := strings.TrimSpace(id); trimmed != "" {
-				sessionIDs = append(sessionIDs, trimmed)
-			}
-		}
+	// The window, project and timezone are read by the same parser the analytics
+	// endpoint uses, and applied by the same filter, so the two dashboards cover
+	// one set of sessions for a given range instead of two overlapping ones.
+	params := parseAnalyticsParams(r)
+	windowed := claudesessions.FilterSessions(s.claudeSessionCache.List(), params)
+	sessionIDs := claudesessions.SessionIDs(windowed)
+
+	// An explicit ids list narrows the window rather than replacing it, so a
+	// caller cannot accidentally widen the range by naming a session outside it.
+	if explicit := parseSessionIDs(r.URL.Query().Get("ids")); len(explicit) > 0 {
+		sessionIDs = intersectIDs(sessionIDs, explicit)
 	}
 
-	// A bare YYYY-MM-DD names a day, not an instant, so it is resolved in the
-	// requesting timezone. The store turns `to` into an exclusive next-midnight,
-	// which then covers the whole local day rather than the whole UTC one.
-	loc := parseTimezone(r.URL.Query().Get("tz"))
-
-	var from, to *time.Time
-	if raw := r.URL.Query().Get("from"); raw != "" {
-		t, err := time.ParseInLocation("2006-01-02", raw, loc)
-		if err != nil {
-			s.writeError(w, http.StatusBadRequest, "invalid 'from' date: expected YYYY-MM-DD")
-			return
-		}
-		from = &t
-	}
-	if raw := r.URL.Query().Get("to"); raw != "" {
-		t, err := time.ParseInLocation("2006-01-02", raw, loc)
-		if err != nil {
-			s.writeError(w, http.StatusBadRequest, "invalid 'to' date: expected YYYY-MM-DD")
-			return
-		}
-		to = &t
-	}
-
-	agg, err := s.insightStore.GetSummary(r.Context(), sessionIDs, from, to)
+	agg, err := s.insightStore.GetSummary(r.Context(), sessionIDs)
 	if err != nil {
 		s.logger.Error("failed to get session insights summary", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "failed to retrieve insights summary")
@@ -87,6 +68,36 @@ func (s *Server) handleGetClaudeSessionInsightsSummary(w http.ResponseWriter, r 
 	}
 
 	s.writeJSON(w, http.StatusOK, buildInsightsSummaryFromAggregate(agg))
+}
+
+// parseSessionIDs splits the comma-separated `ids` parameter, dropping blanks.
+func parseSessionIDs(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	var ids []string
+	for _, id := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(id); trimmed != "" {
+			ids = append(ids, trimmed)
+		}
+	}
+	return ids
+}
+
+// intersectIDs returns the members of base that also appear in filter,
+// preserving base's order.
+func intersectIDs(base, filter []string) []string {
+	wanted := make(map[string]struct{}, len(filter))
+	for _, id := range filter {
+		wanted[id] = struct{}{}
+	}
+	out := make([]string, 0, len(base))
+	for _, id := range base {
+		if _, ok := wanted[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // insightsSummary holds aggregated statistics across multiple sessions.
@@ -99,6 +110,7 @@ type insightsSummary struct {
 	TotalCostEstimateUSD float64     `json:"total_cost_estimate_usd"`
 	AvgCacheHitRate      float64     `json:"avg_cache_hit_rate"`
 	SessionsWithErrors   int         `json:"sessions_with_errors"`
+	TotalToolErrors      int         `json:"total_tool_errors"`
 	AvgTotalDurationMs   float64     `json:"avg_total_duration_ms"`
 	TopTools             []toolCount `json:"top_tools"`
 	// Attribution breakdowns. Each counts tool calls, so they are directly
@@ -146,6 +158,7 @@ func buildInsightsSummaryFromAggregate(agg *claudesessions.InsightAggregateSumma
 		AvgCostEstimateUSD:   agg.TotalCostEstimateUSD / n,
 		AvgCacheHitRate:      agg.AvgCacheHitRate,
 		SessionsWithErrors:   agg.SessionsWithErrors,
+		TotalToolErrors:      agg.TotalToolErrors,
 		AvgTotalDurationMs:   agg.AvgTotalDurationMs,
 		TopTools:             sortedToolCounts(agg.TopToolTotals),
 		TotalToolCalls:       agg.TotalToolCalls,

@@ -16,17 +16,43 @@ import (
 
 // SessionJourney is the top-level response for the journey endpoint.
 type SessionJourney struct {
-	SessionID     string        `json:"session_id"`
-	Model         string        `json:"model,omitempty"`
-	CWD           string        `json:"cwd,omitempty"`
-	GitBranch     string        `json:"git_branch,omitempty"`
-	StartTime     time.Time     `json:"start_time"`
-	EndTime       time.Time     `json:"end_time"`
-	TotalDuration int64         `json:"total_duration_ms"`
-	TotalTurns    int           `json:"total_turns"`
-	Usage         TokenUsage    `json:"usage"`
+	SessionID     string    `json:"session_id"`
+	Model         string    `json:"model,omitempty"`
+	CWD           string    `json:"cwd,omitempty"`
+	GitBranch     string    `json:"git_branch,omitempty"`
+	StartTime     time.Time `json:"start_time"`
+	EndTime       time.Time `json:"end_time"`
+	TotalDuration int64     `json:"total_duration_ms"`
+	TotalTurns    int       `json:"total_turns"`
+	// Usage is main-thread only, exactly as ClaudeSessionSummary.Usage is.
+	Usage TokenUsage `json:"usage"`
+	// SubagentUsage is the summed usage of every sub-agent transcript this
+	// journey rendered, and SubagentCount how many there were.
+	//
+	// They are reported alongside Usage rather than folded into it, for the
+	// reason the session summary keeps the same split: "this session's tokens"
+	// and "the model that spent them" are different questions. But the journey
+	// header used to show Usage alone while the sessions list showed the sum, so
+	// one session reported 784K output on one page and 1.8M on another with
+	// nothing to explain the gap. Shipping both lets the header state the total
+	// *and* say how much of it was delegated.
+	SubagentUsage TokenUsage    `json:"subagent_usage"`
+	SubagentCount int           `json:"subagent_count"`
 	Summary       string        `json:"summary,omitempty"`
 	Turns         []JourneyTurn `json:"turns"`
+}
+
+// TotalUsage is Usage plus every sub-agent's, the figure the sessions list and
+// the analytics totals report for this session.
+func (j SessionJourney) TotalUsage() TokenUsage {
+	return TokenUsage{
+		InputTokens:           j.Usage.InputTokens + j.SubagentUsage.InputTokens,
+		OutputTokens:          j.Usage.OutputTokens + j.SubagentUsage.OutputTokens,
+		CacheCreationTokens:   j.Usage.CacheCreationTokens + j.SubagentUsage.CacheCreationTokens,
+		CacheCreation5mTokens: j.Usage.CacheCreation5mTokens + j.SubagentUsage.CacheCreation5mTokens,
+		CacheCreation1hTokens: j.Usage.CacheCreation1hTokens + j.SubagentUsage.CacheCreation1hTokens,
+		CacheReadTokens:       j.Usage.CacheReadTokens + j.SubagentUsage.CacheReadTokens,
+	}
 }
 
 // JourneyTurn groups steps that belong to one user→assistant interaction cycle.
@@ -233,6 +259,12 @@ type journeyBuilder struct {
 	subagents    map[string]*subagentEntry
 	subagentList []*subagentEntry
 	logger       *slog.Logger
+	// subagentUsage and subagentCount tally delegated work as each sub-agent
+	// transcript is read, so the journey can report it separately from the main
+	// thread's rather than under-reporting the session's real total.
+	subagentUsage TokenUsage
+	subagentCount int
+
 	// subagentMode is set when building a sub-agent's own steps: its transcript
 	// carries isSidechain on every event, which the parent builder skips.
 	subagentMode bool
@@ -538,6 +570,9 @@ func (b *journeyBuilder) finalize(j *SessionJourney) {
 		j.Turns = []JourneyTurn{}
 	}
 
+	j.SubagentUsage = b.subagentUsage
+	j.SubagentCount = b.subagentCount
+
 	if j.Summary == "" {
 		j.Summary = extractFirstUserInput(j.Turns)
 	}
@@ -646,6 +681,16 @@ func (b *journeyBuilder) buildSubagentSteps(e *subagentEntry) ([]JourneyStep, To
 	for _, t := range sub.Turns {
 		steps = append(steps, t.Steps...)
 	}
+
+	// Tallied here rather than at each call site: this is the one place a
+	// sub-agent's usage is computed, and both the matched (nested under its
+	// Task tool_use) and unmatched (appended to the last turn) paths reach it.
+	b.subagentCount++
+	b.subagentUsage.InputTokens += sub.Usage.InputTokens
+	b.subagentUsage.OutputTokens += sub.Usage.OutputTokens
+	b.subagentUsage.CacheCreationTokens += sub.Usage.CacheCreationTokens
+	b.subagentUsage.CacheReadTokens += sub.Usage.CacheReadTokens
+
 	return steps, sub.Usage
 }
 

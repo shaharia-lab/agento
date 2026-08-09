@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -226,16 +225,16 @@ func (s *SQLiteSessionInsightsStore) GetMany(ctx context.Context, sessionIDs []s
 	var err error
 	defer func() { end(err) }()
 
-	placeholders := make([]string, len(sessionIDs))
-	args := make([]any, len(sessionIDs))
-	for i, id := range sessionIDs {
-		placeholders[i] = "?"
-		args[i] = id
+	// The same json_each binding GetAggregateSummary uses, for the same reason:
+	// one placeholder per ID overflows SQLite's variable limit on a large set,
+	// and one idiom per file beats two answers to one question.
+	where, args, err := insightWhereClause(sessionIDs)
+	if err != nil {
+		return nil, err
 	}
 
-	//nolint:gosec // placeholders are generated from fixed pattern, not user input
-	query := insightSelectCols + ` WHERE session_id IN (` + strings.Join(placeholders, ",") + `)`
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	//nolint:gosec // the clause is a fixed string; IDs travel as one bound parameter
+	rows, err := s.db.QueryContext(ctx, insightSelectCols+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -268,6 +267,11 @@ type InsightAggregateSummary struct {
 	AvgCacheHitRate      float64
 	AvgTotalDurationMs   float64
 	SessionsWithErrors   int
+	// TotalToolErrors is the summed tool_error_count, the numerator for an
+	// errors-per-100-tool-calls rate. SessionsWithErrors alone cannot express
+	// one: it counts sessions, not errors, so a session with a single failing
+	// grep and one with fifty broken commands are the same number.
+	TotalToolErrors int
 	// TotalToolCalls and UnattributedCalls give the breakdowns a denominator:
 	// without them a "top skills" panel silently omits every built-in call.
 	TotalToolCalls    int
@@ -283,19 +287,35 @@ type InsightAggregateSummary struct {
 	AgentBreakdowns     []string
 }
 
-// GetAggregateSummary computes aggregated insight statistics using SQL aggregation
-// for scalars and fetches only the tool_breakdown JSON column for top-tool computation.
-// If sessionIDs is non-empty, results are filtered to those sessions.
-// from and to are inclusive date boundaries applied against claude_session_cache.start_time;
-// nil means unbounded.
+// GetAggregateSummary computes aggregated insight statistics over exactly the
+// given sessions, using SQL aggregation for scalars and fetching only the
+// breakdown JSON columns for merging by the caller.
+//
+// sessionIDs is the complete set to include, never a hint: an empty set yields
+// a zero summary rather than "everything". Windowing happens before this call,
+// in claudesessions.FilterSessions, so the insights summary and the analytics
+// report cover the same sessions by construction rather than by two SQL
+// predicates that agreed until one of them was edited.
+//
+// Filtering here by date would not even be reliable: the DATETIME columns hold
+// Go's time.Time.String() rendering ("2024-03-15 12:00:00 +0000 UTC"), so
+// comparing them against an RFC3339 bound — as this did — compares ' ' with 'T'
+// at index 10 and silently misplaces every row whose date equals a boundary's.
 func (s *SQLiteSessionInsightsStore) GetAggregateSummary(
-	ctx context.Context, sessionIDs []string, from, to *time.Time,
+	ctx context.Context, sessionIDs []string,
 ) (*InsightAggregateSummary, error) {
 	ctx, end := withStorageSpan(ctx, "get_aggregate_summary", "session_insights")
 	var err error
 	defer func() { end(err) }()
 
-	where, args := insightWhereClause(sessionIDs, from, to)
+	if len(sessionIDs) == 0 {
+		return &InsightAggregateSummary{}, nil
+	}
+
+	where, args, err := insightWhereClause(sessionIDs)
+	if err != nil {
+		return nil, err
+	}
 	summary, err := s.queryAggregateScalars(ctx, where, args)
 	if err != nil || summary.TotalSessions == 0 {
 		return summary, err
@@ -307,59 +327,27 @@ func (s *SQLiteSessionInsightsStore) GetAggregateSummary(
 	return summary, nil
 }
 
-// insightWhereClause builds a WHERE clause that optionally filters by session ID list
-// and/or by session start_time range (via a subquery on claude_session_cache).
-// All predicates use parameterised placeholders to prevent SQL injection.
-func insightWhereClause(sessionIDs []string, from, to *time.Time) (string, []any) {
-	var clauses []string
-	var args []any
-
-	if len(sessionIDs) > 0 {
-		placeholders := make([]string, len(sessionIDs))
-		for i, id := range sessionIDs {
-			placeholders[i] = "?"
-			args = append(args, id)
-		}
-		//nolint:gosec // placeholders are generated from fixed pattern, not user input
-		clauses = append(clauses, "session_id IN ("+strings.Join(placeholders, ",")+")")
+// insightWhereClause restricts a query to the given session IDs.
+//
+// The set travels as a single JSON-array parameter expanded by json_each rather
+// than as one placeholder per ID. A window can legitimately contain thousands of
+// sessions, and a placeholder per ID would hit SQLite's variable limit on
+// exactly the corpora this feature exists for — while the bind stays fully
+// parameterised, so no ID is ever interpolated into SQL.
+func insightWhereClause(sessionIDs []string) (string, []any, error) {
+	if sessionIDs == nil {
+		// Marshaling a nil slice yields "null", and json_each('null') produces a
+		// single NULL row that matches nothing only because NULL comparisons are
+		// never true. Both callers already refuse an empty set before getting
+		// here; encoding "[]" makes the clause correct on its own rather than by
+		// their good behavior.
+		sessionIDs = []string{}
 	}
-
-	if from != nil || to != nil {
-		// Use a subquery so we never JOIN and accidentally duplicate rows when a
-		// session_id appears in multiple project_path entries.
-		sub, subArgs := dateRangeSubquery(from, to)
-		clauses = append(clauses, "session_id IN ("+sub+")")
-		args = append(args, subArgs...)
+	ids, err := json.Marshal(sessionIDs)
+	if err != nil {
+		return "", nil, fmt.Errorf("marshaling session id filter: %w", err)
 	}
-
-	if len(clauses) == 0 {
-		return "", nil
-	}
-	return " WHERE " + strings.Join(clauses, " AND "), args
-}
-
-// dateRangeSubquery returns a SELECT subquery that returns session_ids from
-// claude_session_cache whose start_time falls within [from, to] (inclusive).
-// Nil boundaries are treated as unbounded.
-func dateRangeSubquery(from, to *time.Time) (string, []any) {
-	if from == nil && to == nil {
-		return "SELECT DISTINCT session_id FROM claude_session_cache", nil
-	}
-	var conds []string
-	var args []any
-	if from != nil {
-		conds = append(conds, "start_time >= ?")
-		args = append(args, from.UTC().Format(time.RFC3339))
-	}
-	if to != nil {
-		// Add one day so "to" is inclusive for day-level comparisons.
-		end := to.UTC().Add(24 * time.Hour)
-		conds = append(conds, "start_time < ?")
-		args = append(args, end.Format(time.RFC3339))
-	}
-	//nolint:gosec // conds are hard-coded string literals, not user input
-	sub := "SELECT DISTINCT session_id FROM claude_session_cache WHERE " + strings.Join(conds, " AND ")
-	return sub, args
+	return " WHERE session_id IN (SELECT value FROM json_each(?))", []any{string(ids)}, nil
 }
 
 const insightAggregateSQL = `SELECT
@@ -372,7 +360,8 @@ const insightAggregateSQL = `SELECT
 	COALESCE(AVG(total_duration_ms), 0),
 	COALESCE(SUM(has_errors), 0),
 	COALESCE(SUM(tool_calls_total), 0),
-	COALESCE(SUM(unattributed_calls), 0)
+	COALESCE(SUM(unattributed_calls), 0),
+	COALESCE(SUM(tool_error_count), 0)
 FROM session_insights`
 
 func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
@@ -393,6 +382,7 @@ func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
 		&summary.SessionsWithErrors,
 		&summary.TotalToolCalls,
 		&summary.UnattributedCalls,
+		&summary.TotalToolErrors,
 	)
 	return summary, err
 }

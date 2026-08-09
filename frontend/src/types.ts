@@ -684,7 +684,11 @@ export interface SessionJourney {
   end_time: string
   total_duration_ms: number
   total_turns: number
+  /** Main-thread only, like ClaudeSessionSummary.usage. */
   usage: ClaudeTokenUsage
+  /** Delegated work — reported separately so the header can label it, not hide it. */
+  subagent_usage: ClaudeTokenUsage
+  subagent_count: number
   summary?: string
   turns: JourneyTurn[]
 }
@@ -991,6 +995,8 @@ export interface InsightSummary {
   total_cost_estimate_usd: number
   avg_cache_hit_rate: number
   sessions_with_errors: number
+  /** Summed tool errors, the numerator for an errors-per-100-calls rate. */
+  total_tool_errors: number
   avg_total_duration_ms: number
   top_tools: ToolUsageStat[]
   /** Total tool calls across the period — the denominator for the breakdowns. */
@@ -1015,6 +1021,12 @@ export interface InsightSummary {
 
 export interface AnalyticsSummary {
   total_sessions: number
+  /**
+   * Projects the *filtered* sessions belong to. `AnalyticsReport.projects` is
+   * built before filtering because it populates the project picker, so its
+   * length is the whole corpus's project count regardless of the window.
+   */
+  unique_projects: number
   total_tokens: number
   total_input_tokens: number
   total_output_tokens: number
@@ -1057,6 +1069,92 @@ export interface ModelSessionStat {
   sessions: number
 }
 
+/**
+ * One model's share of spend. Unlike ModelStat this is money, attributed to the
+ * model that spent it including for delegated work — the two answer different
+ * questions and, on a corpus mixing a caching backend with a non-caching one,
+ * give nearly opposite pictures.
+ */
+export interface ModelCostStat {
+  model: string
+  /** Display grouping derived from the model id: Anthropic, Moonshot, Z.ai, … */
+  provider: string
+  cost: ClaudeSessionCost
+  percentage: number
+  /** How many sessions this model spent money in. */
+  sessions: number
+}
+
+/**
+ * One actionable fact about the window, computed from stored data.
+ *
+ * The backend supplies the numbers and the frontend does the phrasing, so the
+ * arithmetic is testable in Go and the copy stays in the UI. Fields not
+ * relevant to a `kind` are absent.
+ */
+export interface InsightCard {
+  kind: 'cache_savings' | 'model_low_cache' | 'delegation_mix' | 'expensive_sessions'
+  amount_usd?: number
+  /** A share, 0–100. */
+  percent?: number
+  count?: number
+  model?: string
+  tokens?: number
+  avg_duration_ms?: number
+  /** What amount_usd should be read against — for savings, the actual bill. */
+  comparison_usd?: number
+  /** Derived from list rates rather than a stored total — say "about". */
+  estimated?: boolean
+}
+
+/** One project's activity over the window. */
+export interface ProjectStat {
+  project: string
+  sessions: number
+  /** Conversation tokens (input+output). */
+  tokens: number
+  /** Every token including cache traffic. */
+  total_tokens: number
+  cost: ClaudeSessionCost
+  /** Share of the window's cost. */
+  percentage: number
+  last_activity: string
+}
+
+/** One project's activity on one local day, for the project×day strip. */
+export interface ProjectDayActivity {
+  project: string
+  date: string
+  sessions: number
+  cost_usd: number
+}
+
+/** One leaderboard row; session_id deep-links to the session. */
+export interface SessionRanking {
+  session_id: string
+  title: string
+  project: string
+  model: string
+  cost_usd: number
+  duration_ms: number
+  tokens: number
+  subagent_count: number
+  last_activity: string
+}
+
+/** The same sessions ranked three ways — they pick out different sessions. */
+export interface TopSessions {
+  by_cost: SessionRanking[]
+  by_duration: SessionRanking[]
+  by_tokens: SessionRanking[]
+}
+
+/** One time bucket's cost split by model; the values sum to the plain series. */
+export interface StackedCostPoint {
+  date: string
+  cost_by_model: Record<string, number>
+}
+
 export interface DayActivity {
   date: string
   sessions: number
@@ -1095,6 +1193,12 @@ export interface AnalyticsReport {
   cache_efficiency: CacheEfficiencyPoint[]
   model_breakdown: ModelStat[]
   sessions_per_model: ModelSessionStat[]
+  cost_by_model: ModelCostStat[]
+  insight_cards: InsightCard[]
+  cost_over_time_by_model: StackedCostPoint[]
+  project_breakdown: ProjectStat[]
+  project_activity: ProjectDayActivity[]
+  top_sessions: TopSessions
   most_active_days: DayActivity[]
   heatmap: HeatmapCell[]
   hourly_activity: HourlyActivity[]

@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
-  AreaChart,
   Area,
   BarChart,
   Bar,
+  ComposedChart,
+  Line,
   Cell,
   XAxis,
   YAxis,
@@ -14,6 +15,15 @@ import {
   ResponsiveContainer,
 } from 'recharts'
 import { analyticsApi } from '@/lib/api'
+import {
+  avgSessionsPerDay,
+  observedDaySpan,
+  previousRange,
+  withPreviousSeries,
+} from '@/lib/analyticsMetrics'
+import { ProjectAnalytics } from './ProjectAnalytics'
+import { TopSessionsCard } from './TopSessionsCard'
+import { ScanStatusNotice } from './ScanStatusNotice'
 import {
   drilldownUrl,
   heatmapCellTarget,
@@ -28,6 +38,7 @@ import type {
   ModelSessionStat,
   HeatmapCell,
   HourlyActivity,
+  DayActivity,
 } from '@/types'
 import { RefreshCw, Hash, Clock, Activity, CalendarDays } from 'lucide-react'
 import {
@@ -41,16 +52,37 @@ import {
   KPICard,
   ChartCard,
   DateRangePicker,
+  CompareToggle,
 } from './analyticsShared'
 
 // ─── Charts ───────────────────────────────────────────────────────────────────
 
-function SessionsTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>) {
-  const formatted = data.map(d => ({ ...d, date: formatDateLabel(d.date) }))
+function SessionsTimeSeriesChart({
+  data,
+  previous,
+}: Readonly<{ data: TimeSeriesPoint[]; previous?: TimeSeriesPoint[] }>) {
+  // Aligned by bucket position: the first day of this window against the first
+  // day of the previous one, which is the comparison being asked for.
+  const hasGhost = (previous?.length ?? 0) > 0
+  const formatted = withPreviousSeries(
+    data,
+    previous,
+    d => ({ ...d, date: formatDateLabel(d.date) }),
+    d => d.sessions,
+  )
   return (
-    <ChartCard title="Sessions Over Time">
+    <ChartCard
+      title="Sessions Over Time"
+      subtitle={
+        hasGhost
+          ? 'Dashed line is the equally-sized window immediately before this one.'
+          : undefined
+      }
+    >
+      {/* ComposedChart rather than AreaChart: the ghost is a line over an area,
+          and an <Area> with no fill does not reliably render as one. */}
       <ResponsiveContainer width="100%" height={280}>
-        <AreaChart data={formatted} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+        <ComposedChart data={formatted} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#27272a" strokeOpacity={0.5} />
           <XAxis
             dataKey="date"
@@ -79,7 +111,18 @@ function SessionsTimeSeriesChart({ data }: Readonly<{ data: TimeSeriesPoint[] }>
             fillOpacity={0.15}
             strokeWidth={1.5}
           />
-        </AreaChart>
+          {hasGhost && (
+            <Line
+              type="monotone"
+              dataKey="previous"
+              name="Previous period"
+              stroke="#a1a1aa"
+              strokeDasharray="4 3"
+              strokeWidth={1.5}
+              dot={false}
+            />
+          )}
+        </ComposedChart>
       </ResponsiveContainer>
     </ChartCard>
   )
@@ -259,7 +302,10 @@ function ActivityHeatmap({
   }, [])
 
   return (
-    <ChartCard title="Activity Heatmap (Day × Hour)">
+    <ChartCard
+      title="Activity Heatmap (Day × Hour)"
+      subtitle="A session counts in every hour between its start and last activity, so an eight-hour session shades eight cells — it used to shade only the hour it ended, making this a map of when work stopped. A session resumed after a break counts the gap too."
+    >
       <div className="overflow-x-auto">
         <div
           className="min-w-[560px]"
@@ -350,7 +396,10 @@ function HourlyActivityChart({
     : undefined
 
   return (
-    <ChartCard title="Activity by Hour of Day">
+    <ChartCard
+      title="Activity by Hour of Day"
+      subtitle="Sessions counted in every hour between their start and last activity. Totals exceed the session count because one session spans several hours, and a session resumed after a break counts the gap."
+    >
       <ResponsiveContainer width="100%" height={240}>
         <BarChart
           data={data}
@@ -396,15 +445,146 @@ function HourlyActivityChart({
   )
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+/**
+ * The busiest days in the window.
+ *
+ * most_active_days has shipped in every analytics response since the endpoint
+ * existed and was never rendered — computed, sorted and thrown away. It answers
+ * "when did the work actually happen" at a glance, which the heatmap answers
+ * only by shape.
+ */
+function MostActiveDays({ days }: Readonly<{ days: DayActivity[] }>) {
+  if (days.length === 0) return null
+  const top = days.slice(0, 10)
+  const max = top[0]?.tokens || 1
 
-function avgSessionsPerDay(totalSessions: number, fromDate: string, toDate: string): string {
-  const days = Math.max(
-    1,
-    Math.round((new Date(toDate).getTime() - new Date(fromDate).getTime()) / 86_400_000) + 1,
+  return (
+    <ChartCard title="Busiest Days" subtitle="Ranked by conversation tokens.">
+      <ul className="space-y-2">
+        {top.map((day, i) => (
+          <li key={day.date} className="text-xs">
+            <div className="flex items-baseline justify-between mb-1">
+              <span className="text-zinc-700 dark:text-zinc-300">
+                {formatDateLabel(day.date)}
+                <span className="text-zinc-400 dark:text-zinc-500">
+                  {' '}
+                  · {day.sessions} session{day.sessions === 1 ? '' : 's'}
+                </span>
+              </span>
+              <span className="tabular-nums text-zinc-500 dark:text-zinc-400">
+                {formatTokens(day.tokens)}
+              </span>
+            </div>
+            <div className="h-1.5 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
+              <div
+                className="h-full rounded-full"
+                style={{
+                  width: `${(day.tokens / max) * 100}%`,
+                  backgroundColor: MODEL_COLORS[i % MODEL_COLORS.length],
+                }}
+              />
+            </div>
+          </li>
+        ))}
+      </ul>
+    </ChartCard>
   )
-  const avg = totalSessions / days
-  return avg < 1 ? avg.toFixed(2) : avg.toFixed(1)
+}
+
+/**
+ * The populated page body, extracted so the page component stays readable —
+ * the same split InsightsPage uses for the same reason.
+ */
+function GeneralUsageContent({
+  report,
+  summary,
+  observedSpan,
+  compare,
+  prevReport,
+  drilldownEnabled,
+  onDrill,
+}: Readonly<{
+  report: AnalyticsReport | null
+  summary: AnalyticsSummary
+  observedSpan: number
+  compare: boolean
+  prevReport: AnalyticsReport | null
+  drilldownEnabled: boolean
+  onDrill: (dayOfWeek: number | null, hour: number) => void
+}>) {
+  return (
+    <>
+      {/* KPI Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <KPICard
+          icon={Hash}
+          label="Total Sessions"
+          value={summary.total_sessions.toLocaleString()}
+        />
+        <KPICard
+          icon={CalendarDays}
+          label="Avg Sessions / Day"
+          value={avgSessionsPerDay(summary.total_sessions, report?.time_series ?? [])}
+          sub={
+            observedSpan > 0
+              ? `over ${observedSpan} day${observedSpan === 1 ? '' : 's'} with activity`
+              : undefined
+          }
+        />
+        <KPICard icon={Clock} label="Top Model" value={formatModelName(summary.most_used_model)} />
+        {/* summary.unique_projects, not report.projects.length: the
+                  latter is the picker's option list and is built before
+                  filtering, so it ignored both the window and the project
+                  filter. */}
+        <KPICard
+          icon={Activity}
+          label="Unique Projects"
+          value={String(summary.unique_projects || '—')}
+        />
+      </div>
+
+      {/* Sessions over time */}
+      <SessionsTimeSeriesChart
+        data={report?.time_series ?? []}
+        previous={compare && prevReport ? prevReport.time_series : undefined}
+      />
+
+      {/* Sessions per model */}
+      {(report?.sessions_per_model?.length ?? 0) > 0 && (
+        <SessionsPerModelChart data={report!.sessions_per_model} />
+      )}
+
+      {/* Heatmap + Hourly */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <ActivityHeatmap
+          data={report?.heatmap ?? []}
+          onCellClick={drilldownEnabled ? (dow, hour) => onDrill(dow, hour) : undefined}
+        />
+        <HourlyActivityChart
+          data={report?.hourly_activity ?? []}
+          onBarClick={drilldownEnabled ? hour => onDrill(null, hour) : undefined}
+        />
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <MostActiveDays days={report?.most_active_days ?? []} />
+        {report?.top_sessions && <TopSessionsCard top={report.top_sessions} />}
+      </div>
+
+      {/* Projects and leaderboards: the two questions the dashboards
+                could not answer at all, rather than answered wrongly. */}
+      <ProjectAnalytics
+        projects={report?.project_breakdown ?? []}
+        activity={report?.project_activity ?? []}
+      />
+
+      {!drilldownEnabled && (
+        <p className="text-[11px] text-zinc-400 dark:text-zinc-500 -mt-3">
+          Session drill-down is available for ranges up to {MAX_DRILLDOWN_DAYS} days — pick a
+          narrower date range to click through to sessions.
+        </p>
+      )}
+    </>
+  )
 }
 
 // ─── Main Page ────────────────────────────────────────────────────────────────
@@ -412,6 +592,7 @@ function avgSessionsPerDay(totalSessions: number, fromDate: string, toDate: stri
 export default function GeneralUsagePage() {
   const navigate = useNavigate()
   const [report, setReport] = useState<AnalyticsReport | null>(null)
+  const [prevReport, setPrevReport] = useState<AnalyticsReport | null>(null)
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -420,15 +601,20 @@ export default function GeneralUsagePage() {
   const [from, setFrom] = useState(() => presetToRange('30d').from)
   const [to, setTo] = useState(() => presetToRange('30d').to)
   const [project, setProject] = useState('all')
+  const [compare, setCompare] = useState(false)
 
-  const load = useCallback(async (f: string, t: string, proj: string) => {
+  const load = useCallback(async (f: string, t: string, proj: string, withPrevious: boolean) => {
     try {
-      const data = await analyticsApi.get({
-        from: f,
-        to: t,
-        project: proj === 'all' ? undefined : proj,
-      })
+      const scope = proj === 'all' ? undefined : proj
+      const prevRange = previousRange(f, t)
+      const [data, prior] = await Promise.all([
+        analyticsApi.get({ from: f, to: t, project: scope }),
+        withPrevious
+          ? analyticsApi.get({ from: prevRange.from, to: prevRange.to, project: scope })
+          : Promise.resolve(null),
+      ])
       setReport(data)
+      setPrevReport(prior)
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load analytics')
@@ -439,8 +625,8 @@ export default function GeneralUsagePage() {
   }, [])
 
   useEffect(() => {
-    load(from, to, project)
-  }, [load, from, to, project])
+    load(from, to, project, compare)
+  }, [load, from, to, project, compare])
 
   const handlePreset = (p: DatePreset) => {
     setPreset(p)
@@ -453,7 +639,7 @@ export default function GeneralUsagePage() {
 
   const handleRefresh = () => {
     setRefreshing(true)
-    load(from, to, project)
+    load(from, to, project, compare)
   }
 
   // Beyond MAX_DRILLDOWN_DAYS the serialized window list would exceed URL
@@ -472,8 +658,11 @@ export default function GeneralUsagePage() {
     [from, to, project, navigate],
   )
 
+  const observedSpan = observedDaySpan(report?.time_series ?? [])
+
   const summary: AnalyticsSummary = report?.summary ?? {
     total_sessions: 0,
+    unique_projects: 0,
     total_tokens: 0,
     total_input_tokens: 0,
     total_output_tokens: 0,
@@ -526,10 +715,19 @@ export default function GeneralUsagePage() {
           project={project}
           onProject={setProject}
         />
+        <div className="mt-2">
+          <CompareToggle
+            enabled={compare}
+            onChange={setCompare}
+            label="Overlay the equally-sized window immediately before this one"
+          />
+        </div>
       </div>
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-5 space-y-5">
+        <ScanStatusNotice onSettled={handleRefresh} />
+
         {error && (
           <div className="rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-sm text-red-700">
             {error}
@@ -541,59 +739,15 @@ export default function GeneralUsagePage() {
             <p className="text-sm text-zinc-400">Loading analytics…</p>
           </div>
         ) : (
-          <>
-            {/* KPI Cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-              <KPICard
-                icon={Hash}
-                label="Total Sessions"
-                value={summary.total_sessions.toLocaleString()}
-              />
-              <KPICard
-                icon={CalendarDays}
-                label="Avg Sessions / Day"
-                value={avgSessionsPerDay(summary.total_sessions, from, to)}
-              />
-              <KPICard
-                icon={Clock}
-                label="Top Model"
-                value={formatModelName(summary.most_used_model)}
-              />
-              <KPICard
-                icon={Activity}
-                label="Unique Projects"
-                value={String((report?.projects?.length ?? 0) || '—')}
-              />
-            </div>
-
-            {/* Sessions over time */}
-            <SessionsTimeSeriesChart data={report?.time_series ?? []} />
-
-            {/* Sessions per model */}
-            {(report?.sessions_per_model?.length ?? 0) > 0 && (
-              <SessionsPerModelChart data={report!.sessions_per_model} />
-            )}
-
-            {/* Heatmap + Hourly */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-              <ActivityHeatmap
-                data={report?.heatmap ?? []}
-                onCellClick={
-                  drilldownEnabled ? (dow, hour) => drillIntoSessions(dow, hour) : undefined
-                }
-              />
-              <HourlyActivityChart
-                data={report?.hourly_activity ?? []}
-                onBarClick={drilldownEnabled ? hour => drillIntoSessions(null, hour) : undefined}
-              />
-            </div>
-            {!drilldownEnabled && (
-              <p className="text-[11px] text-zinc-400 dark:text-zinc-500 -mt-3">
-                Session drill-down is available for ranges up to {MAX_DRILLDOWN_DAYS} days — pick a
-                narrower date range to click through to sessions.
-              </p>
-            )}
-          </>
+          <GeneralUsageContent
+            report={report}
+            summary={summary}
+            observedSpan={observedSpan}
+            compare={compare}
+            prevReport={prevReport}
+            drilldownEnabled={drilldownEnabled}
+            onDrill={drillIntoSessions}
+          />
         )}
       </div>
     </div>

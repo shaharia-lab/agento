@@ -3,6 +3,7 @@ package claudesessions
 import (
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -96,22 +97,34 @@ func mostFrequent(counts map[string]int) string {
 
 // AnalyticsReport is the complete response payload for GET /api/claude-analytics.
 type AnalyticsReport struct {
-	Summary          AnalyticsSummary       `json:"summary"`
-	TimeSeries       []TimeSeriesPoint      `json:"time_series"`
-	CacheEfficiency  []CacheEfficiencyPoint `json:"cache_efficiency"`
-	ModelBreakdown   []ModelStat            `json:"model_breakdown"`
-	SessionsPerModel []ModelSessionStat     `json:"sessions_per_model"`
-	MostActiveDays   []DayActivity          `json:"most_active_days"`
-	Heatmap          []HeatmapCell          `json:"heatmap"`
-	HourlyActivity   []HourlyActivity       `json:"hourly_activity"`
-	CostOverTime     []CostPoint            `json:"cost_over_time"`
-	CostSummary      CostSummary            `json:"cost_summary"`
-	Projects         []string               `json:"projects"`
+	Summary             AnalyticsSummary       `json:"summary"`
+	TimeSeries          []TimeSeriesPoint      `json:"time_series"`
+	CacheEfficiency     []CacheEfficiencyPoint `json:"cache_efficiency"`
+	ModelBreakdown      []ModelStat            `json:"model_breakdown"`
+	SessionsPerModel    []ModelSessionStat     `json:"sessions_per_model"`
+	CostByModel         []ModelCostStat        `json:"cost_by_model"`
+	InsightCards        []InsightCard          `json:"insight_cards"`
+	ProjectBreakdown    []ProjectStat          `json:"project_breakdown"`
+	ProjectActivity     []ProjectDayActivity   `json:"project_activity"`
+	TopSessions         TopSessions            `json:"top_sessions"`
+	CostOverTimeByModel []StackedCostPoint     `json:"cost_over_time_by_model"`
+	MostActiveDays      []DayActivity          `json:"most_active_days"`
+	Heatmap             []HeatmapCell          `json:"heatmap"`
+	HourlyActivity      []HourlyActivity       `json:"hourly_activity"`
+	CostOverTime        []CostPoint            `json:"cost_over_time"`
+	CostSummary         CostSummary            `json:"cost_summary"`
+	Projects            []string               `json:"projects"`
 }
 
 // AnalyticsSummary holds the top-level KPI values.
 type AnalyticsSummary struct {
-	TotalSessions            int     `json:"total_sessions"`
+	TotalSessions int `json:"total_sessions"`
+	// UniqueProjects counts the projects the *filtered* sessions belong to.
+	// AnalyticsReport.Projects is deliberately built before filtering because it
+	// populates the project picker, which must keep offering every project; a
+	// KPI reading its length reported the whole corpus's project count no matter
+	// what the window or the project filter said.
+	UniqueProjects           int     `json:"unique_projects"`
 	TotalTokens              int     `json:"total_tokens"`
 	TotalInputTokens         int     `json:"total_input_tokens"`
 	TotalOutputTokens        int     `json:"total_output_tokens"`
@@ -142,10 +155,14 @@ type TimeSeriesPoint struct {
 
 // CacheEfficiencyPoint holds per-bucket cache hit rate data.
 type CacheEfficiencyPoint struct {
-	Date             string  `json:"date"`
-	CacheHitRate     float64 `json:"cache_hit_rate"` // 0–100 %
-	CachedTokens     int     `json:"cached_tokens"`
-	TotalInputTokens int     `json:"total_input_tokens"`
+	Date         string  `json:"date"`
+	CacheHitRate float64 `json:"cache_hit_rate"` // 0–100 %
+	CachedTokens int     `json:"cached_tokens"`
+	// TotalInputTokens is every input-side token in the bucket — fresh input,
+	// cache reads and cache writes — which is the denominator CacheHitRate is
+	// taken over. It is not the fresh-input count; that is TimeSeriesPoint's
+	// InputTokens.
+	TotalInputTokens int `json:"total_input_tokens"`
 }
 
 // ModelStat describes token distribution across models.
@@ -153,6 +170,80 @@ type ModelStat struct {
 	Model      string  `json:"model"`
 	Tokens     int     `json:"tokens"`
 	Percentage float64 `json:"percentage"`
+}
+
+// ModelCostStat is one model's share of spend, the answer to the question the
+// token breakdown cannot answer. Cost is attributed to the model that spent it,
+// including for delegated work — see ClaudeSessionSummary.TotalCostByModel.
+type ModelCostStat struct {
+	Model string `json:"model"`
+	// Provider groups models for display ("Anthropic", "Moonshot"). Derived
+	// from the model id, so it needs no catalog lookup and stays correct for a
+	// model the catalog has no rate for.
+	Provider   string      `json:"provider"`
+	Cost       SessionCost `json:"cost"`
+	Percentage float64     `json:"percentage"`
+	// Sessions is how many sessions this model spent money in — context for a
+	// large total, which may be one runaway session or a hundred small ones.
+	Sessions int `json:"sessions"`
+}
+
+// StackedCostPoint is one time bucket's cost split by model, for the stacked
+// cost-over-time chart. The values sum to the same bucket's CostPoint.
+type StackedCostPoint struct {
+	Date string `json:"date"`
+	// CostByModel is keyed by model id. Buckets are independent: a model absent
+	// from one bucket spent nothing in it, which the chart renders as zero.
+	CostByModel map[string]float64 `json:"cost_by_model"`
+}
+
+// ProjectStat aggregates one project's activity over the window.
+//
+// The project was previously only a filter: nothing anywhere told a user which
+// of their projects the money went to, or when they worked on what.
+type ProjectStat struct {
+	Project  string `json:"project"`
+	Sessions int    `json:"sessions"`
+	// Tokens is conversation tokens (input+output); TotalTokens includes cache
+	// traffic. Both are reported because they answer different questions and
+	// conflating them is what made the token headline misleading.
+	Tokens       int         `json:"tokens"`
+	TotalTokens  int         `json:"total_tokens"`
+	Cost         SessionCost `json:"cost"`
+	Percentage   float64     `json:"percentage"` // share of the window's cost
+	LastActivity time.Time   `json:"last_activity"`
+}
+
+// ProjectDayActivity is one project's activity on one local day, for the
+// "what did I work on when" strip.
+type ProjectDayActivity struct {
+	Project  string  `json:"project"`
+	Date     string  `json:"date"`
+	Sessions int     `json:"sessions"`
+	CostUSD  float64 `json:"cost_usd"`
+}
+
+// SessionRanking is one row of a leaderboard: enough to recognize the session
+// and follow the id to it.
+type SessionRanking struct {
+	SessionID     string    `json:"session_id"`
+	Title         string    `json:"title"`
+	Project       string    `json:"project"`
+	Model         string    `json:"model"`
+	CostUSD       float64   `json:"cost_usd"`
+	DurationMs    int64     `json:"duration_ms"`
+	Tokens        int       `json:"tokens"`
+	SubagentCount int       `json:"subagent_count"`
+	LastActivity  time.Time `json:"last_activity"`
+}
+
+// TopSessions holds the leaderboards. Each is the same sessions ranked by a
+// different measure, because "expensive", "long" and "large" pick out different
+// sessions and a user chasing cost wants the first.
+type TopSessions struct {
+	ByCost     []SessionRanking `json:"by_cost"`
+	ByDuration []SessionRanking `json:"by_duration"`
+	ByTokens   []SessionRanking `json:"by_tokens"`
 }
 
 // ModelSessionStat describes session count per model.
@@ -245,44 +336,82 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 	sort.Strings(projects)
 
 	loc := p.location()
-	filtered := filterSessions(sessions, p)
+	filtered := FilterSessions(sessions, p)
 
 	if len(filtered) == 0 {
-		return AnalyticsReport{
-			TimeSeries:       []TimeSeriesPoint{},
-			CacheEfficiency:  []CacheEfficiencyPoint{},
-			ModelBreakdown:   []ModelStat{},
-			SessionsPerModel: []ModelSessionStat{},
-			MostActiveDays:   []DayActivity{},
-			Heatmap:          []HeatmapCell{},
-			HourlyActivity:   buildHourlyActivity(nil, loc),
-			CostOverTime:     []CostPoint{},
-			Projects:         projects,
-		}
+		return emptyReport(projects, loc)
 	}
 
 	granularity := p.Granularity()
 	summary, costSummary := buildSummary(filtered)
+	projectBreakdown := buildProjectBreakdown(filtered)
+	costByModel := buildCostByModel(filtered)
 	timeSeries := buildTimeSeries(filtered, p.From, p.To, granularity, loc)
 
 	return AnalyticsReport{
-		Summary:          summary,
-		TimeSeries:       timeSeries,
-		CacheEfficiency:  buildCacheEfficiency(timeSeries),
-		ModelBreakdown:   buildModelBreakdown(filtered),
-		SessionsPerModel: buildSessionsPerModel(filtered),
-		MostActiveDays:   buildMostActiveDays(filtered, loc),
-		Heatmap:          buildHeatmap(filtered, loc),
-		HourlyActivity:   buildHourlyActivity(filtered, loc),
-		CostOverTime:     buildCostOverTime(filtered, p.From, p.To, granularity, loc),
-		CostSummary:      costSummary,
-		Projects:         projects,
+		Summary:             summary,
+		TimeSeries:          timeSeries,
+		CacheEfficiency:     buildCacheEfficiency(timeSeries),
+		ModelBreakdown:      buildModelBreakdown(filtered),
+		CostByModel:         costByModel,
+		InsightCards:        buildInsightCards(filtered, costByModel),
+		CostOverTimeByModel: buildCostOverTimeByModel(filtered, p.From, p.To, granularity, loc),
+		ProjectBreakdown:    projectBreakdown,
+		ProjectActivity:     buildProjectActivity(filtered, projectBreakdown, loc),
+		TopSessions:         buildTopSessions(filtered),
+		SessionsPerModel:    buildSessionsPerModel(filtered),
+		MostActiveDays:      buildMostActiveDays(filtered, loc),
+		Heatmap:             buildHeatmap(filtered, loc),
+		HourlyActivity:      buildHourlyActivity(filtered, loc),
+		CostOverTime:        buildCostOverTime(filtered, p.From, p.To, granularity, loc),
+		CostSummary:         costSummary,
+		Projects:            projects,
+	}
+}
+
+// emptyReport is what a window with no sessions returns.
+//
+// Every slice is empty rather than nil so the JSON carries [] and no consumer
+// has to distinguish "no data" from "field missing". Projects is still
+// populated: the picker must keep offering every project, or a user who filters
+// into an empty window cannot filter back out of it.
+func emptyReport(projects []string, loc *time.Location) AnalyticsReport {
+	return AnalyticsReport{
+		TimeSeries:          []TimeSeriesPoint{},
+		CacheEfficiency:     []CacheEfficiencyPoint{},
+		ModelBreakdown:      []ModelStat{},
+		CostByModel:         []ModelCostStat{},
+		InsightCards:        []InsightCard{},
+		CostOverTimeByModel: []StackedCostPoint{},
+		SessionsPerModel:    []ModelSessionStat{},
+		MostActiveDays:      []DayActivity{},
+		Heatmap:             []HeatmapCell{},
+		HourlyActivity:      buildHourlyActivity(nil, loc),
+		CostOverTime:        []CostPoint{},
+		ProjectBreakdown:    []ProjectStat{},
+		ProjectActivity:     []ProjectDayActivity{},
+		TopSessions: TopSessions{
+			ByCost:     []SessionRanking{},
+			ByDuration: []SessionRanking{},
+			ByTokens:   []SessionRanking{},
+		},
+		Projects: projects,
 	}
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-func filterSessions(sessions []ClaudeSessionSummary, p AnalyticsParams) []ClaudeSessionSummary {
+// FilterSessions selects the sessions a window covers: last activity within
+// [From, To] inclusive, and — when set — matching Project.
+//
+// It is exported because it is the single definition of "which sessions does
+// this window contain", and more than one endpoint needs to agree on that. The
+// insights summary used to answer it with its own SQL predicate over a
+// different column (start_time), so the same range produced a different session
+// count and a different total cost on two dashboards showing the same window.
+// Callers that cannot aggregate in memory take the IDs this returns rather than
+// re-implementing the predicate.
+func FilterSessions(sessions []ClaudeSessionSummary, p AnalyticsParams) []ClaudeSessionSummary {
 	out := make([]ClaudeSessionSummary, 0, len(sessions))
 	for _, s := range sessions {
 		if s.LastActivity.Before(p.From) || s.LastActivity.After(p.To) {
@@ -296,14 +425,25 @@ func filterSessions(sessions []ClaudeSessionSummary, p AnalyticsParams) []Claude
 	return out
 }
 
+// SessionIDs returns the session IDs of the given summaries, in order.
+func SessionIDs(sessions []ClaudeSessionSummary) []string {
+	ids := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		ids = append(ids, s.SessionID)
+	}
+	return ids
+}
+
 func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummary) {
 	var totalInput, totalOutput, totalCacheRead, totalCacheWrite int
 	modelCount := make(map[string]int)
+	projects := make(map[string]struct{})
 	var cost CostSummary
 
 	var unknown unknownPricingAccumulator
 
 	for _, s := range sessions {
+		projects[s.ProjectPath] = struct{}{}
 		u := s.TotalUsage()
 		totalInput += u.InputTokens
 		totalOutput += u.OutputTokens
@@ -330,6 +470,7 @@ func buildSummary(sessions []ClaudeSessionSummary) (AnalyticsSummary, CostSummar
 
 	return AnalyticsSummary{
 		TotalSessions:            len(sessions),
+		UniqueProjects:           len(projects),
 		TotalTokens:              total,
 		TotalInputTokens:         totalInput,
 		TotalOutputTokens:        totalOutput,
@@ -366,19 +507,20 @@ func buildTimeSeries(
 	return fillTimeSeries(buckets, from, to, granularity, loc)
 }
 
+// buildCacheEfficiency derives the per-bucket hit rate from the token series.
+//
+// The rate comes from CacheHitRate, the single definition this and the insight
+// pipeline now share — see that function for why the denominator is every
+// input-side token rather than just fresh input.
 func buildCacheEfficiency(ts []TimeSeriesPoint) []CacheEfficiencyPoint {
 	out := make([]CacheEfficiencyPoint, 0, len(ts))
 	for _, p := range ts {
-		rate := 0.0
-		denom := p.InputTokens + p.CacheReadTokens
-		if denom > 0 {
-			rate = math.Round(float64(p.CacheReadTokens)/float64(denom)*10000) / 100
-		}
+		rate := CacheHitRate(p.InputTokens, p.CacheReadTokens, p.CacheWriteTokens)
 		out = append(out, CacheEfficiencyPoint{
 			Date:             p.Date,
-			CacheHitRate:     rate,
+			CacheHitRate:     math.Round(rate*10000) / 100,
 			CachedTokens:     p.CacheReadTokens,
-			TotalInputTokens: p.InputTokens,
+			TotalInputTokens: p.InputTokens + p.CacheReadTokens + p.CacheWriteTokens,
 		})
 	}
 	return out
@@ -447,6 +589,258 @@ func buildModelBreakdown(sessions []ClaudeSessionSummary) []ModelStat {
 	return out
 }
 
+// providerPrefixes maps a model-id prefix to the provider that publishes it.
+//
+// A prefix map rather than a catalog lookup: the provider is a property of the
+// identifier, and deriving it here keeps a model with no published rate — the
+// case the unpriced bucket exists for — grouped correctly instead of falling
+// into "unknown provider" precisely when a reader is trying to find it.
+var providerPrefixes = []struct{ prefix, provider string }{
+	{"claude-", "Anthropic"},
+	{"glm-", "Z.ai"},
+	{"qwen", "Alibaba"},
+	{"k", "Moonshot"},
+}
+
+// providerFor names the provider behind a model id, or "Other" when no prefix
+// matches. Matching is longest-prefix-first by declaration order, so the
+// single-letter Moonshot prefix is checked last and cannot swallow another
+// vendor's id.
+func providerFor(model string) string {
+	for _, p := range providerPrefixes {
+		if strings.HasPrefix(model, p.prefix) {
+			return p.provider
+		}
+	}
+	return "Other"
+}
+
+// buildCostByModel attributes spend to the model that spent it.
+//
+// This is the chart the dashboards were missing. The token breakdown beside it
+// answers a different question and, on any corpus mixing a caching backend with
+// a non-caching one, answers it in a way a reader will misread as spend: cache
+// reads and writes are most of the money and none of the tokens that chart
+// plots.
+//
+// Sessions whose rows predate the cost_by_model column contribute nothing here
+// until the scanner re-reads them. That is visible as a total below the cost
+// summary rather than as a wrong attribution, which is the right way round —
+// and it resolves itself on the next scan.
+func buildCostByModel(sessions []ClaudeSessionSummary) []ModelCostStat {
+	costs := map[string]*SessionCost{}
+	sessionCount := map[string]int{}
+	total := 0.0
+
+	for _, s := range sessions {
+		for model, c := range s.TotalCostByModel() {
+			if model == syntheticModel {
+				continue // never billed; see buildModelBreakdown
+			}
+			if costs[model] == nil {
+				costs[model] = &SessionCost{}
+			}
+			costs[model].Add(c)
+			sessionCount[model]++
+			total += c.TotalUSD
+		}
+	}
+
+	out := make([]ModelCostStat, 0, len(costs))
+	for model, c := range costs {
+		pct := 0.0
+		if total > 0 {
+			pct = math.Round(c.TotalUSD/total*1000) / 10
+		}
+		out = append(out, ModelCostStat{
+			Model:      model,
+			Provider:   providerFor(model),
+			Cost:       *c,
+			Percentage: pct,
+			Sessions:   sessionCount[model],
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Cost.TotalUSD > out[j].Cost.TotalUSD })
+	return out
+}
+
+// buildCostOverTimeByModel splits the cost series by model, so "did switching
+// models actually change what I spend" is legible over a period rather than
+// only in a single-period total.
+//
+// Buckets follow buildCostOverTime exactly — same key, same walk — so the
+// stacked chart and the plain one line up bar for bar.
+func buildCostOverTimeByModel(
+	sessions []ClaudeSessionSummary, from, to time.Time, granularity string, loc *time.Location,
+) []StackedCostPoint {
+	buckets := map[string]map[string]float64{}
+	for _, s := range sessions {
+		key := bucketKey(s.LastActivity, granularity, loc)
+		if buckets[key] == nil {
+			buckets[key] = map[string]float64{}
+		}
+		for model, c := range s.TotalCostByModel() {
+			if model == syntheticModel {
+				continue
+			}
+			buckets[key][model] += c.TotalUSD
+		}
+	}
+
+	var result []StackedCostPoint
+	walkBuckets(from, to, granularity, loc, func(key string, cur time.Time) {
+		costs := buckets[key]
+		if costs == nil {
+			costs = map[string]float64{}
+		}
+		result = append(result, StackedCostPoint{Date: bucketLabel(cur, granularity, loc), CostByModel: costs})
+	})
+	return result
+}
+
+// topProjectsCharted bounds the project×day strip. Every project appears in the
+// table; the strip shows the busiest, because a 30-row strip is unreadable and
+// the tail is visually indistinguishable from empty anyway.
+const topProjectsCharted = 8
+
+// topSessionsPerBoard is how many rows each leaderboard carries.
+const topSessionsPerBoard = 10
+
+// buildProjectBreakdown aggregates the window by project, ordered by spend.
+//
+// No schema change was needed: project_path is on every cached row, and cost is
+// the stored per-session figure, so this total and the dashboard total are the
+// same money by construction.
+func buildProjectBreakdown(sessions []ClaudeSessionSummary) []ProjectStat {
+	stats := map[string]*ProjectStat{}
+	total := 0.0
+
+	for _, s := range sessions {
+		p := stats[s.ProjectPath]
+		if p == nil {
+			p = &ProjectStat{Project: s.ProjectPath}
+			stats[s.ProjectPath] = p
+		}
+		u := s.TotalUsage()
+		c := s.TotalCost()
+		p.Sessions++
+		p.Tokens += u.InputTokens + u.OutputTokens
+		p.TotalTokens += u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheCreationTokens
+		p.Cost.Add(c)
+		if s.LastActivity.After(p.LastActivity) {
+			p.LastActivity = s.LastActivity
+		}
+		total += c.TotalUSD
+	}
+
+	out := make([]ProjectStat, 0, len(stats))
+	for _, p := range stats {
+		if total > 0 {
+			p.Percentage = math.Round(p.Cost.TotalUSD/total*1000) / 10
+		}
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Cost.TotalUSD != out[j].Cost.TotalUSD {
+			return out[i].Cost.TotalUSD > out[j].Cost.TotalUSD
+		}
+		// A tie is common when several projects are entirely unpriced; ordering
+		// by name then keeps the response stable across requests.
+		return out[i].Project < out[j].Project
+	})
+	return out
+}
+
+// buildProjectActivity is the project×day strip: which projects were worked on
+// which days, for the busiest projects in the window.
+func buildProjectActivity(
+	sessions []ClaudeSessionSummary, ranked []ProjectStat, loc *time.Location,
+) []ProjectDayActivity {
+	charted := map[string]struct{}{}
+	for i, p := range ranked {
+		if i >= topProjectsCharted {
+			break
+		}
+		charted[p.Project] = struct{}{}
+	}
+
+	type key struct{ project, date string }
+	cells := map[key]*ProjectDayActivity{}
+	for _, s := range sessions {
+		if _, ok := charted[s.ProjectPath]; !ok {
+			continue
+		}
+		k := key{s.ProjectPath, bucketKey(s.LastActivity, "daily", loc)}
+		if cells[k] == nil {
+			cells[k] = &ProjectDayActivity{Project: k.project, Date: k.date}
+		}
+		cells[k].Sessions++
+		cells[k].CostUSD += s.TotalCost().TotalUSD
+	}
+
+	out := make([]ProjectDayActivity, 0, len(cells))
+	for _, c := range cells {
+		out = append(out, *c)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Project != out[j].Project {
+			return out[i].Project < out[j].Project
+		}
+		return out[i].Date < out[j].Date
+	})
+	return out
+}
+
+// buildTopSessions ranks the window's sessions three ways.
+//
+// The rankings ship with the report rather than being sorted client-side so a
+// dashboard is self-contained and the ids can deep-link straight to a session —
+// the list page can already filter, but nothing pointed a user at the five
+// sessions that cost them the most.
+func buildTopSessions(sessions []ClaudeSessionSummary) TopSessions {
+	rankings := make([]SessionRanking, 0, len(sessions))
+	for _, s := range sessions {
+		u := s.TotalUsage()
+		duration := int64(0)
+		if s.LastActivity.After(s.StartTime) {
+			duration = s.LastActivity.Sub(s.StartTime).Milliseconds()
+		}
+		rankings = append(rankings, SessionRanking{
+			SessionID:     s.SessionID,
+			Title:         s.ResolveDisplayTitle(),
+			Project:       s.ProjectPath,
+			Model:         displayModel(s.Model),
+			CostUSD:       s.TotalCost().TotalUSD,
+			DurationMs:    duration,
+			Tokens:        u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheCreationTokens,
+			SubagentCount: s.SubagentCount,
+			LastActivity:  s.LastActivity,
+		})
+	}
+
+	return TopSessions{
+		ByCost:     topBy(rankings, func(r SessionRanking) float64 { return r.CostUSD }),
+		ByDuration: topBy(rankings, func(r SessionRanking) float64 { return float64(r.DurationMs) }),
+		ByTokens:   topBy(rankings, func(r SessionRanking) float64 { return float64(r.Tokens) }),
+	}
+}
+
+// topBy returns the highest-scoring rankings, dropping zero scores: a
+// leaderboard padded with $0.00 rows to reach ten states nothing.
+func topBy(rankings []SessionRanking, score func(SessionRanking) float64) []SessionRanking {
+	out := make([]SessionRanking, 0, len(rankings))
+	for _, r := range rankings {
+		if score(r) > 0 {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return score(out[i]) > score(out[j]) })
+	if len(out) > topSessionsPerBoard {
+		out = out[:topSessionsPerBoard]
+	}
+	return out
+}
+
 func buildSessionsPerModel(sessions []ClaudeSessionSummary) []ModelSessionStat {
 	countByModel := make(map[string]int)
 	for _, s := range sessions {
@@ -490,18 +884,84 @@ func buildMostActiveDays(sessions []ClaudeSessionSummary, loc *time.Location) []
 	return out
 }
 
+// maxSessionHourCells bounds how many hour cells one session may occupy.
+//
+// Two weeks of continuous activity is already far outside anything real; a span
+// longer than that is a broken time range, and letting it paint thousands of
+// cells would swamp the chart with one bad row. Such a session is attributed to
+// the hour it ended, which is what every session used to get.
+const maxSessionHourCells = 24 * 14
+
+// walkSessionHours calls fn once for every local hour a session was active,
+// with that hour's share of the session's duration.
+//
+// Bucketing a session at a single instant is what made "Activity by Hour of
+// Day" answer a different question than its title: an 8h51m session put all of
+// its weight on the hour it *ended*, so the chart showed when work stopped
+// rather than when it happened. Spreading it across its span also makes the
+// chart agree with its own drill-down, which has always selected sessions whose
+// activity window overlaps the clicked hour.
+//
+// A session with no measurable duration occupies the single hour it happened
+// in, with the full weight.
+func walkSessionHours(s ClaudeSessionSummary, loc *time.Location, fn func(at time.Time, share float64)) {
+	start := s.StartTime.In(loc)
+	end := s.LastActivity.In(loc)
+	if !end.After(start) {
+		fn(start, 1)
+		return
+	}
+	if end.Sub(start) > maxSessionHourCells*time.Hour {
+		fn(end, 1)
+		return
+	}
+
+	total := end.Sub(start)
+	for cur := start; cur.Before(end); {
+		next := nextLocalHour(cur, loc)
+		if next.After(end) {
+			next = end
+		}
+		fn(cur, float64(next.Sub(cur))/float64(total))
+		cur = next
+	}
+}
+
+// nextLocalHour is the start of the hour after t, on t's own wall clock.
+//
+// Built with time.Date rather than Truncate because Truncate works in UTC: in a
+// zone offset by a half or quarter hour (Asia/Kolkata, Asia/Kathmandu) it puts
+// the cell boundary at :30 or :45 local, which splits one local hour into two
+// cells and counts the session in it twice. time.Date also normalizes a DST
+// transition to a real instant, and always advances, so the walk terminates.
+func nextLocalHour(t time.Time, loc *time.Location) time.Time {
+	local := t.In(loc)
+	next := time.Date(local.Year(), local.Month(), local.Day(), local.Hour()+1, 0, 0, 0, loc)
+	if !next.After(t) {
+		// Only reachable if a zone transition maps the next wall-clock hour to
+		// an instant at or before t; stepping an hour keeps the walk moving.
+		return t.Add(time.Hour)
+	}
+	return next
+}
+
 func buildHeatmap(sessions []ClaudeSessionSummary, loc *time.Location) []HeatmapCell {
 	type cellKey struct{ dow, hour int }
 	cells := make(map[cellKey]*HeatmapCell)
 	for _, s := range sessions {
-		at := s.LastActivity.In(loc)
-		k := cellKey{int(at.Weekday()), at.Hour()}
-		if cells[k] == nil {
-			cells[k] = &HeatmapCell{DayOfWeek: k.dow, Hour: k.hour}
-		}
 		u := s.TotalUsage()
-		cells[k].Sessions++
-		cells[k].Tokens += u.InputTokens + u.OutputTokens
+		tokens := u.InputTokens + u.OutputTokens
+		walkSessionHours(s, loc, func(at time.Time, share float64) {
+			k := cellKey{int(at.Weekday()), at.Hour()}
+			if cells[k] == nil {
+				cells[k] = &HeatmapCell{DayOfWeek: k.dow, Hour: k.hour}
+			}
+			// Sessions counts presence — a session active across three hours is
+			// one session in each, so the column totals exceed the session count
+			// by design. Tokens are shared out, so they still sum to the corpus.
+			cells[k].Sessions++
+			cells[k].Tokens += int(math.Round(float64(tokens) * share))
+		})
 	}
 	out := make([]HeatmapCell, 0, len(cells))
 	for _, c := range cells {
@@ -522,10 +982,13 @@ func buildHourlyActivity(sessions []ClaudeSessionSummary, loc *time.Location) []
 		hours[i] = HourlyActivity{Hour: i}
 	}
 	for _, s := range sessions {
-		h := s.LastActivity.In(loc).Hour()
 		u := s.TotalUsage()
-		hours[h].Sessions++
-		hours[h].Tokens += u.InputTokens + u.OutputTokens
+		tokens := u.InputTokens + u.OutputTokens
+		// Same span-based attribution as the heatmap — see walkSessionHours.
+		walkSessionHours(s, loc, func(at time.Time, share float64) {
+			hours[at.Hour()].Sessions++
+			hours[at.Hour()].Tokens += int(math.Round(float64(tokens) * share))
+		})
 	}
 	out := make([]HourlyActivity, 24)
 	copy(out, hours[:])

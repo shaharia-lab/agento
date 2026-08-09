@@ -36,6 +36,7 @@ import type {
   MonitoringResponse,
   MonitoringTestResult,
   InsightSummary,
+  SessionInsight,
   TriggerRule,
   WebhookStatus,
   PricingCatalog,
@@ -743,16 +744,36 @@ export const analyticsApi = {
 // ── Session Insights ─────────────────────────────────────────────────────────
 
 export const insightsApi = {
+  /**
+   * The computed insight for one session, or null when the pipeline has not
+   * reached it yet.
+   *
+   * A missing insight is an ordinary state, not an error: the worker processes
+   * sessions in the background and reprocesses everything after a version bump,
+   * so a freshly discovered session legitimately has no row for a while. The
+   * caller renders nothing rather than an error banner.
+   */
+  getSession: async (id: string): Promise<SessionInsight | null> => {
+    const res = await fetch(`${BASE}/claude-sessions/${encodeURIComponent(id)}/insights`)
+    if (res.status === 404) return null
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return (await res.json()) as SessionInsight
+  },
+
   /** Aggregate insights across multiple (or all) sessions, optionally filtered by date range. */
   getSummary: (params?: {
     ids?: string[]
     from?: string
     to?: string
+    project?: string
   }): Promise<InsightSummary> => {
     const qs = new URLSearchParams()
     if (params?.ids && params.ids.length > 0) qs.set('ids', params.ids.join(','))
     if (params?.from) qs.set('from', params.from)
     if (params?.to) qs.set('to', params.to)
+    // Scoping this endpoint the way the other two dashboards scope theirs is
+    // what stops Insights being silently broader than the page beside it.
+    if (params?.project) qs.set('project', params.project)
     qs.set('tz', browserTimezone())
     const suffix = qs.toString() ? `?${qs.toString()}` : ''
     return request<InsightSummary>(`/claude-sessions/insights/summary${suffix}`)
