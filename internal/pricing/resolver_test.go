@@ -1,6 +1,7 @@
 package pricing
 
 import (
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -415,21 +416,35 @@ func TestBuiltinCatalog_QwenCachePercentageRule(t *testing.T) {
 		if err != nil {
 			t.Fatalf("entry %q: %v", e.ModelPattern, err)
 		}
+		type check struct {
+			name string
+			got  float64
+			want float64
+		}
+		// cacheChecks states the rule once, for any set of input/cache columns
+		// — the base row and each of its context-length bands are the same
+		// shape and owe the same arithmetic.
+		cacheChecks := func(label string, in, read, write5m, write1h float64) []check {
+			return []check{
+				{label + "cache_read (10% of input)", read, in * 0.10},
+				{label + "cache_write_5m (125% of input)", write5m, in * 1.25},
+				{label + "cache_write_1h (125% of input)", write1h, in * 1.25},
+			}
+		}
 		for _, rate := range rates {
-			in := rate.InputPerMTok
-			checks := []struct {
-				name string
-				got  float64
-				want float64
-			}{
-				{"cache_read (10% of input)", rate.CacheReadPerMTok, in * 0.10},
-				{"cache_write_5m (125% of input)", rate.CacheWrite5mPerMTok, in * 1.25},
-				{"cache_write_1h (125% of input)", rate.CacheWrite1hPerMTok, in * 1.25},
+			checks := cacheChecks("", rate.InputPerMTok,
+				rate.CacheReadPerMTok, rate.CacheWrite5mPerMTok, rate.CacheWrite1hPerMTok)
+			// The rule is a property of the provider, not of the base row, so
+			// every band owes it too — and a band's cache columns are derived
+			// exactly like the flat ones, so a slip there is just as invisible.
+			for i, tier := range rate.Tiers {
+				checks = append(checks, cacheChecks(fmt.Sprintf("tier %d ", i), tier.InputPerMTok,
+					tier.CacheReadPerMTok, tier.CacheWrite5mPerMTok, tier.CacheWrite1hPerMTok)...)
 			}
 			for _, c := range checks {
 				if math.Abs(c.got-c.want) > epsilon {
 					t.Errorf("%s: %s = %v, want %v (input $%v)",
-						e.ModelPattern, c.name, c.got, c.want, in)
+						e.ModelPattern, c.name, c.got, c.want, rate.InputPerMTok)
 				}
 			}
 		}
@@ -448,4 +463,130 @@ func allBuiltinRates(t *testing.T) []Rate {
 		all = append(all, rates...)
 	}
 	return all
+}
+
+// TestBuiltinCatalog_QwenContextTiers pins the seeded bands to what Alibaba
+// publishes (#218). These are the numbers that decide whether a long-context
+// session is priced right, and nothing else in the catalog contradicts them,
+// so an edit slip would be silent.
+func TestBuiltinCatalog_QwenContextTiers(t *testing.T) {
+	want := map[string][]TierRate{
+		"qwen3.7-plus": {
+			{MaxInputTokens: 256_000, InputPerMTok: 0.4, OutputPerMTok: 1.6},
+			{MaxInputTokens: 1_000_000, InputPerMTok: 1.2, OutputPerMTok: 4.8},
+		},
+		"qwen3.6-flash": {
+			{MaxInputTokens: 256_000, InputPerMTok: 0.25, OutputPerMTok: 1.5},
+			{MaxInputTokens: 1_000_000, InputPerMTok: 1.0, OutputPerMTok: 4.0},
+		},
+		"qwen3.5-plus": {
+			{MaxInputTokens: 256_000, InputPerMTok: 0.4, OutputPerMTok: 2.4},
+			{MaxInputTokens: 1_000_000, InputPerMTok: 0.5, OutputPerMTok: 3.0},
+		},
+		"qwen3-max": {
+			{MaxInputTokens: 32_000, InputPerMTok: 1.2, OutputPerMTok: 6.0},
+			{MaxInputTokens: 128_000, InputPerMTok: 2.4, OutputPerMTok: 12.0},
+			{MaxInputTokens: 256_000, InputPerMTok: 3.0, OutputPerMTok: 15.0},
+		},
+	}
+
+	seen := map[string]bool{}
+	for _, e := range BuiltinCatalog() {
+		rates, err := e.rates()
+		if err != nil {
+			t.Fatalf("entry %q: %v", e.ModelPattern, err)
+		}
+		exp, tiered := want[e.ModelPattern]
+		for _, r := range rates {
+			if !tiered {
+				// Everything else in the catalog stays flat. qwen3.7-max in
+				// particular is flat 0-1M and must not acquire bands.
+				if len(r.Tiers) != 0 {
+					t.Errorf("%s is not a tiered model but declares %d bands", e.ModelPattern, len(r.Tiers))
+				}
+				continue
+			}
+			seen[e.ModelPattern] = true
+			if len(r.Tiers) != len(exp) {
+				t.Errorf("%s: %d bands, want %d", e.ModelPattern, len(r.Tiers), len(exp))
+				continue
+			}
+			for i, w := range exp {
+				got := r.Tiers[i]
+				if got.MaxInputTokens != w.MaxInputTokens ||
+					got.InputPerMTok != w.InputPerMTok || got.OutputPerMTok != w.OutputPerMTok {
+					t.Errorf("%s band %d = {%d, $%v/$%v}, want {%d, $%v/$%v}",
+						e.ModelPattern, i,
+						got.MaxInputTokens, got.InputPerMTok, got.OutputPerMTok,
+						w.MaxInputTokens, w.InputPerMTok, w.OutputPerMTok)
+				}
+			}
+			// The flat columns are the lowest band, so a consumer that ignores
+			// Tiers still reports the base price rather than a random one.
+			if r.InputPerMTok != exp[0].InputPerMTok || r.OutputPerMTok != exp[0].OutputPerMTok {
+				t.Errorf("%s flat columns $%v/$%v do not match the lowest band $%v/$%v",
+					e.ModelPattern, r.InputPerMTok, r.OutputPerMTok, exp[0].InputPerMTok, exp[0].OutputPerMTok)
+			}
+		}
+	}
+	for pattern := range want {
+		if !seen[pattern] {
+			t.Errorf("%s is not in the built-in catalog", pattern)
+		}
+	}
+}
+
+// TestValidateTiers_RejectsAuthoringErrors covers the build-time guard. A band
+// list is only usable if it ascends, so these are the mistakes that would
+// otherwise silently pick the wrong price.
+func TestValidateTiers_RejectsAuthoringErrors(t *testing.T) {
+	base := func(tiers []TierRate) Rate {
+		return Rate{
+			InputPerMTok: 1, OutputPerMTok: 2, Billable: true, Tiers: tiers,
+		}
+	}
+	cases := []struct {
+		name string
+		rate Rate
+	}{
+		{"descending bounds", base([]TierRate{
+			{MaxInputTokens: 100, InputPerMTok: 1, OutputPerMTok: 2},
+			{MaxInputTokens: 50, InputPerMTok: 3, OutputPerMTok: 4},
+		})},
+		{"duplicate bounds", base([]TierRate{
+			{MaxInputTokens: 100, InputPerMTok: 1, OutputPerMTok: 2},
+			{MaxInputTokens: 100, InputPerMTok: 3, OutputPerMTok: 4},
+		})},
+		{"zero bound", base([]TierRate{{MaxInputTokens: 0, InputPerMTok: 1, OutputPerMTok: 2}})},
+		{"zero price in a band", base([]TierRate{
+			{MaxInputTokens: 100, InputPerMTok: 1, OutputPerMTok: 2},
+			{MaxInputTokens: 200, InputPerMTok: 3, OutputPerMTok: 0},
+		})},
+		{"negative cache price in a band", base([]TierRate{
+			{MaxInputTokens: 100, InputPerMTok: 1, OutputPerMTok: 2, CacheReadPerMTok: -1},
+		})},
+		{"flat columns disagree with the lowest band", base([]TierRate{
+			{MaxInputTokens: 100, InputPerMTok: 9, OutputPerMTok: 2},
+		})},
+		{"non-billable rate with bands", Rate{
+			Billable: false,
+			Tiers:    []TierRate{{MaxInputTokens: 100, InputPerMTok: 1, OutputPerMTok: 2}},
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := validateRate("test-model", tc.rate); err == nil {
+				t.Error("expected a validation error, got nil")
+			}
+		})
+	}
+
+	// And the well-formed case passes.
+	ok := base([]TierRate{
+		{MaxInputTokens: 100, InputPerMTok: 1, OutputPerMTok: 2},
+		{MaxInputTokens: 200, InputPerMTok: 3, OutputPerMTok: 4},
+	})
+	if err := validateRate("test-model", ok); err != nil {
+		t.Errorf("a well-formed tiered rate was rejected: %v", err)
+	}
 }

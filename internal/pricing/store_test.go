@@ -3,6 +3,7 @@ package pricing
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"testing"
 	"time"
 
@@ -89,7 +90,9 @@ func TestSeed_Idempotent(t *testing.T) {
 		t.Fatalf("row count changed across re-seed: %d -> %d", len(before), len(after))
 	}
 	for i := range before {
-		if before[i] != after[i] {
+		// reflect.DeepEqual rather than !=: Rate carries a Tiers slice since
+		// #218 and is no longer comparable.
+		if !reflect.DeepEqual(before[i], after[i]) {
 			t.Errorf("row %d (%q) changed across idempotent re-seed", i, before[i].ModelPattern)
 		}
 	}
@@ -274,5 +277,228 @@ func TestUpsertRate_NormalizesPattern(t *testing.T) {
 
 	if err := s.DeleteRate(ctx, "CLAUDE-TEST-CASE", from); err != nil {
 		t.Fatalf("delete by different-case spelling: %v", err)
+	}
+}
+
+// findRate returns the seeded rate with the given pattern, or fails.
+func findRate(t *testing.T, rates []Rate, pattern string) Rate {
+	t.Helper()
+	for _, r := range rates {
+		if r.ModelPattern == pattern {
+			return r
+		}
+	}
+	t.Fatalf("no seeded rate for %q", pattern)
+	return Rate{}
+}
+
+func TestSeed_RoundTripsTiers(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	rates, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+
+	flash := findRate(t, rates, "qwen3.6-flash")
+	if len(flash.Tiers) != 2 {
+		t.Fatalf("qwen3.6-flash tiers = %d, want 2: %+v", len(flash.Tiers), flash.Tiers)
+	}
+	// Ascending order is what tierFor's first-match scan depends on.
+	if flash.Tiers[0].MaxInputTokens != 256_000 || flash.Tiers[1].MaxInputTokens != 1_000_000 {
+		t.Errorf("bands out of order or wrong: %+v", flash.Tiers)
+	}
+	if flash.Tiers[1].InputPerMTok != 1.0 || flash.Tiers[1].OutputPerMTok != 4.0 {
+		t.Errorf("upper band = %+v, want $1.00/$4.00", flash.Tiers[1])
+	}
+
+	// An untiered model must come back with no bands at all, not an empty
+	// band list that later reads as "tiered but unpriced".
+	if opus := findRate(t, rates, "claude-opus-5"); len(opus.Tiers) != 0 {
+		t.Errorf("claude-opus-5 gained tiers: %+v", opus.Tiers)
+	}
+}
+
+func TestSeed_TiersAreIdempotentAndPruneOrphans(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var before int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM model_pricing_tier`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if before == 0 {
+		t.Fatal("no tier rows were seeded")
+	}
+
+	// A band the catalog no longer declares (say a provider retires one) must
+	// not survive the next startup, or it would keep pricing requests.
+	rates, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flash := findRate(t, rates, "qwen3.6-flash")
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO model_pricing_tier (rate_id, max_input_tokens, input_per_mtok, output_per_mtok,
+			cache_write_5m_per_mtok, cache_write_1h_per_mtok, cache_read_per_mtok)
+		VALUES (?, 9999999, 1, 1, 1, 1, 1)`, flash.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("re-seed: %v", err)
+	}
+
+	var after int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM model_pricing_tier`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Errorf("tier row count after re-seed = %d, want %d (orphan not pruned, or bands duplicated)", after, before)
+	}
+}
+
+func TestSeed_NeverClobbersUserModifiedRowTiers(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	rates, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flash := findRate(t, rates, "qwen3.6-flash")
+
+	// Mark the row user-modified, exactly as an edit through the settings UI
+	// would, and change a band underneath it.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE model_pricing SET user_modified = 1 WHERE id = ?`, flash.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE model_pricing_tier SET input_per_mtok = 42 WHERE rate_id = ? AND max_input_tokens = ?`,
+		flash.ID, 1_000_000); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("re-seed: %v", err)
+	}
+
+	rates, err = s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := findRate(t, rates, "qwen3.6-flash")
+	if len(got.Tiers) != 2 || got.Tiers[1].InputPerMTok != 42 {
+		t.Errorf("re-seed overwrote a user-modified row's bands: %+v", got.Tiers)
+	}
+}
+
+func TestRevision_TracksTierEdits(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	base, err := s.Revision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rates, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flash := findRate(t, rates, "qwen3.6-flash")
+
+	// Without this, a band correction leaves pricing_rev unchanged, #188's
+	// stored session costs are never invalidated, and the total stays wrong
+	// with nothing to signal it — the failure this whole issue is about.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE model_pricing_tier SET input_per_mtok = 2.5 WHERE rate_id = ? AND max_input_tokens = ?`,
+		flash.ID, 1_000_000); err != nil {
+		t.Fatal(err)
+	}
+	edited, err := s.Revision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited == base {
+		t.Error("revision did not change when a tier price was corrected")
+	}
+
+	// A bound moving is also a price change in effect.
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE model_pricing_tier SET max_input_tokens = 512000 WHERE rate_id = ? AND max_input_tokens = ?`,
+		flash.ID, 256_000); err != nil {
+		t.Fatal(err)
+	}
+	moved, err := s.Revision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved == edited {
+		t.Error("revision did not change when a tier boundary moved")
+	}
+
+	// And it must stay put when nothing does.
+	again, err := s.Revision(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != moved {
+		t.Errorf("revision is not stable: %d then %d", moved, again)
+	}
+}
+
+// TestUpsertRate_ClearsTiers guards the interaction between the settings UI and
+// #218's bands. Price picks a band before applying any price, so a rate the user
+// corrected while its catalog bands survived would save successfully and then
+// change nothing at any request size.
+func TestUpsertRate_ClearsTiers(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	rates, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeded := findRate(t, rates, "qwen3.6-flash")
+	if len(seeded.Tiers) == 0 {
+		t.Fatal("qwen3.6-flash should be seeded with bands")
+	}
+
+	corrected := Rate{
+		Provider: "alibaba", ModelPattern: "qwen3.6-flash", MatchType: MatchPrefix,
+		InputPerMTok: 99, OutputPerMTok: 199,
+		CacheWrite5mPerMTok: 1, CacheWrite1hPerMTok: 1, CacheReadPerMTok: 1,
+		EffectiveFrom: seeded.EffectiveFrom, Billable: true,
+	}
+	if err := s.UpsertRate(ctx, corrected); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	rates, err = s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := findRate(t, rates, "qwen3.6-flash")
+	if len(got.Tiers) != 0 {
+		t.Errorf("bands survived a user correction: %+v", got.Tiers)
+	}
+	// The point of clearing them: the user's price is now what is charged, at
+	// a size that used to fall in the upper band.
+	if c := got.Price(Usage{InputTokens: 1_000_000}); c.InputCostUSD != 99 {
+		t.Errorf("1M-token request cost $%v, want $99 — the correction did not take effect", c.InputCostUSD)
 	}
 }

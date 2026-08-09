@@ -749,3 +749,102 @@ func TestBuildSummary_SyntheticNeverTopModel(t *testing.T) {
 		t.Errorf("most used model = %q, want claude-opus-4-8", summary.MostUsedModel)
 	}
 }
+
+// TestCostForUsage_QwenContextTiers is #218's acceptance case, driven through
+// the same resolver-plus-Price path the scanner uses: a long-context Qwen
+// message must price at its upper band, and every token must price there.
+func TestCostForUsage_QwenContextTiers(t *testing.T) {
+	at := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name      string
+		model     string
+		usage     TokenUsage
+		wantIn    float64
+		wantOut   float64
+		wantTotal float64
+	}{
+		{
+			// 300K input is above qwen3.6-flash's 256K bound, so the whole
+			// request bills at $1.00/$4.00 rather than $0.25/$1.50 — the 300%
+			// under-report this issue was filed for.
+			name:  "300K input crosses into the upper band",
+			model: "qwen3.6-flash",
+			usage: TokenUsage{InputTokens: 300_000, OutputTokens: 10_000},
+			// 0.3M * $1.00 + 0.01M * $4.00
+			wantIn: 0.30, wantOut: 0.04, wantTotal: 0.34,
+		},
+		{
+			name:  "200K input stays in the base band",
+			model: "qwen3.6-flash",
+			usage: TokenUsage{InputTokens: 200_000, OutputTokens: 10_000},
+			// 0.2M * $0.25 + 0.01M * $1.50
+			wantIn: 0.05, wantOut: 0.015, wantTotal: 0.065,
+		},
+		{
+			name:   "exactly on the bound is still the base band",
+			model:  "qwen3.6-flash",
+			usage:  TokenUsage{InputTokens: 256_000},
+			wantIn: 0.064, wantOut: 0, wantTotal: 0.064,
+		},
+		{
+			// qwen3-max is the three-band model; 100K lands in the middle one.
+			name:  "middle band on a three-band model",
+			model: "qwen3-max",
+			usage: TokenUsage{InputTokens: 100_000, OutputTokens: 1_000},
+			// 0.1M * $2.40 + 0.001M * $12.00
+			wantIn: 0.24, wantOut: 0.012, wantTotal: 0.252,
+		},
+		{
+			// Above every declared band, the highest one applies rather than
+			// the base rate or nothing at all.
+			name:  "beyond the top bound uses the highest band",
+			model: "qwen3-max",
+			usage: TokenUsage{InputTokens: 1_000_000},
+			// 1M * $3.00
+			wantIn: 3.0, wantOut: 0, wantTotal: 3.0,
+		},
+		{
+			// qwen3.7-max is flat 0-1M and must be unaffected by tiering.
+			name:  "an untiered Qwen model prices flat at any size",
+			model: "qwen3.7-max",
+			usage: TokenUsage{InputTokens: 900_000},
+			// 0.9M * $2.50
+			wantIn: 2.25, wantOut: 0, wantTotal: 2.25,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := costForUsage(tt.model, tt.usage, at)
+			if !ok {
+				t.Fatalf("%s did not resolve to a rate", tt.model)
+			}
+			assertUSD(t, "input", got.InputCostUSD, tt.wantIn)
+			assertUSD(t, "output", got.OutputCostUSD, tt.wantOut)
+			assertUSD(t, "total", got.TotalCostUSD, tt.wantTotal)
+		})
+	}
+}
+
+// TestCostForUsage_AnthropicUnaffectedByTiers is the regression guard: the
+// entire Anthropic catalog is flat, so #218 must not have moved a single
+// Anthropic figure.
+func TestCostForUsage_AnthropicUnaffectedByTiers(t *testing.T) {
+	at := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	u := TokenUsage{
+		InputTokens: 500_000, OutputTokens: 50_000,
+		CacheCreationTokens: 300_000, CacheCreation5mTokens: 200_000,
+		CacheCreation1hTokens: 100_000, CacheReadTokens: 2_000_000,
+	}
+	got, ok := costForUsage("claude-opus-5", u, at)
+	if !ok {
+		t.Fatal("claude-opus-5 did not resolve")
+	}
+	// $5 in / $25 out / 6.25 5m / 10 1h / 0.5 read, all flat regardless of the
+	// 2.8M-token request size.
+	assertUSD(t, "input", got.InputCostUSD, 0.5*5)
+	assertUSD(t, "output", got.OutputCostUSD, 0.05*25)
+	assertUSD(t, "cache write", got.CacheWriteCostUSD, 0.2*6.25+0.1*10)
+	assertUSD(t, "cache read", got.CacheReadCostUSD, 2.0*0.5)
+}

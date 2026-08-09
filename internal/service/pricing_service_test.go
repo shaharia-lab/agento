@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"reflect"
 	"testing"
 	"time"
 
@@ -65,7 +66,9 @@ func TestAddRate_AppendsWithoutTouchingHistory(t *testing.T) {
 	for _, old := range before {
 		found := false
 		for _, now := range after {
-			if now == old {
+			// reflect.DeepEqual rather than ==: pricing.Rate carries a Tiers
+			// slice since #218 and is no longer comparable.
+			if reflect.DeepEqual(now, old) {
 				found = true
 				break
 			}

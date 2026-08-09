@@ -60,6 +60,27 @@ type Rate struct {
 	// priced at the current flagship of that tier as a best effort. Resolved
 	// reports this alongside the predates-the-catalog case.
 	Estimated bool `json:"estimated"`
+	// Tiers holds the rate's context-length bands, ascending by
+	// MaxInputTokens. Empty means the rate is flat, which is the default and
+	// the case for every Anthropic model — Anthropic does not price by context
+	// length. Only providers that publish input-length bands (Alibaba) carry
+	// tiers, and a tiered rate's own five price columns are its lowest band, so
+	// a consumer that ignores Tiers still reports a sane figure.
+	Tiers []TierRate `json:"tiers,omitempty"`
+}
+
+// TierRate is one context-length band of a tiered rate. MaxInputTokens is an
+// inclusive upper bound on a request's input tokens; the highest band applies
+// to everything above it. Providers that price this way (Alibaba) bill ALL of
+// a request's tokens at the selected band's rates, so bands are selected, not
+// accumulated across — there is no progressive-bracket arithmetic here.
+type TierRate struct {
+	MaxInputTokens      int     `json:"max_input_tokens"`
+	InputPerMTok        float64 `json:"input_per_mtok"`
+	OutputPerMTok       float64 `json:"output_per_mtok"`
+	CacheWrite5mPerMTok float64 `json:"cache_write_5m_per_mtok"`
+	CacheWrite1hPerMTok float64 `json:"cache_write_1h_per_mtok"`
+	CacheReadPerMTok    float64 `json:"cache_read_per_mtok"`
 }
 
 // Usage is the token consumption of one assistant message, with cache
@@ -81,9 +102,56 @@ type Cost struct {
 	TotalCostUSD      float64 `json:"total_cost_usd"`
 }
 
+// tierInputTokens is the token count a context-length band is selected by.
+//
+// Alibaba defines the boundary as "the total number of input tokens in a
+// single request", so every input-side category counts: fresh input, tokens
+// read from the prompt cache, and tokens written to it. Their pricing page
+// states how cached tokens are *billed* (at their own rates, which the cache
+// columns already carry) but not whether they *count* toward the boundary;
+// re-checked 2026-08-09 and still unanswered. We take the reading that they
+// do, because they are input — merely input the provider found cheaper to
+// serve. This is the one place that decision is encoded; if the provider ever
+// documents otherwise, change it here and nowhere else.
+func (u Usage) tierInputTokens() int {
+	return u.InputTokens + u.CacheReadTokens + u.CacheCreation5mTokens + u.CacheCreation1hTokens
+}
+
+// tierFor returns the rate whose prices govern a request of the given input
+// size. A flat rate (no Tiers) is returned unchanged, so the untiered path
+// costs one nil-slice check and nothing else. Otherwise the first band whose
+// MaxInputTokens covers the count wins, and a request larger than every
+// declared band falls through to the highest one rather than to zero.
+func (r Rate) tierFor(inputTokens int) Rate {
+	if len(r.Tiers) == 0 {
+		return r
+	}
+	band := r.Tiers[len(r.Tiers)-1]
+	for _, t := range r.Tiers {
+		if inputTokens <= t.MaxInputTokens {
+			band = t
+			break
+		}
+	}
+	r.InputPerMTok = band.InputPerMTok
+	r.OutputPerMTok = band.OutputPerMTok
+	r.CacheWrite5mPerMTok = band.CacheWrite5mPerMTok
+	r.CacheWrite1hPerMTok = band.CacheWrite1hPerMTok
+	r.CacheReadPerMTok = band.CacheReadPerMTok
+	return r
+}
+
 // Price computes the cost of u under r. Costs are independent of the time
-// dimension — the caller resolves the rate first.
+// dimension — the caller resolves the rate first. For a tiered rate the band
+// is selected from u's own input size and then applied to all of u's tokens.
 func (r Rate) Price(u Usage) Cost {
+	return r.tierFor(u.tierInputTokens()).priceFlat(u)
+}
+
+// priceFlat is the flat-rate arithmetic, unchanged since before tiers existed.
+// Keeping it separate means tiering is a rate substitution in front of one
+// implementation rather than a branch inside it.
+func (r Rate) priceFlat(u Usage) Cost {
 	c := Cost{
 		InputCostUSD:     float64(u.InputTokens) / 1_000_000 * r.InputPerMTok,
 		OutputCostUSD:    float64(u.OutputTokens) / 1_000_000 * r.OutputPerMTok,

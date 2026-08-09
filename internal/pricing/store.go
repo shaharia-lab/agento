@@ -87,7 +87,55 @@ func (s *Store) Snapshot(ctx context.Context) ([]Rate, error) {
 		}
 		rates = append(rates, r)
 	}
-	return rates, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.attachTiers(ctx, rates); err != nil {
+		return nil, err
+	}
+	return rates, nil
+}
+
+// attachTiers loads every context-length band in ONE query and distributes
+// them by rate_id. Snapshot feeds the process-wide resolver, so a per-rate
+// query here would be an N+1 on the path every cost figure goes through.
+// Ordering by max_input_tokens is what lets tierFor stop at the first match.
+func (s *Store) attachTiers(ctx context.Context, rates []Rate) error {
+	if len(rates) == 0 {
+		return nil
+	}
+	byID := make(map[int64]*Rate, len(rates))
+	for i := range rates {
+		byID[rates[i].ID] = &rates[i]
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT rate_id, max_input_tokens,
+			input_per_mtok, output_per_mtok,
+			cache_write_5m_per_mtok, cache_write_1h_per_mtok, cache_read_per_mtok
+		FROM model_pricing_tier
+		ORDER BY rate_id, max_input_tokens`)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cerr := rows.Close(); cerr != nil {
+			s.logger.Warn("pricing: failed to close tier rows", "error", cerr)
+		}
+	}()
+
+	for rows.Next() {
+		var rateID int64
+		var t TierRate
+		if err := rows.Scan(&rateID, &t.MaxInputTokens,
+			&t.InputPerMTok, &t.OutputPerMTok,
+			&t.CacheWrite5mPerMTok, &t.CacheWrite1hPerMTok, &t.CacheReadPerMTok); err != nil {
+			return err
+		}
+		if r, ok := byID[rateID]; ok {
+			r.Tiers = append(r.Tiers, t)
+		}
+	}
+	return rows.Err()
 }
 
 // Revision is a stable fingerprint of the catalog's contents: FNV-1a over the
@@ -122,6 +170,19 @@ func (s *Store) Revision(ctx context.Context) (int64, error) {
 		// billable decides whether tokens land in the unknown bucket, and
 		// estimated qualifies the figure. Toggling either must re-cost.
 		_, _ = h.Write([]byte{boolToByte(r.Billable), boolToByte(r.Estimated)})
+		// Tiers are prices too, so a band edit has to move the fingerprint —
+		// otherwise #188's stored per-session costs keep the pre-edit figure
+		// forever and nothing anywhere signals it. Snapshot returns bands in
+		// ascending order, so this is deterministic.
+		for _, t := range r.Tiers {
+			binary.LittleEndian.PutUint64(buf[:], uint64(t.MaxInputTokens)) // #nosec G115 -- bounds are small positive ints.
+			_, _ = h.Write(buf[:])
+			writeFloat(t.InputPerMTok)
+			writeFloat(t.OutputPerMTok)
+			writeFloat(t.CacheWrite5mPerMTok)
+			writeFloat(t.CacheWrite1hPerMTok)
+			writeFloat(t.CacheReadPerMTok)
+		}
 	}
 	// Keep the value non-negative so it survives SQLite integer round-trips.
 	// #nosec G115 -- the mask clears the sign bit before the conversion.
@@ -175,9 +236,69 @@ func (s *Store) Seed(ctx context.Context) (int, error) {
 			if n, err := res.RowsAffected(); err == nil {
 				written += int(n)
 			}
+			if err := s.seedTiers(ctx, r); err != nil {
+				return written, fmt.Errorf("pricing: seeding tiers for %q: %w", r.ModelPattern, err)
+			}
 		}
 	}
 	return written, nil
+}
+
+// seedTiers brings one seeded rate's bands in line with the catalog. It
+// upserts the declared bands and only then deletes the ones no longer
+// declared, rather than delete-then-insert: Seed runs without a surrounding
+// transaction, so a delete-first order would leave a crash-interrupted startup
+// with a tiered rate carrying zero bands — which prices silently at the base
+// tier, the exact under-reporting this table exists to end.
+//
+// A user-modified rate is skipped entirely, matching the rate upsert's
+// WHERE user_modified = 0 guard: re-seeding must never overwrite a deliberate
+// override, and that has to include its bands.
+func (s *Store) seedTiers(ctx context.Context, r Rate) error {
+	var rateID int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id FROM model_pricing
+		 WHERE model_pattern = ? AND effective_from = ? AND user_modified = 0`,
+		r.ModelPattern, r.EffectiveFrom.UTC().Format(time.RFC3339)).Scan(&rateID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // user-modified row: leave it and its bands alone.
+	}
+	if err != nil {
+		return err
+	}
+
+	keep := make([]any, 0, len(r.Tiers))
+	for _, t := range r.Tiers {
+		if _, err := s.db.ExecContext(ctx, `
+			INSERT INTO model_pricing_tier (
+				rate_id, max_input_tokens,
+				input_per_mtok, output_per_mtok,
+				cache_write_5m_per_mtok, cache_write_1h_per_mtok, cache_read_per_mtok
+			) VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(rate_id, max_input_tokens) DO UPDATE SET
+				input_per_mtok = excluded.input_per_mtok,
+				output_per_mtok = excluded.output_per_mtok,
+				cache_write_5m_per_mtok = excluded.cache_write_5m_per_mtok,
+				cache_write_1h_per_mtok = excluded.cache_write_1h_per_mtok,
+				cache_read_per_mtok = excluded.cache_read_per_mtok`,
+			rateID, t.MaxInputTokens,
+			t.InputPerMTok, t.OutputPerMTok,
+			t.CacheWrite5mPerMTok, t.CacheWrite1hPerMTok, t.CacheReadPerMTok); err != nil {
+			return err
+		}
+		keep = append(keep, t.MaxInputTokens)
+	}
+
+	// Prune bands the catalog dropped. With no bands declared this clears them
+	// all, so a rate that stops being tiered stops being tiered here too.
+	q := `DELETE FROM model_pricing_tier WHERE rate_id = ?`
+	args := []any{rateID}
+	if len(keep) > 0 {
+		q += ` AND max_input_tokens NOT IN (?` + strings.Repeat(`, ?`, len(keep)-1) + `)`
+		args = append(args, keep...)
+	}
+	_, err = s.db.ExecContext(ctx, q, args...)
+	return err
 }
 
 // UpsertRate inserts or replaces one rate row, marking it user-modified so
@@ -233,6 +354,23 @@ func (s *Store) UpsertRate(ctx context.Context, r Rate) error {
 		r.Billable, r.Estimated,
 		now, now,
 	)
+	if err != nil {
+		return err
+	}
+	// A rate written here is flat, so its catalog bands must go.
+	//
+	// This is not housekeeping: Price selects a band before applying any price,
+	// so leaving the seeded bands in place would make the user's new figures
+	// unreachable at every request size — the edit would appear to save and
+	// then change nothing. The settings form cannot express bands, so entering
+	// a price here is an assertion that this is *the* price, and user intent
+	// overriding the built-in catalog is the same rule user_modified already
+	// encodes everywhere else.
+	_, err = s.db.ExecContext(ctx, `
+		DELETE FROM model_pricing_tier
+		WHERE rate_id = (SELECT id FROM model_pricing
+		                 WHERE model_pattern = ? AND effective_from = ?)`,
+		r.ModelPattern, r.EffectiveFrom.UTC().Format(time.RFC3339))
 	return err
 }
 

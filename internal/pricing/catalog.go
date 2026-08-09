@@ -58,6 +58,23 @@ type builtinPrice struct {
 	CacheWrite5m  *float64 `json:"cache_write_5m,omitempty"`
 	CacheWrite1h  *float64 `json:"cache_write_1h,omitempty"`
 	CacheRead     *float64 `json:"cache_read,omitempty"`
+	// Tiers lists context-length bands, ascending by max_input_tokens. Absent
+	// means the rate is flat, which is the overwhelming majority — only
+	// Alibaba publishes input-length bands. The row's own input/output are the
+	// lowest band and must agree with the first tier.
+	Tiers []builtinTier `json:"tiers,omitempty"`
+}
+
+// builtinTier is one context-length band in the seed. Cache prices follow the
+// same derive-unless-overridden rule as the flat columns, so a provider with
+// its own cached-input price states it per band.
+type builtinTier struct {
+	MaxInputTokens int      `json:"max_input_tokens"`
+	InputPerMTok   float64  `json:"input"`
+	OutputPerMTok  float64  `json:"output"`
+	CacheWrite5m   *float64 `json:"cache_write_5m,omitempty"`
+	CacheWrite1h   *float64 `json:"cache_write_1h,omitempty"`
+	CacheRead      *float64 `json:"cache_read,omitempty"`
 }
 
 // orDerive returns the explicit override when present, else input × mult.
@@ -106,7 +123,9 @@ func validateRate(pattern string, r Rate) error {
 				return fmt.Errorf("pricing: rate %q: non-billable rates must all be zero", pattern)
 			}
 		}
-		return nil
+		// Still tier-checked: a non-billable rate carrying bands is incoherent
+		// in the same way a non-billable rate carrying prices is.
+		return validateTiers(pattern, r)
 	}
 	if r.InputPerMTok <= 0 || r.OutputPerMTok <= 0 {
 		return fmt.Errorf("pricing: rate %q: rates must be positive", pattern)
@@ -116,7 +135,75 @@ func validateRate(pattern string, r Rate) error {
 			return fmt.Errorf("pricing: rate %q: cache rates must not be negative", pattern)
 		}
 	}
+	return validateTiers(pattern, r)
+}
+
+// validateTiers enforces that a tiered rate is usable for band selection:
+// bands strictly ascending (tierFor scans in order and stops at the first
+// match, so an unsorted list would silently pick the wrong band), bounds and
+// prices positive by the same "a zero is an unfilled entry" rule as the flat
+// columns, and no tiers at all on a non-billable rate — a model that costs
+// nothing cannot cost a different nothing above 256K.
+func validateTiers(pattern string, r Rate) error {
+	if len(r.Tiers) == 0 {
+		return nil
+	}
+	if !r.Billable {
+		return fmt.Errorf("pricing: rate %q: non-billable rates must not declare tiers", pattern)
+	}
+	if lo := r.Tiers[0]; !nearlyEqual(lo.InputPerMTok, r.InputPerMTok) ||
+		!nearlyEqual(lo.OutputPerMTok, r.OutputPerMTok) {
+		return fmt.Errorf(
+			"pricing: rate %q: the flat columns must equal the lowest tier (got %g/%g vs tier %g/%g)",
+			pattern, r.InputPerMTok, r.OutputPerMTok, lo.InputPerMTok, lo.OutputPerMTok)
+	}
+	prev := 0
+	for i, t := range r.Tiers {
+		if t.MaxInputTokens <= prev {
+			return fmt.Errorf(
+				"pricing: rate %q: tier %d: max_input_tokens must ascend (got %d after %d)",
+				pattern, i, t.MaxInputTokens, prev)
+		}
+		prev = t.MaxInputTokens
+		if t.InputPerMTok <= 0 || t.OutputPerMTok <= 0 {
+			return fmt.Errorf("pricing: rate %q: tier %d: rates must be positive", pattern, i)
+		}
+		for _, v := range []float64{t.CacheWrite5mPerMTok, t.CacheWrite1hPerMTok, t.CacheReadPerMTok} {
+			if v < 0 {
+				return fmt.Errorf("pricing: rate %q: tier %d: cache rates must not be negative", pattern, i)
+			}
+		}
+	}
 	return nil
+}
+
+// nearlyEqual compares two per-million-token prices. An explicit band price
+// and one derived from the same input rate can differ in the last bit, and a
+// last-bit difference is not an authoring error.
+func nearlyEqual(a, b float64) bool {
+	const eps = 1e-12
+	d := a - b
+	return d < eps && d > -eps
+}
+
+// tiers converts a seed row's bands, deriving cache prices per band by the
+// same rule the flat columns use.
+func (p builtinPrice) tiers() []TierRate {
+	if len(p.Tiers) == 0 {
+		return nil
+	}
+	out := make([]TierRate, 0, len(p.Tiers))
+	for _, t := range p.Tiers {
+		out = append(out, TierRate{
+			MaxInputTokens:      t.MaxInputTokens,
+			InputPerMTok:        t.InputPerMTok,
+			OutputPerMTok:       t.OutputPerMTok,
+			CacheWrite5mPerMTok: orDerive(t.CacheWrite5m, t.InputPerMTok, 1.25),
+			CacheWrite1hPerMTok: orDerive(t.CacheWrite1h, t.InputPerMTok, 2),
+			CacheReadPerMTok:    orDerive(t.CacheRead, t.InputPerMTok, 0.1),
+		})
+	}
+	return out
 }
 
 // rates flattens an entry into seed rows ready for the store.
@@ -147,6 +234,7 @@ func (e builtinEntry) rates() ([]Rate, error) {
 			IsBuiltin:           true,
 			Billable:            e.billable(),
 			Estimated:           e.Estimated,
+			Tiers:               p.tiers(),
 		}
 		if err := validateRate(e.ModelPattern, r); err != nil {
 			return nil, err
