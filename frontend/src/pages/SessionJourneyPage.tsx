@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { claudeSessionsApi } from '@/lib/api'
-import type { SessionJourney, JourneyTurn, JourneyStep } from '@/types'
+import type { SessionJourney, JourneyTurn, JourneyStep, ClaudeTokenUsage } from '@/types'
 import { Badge } from '@/components/ui/badge'
 import {
   ArrowLeft,
@@ -118,13 +118,36 @@ function getStepStyle(step: JourneyStep): StepStyle {
 
 // ── Step content components ──────────────────────────────────────────────────
 
+/**
+ * Content that is expensive to produce is passed as a thunk, so the cost is
+ * paid on expand rather than on every render of a collapsed block.
+ *
+ * A tool call's input used to be JSON.stringify'd eagerly for every step in
+ * every open turn, whether or not anyone looked at it. On a session with
+ * hundreds of tool calls carrying large inputs that is the page's single
+ * biggest render cost, and it bought nothing.
+ */
+type LazyContent = string | (() => string)
+
+function resolveContent(content: LazyContent): string {
+  return typeof content === 'function' ? content() : content
+}
+
 function ExpandableCode({
   label,
   content,
+  hasContent = true,
   errorStyle,
-}: Readonly<{ label: string; content: string; errorStyle?: boolean }>) {
+}: Readonly<{
+  label: string
+  content: LazyContent
+  /** Whether there is anything to show, checked without resolving the thunk. */
+  hasContent?: boolean
+  errorStyle?: boolean
+}>) {
   const [expanded, setExpanded] = useState(false)
-  if (!content) return null
+  if (!hasContent) return null
+  if (typeof content === 'string' && !content) return null
   return (
     <div>
       <button
@@ -141,8 +164,39 @@ function ExpandableCode({
               : 'text-zinc-500 dark:text-zinc-400 bg-zinc-100 dark:bg-zinc-800'
           }`}
         >
-          {content}
+          {resolveContent(content)}
         </pre>
+      )}
+    </div>
+  )
+}
+
+/**
+ * How much of a message body renders before it is cut off behind a link.
+ *
+ * A pasted file or a long tool-driven answer can run to tens of thousands of
+ * characters, and a single turn can hold dozens of them; rendering all of it as
+ * one text node is what made the largest sessions — the expensive ones users
+ * most want to inspect — hang the tab for 30 seconds at a time.
+ */
+const MAX_INLINE_CHARS = 2_000
+
+function TruncatedText({ content }: Readonly<{ content: string }>) {
+  const [expanded, setExpanded] = useState(false)
+  const isLong = content.length > MAX_INLINE_CHARS
+
+  return (
+    <div>
+      <p className="text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words leading-relaxed">
+        {expanded || !isLong ? content : `${content.slice(0, MAX_INLINE_CHARS)}…`}
+      </p>
+      {isLong && (
+        <button
+          className="mt-1 text-xs text-zinc-400 hover:underline"
+          onClick={() => setExpanded(e => !e)}
+        >
+          {expanded ? 'Show less' : `Show all ${content.length.toLocaleString()} characters`}
+        </button>
       )}
     </div>
   )
@@ -210,7 +264,6 @@ function AgentStepsSummary({ step }: Readonly<{ step: JourneyStep }>) {
 function ToolCallContent({ step }: Readonly<{ step: JourneyStep }>) {
   const data = step.data
   const toolName = (data?.tool_name as string) || 'unknown'
-  const input = data?.input ? JSON.stringify(data.input, null, 2) : ''
   const agentType = (data?.agent_type as string) || ''
   const description = (data?.description as string) || ''
   const agentUsage = data?.agent_usage as Record<string, unknown> | undefined
@@ -218,7 +271,11 @@ function ToolCallContent({ step }: Readonly<{ step: JourneyStep }>) {
   return (
     <div>
       <span className="text-xs font-medium text-zinc-600 dark:text-zinc-300">{toolName}</span>
-      {input && <ExpandableCode label="input" content={input} />}
+      <ExpandableCode
+        label="input"
+        hasContent={!!data?.input}
+        content={() => JSON.stringify(data.input, null, 2)}
+      />
       {isAgent && (
         <div className="mt-0.5 flex flex-wrap items-center gap-2">
           {agentType && (
@@ -274,11 +331,7 @@ function StepContent({ step }: Readonly<{ step: JourneyStep }>) {
   switch (step.type) {
     case 'user_input':
     case 'text_response':
-      return (
-        <p className="text-sm text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-words leading-relaxed">
-          {data?.content as string}
-        </p>
-      )
+      return <TruncatedText content={(data?.content as string) ?? ''} />
     case 'thinking':
       return <ThinkingContent data={data} />
     case 'tool_call':
@@ -368,11 +421,28 @@ function StepRow({ step, depth = 0 }: Readonly<{ step: JourneyStep; depth?: numb
 
 // ── Turn card ─────────────────────────────────────────────────────────────────
 
-function TurnCard({ turn }: Readonly<{ turn: JourneyTurn }>) {
-  const [open, setOpen] = useState(turn.number <= 3) // auto-expand first 3 turns
+/**
+ * Above this many turns nothing auto-expands.
+ *
+ * Below it, auto-expanding the first few turns is a convenience. Above it the
+ * same behaviour is a hazard: the sessions with the most turns are also the
+ * ones whose turns are largest, and rendering even three of them up front is
+ * what users experienced as the page freezing on their most expensive sessions.
+ */
+const AUTO_EXPAND_TURN_LIMIT = 30
+
+function TurnCard({ turn, defaultOpen }: Readonly<{ turn: JourneyTurn; defaultOpen: boolean }>) {
+  const [open, setOpen] = useState(defaultOpen)
 
   return (
-    <div className="border border-zinc-200 dark:border-zinc-700/50 rounded-lg overflow-hidden">
+    <div
+      className="border border-zinc-200 dark:border-zinc-700/50 rounded-lg overflow-hidden"
+      // Lets the browser skip layout and paint for cards scrolled out of view,
+      // with a size hint so the scrollbar stays stable. This is what keeps a
+      // 100-turn timeline responsive without hand-rolled virtualization, which
+      // would break in-page search and anchor links.
+      style={{ contentVisibility: 'auto', containIntrinsicSize: 'auto 56px' }}
+    >
       {/* Turn header */}
       <button
         className="flex items-center gap-3 w-full px-4 py-3 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors"
@@ -425,10 +495,30 @@ function TurnCard({ turn }: Readonly<{ turn: JourneyTurn }>) {
 
 // ── Token usage bar ─────────────────────────────────────────────────────────
 
-function TokenUsageBar({ journey }: Readonly<{ journey: SessionJourney }>) {
+/** Main thread plus delegated, the figure every other page reports. */
+function totalJourneyUsage(journey: SessionJourney): ClaudeTokenUsage {
   const u = journey.usage
+  const s = journey.subagent_usage
+  return {
+    input_tokens: u.input_tokens + s.input_tokens,
+    output_tokens: u.output_tokens + s.output_tokens,
+    cache_creation_tokens: u.cache_creation_tokens + s.cache_creation_tokens,
+    cache_creation_5m_tokens: u.cache_creation_5m_tokens + s.cache_creation_5m_tokens,
+    cache_creation_1h_tokens: u.cache_creation_1h_tokens + s.cache_creation_1h_tokens,
+    cache_read_tokens: u.cache_read_tokens + s.cache_read_tokens,
+  }
+}
+
+function TokenUsageBar({ journey }: Readonly<{ journey: SessionJourney }>) {
+  const u = totalJourneyUsage(journey)
   const total = u.input_tokens + u.output_tokens + u.cache_creation_tokens + u.cache_read_tokens
   if (total === 0) return null
+
+  const delegated =
+    journey.subagent_usage.input_tokens +
+    journey.subagent_usage.output_tokens +
+    journey.subagent_usage.cache_creation_tokens +
+    journey.subagent_usage.cache_read_tokens
 
   const segments = [
     { label: 'Input', value: u.input_tokens, color: 'bg-blue-500' },
@@ -464,6 +554,16 @@ function TokenUsageBar({ journey }: Readonly<{ journey: SessionJourney }>) {
             </span>
           </div>
         ))}
+        {delegated > 0 && (
+          <div className="flex items-center gap-1.5 text-xs text-indigo-600 dark:text-indigo-400">
+            <Bot className="h-3 w-3" />
+            {/* Spelled out because the header states delegated in+out while
+                this bar covers all four token types; two different numbers
+                labeled "delegated" a few pixels apart read as a contradiction. */}
+            <span>of which delegated (all types):</span>
+            <span className="font-medium">{formatTokens(delegated)}</span>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -521,6 +621,8 @@ export default function SessionJourneyPage() {
     )
   }
 
+  const totalUsage = totalJourneyUsage(journey)
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -571,11 +673,29 @@ export default function SessionJourneyPage() {
               <span className="text-xs text-zinc-500 dark:text-zinc-400">
                 {journey.total_turns} turn{journey.total_turns === 1 ? '' : 's'}
               </span>
+              {/* The session's real total, matching the sessions list. The
+                  header used to show main-thread usage only while the list
+                  showed main + delegated, so a heavily delegating session
+                  reported two different totals on two pages. Delegated work is
+                  named rather than merged, so the split stays legible. */}
               <span className="flex items-center gap-0.5 text-xs text-zinc-500 dark:text-zinc-400">
                 <Zap className="h-3 w-3" />
-                {formatTokens(journey.usage.input_tokens)} in /{' '}
-                {formatTokens(journey.usage.output_tokens)} out
+                {formatTokens(totalUsage.input_tokens)} in /{' '}
+                {formatTokens(totalUsage.output_tokens)} out
               </span>
+              {journey.subagent_count > 0 && (
+                <span
+                  className="flex items-center gap-1 text-xs text-indigo-600 dark:text-indigo-400"
+                  title="Tokens spent by sub-agents this session delegated to, included in the total above"
+                >
+                  <Bot className="h-3 w-3" />
+                  {journey.subagent_count} sub-agent{journey.subagent_count === 1 ? '' : 's'} ·{' '}
+                  {formatTokens(
+                    journey.subagent_usage.input_tokens + journey.subagent_usage.output_tokens,
+                  )}{' '}
+                  in+out delegated
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -590,8 +710,18 @@ export default function SessionJourneyPage() {
           <p className="text-sm text-zinc-400 text-center py-8">No turns in this session.</p>
         ) : (
           <div className="flex flex-col gap-3">
+            {journey.turns.length > AUTO_EXPAND_TURN_LIMIT && (
+              <p className="text-xs text-zinc-400 dark:text-zinc-500">
+                {journey.turns.length} turns — all collapsed by default. Open the ones you need;
+                each renders its content only when expanded.
+              </p>
+            )}
             {journey.turns.map(turn => (
-              <TurnCard key={turn.number} turn={turn} />
+              <TurnCard
+                key={turn.number}
+                turn={turn}
+                defaultOpen={journey.turns.length <= AUTO_EXPAND_TURN_LIMIT && turn.number <= 3}
+              />
             ))}
           </div>
         )}
