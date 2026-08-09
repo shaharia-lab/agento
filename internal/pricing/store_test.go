@@ -458,3 +458,47 @@ func TestRevision_TracksTierEdits(t *testing.T) {
 		t.Errorf("revision is not stable: %d then %d", moved, again)
 	}
 }
+
+// TestUpsertRate_ClearsTiers guards the interaction between the settings UI and
+// #218's bands. Price picks a band before applying any price, so a rate the user
+// corrected while its catalog bands survived would save successfully and then
+// change nothing at any request size.
+func TestUpsertRate_ClearsTiers(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	if _, err := s.Seed(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	rates, err := s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seeded := findRate(t, rates, "qwen3.6-flash")
+	if len(seeded.Tiers) == 0 {
+		t.Fatal("qwen3.6-flash should be seeded with bands")
+	}
+
+	corrected := Rate{
+		Provider: "alibaba", ModelPattern: "qwen3.6-flash", MatchType: MatchPrefix,
+		InputPerMTok: 99, OutputPerMTok: 199,
+		CacheWrite5mPerMTok: 1, CacheWrite1hPerMTok: 1, CacheReadPerMTok: 1,
+		EffectiveFrom: seeded.EffectiveFrom, Billable: true,
+	}
+	if err := s.UpsertRate(ctx, corrected); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	rates, err = s.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := findRate(t, rates, "qwen3.6-flash")
+	if len(got.Tiers) != 0 {
+		t.Errorf("bands survived a user correction: %+v", got.Tiers)
+	}
+	// The point of clearing them: the user's price is now what is charged, at
+	// a size that used to fall in the upper band.
+	if c := got.Price(Usage{InputTokens: 1_000_000}); c.InputCostUSD != 99 {
+		t.Errorf("1M-token request cost $%v, want $99 — the correction did not take effect", c.InputCostUSD)
+	}
+}

@@ -354,6 +354,23 @@ func (s *Store) UpsertRate(ctx context.Context, r Rate) error {
 		r.Billable, r.Estimated,
 		now, now,
 	)
+	if err != nil {
+		return err
+	}
+	// A rate written here is flat, so its catalog bands must go.
+	//
+	// This is not housekeeping: Price selects a band before applying any price,
+	// so leaving the seeded bands in place would make the user's new figures
+	// unreachable at every request size — the edit would appear to save and
+	// then change nothing. The settings form cannot express bands, so entering
+	// a price here is an assertion that this is *the* price, and user intent
+	// overriding the built-in catalog is the same rule user_modified already
+	// encodes everywhere else.
+	_, err = s.db.ExecContext(ctx, `
+		DELETE FROM model_pricing_tier
+		WHERE rate_id = (SELECT id FROM model_pricing
+		                 WHERE model_pattern = ? AND effective_from = ?)`,
+		r.ModelPattern, r.EffectiveFrom.UTC().Format(time.RFC3339))
 	return err
 }
 

@@ -89,8 +89,8 @@ function RateForm({
   const set = (patch: Partial<PricingRateInput>) => onChange({ ...input, ...patch })
   const collision = mode === 'add' && hasRateOn(existing, input.effective_from)
   // Bands come from the seeded catalog and are not editable here. Saying so
-  // matters: the fields below are the lowest band only, so on a tiered model
-  // an edit leaves long-context requests priced by the untouched bands.
+  // matters: saving a correction on a tiered model drops its bands, so the
+  // single price below becomes the price at every request size.
   const correctingTiered =
     mode === 'correct' &&
     existing.some(r => r.effective_from === input.effective_from && isTiered(r))
@@ -111,9 +111,9 @@ function RateForm({
 
       {correctingTiered && (
         <div className="rounded-md border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
-          This model prices by context length. The rates below are its lowest band only — the higher
-          bands ship with the catalog and are not editable here, so requests above the first bound
-          keep their existing prices.
+          This model prices by context length, and the rates below are its lowest band. Saving here
+          replaces its context-length bands with this single flat price, at every request size — the
+          bands ship with the catalog and cannot be edited individually.
         </div>
       )}
 
