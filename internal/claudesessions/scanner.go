@@ -65,7 +65,12 @@ const (
 	// priced — a stored total carries neither the model nor the timestamp of the
 	// messages behind it — so rows written before v9 have an empty breakdown
 	// that no later pass could fill in.
-	CurrentScannerVersion = 10
+	// v11: the injected user events that arrive as *array* content — the
+	// skill-invocation preamble and the "[Request interrupted by user]" notice
+	// — stop counting as messages too (#226). v7 covered string content only,
+	// so rows written before v11 still count that machine chatter as human
+	// turns, and their previews were taken from the genuine-turn branch.
+	CurrentScannerVersion = 11
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -1704,11 +1709,13 @@ func addSummaryUserEvent(summary *ClaudeSessionSummary, ev rawEvent) {
 	// A genuine turn replaces a wrapper-sourced preview, so the label prefers
 	// what the person actually typed even when a wrapper came first.
 	//
-	// Still passed through fallbackPreviewLabel, because two injected classes
-	// reach this branch by design: a skill preamble and an interruption arrive
-	// as *array* content rather than a string, so isUserTurnContent counts them
-	// as turns (see CLAUDE.md). Their previews are exactly the unreadable rows
-	// worth labeling, and a real prompt matches neither wrapper shape.
+	// Since #226 every known injected form — string wrapper, skill preamble and
+	// interruption notice alike — is classified above and takes the fallback
+	// branch, so this call is normally a no-op on real prose. It stays because
+	// the marker tables are empirical: a wrapper shape a future Claude Code
+	// release invents reaches this branch until the tables catch up, and
+	// labeling it beats rendering raw tag soup. A real prompt matches neither
+	// pattern and is returned unchanged.
 	if summary.Preview == "" || summary.previewIsFallback {
 		raw := extractTextContent(ev.Message.Content)
 		summary.Preview = truncateRunes(fallbackPreviewLabel(raw), previewMaxRunes)
