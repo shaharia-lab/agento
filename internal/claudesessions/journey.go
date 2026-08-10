@@ -360,8 +360,14 @@ func (b *journeyBuilder) processUserEvent(ev rawJourneyEvent, j *SessionJourney)
 		return
 	}
 
-	// Check if this is a tool_result event
-	if b.tryProcessToolResults(ev) {
+	// Turn segmentation goes through the shared predicate, so a journey's turns,
+	// the session's message_count and the insight pipeline's turn_count all mean
+	// the same thing. An event that is not genuine input is either a tool_result
+	// carrier or one of Claude Code's injected wrappers: attach whatever
+	// tool_result blocks it carries to the enclosing turn, and never open a new
+	// one. A wrapper carries no blocks, so it is simply a no-op.
+	if !isJourneyTurnStart(ev) {
+		b.attachToolResults(ev)
 		return
 	}
 
@@ -383,21 +389,51 @@ func (b *journeyBuilder) processUserEvent(ev rawJourneyEvent, j *SessionJourney)
 	})
 }
 
-// tryProcessToolResults checks if the user event contains tool_result blocks and adds them as steps.
-// Returns true if tool results were found and processed.
-func (b *journeyBuilder) tryProcessToolResults(ev rawJourneyEvent) bool {
-	if ev.Message == nil || len(ev.Message.Content) == 0 {
+// isJourneyTurnStart reports whether a user event in a journey is genuine human
+// input, and so opens a turn.
+//
+// It is a thin wrapper over isUserTurnContent — the ONE definition of a user
+// turn, shared with the scanner's message_count and the insight pipeline's
+// isTurnStart. rawJourneyEvent and ProcessableEvent are different structs, so
+// this cannot be isTurnStart itself; the predicate underneath is the point, and
+// a change to it moves journey turns along with the other two.
+//
+// The isSidechain check is deliberately NOT made here, exactly as
+// isUserTurnContent leaves it to its callers: the flag means "delegated work,
+// skip" in a parent transcript but is set on every event of a sub-agent
+// transcript, where it carries no such meaning. processUserEvent handles it.
+func isJourneyTurnStart(ev rawJourneyEvent) bool {
+	if ev.Message == nil {
 		return false
+	}
+	return isUserTurnContent(ev.Message.Content)
+}
+
+// attachToolResults decodes the tool_result blocks of a user event and adds
+// them as steps of the enclosing turn.
+//
+// It is deliberately NOT the turn-start test — that is isJourneyTurnStart, over
+// the shared predicate. Because the decision no longer depends on this decode,
+// every block is inspected rather than only the first: a carrier whose
+// tool_result is not in first position still has its results attached, and no
+// longer opens a turn the session's own message_count does not count.
+func (b *journeyBuilder) attachToolResults(ev rawJourneyEvent) {
+	if ev.Message == nil || len(ev.Message.Content) == 0 {
+		return
 	}
 	var blocks []rawToolResultBlock
-	if json.Unmarshal(ev.Message.Content, &blocks) != nil || len(blocks) == 0 || blocks[0].Type != "tool_result" {
-		return false
+	if json.Unmarshal(ev.Message.Content, &blocks) != nil {
+		return
 	}
-	b.ensureTurn(ev.Timestamp)
 	for _, blk := range blocks {
 		if blk.Type != "tool_result" {
 			continue
 		}
+		// ensureTurn is load-bearing and sits inside the loop on purpose: a
+		// transcript can open with a tool-result carrier and those steps must
+		// still land somewhere, but an event carrying no tool_result at all —
+		// an injected wrapper — must not conjure a turn out of nothing.
+		b.ensureTurn(ev.Timestamp)
 		data := ToolResultData{
 			ToolUseID: blk.ToolUseID,
 			Content:   truncateRunes(blk.Content, 2000),
@@ -410,7 +446,6 @@ func (b *journeyBuilder) tryProcessToolResults(ev rawJourneyEvent) bool {
 			Data:      raw,
 		})
 	}
-	return true
 }
 
 func (b *journeyBuilder) processAssistantEvent(ev rawJourneyEvent, j *SessionJourney) {
