@@ -657,6 +657,21 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 	}
 	ctx := context.Background()
 
+	// Assert the fixture really is at 19. Without this the test's whole premise
+	// rests on the literal above being right: a bound that overshoots leaves
+	// migration 20 already applied, and every assertion below still passes —
+	// the raw INSERT succeeds because agent_breakdown is NOT NULL DEFAULT '{}',
+	// the version check compares after the upgrade, and an empty breakdown is
+	// what a never-written column holds anyway. Exactly the silent pass this
+	// test was rewritten to eliminate, just relocated to a different literal.
+	var fixtureVersion int
+	if err := db.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&fixtureVersion); err != nil {
+		t.Fatalf("reading the fixture's schema version: %v", err)
+	}
+	if fixtureVersion != 19 {
+		t.Fatalf("fixture is at schema version %d, want 19; migration 20 is not being exercised", fixtureVersion)
+	}
+
 	// Written as raw SQL against the version-19 column list, not through
 	// NewSQLiteSessionInsightsStore.Upsert: the store writes agent_breakdown,
 	// which does not exist yet. Knowing the old schema here is inherent to
