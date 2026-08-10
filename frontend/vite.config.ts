@@ -23,7 +23,18 @@ export default defineConfig({
   },
   test: {
     include: ['src/**/*.test.{ts,tsx}'],
+    // jsdom globally rather than a per-file `@vitest-environment` pragma: every
+    // existing suite passes under it, so the switch costs only time. Measured
+    // at 13 files: 772ms -> 2.41s wall, ~1.25s of jsdom construction per file.
+    // Negligible now and it buys one uniform environment, but it scales
+    // linearly and the pure-logic src/lib suites pay it for nothing. If this
+    // reaches ~100 files, split with vitest `projects` (node for src/lib, jsdom
+    // for components) or move to happy-dom.
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
+    // Component tests are the ones that spy on fetch/matchMedia/timers, and an
+    // un-restored spy fails whichever test happens to run next. Free to set in
+    // the change that defines the harness; an audit once there are 40 files.
+    restoreMocks: true,
   },
 })
