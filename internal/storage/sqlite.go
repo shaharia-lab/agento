@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -539,37 +540,11 @@ ALTER TABLE claude_session_cache ADD COLUMN cost_by_model TEXT NOT NULL DEFAULT 
 // migrations. Returns true as the second value if the database was newly
 // created (i.e. no tables existed before this call).
 func NewSQLiteDB(dbPath string, logger *slog.Logger) (*sql.DB, bool, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0750); err != nil {
-		return nil, false, fmt.Errorf("creating database directory: %w", err)
-	}
-
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, false, fmt.Errorf("opening database: %w", err)
-	}
-
-	// SQLite is single-writer; serialize all access through one connection
-	// to avoid SQLITE_BUSY errors from concurrent goroutines.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
-
 	ctx := context.Background()
 
-	// Configure SQLite pragmas.
-	pragmas := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA synchronous=NORMAL",
-	}
-	for _, p := range pragmas {
-		if _, pragmaErr := db.ExecContext(ctx, p); pragmaErr != nil {
-			if cerr := db.Close(); cerr != nil {
-				logger.Warn("failed to close database after pragma error", "error", cerr)
-			}
-			return nil, false, fmt.Errorf("setting pragma %q: %w", p, pragmaErr)
-		}
+	db, err := openSQLiteDB(ctx, dbPath, logger)
+	if err != nil {
+		return nil, false, err
 	}
 
 	freshDB, err := runMigrations(ctx, db, logger)
@@ -583,10 +558,60 @@ func NewSQLiteDB(dbPath string, logger *slog.Logger) (*sql.DB, bool, error) {
 	return db, freshDB, nil
 }
 
+// openSQLiteDB creates the parent directory, opens the database and configures
+// its connection pool and pragmas. It does not migrate: callers decide which
+// schema version to bring the file to.
+func openSQLiteDB(ctx context.Context, dbPath string, logger *slog.Logger) (*sql.DB, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0750); err != nil {
+		return nil, fmt.Errorf("creating database directory: %w", err)
+	}
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("opening database: %w", err)
+	}
+
+	// SQLite is single-writer; serialize all access through one connection
+	// to avoid SQLITE_BUSY errors from concurrent goroutines.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+
+	// Configure SQLite pragmas.
+	pragmas := []string{
+		"PRAGMA journal_mode=WAL",
+		"PRAGMA busy_timeout=5000",
+		"PRAGMA foreign_keys=ON",
+		"PRAGMA synchronous=NORMAL",
+	}
+	for _, p := range pragmas {
+		if _, pragmaErr := db.ExecContext(ctx, p); pragmaErr != nil {
+			if cerr := db.Close(); cerr != nil {
+				logger.Warn("failed to close database after pragma error", "error", cerr)
+			}
+			return nil, fmt.Errorf("setting pragma %q: %w", p, pragmaErr)
+		}
+	}
+
+	return db, nil
+}
+
+// allMigrations is the upTo bound that applies every migration in the list —
+// what a normal database open does. Bounding below it is only for tests that
+// need to build a genuine older database (see ApplyMigrationsUpTo).
+const allMigrations = math.MaxInt
+
 // runMigrations ensures the schema_migrations table exists and applies any
 // pending migrations. Returns true if migration version 1 was applied during
 // this call (indicating a fresh database).
 func runMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) (bool, error) {
+	return applyMigrations(ctx, db, logger, allMigrations)
+}
+
+// applyMigrations ensures the schema_migrations table exists and applies every
+// pending migration whose version is <= upTo, recording each one. Returns true
+// if migration version 1 was applied during this call.
+func applyMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger, upTo int) (bool, error) {
 	// Ensure the migrations tracking table exists.
 	_, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version    INTEGER PRIMARY KEY,
@@ -603,7 +628,7 @@ func runMigrations(ctx context.Context, db *sql.DB, logger *slog.Logger) (bool, 
 
 	freshDB := false
 	for _, m := range migrations {
-		if m.version <= current {
+		if m.version <= current || m.version > upTo {
 			continue
 		}
 		if m.version == 1 {

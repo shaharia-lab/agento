@@ -373,6 +373,12 @@ func setupPopulatedCache(t *testing.T) *Cache {
 	if got := len(cache.List()); got != 1 {
 		t.Fatalf("cold List returned %d sessions, want 1", got)
 	}
+	// The cold List returns as soon as there are rows to serve, which can be
+	// before the scan goroutine has run its cleanup — leaving a real scan in
+	// flight. A test that then fakes one with markScanning gets its flag
+	// cleared out from under it when the real one finishes. Wait the scan out
+	// so every caller starts from a quiescent cache.
+	<-cache.EnsureScan()
 	return cache
 }
 

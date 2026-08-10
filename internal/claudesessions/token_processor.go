@@ -59,10 +59,12 @@ func (p *TokenProfileProcessor) Finalize(insight *SessionInsight) {
 	// report two different numbers under the same name again.
 	insight.CacheHitRate = CacheHitRate(p.inputTokens, p.cacheRead, p.cacheCreation)
 
+	// Divide by one when there are no turns, for the reason spelled out in
+	// TurnCountProcessor.Finalize: a skill-driven session has no genuine user
+	// event, and reporting 0 tokens per turn for a session that spent millions
+	// of them says the opposite of what happened.
 	totalTokens := p.inputTokens + p.outputTokens
-	if insight.TurnCount > 0 {
-		insight.TokensPerTurnAvg = float64(totalTokens) / float64(insight.TurnCount)
-	}
+	insight.TokensPerTurnAvg = float64(totalTokens) / float64(max(1, insight.TurnCount))
 
 	// Sessions with no usage-bearing messages — or run without a pricing
 	// resolver — leave the estimate at zero, matching the pre-#186 semantics

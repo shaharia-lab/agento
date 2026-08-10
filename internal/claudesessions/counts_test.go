@@ -238,10 +238,19 @@ func TestScan_AgreesWithInsightPipeline(t *testing.T) {
 	}
 	s := findSession(t, sessions, "session-agree")
 
-	// Replay the same transcript through the real insight processor.
+	assertScannerAgreesWithPipeline(t, s, filepath.Join(projectDir, "session-agree.jsonl"))
+}
+
+// assertScannerAgreesWithPipeline replays a transcript through the real insight
+// processor and checks the scanner's message_count against turn_count plus the
+// assistant replies. Both sides read isUserTurnContent, so any divergence means
+// the shared predicate stopped being shared.
+func assertScannerAgreesWithPipeline(t *testing.T, s ClaudeSessionSummary, path string) {
+	t.Helper()
+
 	turns := &TurnCountProcessor{}
 	assistantReplies := 0
-	for _, ev := range readProcessableEvents(t, filepath.Join(projectDir, "session-agree.jsonl")) {
+	for _, ev := range readProcessableEvents(t, path) {
 		turns.Process(ev)
 		if ev.Type == "assistant" && ev.Message != nil && isAssistantReply(ev.Message.Content) {
 			assistantReplies++
@@ -325,17 +334,19 @@ func TestIncrementalScan_ScannerVersionRecomputesCounts(t *testing.T) {
 	}
 }
 
-// TestVersionConstants_BumpedTogetherForInjectedTurns pins #197's central risk.
-// isUserTurnContent feeds both message_count (scanner) and turn_count (insight
-// pipeline), so bumping only one constant would leave the two recomputed at
-// different times and disagreeing — exactly the drift #182 existed to remove.
+// TestVersionConstants_BumpedTogetherForInjectedTurns pins #197's central risk,
+// raised to #226's floor. isUserTurnContent feeds both message_count (scanner)
+// and turn_count (insight pipeline), so bumping only one constant would leave
+// the two recomputed at different times and disagreeing — exactly the drift
+// #182 existed to remove. The floors move together on every change to the
+// predicate; #226 extended it to array content, so both are one higher.
 func TestVersionConstants_BumpedTogetherForInjectedTurns(t *testing.T) {
-	if CurrentScannerVersion < 7 {
-		t.Errorf("CurrentScannerVersion = %d, want >= 7 so cached message_count is recomputed",
+	if CurrentScannerVersion < 11 {
+		t.Errorf("CurrentScannerVersion = %d, want >= 11 so cached message_count is recomputed",
 			CurrentScannerVersion)
 	}
-	if CurrentProcessorVersion < 7 {
-		t.Errorf("CurrentProcessorVersion = %d, want >= 7 so stored turn_count is reprocessed",
+	if CurrentProcessorVersion < 9 {
+		t.Errorf("CurrentProcessorVersion = %d, want >= 9 so stored turn_count is reprocessed",
 			CurrentProcessorVersion)
 	}
 }
@@ -393,12 +404,60 @@ func TestIsUserTurnContent(t *testing.T) {
 		// A marker-like tag that is not one of ours stays a turn.
 		{"unrelated leading tag", `"<div>hello</div>"`, true},
 
-		// Array content is unaffected by the wrapper rule.
+		// Array content is unaffected by the *string* wrapper rule.
 		{"array with tool_result", `[{"type":"tool_result","tool_use_id":"t1"}]`, false},
 		{"array with text", `[{"type":"text","text":"hello"}]`, true},
 		{
-			"array whose text opens with a marker is still a turn",
+			"array whose text opens with a string-only wrapper is still a turn",
 			`[{"type":"text","text":"<system-reminder>x</system-reminder>"}]`,
+			true,
+		},
+
+		// #226: the injected classes that arrive as a lone text block.
+		{
+			"skill preamble",
+			`[{"type":"text","text":"Base directory for this skill: ` +
+				`/home/u/.claude/skills/review-pr\n\n# Strict PR Review"}]`,
+			false,
+		},
+		{
+			"interrupted by user",
+			`[{"type":"text","text":"[Request interrupted by user]"}]`,
+			false,
+		},
+		{
+			"interrupted by user for tool use",
+			`[{"type":"text","text":"[Request interrupted by user for tool use]"}]`,
+			false,
+		},
+
+		// ...and the false positives the anchor, the path token and the
+		// single-block rule exist to prevent.
+		{
+			"prose quoting the skill marker mid-sentence",
+			`[{"type":"text","text":"the preamble reads Base directory for this skill: fix the parser"}]`,
+			true,
+		},
+		{
+			"prose opening with the skill words but no path token",
+			`[{"type":"text","text":"Base directory for this skill:"}]`,
+			true,
+		},
+		{
+			"prose mentioning an interruption mid-sentence",
+			`[{"type":"text","text":"why does [Request interrupted by user] count as a turn?"}]`,
+			true,
+		},
+		{
+			"multi-block array whose first text opens with a marker",
+			`[{"type":"text","text":"[Request interrupted by user]"},` +
+				`{"type":"text","text":"and here is what I meant"}]`,
+			true,
+		},
+		{
+			"marker text alongside an image block",
+			`[{"type":"image","source":{}},` +
+				`{"type":"text","text":"Base directory for this skill: /opt/skills/x"}]`,
 			true,
 		},
 	}
@@ -458,6 +517,102 @@ func TestScan_InjectedUserEventIsNotATurn(t *testing.T) {
 	}
 	if s.Preview != "the real prompt" {
 		t.Errorf("preview = %q, want the typed prompt — a wrapper must never seed the preview", s.Preview)
+	}
+}
+
+// TestScan_ArrayInjectedUserEventsAreNotTurns is #226's acceptance case: the
+// skill preamble and the interruption notice arrive as array content, so #197's
+// string-only rule missed them and they kept counting as human turns. They are
+// still raw events, and a genuine array message that merely quotes one is still
+// a turn.
+func TestScan_ArrayInjectedUserEventsAreNotTurns(t *testing.T) {
+	db := setupTestDB(t)
+	projectDir := titleProjectDir(t)
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	if err := os.MkdirAll(projectDir, 0750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	const id = "session-array-injected"
+	userEvent := func(offset int, content string) rawEvent {
+		return rawEvent{
+			Type: "user", SessionID: id, CWD: "/tmp",
+			Timestamp: ts.Add(time.Duration(offset) * time.Second),
+			Message:   &rawMessage{Role: "user", Content: json.RawMessage(content)},
+		}
+	}
+	writeRawEvents(t, projectDir, id, []rawEvent{
+		// A real prompt.
+		userEvent(0, `[{"type":"text","text":"please refactor this"}]`),
+		// A skill invocation the harness injected.
+		userEvent(1, `[{"type":"text","text":"Base directory for this skill: `+
+			`/home/u/.claude/skills/review-pr\n\n# Strict PR Review"}]`),
+		// Two interruption notices, both variants.
+		userEvent(2, `[{"type":"text","text":"[Request interrupted by user]"}]`),
+		userEvent(3, `[{"type":"text","text":"[Request interrupted by user for tool use]"}]`),
+		// A string wrapper, still excluded by #197.
+		userEvent(4, `"<task-notification>\n<status>completed</status>\n</task-notification>"`),
+		// A person writing *about* the markers. Prefix-anchored, never a
+		// substring, so this is a turn.
+		userEvent(5, `[{"type":"text","text":"why does [Request interrupted by user] count?"}]`),
+	})
+
+	sessions, err := IncrementalScan(db, testLogger)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	s := findSession(t, sessions, id)
+
+	if s.MessageCount != 2 {
+		t.Errorf("message_count = %d, want 2 — only the typed prompt and the prompt quoting a marker",
+			s.MessageCount)
+	}
+	if s.EventCount != 6 {
+		t.Errorf("event_count = %d, want 6 — filtering turns must not drop raw events", s.EventCount)
+	}
+	if s.Preview != "please refactor this" {
+		t.Errorf("preview = %q, want the typed prompt", s.Preview)
+	}
+	assertScannerAgreesWithPipeline(t, s, filepath.Join(projectDir, id+".jsonl"))
+}
+
+// TestScan_SkillPreambleOnlySessionKeepsALabel is the preview half of #226. The
+// preamble moved from the genuine-turn branch to the injected one, and both
+// apply fallbackPreviewLabel — so a session that is nothing but a skill
+// invocation must still name the skill rather than render as a blank row.
+func TestScan_SkillPreambleOnlySessionKeepsALabel(t *testing.T) {
+	db := setupTestDB(t)
+	projectDir := titleProjectDir(t)
+	ts := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	if err := os.MkdirAll(projectDir, 0750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	const id = "session-skill-only"
+	writeRawEvents(t, projectDir, id, []rawEvent{
+		{
+			Type: "user", SessionID: id, Timestamp: ts, CWD: "/tmp",
+			Message: &rawMessage{Role: "user", Content: json.RawMessage(
+				`[{"type":"text","text":"Base directory for this skill: ` +
+					`/home/u/.claude/plugins/cache/lab/skills/github-issue-to-pr\n\n# Do the thing"}]`)},
+		},
+	})
+
+	sessions, err := IncrementalScan(db, testLogger)
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	s := findSession(t, sessions, id)
+
+	if s.MessageCount != 0 {
+		t.Errorf("message_count = %d, want 0 — nobody typed the preamble", s.MessageCount)
+	}
+	if s.Preview != "skill: github-issue-to-pr" {
+		t.Errorf("preview = %q, want %q", s.Preview, "skill: github-issue-to-pr")
+	}
+	if s.ResolveDisplayTitle() == "" {
+		t.Error("display title is empty — the session is unidentifiable in the list")
 	}
 }
 
