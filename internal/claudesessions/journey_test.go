@@ -736,3 +736,351 @@ func TestBuildJourney_CompactBoundaryWithoutMetadata(t *testing.T) {
 		}
 	}
 }
+
+// ── Turn segmentation through the shared predicate (issue #227) ─────────────
+
+// rawContentUserEvent builds a user event whose message content is the given
+// raw JSON, so a test can write block shapes userInputEvent/toolResultEvent do
+// not cover — notably a mixed array where the tool_result is not first.
+func rawContentUserEvent(uuid, ts_ string, content string) string {
+	return mustMarshal(map[string]any{
+		"type":      "user",
+		"uuid":      uuid,
+		"sessionId": "test-session",
+		"timestamp": ts_,
+		"message":   map[string]any{"role": "user", "content": json.RawMessage(content)},
+	})
+}
+
+// stepTypes flattens a turn's step types for comparison.
+func stepTypes(turn JourneyTurn) []string {
+	types := make([]string, 0, len(turn.Steps))
+	for _, s := range turn.Steps {
+		types = append(types, s.Type)
+	}
+	return types
+}
+
+// TestBuildJourney_InjectedWrapperOpensNoTurn is #227's headline case: the
+// wrappers Claude Code writes as user events are not turns for message_count or
+// turn_count, and after this change they are not turns on the timeline either —
+// nor may their raw tag soup become a user_input step or the journey summary.
+func TestBuildJourney_InjectedWrapperOpensNoTurn(t *testing.T) {
+	wrappers := []string{
+		"<task-notification>\n<status>completed</status>\n</task-notification>",
+		"<command-message>lab-workflow:github-issue-to-pr</command-message>",
+		"<command-name>/review-pr</command-name>",
+		"<local-command-caveat>Caveat: the messages below</local-command-caveat>",
+		"<local-command-stdout>(no content)</local-command-stdout>",
+		"<system-reminder>\nThe user named this session\n</system-reminder>",
+	}
+	for _, wrapper := range wrappers {
+		t.Run(wrapper[:min(len(wrapper), 24)], func(t *testing.T) {
+			journey, err := buildJourney("test-session",
+				writeJourneyJSONL(t, []string{userInputEvent("u1", ts(t0), wrapper)}), testLogger)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if journey == nil {
+				t.Fatal("expected a journey — the wrapper is still an event with a timestamp")
+			}
+			if journey.TotalTurns != 0 {
+				t.Errorf("total_turns = %d, want 0 — nobody typed the wrapper", journey.TotalTurns)
+			}
+			for _, turn := range journey.Turns {
+				for _, s := range turn.Steps {
+					if s.Type == "user_input" {
+						t.Errorf("wrapper produced a user_input step: %s", s.Data)
+					}
+				}
+			}
+			if journey.Summary != "" {
+				t.Errorf("summary = %q, want empty — never seeded from a wrapper", journey.Summary)
+			}
+		})
+	}
+}
+
+// TestBuildJourney_ToolResultNotFirstOpensNoTurn is the explicit regression for
+// the block-order divergence: the old test decoded only blocks[0], so a carrier
+// whose tool_result sat behind another block opened a turn the session's own
+// message_count never counted. The shared predicate scans every block.
+func TestBuildJourney_ToolResultNotFirstOpensNoTurn(t *testing.T) {
+	lines := []string{
+		userInputEvent("u1", ts(t0), "Please read main.go"),
+		assistantEvent("a1", "u1", ts(t1), []map[string]any{
+			{"type": "tool_use", "id": "tool1", "name": "Read", "input": map[string]any{"path": "main.go"}},
+		}),
+		// The tool_result is the SECOND block, behind a text block.
+		rawContentUserEvent("u2", ts(t2),
+			`[{"type":"text","text":"here you go"},`+
+				`{"type":"tool_result","tool_use_id":"tool1","content":"package main","is_error":false}]`),
+	}
+
+	journey, err := buildJourney("test-session", writeJourneyJSONL(t, lines), testLogger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if journey.TotalTurns != 1 {
+		t.Fatalf("total_turns = %d, want 1 — a tool_result carrier is a carrier at any block position",
+			journey.TotalTurns)
+	}
+	want := []string{"user_input", "tool_call", "tool_result"}
+	if got := stepTypes(journey.Turns[0]); !equalStrings(got, want) {
+		t.Errorf("steps = %v, want %v — the result must still attach to the enclosing turn", got, want)
+	}
+}
+
+// TestBuildJourney_CarrierAsFirstEventStillCreatesTurn pins the load-bearing
+// ensureTurn on the non-genuine path: a transcript can open with a tool-result
+// carrier (a resumed session, or one whose head was compacted away), and
+// short-circuiting that branch would lose the steps entirely.
+func TestBuildJourney_CarrierAsFirstEventStillCreatesTurn(t *testing.T) {
+	lines := []string{
+		toolResultEvent("u1", ts(t0), "tool1", "orphan output", true),
+		assistantEvent("a1", "u1", ts(t1), []map[string]any{
+			{"type": "text", "text": "carrying on"},
+		}),
+	}
+
+	journey, err := buildJourney("test-session", writeJourneyJSONL(t, lines), testLogger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if journey.TotalTurns != 1 {
+		t.Fatalf("total_turns = %d, want 1 — the orphan steps need a turn to live in", journey.TotalTurns)
+	}
+	want := []string{"tool_result", "text_response"}
+	if got := stepTypes(journey.Turns[0]); !equalStrings(got, want) {
+		t.Fatalf("steps = %v, want %v", got, want)
+	}
+	// The payload still round-trips through the attach path, error flag included.
+	var d ToolResultData
+	if err := json.Unmarshal(journey.Turns[0].Steps[0].Data, &d); err != nil {
+		t.Fatalf("decode tool_result: %v", err)
+	}
+	if d.ToolUseID != "tool1" || d.Content != "orphan output" || !d.IsError {
+		t.Errorf("tool_result data = %+v", d)
+	}
+}
+
+// TestBuildJourney_SummaryComesFromFirstGenuineTurn covers a mixed transcript:
+// the slash-command expansion that opens most real sessions must not become the
+// journey's summary; the prompt behind it must.
+func TestBuildJourney_SummaryComesFromFirstGenuineTurn(t *testing.T) {
+	lines := []string{
+		userInputEvent("u1", ts(t0), "<command-message>lab-workflow:review-pr</command-message>"),
+		userInputEvent("u2", ts(t0.Add(time.Second)), "review PR 42 for me"),
+		assistantEvent("a1", "u2", ts(t1), []map[string]any{
+			{"type": "tool_use", "id": "tool1", "name": "Read", "input": map[string]any{"path": "a.go"}},
+		}),
+		toolResultEvent("u3", ts(t2), "tool1", "contents", false),
+		userInputEvent("u4", ts(t3), "<task-notification>done</task-notification>"),
+	}
+
+	journey, err := buildJourney("test-session", writeJourneyJSONL(t, lines), testLogger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if journey.TotalTurns != 1 {
+		t.Fatalf("total_turns = %d, want 1 — only one event here was typed by a person", journey.TotalTurns)
+	}
+	if journey.Summary != "review PR 42 for me" {
+		t.Errorf("summary = %q, want the genuine prompt", journey.Summary)
+	}
+	want := []string{"user_input", "tool_call", "tool_result"}
+	if got := stepTypes(journey.Turns[0]); !equalStrings(got, want) {
+		t.Errorf("steps = %v, want %v", got, want)
+	}
+	var d UserInputData
+	if err := json.Unmarshal(journey.Turns[0].Steps[0].Data, &d); err != nil {
+		t.Fatalf("decode user_input: %v", err)
+	}
+	if d.Content != "review PR 42 for me" {
+		t.Errorf("user_input content = %q, want the genuine prompt", d.Content)
+	}
+}
+
+// TestBuildJourney_SubagentNestingSurvivesWrapperTurns is the required nesting
+// regression: #227 moves turn boundaries underneath the toolUseId join, so both
+// the matched (nested) and unmatched (appended) sub-agent paths are re-checked
+// on a transcript whose first user event is a wrapper.
+func TestBuildJourney_SubagentNestingSurvivesWrapperTurns(t *testing.T) {
+	parentLines := []string{
+		userInputEvent("u0", ts(t0), "<command-name>/explore</command-name>"),
+		userInputEvent("u1", ts(t0.Add(time.Second)), "Explore the repo"),
+		assistantEvent("a1", "u1", ts(t1), []map[string]any{
+			{"type": "tool_use", "id": "toolu_1", "name": "Task", "input": map[string]any{"description": "explore"}},
+		}),
+		toolResultEvent("u2", ts(t2), "toolu_1", "agent done", false),
+	}
+	subagents := map[string]subagentFixture{
+		"agent-x": {
+			meta: subagentMetaJSON("toolu_1", "general-purpose", "explore the repo"),
+			lines: []string{
+				subagentSidechainEvent("user", "su1", ts(t1.Add(time.Second)), nil),
+				subagentSidechainEvent("assistant", "sa1", ts(t1.Add(2*time.Second)), []map[string]any{
+					{"type": "text", "text": "agent working"},
+				}),
+			},
+		},
+		"agent-orphan": {
+			meta: subagentMetaJSON("toolu_gone", "Explore", "orphan task"),
+			lines: []string{
+				subagentSidechainEvent("assistant", "oa1", ts(t3), []map[string]any{
+					{"type": "text", "text": "orphan work"},
+				}),
+			},
+		},
+	}
+
+	journey, err := buildJourney("sess-185", writeSubagentFixture(t, parentLines, subagents), testLogger)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if journey.TotalTurns != 1 {
+		t.Fatalf("total_turns = %d, want 1 — the wrapper must not open a turn", journey.TotalTurns)
+	}
+	if journey.Summary != "Explore the repo" {
+		t.Errorf("summary = %q, want the genuine prompt", journey.Summary)
+	}
+
+	var toolCall, orphan *JourneyStep
+	for i := range journey.Turns[0].Steps {
+		switch journey.Turns[0].Steps[i].Type {
+		case "tool_call":
+			toolCall = &journey.Turns[0].Steps[i]
+		case "sub_agent":
+			orphan = &journey.Turns[0].Steps[i]
+		}
+	}
+	if toolCall == nil {
+		t.Fatal("expected the spawning tool_call step")
+	}
+	var td ToolCallData
+	if err := json.Unmarshal(toolCall.Data, &td); err != nil {
+		t.Fatalf("decode tool_call data: %v", err)
+	}
+	if td.AgentType != "general-purpose" || td.Description != "explore the repo" {
+		t.Errorf("agent identity = type %q desc %q — the toolUseId join must be unchanged",
+			td.AgentType, td.Description)
+	}
+	if len(toolCall.Steps) == 0 {
+		t.Error("delegated steps no longer nest under the spawning Task tool_use")
+	}
+	if orphan == nil {
+		t.Fatal("the unmatched sub-agent was dropped rather than appended to its turn")
+	}
+	if journey.SubagentCount != 2 {
+		t.Errorf("subagent_count = %d, want 2", journey.SubagentCount)
+	}
+}
+
+// TestBuildJourney_TurnsAgreeWithInsightPipeline is #227's anti-drift check, the
+// journey-path counterpart of TestScan_AgreesWithInsightPipeline: the number of
+// turns a journey renders must equal the insight pipeline's turn_count over the
+// same transcript, because both now resolve "is this a turn?" through the one
+// isUserTurnContent predicate. A fourth definition cannot be added quietly.
+//
+// Both fixtures deliberately open with genuine input. A transcript whose first
+// user event is a tool-result carrier is the one structural difference between
+// the two paths — ensureTurn must give those orphan steps somewhere to live,
+// while the pipeline counts no turn — and is covered on its own by
+// TestBuildJourney_CarrierAsFirstEventStillCreatesTurn.
+func TestBuildJourney_TurnsAgreeWithInsightPipeline(t *testing.T) {
+	base := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+
+	userEvent := func(sessionID string, at int, content string) rawEvent {
+		return rawEvent{
+			Type: "user", SessionID: sessionID, CWD: "/tmp",
+			Timestamp: base.Add(time.Duration(at) * time.Second),
+			Message:   &rawMessage{Role: "user", Content: json.RawMessage(content)},
+		}
+	}
+	assistantEv := func(sessionID string, at int, content string) rawEvent {
+		return rawEvent{
+			Type: "assistant", SessionID: sessionID,
+			Timestamp: base.Add(time.Duration(at) * time.Second),
+			Message: &rawMessage{
+				Role: "assistant", Model: "claude-opus-4-8",
+				Content: json.RawMessage(content),
+				Usage:   &rawUsage{InputTokens: 1, OutputTokens: 1},
+			},
+		}
+	}
+
+	cases := []struct {
+		name  string
+		write func(t *testing.T, dir, sessionID string)
+	}{
+		{
+			// The very fixture the scanner/pipeline agreement test uses.
+			name: "counts fixture",
+			write: func(t *testing.T, dir, sessionID string) {
+				countsFixture(t, dir, sessionID, base)
+			},
+		},
+		{
+			// Wrappers interleaved with two genuine turns and a carrier.
+			name: "wrappers between genuine turns",
+			write: func(t *testing.T, dir, sessionID string) {
+				writeRawEvents(t, dir, sessionID, []rawEvent{
+					userEvent(sessionID, 0, `"<command-name>/review-pr</command-name>"`),
+					userEvent(sessionID, 1, `"first prompt"`),
+					assistantEv(sessionID, 2, `[{"type":"text","text":"on it"}]`),
+					assistantEv(sessionID, 3, `[{"type":"tool_use","id":"tu","name":"Read","input":{}}]`),
+					userEvent(sessionID, 4, `[{"type":"tool_result","tool_use_id":"tu","content":"body"}]`),
+					userEvent(sessionID, 5, `"<task-notification>\n<status>completed</status>\n</task-notification>"`),
+					userEvent(sessionID, 6, `"second prompt"`),
+					assistantEv(sessionID, 7, `[{"type":"text","text":"done"}]`),
+				})
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			const sessionID = "session-journey-drift"
+			tc.write(t, dir, sessionID)
+			path := filepath.Join(dir, sessionID+jsonlExt)
+
+			journey, err := buildJourney(sessionID, path, testLogger)
+			if err != nil {
+				t.Fatalf("build journey: %v", err)
+			}
+			if journey == nil {
+				t.Fatal("expected a journey")
+			}
+
+			turns := &TurnCountProcessor{}
+			for _, ev := range readProcessableEvents(t, path) {
+				turns.Process(ev)
+			}
+			var insight SessionInsight
+			turns.Finalize(&insight)
+
+			if len(journey.Turns) != insight.TurnCount {
+				t.Errorf("journey turns = %d, insight turn_count = %d — the journey has drifted "+
+					"from the shared isUserTurnContent predicate",
+					len(journey.Turns), insight.TurnCount)
+			}
+			if journey.TotalTurns != len(journey.Turns) {
+				t.Errorf("total_turns = %d, len(turns) = %d", journey.TotalTurns, len(journey.Turns))
+			}
+		})
+	}
+}
+
+// equalStrings compares two string slices element-wise.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
