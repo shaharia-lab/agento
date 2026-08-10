@@ -40,8 +40,11 @@ cd frontend && npm ci --legacy-peer-deps   # Install dependencies
 make dev-frontend            # Vite dev server on :5173
 npm run build                # TypeScript check + Vite bundle
 npm run lint                 # ESLint
-npm run typecheck            # TypeScript strict check
+npm run typecheck            # TypeScript strict check (tsc -b — the root tsconfig is a
+                             # solution file with "files": [], so plain `tsc --noEmit`
+                             # checks nothing and exits 0)
 npm run format               # Prettier
+npm run test                 # Vitest (run once); test:watch for the watcher
 ```
 
 ### E2E (Playwright)
@@ -107,6 +110,7 @@ One line per package — list files in a directory to see current contents.
 - `frontend/src/types.ts` — TypeScript types mirroring Go structs; keep in sync when changing API types.
 - `frontend/src/App.tsx` — React Router routes; one page component per feature under `frontend/src/pages/`.
 - `frontend/src/contexts/` — theme/appearance state.
+- Tests are `src/**/*.test.{ts,tsx}`, run under **jsdom** with `src/test/setup.ts` loaded for every suite — it registers `@testing-library/jest-dom`'s matchers and an `afterEach(cleanup)`, so a break there breaks every file at once, not just the one you edited. `@testing-library/dom` is an explicit devDependency rather than an inherited peer, because this repo installs with `--legacy-peer-deps` and would otherwise not resolve it.
 
 ### Agent Configuration
 Agents are stored in SQLite (legacy YAML files in `~/.agento/agents/` are auto-migrated on first startup); create/edit via UI or API. Permission modes: `bypass` (default), `default`, `plan`, `dontAsk`. System prompts support `{{current_date}}` and `{{current_time}}` template variables.
