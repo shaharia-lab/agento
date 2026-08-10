@@ -641,35 +641,35 @@ func TestNeedsProcessing_ReturnsRowsBelowCurrentVersion(t *testing.T) {
 // database with insight rows must gain the column with its '{}' default, so a
 // pre-v6 row reads as "nothing attributed" until the processor-version bump
 // reprocesses it. A nullable column here would fail Scan on real data only.
+//
+// The version-19 fixture is built forwards, by replaying the migration list up
+// to 19, rather than by undoing everything above 19 on a current database. The
+// backwards version needed an inverse statement per later migration and had to
+// be hand-extended by every new one; worse, a forgotten inverse failed silently
+// — MAX(version) stayed high, migration 20 was skipped, and the test passed
+// asserting nothing. storage.ApplyMigrationsUpTo makes upgrade-path tests for
+// any other migration cheap to add the same way.
 func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
-	db, _, err := storage.NewSQLiteDB(dbPath, slog.Default())
+	db, err := storage.ApplyMigrationsUpTo(dbPath, 19)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
 
-	store := storage.NewSQLiteSessionInsightsStore(db)
-	r := sampleRecord("pre-migration")
-	r.AgentBreakdown = map[string]int{"Explore": 4}
-	if err := store.Upsert(ctx, r); err != nil {
-		t.Fatal(err)
-	}
-
-	// Roll the schema back to 19, with the row still in place. Everything
-	// above 19 has to go, not just 20: the runner replays by MAX(version), so
-	// leaving a later migration recorded would make it skip 20 entirely and
-	// this test would assert nothing.
-	for _, stmt := range []string{
-		"ALTER TABLE session_insights DROP COLUMN agent_breakdown",
-		"DROP TABLE IF EXISTS model_pricing_tier",
-		"ALTER TABLE claude_subagent_cache DROP COLUMN event_count",
-		"ALTER TABLE claude_session_cache DROP COLUMN cost_by_model",
-		"DELETE FROM schema_migrations WHERE version >= 20",
-	} {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
-			t.Fatalf("rolling back (%s): %v", stmt, err)
-		}
+	// Written as raw SQL against the version-19 column list, not through
+	// NewSQLiteSessionInsightsStore.Upsert: the store writes agent_breakdown,
+	// which does not exist yet. Knowing the old schema here is inherent to
+	// testing an upgrade — a row has to predate the column to prove it is
+	// backfilled. Only the NOT NULL columns without a default are required;
+	// the rest are left to their defaults exactly as a real old row would be.
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO session_insights
+			(session_id, processor_version, scanned_at, turn_count, tool_calls_total, tool_breakdown, session_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"pre-migration", 1, time.Now().UTC().Format(time.RFC3339), 3, 4, `{"Read":4}`, "coding",
+	); err != nil {
+		t.Fatalf("inserting a row through the version-19 schema: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
@@ -686,7 +686,7 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 	}
 
 	// Compared against a freshly created database rather than a literal: what
-	// this asserts is that the rollback replayed all the way back to head, not
+	// this asserts is that the upgrade replayed all the way up to head, not
 	// that head is any particular number. Pinning the number here made every
 	// new migration fail this test for a reason unrelated to what it covers.
 	var version, head int
