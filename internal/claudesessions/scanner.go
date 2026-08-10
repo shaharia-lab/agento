@@ -1729,6 +1729,14 @@ var commandNamePattern = regexp.MustCompile(`<command-name>([^<]+)</command-name
 
 // skillPreamblePattern captures the skill path from the preamble Claude Code
 // injects when a skill is invoked.
+//
+// Since #226 this is not only a preview matcher: isInjectedUserContent
+// (processor.go) uses it to decide that a skill preamble is not a human turn.
+// Loosening it for a preview reason — dropping the required (\S+) so a
+// colon-only line matches, say — would silently move message_count and
+// turn_count corpus-wide, and everything derived from turn_count with them.
+// Any change here needs both CurrentScannerVersion and CurrentProcessorVersion
+// bumped, exactly as a change to isUserTurnContent does.
 var skillPreamblePattern = regexp.MustCompile(`^Base directory for this skill:\s*(\S+)`)
 
 // fallbackPreviewLabel turns an injected wrapper into something a person can

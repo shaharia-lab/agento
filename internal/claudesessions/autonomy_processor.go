@@ -14,6 +14,13 @@ import "math"
 //	score = clamp(score, 0, 100)
 //
 // Higher score = fewer user interruptions relative to autonomous work done.
+//
+// turnCount == 0 takes the same branch as 1 deliberately. Since #226 a
+// skill-driven session has no genuine user turn at all, and zero interventions
+// is more autonomous than one, not less — the branch already encodes "one turn
+// = maximally autonomous". This only produces a sensible score because
+// TurnCountProcessor divides by max(1, turnCount); with StepsPerTurnAvg left at
+// 0 the log factor would be 0 and these sessions would score 0.
 type AutonomyScoreProcessor struct{}
 
 // Name returns the processor identifier.

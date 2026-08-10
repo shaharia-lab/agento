@@ -7,6 +7,14 @@ package claudesessions
 //     single assistant message; a non-tool_use block (e.g. text) resets the run.
 //   - LongestAutonomousChain: longest unbroken sequence of tool calls across the
 //     entire session without a genuine user message in between.
+//
+// One known imprecision, measured and accepted: since #226 an interrupt notice
+// ([Request interrupted by user]) is injected content rather than a genuine
+// turn, so it no longer breaks the chain — even though it is literally the user
+// intervening. On the reference corpus 115 of 120 interrupts are not followed
+// by a genuine turn, so the break is lost rather than moved, and only 2
+// sessions change at all (77→114, 49→51). Not worth a second predicate; revisit
+// if interrupts become common.
 type ConversationDepthProcessor struct {
 	maxConsecutive int // within a single assistant message
 	longestChain   int // across session

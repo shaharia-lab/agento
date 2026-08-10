@@ -22,11 +22,19 @@ func (p *TurnCountProcessor) Process(ev ProcessableEvent) {
 }
 
 // Finalize writes TurnCount and StepsPerTurnAvg into the insight.
+//
+// A zero-turn session divides by one, not by zero. Since #226 excluded the
+// injected wrappers, a session driven entirely by one skill invocation has no
+// genuine user event at all — the user's argument is embedded inside the
+// preamble block — so turnCount is legitimately 0 for real, often very long
+// sessions. Leaving StepsPerTurnAvg at 0 for those would report the work as
+// not having happened, and AutonomyScore reads this value: it would score the
+// most autonomous sessions in the corpus 0, the wrong extreme. One unattended
+// run of n steps is n steps per turn, which is what turnCount == 1 already
+// means to every consumer.
 func (p *TurnCountProcessor) Finalize(insight *SessionInsight) {
 	insight.TurnCount = p.turnCount
-	if p.turnCount > 0 {
-		insight.StepsPerTurnAvg = float64(p.totalEvents) / float64(p.turnCount)
-	}
+	insight.StepsPerTurnAvg = float64(p.totalEvents) / float64(max(1, p.turnCount))
 }
 
 // Reset clears all internal state.
