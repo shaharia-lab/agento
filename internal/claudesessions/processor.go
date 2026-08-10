@@ -32,7 +32,13 @@ import (
 // the analytics dashboard and a model that never caches now scores 0 instead of
 // being excluded from its own denominator. Every row written before v8 holds
 // the old, higher figure.
-const CurrentProcessorVersion = 8
+// v9: the two injected user-event classes that arrive as *array* content — the
+// skill-invocation preamble and the "[Request interrupted by user]" notice —
+// no longer start a turn either (#226). v7 covered only string content, so
+// every row written before v9 counts those ~963 machine-written events (on the
+// reference corpus) as human turns, inflating turn_count and everything derived
+// from it.
+const CurrentProcessorVersion = 9
 
 // ProcessableEvent is a single decoded line from a Claude Code session JSONL file,
 // passed to each SessionProcessor in chronological order.
@@ -280,27 +286,77 @@ var injectedTurnMarkers = []string{
 	"<system-reminder>",
 }
 
-// isInjectedUserContent reports whether string content is one of Claude Code's
-// own injection wrappers rather than something a person typed.
+// injectedArrayTurnMarkers are the injected user events that arrive as *array*
+// content — a single text block, no tool_result — rather than as a bare JSON
+// string (#226). They are kept in their own table because the two populations
+// do not overlap: injectedTurnMarkers are XML-ish wrappers that only ever
+// appear as strings, and these only ever appear as array text.
+//
+// Both entries are required — neither is a prefix of the other, since the
+// shorter one closes its bracket where the longer one continues (" for tool
+// use]"), so a prefix test on one does not cover the other.
+//
+// The skill-invocation preamble is the third member of this class and is
+// matched by skillPreamblePattern (scanner.go) instead of by a bare prefix, so
+// the colon must be followed by a path token. That regexp is shared rather than
+// duplicated: it is the same shape fallbackPreviewLabel already recognizes.
+//
+// Like injectedTurnMarkers this list is empirical — it was read off the local
+// corpus (1,598 transcripts: 843 skill preambles, 120 interruption notices,
+// among non-sidechain user events that were still counting as turns) — and a
+// new Claude Code release can add a form that is not here. That failure mode is
+// benign in the same way: a missed marker leaves the count where it already is.
+var injectedArrayTurnMarkers = []string{
+	"[Request interrupted by user]",
+	"[Request interrupted by user for tool use]",
+}
+
+// isInjectedUserContent reports whether content is one of Claude Code's own
+// injections rather than something a person typed. It handles both shapes the
+// harness writes:
+//
+//   - bare JSON string content, matched against injectedTurnMarkers; and
+//   - array content holding exactly one text block, matched against
+//     injectedArrayTurnMarkers plus the skill preamble. Any other array shape —
+//     several blocks, or a block that is not text — is genuine, because the
+//     injected forms are always emitted alone.
 //
 // The match is anchored to the start, after trimming leading whitespace, and
 // that is deliberate: a person can legitimately write about these markers, and
 // a substring test would silently stop counting their message as a turn. The
 // corpus already contains such a prompt — a genuine human instruction that
 // quotes "system-reminder" mid-sentence — so this is a real case, not a
-// hypothetical one. Only content that *opens* with a wrapper is rejected.
+// hypothetical one. Only content that *opens* with a marker is rejected.
 func isInjectedUserContent(content json.RawMessage) bool {
-	// Only bare JSON strings reach here as candidates; array content is
-	// classified by its blocks.
-	if len(content) == 0 || content[0] != '"' {
+	if len(content) == 0 {
 		return false
 	}
-	var s string
-	if err := json.Unmarshal(content, &s); err != nil {
+	switch content[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(content, &s); err != nil {
+			return false
+		}
+		return hasInjectedPrefix(strings.TrimSpace(s), injectedTurnMarkers)
+	case '[':
+		blocks := parseContentBlocks(content)
+		if len(blocks) != 1 || blocks[0].Type != "text" {
+			return false
+		}
+		text := strings.TrimSpace(blocks[0].Text)
+		// skillPreamblePattern is anchored and requires a path token after the
+		// colon, so prose that merely opens with the same words stays a turn.
+		return hasInjectedPrefix(text, injectedArrayTurnMarkers) ||
+			skillPreamblePattern.MatchString(text)
+	default:
 		return false
 	}
-	s = strings.TrimSpace(s)
-	for _, marker := range injectedTurnMarkers {
+}
+
+// hasInjectedPrefix reports whether s opens with any of the given markers. The
+// caller trims first; the prefix anchor is the whole point (see above).
+func hasInjectedPrefix(s string, markers []string) bool {
+	for _, marker := range markers {
 		if strings.HasPrefix(s, marker) {
 			return true
 		}
@@ -313,8 +369,10 @@ func isInjectedUserContent(content json.RawMessage) bool {
 //
 //   - carriers for tool_result blocks, which exist only to hand a tool's output
 //     back to the model — the overwhelming majority of user events; and
-//   - string content that opens with one of Claude Code's injection wrappers
-//     (see injectedTurnMarkers), which the harness wrote, not the user.
+//   - content that opens with one of Claude Code's own injections, whether it
+//     arrives as a string (injectedTurnMarkers) or as a lone text block
+//     (injectedArrayTurnMarkers and the skill preamble) — the harness wrote it,
+//     not the user.
 //
 // The isSidechain check is deliberately left to the caller: the flag means
 // "delegated work, already counted elsewhere" in a parent transcript but is set

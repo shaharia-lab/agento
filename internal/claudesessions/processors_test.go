@@ -203,12 +203,62 @@ func TestAutonomyScoreProcessor_ManyTurns(t *testing.T) {
 	}
 }
 
-func TestAutonomyScoreProcessor_ZeroTurns(t *testing.T) {
+// A session with no turns AND no steps is genuinely empty, and 0 is the right
+// score for it. This is the degenerate case, not the skill-driven one — see
+// TestAutonomyScoreProcessor_ZeroTurnsWithStepsScoresHigh.
+func TestAutonomyScoreProcessor_ZeroTurnsAndNoSteps(t *testing.T) {
 	insight := &claudesessions.SessionInsight{ToolBreakdown: make(map[string]int)}
 	p := &claudesessions.AutonomyScoreProcessor{}
 	p.Finalize(insight)
 	if insight.AutonomyScore != 0 {
-		t.Errorf("expected 0 score for zero turns, got %f", insight.AutonomyScore)
+		t.Errorf("expected 0 score for an empty session, got %f", insight.AutonomyScore)
+	}
+}
+
+// Since #226 a session driven entirely by one skill invocation has no genuine
+// user turn — the argument is embedded in the injected preamble. Those are the
+// most autonomous sessions in the corpus and must not score 0, the opposite
+// extreme, just because the turn counter reads 0.
+func TestAutonomyScoreProcessor_ZeroTurnsWithStepsScoresHigh(t *testing.T) {
+	insight := &claudesessions.SessionInsight{
+		TurnCount:       0,
+		StepsPerTurnAvg: 20,
+		ToolBreakdown:   make(map[string]int),
+	}
+	p := &claudesessions.AutonomyScoreProcessor{}
+	p.Finalize(insight)
+	if insight.AutonomyScore <= 50 {
+		t.Errorf("expected a high score for an unattended 20-step session, got %f", insight.AutonomyScore)
+	}
+
+	oneTurn := &claudesessions.SessionInsight{
+		TurnCount:       1,
+		StepsPerTurnAvg: 20,
+		ToolBreakdown:   make(map[string]int),
+	}
+	p.Finalize(oneTurn)
+	if insight.AutonomyScore != oneTurn.AutonomyScore {
+		t.Errorf("zero turns scored %f but one turn scored %f; zero interventions is not less autonomous than one",
+			insight.AutonomyScore, oneTurn.AutonomyScore)
+	}
+}
+
+// The averages are what feed AutonomyScore, so the max(1, turnCount) divisor
+// belongs to the counters rather than to each consumer.
+func TestTurnCountProcessor_ZeroTurnsStillReportsSteps(t *testing.T) {
+	p := &claudesessions.TurnCountProcessor{}
+	for i := 0; i < 12; i++ {
+		p.Process(claudesessions.ProcessableEvent{Type: "assistant"})
+	}
+	insight := &claudesessions.SessionInsight{ToolBreakdown: make(map[string]int)}
+	p.Finalize(insight)
+
+	if insight.TurnCount != 0 {
+		t.Fatalf("TurnCount = %d, want 0", insight.TurnCount)
+	}
+	if insight.StepsPerTurnAvg != 12 {
+		t.Errorf("StepsPerTurnAvg = %f, want 12: an unattended run of n steps is n steps per turn",
+			insight.StepsPerTurnAvg)
 	}
 }
 
