@@ -15,9 +15,12 @@ func spanSession(id, project string, start, end time.Time, tokens int, costUSD f
 		Model:        "claude-opus-5",
 		StartTime:    start,
 		LastActivity: end,
-		Usage:        TokenUsage{InputTokens: tokens},
-		Cost:         SessionCost{InputUSD: costUSD, TotalUSD: costUSD},
-		CostByModel:  map[string]SessionCost{"claude-opus-5": {InputUSD: costUSD, TotalUSD: costUSD}},
+		// A fully active span, so tests that rank or display durations can keep
+		// deriving expectations from start/end.
+		ActiveDurationMs: end.Sub(start).Milliseconds(),
+		Usage:            TokenUsage{InputTokens: tokens},
+		Cost:             SessionCost{InputUSD: costUSD, TotalUSD: costUSD},
+		CostByModel:      map[string]SessionCost{"claude-opus-5": {InputUSD: costUSD, TotalUSD: costUSD}},
 	}
 }
 

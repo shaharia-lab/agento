@@ -28,17 +28,17 @@ export function sessionCost(s: ClaudeSessionSummary): number {
 }
 
 /**
- * Wall-clock span from the first event to the last, in milliseconds.
+ * Active duration in milliseconds: inter-event gaps capped at 10 minutes,
+ * main thread plus delegated sub-agents — the backend-computed figure, not the
+ * start/last span. The span of a resumable session counts every idle day
+ * between sittings, which reported a 6-hour session as 678 hours.
  *
- * Zero for an unparseable or reversed pair rather than NaN or a negative: those
- * would make every duration comparison false, silently hiding the row from a
- * filter it should simply not have matched.
+ * Missing values read as 0 rather than NaN: NaN would make every duration
+ * comparison false, silently hiding the row from a filter it should simply not
+ * have matched.
  */
 export function sessionDurationMs(s: ClaudeSessionSummary): number {
-  const start = new Date(s.start_time).getTime()
-  const end = new Date(s.last_activity).getTime()
-  if (Number.isNaN(start) || Number.isNaN(end)) return 0
-  return Math.max(0, end - start)
+  return (s.active_duration_ms ?? 0) + (s.subagent_active_duration_ms ?? 0)
 }
 
 /** The same span in minutes, the unit the duration filter is entered in. */

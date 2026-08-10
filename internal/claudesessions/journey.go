@@ -16,14 +16,18 @@ import (
 
 // SessionJourney is the top-level response for the journey endpoint.
 type SessionJourney struct {
-	SessionID     string    `json:"session_id"`
-	Model         string    `json:"model,omitempty"`
-	CWD           string    `json:"cwd,omitempty"`
-	GitBranch     string    `json:"git_branch,omitempty"`
-	StartTime     time.Time `json:"start_time"`
-	EndTime       time.Time `json:"end_time"`
-	TotalDuration int64     `json:"total_duration_ms"`
-	TotalTurns    int       `json:"total_turns"`
+	SessionID string    `json:"session_id"`
+	Model     string    `json:"model,omitempty"`
+	CWD       string    `json:"cwd,omitempty"`
+	GitBranch string    `json:"git_branch,omitempty"`
+	StartTime time.Time `json:"start_time"`
+	EndTime   time.Time `json:"end_time"`
+	// TotalDuration is the raw start-to-end span; ActiveDuration caps every
+	// inter-event gap at IdleGapThreshold and is what the header should show —
+	// a resumed session's span contains every idle day between sittings.
+	TotalDuration  int64 `json:"total_duration_ms"`
+	ActiveDuration int64 `json:"active_duration_ms"`
+	TotalTurns     int   `json:"total_turns"`
 	// Usage is main-thread only, exactly as ClaudeSessionSummary.Usage is.
 	Usage TokenUsage `json:"usage"`
 	// SubagentUsage is the summed usage of every sub-agent transcript this
@@ -246,7 +250,11 @@ func buildJourney(sessionID, filePath string, logger *slog.Logger) (*SessionJour
 
 // journeyBuilder accumulates state while scanning events.
 type journeyBuilder struct {
-	tr            timeRange
+	tr timeRange
+	// active feeds ActiveDuration. Sub-agent builders merge their stamps into
+	// the parent's, so delegated work fills the parent's Task wait gaps exactly
+	// as it does in the insight pipeline.
+	active        activeTimeTracker
 	currentTurn   *JourneyTurn
 	turns         []JourneyTurn
 	turnNumber    int
@@ -282,6 +290,7 @@ type subagentEntry struct {
 
 func (b *journeyBuilder) processEvent(ev rawJourneyEvent, j *SessionJourney) {
 	b.tr.update(ev.Timestamp)
+	b.active.observe(ev.Timestamp, ev.Type == "assistant")
 	if j.CWD == "" && ev.CWD != "" {
 		j.CWD = ev.CWD
 	}
@@ -594,6 +603,7 @@ func (b *journeyBuilder) finalize(j *SessionJourney) {
 	if !j.StartTime.IsZero() && !j.EndTime.IsZero() {
 		j.TotalDuration = j.EndTime.Sub(j.StartTime).Milliseconds()
 	}
+	j.ActiveDuration, _ = b.active.durations()
 	j.TotalTurns = len(b.turns)
 
 	for i := range b.turns {
@@ -720,6 +730,9 @@ func (b *journeyBuilder) buildSubagentSteps(e *subagentEntry) ([]JourneyStep, To
 	// Tallied here rather than at each call site: this is the one place a
 	// sub-agent's usage is computed, and both the matched (nested under its
 	// Task tool_use) and unmatched (appended to the last turn) paths reach it.
+	// The sub-agent's timestamps merge into the parent's active tracker for the
+	// same reason.
+	b.active.stamps = append(b.active.stamps, sb.active.stamps...)
 	b.subagentCount++
 	b.subagentUsage.InputTokens += sub.Usage.InputTokens
 	b.subagentUsage.OutputTokens += sub.Usage.OutputTokens

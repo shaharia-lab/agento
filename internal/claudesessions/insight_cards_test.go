@@ -104,6 +104,7 @@ func TestExpensiveSessionsCard(t *testing.T) {
 			map[string]SessionCost{"claude-opus-5": cost(100, 0, 0, 0)}, nil)
 		s.StartTime = at
 		s.LastActivity = at.Add(2 * time.Hour)
+		s.ActiveDurationMs = (2 * time.Hour).Milliseconds()
 		sessions = append(sessions, s)
 	}
 	for i := range 5 {

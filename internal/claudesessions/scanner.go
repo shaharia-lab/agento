@@ -70,7 +70,12 @@ const (
 	// — stop counting as messages too (#226). v7 covered string content only,
 	// so rows written before v11 still count that machine chatter as human
 	// turns, and their previews were taken from the genuine-turn branch.
-	CurrentScannerVersion = 11
+	// v12: active_duration_ms is stored for every transcript — parent and
+	// sub-agent alike — as the sum of inter-event gaps capped at
+	// IdleGapThreshold. Sessions are resumable, so the start/last span counts
+	// every idle day between sittings; rows written before v12 hold 0, which is
+	// indistinguishable from a single-event session.
+	CurrentScannerVersion = 12
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -841,9 +846,9 @@ func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessi
 			compaction_count, dropped_tokens,
 			input_cost_usd, output_cost_usd, cache_read_cost_usd,
 			cache_write_cost_usd, total_cost_usd, unpriced_models, unpriced_tokens,
-			cost_by_model
+			cost_by_model, active_duration_ms
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, project_path) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -879,7 +884,8 @@ func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessi
 			total_cost_usd = excluded.total_cost_usd,
 			unpriced_models = excluded.unpriced_models,
 			unpriced_tokens = excluded.unpriced_tokens,
-			cost_by_model = excluded.cost_by_model`,
+			cost_by_model = excluded.cost_by_model,
+			active_duration_ms = excluded.active_duration_ms`,
 		cacheRowArgs(df, s)...,
 	)
 	return err
@@ -911,7 +917,7 @@ func cacheRowArgs(df diskFile, s *ClaudeSessionSummary) []any {
 		s.Cost.InputUSD, s.Cost.OutputUSD, s.Cost.CacheReadUSD,
 		s.Cost.CacheWriteUSD, s.Cost.TotalUSD,
 		encodeUnpricedModels(s.UnpricedModels), s.UnpricedTokens,
-		encodeCostByModel(s.CostByModel),
+		encodeCostByModel(s.CostByModel), s.ActiveDurationMs,
 	}
 }
 
@@ -1061,8 +1067,9 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 			cache_creation_5m_tokens, cache_creation_1h_tokens,
 			model,
 			input_cost_usd, output_cost_usd, cache_read_cost_usd,
-			cache_write_cost_usd, total_cost_usd, unpriced_models, unpriced_tokens
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			cache_write_cost_usd, total_cost_usd, unpriced_models, unpriced_tokens,
+			active_duration_ms
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(parent_session_id, agent_id) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -1086,7 +1093,8 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 			cache_write_cost_usd = excluded.cache_write_cost_usd,
 			total_cost_usd = excluded.total_cost_usd,
 			unpriced_models = excluded.unpriced_models,
-			unpriced_tokens = excluded.unpriced_tokens`,
+			unpriced_tokens = excluded.unpriced_tokens,
+			active_duration_ms = excluded.active_duration_ms`,
 		df.sessionID, df.agentID, df.filePath, df.mtime,
 		meta.AgentType, meta.Description, meta.ToolUseID,
 		s.StartTime, s.LastActivity, s.MessageCount, s.EventCount,
@@ -1097,6 +1105,7 @@ func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta su
 		s.Cost.InputUSD, s.Cost.OutputUSD, s.Cost.CacheReadUSD,
 		s.Cost.CacheWriteUSD, s.Cost.TotalUSD,
 		encodeUnpricedModels(s.UnpricedModels), s.UnpricedTokens,
+		s.ActiveDurationMs,
 	)
 	return err
 }
@@ -1187,13 +1196,13 @@ const sessionSummaryFrom = `
 	       c.compaction_count, c.dropped_tokens,
 	       c.input_cost_usd, c.output_cost_usd, c.cache_read_cost_usd,
 	       c.cache_write_cost_usd, c.total_cost_usd, c.unpriced_models, c.unpriced_tokens,
-	       c.cost_by_model,
+	       c.cost_by_model, c.active_duration_ms,
 	       COALESCE(sa.n, 0), COALESCE(sa.it, 0), COALESCE(sa.ot, 0),
 	       COALESCE(sa.cct, 0), COALESCE(sa.crt, 0),
 	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0),
 	       COALESCE(sa.ic, 0), COALESCE(sa.oc, 0), COALESCE(sa.crc, 0),
 	       COALESCE(sa.cwc, 0), COALESCE(sa.tc, 0), COALESCE(sa.ut, 0),
-	       COALESCE(sa.um, '')
+	       COALESCE(sa.um, ''), COALESCE(sa.adm, 0)
 	FROM claude_session_cache c
 	LEFT JOIN (
 		SELECT parent_session_id,
@@ -1210,6 +1219,7 @@ const sessionSummaryFrom = `
 		       SUM(cache_write_cost_usd) AS cwc,
 		       SUM(total_cost_usd) AS tc,
 		       SUM(unpriced_tokens) AS ut,
+		       SUM(active_duration_ms) AS adm,
 		       -- NULLIF keeps fully-priced sub-agents from contributing blank
 		       -- entries; duplicates across sub-agents are deduped in Go.
 		       GROUP_CONCAT(NULLIF(unpriced_models, ''), char(10)) AS um
@@ -1368,13 +1378,13 @@ func scanSessionSummary(rows *sql.Rows) (ClaudeSessionSummary, error) {
 		&s.CompactionCount, &s.DroppedTokens,
 		&s.Cost.InputUSD, &s.Cost.OutputUSD, &s.Cost.CacheReadUSD,
 		&s.Cost.CacheWriteUSD, &s.Cost.TotalUSD, &unpriced, &s.UnpricedTokens,
-		&costByModel,
+		&costByModel, &s.ActiveDurationMs,
 		&s.SubagentCount, &s.SubagentUsage.InputTokens, &s.SubagentUsage.OutputTokens,
 		&s.SubagentUsage.CacheCreationTokens, &s.SubagentUsage.CacheReadTokens,
 		&s.SubagentUsage.CacheCreation5mTokens, &s.SubagentUsage.CacheCreation1hTokens,
 		&s.SubagentCost.InputUSD, &s.SubagentCost.OutputUSD, &s.SubagentCost.CacheReadUSD,
 		&s.SubagentCost.CacheWriteUSD, &s.SubagentCost.TotalUSD, &subagentUnpriced,
-		&subagentUnpricedModels,
+		&subagentUnpricedModels, &s.SubagentActiveDurationMs,
 	); err != nil {
 		return s, err
 	}
@@ -1516,6 +1526,7 @@ func readSummaryFile(
 	}
 
 	var tr timeRange
+	var active activeTimeTracker
 	costs := newCostAccumulator(defaultPricingResolver())
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 4*1024*1024), 4*1024*1024)
@@ -1531,6 +1542,11 @@ func readSummaryFile(
 
 		if boundsSessionTimeRange(ev.Type) {
 			tr.update(ev.Timestamp)
+			// The same event set that bounds the time range feeds active
+			// duration, so active time is contained in [start, last] by
+			// construction — a pr-link posted days after the conversation can
+			// extend neither.
+			active.observe(ev.Timestamp, ev.Type == "assistant")
 		}
 		updateMetadataFromEvent(&summary.CWD, &summary.GitBranch, ev)
 		processSummaryEvent(summary, ev, countSidechainUsers)
@@ -1543,6 +1559,7 @@ func readSummaryFile(
 
 	summary.StartTime = tr.start
 	summary.LastActivity = tr.last
+	summary.ActiveDurationMs, _ = active.durations()
 	// Carry the accumulated cost on the summary so every persistence path — the
 	// session cache and the sub-agent cache alike — stores it without having to
 	// thread the accumulator through. The accumulator is still returned for

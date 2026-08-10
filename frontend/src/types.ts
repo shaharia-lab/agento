@@ -541,6 +541,10 @@ export interface ClaudeSessionSummary {
   is_favorite?: boolean
   start_time: string
   last_activity: string
+  /** Main-thread active time: inter-event gaps capped at 10 min. Excludes delegated work. */
+  active_duration_ms: number
+  /** Summed active time of the session's sub-agent transcripts, mirroring subagent_usage. */
+  subagent_active_duration_ms: number
   /** Conversational turns: real user input plus assistant replies containing text. */
   message_count: number
   /** Raw top-level user + assistant events, i.e. API round-trips. */
@@ -682,7 +686,10 @@ export interface SessionJourney {
   git_branch?: string
   start_time: string
   end_time: string
+  /** Raw start-to-end span — includes idle time between sittings of a resumed session. */
   total_duration_ms: number
+  /** Inter-event gaps capped at 10 min — the time the session was actually being worked. */
+  active_duration_ms: number
   total_turns: number
   /** Main-thread only, like ClaudeSessionSummary.usage. */
   usage: ClaudeTokenUsage
@@ -966,8 +973,12 @@ export interface SessionInsight {
   agent_breakdown: Record<string, number>
   /** Tool calls made with no skill in context — built-in tool use. */
   unattributed_calls: number
+  /** Raw start-to-end span — includes idle time between sittings of a resumed session. */
   total_duration_ms: number
-  thinking_time_ms: number
+  /** Inter-event gaps capped at 10 min — the time the session was actually being worked. */
+  active_duration_ms: number
+  /** Subset of active time spent producing assistant output, measured from event timing. */
+  claude_working_time_ms: number
   cache_hit_rate: number
   tokens_per_turn_avg: number
   cost_estimate_usd: number
@@ -997,7 +1008,10 @@ export interface InsightSummary {
   sessions_with_errors: number
   /** Summed tool errors, the numerator for an errors-per-100-calls rate. */
   total_tool_errors: number
+  /** Mean raw span — kept for reference; idle time between sittings inflates it. */
   avg_total_duration_ms: number
+  /** Mean active duration (idle gaps over 10 min excluded) — what the dashboard shows. */
+  avg_active_duration_ms: number
   top_tools: ToolUsageStat[]
   /** Total tool calls across the period — the denominator for the breakdowns. */
   total_tool_calls: number

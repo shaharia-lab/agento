@@ -44,13 +44,6 @@ func withMessage(role, model string, content any, usage *claudesessions.EventUsa
 	}
 }
 
-func withRaw(data map[string]any) func(*claudesessions.ProcessableEvent) {
-	return func(ev *claudesessions.ProcessableEvent) {
-		raw, _ := json.Marshal(data)
-		ev.Raw = raw
-	}
-}
-
 func toolUseBlocks(names ...string) []map[string]any {
 	blocks := make([]map[string]any, len(names))
 	for i, n := range names {
@@ -65,10 +58,6 @@ func toolResultBlocks(errFlags ...bool) []map[string]any {
 		blocks[i] = map[string]any{"type": "tool_result", "tool_use_id": "id", "is_error": isErr}
 	}
 	return blocks
-}
-
-func thinkingBlock(text string) map[string]any {
-	return map[string]any{"type": "thinking", "thinking": text}
 }
 
 func textBlocks(s string) []map[string]any {
@@ -320,48 +309,75 @@ func TestTimeProfileProcessor_Duration(t *testing.T) {
 	}
 }
 
-func TestTimeProfileProcessor_ThinkingFallback(t *testing.T) {
-	// 100 chars × 0.5ms/char = 50ms
-	thinking := thinkingBlock(string(make([]byte, 100)))
+func TestTimeProfileProcessor_ActiveDurationCapsIdleGaps(t *testing.T) {
+	// A sitting, a resume 28 days later, and another sitting: the span covers
+	// the idle month, the active duration counts each sitting plus one capped
+	// gap for the resume. This is the exact shape that put the dashboard's
+	// average at 8 hours while the median sitting was 17 minutes.
+	t0 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
 	evs := []claudesessions.ProcessableEvent{
-		makeEvent("assistant", withMessage("assistant", "", []map[string]any{thinking}, nil)),
+		makeEvent("user", withTS(t0)),
+		makeEvent("assistant", withTS(t0.Add(2*time.Minute))),
+		makeEvent("user", withTS(t0.Add(28*24*time.Hour))), // resume
+		makeEvent("assistant", withTS(t0.Add(28*24*time.Hour+3*time.Minute))),
 	}
 	insight := runProcessors(evs, &claudesessions.TimeProfileProcessor{})
-	if insight.ThinkingTimeMs != 50 {
-		t.Errorf("expected 50ms thinking (fallback), got %d", insight.ThinkingTimeMs)
+
+	wantSpan := (28*24*time.Hour + 3*time.Minute).Milliseconds()
+	if insight.TotalDurationMs != wantSpan {
+		t.Errorf("span = %dms, want %d", insight.TotalDurationMs, wantSpan)
+	}
+	wantActive := (2*time.Minute + claudesessions.IdleGapThreshold + 3*time.Minute).Milliseconds()
+	if insight.ActiveDurationMs != wantActive {
+		t.Errorf("active = %dms, want %d", insight.ActiveDurationMs, wantActive)
 	}
 }
 
-func TestTimeProfileProcessor_SystemTurnDuration(t *testing.T) {
+func TestTimeProfileProcessor_ClaudeWorkingTimeIsAssistantGaps(t *testing.T) {
+	// Gaps ending at an assistant event are Claude working; the gap ending at
+	// the user's next message is not.
+	t0 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
 	evs := []claudesessions.ProcessableEvent{
-		makeEvent("system", withRaw(map[string]any{
-			"type":        "system",
-			"subtype":     "turn_duration",
-			"duration_ms": 1234,
-			"timestamp":   "2025-01-01T10:00:00Z",
-		})),
+		makeEvent("user", withTS(t0)),
+		makeEvent("assistant", withTS(t0.Add(30*time.Second))),
+		makeEvent("assistant", withTS(t0.Add(90*time.Second))),
+		makeEvent("user", withTS(t0.Add(5*time.Minute))),
 	}
 	insight := runProcessors(evs, &claudesessions.TimeProfileProcessor{})
-	if insight.ThinkingTimeMs != 1234 {
-		t.Errorf("expected 1234ms from system event, got %d", insight.ThinkingTimeMs)
+
+	want := (90 * time.Second).Milliseconds()
+	if insight.ClaudeWorkingTimeMs != want {
+		t.Errorf("claude working = %dms, want %d", insight.ClaudeWorkingTimeMs, want)
+	}
+	if insight.ActiveDurationMs != (5 * time.Minute).Milliseconds() {
+		t.Errorf("active = %dms, want %d", insight.ActiveDurationMs, (5 * time.Minute).Milliseconds())
 	}
 }
 
-func TestTimeProfileProcessor_SystemDurationTakesPrecedence(t *testing.T) {
-	// When system events provide duration, thinking blocks should NOT add to it.
-	thinking := thinkingBlock(string(make([]byte, 100))) // would be 50ms
+func TestTimeProfileProcessor_SubagentEventsFillParentWaitGaps(t *testing.T) {
+	// The pipeline feeds the parent transcript first and sub-agent transcripts
+	// after it, so timestamps arrive out of order. The tracker sorts before
+	// walking: a 40-minute delegated run inside the parent's Task wait must be
+	// credited, not collapsed to one capped gap.
+	t0 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
 	evs := []claudesessions.ProcessableEvent{
-		makeEvent("system", withRaw(map[string]any{
-			"type":        "system",
-			"subtype":     "turn_duration",
-			"duration_ms": 200,
-			"timestamp":   "2025-01-01T10:00:00Z",
-		})),
-		makeEvent("assistant", withMessage("assistant", "", []map[string]any{thinking}, nil)),
+		// Parent: Task tool_use at t0, tool_result 40 minutes later.
+		makeEvent("assistant", withTS(t0)),
+		makeEvent("user", withTS(t0.Add(40*time.Minute))),
+		// Sub-agent transcript, processed afterwards, working every 5 minutes.
+		makeEvent("assistant", withTS(t0.Add(5*time.Minute)), withSidechain()),
+		makeEvent("assistant", withTS(t0.Add(10*time.Minute)), withSidechain()),
+		makeEvent("assistant", withTS(t0.Add(20*time.Minute)), withSidechain()),
+		makeEvent("assistant", withTS(t0.Add(30*time.Minute)), withSidechain()),
+		makeEvent("assistant", withTS(t0.Add(38*time.Minute)), withSidechain()),
 	}
 	insight := runProcessors(evs, &claudesessions.TimeProfileProcessor{})
-	if insight.ThinkingTimeMs != 200 {
-		t.Errorf("expected 200ms (system wins), got %d", insight.ThinkingTimeMs)
+
+	// Sorted gaps: 5,5,10,10,8,2 minutes — all under the cap, so the whole 40
+	// minutes counts. Without the merge it would be one capped 10-minute gap.
+	want := (40 * time.Minute).Milliseconds()
+	if insight.ActiveDurationMs != want {
+		t.Errorf("active = %dms, want %d", insight.ActiveDurationMs, want)
 	}
 }
 
@@ -535,6 +551,30 @@ func TestSessionRhythmProcessor_BasicRhythm(t *testing.T) {
 	// Claude responded 2s both times
 	if math.Abs(insight.AvgClaudeResponseTimeMs-2000) > 1 {
 		t.Errorf("expected avg_claude_response=2000ms, got %f", insight.AvgClaudeResponseTimeMs)
+	}
+}
+
+func TestSessionRhythmProcessor_ExcludesIdleGaps(t *testing.T) {
+	// A resume after days is a new sitting, not a reply: the corpus contained a
+	// 226-hour "user response time" from exactly this shape. The idle gap is
+	// dropped entirely rather than capped — capped, every resumed session's
+	// average would converge on the cap.
+	t0 := time.Date(2025, 1, 1, 10, 0, 0, 0, time.UTC)
+	evs := []claudesessions.ProcessableEvent{
+		makeEvent("user", withTS(t0), withMessage("user", "", textBlocks("go"), nil)),
+		makeEvent("assistant", withTS(t0.Add(2*time.Second)), withMessage("assistant", "", nil, nil)),
+		// Resume seven days later.
+		makeEvent("user", withTS(t0.Add(7*24*time.Hour)), withMessage("user", "", textBlocks("more"), nil)),
+		makeEvent("assistant", withTS(t0.Add(7*24*time.Hour+4*time.Second)), withMessage("assistant", "", nil, nil)),
+	}
+	insight := runProcessors(evs, &claudesessions.SessionRhythmProcessor{})
+
+	if insight.AvgUserResponseTimeMs != 0 {
+		t.Errorf("expected the resume gap excluded, got avg_user_response=%f", insight.AvgUserResponseTimeMs)
+	}
+	// Claude's replies (2s and 4s) are unaffected.
+	if math.Abs(insight.AvgClaudeResponseTimeMs-3000) > 1 {
+		t.Errorf("expected avg_claude_response=3000ms, got %f", insight.AvgClaudeResponseTimeMs)
 	}
 }
 

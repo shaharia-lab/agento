@@ -533,6 +533,33 @@ ALTER TABLE claude_subagent_cache ADD COLUMN event_count INTEGER NOT NULL DEFAUL
 ALTER TABLE claude_session_cache ADD COLUMN cost_by_model TEXT NOT NULL DEFAULT '';
 `,
 	},
+	{
+		version: 24,
+		sql: `
+-- Active duration: inter-event gaps capped at the 10-minute idle threshold
+-- (claudesessions.IdleGapThreshold). Claude Code sessions are resumable, so
+-- the raw first-to-last span counts every idle day between sittings — one
+-- resumed-after-28-days session carried 82% of the dashboard's "Avg Duration"
+-- on the reference corpus. The span columns stay; these are the figures
+-- aggregate reporting should use.
+--
+-- Zero defaults are not a backfill: cache rows are recomputed by the
+-- CurrentScannerVersion 11 -> 12 bump and insight rows by the
+-- CurrentProcessorVersion 9 -> 10 bump, since no transcript mtime changes just
+-- because Agento learned to store another number about it.
+ALTER TABLE claude_session_cache ADD COLUMN active_duration_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE claude_subagent_cache ADD COLUMN active_duration_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE session_insights ADD COLUMN active_duration_ms INTEGER NOT NULL DEFAULT 0;
+
+-- thinking_time_ms was built on turn_duration system events that modern
+-- Claude Code never emits, with a 0.5ms-per-character guess as fallback; its
+-- maximum across a 1,071-session corpus was 26 seconds. The replacement is
+-- measured: the subset of active time whose gaps end at an assistant event.
+-- Renamed rather than added so no consumer can keep reading the dead figure;
+-- stale values are overwritten by the same processor-version bump.
+ALTER TABLE session_insights RENAME COLUMN thinking_time_ms TO claude_working_time_ms;
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

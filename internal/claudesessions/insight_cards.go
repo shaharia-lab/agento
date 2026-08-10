@@ -3,7 +3,6 @@ package claudesessions
 import (
 	"math"
 	"sort"
-	"time"
 )
 
 // Insight cards: a specific fact with a number attached, replacing a 0–100
@@ -53,7 +52,8 @@ type InsightCard struct {
 	Model string `json:"model,omitempty"`
 	// Tokens is the token figure behind AmountUSD, when there is one.
 	Tokens int `json:"tokens,omitempty"`
-	// AvgDurationMs is the mean wall-clock span of the sessions a card covers.
+	// AvgDurationMs is the mean active duration of the sessions a card covers —
+	// idle gaps above IdleGapThreshold excluded, delegated work included.
 	AvgDurationMs int64 `json:"avg_duration_ms,omitempty"`
 	// ComparisonUSD is the figure AmountUSD should be read against — for cache
 	// savings, what the window actually cost. A saving of $102k means nothing
@@ -259,12 +259,14 @@ func expensiveSessionsCard(sessions []ClaudeSessionSummary) (InsightCard, bool) 
 		total += s.TotalCost().TotalUSD
 	}
 
-	top, duration := 0.0, time.Duration(0)
+	top, durationMs := 0.0, int64(0)
 	for _, s := range costs[:expensiveSessionSample] {
 		top += s.TotalCost().TotalUSD
-		if s.LastActivity.After(s.StartTime) {
-			duration += s.LastActivity.Sub(s.StartTime)
-		}
+		// Active time, not the start/last span: expensive sessions are exactly
+		// the long-lived ones people resume, and a span that includes the idle
+		// week between sittings would make this card's "ran Xh on average"
+		// meaningless.
+		durationMs += s.TotalActiveDurationMs()
 	}
 
 	if top < minCardCostUSD || total <= 0 {
@@ -275,6 +277,6 @@ func expensiveSessionsCard(sessions []ClaudeSessionSummary) (InsightCard, bool) 
 		AmountUSD:     top,
 		Percent:       math.Round(top/total*1000) / 10,
 		Count:         expensiveSessionSample,
-		AvgDurationMs: (duration / expensiveSessionSample).Milliseconds(),
+		AvgDurationMs: durationMs / expensiveSessionSample,
 	}, true
 }

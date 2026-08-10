@@ -9,6 +9,15 @@ import "time"
 //     next genuine user input event (how quickly the user reacts).
 //   - AvgClaudeResponseTimeMs: mean gap between a genuine user input and the
 //     first assistant event that follows it (how quickly Claude starts responding).
+//
+// Gaps above IdleGapThreshold are excluded from both averages rather than
+// capped. A message sent after lunch, overnight, or on resuming the session
+// days later is the start of a new sitting, not a reply — the corpus contained
+// a 226-hour "user response time" from exactly that — and capping would only
+// make every resumed session's average converge on the cap. On the Claude
+// side a gap that large is a queued-message artifact (the event carries the
+// typed-at timestamp, delivery came after the running turn finished), not a
+// response Claude took hours to start.
 type SessionRhythmProcessor struct {
 	lastAssistantTS   time.Time
 	lastGenuineUserTS time.Time
@@ -28,30 +37,40 @@ func (p *SessionRhythmProcessor) Process(ev ProcessableEvent) {
 
 	switch ev.Type {
 	case "user":
-		if !isTurnStart(ev) {
-			return
-		}
-		// How long did the user take to respond after Claude finished?
-		if !p.lastAssistantTS.IsZero() {
-			gap := ev.Timestamp.Sub(p.lastAssistantTS).Milliseconds()
-			if gap >= 0 {
-				p.userResponseGaps = append(p.userResponseGaps, gap)
-			}
-		}
-		p.lastGenuineUserTS = ev.Timestamp
-
+		p.processUser(ev)
 	case "assistant":
-		// How quickly did Claude start responding after the user?
-		if !p.lastGenuineUserTS.IsZero() {
-			gap := ev.Timestamp.Sub(p.lastGenuineUserTS).Milliseconds()
-			if gap >= 0 {
-				p.claudeResponseGaps = append(p.claudeResponseGaps, gap)
-				// Only record once per user→assistant pair.
-				p.lastGenuineUserTS = time.Time{}
-			}
-		}
-		p.lastAssistantTS = ev.Timestamp
+		p.processAssistant(ev)
 	}
+}
+
+// processUser measures how long the user took to respond after Claude finished.
+func (p *SessionRhythmProcessor) processUser(ev ProcessableEvent) {
+	if !isTurnStart(ev) {
+		return
+	}
+	if !p.lastAssistantTS.IsZero() {
+		gap := ev.Timestamp.Sub(p.lastAssistantTS).Milliseconds()
+		if gap >= 0 && gap <= IdleGapThreshold.Milliseconds() {
+			p.userResponseGaps = append(p.userResponseGaps, gap)
+		}
+	}
+	p.lastGenuineUserTS = ev.Timestamp
+}
+
+// processAssistant measures how quickly Claude started responding after the user.
+func (p *SessionRhythmProcessor) processAssistant(ev ProcessableEvent) {
+	if !p.lastGenuineUserTS.IsZero() {
+		gap := ev.Timestamp.Sub(p.lastGenuineUserTS).Milliseconds()
+		if gap >= 0 {
+			if gap <= IdleGapThreshold.Milliseconds() {
+				p.claudeResponseGaps = append(p.claudeResponseGaps, gap)
+			}
+			// Consume the pair even when the gap was an artifact, so a later
+			// assistant event is not measured against it too.
+			p.lastGenuineUserTS = time.Time{}
+		}
+	}
+	p.lastAssistantTS = ev.Timestamp
 }
 
 // Finalize writes AvgUserResponseTimeMs and AvgClaudeResponseTimeMs into the insight.

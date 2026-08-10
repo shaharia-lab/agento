@@ -666,9 +666,15 @@ export default function SessionJourneyPage() {
                   {journey.model}
                 </Badge>
               )}
-              <span className="flex items-center gap-1 text-xs text-zinc-500 dark:text-zinc-400">
+              {/* Active time, with the raw span in the tooltip: a resumed
+                  session's span includes every idle day between sittings, so
+                  showing it as "duration" reported a 6-hour session as 678h. */}
+              <span
+                className="flex items-center gap-1 text-xs text-zinc-500 dark:text-zinc-400"
+                title={`active time (idle gaps > 10 min excluded); span ${formatDuration(journey.total_duration_ms)}`}
+              >
                 <Clock className="h-3 w-3" />
-                {formatDuration(journey.total_duration_ms)}
+                {formatDuration(journey.active_duration_ms)}
               </span>
               <span className="text-xs text-zinc-500 dark:text-zinc-400">
                 {journey.total_turns} turn{journey.total_turns === 1 ? '' : 's'}
