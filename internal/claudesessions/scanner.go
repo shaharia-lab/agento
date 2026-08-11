@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -278,44 +277,6 @@ func findExistingDir(parent, segment string) (string, bool) {
 	return "", false
 }
 
-// ListProjects returns all projects found in ~/.claude/projects/.
-func ListProjects() ([]ClaudeProject, error) {
-	projectsDir := filepath.Join(ClaudeHome(), "projects")
-	entries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	projects := make([]ClaudeProject, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		files, rdErr := os.ReadDir(filepath.Join(projectsDir, e.Name()))
-		if rdErr != nil {
-			continue
-		}
-		count := 0
-		for _, f := range files {
-			if !f.IsDir() && strings.HasSuffix(f.Name(), jsonlExt) {
-				count++
-			}
-		}
-		projects = append(projects, ClaudeProject{
-			EncodedName:  e.Name(),
-			DecodedPath:  DecodeProjectPath(e.Name()),
-			SessionCount: count,
-		})
-	}
-	sort.Slice(projects, func(i, j int) bool {
-		return projects[i].DecodedPath < projects[j].DecodedPath
-	})
-	return projects, nil
-}
-
 // ScanAllSessions scans all project directories and returns summaries for all sessions.
 // Sessions are sorted by last activity, most recent first.
 func ScanAllSessions(logger *slog.Logger) ([]ClaudeSessionSummary, error) {
@@ -407,6 +368,26 @@ func IncrementalScan(db *sql.DB, logger *slog.Logger) ([]ClaudeSessionSummary, e
 func IncrementalScanWithNotify(
 	db *sql.DB, logger *slog.Logger, notify func(sessionID, filePath string, isNew bool),
 ) ([]ClaudeSessionSummary, error) {
+	return IncrementalScanWith(db, logger, ScanOptions{Notify: notify})
+}
+
+// ScanOptions carries the scan's optional callbacks. A struct rather than more
+// parameters because the two have nothing to do with each other and most
+// callers want neither.
+type ScanOptions struct {
+	// Notify is called once per session that was inserted or updated.
+	Notify func(sessionID, filePath string, isNew bool)
+	// Progress reports how many of the scan's files have been written, and how
+	// many there are. It is called once before any work and once per committed
+	// batch, so a first run on a large corpus can show something moving instead
+	// of two minutes of silence.
+	Progress func(done, total int)
+}
+
+// IncrementalScanWith is the full scan entry point.
+func IncrementalScanWith(
+	db *sql.DB, logger *slog.Logger, opts ScanOptions,
+) ([]ClaudeSessionSummary, error) {
 	projectsDir := filepath.Join(ClaudeHome(), "projects")
 
 	onDisk, err := walkDiskFiles(projectsDir)
@@ -421,6 +402,7 @@ func IncrementalScanWithNotify(
 				}
 			}
 			updateLastScanned(db, logger)
+			cacheProjects(nil)
 			return []ClaudeSessionSummary{}, nil
 		}
 		return nil, err
@@ -435,8 +417,12 @@ func IncrementalScanWithNotify(
 	stale.invalidate(db, cached, logger)
 
 	diff := diffDiskAndCache(onDisk, cached)
-	applyChangesWithNotify(db, logger, onDisk, diff, notify)
+	applyChangesWithNotify(db, logger, onDisk, diff, opts.Notify, opts.Progress)
 
+	// The scan has just walked every project directory, so the project list it
+	// implies is free here and costs 500 ReadDir round trips per request
+	// otherwise.
+	cacheProjects(projectsFromDiskFiles(onDisk))
 	updateLastScanned(db, logger)
 	stale.record(db, logger)
 	return loadAllSessions(db, logger)
@@ -798,148 +784,6 @@ func diffDiskAndCache(onDisk map[string]diskFile, cached map[string]cachedEntry)
 	return d
 }
 
-func applyChangesWithNotify(
-	db *sql.DB, logger *slog.Logger,
-	onDisk map[string]diskFile,
-	diff diskDiff,
-	notify func(sessionID, filePath string, isNew bool),
-) {
-	total := len(diff.toInsert) + len(diff.toUpdate)
-	if total > 0 || len(diff.toDelete) > 0 {
-		logger.Info("claude sessions: incremental scan",
-			"new", len(diff.toInsert),
-			"modified", len(diff.toUpdate),
-			"deleted", len(diff.toDelete),
-			"unchanged", len(onDisk)-total)
-	}
-
-	// Insights are computed per session over the parent transcript plus all of
-	// its sub-agent transcripts, so a session is worth notifying about at most
-	// once per scan however many of its files changed. Collect first, emit after:
-	// a session with N changed sub-agents would otherwise enqueue N+1 items that
-	// each re-read all N+1 files, and on a first scan the resulting fan-out
-	// overflows the worker queue.
-	pending := make(map[string]pendingNotify)
-	for _, fp := range diff.toInsert {
-		applyOne(db, logger, onDisk[fp], true, pending)
-	}
-	for _, fp := range diff.toUpdate {
-		applyOne(db, logger, onDisk[fp], false, pending)
-	}
-	if notify != nil {
-		for sessionID, p := range pending {
-			notify(sessionID, p.filePath, p.isNew)
-		}
-	}
-
-	for _, ce := range diff.toDelete {
-		deleteCachedFile(db, logger, ce)
-	}
-}
-
-// deleteCachedFile removes every cache row belonging to a transcript that is no
-// longer on disk.
-func deleteCachedFile(db *sql.DB, logger *slog.Logger, ce cachedEntry) {
-	table := "claude_session_cache"
-	if ce.isSubagent {
-		table = "claude_subagent_cache"
-	} else {
-		// Linked PRs hang off the session row with no foreign key, so they must
-		// be cleared here or they outlive the session forever — and attachPRs
-		// reads the whole table on every list. This runs before the session row
-		// is deleted, because it resolves the session through it.
-		if _, err := db.ExecContext(context.Background(),
-			`DELETE FROM claude_session_pr WHERE session_id IN (
-				SELECT session_id FROM claude_session_cache WHERE file_path = ?)`,
-			ce.filePath); err != nil {
-			logger.Warn("claude sessions: failed to delete linked PRs",
-				"file", ce.filePath, "error", err)
-		}
-	}
-	// #nosec G202 -- table is a package-internal constant, never user input.
-	deleteQuery := "DELETE FROM " + table + " WHERE file_path = ?"
-	if _, err := db.ExecContext(context.Background(), deleteQuery, ce.filePath); err != nil {
-		logger.Warn("claude sessions: failed to delete cache row",
-			"file", ce.filePath, "error", err)
-	}
-}
-
-// pendingNotify is one session's queued insight notification for this scan.
-type pendingNotify struct {
-	filePath string
-	isNew    bool
-}
-
-// applyOne upserts a single changed file into the appropriate cache table and
-// records the session's insight notification in pending.
-//
-// A sub-agent file is recorded against its PARENT session id and file path,
-// because a changed fragment must re-run the whole session. It never marks the
-// session as new — the session already existed — and never overwrites an entry
-// the parent file recorded, so a genuinely new session still reports as new
-// regardless of the order the two are applied in.
-func applyOne(
-	db *sql.DB, logger *slog.Logger, df diskFile, isNew bool, pending map[string]pendingNotify,
-) {
-	if df.isSubagent {
-		if !applySubagentUpsert(db, logger, df) {
-			return
-		}
-		if _, exists := pending[df.sessionID]; !exists {
-			pending[df.sessionID] = pendingNotify{filePath: df.parentFilePath, isNew: false}
-		}
-		return
-	}
-	if !applyUpsert(db, logger, df) {
-		return
-	}
-	pending[df.sessionID] = pendingNotify{filePath: df.filePath, isNew: isNew}
-}
-
-// applyUpsert reads the session summary and writes it to the cache.
-// Returns true on success.
-func applyUpsert(db *sql.DB, logger *slog.Logger, df diskFile) bool {
-	summary, _, err := readSessionSummary(df.sessionID, df.projectPath, df.filePath, logger)
-	if err != nil || summary == nil {
-		return false
-	}
-	if err := upsertCacheRow(db, df, summary); err != nil {
-		logger.Warn("claude sessions: failed to upsert cache row",
-			"file", df.filePath, "error", err)
-		return false
-	}
-	return true
-}
-
-// upsertCacheRow writes one session's cache row and its linked pull requests.
-//
-// Both happen in a single transaction: the row carries the file's mtime, so a
-// PR write failing after the row committed would leave the file looking
-// unchanged to diffDiskAndCache, and the PR rows would never be rebuilt — not
-// until an unrelated scanner-version bump or a touch of the file.
-func upsertCacheRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary) (err error) {
-	ctx := context.Background()
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
-				err = errors.Join(err, rbErr)
-			}
-		}
-	}()
-
-	if err = insertCacheRow(ctx, tx, df, s); err != nil {
-		return err
-	}
-	if err = replacePRRows(ctx, tx, s.SessionID, s.PRs); err != nil {
-		return err
-	}
-	return tx.Commit()
-}
-
 // insertCacheRow writes the session's own row. custom_title and is_favorite are
 // intentionally absent from both the INSERT and the UPDATE SET so user-defined
 // values survive a rescan; everything else is derived from the transcript and
@@ -1153,22 +997,12 @@ func readSubagentMeta(filePath string, logger *slog.Logger) subagentMeta {
 
 // applySubagentUpsert reads a sub-agent transcript and writes it to the
 // sub-agent cache. Returns true on success.
-func applySubagentUpsert(db *sql.DB, logger *slog.Logger, df diskFile) bool {
-	summary, _, err := readSubagentSummary(df.sessionID, df.projectPath, df.filePath, logger)
-	if err != nil || summary == nil {
-		return false
-	}
-	meta := readSubagentMeta(df.filePath, logger)
-	if err := upsertSubagentRow(db, df, summary, meta); err != nil {
-		logger.Warn("claude sessions: failed to upsert sub-agent cache row",
-			"file", df.filePath, "error", err)
-		return false
-	}
-	return true
-}
-
-func upsertSubagentRow(db *sql.DB, df diskFile, s *ClaudeSessionSummary, meta subagentMeta) error {
-	ctx := context.Background()
+// upsertSubagentRow writes one delegated transcript's cache row. It takes an
+// execer rather than a *sql.DB so the scan's batching writer can run it inside
+// the same transaction as the session rows around it.
+func upsertSubagentRow(
+	ctx context.Context, db execer, df diskFile, s *ClaudeSessionSummary, meta subagentMeta,
+) error {
 	_, err := db.ExecContext(ctx, `
 		INSERT INTO claude_subagent_cache (
 			parent_session_id, agent_id, file_path, file_mtime,

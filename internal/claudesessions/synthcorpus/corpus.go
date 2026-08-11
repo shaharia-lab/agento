@@ -122,6 +122,30 @@ var toolNames = []string{
 	"mcp__github__list_issues", "mcp__slack__slack_send_message",
 }
 
+// filler is what body text and tool payloads are padded with.
+//
+// Line *size* matters as much as line count: the reference corpus is 1.09 GB
+// across 375,291 lines — about 2.9 KB per line, because a Read result or an
+// Edit's structuredPatch carries file contents. A generator emitting 400-byte
+// lines would measure decode overhead against a corpus an eighth the real size
+// and report a scan budget no actual machine could meet.
+const filler = "func handle(ctx context.Context, req *Request) (*Response, error) { " +
+	"if err := validate(req); err != nil { return nil, fmt.Errorf(\"validating: %w\", err) } " +
+	"return svc.Process(ctx, req) }\n"
+
+// pad returns roughly n bytes of plausible source text.
+func pad(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.Grow(n + len(filler))
+	for sb.Len() < n {
+		sb.WriteString(filler)
+	}
+	return sb.String()[:n]
+}
+
 // Generate writes the corpus under home/.claude/projects, creating home if it
 // does not exist. An existing projects directory is removed first, so a
 // benchmark that reruns measures a scan of exactly the corpus it asked for.
@@ -265,7 +289,7 @@ func (g *generator) transcript(
 	sessionID, projectPath string, start time.Time, events int, sidechain bool, agentID string,
 ) ([]byte, int, time.Time) {
 	var sb strings.Builder
-	sb.Grow(events * 700)
+	sb.Grow(events * 3000)
 	at := start
 	model := models[g.rng.Intn(len(models))]
 	branch := fmt.Sprintf("feat/bench-%d", g.rng.Intn(40))
@@ -336,8 +360,9 @@ func (g *generator) userEvent(
 		"sessionId": sessionID, "timestamp": at, "cwd": projectPath,
 		"gitBranch": branch, "version": "2.1.224",
 		"message": map[string]any{
-			"role":    "user",
-			"content": fmt.Sprintf("Please look at the %s module and report what it does.", branch),
+			"role": "user",
+			"content": fmt.Sprintf("Please look at the %s module and report what it does.\n%s",
+				branch, pad(200+g.rng.Intn(3000))),
 		},
 	}
 	if sidechain {
@@ -352,7 +377,8 @@ func (g *generator) assistantEvent(
 	sidechain bool, agentID, model string, i int,
 ) map[string]any {
 	blocks := []map[string]any{
-		{"type": "text", "text": "Looking at that now — here is what I found in the module."},
+		{"type": "text", "text": "Looking at that now — here is what I found in the module.\n" +
+			pad(400+g.rng.Intn(2200))},
 	}
 	// Roughly half of assistant turns call a tool, which is what the attribution
 	// and tool-usage processors are measured on.
@@ -364,6 +390,7 @@ func (g *generator) assistantEvent(
 			"input": map[string]any{
 				"file_path": projectPath + "/internal/service/handler.go",
 				"pattern":   branch,
+				"content":   pad(1000 + g.rng.Intn(6000)),
 			},
 		})
 	}

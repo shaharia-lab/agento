@@ -298,6 +298,14 @@ type claudeSessionStatus struct {
 	CostsStale bool `json:"costs_stale"`
 	// ScanInProgress means a background scan is running right now.
 	ScanInProgress bool `json:"scan_in_progress"`
+	// FilesDone and FilesTotal are the running scan's position. Both zero when
+	// nothing is running or the scan had nothing to re-read.
+	//
+	// The list no longer blocks on a cold-start scan — at 5,000 sessions that
+	// would be minutes and then a timeout — so an empty list during a first run
+	// needs something to say beyond "no sessions".
+	FilesDone  int `json:"files_done"`
+	FilesTotal int `json:"files_total"`
 	// LastScannedAt is empty when the cache has never been scanned.
 	LastScannedAt string `json:"last_scanned_at"`
 }
@@ -309,9 +317,12 @@ func (s *Server) handleGetClaudeSessionStatus(w http.ResponseWriter, _ *http.Req
 	if t := s.claudeSessionCache.LastScannedAt(); !t.IsZero() {
 		lastScanned = t.UTC().Format(time.RFC3339)
 	}
+	done, total := s.claudeSessionCache.ScanProgress()
 	s.writeJSON(w, http.StatusOK, claudeSessionStatus{
 		CostsStale:     s.claudeSessionCache.CostsStale(),
 		ScanInProgress: s.claudeSessionCache.ScanInProgress(),
+		FilesDone:      done,
+		FilesTotal:     total,
 		LastScannedAt:  lastScanned,
 	})
 }

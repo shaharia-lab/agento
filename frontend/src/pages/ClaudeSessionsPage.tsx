@@ -273,6 +273,7 @@ export default function ClaudeSessionsPage() {
   // large corpus), so an empty list has two meanings and the empty state has to
   // say which: "nothing here" or "not scanned yet".
   const [scanning, setScanning] = useState(false)
+  const [scanProgress, setScanProgress] = useState({ done: 0, total: 0 })
   const wasPending = useRef(false)
   useEffect(() => {
     let cancelled = false
@@ -295,6 +296,7 @@ export default function ClaudeSessionsPage() {
       if (wasPending.current && !pending) reload()
       wasPending.current = pending
       setScanning(status.scan_in_progress)
+      setScanProgress({ done: status.files_done ?? 0, total: status.files_total ?? 0 })
       setRecosting(pending)
       if (pending) timer = setTimeout(poll, STATUS_POLL_MS)
     }
@@ -434,6 +436,7 @@ export default function ClaudeSessionsPage() {
     ) : (
       <EmptyList
         scanning={scanning}
+        progress={scanProgress}
         filtered={filterActive(filters)}
         timeFiltered={timeFilterActive}
         drilldownActive={drilldownActive}
@@ -821,12 +824,14 @@ function SessionRows({
  */
 function EmptyList({
   scanning,
+  progress,
   filtered,
   timeFiltered,
   drilldownActive,
   onClearDrilldown,
 }: Readonly<{
   scanning: boolean
+  progress: { done: number; total: number }
   filtered: boolean
   timeFiltered: boolean
   drilldownActive: boolean
@@ -836,7 +841,15 @@ function EmptyList({
     return (
       <div className="flex flex-col items-center justify-center py-20 text-center">
         <RefreshCw className="h-5 w-5 animate-spin text-zinc-400 mb-3" />
-        <p className="text-sm text-zinc-500 dark:text-zinc-400">Scanning ~/.claude…</p>
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          Scanning ~/.claude…
+          {progress.total > 0 && (
+            <span className="tabular-nums">
+              {' '}
+              {progress.done} / {progress.total} transcripts
+            </span>
+          )}
+        </p>
         <p className="text-xs text-zinc-400 mt-1 max-w-xs">
           The first scan reads every transcript on this machine. Sessions appear as soon as it
           finishes.

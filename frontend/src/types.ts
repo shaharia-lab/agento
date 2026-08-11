@@ -682,6 +682,16 @@ export interface ClaudeSessionStatus {
   costs_stale: boolean
   /** A background scan is running right now. */
   scan_in_progress: boolean
+  /**
+   * The running scan's position. Both zero when nothing is running or the scan
+   * had nothing to re-read.
+   *
+   * The list no longer blocks on a cold-start scan — at 5,000 sessions that
+   * would be minutes and then a timeout — so an empty list during a first run
+   * needs something to say beyond "no sessions".
+   */
+  files_done: number
+  files_total: number
   /** RFC3339; empty when the cache has never been scanned. */
   last_scanned_at: string
 }

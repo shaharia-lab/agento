@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shaharia-lab/agento/internal/eventbus"
@@ -97,6 +98,13 @@ type Cache struct {
 	// a dozen passes over a full corpus load, and a dashboard fires two or
 	// three of them per open.
 	analytics *analyticsMemo
+
+	// filesDone and filesTotal report the running scan's progress. Atomics
+	// rather than mutex-guarded fields because the status endpoint polls them
+	// every few seconds while the scan writes them once per batch, and neither
+	// should ever wait on the other.
+	filesDone  atomic.Int64
+	filesTotal atomic.Int64
 }
 
 // NewCache creates a new Cache backed by the given SQLite database.
@@ -231,7 +239,10 @@ func (c *Cache) EnsureScan() <-chan struct{} {
 			close(done)
 		}()
 		c.logger.Info("claude sessions: starting background scan")
-		if _, err := IncrementalScanWithNotify(c.db, c.logger, c.notify); err != nil {
+		if _, err := IncrementalScanWith(c.db, c.logger, ScanOptions{
+			Notify:   c.notify,
+			Progress: c.recordProgress,
+		}); err != nil {
 			// pricing_rev and scanner_version are advanced inside the scan and
 			// only after it applies its changes, so a failure leaves the drift
 			// recorded and the next read retries it.
@@ -241,6 +252,22 @@ func (c *Cache) EnsureScan() <-chan struct{} {
 		c.logger.Info("claude sessions: background scan complete")
 	}()
 	return done
+}
+
+// recordProgress publishes the running scan's position for the status endpoint.
+func (c *Cache) recordProgress(done, total int) {
+	c.filesDone.Store(int64(done))
+	c.filesTotal.Store(int64(total))
+}
+
+// ScanProgress reports how many transcripts the running scan has written and
+// how many it has to write.
+//
+// Both are zero when no scan is running or when the last one had nothing to do.
+// A first run on a large corpus takes minutes, and since the list no longer
+// blocks on it, silence for that long is indistinguishable from a hang.
+func (c *Cache) ScanProgress() (done, total int) {
+	return int(c.filesDone.Load()), int(c.filesTotal.Load())
 }
 
 // ScanInProgress reports whether a background scan is currently running.
