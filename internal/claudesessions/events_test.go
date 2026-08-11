@@ -225,6 +225,7 @@ func TestScan_PRLinkDoesNotExtendActivity(t *testing.T) {
 
 	// The detail path must agree with the summary, since it applies the same denylist.
 	detail, err := readSessionDetail(
+		"",
 		eventsSessionID, projectDir,
 		filepath.Join(projectDir, eventsSessionID+".jsonl"), testLogger,
 	)
@@ -347,6 +348,7 @@ func TestDetail_CollectsSessionMetadata(t *testing.T) {
 	summary := findSession(t, sessions, eventsSessionID)
 
 	detail, err := readSessionDetail(
+		"",
 		eventsSessionID, projectDir,
 		filepath.Join(projectDir, eventsSessionID+".jsonl"), testLogger,
 	)

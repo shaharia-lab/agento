@@ -105,36 +105,70 @@ func ListProjects() ([]ClaudeProject, error) {
 // walkProjects reads the project directories directly. It counts the .jsonl
 // files in each, which is the same count projectsFromDiskFiles derives.
 func walkProjects() ([]ClaudeProject, error) {
-	projectsDir := filepath.Join(ClaudeHome(), "projects")
-	entries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
+	// Projects are keyed by their encoded directory name, so the same project
+	// worked on under two config dirs folds into one entry with the counts
+	// summed — which is what a project list should say, since the project is
+	// one project whichever account opened it.
+	byName := make(map[string]int)
+	var order []string
+	for _, dir := range ClaudeHomes() {
+		if err := walkProjectsIn(dir, byName, &order); err != nil {
+			return nil, err
 		}
-		return nil, err
 	}
 
-	projects := make([]ClaudeProject, 0, len(entries))
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		files, rdErr := os.ReadDir(filepath.Join(projectsDir, e.Name()))
-		if rdErr != nil {
-			continue
-		}
-		count := 0
-		for _, f := range files {
-			if !f.IsDir() && strings.HasSuffix(f.Name(), jsonlExt) {
-				count++
-			}
-		}
+	projects := make([]ClaudeProject, 0, len(order))
+	for _, name := range order {
 		projects = append(projects, ClaudeProject{
-			EncodedName:  e.Name(),
-			DecodedPath:  DecodeProjectPath(e.Name()),
-			SessionCount: count,
+			EncodedName:  name,
+			DecodedPath:  DecodeProjectPath(name),
+			SessionCount: byName[name],
 		})
 	}
 	sortProjects(projects)
 	return projects, nil
+}
+
+// walkProjectsIn accumulates one config dir's projects into byName, appending
+// newly seen encoded names to order so the result is deterministic.
+func walkProjectsIn(configDir string, byName map[string]int, order *[]string) error {
+	projectsDir := filepath.Join(configDir, "projects")
+	entries, err := os.ReadDir(projectsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		count := countTranscripts(filepath.Join(projectsDir, e.Name()))
+		if count < 0 {
+			continue
+		}
+		if _, seen := byName[e.Name()]; !seen {
+			*order = append(*order, e.Name())
+		}
+		byName[e.Name()] += count
+	}
+	return nil
+}
+
+// countTranscripts returns the number of .jsonl files directly in dir, or -1
+// when the directory cannot be listed.
+func countTranscripts(dir string) int {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return -1
+	}
+	count := 0
+	for _, f := range files {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), jsonlExt) {
+			count++
+		}
+	}
+	return count
 }

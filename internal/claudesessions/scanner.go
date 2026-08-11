@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/shaharia-lab/agento/internal/config"
 )
 
 const (
@@ -197,13 +199,22 @@ type rawContentBlock struct {
 	Input    json.RawMessage `json:"input,omitempty"`
 }
 
-// ClaudeHome returns the path to the user's ~/.claude directory.
+// ClaudeHome returns the Claude config dir agent runs target by default.
+//
+// Reads that need the whole corpus use ClaudeHomes instead; this remains for
+// the single-dir lookups where one answer is the right answer.
 func ClaudeHome() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join("/root", ".claude")
-	}
-	return filepath.Join(home, ".claude")
+	return config.ClaudeRunConfigDir()
+}
+
+// ClaudeHomes returns every Claude config dir Agento indexes, default first.
+//
+// Claude Code supports running several accounts side by side via
+// CLAUDE_CONFIG_DIR, and analytics is retrospective: a machine with two
+// accounts wants both corpora in every total, or "how much have I spent" answers
+// only for whichever account happens to be selected right now.
+func ClaudeHomes() []string {
+	return config.ClaudeConfigDirs()
 }
 
 // DecodeProjectPath converts an encoded Claude Code directory name to the original
@@ -280,21 +291,22 @@ func findExistingDir(parent, segment string) (string, bool) {
 // ScanAllSessions scans all project directories and returns summaries for all sessions.
 // Sessions are sorted by last activity, most recent first.
 func ScanAllSessions(logger *slog.Logger) ([]ClaudeSessionSummary, error) {
-	projectsDir := filepath.Join(ClaudeHome(), "projects")
-	entries, err := os.ReadDir(projectsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
 	var sessions []ClaudeSessionSummary
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
+	for _, dir := range ClaudeHomes() {
+		projectsDir := filepath.Join(dir, "projects")
+		entries, err := os.ReadDir(projectsDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
 		}
-		sessions = scanProjectSessions(projectsDir, e.Name(), sessions, logger)
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			sessions = scanProjectSessions(projectsDir, e.Name(), sessions, logger)
+		}
 	}
 
 	sort.Slice(sessions, func(i, j int) bool {
@@ -343,15 +355,23 @@ type diskFile struct {
 	// notified against this path so a changed sub-agent re-runs the whole
 	// session (parent + every sub-agent) rather than the fragment alone.
 	parentFilePath string
+
+	// configDir is the Claude config dir this file was found under. Stored on
+	// the row so a session can be attributed and filtered by account, and so a
+	// dir that fails to walk can have its rows protected from the delete pass.
+	configDir string
 }
 
 // cachedEntry holds a cached file's path and modification time. isSubagent
 // records which table the row came from, so deletions — where the file is gone
-// and no diskFile survives — can still be routed to the right table.
+// and no diskFile survives — can still be routed to the right table. configDir
+// records which config dir the row was indexed from, so a dir that could not be
+// walked this scan can be excluded from deletion.
 type cachedEntry struct {
 	filePath   string
 	mtime      time.Time
 	isSubagent bool
+	configDir  string
 }
 
 // IncrementalScan walks ~/.claude/projects/, compares files on disk with the
@@ -388,24 +408,20 @@ type ScanOptions struct {
 func IncrementalScanWith(
 	db *sql.DB, logger *slog.Logger, opts ScanOptions,
 ) ([]ClaudeSessionSummary, error) {
-	projectsDir := filepath.Join(ClaudeHome(), "projects")
+	dirs := ClaudeHomes()
+	walk := walkAllDiskFiles(dirs, logger)
+	onDisk := walk.files
 
-	onDisk, err := walkDiskFiles(projectsDir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			for _, table := range []string{
-				"claude_session_cache", "claude_subagent_cache", "claude_session_pr",
-			} {
-				// #nosec G202 -- table is a package-internal constant, never user input.
-				if _, execErr := db.ExecContext(context.Background(), "DELETE FROM "+table); execErr != nil {
-					logger.Warn("failed to clear session cache", "table", table, "error", execErr)
-				}
-			}
-			updateLastScanned(db, logger)
-			cacheProjects(nil)
-			return []ClaudeSessionSummary{}, nil
-		}
-		return nil, err
+	if len(walk.walked) == 0 {
+		// Not one configured dir could be listed. Previously this was the
+		// "wipe the cache" path, on the reasoning that a missing ~/.claude
+		// means the user deleted their sessions. With several dirs that
+		// inference no longer holds — an unplugged drive looks identical —
+		// so leave every row alone and let the next scan reconcile.
+		logger.Warn("claude sessions: no readable claude config dir, keeping cached rows",
+			"dirs", dirs)
+		updateLastScanned(db, logger)
+		return loadAllSessions(db, logger)
 	}
 
 	cached, err := loadCachedEntries(db, logger)
@@ -416,7 +432,7 @@ func IncrementalScanWith(
 	stale := detectStaleness(db)
 	stale.invalidate(db, cached, logger)
 
-	diff := diffDiskAndCache(onDisk, cached)
+	diff := diffDiskAndCache(onDisk, cached, walk.walked)
 	applyChangesWithNotify(db, logger, onDisk, diff, opts.Notify, opts.Progress)
 
 	// The scan has just walked every project directory, so the project list it
@@ -632,27 +648,125 @@ func recordScannerVersion(db *sql.DB, logger *slog.Logger) {
 	}
 }
 
-func walkDiskFiles(projectsDir string) (map[string]diskFile, error) {
+// diskWalk is the result of walking every configured Claude config dir.
+//
+// walked records which dirs produced a complete listing. It is not
+// bookkeeping: a cached row whose config dir is absent from this set must be
+// excluded from the delete pass, because "no file on disk" and "we could not
+// look" are indistinguishable to diffDiskAndCache and only one of them means
+// the session is gone. An unmounted home would otherwise delete its whole
+// corpus — including custom_title and is_favorite, the two user-owned columns
+// a rescan deliberately preserves.
+type diskWalk struct {
+	files  map[string]diskFile
+	walked map[string]struct{}
+}
+
+// walkAllDiskFiles walks every configured config dir into one set.
+//
+// Failure is isolated per dir on purpose. A dir that cannot be listed is
+// skipped and left out of walked, so the rest of the scan proceeds and that
+// dir's rows are protected rather than deleted.
+func walkAllDiskFiles(dirs []string, logger *slog.Logger) diskWalk {
+	w := diskWalk{
+		files:  make(map[string]diskFile),
+		walked: make(map[string]struct{}, len(dirs)),
+	}
+	// Tracks which (session, project) pair a config dir already claimed, so a
+	// corpus copied between dirs is indexed once. See claimSession.
+	claimed := make(map[string]string)
+
+	for _, dir := range dirs {
+		if walkOneDir(dir, w.files, claimed, logger) {
+			w.walked[dir] = struct{}{}
+		}
+	}
+	return w
+}
+
+// walkOneDir collects one config dir's transcripts, reporting whether it was
+// listed end to end.
+//
+// Only a dir listed completely may have its rows reconciled: reconciling a
+// partial listing deletes sessions that are present but could not be seen.
+func walkOneDir(
+	dir string, onDisk map[string]diskFile, claimed map[string]string, logger *slog.Logger,
+) bool {
+	projectsDir := filepath.Join(dir, "projects")
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
-		return nil, err
+		// A config dir that exists but has no projects/ has genuinely never
+		// run a session: it walked fine and contributed nothing, and its
+		// (nonexistent) rows are safe to reconcile. A config dir that is
+		// itself missing or unreadable is a different thing entirely — the
+		// user may have unplugged a drive — and must protect its rows.
+		if os.IsNotExist(err) && dirExists(dir) {
+			return true
+		}
+		logger.Warn("claude sessions: skipping unreadable config dir",
+			"config_dir", dir, "error", err)
+		return false
 	}
-	onDisk := make(map[string]diskFile)
+
+	complete := true
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		collectProjectDiskFiles(projectsDir, e.Name(), onDisk)
+		if !collectProjectDiskFiles(dir, projectsDir, e.Name(), onDisk, claimed, logger) {
+			complete = false
+		}
 	}
-	return onDisk, nil
+	if !complete {
+		logger.Warn("claude sessions: config dir listed incompletely, "+
+			"its cached rows are preserved this scan", "config_dir", dir)
+	}
+	return complete
 }
 
-func collectProjectDiskFiles(projectsDir, dirName string, onDisk map[string]diskFile) {
+// dirExists reports whether path is an existing directory.
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
+}
+
+// claimSession decides whether a config dir may index a (session, project)
+// pair, recording the winner so later dirs lose.
+//
+// The same session appearing under two config dirs is one session, not two:
+// the ordinary way to set up a second account is to copy the first dir, which
+// duplicates every session id under the same project paths. Indexing both
+// would double that corpus's tokens and cost in every total, and — because
+// claude_session_cache is keyed on (session_id, project_path) while file_path
+// is only a non-unique index — would also leave the losing path permanently
+// classified as an insert, re-firing EventSessionDiscovered on every scan.
+// Dirs are walked default-first, so the default dir wins ties.
+func claimSession(claimed map[string]string, key, dir string) bool {
+	owner, seen := claimed[key]
+	if !seen {
+		claimed[key] = dir
+		return true
+	}
+	return owner == dir
+}
+
+func collectProjectDiskFiles(
+	configDir, projectsDir, dirName string,
+	onDisk map[string]diskFile,
+	claimed map[string]string,
+	logger *slog.Logger,
+) bool {
 	projectPath := DecodeProjectPath(dirName)
 	projectDir := filepath.Join(projectsDir, dirName)
 	files, err := os.ReadDir(projectDir)
 	if err != nil {
-		return
+		// Previously silent. A project dir that cannot be listed drops every
+		// file under it from onDisk, which diffDiskAndCache reads as "deleted"
+		// — so it is logged, and reported as an incomplete listing so the
+		// caller protects this config dir's rows rather than reconciling them.
+		logger.Warn("claude sessions: skipping unreadable project dir",
+			"project_dir", projectDir, "error", err)
+		return false
 	}
 
 	// Session ids are needed before their sibling directories can be matched,
@@ -667,6 +781,12 @@ func collectProjectDiskFiles(projectsDir, dirName string, onDisk map[string]disk
 			continue
 		}
 		sessionID := strings.TrimSuffix(f.Name(), jsonlExt)
+		if !claimSession(claimed, sessionID+"\x00"+projectPath, configDir) {
+			// Another config dir already indexed this exact session. Skipping
+			// it here also keeps its sub-agent directory out, since pass 2
+			// only descends into ids collected in pass 1.
+			continue
+		}
 		sessionIDs[sessionID] = struct{}{}
 		fp := filepath.Join(projectDir, f.Name())
 		onDisk[fp] = diskFile{
@@ -674,6 +794,7 @@ func collectProjectDiskFiles(projectsDir, dirName string, onDisk map[string]disk
 			projectPath: projectPath,
 			filePath:    fp,
 			mtime:       info.ModTime().UTC(),
+			configDir:   configDir,
 		}
 	}
 
@@ -684,15 +805,18 @@ func collectProjectDiskFiles(projectsDir, dirName string, onDisk map[string]disk
 		if _, ok := sessionIDs[f.Name()]; !ok {
 			continue
 		}
-		collectSubagentDiskFiles(projectDir, f.Name(), projectPath, onDisk)
+		collectSubagentDiskFiles(configDir, projectDir, f.Name(), projectPath, onDisk)
 	}
+	return true
 }
 
 // collectSubagentDiskFiles emits one diskFile per sub-agent transcript under
 // <projectDir>/<sessionID>/subagents/. Claude Code moved delegated work out of
 // the parent JSONL into this directory; a session with no such directory simply
 // contributes nothing.
-func collectSubagentDiskFiles(projectDir, sessionID, projectPath string, onDisk map[string]diskFile) {
+func collectSubagentDiskFiles(
+	configDir, projectDir, sessionID, projectPath string, onDisk map[string]diskFile,
+) {
 	subagentsDir := filepath.Join(projectDir, sessionID, "subagents")
 	entries, err := os.ReadDir(subagentsDir)
 	if err != nil {
@@ -716,6 +840,7 @@ func collectSubagentDiskFiles(projectDir, sessionID, projectPath string, onDisk 
 			isSubagent:     true,
 			agentID:        strings.TrimSuffix(e.Name(), jsonlExt),
 			parentFilePath: parentFilePath,
+			configDir:      configDir,
 		}
 	}
 }
@@ -738,7 +863,8 @@ func loadCachedEntriesFrom(
 	db *sql.DB, logger *slog.Logger, table string, isSubagent bool, cached map[string]cachedEntry,
 ) error {
 	// #nosec G202 -- table is a package-internal constant, never user input.
-	rows, err := db.QueryContext(context.Background(), "SELECT file_path, file_mtime FROM "+table)
+	rows, err := db.QueryContext(context.Background(),
+		"SELECT file_path, file_mtime, config_dir FROM "+table)
 	if err != nil {
 		return err
 	}
@@ -750,7 +876,7 @@ func loadCachedEntriesFrom(
 
 	for rows.Next() {
 		ce := cachedEntry{isSubagent: isSubagent}
-		if err := rows.Scan(&ce.filePath, &ce.mtime); err != nil {
+		if err := rows.Scan(&ce.filePath, &ce.mtime, &ce.configDir); err != nil {
 			return err
 		}
 		cached[ce.filePath] = ce
@@ -765,7 +891,16 @@ type diskDiff struct {
 	toDelete []cachedEntry // cache rows whose file is no longer on disk
 }
 
-func diffDiskAndCache(onDisk map[string]diskFile, cached map[string]cachedEntry) diskDiff {
+// diffDiskAndCache classifies every file into insert, update or delete.
+//
+// walked is the set of config dirs that produced a complete listing. A cached
+// row belonging to any other dir is left untouched: its file's absence from
+// onDisk means "we could not look", not "it is gone". A row whose config dir is
+// blank predates the column and belongs to the default dir, which is always in
+// the walk set when it is readable.
+func diffDiskAndCache(
+	onDisk map[string]diskFile, cached map[string]cachedEntry, walked map[string]struct{},
+) diskDiff {
 	var d diskDiff
 	for fp, df := range onDisk {
 		ce, exists := cached[fp]
@@ -777,11 +912,28 @@ func diffDiskAndCache(onDisk map[string]diskFile, cached map[string]cachedEntry)
 		}
 	}
 	for fp, ce := range cached {
-		if _, exists := onDisk[fp]; !exists {
-			d.toDelete = append(d.toDelete, ce)
+		if _, exists := onDisk[fp]; exists {
+			continue
 		}
+		if !rowReconcilable(ce.configDir, walked) {
+			continue
+		}
+		d.toDelete = append(d.toDelete, ce)
 	}
 	return d
+}
+
+// rowReconcilable reports whether a cached row's absence from disk can be
+// trusted as a deletion.
+func rowReconcilable(configDir string, walked map[string]struct{}) bool {
+	if configDir == "" {
+		// Pre-migration rows carry the default dir after the backfill; a blank
+		// here means a row written by a path that did not stamp one. Trust the
+		// default dir's walk for it, which is the dir it must have come from.
+		configDir = config.DefaultClaudeConfigDir()
+	}
+	_, ok := walked[configDir]
+	return ok
 }
 
 // insertCacheRow writes the session's own row. custom_title and is_favorite are
@@ -801,9 +953,9 @@ func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessi
 			compaction_count, dropped_tokens,
 			input_cost_usd, output_cost_usd, cache_read_cost_usd,
 			cache_write_cost_usd, total_cost_usd, unpriced_models, unpriced_tokens,
-			cost_by_model, active_duration_ms
+			cost_by_model, active_duration_ms, config_dir
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-		          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(session_id, project_path) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -840,7 +992,8 @@ func insertCacheRow(ctx context.Context, tx *sql.Tx, df diskFile, s *ClaudeSessi
 			unpriced_models = excluded.unpriced_models,
 			unpriced_tokens = excluded.unpriced_tokens,
 			cost_by_model = excluded.cost_by_model,
-			active_duration_ms = excluded.active_duration_ms`,
+			active_duration_ms = excluded.active_duration_ms,
+			config_dir = excluded.config_dir`,
 		cacheRowArgs(df, s)...,
 	)
 	return err
@@ -872,7 +1025,7 @@ func cacheRowArgs(df diskFile, s *ClaudeSessionSummary) []any {
 		s.Cost.InputUSD, s.Cost.OutputUSD, s.Cost.CacheReadUSD,
 		s.Cost.CacheWriteUSD, s.Cost.TotalUSD,
 		encodeUnpricedModels(s.UnpricedModels), s.UnpricedTokens,
-		encodeCostByModel(s.CostByModel), s.ActiveDurationMs,
+		encodeCostByModel(s.CostByModel), s.ActiveDurationMs, df.configDir,
 	}
 }
 
@@ -1013,8 +1166,8 @@ func upsertSubagentRow(
 			model,
 			input_cost_usd, output_cost_usd, cache_read_cost_usd,
 			cache_write_cost_usd, total_cost_usd, unpriced_models, unpriced_tokens,
-			active_duration_ms
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			active_duration_ms, config_dir
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(parent_session_id, agent_id) DO UPDATE SET
 			file_path = excluded.file_path,
 			file_mtime = excluded.file_mtime,
@@ -1039,7 +1192,8 @@ func upsertSubagentRow(
 			total_cost_usd = excluded.total_cost_usd,
 			unpriced_models = excluded.unpriced_models,
 			unpriced_tokens = excluded.unpriced_tokens,
-			active_duration_ms = excluded.active_duration_ms`,
+			active_duration_ms = excluded.active_duration_ms,
+			config_dir = excluded.config_dir`,
 		df.sessionID, df.agentID, df.filePath, df.mtime,
 		meta.AgentType, meta.Description, meta.ToolUseID,
 		s.StartTime, s.LastActivity, s.MessageCount, s.EventCount,
@@ -1050,7 +1204,7 @@ func upsertSubagentRow(
 		s.Cost.InputUSD, s.Cost.OutputUSD, s.Cost.CacheReadUSD,
 		s.Cost.CacheWriteUSD, s.Cost.TotalUSD,
 		encodeUnpricedModels(s.UnpricedModels), s.UnpricedTokens,
-		s.ActiveDurationMs,
+		s.ActiveDurationMs, df.configDir,
 	)
 	return err
 }
@@ -1140,7 +1294,7 @@ const sessionSummaryColumns = `
 	       c.compaction_count, c.dropped_tokens,
 	       c.input_cost_usd, c.output_cost_usd, c.cache_read_cost_usd,
 	       c.cache_write_cost_usd, c.total_cost_usd, c.unpriced_models, c.unpriced_tokens,
-	       c.cost_by_model, c.active_duration_ms,
+	       c.cost_by_model, c.active_duration_ms, c.config_dir,
 	       COALESCE(sa.n, 0), COALESCE(sa.it, 0), COALESCE(sa.ot, 0),
 	       COALESCE(sa.cct, 0), COALESCE(sa.crt, 0),
 	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0),
@@ -1335,7 +1489,7 @@ func scanSessionSummary(rows *sql.Rows) (ClaudeSessionSummary, error) {
 		&s.CompactionCount, &s.DroppedTokens,
 		&s.Cost.InputUSD, &s.Cost.OutputUSD, &s.Cost.CacheReadUSD,
 		&s.Cost.CacheWriteUSD, &s.Cost.TotalUSD, &unpriced, &s.UnpricedTokens,
-		&costByModel, &s.ActiveDurationMs,
+		&costByModel, &s.ActiveDurationMs, &s.ConfigDir,
 		&s.SubagentCount, &s.SubagentUsage.InputTokens, &s.SubagentUsage.OutputTokens,
 		&s.SubagentUsage.CacheCreationTokens, &s.SubagentUsage.CacheReadTokens,
 		&s.SubagentUsage.CacheCreation5mTokens, &s.SubagentUsage.CacheCreation1hTokens,
@@ -1786,31 +1940,46 @@ func addSummaryAssistantEvent(summary *ClaudeSessionSummary, ev rawEvent) {
 // GetSessionDetail reads the full session JSONL and builds the complete message list.
 // Returns nil if the session is not found.
 func GetSessionDetail(sessionID string, logger *slog.Logger) (*ClaudeSessionDetail, error) {
-	projectsDir := filepath.Join(ClaudeHome(), "projects")
-	entries, rdErr := os.ReadDir(projectsDir)
-	if rdErr != nil {
-		if os.IsNotExist(rdErr) {
-			return nil, nil
-		}
-		return nil, rdErr
+	configDir, projectPath, filePath := findSessionFile(sessionID)
+	if filePath == "" {
+		return nil, nil
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
+	return readSessionDetail(configDir, sessionID, projectPath, filePath, logger)
+}
+
+// findSessionFile locates a session transcript across every configured config
+// dir, returning the dir it was found in, the decoded project path and the
+// file path. Empty strings when the session is not found anywhere.
+//
+// The config dir is returned rather than discarded because the session's todo
+// list lives beside its transcript, under that same dir's todos/ — resolving it
+// against the default dir would return another account's todos, or none.
+func findSessionFile(sessionID string) (configDir, projectPath, filePath string) {
+	for _, dir := range ClaudeHomes() {
+		projectsDir := filepath.Join(dir, "projects")
+		entries, err := os.ReadDir(projectsDir)
+		if err != nil {
 			continue
 		}
-		filePath := filepath.Join(projectsDir, e.Name(), sessionID+jsonlExt)
-		if _, err := os.Stat(filePath); err == nil {
-			projectPath := DecodeProjectPath(e.Name())
-			return readSessionDetail(sessionID, projectPath, filePath, logger)
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			fp := filepath.Join(projectsDir, e.Name(), sessionID+jsonlExt)
+			if _, statErr := os.Stat(fp); statErr == nil {
+				return dir, DecodeProjectPath(e.Name()), fp
+			}
 		}
 	}
-	return nil, nil
+	return "", "", ""
 }
 
 // readSessionDetail reads a session JSONL file and builds the full message
 // detail. Sidechain (sub-agent) events are skipped here — sub-agents are read
 // from <session-id>/subagents/ and reported separately (see ClaudeSubagent).
-func readSessionDetail(sessionID, projectPath, filePath string, logger *slog.Logger) (*ClaudeSessionDetail, error) {
+func readSessionDetail(
+	configDir, sessionID, projectPath, filePath string, logger *slog.Logger,
+) (*ClaudeSessionDetail, error) {
 	f, err := os.Open(filePath) //nolint:gosec
 	if err != nil {
 		return nil, err
@@ -1854,7 +2023,7 @@ func readSessionDetail(sessionID, projectPath, filePath string, logger *slog.Log
 	if detail.Messages == nil {
 		detail.Messages = []ClaudeMessage{}
 	}
-	detail.Todos = loadTodos(sessionID)
+	detail.Todos = loadTodos(configDir, sessionID)
 	if detail.Todos == nil {
 		detail.Todos = []ClaudeTodo{}
 	}
@@ -2014,9 +2183,19 @@ func extractTextContent(raw json.RawMessage) string {
 	return sb.String()
 }
 
-// loadTodos reads the session's todo list from ~/.claude/todos/{id}-agent-{id}.json.
-func loadTodos(sessionID string) []ClaudeTodo {
-	todoPath := filepath.Join(ClaudeHome(), "todos",
+// loadTodos reads the session's todo list from
+// <configDir>/todos/{id}-agent-{id}.json.
+//
+// The dir is the one the transcript was found in, not the run default: a
+// session belongs to the account that produced it, and resolving its todos
+// anywhere else returns another account's list or nothing at all. An empty
+// configDir falls back to the run default so callers that never located a file
+// behave as before.
+func loadTodos(configDir, sessionID string) []ClaudeTodo {
+	if configDir == "" {
+		configDir = ClaudeHome()
+	}
+	todoPath := filepath.Join(configDir, "todos",
 		sessionID+"-agent-"+sessionID+".json")
 	data, err := os.ReadFile(todoPath) //nolint:gosec
 	if err != nil {

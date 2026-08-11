@@ -122,6 +122,7 @@ func TestDetail_CountersMatchSummary(t *testing.T) {
 	summary := findSession(t, sessions, "session-detail-counts")
 
 	detail, err := readSessionDetail(
+		"",
 		"session-detail-counts", projectDir,
 		filepath.Join(projectDir, "session-detail-counts.jsonl"), testLogger,
 	)

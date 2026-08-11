@@ -27,13 +27,14 @@ func (s *Server) handleCreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agent := &config.AgentConfig{
-		Name:         req.Name,
-		Slug:         req.Slug,
-		Description:  req.Description,
-		Model:        req.Model,
-		Thinking:     req.Thinking,
-		SystemPrompt: req.SystemPrompt,
-		Capabilities: req.Capabilities,
+		Name:            req.Name,
+		Slug:            req.Slug,
+		Description:     req.Description,
+		Model:           req.Model,
+		Thinking:        req.Thinking,
+		SystemPrompt:    req.SystemPrompt,
+		Capabilities:    req.Capabilities,
+		ClaudeConfigDir: req.ClaudeConfigDir,
 	}
 
 	created, err := s.agentSvc.Create(r.Context(), agent)
@@ -68,13 +69,14 @@ func (s *Server) handleUpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agent := &config.AgentConfig{
-		Name:         req.Name,
-		Slug:         slug,
-		Description:  req.Description,
-		Model:        req.Model,
-		Thinking:     req.Thinking,
-		SystemPrompt: req.SystemPrompt,
-		Capabilities: req.Capabilities,
+		Name:            req.Name,
+		Slug:            slug,
+		Description:     req.Description,
+		Model:           req.Model,
+		Thinking:        req.Thinking,
+		SystemPrompt:    req.SystemPrompt,
+		Capabilities:    req.Capabilities,
+		ClaudeConfigDir: req.ClaudeConfigDir,
 	}
 
 	updated, err := s.agentSvc.Update(r.Context(), slug, agent)

@@ -28,7 +28,7 @@ func (s *SQLiteAgentStore) List(ctx context.Context) (agents []*config.AgentConf
 	var rows *sql.Rows
 	rows, err = s.db.QueryContext(ctx, `
 		SELECT slug, name, description, model, thinking, permission_mode,
-		       system_prompt, capabilities
+		       system_prompt, capabilities, claude_config_dir
 		FROM agents
 		ORDER BY name ASC`)
 	if err != nil {
@@ -55,14 +55,14 @@ func (s *SQLiteAgentStore) Get(ctx context.Context, slug string) (a *config.Agen
 
 	row := s.db.QueryRowContext(ctx, `
 		SELECT slug, name, description, model, thinking, permission_mode,
-		       system_prompt, capabilities
+		       system_prompt, capabilities, claude_config_dir
 		FROM agents WHERE slug = ?`, slug)
 
 	a = &config.AgentConfig{}
 	var capsJSON string
 	err = row.Scan(
 		&a.Slug, &a.Name, &a.Description, &a.Model, &a.Thinking,
-		&a.PermissionMode, &a.SystemPrompt, &capsJSON,
+		&a.PermissionMode, &a.SystemPrompt, &capsJSON, &a.ClaudeConfigDir,
 	)
 	if err == sql.ErrNoRows {
 		err = nil
@@ -96,8 +96,9 @@ func (s *SQLiteAgentStore) Save(ctx context.Context, agent *config.AgentConfig) 
 	now := time.Now().UTC()
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO agents (slug, name, description, model, thinking, permission_mode,
-		                    system_prompt, capabilities, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		                    system_prompt, capabilities, claude_config_dir,
+		                    created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(slug) DO UPDATE SET
 			name = excluded.name,
 			description = excluded.description,
@@ -106,10 +107,11 @@ func (s *SQLiteAgentStore) Save(ctx context.Context, agent *config.AgentConfig) 
 			permission_mode = excluded.permission_mode,
 			system_prompt = excluded.system_prompt,
 			capabilities = excluded.capabilities,
+			claude_config_dir = excluded.claude_config_dir,
 			updated_at = excluded.updated_at`,
 		agent.Slug, agent.Name, agent.Description, agent.Model,
 		agent.Thinking, agent.PermissionMode, agent.SystemPrompt,
-		string(capsJSON), now, now,
+		string(capsJSON), agent.ClaudeConfigDir, now, now,
 	)
 	if err != nil {
 		return fmt.Errorf("saving agent %q: %w", agent.Slug, err)
@@ -144,7 +146,7 @@ func scanAgent(rows *sql.Rows) (*config.AgentConfig, error) {
 	var capsJSON string
 	err := rows.Scan(
 		&a.Slug, &a.Name, &a.Description, &a.Model, &a.Thinking,
-		&a.PermissionMode, &a.SystemPrompt, &capsJSON,
+		&a.PermissionMode, &a.SystemPrompt, &capsJSON, &a.ClaudeConfigDir,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scanning agent: %w", err)

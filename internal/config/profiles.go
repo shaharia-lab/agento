@@ -19,25 +19,38 @@ type ProfilesMetadata struct {
 	Profiles []ClaudeSettingsProfile `json:"profiles"`
 }
 
-// ClaudeSettingsDirPath returns the path to the ~/.claude directory.
+// ClaudeSettingsDirPath returns the Claude config dir agent runs target by
+// default — $HOME/.claude unless the user or CLAUDE_CONFIG_DIR says otherwise.
+//
+// Profiles are a global CRUD surface, so they live in the run default rather
+// than in any per-agent override: an agent that overrides its config dir
+// resolves its settings file inside that dir at run time instead
+// (ClaudeSettingsJSONPathIn / LoadProfileFilePathIn).
+//
+// The error return is retained for callers even though the resolver cannot
+// fail; removing it would churn eight call sites for no gain.
 func ClaudeSettingsDirPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(home, ".claude"), nil
+	return ClaudeRunConfigDir(), nil
 }
 
-// ClaudeSettingsJSONPath returns the path to ~/.claude/settings.json.
+// ClaudeSettingsJSONPath returns the path to settings.json in the run default
+// config dir.
 func ClaudeSettingsJSONPath() (string, error) {
 	dir, err := ClaudeSettingsDirPath()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, "settings.json"), nil
+	return ClaudeSettingsJSONPathIn(dir), nil
 }
 
-// ClaudeSettingsProfilesPath returns the path to ~/.claude/settings_profiles.json.
+// ClaudeSettingsJSONPathIn returns the path to settings.json inside the given
+// config dir.
+func ClaudeSettingsJSONPathIn(dir string) string {
+	return filepath.Join(dir, "settings.json")
+}
+
+// ClaudeSettingsProfilesPath returns the path to settings_profiles.json in the
+// run default config dir.
 func ClaudeSettingsProfilesPath() (string, error) {
 	dir, err := ClaudeSettingsDirPath()
 	if err != nil {
@@ -67,26 +80,43 @@ func LoadProfilesMetadata() (ProfilesMetadata, error) {
 	return m, nil
 }
 
-// LoadProfileFilePath returns the settings file path for the given profile ID.
-// If profileID is empty or not found, falls back to ~/.claude/settings.json.
+// LoadProfileFilePath returns the settings file path for the given profile ID,
+// resolved in the run default config dir.
 func LoadProfileFilePath(profileID string) (string, error) {
+	return LoadProfileFilePathIn(ClaudeRunConfigDir(), profileID), nil
+}
+
+// LoadProfileFilePathIn returns the settings file path for the given profile
+// ID, resolved inside dir.
+//
+// An explicitly named profile keeps its recorded absolute path, because a
+// profile is a file the user created and pointed at; only the unnamed fallback
+// follows dir. That fallback is the case this issue exists for: it used to
+// hand every run $HOME/.claude/settings.json regardless of which config dir the
+// run targeted, applying one account's settings to the other account's session.
+//
+// The returned path is not guaranteed to exist — callers pass it to Claude Code
+// only after checking, since a dir that has never been used by Claude Code has
+// no settings.json and naming a missing file is worse than naming none.
+func LoadProfileFilePathIn(dir, profileID string) string {
+	fallback := ClaudeSettingsJSONPathIn(dir)
 	if profileID == "" {
-		return ClaudeSettingsJSONPath()
+		return fallback
 	}
 	m, err := LoadProfilesMetadata()
 	if err != nil {
-		return ClaudeSettingsJSONPath()
+		return fallback
 	}
 	for _, p := range m.Profiles {
 		if p.ID == profileID {
-			return p.FilePath, nil
+			return p.FilePath
 		}
 	}
 	// Fall back to default profile.
 	for _, p := range m.Profiles {
 		if p.IsDefault {
-			return p.FilePath, nil
+			return p.FilePath
 		}
 	}
-	return ClaudeSettingsJSONPath()
+	return fallback
 }

@@ -315,12 +315,9 @@ func (s *chatService) populateRunOptions(opts *agent.RunOptions, session *storag
 	opts.IntegrationRegistry = s.integrationRegistry
 	opts.WorkingDir = session.WorkingDir
 
-	settingsFilePath, resolveErr := config.LoadProfileFilePath(session.SettingsProfileID)
-	if resolveErr != nil {
-		s.logger.Warn("failed to resolve settings profile path, using default", "error", resolveErr)
-	} else {
-		opts.SettingsFilePath = settingsFilePath
-	}
+	// The profile is resolved to a path inside the runner, which is the only
+	// place that knows which Claude config dir this agent's run targets.
+	opts.SettingsProfileID = session.SettingsProfileID
 }
 
 func (s *chatService) CommitMessage(

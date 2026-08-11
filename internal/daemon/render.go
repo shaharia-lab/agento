@@ -16,12 +16,13 @@ var templates embed.FS
 
 // templateData is the substitution set shared by both unit templates.
 type templateData struct {
-	Label      string // launchd label (unused by the systemd template)
-	BinaryPath string
-	DataDir    string
-	LogPath    string
-	Port       int
-	ExtraPath  string
+	Label           string // launchd label (unused by the systemd template)
+	BinaryPath      string
+	DataDir         string
+	LogPath         string
+	Port            int
+	ExtraPath       string
+	ClaudeConfigDir string
 }
 
 // templateFuncs are the per-format escapers the templates pipe every
@@ -78,12 +79,13 @@ func render(name string, opts Options) ([]byte, error) {
 		return nil, fmt.Errorf("parsing embedded template %s: %w", name, err)
 	}
 	data := templateData{
-		Label:      launchdLabel,
-		BinaryPath: opts.BinaryPath,
-		DataDir:    opts.DataDir,
-		LogPath:    opts.LogPath,
-		Port:       opts.Port,
-		ExtraPath:  opts.ExtraPath,
+		Label:           launchdLabel,
+		BinaryPath:      opts.BinaryPath,
+		DataDir:         opts.DataDir,
+		LogPath:         opts.LogPath,
+		Port:            opts.Port,
+		ExtraPath:       opts.ExtraPath,
+		ClaudeConfigDir: opts.ClaudeConfigDir,
 	}
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, data); err != nil {

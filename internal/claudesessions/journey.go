@@ -187,24 +187,11 @@ func GetSessionJourney(sessionID string, logger *slog.Logger) (*SessionJourney, 
 	if !validSessionID.MatchString(sessionID) {
 		return nil, fmt.Errorf("invalid session ID format: %q", sessionID)
 	}
-	projectsDir := filepath.Join(ClaudeHome(), "projects")
-	entries, rdErr := os.ReadDir(projectsDir)
-	if rdErr != nil {
-		if os.IsNotExist(rdErr) {
-			return nil, nil
-		}
-		return nil, rdErr
+	_, _, filePath := findSessionFile(sessionID)
+	if filePath == "" {
+		return nil, nil
 	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		filePath := filepath.Join(projectsDir, e.Name(), sessionID+jsonlExt)
-		if _, err := os.Stat(filePath); err == nil {
-			return buildJourney(sessionID, filePath, logger)
-		}
-	}
-	return nil, nil
+	return buildJourney(sessionID, filePath, logger)
 }
 
 func buildJourney(sessionID, filePath string, logger *slog.Logger) (*SessionJourney, error) {

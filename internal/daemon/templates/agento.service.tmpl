@@ -12,7 +12,8 @@ Environment="PATH={{ .ExtraPath | systemdEnv }}"
 Environment="PORT={{ .Port | systemdEnv }}"
 Environment="AGENTO_DATA_DIR={{ .DataDir | systemdEnv }}"
 Environment=AGENTO_SKIP_UPDATE_CHECK=1
-StandardOutput=append:{{.LogPath}}
+{{ if .ClaudeConfigDir }}Environment="CLAUDE_CONFIG_DIR={{ .ClaudeConfigDir | systemdEnv }}"
+{{ end }}StandardOutput=append:{{.LogPath}}
 StandardError=append:{{.LogPath}}
 
 [Install]

@@ -96,6 +96,7 @@ func sessionQueryFromRequest(r *http.Request) (claudesessions.SessionQuery, erro
 	v := r.URL.Query()
 	q := claudesessions.SessionQuery{
 		Project:         v.Get("project"),
+		ConfigDir:       v.Get("config_dir"),
 		Search:          v.Get("q"),
 		FavoritesOnly:   v.Get("favorites") == "true",
 		Links:           claudesessions.LinkFilter(v.Get("links")),

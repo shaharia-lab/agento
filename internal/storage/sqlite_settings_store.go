@@ -25,18 +25,21 @@ func (s *SQLiteSettingsStore) Load() (config.UserSettings, error) {
 	var us config.UserSettings
 	var darkMode, onboarding int
 	var hiddenProjects string
+	var claudeConfigDirs string
 
 	ctx := context.Background()
 	err := s.db.QueryRowContext(ctx, `
 		SELECT default_working_dir, default_model, onboarding_complete,
 		       appearance_dark_mode, appearance_font_size, appearance_font_family,
 		       notification_settings, event_bus_worker_pool_size, public_url,
-		       hidden_projects, idle_gap_threshold_minutes
+		       hidden_projects, idle_gap_threshold_minutes,
+		       claude_config_dir, claude_config_dirs
 		FROM user_settings WHERE id = 1`).Scan(
 		&us.DefaultWorkingDir, &us.DefaultModel, &onboarding,
 		&darkMode, &us.AppearanceFontSize, &us.AppearanceFontFamily,
 		&us.NotificationSettings, &us.EventBusWorkerPoolSize,
 		&us.PublicURL, &hiddenProjects, &us.IdleGapThresholdMinutes,
+		&us.ClaudeConfigDir, &claudeConfigDirs,
 	)
 	if err == sql.ErrNoRows {
 		// Return zero-value settings; SettingsManager fills defaults.
@@ -47,32 +50,34 @@ func (s *SQLiteSettingsStore) Load() (config.UserSettings, error) {
 	}
 	us.OnboardingComplete = onboarding != 0
 	us.AppearanceDarkMode = darkMode != 0
-	us.HiddenProjects = decodeHiddenProjects(hiddenProjects)
+	us.HiddenProjects = decodeStringList(hiddenProjects)
+	us.ClaudeConfigDirs = decodeStringList(claudeConfigDirs)
 	return us, nil
 }
 
-// decodeHiddenProjects reads the stored JSON array. Unparseable content yields
-// no hidden projects rather than an error: the failure mode of showing a
-// project the user hid is a visible one they can fix, while failing the whole
-// settings load over it would take the app down with it.
-func decodeHiddenProjects(raw string) []string {
+// decodeStringList reads a stored JSON array of strings. Unparseable content
+// yields an empty list rather than an error: the failure mode of showing a
+// project the user hid — or missing a config dir they added — is a visible one
+// they can fix, while failing the whole settings load over it would take the
+// app down with it.
+func decodeStringList(raw string) []string {
 	if raw == "" {
 		return nil
 	}
-	var projects []string
-	if err := json.Unmarshal([]byte(raw), &projects); err != nil {
+	var values []string
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
 		return nil
 	}
-	return projects
+	return values
 }
 
-// encodeHiddenProjects serializes the list for storage, degrading to an empty
+// encodeStringList serializes a string list for storage, degrading to an empty
 // array so the NOT NULL column always holds valid JSON.
-func encodeHiddenProjects(projects []string) string {
-	if len(projects) == 0 {
+func encodeStringList(values []string) string {
+	if len(values) == 0 {
 		return "[]"
 	}
-	encoded, err := json.Marshal(projects)
+	encoded, err := json.Marshal(values)
 	if err != nil {
 		return "[]"
 	}
@@ -101,8 +106,9 @@ func (s *SQLiteSettingsStore) Save(settings config.UserSettings) error {
 			(id, default_working_dir, default_model, onboarding_complete,
 			 appearance_dark_mode, appearance_font_size, appearance_font_family,
 			 notification_settings, event_bus_worker_pool_size, public_url,
-			 hidden_projects, idle_gap_threshold_minutes)
-		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 hidden_projects, idle_gap_threshold_minutes,
+			 claude_config_dir, claude_config_dirs)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			default_working_dir = excluded.default_working_dir,
 			default_model = excluded.default_model,
@@ -114,12 +120,15 @@ func (s *SQLiteSettingsStore) Save(settings config.UserSettings) error {
 			event_bus_worker_pool_size = excluded.event_bus_worker_pool_size,
 			public_url = excluded.public_url,
 			hidden_projects = excluded.hidden_projects,
-			idle_gap_threshold_minutes = excluded.idle_gap_threshold_minutes`,
+			idle_gap_threshold_minutes = excluded.idle_gap_threshold_minutes,
+			claude_config_dir = excluded.claude_config_dir,
+			claude_config_dirs = excluded.claude_config_dirs`,
 		settings.DefaultWorkingDir, settings.DefaultModel, onboarding,
 		darkMode, settings.AppearanceFontSize, settings.AppearanceFontFamily,
 		notificationSettings, settings.EventBusWorkerPoolSize,
-		settings.PublicURL, encodeHiddenProjects(settings.HiddenProjects),
+		settings.PublicURL, encodeStringList(settings.HiddenProjects),
 		settings.IdleGapThresholdMinutes,
+		settings.ClaudeConfigDir, encodeStringList(settings.ClaudeConfigDirs),
 	)
 	if err != nil {
 		return fmt.Errorf("saving settings: %w", err)

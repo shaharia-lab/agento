@@ -33,16 +33,44 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 // something else happens to trigger a scan; it is idempotent, since the scanner
 // compares the stored threshold itself and Cache.EnsureScan admits exactly one
 // scan at a time.
-func (s *Server) applyDataSettings(previousIdleGap int) {
+func (s *Server) applyDataSettings(previousIdleGap int, previousDirs []string) {
 	current := s.settingsMgr.Get()
 	claudesessions.ApplyDataSettings(current.IdleGapThresholdMinutes, current.HiddenProjects)
+	config.ApplyClaudeDirs(current.ClaudeConfigDir, current.ClaudeConfigDirs)
 
-	if s.claudeSessionCache == nil || current.IdleGapThresholdMinutes == previousIdleGap {
+	if s.claudeSessionCache == nil {
 		return
 	}
-	s.logger.Info("claude sessions: idle-gap threshold changed; recomputing durations",
-		"from_minutes", previousIdleGap, "to_minutes", current.IdleGapThresholdMinutes)
-	s.claudeSessionCache.EnsureScan()
+	if current.IdleGapThresholdMinutes != previousIdleGap {
+		s.logger.Info("claude sessions: idle-gap threshold changed; recomputing durations",
+			"from_minutes", previousIdleGap, "to_minutes", current.IdleGapThresholdMinutes)
+		s.claudeSessionCache.EnsureScan()
+		return
+	}
+	// A newly added config dir has never been walked, so unlike hiding a
+	// project this cannot wait for the next read: there are no cached rows to
+	// filter. Removing one needs no scan — its rows are filtered out, not
+	// deleted — but the comparison is on the resolved set either way, so an
+	// unchanged save costs nothing.
+	if dirsDiffer(previousDirs, claudesessions.ClaudeHomes()) {
+		s.logger.Info("claude sessions: config dirs changed; indexing",
+			"from", previousDirs, "to", claudesessions.ClaudeHomes())
+		s.claudeSessionCache.EnsureScan()
+	}
+}
+
+// dirsDiffer reports whether two resolved config-dir sets differ. Order is
+// significant: it decides which dir wins a duplicated session.
+func dirsDiffer(a, b []string) bool {
+	if len(a) != len(b) {
+		return true
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
@@ -53,13 +81,14 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	previousIdleGap := s.settingsMgr.Get().IdleGapThresholdMinutes
+	previousDirs := claudesessions.ClaudeHomes()
 
 	if err := s.settingsMgr.Update(incoming); err != nil {
 		s.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	s.applyDataSettings(previousIdleGap)
+	s.applyDataSettings(previousIdleGap, previousDirs)
 
 	s.writeJSON(w, http.StatusOK, settingsResponse{
 		Settings:     s.settingsMgr.Get(),

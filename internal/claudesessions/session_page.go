@@ -52,6 +52,9 @@ type SessionFacets struct {
 	// removes the option you just picked cannot be un-picked.
 	Models          []string `json:"models"`
 	PermissionModes []string `json:"permission_modes"`
+	// ConfigDirs are the Claude config dirs present in the corpus — the
+	// accounts sessions were run under. Same basis as the dropdowns above.
+	ConfigDirs []string `json:"config_dirs"`
 	// HasFavorites and HasPRs gate the toggles that would otherwise filter
 	// nothing. Same basis as the dropdowns, and for the same reason.
 	HasFavorites bool `json:"has_favorites"`
@@ -284,7 +287,16 @@ func loadFacetOptions(db *sql.DB, logger *slog.Logger, f *SessionFacets) error {
 	for _, p := range HiddenProjects() {
 		visible.add("c.project_path != ?", p)
 	}
+	addConfigDirScope(visible)
 	where := visible.where()
+
+	configDirs, err := distinctStrings(db, logger,
+		"SELECT DISTINCT c.config_dir FROM claude_session_cache c"+where+
+			" ORDER BY c.config_dir", visible.args)
+	if err != nil {
+		return err
+	}
+	f.ConfigDirs = configDirs
 
 	models, err := distinctStrings(db, logger,
 		"SELECT DISTINCT c.model FROM claude_session_cache c"+where+" ORDER BY c.model", visible.args)

@@ -710,3 +710,51 @@ func TestLaunchdRestartFallsBackToStart(t *testing.T) {
 		t.Errorf("fallback call: got %q, want bootstrap", seqs[1])
 	}
 }
+
+// The service runs detached from any shell, so a CLAUDE_CONFIG_DIR the user
+// exported in their profile never reaches it. Without this the variable is
+// dropped entirely under `agento service`, which is the most likely reason
+// pointing Agento at a second Claude account appears to do nothing.
+func TestRenderPropagatesClaudeConfigDir(t *testing.T) {
+	opts := testOptions()
+	opts.ClaudeConfigDir = "/home/dev/.claude-personal"
+
+	unit, err := render("agento.service.tmpl", opts)
+	if err != nil {
+		t.Fatalf("render systemd: %v", err)
+	}
+	if !strings.Contains(string(unit), `Environment="CLAUDE_CONFIG_DIR=/home/dev/.claude-personal"`) {
+		t.Errorf("systemd unit missing CLAUDE_CONFIG_DIR:\n%s", unit)
+	}
+
+	plist, err := render("agento.plist.tmpl", opts)
+	if err != nil {
+		t.Fatalf("render launchd: %v", err)
+	}
+	if !strings.Contains(string(plist), "<key>CLAUDE_CONFIG_DIR</key>") ||
+		!strings.Contains(string(plist), "<string>/home/dev/.claude-personal</string>") {
+		t.Errorf("plist missing CLAUDE_CONFIG_DIR:\n%s", plist)
+	}
+	if err := xml.Unmarshal(plist, new(struct {
+		XMLName xml.Name `xml:"plist"`
+	})); err != nil {
+		t.Errorf("plist is not well-formed: %v", err)
+	}
+}
+
+// An unset variable must emit nothing at all, so an install that never uses a
+// second account produces exactly the unit it produced before.
+func TestRenderOmitsUnsetClaudeConfigDir(t *testing.T) {
+	opts := testOptions()
+	opts.ClaudeConfigDir = ""
+
+	for _, tmpl := range []string{"agento.service.tmpl", "agento.plist.tmpl"} {
+		out, err := render(tmpl, opts)
+		if err != nil {
+			t.Fatalf("render %s: %v", tmpl, err)
+		}
+		if strings.Contains(string(out), "CLAUDE_CONFIG_DIR") {
+			t.Errorf("%s mentions CLAUDE_CONFIG_DIR when unset:\n%s", tmpl, out)
+		}
+	}
+}

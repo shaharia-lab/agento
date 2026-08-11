@@ -139,11 +139,11 @@ func migrateOneAgent(ctx context.Context, tx *sql.Tx, dir, fileName string, logg
 	_, err = tx.ExecContext(ctx, `
 		INSERT OR IGNORE INTO agents
 			(slug, name, description, model, thinking, permission_mode,
-			 system_prompt, capabilities, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 system_prompt, capabilities, claude_config_dir, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		cfg.Slug, cfg.Name, cfg.Description, cfg.Model,
 		cfg.Thinking, cfg.PermissionMode, cfg.SystemPrompt,
-		string(capsJSON), now, now,
+		string(capsJSON), cfg.ClaudeConfigDir, now, now,
 	)
 	if err != nil {
 		return false, fmt.Errorf("inserting agent %q: %w", cfg.Slug, err)

@@ -21,6 +21,10 @@ type AgentConfig struct {
 	PermissionMode string            `yaml:"permission_mode" json:"permission_mode"`
 	SystemPrompt   string            `yaml:"system_prompt"   json:"system_prompt"`
 	Capabilities   AgentCapabilities `yaml:"capabilities"    json:"capabilities"`
+	// ClaudeConfigDir overrides which Claude Code config dir this agent's runs
+	// target — the mechanism by which a work agent and a personal agent can be
+	// live in one Agento instance. Empty means the global default.
+	ClaudeConfigDir string `yaml:"claude_config_dir" json:"claude_config_dir"`
 }
 
 // AgentCapabilities defines what tools an agent can use.
