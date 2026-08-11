@@ -116,6 +116,11 @@ func (k analyticsCacheKey) String() string {
 // It also triggers the same background rescan List does, so opening a dashboard
 // after a rate edit starts the re-cost rather than waiting for someone to open
 // the sessions list.
+//
+// The returned report **shares its slices and maps with the memo**. Every
+// caller today marshals it and nothing more, which is why it is handed back
+// rather than deep-copied — copying a report per cache hit would spend most of
+// what memoizing it saved. A caller that needs to mutate one must copy first.
 func (c *Cache) Analytics(p AnalyticsParams) AnalyticsReport {
 	c.ensureFresh()
 
