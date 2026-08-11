@@ -136,7 +136,7 @@ describe('DataAnalyticsTab', () => {
 
     await user.type(screen.getByLabelText('Excluded Projects'), 'p497')
     expect(suggestions()).toHaveLength(1)
-    expect(screen.queryByText(/more —/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/more\. Keep typing/)).not.toBeInTheDocument()
   })
 
   it('excludes the top match on Enter', async () => {

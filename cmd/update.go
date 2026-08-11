@@ -126,9 +126,9 @@ func maybeRestartService(ctx context.Context, cfg *config.AppConfig, noRestart b
 	restarted, status, err := restartManagedService(ctx, mgr)
 	switch {
 	case err != nil:
-		fmt.Printf("warning: restarting the agento service failed (%v) — run 'agento service restart' manually\n", err)
+		fmt.Printf("warning: restarting the agento service failed (%v). Run 'agento service restart' manually\n", err)
 	case restarted:
-		fmt.Println("Restarted the agento service — the new version is live.")
+		fmt.Println("Restarted the agento service. The new version is live.")
 	case status.Installed:
 		fmt.Println("The agento service is installed but not running; start it with 'agento service start'.")
 	default:

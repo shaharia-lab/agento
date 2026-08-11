@@ -33,7 +33,7 @@ function copyFor(card: InsightCard): CardCopy | null {
       return {
         icon: Coins,
         headline: `Caching kept the bill at ${formatCost(card.comparison_usd ?? 0)}`,
-        fact: `Without it, the ${formatTokens(card.tokens ?? 0)} tokens served from cache would have been billed as fresh input — about ${formatCost((card.comparison_usd ?? 0) + (card.amount_usd ?? 0))} for the same work.`,
+        fact: `Without it, the ${formatTokens(card.tokens ?? 0)} tokens served from cache would have been billed as fresh input, about ${formatCost((card.comparison_usd ?? 0) + (card.amount_usd ?? 0))} for the same work.`,
         action:
           'Longer-lived sessions keep this working; frequent restarts pay the full price again.',
       }
@@ -43,7 +43,7 @@ function copyFor(card: InsightCard): CardCopy | null {
         headline: `${formatModelName(card.model ?? '')} is barely served from cache`,
         fact: `Only ${(card.percent ?? 0).toFixed(1)}% of its input came from cache, so ${formatTokens(card.tokens ?? 0)} tokens of context were re-billed as fresh input for ${formatCost(card.amount_usd ?? 0)}.`,
         action:
-          'It will dominate token-volume charts and barely register on cost charts — judge it by cost.',
+          'It will dominate token-volume charts and barely register on cost charts, so judge it by cost.',
       }
     case 'delegation_mix':
       return {
@@ -51,7 +51,7 @@ function copyFor(card: InsightCard): CardCopy | null {
         headline: `${(card.percent ?? 0).toFixed(1)}% of spend was delegated`,
         fact: `${formatCost(card.amount_usd ?? 0)} across ${card.count ?? 0} session${card.count === 1 ? '' : 's'} ran in sub-agents${card.model ? `, mostly on ${formatModelName(card.model)}` : ''}.`,
         action:
-          'Delegating to a cheaper model is the lever here — this is the number that shows whether it is working.',
+          'Delegating to a cheaper model is the lever here. This is the number that shows whether it is working.',
       }
     case 'expensive_sessions':
       return {

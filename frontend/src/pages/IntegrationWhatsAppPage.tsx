@@ -309,14 +309,14 @@ export default function IntegrationWhatsAppPage() {
                       <p className="font-medium">What your agent can do right now</p>
                       <ul className="space-y-1 text-xs text-blue-600 dark:text-blue-400">
                         <li>
-                          ✅ <strong>send_message</strong> — provide a phone number and the agent
-                          can send messages immediately
+                          ✅ <strong>send_message</strong>: provide a phone number and the agent can
+                          send messages immediately
                         </li>
                         <li>
-                          ✅ <strong>send_media</strong> — send images or documents by URL
+                          ✅ <strong>send_media</strong>: send images or documents by URL
                         </li>
                         <li>
-                          ⏳ <strong>get_contacts</strong> — reads from the local device contact
+                          ⏳ <strong>get_contacts</strong>: reads from the local device contact
                           store, which starts empty. WhatsApp does not sync contact history to
                           linked devices, so it populates gradually as messages flow through this
                           session.

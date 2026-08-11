@@ -68,7 +68,7 @@ export default function AboutModal({ onClose }: AboutModalProps) {
           {/* Description */}
           <p className="text-sm text-zinc-600 dark:text-zinc-400 leading-relaxed">
             Personal AI agent platform using Claude Code. Build and run AI agents with a clean web
-            UI — manage chats, configure agents, schedule tasks, and connect third-party
+            UI: manage chats, configure agents, schedule tasks, and connect third-party
             integrations.
           </p>
 
@@ -92,7 +92,7 @@ export default function AboutModal({ onClose }: AboutModalProps) {
                   className="inline-flex items-center gap-1 text-xs text-amber-700 dark:text-amber-400 hover:underline"
                 >
                   <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
-                  Update available — v{versionInfo.latest_version}
+                  Update available: v{versionInfo.latest_version}
                 </a>
               )}
             </div>

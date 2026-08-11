@@ -490,7 +490,7 @@ export default function ClaudeSessionsPage() {
         <div className="flex items-center gap-2 px-4 sm:px-6 py-2 border-b border-amber-100 dark:border-amber-900/50 bg-amber-50/60 dark:bg-amber-950/30 shrink-0">
           <RefreshCw className="h-3.5 w-3.5 shrink-0 animate-spin text-amber-600 dark:text-amber-400" />
           <p className="text-xs text-amber-700 dark:text-amber-300">
-            Cost figures are being recalculated against updated pricing — the values shown are from
+            Cost figures are being recalculated against updated pricing. The values shown are from
             the previous rates and will refresh automatically.
           </p>
         </div>
@@ -754,7 +754,7 @@ function LoadMore({
           disabled={loading}
           className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-100 disabled:pointer-events-none"
         >
-          {loading ? 'Loading…' : `Load more — showing ${loaded} of ${total}`}
+          {loading ? 'Loading…' : `Load more (showing ${loaded} of ${total})`}
         </button>
       ) : (
         <span className="tabular-nums">
@@ -1144,7 +1144,7 @@ function AdvancedFilterPanel({
 
       <div className="flex flex-wrap items-center gap-3 mt-3.5 pt-3 border-t border-zinc-200 dark:border-zinc-700/60">
         <p className="text-[11px] text-zinc-400 dark:text-zinc-500">
-          Leave a side empty for an open bound — min only is “at least”, max only “at most”.
+          Leave a side empty for an open bound: min only is “at least”, max only “at most”.
         </p>
         <div className="flex-1" />
         {dirty && (
@@ -1241,7 +1241,7 @@ function SessionCostCell({ session }: Readonly<{ session: ClaudeSessionSummary }
           <CostLine label="Sub-agents" usd={sub?.total_usd ?? 0} />
           {partial && (
             <div className="text-amber-300 pt-1">
-              Excludes {unpriced.join(', ')} — no published rate
+              Excludes {unpriced.join(', ')} (no published rate)
             </div>
           )}
         </div>

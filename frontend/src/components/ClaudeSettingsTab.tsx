@@ -1113,8 +1113,8 @@ export default function ClaudeSettingsTab() {
       <div>
         <h2 className="text-sm font-semibold text-zinc-900">Claude Code Settings</h2>
         <p className="text-xs text-zinc-500 mt-1">
-          Manages <code className="font-mono">~/.claude/settings.json</code> — the global Claude
-          Code configuration file.
+          Manages <code className="font-mono">~/.claude/settings.json</code>, the global Claude Code
+          configuration file.
         </p>
       </div>
 

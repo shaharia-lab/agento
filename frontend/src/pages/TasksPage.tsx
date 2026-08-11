@@ -167,7 +167,7 @@ export default function TasksPage() {
               No scheduled tasks
             </h2>
             <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-4 max-w-xs">
-              Schedule agent tasks to run automatically — one-time or recurring.
+              Schedule agent tasks to run automatically, one-time or recurring.
             </p>
             <Button
               onClick={() => navigate('/tasks/new')}

@@ -181,8 +181,8 @@ const ARROW_MOVES: Record<string, [number, number]> = {
 }
 
 function cellTitle(day: string, hour: number, cell: HeatmapCell | undefined): string {
-  if (!cell) return `${day} ${hour}:00 — no activity`
-  return `${day} ${hour}:00 — ${cell.sessions} sessions, ${formatTokens(cell.tokens)} tokens — click to view sessions`
+  if (!cell) return `${day} ${hour}:00, no activity`
+  return `${day} ${hour}:00, ${cell.sessions} sessions, ${formatTokens(cell.tokens)} tokens. Click to view sessions`
 }
 
 interface HeatmapCellCommonProps {
@@ -200,8 +200,8 @@ function StaticHeatmapCell({ day, hour, cell, maxSessions }: Readonly<HeatmapCel
       className={`flex-1 aspect-square rounded-[2px] mx-px ${heatmapCellBg(intensity)} cursor-default`}
       title={
         cell
-          ? cellTitle(day, hour, cell).replace(' — click to view sessions', '')
-          : `${day} ${hour}:00 — no activity`
+          ? cellTitle(day, hour, cell).replace('. Click to view sessions', '')
+          : `${day} ${hour}:00, no activity`
       }
     />
   )
@@ -245,7 +245,7 @@ function InteractiveHeatmapCell({
     <div
       ref={el => registerRef(`${dow}-${hour}`, el)}
       role="gridcell"
-      aria-label={`${day} ${hour}:00 — ${cell ? `${cell.sessions} sessions` : 'no activity'}`}
+      aria-label={`${day} ${hour}:00, ${cell ? `${cell.sessions} sessions` : 'no activity'}`}
       tabIndex={focused ? 0 : -1}
       onClick={clickable ? () => onCellClick(dow, hour) : undefined}
       onKeyDown={handleKeyDown}
@@ -304,7 +304,7 @@ function ActivityHeatmap({
   return (
     <ChartCard
       title="Activity Heatmap (Day × Hour)"
-      subtitle="A session counts in every hour between its start and last activity, so an eight-hour session shades eight cells — it used to shade only the hour it ended, making this a map of when work stopped. A session resumed after a break counts the gap too."
+      subtitle="A session counts in every hour between its start and last activity, so an eight-hour session shades eight cells. It used to shade only the hour it ended, making this a map of when work stopped. A session resumed after a break counts the gap too."
     >
       <div className="overflow-x-auto">
         <div
@@ -583,7 +583,7 @@ function GeneralUsageContent({
 
       {!drilldownEnabled && (
         <p className="text-[11px] text-zinc-400 dark:text-zinc-500 -mt-3">
-          Session drill-down is available for ranges up to {MAX_DRILLDOWN_DAYS} days — pick a
+          Session drill-down is available for ranges up to {MAX_DRILLDOWN_DAYS} days. Pick a
           narrower date range to click through to sessions.
         </p>
       )}

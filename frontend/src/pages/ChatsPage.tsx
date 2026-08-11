@@ -273,7 +273,7 @@ export default function ChatsPage() {
         </div>
         <h2 className="text-lg font-semibold text-zinc-900 mb-1">No chats yet</h2>
         <p className="text-xs text-zinc-500 mb-4 max-w-xs">
-          Start a conversation — with or without an agent.
+          Start a conversation, with or without an agent.
         </p>
         <Button
           size="sm"
@@ -433,7 +433,7 @@ export default function ChatsPage() {
           <DialogHeader>
             <DialogTitle>New Chat</DialogTitle>
             <DialogDescription>
-              Type your first message. Optionally choose an agent — or chat directly without one.
+              Type your first message. Optionally choose an agent, or chat directly without one.
             </DialogDescription>
           </DialogHeader>
 

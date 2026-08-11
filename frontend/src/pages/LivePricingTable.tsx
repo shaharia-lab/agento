@@ -67,7 +67,7 @@ export function LivePricingTable() {
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mb-2">
             Each message is priced at its own model and timestamp against this catalog, so a session
             that spans a price change keeps the rate in force when its tokens were spent. A model
-            with no rate here contributes no cost and is reported separately — costs are never
+            with no rate here contributes no cost and is reported separately. Costs are never
             guessed from another model&apos;s price. Edit rates in{' '}
             <Link to="/settings" className="underline hover:text-zinc-900 dark:hover:text-zinc-100">
               Settings → Model Pricing
@@ -103,7 +103,7 @@ export function LivePricingTable() {
                           {r.estimated && (
                             <span
                               className="ml-1 text-amber-600 dark:text-amber-400"
-                              title="Best-effort rate — this pattern names a model family rather than a concrete model"
+                              title="Best-effort rate: this pattern names a model family rather than a concrete model"
                             >
                               est.
                             </span>
