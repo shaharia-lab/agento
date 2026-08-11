@@ -41,6 +41,7 @@ export default function SettingsPage() {
   const [workingDir, setWorkingDir] = useState('')
   const [model, setModel] = useState('')
   const [publicUrl, setPublicUrl] = useState('')
+  const [claudeConfigDir, setClaudeConfigDir] = useState('')
   const [browserOpen, setBrowserOpen] = useState(false)
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
@@ -53,6 +54,7 @@ export default function SettingsPage() {
       setWorkingDir(data.settings.default_working_dir)
       setModel(data.settings.default_model)
       setPublicUrl(data.settings.public_url ?? '')
+      setClaudeConfigDir(data.settings.claude_config_dir ?? '')
     } catch {
       setError('Failed to load settings')
     } finally {
@@ -79,6 +81,7 @@ export default function SettingsPage() {
         default_model: model,
         onboarding_complete: resp?.settings.onboarding_complete ?? true,
         public_url: publicUrl,
+        claude_config_dir: claudeConfigDir,
       })
       setResp(updated)
       showToast('Settings saved')
@@ -93,6 +96,7 @@ export default function SettingsPage() {
   const wdirLocked = 'default_working_dir' in locked
   const modelLocked = 'default_model' in locked
   const publicUrlLocked = 'public_url' in locked
+  const claudeDirLocked = 'claude_config_dir' in locked
 
   if (loading) {
     return (
@@ -256,6 +260,26 @@ export default function SettingsPage() {
                     </Select>
                   )}
                   {modelLocked && <LockedNote envVar={locked['default_model']} />}
+                </div>
+
+                {/* Claude Config Directory */}
+                <div className="flex flex-col gap-1.5">
+                  <Label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
+                    Claude Config Directory
+                  </Label>
+                  <Input
+                    value={claudeConfigDir}
+                    onChange={e => setClaudeConfigDir(e.target.value)}
+                    disabled={claudeDirLocked}
+                    className="flex-1 font-mono text-sm"
+                    placeholder="~/.claude"
+                  />
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    Which Claude Code account agent runs use — the directory holding its
+                    credentials, projects and settings. Individual agents can override this.
+                    Sessions from other configured directories are still included in analytics.
+                  </p>
+                  {claudeDirLocked && <LockedNote envVar={locked['claude_config_dir']} />}
                 </div>
 
                 {/* Public URL */}

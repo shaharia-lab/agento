@@ -96,3 +96,28 @@ func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		ModelFromEnv: s.settingsMgr.ModelFromEnv(),
 	})
 }
+
+// claudeConfigDirsResponse reports which Claude config dirs are indexed and
+// which unconfigured ones exist beside the default.
+type claudeConfigDirsResponse struct {
+	// Indexed is the resolved set the scanner walks, default first.
+	Indexed []string `json:"indexed"`
+	// Candidates are dirs that look like Claude config dirs but are not
+	// configured yet. Suggested, never enabled on the user's behalf.
+	Candidates []string `json:"candidates"`
+	// Default is the dir Claude Code uses out of the box, always indexed.
+	Default string `json:"default"`
+}
+
+// handleClaudeConfigDirs powers the config-dir editor.
+//
+// Candidates exist so the union is not purely manual: someone running a second
+// account almost always put it beside the first, and typing an absolute path
+// to discover that is a poor trade for one directory listing.
+func (s *Server) handleClaudeConfigDirs(w http.ResponseWriter, _ *http.Request) {
+	s.writeJSON(w, http.StatusOK, claudeConfigDirsResponse{
+		Indexed:    config.ClaudeConfigDirs(),
+		Candidates: config.DiscoverCandidateClaudeDirs(),
+		Default:    config.DefaultClaudeConfigDir(),
+	})
+}

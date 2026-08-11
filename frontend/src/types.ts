@@ -14,6 +14,12 @@ export interface Agent {
   permission_mode: 'bypass' | 'default' | 'plan' | 'dontAsk' | ''
   system_prompt: string
   capabilities: AgentCapabilities
+  /**
+   * Overrides which Claude config dir this agent's runs target — how a work
+   * agent and a personal agent stay live in one instance. Empty means the
+   * global default.
+   */
+  claude_config_dir?: string
 }
 
 export interface ChatSession {
@@ -55,6 +61,18 @@ export interface UserSettings {
    * and resolves to DEFAULT_IDLE_GAP_MINUTES.
    */
   idle_gap_threshold_minutes?: number
+
+  /**
+   * Claude config dir agent runs target unless an agent overrides it. Empty
+   * means the default (~/.claude). Locked by the CLAUDE_CONFIG_DIR env var.
+   */
+  claude_config_dir?: string
+
+  /**
+   * Extra Claude config dirs to index. The default dir and claude_config_dir
+   * are always indexed and need not be listed.
+   */
+  claude_config_dirs?: string[]
 }
 
 /**
@@ -64,6 +82,15 @@ export interface UserSettings {
 export const DEFAULT_IDLE_GAP_MINUTES = 10
 export const MIN_IDLE_GAP_MINUTES = 1
 export const MAX_IDLE_GAP_MINUTES = 240
+
+export interface ClaudeConfigDirsResponse {
+  /** The resolved set the scanner walks, default first. */
+  indexed: string[]
+  /** Dirs beside the default that look like config dirs but are not configured. */
+  candidates: string[]
+  /** The dir Claude Code uses out of the box; always indexed. */
+  default: string
+}
 
 export interface SettingsResponse {
   settings: UserSettings
@@ -555,6 +582,8 @@ export interface ClaudeProject {
 export interface ClaudeSessionSummary {
   session_id: string
   project_path: string
+  /** Claude config dir this session was indexed from — the account it ran under. */
+  config_dir?: string
   preview: string
   custom_title?: string
   /** Claude Code's own `/rename`, refreshed on every scan. */
@@ -669,6 +698,7 @@ export interface ClaudeSessionFacets {
    */
   models: string[]
   permission_modes: string[]
+  config_dirs: string[]
   has_favorites: boolean
   has_prs: boolean
 }

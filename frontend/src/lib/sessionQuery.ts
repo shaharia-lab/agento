@@ -61,6 +61,8 @@ export function groupsByDay(sort: SessionSort): boolean {
 export interface SessionFilters {
   /** `'all'` matches every project. */
   project: string
+  /** `'all'` matches every Claude config dir (i.e. every account). */
+  configDir: string
   /** Empty matches everything; matched case-insensitively as a substring. */
   search: string
   favorites: boolean
@@ -85,6 +87,7 @@ export interface SessionFilters {
 /** The filter state that narrows nothing. */
 export const NO_FILTERS: SessionFilters = {
   project: 'all',
+  configDir: 'all',
   search: '',
   favorites: false,
   links: 'all',
@@ -110,6 +113,7 @@ export const NO_FILTERS: SessionFilters = {
 export function toQueryParams(f: SessionFilters): URLSearchParams {
   const qs = new URLSearchParams()
   if (f.project !== 'all') qs.set('project', f.project)
+  if (f.configDir !== 'all') qs.set('config_dir', f.configDir)
   if (f.search.trim()) qs.set('q', f.search.trim())
   if (f.favorites) qs.set('favorites', 'true')
   if (f.links !== 'all') qs.set('links', f.links)
@@ -150,6 +154,7 @@ function setRange(qs: URLSearchParams, name: string, r: NumericRange): void {
 export function filterActive(f: SessionFilters): boolean {
   return (
     f.project !== 'all' ||
+    f.configDir !== 'all' ||
     f.search.trim() !== '' ||
     f.favorites ||
     f.from !== null ||

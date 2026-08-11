@@ -121,6 +121,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
     agent?.permission_mode ?? 'default',
   )
   const [systemPrompt, setSystemPrompt] = useState(agent?.system_prompt ?? '')
+  const [claudeConfigDir, setClaudeConfigDir] = useState(agent?.claude_config_dir ?? '')
   const [builtInTools, setBuiltInTools] = useState<string[]>(agent?.capabilities?.built_in ?? [])
 
   const [mcpTools, setMcpTools] = useState<Record<string, string[]>>(() => {
@@ -196,6 +197,7 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
         thinking,
         permission_mode: permissionMode,
         system_prompt: systemPrompt,
+        claude_config_dir: claudeConfigDir.trim(),
         capabilities: {
           built_in: builtInTools,
           ...(Object.keys(mcp).length > 0 ? { mcp } : {}),
@@ -329,6 +331,20 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
           </Select>
           <p className="text-xs text-muted-foreground">
             Adaptive lets Claude decide when extended thinking is helpful.
+          </p>
+        </div>
+        <div className="space-y-1.5">
+          <Label htmlFor="claude-config-dir">Claude Config Directory</Label>
+          <Input
+            id="claude-config-dir"
+            value={claudeConfigDir}
+            onChange={e => setClaudeConfigDir(e.target.value)}
+            placeholder="Leave empty to use the default"
+            className="font-mono text-sm"
+          />
+          <p className="text-xs text-muted-foreground">
+            Which Claude Code account this agent runs as — the directory holding its credentials,
+            projects and settings. Set this to run a second account alongside the default one.
           </p>
         </div>
         <div className="space-y-1.5">

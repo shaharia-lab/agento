@@ -3,12 +3,21 @@ import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import DataAnalyticsTab from './DataAnalyticsTab'
 import { settingsApi, claudeSessionsApi } from '@/lib/api'
-import type { SettingsResponse, ClaudeProject } from '@/types'
+import type { SettingsResponse, ClaudeProject, ClaudeConfigDirsResponse } from '@/types'
 
 vi.mock('@/lib/api', () => ({
-  settingsApi: { get: vi.fn(), update: vi.fn() },
+  settingsApi: { get: vi.fn(), update: vi.fn(), claudeConfigDirs: vi.fn() },
   claudeSessionsApi: { projects: vi.fn() },
 }))
+
+const configDirs = (
+  overrides: Partial<ClaudeConfigDirsResponse> = {},
+): ClaudeConfigDirsResponse => ({
+  indexed: ['/home/me/.claude'],
+  candidates: [],
+  default: '/home/me/.claude',
+  ...overrides,
+})
 
 const settingsResponse = (overrides = {}): SettingsResponse => ({
   settings: {
@@ -47,6 +56,7 @@ describe('DataAnalyticsTab', () => {
     vi.mocked(settingsApi.get).mockResolvedValue(settingsResponse())
     vi.mocked(settingsApi.update).mockResolvedValue(settingsResponse())
     vi.mocked(claudeSessionsApi.projects).mockResolvedValue(projects)
+    vi.mocked(settingsApi.claudeConfigDirs).mockResolvedValue(configDirs())
   })
 
   // The picker must know about every project, or one that is already excluded
@@ -70,7 +80,7 @@ describe('DataAnalyticsTab', () => {
     )
     render(<DataAnalyticsTab />)
 
-    const list = await screen.findByRole('list')
+    const list = await screen.findByRole('list', { name: 'Excluded projects' })
     expect(within(list).getByText('/home/me/scratch')).toBeInTheDocument()
     expect(within(list).queryByText('/home/me/agento')).not.toBeInTheDocument()
   })
@@ -176,5 +186,57 @@ describe('DataAnalyticsTab', () => {
     expect(screen.getByText(/between 1 and 240 minutes/i)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /save data settings/i })).toBeDisabled()
     expect(settingsApi.update).not.toHaveBeenCalled()
+  })
+  // Analytics is retrospective, so a machine with two Claude accounts wants
+  // both corpora in every total. The default dir is always indexed and cannot
+  // be removed; anything the user added can be.
+  it('lists indexed config dirs and only lets the added ones be removed', async () => {
+    vi.mocked(settingsApi.get).mockResolvedValue(
+      settingsResponse({ claude_config_dirs: ['/home/me/.claude-personal'] }),
+    )
+    vi.mocked(settingsApi.claudeConfigDirs).mockResolvedValue(
+      configDirs({ indexed: ['/home/me/.claude', '/home/me/.claude-personal'] }),
+    )
+    render(<DataAnalyticsTab />)
+
+    const list = await screen.findByRole('list', { name: 'Indexed Claude config directories' })
+    expect(within(list).getByText('/home/me/.claude')).toBeInTheDocument()
+    expect(within(list).getByText('/home/me/.claude-personal')).toBeInTheDocument()
+
+    expect(screen.getByLabelText('Stop indexing /home/me/.claude-personal')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Stop indexing /home/me/.claude')).not.toBeInTheDocument()
+  })
+
+  // Suggested, never enabled on the user's behalf: discovery without guessing.
+  it('offers candidate dirs and adds one on click', async () => {
+    const user = userEvent.setup()
+    vi.mocked(settingsApi.claudeConfigDirs).mockResolvedValue(
+      configDirs({ candidates: ['/home/me/.claude-personal'] }),
+    )
+    render(<DataAnalyticsTab />)
+
+    await user.click(
+      await screen.findByRole('button', { name: /\+ \/home\/me\/\.claude-personal/ }),
+    )
+    await user.click(screen.getByRole('button', { name: /save data settings/i }))
+
+    await waitFor(() => expect(settingsApi.update).toHaveBeenCalled())
+    expect(vi.mocked(settingsApi.update).mock.calls[0][0]).toMatchObject({
+      claude_config_dirs: ['/home/me/.claude-personal'],
+    })
+  })
+
+  it('adds a hand-typed dir and saves it', async () => {
+    const user = userEvent.setup()
+    render(<DataAnalyticsTab />)
+
+    await user.type(await screen.findByLabelText('Claude Config Directories'), '/mnt/other/.claude')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    await user.click(screen.getByRole('button', { name: /save data settings/i }))
+
+    await waitFor(() => expect(settingsApi.update).toHaveBeenCalled())
+    expect(vi.mocked(settingsApi.update).mock.calls[0][0]).toMatchObject({
+      claude_config_dirs: ['/mnt/other/.claude'],
+    })
   })
 })
