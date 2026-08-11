@@ -1468,7 +1468,7 @@ function AskUserQuestionCard({
                       {opt.description && (
                         <span className={cn('ml-1', selected ? 'text-zinc-300' : 'text-zinc-400')}>
                           {' '}
-                          — {opt.description}
+                          · {opt.description}
                         </span>
                       )}
                     </button>

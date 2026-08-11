@@ -66,7 +66,7 @@ function HowToUpdateModal({ latestVersion, releaseUrl, onClose }: HowToUpdateMod
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-sm font-medium text-zinc-800 dark:text-zinc-200">
               <Terminal className="h-4 w-4 text-zinc-500" />
-              <span>Option 1 — Automatic update (recommended)</span>
+              <span>Option 1: Automatic update (recommended)</span>
             </div>
             <p className="text-sm text-zinc-500 dark:text-zinc-400 pl-6">
               Run the built-in update command. It downloads the latest binary and replaces the
@@ -89,7 +89,7 @@ function HowToUpdateModal({ latestVersion, releaseUrl, onClose }: HowToUpdateMod
           <div className="space-y-2">
             <div className="flex items-center gap-2 text-sm font-medium text-zinc-800 dark:text-zinc-200">
               <Download className="h-4 w-4 text-zinc-500" />
-              <span>Option 2 — Manual download</span>
+              <span>Option 2: Manual download</span>
             </div>
             <p className="text-sm text-zinc-500 dark:text-zinc-400 pl-6">
               Download the pre-built binary for your platform from the GitHub releases page and

@@ -157,7 +157,7 @@ export default function TriggerRulesPanel({ integrationId }: Props) {
                 <span className="font-medium text-zinc-700 dark:text-zinc-300">
                   Register Webhook
                 </span>{' '}
-                below — Agento will automatically notify Telegram of the webhook URL.
+                below. Agento will automatically notify Telegram of the webhook URL.
               </li>
               <li className={!isActive ? 'opacity-40' : hasRules ? 'line-through opacity-40' : ''}>
                 Add at least one{' '}
@@ -165,7 +165,7 @@ export default function TriggerRulesPanel({ integrationId }: Props) {
                 to route incoming messages to an agent.
               </li>
               <li className={!isActive || !hasRules ? 'opacity-40' : ''}>
-                Send a message to your bot in Telegram — the matching agent will reply.
+                Send a message to your bot in Telegram and the matching agent will reply.
               </li>
             </ol>
           </div>

@@ -128,7 +128,7 @@ export default function NewChatDialog({ open, onOpenChange, onCreated }: NewChat
           <DialogHeader>
             <DialogTitle>New Chat</DialogTitle>
             <DialogDescription>
-              Type your first message. Optionally choose an agent — or chat directly without one.
+              Type your first message. Optionally choose an agent, or chat directly without one.
             </DialogDescription>
           </DialogHeader>
 

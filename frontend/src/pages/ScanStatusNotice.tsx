@@ -69,7 +69,7 @@ export function ScanStatusNotice({ onSettled }: Readonly<{ onSettled?: () => voi
     <div className="flex items-center gap-2 rounded-md border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
       <Loader2 className="h-3.5 w-3.5 animate-spin shrink-0" />
       {scanning
-        ? 'A scan is running — sessions and costs on this page may be incomplete until it finishes.'
+        ? 'A scan is running. Sessions and costs on this page may be incomplete until it finishes.'
         : 'Pricing changed since these costs were computed. They are being recalculated in the background.'}
     </div>
   )

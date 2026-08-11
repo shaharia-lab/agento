@@ -387,7 +387,7 @@ function TranscriptSentinel({
         onClick={onMore}
         className="tabular-nums hover:text-zinc-800 dark:hover:text-zinc-100 transition-colors"
       >
-        Showing {shown} of {total} events — show more
+        Show more ({shown} of {total} events)
       </button>
     </div>
   )
@@ -502,7 +502,7 @@ function TranscriptPanel({
                   }`}
                 />
                 {isActive
-                  ? 'Session is live — reload to pick up new events'
+                  ? 'Session is live. Reload to pick up new events'
                   : `End of transcript · ${visible.length} of ${messages.length} events`}
               </div>
             )}
@@ -913,7 +913,7 @@ export default function ClaudeSessionDetailPage() {
           // The total is a floor, so say which models it left out rather than
           // letting an understated figure read as complete.
           <p className="text-[11.5px] text-amber-600 dark:text-amber-400">
-            Cost excludes {unpricedModels.join(', ')} — no published rate.
+            Cost excludes {unpricedModels.join(', ')} (no published rate).
           </p>
         )}
         {/* The strip's figures include delegated work and survive compaction,

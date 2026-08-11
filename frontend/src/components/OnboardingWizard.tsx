@@ -106,7 +106,7 @@ export default function OnboardingWizard({
 
               <div>
                 <h2 className="text-sm font-semibold text-zinc-900 mb-1">
-                  Step 1 of 2 — Working Directory
+                  Step 1 of 2: Working Directory
                 </h2>
                 <p className="text-xs text-zinc-500 mb-3">
                   This is the directory where agents will run commands. You can change it per chat
@@ -175,7 +175,7 @@ export default function OnboardingWizard({
             <div className="flex flex-col gap-5">
               <div>
                 <h2 className="text-sm font-semibold text-zinc-900 mb-1">
-                  Step 2 of 2 — Default AI Model
+                  Step 2 of 2: Default AI Model
                 </h2>
                 <p className="text-xs text-zinc-500 mb-3">
                   {modelFromEnv

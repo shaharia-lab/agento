@@ -133,12 +133,12 @@ func runServiceInstall(ctx context.Context, cfg *config.AppConfig) error {
 	fmt.Printf("  Logs:     %s\n", opts.LogPath)
 	fmt.Printf("  Data dir: %s\n", cfg.DataDir)
 	if runtime.GOOS == "darwin" {
-		fmt.Println("Note: LaunchAgents start at login, not at boot — log in once after a restart.")
+		fmt.Println("Note: LaunchAgents start at login, not at boot. Log in once after a restart.")
 	} else {
 		fmt.Println("Note: lingering was enabled so the service keeps running after logout.")
 	}
 	if !waitForRunning(ctx, mgr, 3*time.Second) {
-		fmt.Println("warning: the service is not answering yet — run `agento service status` " +
+		fmt.Println("warning: the service is not answering yet. Run `agento service status` " +
 			"and `agento service logs` to diagnose, or `agento service restart` to retry")
 	}
 	return nil
@@ -240,7 +240,7 @@ func runServiceLogs(ctx context.Context, logPath string, follow bool, lines int)
 	f, err := os.Open(logPath) //nolint:gosec // path is derived from the user's own data dir
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("no service log at %s — is the service installed and has it run yet?", logPath)
+			return fmt.Errorf("no service log at %s. Is the service installed and has it run yet?", logPath)
 		}
 		return fmt.Errorf("opening service log: %w", err)
 	}

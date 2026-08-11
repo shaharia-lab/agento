@@ -122,7 +122,7 @@ export default function DataAnalyticsTab() {
       setResp(updated)
       showToast(
         idleGapChanged
-          ? 'Saved — recomputing session durations in the background'
+          ? 'Saved. Recomputing session durations in the background'
           : 'Data settings saved',
       )
     } catch (err) {
@@ -195,7 +195,7 @@ export default function DataAnalyticsTab() {
         </Label>
         <p className="text-xs text-zinc-400">
           Sessions from these projects disappear from the list, and their tokens, costs and metrics
-          are left out of every chart and total. Nothing is deleted — removing a project from this
+          are left out of every chart and total. Nothing is deleted. Removing a project from this
           list brings its data straight back.
         </p>
 
@@ -265,7 +265,7 @@ export default function DataAnalyticsTab() {
 
               {matches.total > matches.shown.length && (
                 <p className="border-t border-zinc-100 px-3 py-1.5 text-xs text-zinc-400 dark:border-zinc-800">
-                  {matches.total - matches.shown.length} more — keep typing to narrow it down.
+                  {matches.total - matches.shown.length} more. Keep typing to narrow it down.
                 </p>
               )}
             </div>

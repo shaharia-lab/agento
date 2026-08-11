@@ -341,13 +341,13 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="default">Default — respect Claude Code settings</SelectItem>
-              <SelectItem value="bypass">Bypass — auto-approve all tool calls</SelectItem>
+              <SelectItem value="default">Default: respect Claude Code settings</SelectItem>
+              <SelectItem value="bypass">Bypass: auto-approve all tool calls</SelectItem>
               <SelectItem value="plan">
-                Plan — plan actions without executing state-changing tools
+                Plan: plan actions without executing state-changing tools
               </SelectItem>
               <SelectItem value="dontAsk">
-                Don&apos;t Ask — silently deny unapproved tool calls
+                Don&apos;t Ask: silently deny unapproved tool calls
               </SelectItem>
             </SelectContent>
           </Select>

@@ -42,7 +42,7 @@ var updateCheckSkipCommands = map[string]struct{}{ //nolint:gochecknoglobals
 func NewRootCmd(cfg *config.AppConfig) *cobra.Command {
 	root := &cobra.Command{
 		Use:     "agento",
-		Short:   "Agento — AI Agents Platform",
+		Short:   "Agento: AI Agents Platform",
 		Long:    "A platform for running Claude agents defined in YAML configuration files.",
 		Version: build.String(),
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {

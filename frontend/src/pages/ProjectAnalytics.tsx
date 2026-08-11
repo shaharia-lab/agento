@@ -129,8 +129,8 @@ function ProjectDayStrip({
                     className={`h-4 flex-1 rounded-[2px] ${shade(cost)}`}
                     title={
                       cell
-                        ? `${shortProject(p.project)} · ${date} — ${cell.sessions} session${cell.sessions === 1 ? '' : 's'}, ${formatCost(cost)}`
-                        : `${shortProject(p.project)} · ${date} — no activity`
+                        ? `${shortProject(p.project)} · ${date}, ${cell.sessions} session${cell.sessions === 1 ? '' : 's'}, ${formatCost(cost)}`
+                        : `${shortProject(p.project)} · ${date}, no activity`
                     }
                   />
                 )

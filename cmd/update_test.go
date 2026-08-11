@@ -171,7 +171,7 @@ func TestMaybeRestartServiceMessages(t *testing.T) {
 		{
 			name:       "restarted",
 			mgr:        &stubManager{status: daemon.Status{Installed: true, Running: true, PID: 42}},
-			wantSubstr: "Restarted the agento service — the new version is live.",
+			wantSubstr: "Restarted the agento service. The new version is live.",
 		},
 		{
 			name:       "installed but stopped",

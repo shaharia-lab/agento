@@ -718,8 +718,8 @@ export default function SessionJourneyPage() {
           <div className="flex flex-col gap-3">
             {journey.turns.length > AUTO_EXPAND_TURN_LIMIT && (
               <p className="text-xs text-zinc-400 dark:text-zinc-500">
-                {journey.turns.length} turns — all collapsed by default. Open the ones you need;
-                each renders its content only when expanded.
+                {journey.turns.length} turns, all collapsed by default. Open the ones you need; each
+                renders its content only when expanded.
               </p>
             )}
             {journey.turns.map(turn => (

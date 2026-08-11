@@ -23,7 +23,7 @@ const STATE_LABEL: Record<ConnectionState, string> = {
 const STATE_DETAIL: Record<ConnectionState, string> = {
   connected: 'The agent can send messages right now.',
   reconnecting:
-    'Session is valid — WhatsApp will reconnect automatically. Use Reconnect if this persists.',
+    'Session is valid. WhatsApp will reconnect automatically. Use Reconnect if this persists.',
   disconnected: 'No active session found. Reconnect to re-establish the WhatsApp connection.',
 }
 

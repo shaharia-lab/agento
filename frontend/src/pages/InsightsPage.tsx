@@ -447,7 +447,7 @@ function InsightsContent({
               {summary.unattributed_calls.toLocaleString()} of{' '}
               {summary.total_tool_calls.toLocaleString()} tool calls (
               {Math.round((summary.unattributed_calls / summary.total_tool_calls) * 100)}%) were
-              made with no skill in context — built-in tool use, not counted above.
+              made with no skill in context: built-in tool use, not counted above.
             </p>
           )}
         </>

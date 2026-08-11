@@ -126,7 +126,7 @@ function CacheEfficiencyChart({ data }: Readonly<{ data: CacheEfficiencyPoint[] 
   return (
     <ChartCard
       title="Cache Hit Rate (%)"
-      subtitle="Cache reads as a share of every input-side token — fresh input, cache writes and cache reads. A model with no prompt caching scores 0 rather than being left out of its own denominator."
+      subtitle="Cache reads as a share of every input-side token: fresh input, cache writes and cache reads. A model with no prompt caching scores 0 rather than being left out of its own denominator."
     >
       <ResponsiveContainer width="100%" height={280}>
         <LineChart data={formatted} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
@@ -415,7 +415,7 @@ function ModelTokenDonut({ data }: Readonly<{ data: ModelStat[] }>) {
   return (
     <ChartCard
       title="Conversation Tokens by Model"
-      subtitle="Input + output only. Cache reads and writes are excluded, so this is not a picture of spend — see Cost by Model for that."
+      subtitle="Input + output only. Cache reads and writes are excluded, so this is not a picture of spend. See Cost by Model for that."
     >
       <DonutWithLegend data={slices} formatValue={formatTokens} />
     </ChartCard>

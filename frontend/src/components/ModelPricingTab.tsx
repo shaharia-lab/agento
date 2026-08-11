@@ -112,7 +112,7 @@ function RateForm({
       {correctingTiered && (
         <div className="rounded-md border border-amber-200 bg-amber-50 dark:border-amber-800 dark:bg-amber-900/20 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
           This model prices by context length, and the rates below are its lowest band. Saving here
-          replaces its context-length bands with this single flat price, at every request size — the
+          replaces its context-length bands with this single flat price, at every request size. The
           bands ship with the catalog and cannot be edited individually.
         </div>
       )}
@@ -316,7 +316,7 @@ function HistoryRow({
           size="sm"
           onClick={onCorrect}
           className="text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"
-          title="Correct this rate — rewrites costs already reported for its window"
+          title="Correct this rate: rewrites costs already reported for its window"
         >
           <Pencil className="h-3 w-3" />
         </Button>
@@ -499,7 +499,7 @@ export default function ModelPricingTab() {
       setForm(null)
       await load()
       showToast(
-        'Rate saved — session costs recalculate in the background; the sessions list stays usable and updates itself',
+        'Rate saved. Session costs recalculate in the background; the sessions list stays usable and updates itself',
       )
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Failed to save the rate')
@@ -516,7 +516,7 @@ export default function ModelPricingTab() {
       await pricingApi.deleteRate(target.model_pattern, target.effective_from)
       await load()
       showToast(
-        'Rate deleted — session costs recalculate in the background; the sessions list stays usable and updates itself',
+        'Rate deleted. Session costs recalculate in the background; the sessions list stays usable and updates itself',
       )
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete the rate')
