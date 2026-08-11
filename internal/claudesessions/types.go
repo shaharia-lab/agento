@@ -178,6 +178,11 @@ type ClaudeProject struct {
 	EncodedName  string `json:"encoded_name"`
 	DecodedPath  string `json:"decoded_path"`
 	SessionCount int    `json:"session_count"`
+	// Hidden means the user excluded this project from reporting. It is set by
+	// the API from the current settings rather than read from disk, and is only
+	// ever true in a response that asked for hidden projects — everywhere else
+	// they are omitted entirely.
+	Hidden bool `json:"hidden"`
 }
 
 // ClaudeSessionSummary contains lightweight metadata for list views.

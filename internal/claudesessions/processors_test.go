@@ -327,7 +327,7 @@ func TestTimeProfileProcessor_ActiveDurationCapsIdleGaps(t *testing.T) {
 	if insight.TotalDurationMs != wantSpan {
 		t.Errorf("span = %dms, want %d", insight.TotalDurationMs, wantSpan)
 	}
-	wantActive := (2*time.Minute + claudesessions.IdleGapThreshold + 3*time.Minute).Milliseconds()
+	wantActive := (2*time.Minute + claudesessions.IdleGapThreshold() + 3*time.Minute).Milliseconds()
 	if insight.ActiveDurationMs != wantActive {
 		t.Errorf("active = %dms, want %d", insight.ActiveDurationMs, wantActive)
 	}

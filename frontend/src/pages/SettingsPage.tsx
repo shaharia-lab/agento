@@ -18,12 +18,20 @@ import NotificationsTab from '@/components/NotificationsTab'
 import AdvancedTab from '@/components/AdvancedTab'
 import MonitoringTab from '@/components/MonitoringTab'
 import ModelPricingTab from '@/components/ModelPricingTab'
+import DataAnalyticsTab from '@/components/DataAnalyticsTab'
 import { settingsApi } from '@/lib/api'
 import type { SettingsResponse } from '@/types'
 import { MODELS } from '@/types'
 
 type Tab =
-  'general' | 'claude' | 'appearance' | 'notifications' | 'advanced' | 'monitoring' | 'pricing'
+  | 'general'
+  | 'claude'
+  | 'appearance'
+  | 'notifications'
+  | 'data'
+  | 'advanced'
+  | 'monitoring'
+  | 'pricing'
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<Tab>('general')
@@ -143,6 +151,16 @@ export default function SettingsPage() {
             onClick={() => setActiveTab('notifications')}
           >
             Notifications
+          </button>
+          <button
+            className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
+              activeTab === 'data'
+                ? 'bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900'
+                : 'text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 hover:text-zinc-900 dark:hover:text-zinc-100'
+            }`}
+            onClick={() => setActiveTab('data')}
+          >
+            Data &amp; Analytics
           </button>
           <button
             className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors ${
@@ -289,6 +307,8 @@ export default function SettingsPage() {
           {activeTab === 'appearance' && <AppearanceTab />}
 
           {activeTab === 'notifications' && <NotificationsTab />}
+
+          {activeTab === 'data' && <DataAnalyticsTab />}
 
           {activeTab === 'advanced' && <AdvancedTab />}
 

@@ -560,6 +560,41 @@ ALTER TABLE session_insights ADD COLUMN active_duration_ms INTEGER NOT NULL DEFA
 ALTER TABLE session_insights RENAME COLUMN thinking_time_ms TO claude_working_time_ms;
 `,
 	},
+	{
+		version: 25,
+		sql: `
+-- Data & Analytics settings.
+--
+-- hidden_projects is a JSON array of decoded project paths the user has
+-- excluded from reporting. Excluded means filtered on read, never unscanned:
+-- the rows stay cached and correct, so unhiding is immediate. A JSON column
+-- rather than a child table for the same reason notification_settings is one —
+-- it is only ever read and written whole, with the settings row.
+ALTER TABLE user_settings ADD COLUMN hidden_projects TEXT NOT NULL DEFAULT '[]';
+
+-- idle_gap_threshold_minutes is the user's definition of "still working": the
+-- largest gap between two transcript events that active duration still counts.
+-- 0 means "not chosen" and resolves to claudesessions.DefaultIdleGapMinutes,
+-- so an existing row keeps behaving exactly as it did before this column.
+ALTER TABLE user_settings ADD COLUMN idle_gap_threshold_minutes INTEGER NOT NULL DEFAULT 0;
+
+-- The threshold the cached active durations were computed under. Those
+-- durations are stored per transcript, not derived on read, so changing the
+-- threshold reaches no cached row on its own — no transcript mtime changes
+-- because a user moved a slider. A drift here invalidates every cached mtime
+-- and zeroes session_insights.processor_version, exactly as scanner_version
+-- and pricing_rev already do for their own kinds of staleness.
+--
+-- The default is 10 minutes rather than 0 because it is not a guess: the
+-- threshold was a compile-time constant until this migration, so every row
+-- that exists when it runs was necessarily computed under that constant, and
+-- defaulting to 0 would make every existing install re-read its whole corpus
+-- to arrive at the numbers it already had. A value that cannot be read still
+-- falls back to 0 in Go, which differs from every valid threshold and so
+-- forces the re-read that an actually-unknown state needs.
+ALTER TABLE claude_cache_metadata ADD COLUMN idle_threshold_ms INTEGER NOT NULL DEFAULT 600000;
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

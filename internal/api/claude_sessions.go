@@ -48,6 +48,12 @@ func (s *Server) handleListClaudeSessions(w http.ResponseWriter, r *http.Request
 }
 
 // handleListClaudeProjects returns all distinct project directories containing sessions.
+//
+// Projects the user has hidden are omitted, so every project picker in the UI
+// offers only what the figures beside it actually cover. The one caller that
+// needs the full list is the Data & Analytics settings tab, which cannot let
+// you unhide a project it is not allowed to show you: it passes
+// include_hidden=true and reads the per-project Hidden flag.
 func (s *Server) handleListClaudeProjects(w http.ResponseWriter, r *http.Request) {
 	projects, err := claudesessions.ListProjects()
 	if err != nil {
@@ -55,10 +61,17 @@ func (s *Server) handleListClaudeProjects(w http.ResponseWriter, r *http.Request
 		s.writeError(w, http.StatusInternalServerError, "failed to list projects")
 		return
 	}
-	if projects == nil {
-		projects = []claudesessions.ClaudeProject{}
+
+	includeHidden := r.URL.Query().Get("include_hidden") == "true"
+	visible := make([]claudesessions.ClaudeProject, 0, len(projects))
+	for _, p := range projects {
+		p.Hidden = claudesessions.IsProjectHidden(p.DecodedPath)
+		if p.Hidden && !includeHidden {
+			continue
+		}
+		visible = append(visible, p)
 	}
-	s.writeJSON(w, http.StatusOK, projects)
+	s.writeJSON(w, http.StatusOK, visible)
 }
 
 // handleGetClaudeSession returns the full detail of a single Claude Code session

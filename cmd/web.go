@@ -259,6 +259,13 @@ func buildWebServer(
 		return nil, nil, fmt.Errorf("initializing settings: %w", err)
 	}
 
+	// Install the Data & Analytics preferences before anything reads a session:
+	// the first background scan computes and stores active durations under the
+	// idle-gap threshold, so a scan that started on the default would write
+	// figures the user did not ask for and only correct them on the next pass.
+	saved := settingsMgr.Get()
+	claudesessions.ApplyDataSettings(saved.IdleGapThresholdMinutes, saved.HiddenProjects)
+
 	monitoringMgr := initMonitoringManager(cfg.DataDir, otelProviders, otelCfg, sysLogger)
 
 	result, err := buildAPIServer(ctx, appDeps{

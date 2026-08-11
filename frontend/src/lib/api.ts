@@ -221,8 +221,16 @@ export const claudeSessionsApi = {
     return request<ClaudeSessionSummary[]>(`/claude-sessions${suffix}`)
   },
 
-  /** List all projects (decoded paths) found in ~/.claude/projects/. */
-  projects: () => request<ClaudeProject[]>('/claude-sessions/projects'),
+  /**
+   * List projects (decoded paths) found in ~/.claude/projects/. Projects the
+   * user has hidden are omitted unless includeHidden is set — which only the
+   * Data & Analytics settings tab does, since it cannot let you unhide a
+   * project it is not allowed to show you.
+   */
+  projects: (includeHidden = false) =>
+    request<ClaudeProject[]>(
+      `/claude-sessions/projects${includeHidden ? '?include_hidden=true' : ''}`,
+    ),
 
   /**
    * Cache freshness. Since #208 the list is served from cache even when a

@@ -63,6 +63,16 @@ func (c *Cache) pricingChanged() bool {
 	return live != pricingRevUnknown && storedPricingRevision(c.db) != live
 }
 
+// idleThresholdChanged reports whether the stored active durations were
+// computed under a different idle-gap threshold than the one now configured.
+// Like pricingChanged, this makes a read trigger the re-read the stored
+// figures need — a settings save also triggers one directly, but a save that
+// raced a restart must not leave the durations quietly wrong.
+func (c *Cache) idleThresholdChanged() bool {
+	_, stale := idleThresholdStaleness(c.db)
+	return stale
+}
+
 // Cache is a SQLite-backed cache of Claude Code session summaries with
 // TTL-based invalidation and incremental scanning. It is safe for concurrent use.
 type Cache struct {
@@ -270,7 +280,7 @@ func (c *Cache) List() []ClaudeSessionSummary {
 	c.refreshPricingResolver()
 
 	var done <-chan struct{}
-	if !c.isFresh() || c.pricingChanged() {
+	if !c.isFresh() || c.pricingChanged() || c.idleThresholdChanged() {
 		done = c.EnsureScan()
 	}
 
@@ -294,13 +304,19 @@ func (c *Cache) List() []ClaudeSessionSummary {
 
 // loadOrEmpty reads the cached rows, degrading to an empty slice on error so
 // the handler always marshals an array.
+//
+// Sessions belonging to hidden projects are dropped here, which is what makes
+// hiding a project reach every reader at once: the sessions list, the
+// analytics endpoint and the insights summary all begin at List. They are
+// filtered rather than left unscanned, so unhiding costs nothing and the rows
+// stay correct while hidden.
 func (c *Cache) loadOrEmpty() []ClaudeSessionSummary {
 	sessions, err := c.loadAll()
 	if err != nil {
 		c.logger.Warn("claude sessions: failed to load from cache", "error", err)
 		return []ClaudeSessionSummary{}
 	}
-	return sessions
+	return VisibleSessions(sessions)
 }
 
 // UnpricedModels returns the distinct model IDs seen in cached sessions that

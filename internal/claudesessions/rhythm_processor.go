@@ -24,6 +24,20 @@ type SessionRhythmProcessor struct {
 
 	userResponseGaps   []int64 // milliseconds
 	claudeResponseGaps []int64 // milliseconds
+
+	// idleGapMs caches the configurable threshold for this processor's
+	// lifetime, which is one session: a settings save landing mid-pass must
+	// not judge two gaps of the same conversation by different rules.
+	idleGapMs int64
+}
+
+// maxGapMs is the largest gap this pass still counts as a reply, resolved on
+// first use. Zero is never a valid threshold, so it doubles as "unresolved".
+func (p *SessionRhythmProcessor) maxGapMs() int64 {
+	if p.idleGapMs == 0 {
+		p.idleGapMs = IdleGapThreshold().Milliseconds()
+	}
+	return p.idleGapMs
 }
 
 // Name returns the processor identifier.
@@ -50,7 +64,7 @@ func (p *SessionRhythmProcessor) processUser(ev ProcessableEvent) {
 	}
 	if !p.lastAssistantTS.IsZero() {
 		gap := ev.Timestamp.Sub(p.lastAssistantTS).Milliseconds()
-		if gap >= 0 && gap <= IdleGapThreshold.Milliseconds() {
+		if gap >= 0 && gap <= p.maxGapMs() {
 			p.userResponseGaps = append(p.userResponseGaps, gap)
 		}
 	}
@@ -62,7 +76,7 @@ func (p *SessionRhythmProcessor) processAssistant(ev ProcessableEvent) {
 	if !p.lastGenuineUserTS.IsZero() {
 		gap := ev.Timestamp.Sub(p.lastGenuineUserTS).Milliseconds()
 		if gap >= 0 {
-			if gap <= IdleGapThreshold.Milliseconds() {
+			if gap <= p.maxGapMs() {
 				p.claudeResponseGaps = append(p.claudeResponseGaps, gap)
 			}
 			// Consume the pair even when the gap was an artifact, so a later

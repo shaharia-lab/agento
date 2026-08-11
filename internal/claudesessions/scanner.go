@@ -431,27 +431,74 @@ func IncrementalScanWithNotify(
 		return nil, err
 	}
 
-	// A scanner-version bump means the cached rows are missing data the current
-	// reader extracts, so mtime comparison would wrongly report them unchanged.
-	// Dropping the cached set makes every file look new for exactly one scan.
-	staleReader := storedScannerVersion(db) < CurrentScannerVersion
-	liveRev, stalePricing := pricingStaleness(db)
-
-	if staleReader || stalePricing {
-		invalidateCachedMtimes(cached, logger, staleReader, stalePricing)
-	}
+	stale := detectStaleness(db)
+	stale.invalidate(db, cached, logger)
 
 	diff := diffDiskAndCache(onDisk, cached)
 	applyChangesWithNotify(db, logger, onDisk, diff, notify)
 
 	updateLastScanned(db, logger)
-	if staleReader {
+	stale.record(db, logger)
+	return loadAllSessions(db, logger)
+}
+
+// cacheStaleness collects every reason the cached rows may no longer describe
+// what the current code would produce from the same files. All three share one
+// remedy — re-read every transcript, since no file mtime changed — and one
+// ordering rule: the new marker is written only after the re-read that earns
+// it, so a failed scan leaves the drift recorded and retryable.
+type cacheStaleness struct {
+	// reader is a CurrentScannerVersion bump: cached rows are missing data the
+	// current reader extracts, so mtime comparison wrongly reports them
+	// unchanged.
+	reader bool
+	// pricing is a catalog edit (#188 stores cost per row, so a rate change
+	// reaches nothing on its own).
+	pricing    bool
+	pricingRev int64
+	// idle is a change to the user's idle-gap threshold, which redefines every
+	// stored active duration and the insight rows derived from them.
+	idle   bool
+	idleMs int64
+}
+
+func detectStaleness(db *sql.DB) cacheStaleness {
+	rev, stalePricing := pricingStaleness(db)
+	idleMs, staleIdle := idleThresholdStaleness(db)
+	return cacheStaleness{
+		reader:     storedScannerVersion(db) < CurrentScannerVersion,
+		pricing:    stalePricing,
+		pricingRev: rev,
+		idle:       staleIdle,
+		idleMs:     idleMs,
+	}
+}
+
+func (s cacheStaleness) any() bool { return s.reader || s.pricing || s.idle }
+
+// invalidate forces the re-read each kind of staleness needs, plus the insight
+// reprocessing that only a threshold change implies.
+func (s cacheStaleness) invalidate(db *sql.DB, cached map[string]cachedEntry, logger *slog.Logger) {
+	if !s.any() {
+		return
+	}
+	invalidateCachedMtimes(cached, logger, s.reader, s.pricing, s.idle)
+	if s.idle {
+		invalidateInsightsForIdleThreshold(db, logger)
+	}
+}
+
+// record stores the markers the next scan compares against.
+func (s cacheStaleness) record(db *sql.DB, logger *slog.Logger) {
+	if s.reader {
 		recordScannerVersion(db, logger)
 	}
-	if stalePricing {
-		recordPricingRevision(db, logger, liveRev)
+	if s.pricing {
+		recordPricingRevision(db, logger, s.pricingRev)
 	}
-	return loadAllSessions(db, logger)
+	if s.idle {
+		recordIdleThreshold(db, logger, s.idleMs)
+	}
 }
 
 // invalidateCachedMtimes zeroes every cached mtime so the next diff treats all
@@ -462,13 +509,14 @@ func IncrementalScanWithNotify(
 // existing sessions rather than as newly discovered ones, and a row whose file
 // is gone must still be detected as a deletion.
 func invalidateCachedMtimes(
-	cached map[string]cachedEntry, logger *slog.Logger, staleReader, stalePricing bool,
+	cached map[string]cachedEntry, logger *slog.Logger, staleReader, stalePricing, staleIdle bool,
 ) {
 	if len(cached) == 0 {
 		return
 	}
 	logger.Info("claude sessions: re-reading all transcripts",
 		"scanner_version_bumped", staleReader, "pricing_changed", stalePricing,
+		"idle_threshold_changed", staleIdle,
 		"current", CurrentScannerVersion, "rows", len(cached))
 	for path, ce := range cached {
 		ce.mtime = time.Time{}
@@ -523,6 +571,69 @@ func recordPricingRevision(db *sql.DB, logger *slog.Logger, rev int64) {
 		"UPDATE claude_cache_metadata SET pricing_rev = ? WHERE id = 1", rev,
 	); err != nil {
 		logger.Warn("claude sessions: failed to record pricing revision", "error", err)
+	}
+}
+
+// idleThresholdStaleness reports the configured idle-gap threshold in
+// milliseconds and whether the cached durations were computed under a
+// different one.
+//
+// Active duration is stored per transcript, not derived on read, so changing
+// what counts as continuous work cannot reach a cached row by itself — no
+// transcript mtime changes because the user moved a slider. This is the same
+// mechanism scanner_version and pricing_rev use, and for the same reason: the
+// only correct response is to re-read, since recomputing needs every event's
+// timestamp and the row keeps two.
+func idleThresholdStaleness(db *sql.DB) (live int64, stale bool) {
+	live = IdleGapThreshold().Milliseconds()
+	return live, storedIdleThresholdMs(db) != live
+}
+
+// storedIdleThresholdMs returns the threshold the cached durations were
+// computed under. Zero — an unreadable value, or a row written before the
+// column existed — differs from every valid threshold and so correctly forces
+// one re-read.
+func storedIdleThresholdMs(db *sql.DB) int64 {
+	var v int64
+	row := db.QueryRowContext(context.Background(),
+		"SELECT idle_threshold_ms FROM claude_cache_metadata WHERE id = 1")
+	if row.Scan(&v) != nil {
+		return 0
+	}
+	return v
+}
+
+func recordIdleThreshold(db *sql.DB, logger *slog.Logger, ms int64) {
+	if _, err := db.ExecContext(context.Background(),
+		"UPDATE claude_cache_metadata SET idle_threshold_ms = ? WHERE id = 1", ms,
+	); err != nil {
+		logger.Warn("claude sessions: failed to record idle threshold", "error", err)
+	}
+}
+
+// invalidateInsightsForIdleThreshold forces the insight worker to reprocess
+// every session after a threshold change.
+//
+// The stored insight rows carry their own active duration and the rhythm
+// averages the threshold gates, and NeedsProcessing selects on
+// processor_version alone — so zeroing it is what a version bump would do,
+// except that this drift is caused by the user rather than by a release and
+// therefore cannot be expressed as a constant. Written from here rather than
+// through InsightStorer because it belongs with the re-read it accompanies:
+// the two must happen together or the insights disagree with the sessions.
+//
+// A failure is logged and the scan continues: the threshold is recorded only
+// after this runs, so the next scan retries.
+func invalidateInsightsForIdleThreshold(db *sql.DB, logger *slog.Logger) {
+	res, err := db.ExecContext(context.Background(),
+		"UPDATE session_insights SET processor_version = 0")
+	if err != nil {
+		logger.Warn("claude sessions: failed to invalidate insights after idle-threshold change",
+			"error", err)
+		return
+	}
+	if rows, rerr := res.RowsAffected(); rerr == nil && rows > 0 {
+		logger.Info("claude sessions: insights queued for reprocessing", "rows", rows)
 	}
 }
 

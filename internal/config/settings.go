@@ -27,7 +27,35 @@ type UserSettings struct {
 	NotificationSettings   string `json:"notification_settings"`
 	EventBusWorkerPoolSize int    `json:"event_bus_worker_pool_size"`
 	PublicURL              string `json:"public_url"`
+
+	// HiddenProjects are Claude Code project paths excluded from every figure
+	// Agento reports — the sessions list, the analytics dashboard and the
+	// insight cards alike. Paths are the decoded form
+	// (/home/me/Projects/agento), matching what the projects endpoint returns.
+	HiddenProjects []string `json:"hidden_projects"`
+
+	// IdleGapThresholdMinutes is the largest gap between two transcript events
+	// that still counts as continuous work when measuring how long a session
+	// actually ran. Zero means "not chosen" and resolves to the built-in
+	// default; anything else is validated against the bounds below.
+	IdleGapThresholdMinutes int `json:"idle_gap_threshold_minutes"`
 }
+
+// Bounds for UserSettings.IdleGapThresholdMinutes, defined here because this
+// is the package every layer may import; claudesessions.IdleGapThreshold
+// documents what the value means and is the only place it is interpreted.
+//
+// The default is the figure #238 established from the reference corpus. The
+// bounds exist because the setting is a definition of "still working", and
+// neither a zero-length sitting nor a multi-day one is a definition anybody
+// can read a dashboard against: below a minute, reading a single long reply
+// already ends the sitting; past four hours, active duration stops differing
+// from the wall-clock span it exists to be different from.
+const (
+	DefaultIdleGapThresholdMinutes = 10
+	MinIdleGapThresholdMinutes     = 1
+	MaxIdleGapThresholdMinutes     = 240
+)
 
 // SettingsStore defines the interface for persisting user settings.
 type SettingsStore interface {
@@ -134,6 +162,23 @@ func (m *SettingsManager) Locked() map[string]string {
 	return result
 }
 
+// validateIdleGapThreshold rejects an out-of-range threshold. Zero is allowed
+// and means "not chosen": a client that does not know about the field — the
+// settings form for any other tab posts the whole object back — must not be
+// read as a request to set it to zero, and every reader resolves zero to the
+// default.
+func validateIdleGapThreshold(minutes int) error {
+	if minutes == 0 {
+		return nil
+	}
+	if minutes < MinIdleGapThresholdMinutes || minutes > MaxIdleGapThresholdMinutes {
+		return fmt.Errorf(
+			"idle_gap_threshold_minutes must be between %d and %d minutes, got %d",
+			MinIdleGapThresholdMinutes, MaxIdleGapThresholdMinutes, minutes)
+	}
+	return nil
+}
+
 // Update persists allowed fields, skipping any locked ones. Returns an error if
 // the caller attempts to change a locked field.
 func (m *SettingsManager) Update(incoming UserSettings) error {
@@ -155,6 +200,10 @@ func (m *SettingsManager) Update(incoming UserSettings) error {
 			return fmt.Errorf("public_url is locked by environment variable %s", m.locked["public_url"])
 		}
 		incoming.PublicURL = m.settings.PublicURL
+	}
+
+	if err := validateIdleGapThreshold(incoming.IdleGapThresholdMinutes); err != nil {
+		return err
 	}
 
 	m.settings = incoming
