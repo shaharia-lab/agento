@@ -260,6 +260,7 @@ interface KPIWithDeltaProps {
   icon: React.ComponentType<{ className?: string }>
   label: string
   value: string
+  sub?: string
   color?: string
   current: number
   previous?: number
@@ -270,6 +271,7 @@ function KPIWithDelta({
   icon,
   label,
   value,
+  sub,
   color,
   current,
   previous,
@@ -278,7 +280,7 @@ function KPIWithDelta({
   return (
     <div className="rounded-lg border border-zinc-200 dark:border-zinc-700/50 bg-white dark:bg-zinc-900 px-3 py-2.5 flex flex-col gap-1">
       <div className="flex items-center justify-between gap-1">
-        <KPICard icon={icon} label={label} value={value} color={color} />
+        <KPICard icon={icon} label={label} value={value} sub={sub} color={color} />
       </div>
       {previous !== undefined && previous !== 0 && (
         <div className="flex justify-start pl-1">
@@ -367,12 +369,16 @@ function InsightsContent({
 
       {/* KPI Cards row 2 */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        {/* Active time, not the start-to-end span: sessions are resumable, and
+            one resumed-after-28-days session put the span mean at 8 hours while
+            the median sitting was 17 minutes. */}
         <KPIWithDelta
           icon={Clock}
           label="Avg Duration"
-          value={fmtMs(summary.avg_total_duration_ms)}
-          current={summary.avg_total_duration_ms}
-          previous={prev?.avg_total_duration_ms}
+          value={fmtMs(summary.avg_active_duration_ms)}
+          sub="active time; idle gaps > 10 min excluded"
+          current={summary.avg_active_duration_ms}
+          previous={prev?.avg_active_duration_ms}
         />
         <KPIWithDelta
           icon={DollarSign}

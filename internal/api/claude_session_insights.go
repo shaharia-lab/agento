@@ -102,17 +102,23 @@ func intersectIDs(base, filter []string) []string {
 
 // insightsSummary holds aggregated statistics across multiple sessions.
 type insightsSummary struct {
-	TotalSessions        int         `json:"total_sessions"`
-	AvgAutonomyScore     float64     `json:"avg_autonomy_score"`
-	AvgTurnCount         float64     `json:"avg_turn_count"`
-	AvgToolCallsTotal    float64     `json:"avg_tool_calls_total"`
-	AvgCostEstimateUSD   float64     `json:"avg_cost_estimate_usd"`
-	TotalCostEstimateUSD float64     `json:"total_cost_estimate_usd"`
-	AvgCacheHitRate      float64     `json:"avg_cache_hit_rate"`
-	SessionsWithErrors   int         `json:"sessions_with_errors"`
-	TotalToolErrors      int         `json:"total_tool_errors"`
-	AvgTotalDurationMs   float64     `json:"avg_total_duration_ms"`
-	TopTools             []toolCount `json:"top_tools"`
+	TotalSessions        int     `json:"total_sessions"`
+	AvgAutonomyScore     float64 `json:"avg_autonomy_score"`
+	AvgTurnCount         float64 `json:"avg_turn_count"`
+	AvgToolCallsTotal    float64 `json:"avg_tool_calls_total"`
+	AvgCostEstimateUSD   float64 `json:"avg_cost_estimate_usd"`
+	TotalCostEstimateUSD float64 `json:"total_cost_estimate_usd"`
+	AvgCacheHitRate      float64 `json:"avg_cache_hit_rate"`
+	SessionsWithErrors   int     `json:"sessions_with_errors"`
+	TotalToolErrors      int     `json:"total_tool_errors"`
+	AvgTotalDurationMs   float64 `json:"avg_total_duration_ms"`
+	// AvgActiveDurationMs is the mean of per-session active durations — every
+	// inter-event gap capped at 10 minutes — and is the figure the dashboard
+	// labels "Avg Duration". AvgTotalDurationMs is the raw span mean, kept
+	// because "first seen → last touched" is an honest answer to a different
+	// question.
+	AvgActiveDurationMs float64     `json:"avg_active_duration_ms"`
+	TopTools            []toolCount `json:"top_tools"`
 	// Attribution breakdowns. Each counts tool calls, so they are directly
 	// comparable with TopTools.
 	// TotalToolCalls and UnattributedCalls let the UI state what share of
@@ -160,6 +166,7 @@ func buildInsightsSummaryFromAggregate(agg *claudesessions.InsightAggregateSumma
 		SessionsWithErrors:   agg.SessionsWithErrors,
 		TotalToolErrors:      agg.TotalToolErrors,
 		AvgTotalDurationMs:   agg.AvgTotalDurationMs,
+		AvgActiveDurationMs:  agg.AvgActiveDurationMs,
 		TopTools:             sortedToolCounts(agg.TopToolTotals),
 		TotalToolCalls:       agg.TotalToolCalls,
 		UnattributedCalls:    agg.UnattributedCalls,

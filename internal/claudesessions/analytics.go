@@ -801,10 +801,9 @@ func buildTopSessions(sessions []ClaudeSessionSummary) TopSessions {
 	rankings := make([]SessionRanking, 0, len(sessions))
 	for _, s := range sessions {
 		u := s.TotalUsage()
-		duration := int64(0)
-		if s.LastActivity.After(s.StartTime) {
-			duration = s.LastActivity.Sub(s.StartTime).Milliseconds()
-		}
+		// Active time, not the start/last span: ranking by span makes "Longest"
+		// a leaderboard of which sessions were resumed after the longest break.
+		duration := s.TotalActiveDurationMs()
 		rankings = append(rankings, SessionRanking{
 			SessionID:     s.SessionID,
 			Title:         s.ResolveDisplayTitle(),

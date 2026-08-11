@@ -201,6 +201,16 @@ type ClaudeSessionSummary struct {
 	DisplayTitle string    `json:"display_title"`
 	StartTime    time.Time `json:"start_time"`
 	LastActivity time.Time `json:"last_activity"`
+	// ActiveDurationMs is the main-thread transcript's active time: the sum of
+	// inter-event gaps, each capped at IdleGapThreshold. The StartTime→
+	// LastActivity span is not a duration — sessions are resumable, and a
+	// resumed transcript's span contains every idle day between sittings.
+	// Like Usage this excludes delegated work; SubagentActiveDurationMs holds
+	// that, and TotalActiveDurationMs() sums them.
+	ActiveDurationMs int64 `json:"active_duration_ms"`
+	// SubagentActiveDurationMs is the summed active time of this session's
+	// sub-agent transcripts, mirroring SubagentUsage.
+	SubagentActiveDurationMs int64 `json:"subagent_active_duration_ms"`
 	// MessageCount counts conversational turns, not JSONL events: user events
 	// that carry genuine human input (not tool_result carriers) plus assistant
 	// events containing at least one text block. It is the number a person
@@ -392,6 +402,19 @@ func (s ClaudeSessionSummary) TotalUsage() TokenUsage {
 		CacheCreation1hTokens: s.Usage.CacheCreation1hTokens + s.SubagentUsage.CacheCreation1hTokens,
 		CacheReadTokens:       s.Usage.CacheReadTokens + s.SubagentUsage.CacheReadTokens,
 	}
+}
+
+// TotalActiveDurationMs is the session's active time including delegated work,
+// following the same additive convention as TotalUsage and TotalCost.
+//
+// The sum can double-count where a sub-agent overlaps the parent's own
+// activity, but the overlap is bounded: while a sub-agent runs, the parent is
+// waiting on its Task tool_result, so the parent side of the overlap is at
+// most one IdleGapThreshold-capped gap per delegation. Not summing would be
+// the larger error — a session whose 40 minutes of work all happened in
+// sub-agents would report one capped gap.
+func (s ClaudeSessionSummary) TotalActiveDurationMs() int64 {
+	return s.ActiveDurationMs + s.SubagentActiveDurationMs
 }
 
 // ClaudeSubagent is a single sub-agent transcript delegated from a parent

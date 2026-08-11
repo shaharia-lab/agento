@@ -35,8 +35,9 @@ type InsightRecord struct {
 	AgentBreakdown     map[string]int
 	UnattributedCalls  int
 
-	TotalDurationMs int64
-	ThinkingTimeMs  int64
+	TotalDurationMs     int64
+	ActiveDurationMs    int64
+	ClaudeWorkingTimeMs int64
 
 	CacheHitRate     float64
 	TokensPerTurnAvg float64
@@ -117,7 +118,7 @@ func insightArgs(r InsightRecord) ([]any, error) {
 		r.SessionID, r.ProcessorVersion, r.ScannedAt.UTC().Format(time.RFC3339),
 		r.TurnCount, r.StepsPerTurnAvg, r.AutonomyScore,
 		r.ToolCallsTotal, breakdown, r.ToolErrorRate,
-		r.TotalDurationMs, r.ThinkingTimeMs,
+		r.TotalDurationMs, r.ActiveDurationMs, r.ClaudeWorkingTimeMs,
 		r.CacheHitRate, r.TokensPerTurnAvg, r.CostEstimateUSD,
 		r.ToolErrorCount, hasErrors,
 		r.MaxConsecutiveToolCalls, r.LongestAutonomousChain,
@@ -162,7 +163,7 @@ INSERT INTO session_insights (
     session_id, processor_version, scanned_at,
     turn_count, steps_per_turn_avg, autonomy_score,
     tool_calls_total, tool_breakdown, tool_error_rate,
-    total_duration_ms, thinking_time_ms,
+    total_duration_ms, active_duration_ms, claude_working_time_ms,
     cache_hit_rate, tokens_per_turn_avg, cost_estimate_usd,
     tool_error_count, has_errors,
     max_consecutive_tool_calls, longest_autonomous_chain,
@@ -171,7 +172,7 @@ INSERT INTO session_insights (
     skill_breakdown, plugin_breakdown, mcp_server_breakdown,
     mcp_tool_breakdown, effort_breakdown, unattributed_calls,
     agent_breakdown
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(session_id) DO UPDATE SET
     processor_version           = excluded.processor_version,
     scanned_at                  = excluded.scanned_at,
@@ -182,7 +183,8 @@ ON CONFLICT(session_id) DO UPDATE SET
     tool_breakdown              = excluded.tool_breakdown,
     tool_error_rate             = excluded.tool_error_rate,
     total_duration_ms           = excluded.total_duration_ms,
-    thinking_time_ms            = excluded.thinking_time_ms,
+    active_duration_ms          = excluded.active_duration_ms,
+    claude_working_time_ms      = excluded.claude_working_time_ms,
     cache_hit_rate              = excluded.cache_hit_rate,
     tokens_per_turn_avg         = excluded.tokens_per_turn_avg,
     cost_estimate_usd           = excluded.cost_estimate_usd,
@@ -266,7 +268,10 @@ type InsightAggregateSummary struct {
 	TotalCostEstimateUSD float64
 	AvgCacheHitRate      float64
 	AvgTotalDurationMs   float64
-	SessionsWithErrors   int
+	// AvgActiveDurationMs averages the idle-capped figure; see the migration-24
+	// comment for why the raw span mean is not what dashboards should show.
+	AvgActiveDurationMs float64
+	SessionsWithErrors  int
 	// TotalToolErrors is the summed tool_error_count, the numerator for an
 	// errors-per-100-tool-calls rate. SessionsWithErrors alone cannot express
 	// one: it counts sessions, not errors, so a session with a single failing
@@ -358,6 +363,7 @@ const insightAggregateSQL = `SELECT
 	COALESCE(SUM(cost_estimate_usd), 0),
 	COALESCE(AVG(cache_hit_rate), 0),
 	COALESCE(AVG(total_duration_ms), 0),
+	COALESCE(AVG(active_duration_ms), 0),
 	COALESCE(SUM(has_errors), 0),
 	COALESCE(SUM(tool_calls_total), 0),
 	COALESCE(SUM(unattributed_calls), 0),
@@ -379,6 +385,7 @@ func (s *SQLiteSessionInsightsStore) queryAggregateScalars(
 		&summary.TotalCostEstimateUSD,
 		&summary.AvgCacheHitRate,
 		&summary.AvgTotalDurationMs,
+		&summary.AvgActiveDurationMs,
 		&summary.SessionsWithErrors,
 		&summary.TotalToolCalls,
 		&summary.UnattributedCalls,
@@ -486,7 +493,7 @@ const insightSelectCols = `
 SELECT session_id, processor_version, scanned_at,
        turn_count, steps_per_turn_avg, autonomy_score,
        tool_calls_total, tool_breakdown, tool_error_rate,
-       total_duration_ms, thinking_time_ms,
+       total_duration_ms, active_duration_ms, claude_working_time_ms,
        cache_hit_rate, tokens_per_turn_avg, cost_estimate_usd,
        tool_error_count, has_errors,
        max_consecutive_tool_calls, longest_autonomous_chain,
@@ -522,7 +529,8 @@ func scanInsightRecord(row rowScanner) (*InsightRecord, error) {
 		&toolBreakdown,
 		&r.ToolErrorRate,
 		&r.TotalDurationMs,
-		&r.ThinkingTimeMs,
+		&r.ActiveDurationMs,
+		&r.ClaudeWorkingTimeMs,
 		&r.CacheHitRate,
 		&r.TokensPerTurnAvg,
 		&r.CostEstimateUSD,

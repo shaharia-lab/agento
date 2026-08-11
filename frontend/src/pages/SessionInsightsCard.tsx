@@ -61,8 +61,15 @@ function metricsFor(insight: SessionInsight): Metric[] {
       value: String(insight.max_consecutive_tool_calls),
     },
     {
-      label: 'Thinking time',
-      value: insight.thinking_time_ms > 0 ? formatDuration(insight.thinking_time_ms) : '—',
+      label: 'Active duration',
+      value: insight.active_duration_ms > 0 ? formatDuration(insight.active_duration_ms) : '—',
+      hint: 'idle gaps over 10 min excluded',
+    },
+    {
+      label: 'Claude working time',
+      value:
+        insight.claude_working_time_ms > 0 ? formatDuration(insight.claude_working_time_ms) : '—',
+      hint: 'time spent producing responses',
     },
   ]
 

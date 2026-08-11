@@ -57,7 +57,7 @@ function copyFor(card: InsightCard): CardCopy | null {
       return {
         icon: Flame,
         headline: `Top ${card.count ?? 0} sessions are ${(card.percent ?? 0).toFixed(1)}% of the bill`,
-        fact: `They cost ${formatCost(card.amount_usd ?? 0)} together and ran ${formatDuration(card.avg_duration_ms ?? 0)} on average.`,
+        fact: `They cost ${formatCost(card.amount_usd ?? 0)} together and worked ${formatDuration(card.avg_duration_ms ?? 0)} on average (active time).`,
         action:
           'A few long runs dominate the total; splitting them is where a change of habit pays.',
       }

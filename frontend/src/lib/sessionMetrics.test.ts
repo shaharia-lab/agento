@@ -65,27 +65,25 @@ describe('session metrics', () => {
     expect(sessionTokens(s)).toBe(0)
   })
 
-  it('measures duration from start to last activity', () => {
+  it('measures duration as backend-computed active time, main thread plus delegated', () => {
+    // Not the start/last span: a resumed session's span counts every idle day
+    // between sittings, which reported a 6-hour session as 678 hours.
     const s = session({
       start_time: '2026-08-09T10:00:00Z',
-      last_activity: '2026-08-09T11:30:00Z',
+      last_activity: '2026-09-06T11:30:00Z', // resumed a month later
+      active_duration_ms: 60 * 60_000,
+      subagent_active_duration_ms: 30 * 60_000,
     })
     expect(sessionDurationMs(s)).toBe(90 * 60_000)
     expect(sessionDurationMinutes(s)).toBe(90)
   })
 
-  it('clamps an unparseable or reversed pair to zero, never NaN or negative', () => {
-    // NaN fails every comparison and a negative passes every "at most" one —
-    // either way a corrupt row lands in the wrong filter results.
-    const broken = session({ start_time: 'nonsense', last_activity: 'nonsense' })
-    const reversed = session({
-      start_time: '2026-08-09T11:00:00Z',
-      last_activity: '2026-08-09T10:00:00Z',
-    })
-    for (const s of [broken, reversed]) {
-      expect(sessionDurationMs(s)).toBe(0)
-      expect(sessionDurationMinutes(s)).toBe(0)
-    }
+  it('treats missing active durations as zero, never NaN', () => {
+    // NaN fails every comparison and would silently hide the row from a filter
+    // it should simply not have matched.
+    const bare = { session_id: 'x' } as ClaudeSessionSummary
+    expect(sessionDurationMs(bare)).toBe(0)
+    expect(sessionDurationMinutes(bare)).toBe(0)
   })
 
   it('treats a missing usage or cost object as zero rather than throwing', () => {

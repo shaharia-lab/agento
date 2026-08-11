@@ -50,6 +50,10 @@ function makeSession(overrides: Partial<ClaudeSessionSummary> = {}): ClaudeSessi
     is_favorite: true,
     start_time: '2026-08-07T10:00:00.000Z',
     last_activity: '2026-08-07T11:00:00.000Z',
+    // A fully active hour, matching the span above, so duration expectations
+    // stay readable from the timestamps.
+    active_duration_ms: 60 * 60_000,
+    subagent_active_duration_ms: 0,
     message_count: 4,
     event_count: 9,
     usage: { ...emptyUsage },
@@ -186,8 +190,8 @@ describe('matchesFilters — each predicate in isolation', () => {
     expect(matchesFilters(unset, noFilters({ model: 'all' }))).toBe(true)
   })
 
-  it('duration is measured in minutes from start to last activity', () => {
-    // 10:00 → 11:00 is 60 minutes.
+  it('duration is measured in minutes of active time', () => {
+    // The fixture's active_duration_ms is one fully-active hour.
     const s = makeSession()
     expect(matchesFilters(s, noFilters({ durationMinutes: { min: 60, max: 60 } }))).toBe(true)
     expect(matchesFilters(s, noFilters({ durationMinutes: { min: 61, max: null } }))).toBe(false)
@@ -195,17 +199,17 @@ describe('matchesFilters — each predicate in isolation', () => {
     expect(matchesFilters(s, noFilters({ durationMinutes: { min: 30, max: 90 } }))).toBe(true)
   })
 
-  it('a reversed timestamp pair reads as zero duration, not a negative', () => {
-    // A negative would pass every "at most" bound, so a corrupt row would show
-    // up in exactly the searches meant to find the short sessions.
-    const reversed = makeSession({
-      start_time: '2026-08-07T11:00:00.000Z',
-      last_activity: '2026-08-07T10:00:00.000Z',
+  it('a row without active durations reads as zero, not NaN', () => {
+    // NaN fails every comparison, so a not-yet-rescanned row would vanish from
+    // every duration filter instead of simply reading as zero.
+    const missing = makeSession({
+      active_duration_ms: undefined as unknown as number,
+      subagent_active_duration_ms: undefined as unknown as number,
     })
-    expect(matchesFilters(reversed, noFilters({ durationMinutes: { min: null, max: 5 } }))).toBe(
+    expect(matchesFilters(missing, noFilters({ durationMinutes: { min: null, max: 5 } }))).toBe(
       true,
     )
-    expect(matchesFilters(reversed, noFilters({ durationMinutes: { min: 1, max: null } }))).toBe(
+    expect(matchesFilters(missing, noFilters({ durationMinutes: { min: 1, max: null } }))).toBe(
       false,
     )
   })
@@ -314,7 +318,7 @@ describe('matchesFilters — the && chain', () => {
     ['permission mode', { permission_mode: 'plan' }],
     ['messages', { message_count: 99 }],
     ['model', { model: 'claude-sonnet-5' }],
-    ['duration', { last_activity: '2026-08-07T10:05:00.000Z' }],
+    ['duration', { active_duration_ms: 5 * 60_000 }],
     ['tokens in', { usage: { ...emptyUsage, input_tokens: 5, output_tokens: 50 } }],
     ['tokens out', { usage: { ...emptyUsage, input_tokens: 100, output_tokens: 1 } }],
     ['cost', { cost: { ...zeroCost, total_usd: 0.1 } }],

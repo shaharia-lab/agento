@@ -38,7 +38,13 @@ import (
 // every row written before v9 counts those ~963 machine-written events (on the
 // reference corpus) as human turns, inflating turn_count and everything derived
 // from it.
-const CurrentProcessorVersion = 9
+// v10: active_duration_ms is computed (inter-event gaps capped at
+// IdleGapThreshold — rows written before v10 hold 0 there), thinking_time_ms
+// becomes claude_working_time_ms measured from gap attribution rather than
+// guessed from character counts, and the response-time averages exclude gaps
+// above IdleGapThreshold, so a resume-after-days no longer counts as a
+// days-long reply.
+const CurrentProcessorVersion = 10
 
 // ProcessableEvent is a single decoded line from a Claude Code session JSONL file,
 // passed to each SessionProcessor in chronological order.
@@ -142,9 +148,16 @@ type SessionInsight struct {
 	// tool use. Kept out of SkillBreakdown so the sum above reconciles.
 	UnattributedCalls int `json:"unattributed_calls"`
 
-	// TimeProfileProcessor
-	TotalDurationMs int64 `json:"total_duration_ms"`
-	ThinkingTimeMs  int64 `json:"thinking_time_ms"`
+	// TimeProfileProcessor. TotalDurationMs is the raw first-to-last span;
+	// ActiveDurationMs caps every inter-event gap at IdleGapThreshold and is
+	// what aggregate reporting averages — a resumed session's span contains
+	// every idle day between sittings, and one resumed-after-28-days session
+	// carried 82% of the dashboard's average on the reference corpus.
+	// ClaudeWorkingTimeMs is the subset of active time spent producing
+	// assistant output.
+	TotalDurationMs     int64 `json:"total_duration_ms"`
+	ActiveDurationMs    int64 `json:"active_duration_ms"`
+	ClaudeWorkingTimeMs int64 `json:"claude_working_time_ms"`
 
 	// TokenProfileProcessor
 	CacheHitRate     float64 `json:"cache_hit_rate"`
@@ -194,7 +207,12 @@ type InsightAggregateSummary struct {
 	TotalCostEstimateUSD float64
 	AvgCacheHitRate      float64
 	AvgTotalDurationMs   float64
-	SessionsWithErrors   int
+	// AvgActiveDurationMs is the mean of per-session active durations — idle
+	// gaps above IdleGapThreshold excluded — and is what the dashboard's Avg
+	// Duration card shows. AvgTotalDurationMs (the raw span mean) is kept for
+	// callers that genuinely want first-seen-to-last-touched.
+	AvgActiveDurationMs float64
+	SessionsWithErrors  int
 	// TotalToolErrors is the summed error count, so an errors-per-100-calls
 	// rate is expressible. SessionsWithErrors counts sessions and cannot be one.
 	TotalToolErrors int
