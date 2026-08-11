@@ -281,6 +281,43 @@ func TestSettingsManager_Update(t *testing.T) {
 			},
 		},
 		{
+			name:          "data & analytics fields round-trip",
+			storeSettings: config.UserSettings{},
+			cfg:           &config.AppConfig{},
+			incoming: config.UserSettings{
+				HiddenProjects:          []string{"/home/me/scratch"},
+				IdleGapThresholdMinutes: 25,
+			},
+			wantSaved: &config.UserSettings{
+				HiddenProjects:          []string{"/home/me/scratch"},
+				IdleGapThresholdMinutes: 25,
+			},
+		},
+		{
+			// Zero is not a rejected value: every other settings tab posts the
+			// whole object back, and a client that predates this field must not
+			// be read as asking for a zero-minute threshold.
+			name:          "an unset idle threshold is accepted and means default",
+			storeSettings: config.UserSettings{},
+			cfg:           &config.AppConfig{},
+			incoming:      config.UserSettings{IdleGapThresholdMinutes: 0},
+			wantSaved:     &config.UserSettings{IdleGapThresholdMinutes: 0},
+		},
+		{
+			name:          "idle threshold below the bound is rejected",
+			storeSettings: config.UserSettings{},
+			cfg:           &config.AppConfig{},
+			incoming:      config.UserSettings{IdleGapThresholdMinutes: -1},
+			wantErr:       "idle_gap_threshold_minutes must be between 1 and 240 minutes",
+		},
+		{
+			name:          "idle threshold above the bound is rejected",
+			storeSettings: config.UserSettings{},
+			cfg:           &config.AppConfig{},
+			incoming:      config.UserSettings{IdleGapThresholdMinutes: 241},
+			wantErr:       "idle_gap_threshold_minutes must be between 1 and 240 minutes",
+		},
+		{
 			name:          "save error is wrapped and returned",
 			storeSettings: config.UserSettings{},
 			cfg:           &config.AppConfig{},

@@ -5,20 +5,6 @@ import (
 	"time"
 )
 
-// IdleGapThreshold is the largest gap between two consecutive transcript
-// events that still counts as continuous work. Claude Code sessions are
-// resumable: a transcript's wall-clock span routinely contains lunch breaks,
-// nights, or a resume weeks later, and on the reference corpus a single
-// resumed-after-28-days session carried 82% of the dashboard's "Avg Duration"
-// on its own. Ten minutes keeps reading a long reply or manually testing a
-// change inside a sitting while excluding everything a person would not call
-// working time.
-//
-// Every consumer of "how long did this actually run" shares this constant —
-// the scanner, the insight processors, and the journey builder — so no two
-// pages can disagree about what active time means.
-const IdleGapThreshold = 10 * time.Minute
-
 // activeTimeTracker accumulates event timestamps and derives active duration:
 // the sum of gaps between consecutive events, each capped at IdleGapThreshold.
 //
@@ -62,7 +48,9 @@ func (t *activeTimeTracker) durations() (active, assistant int64) {
 	copy(sorted, t.stamps)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ts.Before(sorted[j].ts) })
 
-	capMs := IdleGapThreshold.Milliseconds()
+	// Read once: the threshold is user-configurable, and a save landing
+	// mid-walk must not cap two gaps of the same session differently.
+	capMs := IdleGapThreshold().Milliseconds()
 	for i := 1; i < len(sorted); i++ {
 		gap := sorted[i].ts.Sub(sorted[i-1].ts).Milliseconds()
 		if gap > capMs {

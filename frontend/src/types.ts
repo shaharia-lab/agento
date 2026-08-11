@@ -44,7 +44,26 @@ export interface UserSettings {
   notification_settings?: string
   event_bus_worker_pool_size?: number
   public_url?: string
+  /**
+   * Decoded project paths excluded from every figure Agento reports — the
+   * sessions list, the analytics dashboard and the insight cards alike.
+   */
+  hidden_projects?: string[]
+  /**
+   * Largest gap between two transcript events that still counts as continuous
+   * work when measuring how long a session actually ran. 0 means "not chosen"
+   * and resolves to DEFAULT_IDLE_GAP_MINUTES.
+   */
+  idle_gap_threshold_minutes?: number
 }
+
+/**
+ * Bounds for idle_gap_threshold_minutes, mirroring the Go constants in
+ * internal/config/settings.go. The backend rejects anything outside them.
+ */
+export const DEFAULT_IDLE_GAP_MINUTES = 10
+export const MIN_IDLE_GAP_MINUTES = 1
+export const MAX_IDLE_GAP_MINUTES = 240
 
 export interface SettingsResponse {
   settings: UserSettings
@@ -525,6 +544,12 @@ export interface ClaudeProject {
   encoded_name: string
   decoded_path: string
   session_count: number
+  /**
+   * True when the user has excluded this project from reporting. Only ever set
+   * in a response that asked for hidden projects; every other caller receives
+   * visible projects only.
+   */
+  hidden?: boolean
 }
 
 export interface ClaudeSessionSummary {

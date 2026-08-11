@@ -44,8 +44,8 @@ func TestNewSQLiteDB_MigrationVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("querying version: %v", err)
 	}
-	if version != 24 {
-		t.Errorf("expected version 24, got %d", version)
+	if version != 25 {
+		t.Errorf("expected version 25, got %d", version)
 	}
 }
 
@@ -475,6 +475,61 @@ func TestSQLiteSettingsStore_LoadSave(t *testing.T) {
 	}
 	if got.AppearanceFontFamily != "monospace" {
 		t.Errorf("expected font family 'monospace', got %q", got.AppearanceFontFamily)
+	}
+}
+
+// TestSQLiteSettingsStore_DataAnalytics covers the Data & Analytics fields,
+// which decide what every reported figure covers. The hidden list is stored as
+// JSON, so a round-trip is the only thing that proves the encode/decode pair
+// agree.
+func TestSQLiteSettingsStore_DataAnalytics(t *testing.T) {
+	db := newTestDB(t)
+	store := NewSQLiteSettingsStore(db)
+
+	// A fresh row has neither: no project is hidden, and the threshold reads
+	// as "not chosen" rather than as zero minutes.
+	fresh, err := store.Load()
+	if err != nil {
+		t.Fatalf("load defaults: %v", err)
+	}
+	if len(fresh.HiddenProjects) != 0 {
+		t.Errorf("expected no hidden projects on a fresh load, got %v", fresh.HiddenProjects)
+	}
+	if fresh.IdleGapThresholdMinutes != 0 {
+		t.Errorf("expected an unset threshold on a fresh load, got %d", fresh.IdleGapThresholdMinutes)
+	}
+
+	fresh.HiddenProjects = []string{"/home/me/scratch", "/home/me/experiments"}
+	fresh.IdleGapThresholdMinutes = 25
+	if err := store.Save(fresh); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, err := store.Load()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(got.HiddenProjects) != 2 ||
+		got.HiddenProjects[0] != "/home/me/scratch" ||
+		got.HiddenProjects[1] != "/home/me/experiments" {
+		t.Errorf("hidden projects round-tripped as %v", got.HiddenProjects)
+	}
+	if got.IdleGapThresholdMinutes != 25 {
+		t.Errorf("idle threshold round-tripped as %d, want 25", got.IdleGapThresholdMinutes)
+	}
+
+	// Unhiding everything must clear the list, not leave the previous one
+	// behind: the column is NOT NULL, so an empty save has to write valid JSON.
+	got.HiddenProjects = nil
+	if err := store.Save(got); err != nil {
+		t.Fatalf("save cleared list: %v", err)
+	}
+	cleared, err := store.Load()
+	if err != nil {
+		t.Fatalf("load cleared list: %v", err)
+	}
+	if len(cleared.HiddenProjects) != 0 {
+		t.Errorf("expected no hidden projects after clearing, got %v", cleared.HiddenProjects)
 	}
 }
 
