@@ -89,20 +89,65 @@ func insertTestSession(t *testing.T, db *sql.DB, s testSession) {
 	}
 }
 
+// newPageCache returns a Cache whose rows these tests write directly, with every
+// staleness marker already recorded.
+//
+// All four matter. ListPage, Facets and Analytics call ensureFresh, which starts
+// a background scan if any marker disagrees with the live value — and a scan
+// finding no ~/.claude/projects at all correctly concludes that every cached row
+// describes a deleted transcript and clears the tables. Seeding only
+// last_scanned_at leaves pricing_rev at 0 against TestMain's real catalog
+// revision, so the scan runs anyway and races the assertions: locally it reads
+// the developer's own corpus and usually loses the race, in CI it finds no
+// corpus and reliably wipes the rows out from under the test.
 func newPageCache(t *testing.T) *Cache {
 	t.Helper()
-	// No hidden projects and the default idle threshold, so a test that runs
-	// after one which changed them is not reading the other's state.
+	// No hidden projects, the default idle threshold, and no project list left
+	// published by an earlier test — all three are process-wide, so without this
+	// a test reads whichever one happened to run before it.
 	ApplyDataSettings(0, nil)
+	resetProjectsCache()
+	// An empty HOME as well, so nothing here can read the developer's own
+	// ~/.claude — which is the difference between these tests passing locally
+	// and passing everywhere. Tests that want a corpus set their own HOME and
+	// use newScanCache instead.
+	t.Setenv("HOME", t.TempDir())
 	db := setupTestDB(t)
-	// A fresh scan timestamp: ListPage triggers a rescan when the cache looks
-	// stale, and these tests write their rows directly rather than from disk.
 	if _, err := db.ExecContext(context.Background(),
 		`INSERT INTO claude_cache_metadata (id, last_scanned_at) VALUES (1, ?)`,
 		time.Now().UTC()); err != nil {
 		t.Fatalf("seeding scan metadata: %v", err)
 	}
-	return NewCache(db, testLogger)
+	recordScannerVersion(db, testLogger)
+	recordPricingRevision(db, testLogger, currentPricingRevision())
+	recordIdleThreshold(db, testLogger, IdleGapThreshold().Milliseconds())
+
+	c := NewCache(db, testLogger)
+	if c.pricingChanged() || c.idleThresholdChanged() || !c.isFresh() {
+		t.Fatal("test cache still looks stale; ensureFresh would start a scan and clear these rows")
+	}
+	return c
+}
+
+// newScanCache returns a Cache for tests that drive the scanner themselves.
+//
+// It leaves HOME alone — the caller has pointed it at a generated corpus — and
+// records no staleness markers, because those tests call IncrementalScan
+// directly rather than through ensureFresh and want the scan to run.
+func newScanCache(t *testing.T) *Cache {
+	t.Helper()
+	ApplyDataSettings(0, nil)
+	resetProjectsCache()
+	return NewCache(setupTestDB(t), testLogger)
+}
+
+// resetProjectsCache drops the project list a previous test's scan published.
+// It is process-wide state, and ListProjects prefers it over a live walk.
+func resetProjectsCache() {
+	projectsCache.Lock()
+	defer projectsCache.Unlock()
+	projectsCache.projects = nil
+	projectsCache.loaded = false
 }
 
 func ids(page SessionPage) []string {

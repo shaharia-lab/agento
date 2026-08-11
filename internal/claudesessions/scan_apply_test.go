@@ -52,7 +52,7 @@ func TestIncrementalScan_ParallelReadsWriteEveryRow(t *testing.T) {
 	sessions := scanBatchSize + 37
 	writeCorpus(t, home, sessions)
 
-	c := newPageCache(t)
+	c := newScanCache(t)
 	if _, err := IncrementalScan(c.db, testLogger); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestIncrementalScan_ReportsProgress(t *testing.T) {
 	t.Setenv("HOME", home)
 	transcripts := writeCorpus(t, home, scanBatchSize+5)
 
-	c := newPageCache(t)
+	c := newScanCache(t)
 	type point struct{ done, total int }
 	var seen []point
 	if _, err := IncrementalScanWith(c.db, testLogger, ScanOptions{
@@ -106,7 +106,7 @@ func TestIncrementalScan_NotifiesEachSessionOnce(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeCorpus(t, home, 12)
 
-	c := newPageCache(t)
+	c := newScanCache(t)
 	notified := map[string]int{}
 	newFlag := map[string]bool{}
 	if _, err := IncrementalScanWith(c.db, testLogger, ScanOptions{
@@ -139,7 +139,7 @@ func TestIncrementalScan_DeletesRowsForRemovedTranscripts(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeCorpus(t, home, 4)
 
-	c := newPageCache(t)
+	c := newScanCache(t)
 	if _, err := IncrementalScan(c.db, testLogger); err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
@@ -180,7 +180,7 @@ func TestIncrementalScan_UnreadableTranscriptDoesNotAbortTheScan(t *testing.T) {
 		t.Fatalf("creating unreadable transcript: %v", err)
 	}
 
-	c := newPageCache(t)
+	c := newScanCache(t)
 	if _, err := IncrementalScan(c.db, testLogger); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -196,7 +196,7 @@ func TestListProjects_ServedFromTheScanRatherThanARedundantWalk(t *testing.T) {
 	t.Setenv("HOME", home)
 	writeCorpus(t, home, 3)
 
-	c := newPageCache(t)
+	c := newScanCache(t)
 	if _, err := IncrementalScan(c.db, testLogger); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
