@@ -27,9 +27,6 @@ import {
 import { formatCost, formatTokens, formatDuration, shortPath } from '@/lib/format'
 import {
   filesTouched,
-  hasProse,
-  hasToolUse,
-  messageText,
   outline,
   tailPath,
   toolSummary,
@@ -38,6 +35,11 @@ import {
   type ToolUsage,
   type FileTouch,
 } from '@/lib/transcript'
+import {
+  useTranscriptWindow,
+  type TranscriptFilter,
+  type TranscriptJump,
+} from '@/lib/useTranscriptWindow'
 import { SessionInsightsCard } from './SessionInsightsCard'
 
 /**
@@ -46,8 +48,6 @@ import { SessionInsightsCard } from './SessionInsightsCard'
  * nothing is running.
  */
 const ACTIVE_WINDOW_MS = 10 * 60 * 1000
-
-type TranscriptFilter = 'all' | 'messages' | 'tools'
 
 const FILTER_LABELS: Record<TranscriptFilter, string> = {
   all: 'All',
@@ -356,6 +356,44 @@ function SubagentsCard({ subagents }: Readonly<{ subagents: ClaudeSubagent[] }>)
 }
 
 /**
+ * The end of the rendered window: extends it as it scrolls into view.
+ */
+function TranscriptSentinel({
+  shown,
+  total,
+  onMore,
+}: Readonly<{ shown: number; total: number; onMore: () => void }>) {
+  const ref = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries.some(e => e.isIntersecting)) onMore()
+      },
+      { rootMargin: '600px' },
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [onMore])
+
+  return (
+    <div
+      ref={ref}
+      className="flex items-center justify-center gap-2 py-3.5 text-[12.5px] text-zinc-400 dark:text-zinc-500"
+    >
+      <button
+        type="button"
+        onClick={onMore}
+        className="tabular-nums hover:text-zinc-800 dark:hover:text-zinc-100 transition-colors"
+      >
+        Showing {shown} of {total} events — show more
+      </button>
+    </div>
+  )
+}
+
+/**
  * The transcript itself: search, the All/Messages/Tools filter, expand-all, and
  * the event rows. It owns that state because nothing outside it reads the
  * filter — the sidebar reaches rows through their DOM ids, not through React.
@@ -363,20 +401,22 @@ function SubagentsCard({ subagents }: Readonly<{ subagents: ClaudeSubagent[] }>)
 function TranscriptPanel({
   messages,
   isActive,
-}: Readonly<{ messages: ClaudeMessage[]; isActive: boolean }>) {
-  const [search, setSearch] = useState('')
-  const [filter, setFilter] = useState<TranscriptFilter>('all')
+  jump,
+}: Readonly<{
+  messages: ClaudeMessage[]
+  isActive: boolean
+  /**
+   * The event the sidebar asked to scroll to. The nonce is what makes clicking
+   * the same entry twice scroll twice: the uuid alone would not change.
+   */
+  jump: TranscriptJump | null
+}>) {
   const [defaultOpen, setDefaultOpen] = useState(false)
   const [overrides, setOverrides] = useState<ReadonlyMap<string, boolean>>(() => new Map())
-
-  const visible = useMemo(() => {
-    const q = search.trim().toLowerCase()
-    return messages.filter(m => {
-      if (filter === 'messages' && !hasProse(m)) return false
-      if (filter === 'tools' && !hasToolUse(m)) return false
-      return !q || messageText(m).includes(q)
-    })
-  }, [messages, filter, search])
+  const { search, setSearch, filter, setFilter, visible, shown, showMore } = useTranscriptWindow(
+    messages,
+    jump,
+  )
 
   const isBlockOpen = useCallback(
     (key: string) => overrides.get(key) ?? defaultOpen,
@@ -443,7 +483,7 @@ function TranscriptPanel({
           </p>
         ) : (
           <>
-            {visible.map(msg => (
+            {shown.map(msg => (
               <EventRow
                 key={msg.uuid}
                 msg={msg}
@@ -452,16 +492,20 @@ function TranscriptPanel({
                 onToggleBlock={toggleBlock}
               />
             ))}
-            <div className="flex items-center justify-center gap-2 py-3.5 text-[12.5px] text-zinc-400 dark:text-zinc-500">
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  isActive ? 'bg-emerald-500' : 'bg-zinc-300 dark:bg-zinc-600'
-                }`}
-              />
-              {isActive
-                ? 'Session is live — reload to pick up new events'
-                : `End of transcript · ${visible.length} of ${messages.length} events`}
-            </div>
+            {shown.length < visible.length ? (
+              <TranscriptSentinel shown={shown.length} total={visible.length} onMore={showMore} />
+            ) : (
+              <div className="flex items-center justify-center gap-2 py-3.5 text-[12.5px] text-zinc-400 dark:text-zinc-500">
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    isActive ? 'bg-emerald-500' : 'bg-zinc-300 dark:bg-zinc-600'
+                  }`}
+                />
+                {isActive
+                  ? 'Session is live — reload to pick up new events'
+                  : `End of transcript · ${visible.length} of ${messages.length} events`}
+              </div>
+            )}
           </>
         )}
       </div>
@@ -477,6 +521,7 @@ function SessionSidebar({
   todos,
   subagents,
   sessionId,
+  onJump,
 }: Readonly<{
   timeline: OutlineEntry[]
   tools: ToolUsage[]
@@ -484,6 +529,8 @@ function SessionSidebar({
   todos: ClaudeTodo[]
   subagents: ClaudeSubagent[]
   sessionId?: string
+  /** Asks the transcript to reveal and scroll to an event. */
+  onJump: (uuid: string) => void
 }>) {
   const maxToolCount = tools[0]?.count ?? 0
   return (
@@ -497,11 +544,7 @@ function SessionSidebar({
             {timeline.map(entry => (
               <button
                 key={entry.uuid}
-                onClick={() =>
-                  document
-                    .getElementById(`event-${entry.uuid}`)
-                    ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                }
+                onClick={() => onJump(entry.uuid)}
                 className="grid gap-2.5 items-baseline py-[5px] text-[12.5px] text-left text-zinc-700 dark:text-zinc-300 hover:text-zinc-900 dark:hover:text-zinc-100 transition-colors"
                 style={{ gridTemplateColumns: '52px 1fr' }}
               >
@@ -702,6 +745,15 @@ export default function ClaudeSessionDetailPage() {
   const tools = useMemo(() => toolUsage(messages), [messages])
   const files = useMemo(() => filesTouched(messages), [messages])
   const timeline = useMemo(() => outline(messages), [messages])
+  // The sidebar's timeline scrolls the transcript to an event. It used to reach
+  // the node through the DOM directly; with the transcript windowed the node
+  // may not exist yet, so the request goes through state and the panel widens
+  // its window to include the target before the scroll runs.
+  const [jump, setJump] = useState<TranscriptJump | null>(null)
+  const requestJump = useCallback(
+    (uuid: string) => setJump(prev => ({ uuid, nonce: (prev?.nonce ?? 0) + 1 })),
+    [],
+  )
 
   if (loading) {
     return (
@@ -897,7 +949,7 @@ export default function ClaudeSessionDetailPage() {
           whole body scrolls as one, so nothing is trapped there either. */}
       <div className="flex-1 min-h-0 overflow-y-auto xl:overflow-hidden xl:flex xl:gap-7 px-4 sm:px-7 pt-5 pb-14 xl:pb-5 max-w-[1600px]">
         <div className="min-w-0 xl:flex-1 xl:h-full xl:overflow-y-auto">
-          <TranscriptPanel messages={messages} isActive={isActive} />
+          <TranscriptPanel messages={messages} isActive={isActive} jump={jump} />
         </div>
 
         <div className="mt-6 xl:mt-0 xl:w-[300px] xl:shrink-0 xl:h-full xl:overflow-y-auto">
@@ -908,6 +960,7 @@ export default function ClaudeSessionDetailPage() {
             todos={detail.todos}
             subagents={detail.subagents}
             sessionId={id}
+            onJump={requestJump}
           />
         </div>
       </div>

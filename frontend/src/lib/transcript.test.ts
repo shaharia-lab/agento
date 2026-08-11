@@ -5,6 +5,7 @@ import {
   hasProse,
   hasToolUse,
   messageText,
+  searchIndex,
   outline,
   tailPath,
   toolSummary,
@@ -152,5 +153,41 @@ describe('tailPath', () => {
 
   it('handles Windows separators', () => {
     expect(tailPath('C:\\Users\\u\\src\\pages\\Page.tsx')).toBe('pages/Page.tsx')
+  })
+})
+
+describe('searchIndex', () => {
+  it('is aligned by index with the messages it was built from', () => {
+    const messages = [
+      msg({ content: 'first message' }),
+      msg({ blocks: [tool('Read', { file_path: '/a/b.go' })] }),
+      msg({ content: 'third' }),
+    ]
+    const index = searchIndex(messages)
+    expect(index).toHaveLength(3)
+    // The search box matches against this by position, so a shorter or
+    // reordered array would silently search the wrong message.
+    expect(index[0]).toContain('first message')
+    expect(index[1]).toContain('/a/b.go')
+    expect(index[2]).toContain('third')
+  })
+
+  it('produces exactly what messageText produces', () => {
+    // Built once per transcript instead of once per keystroke per message, so
+    // it has to be the same text — a divergence would make the search find
+    // different results depending on how it was computed.
+    const messages = [
+      msg({ content: 'Hello' }),
+      msg({ blocks: [tool('Bash', { command: 'ls -la' })] }),
+    ]
+    expect(searchIndex(messages)).toEqual(messages.map(messageText))
+  })
+
+  it('lowercases, so the search never has to', () => {
+    expect(searchIndex([msg({ content: 'SHOUTING' })])[0]).toContain('shouting')
+  })
+
+  it('is empty for an empty transcript rather than throwing', () => {
+    expect(searchIndex([])).toEqual([])
   })
 })

@@ -47,21 +47,31 @@ type budget struct {
 	pageBytes int
 }
 
+// The budgets are set roughly an order of magnitude above what this branch
+// measures, so a busy machine passes and a regression that reintroduces a
+// full-corpus load per request does not. Measured on the reference machine:
+//
+//	medium  686 MB / 1,373 transcripts:  scan 2.2s   page  7ms/88 KB  facets 12ms  analytics  18ms/71 KB
+//	large  4.24 GB / 8,376 transcripts:  scan 14.9s  page 30ms/83 KB  facets 87ms  analytics 103ms/83 KB
+//
+// For contrast, the shape this work replaced: the same list was a 1.33 MB bare
+// array at 798 sessions, projecting to ~8.3 MB at 5,000, and an all-time
+// analytics report was 790 KB of daily buckets at any corpus size.
 var budgets = map[string]budget{
 	"small": {
 		name: "small", opts: synthcorpus.Small(),
-		scan: 20 * time.Second, listPage: 250 * time.Millisecond, facets: 250 * time.Millisecond,
+		scan: 30 * time.Second, listPage: 500 * time.Millisecond, facets: 500 * time.Millisecond,
 		analytics: 2 * time.Second, analyticsBytes: 400 << 10, pageBytes: 300 << 10,
 	},
 	"medium": {
 		name: "medium", opts: synthcorpus.Medium(),
-		scan: 3 * time.Minute, listPage: 500 * time.Millisecond, facets: 750 * time.Millisecond,
-		analytics: 5 * time.Second, analyticsBytes: 400 << 10, pageBytes: 300 << 10,
+		scan: 60 * time.Second, listPage: 500 * time.Millisecond, facets: 750 * time.Millisecond,
+		analytics: 3 * time.Second, analyticsBytes: 400 << 10, pageBytes: 300 << 10,
 	},
 	"large": {
 		name: "large", opts: synthcorpus.Large(),
-		scan: 20 * time.Minute, listPage: 1500 * time.Millisecond, facets: 3 * time.Second,
-		analytics: 20 * time.Second, analyticsBytes: 400 << 10, pageBytes: 300 << 10,
+		scan: 3 * time.Minute, listPage: time.Second, facets: 2 * time.Second,
+		analytics: 5 * time.Second, analyticsBytes: 400 << 10, pageBytes: 300 << 10,
 	},
 }
 
