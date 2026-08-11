@@ -66,7 +66,7 @@ func insertTestSession(t *testing.T, db *sql.DB, s testSession) {
 		t.Fatalf("inserting session %s: %v", s.id, err)
 	}
 
-	if s.subInputTokens|s.subOutputTokens != 0 || s.subCostUSD != 0 || s.subActiveMs != 0 {
+	if s.subInputTokens != 0 || s.subOutputTokens != 0 || s.subCostUSD != 0 || s.subActiveMs != 0 {
 		_, err = db.ExecContext(ctx, `
 			INSERT INTO claude_subagent_cache (
 				parent_session_id, agent_id, file_path, file_mtime,
@@ -194,6 +194,50 @@ func TestListPage_TiesArePagedByTheSessionIDTiebreak(t *testing.T) {
 	for id, n := range seen {
 		if n != 1 {
 			t.Errorf("tied session %s returned %d times", id, n)
+		}
+	}
+}
+
+func TestListPage_CostTiesPageExactlyAcrossFractionalValues(t *testing.T) {
+	c := newPageCache(t)
+	// The cost cursor carries Go's Cost.TotalUSD + SubagentCost.TotalUSD while
+	// the keyset predicate compares SQL's c.total_cost_usd + COALESCE(sa.tc, 0).
+	// The tiebreak is an equality on that value, so the two sums have to agree
+	// to the bit — a coupling only fractional, delegated costs exercise, since
+	// whole dollars round-trip through any arithmetic unchanged.
+	const perSession = 36.30 // 12.05 main thread + 24.25 delegated
+	for i := range 7 {
+		insertTestSession(t, c.db, testSession{
+			id: fmt.Sprintf("frac-%d", i), costUSD: 12.05, subCostUSD: 24.25,
+		})
+	}
+
+	seen := map[string]int{}
+	cursor := ""
+	for {
+		page, err := c.ListPage(SessionQuery{Sort: SortCost, Limit: 3, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("paging: %v", err)
+		}
+		for _, s := range page.Items {
+			seen[s.SessionID]++
+			if got := s.TotalCost().TotalUSD; math.Abs(got-perSession) > 1e-9 {
+				t.Errorf("session %s totals %v, want %v", s.SessionID, got, perSession)
+			}
+		}
+		if !page.HasMore {
+			break
+		}
+		cursor = page.NextCursor
+	}
+
+	if len(seen) != 7 {
+		t.Errorf("saw %d of 7 sessions; a cursor value that does not match the SQL sum "+
+			"skips the row it points at", len(seen))
+	}
+	for id, n := range seen {
+		if n != 1 {
+			t.Errorf("session %s returned %d times", id, n)
 		}
 	}
 }

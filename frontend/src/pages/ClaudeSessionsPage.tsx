@@ -275,6 +275,12 @@ export default function ClaudeSessionsPage() {
   const [scanning, setScanning] = useState(false)
   const [scanProgress, setScanProgress] = useState({ done: 0, total: 0 })
   const wasPending = useRef(false)
+  // Held in a ref so the poll below can call the current reload without
+  // depending on its identity: reload changes whenever the filter or the sort
+  // does, and an effect keyed on it would tear the poll down and start a fresh
+  // one — an extra request and a reset timer — on every filter change.
+  const reloadRef = useRef(reload)
+  reloadRef.current = reload
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
@@ -293,7 +299,7 @@ export default function ClaudeSessionsPage() {
       const pending = status.costs_stale || status.scan_in_progress
       // Tracked in a ref, not read out of the state updater: an updater must
       // stay pure, and React may invoke it twice in development.
-      if (wasPending.current && !pending) reload()
+      if (wasPending.current && !pending) reloadRef.current()
       wasPending.current = pending
       setScanning(status.scan_in_progress)
       setScanProgress({ done: status.files_done ?? 0, total: status.files_total ?? 0 })
@@ -306,7 +312,7 @@ export default function ClaudeSessionsPage() {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [reload])
+  }, [])
 
   const handleRefresh = async () => {
     setRefreshing(true)
@@ -357,7 +363,10 @@ export default function ClaudeSessionsPage() {
   // rather than from four passes over the loaded rows: a page is a page, and
   // deriving "does any session have a PR" from fifty of five thousand would
   // hide the control from most users most of the time.
-  const hasFavorites = facets?.has_favorites ?? false
+  // The loaded rows are consulted as well as the aggregate: starring the first
+  // session in a corpus must reveal the toggle immediately, and the facets are
+  // not refetched for a star.
+  const hasFavorites = (facets?.has_favorites ?? false) || sessions.some(s => s.is_favorite)
   const hasPRs = facets?.has_prs ?? false
   const permissionModes = facets?.permission_modes ?? []
   const models = facets?.models ?? []

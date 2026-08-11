@@ -154,13 +154,21 @@ func cursorValue(s ClaudeSessionSummary, sort SessionSort) string {
 // bound are all SQL, so the cost is one indexed range scan rather than a full
 // table read plus an in-memory pass per filter.
 //
-// It triggers a background rescan on the same conditions List does but never
-// waits for one, not even on a cold cache. An empty first page during a scan is
-// reported as "scanning" by GET /claude-sessions/status, which the list already
-// polls — blocking the request instead would mean a first-run user on a large
-// corpus waits out the whole scan and then times out anyway.
+// The first page of a scroll triggers a background rescan on the same
+// conditions List does, but never waits for one, not even on a cold cache: an
+// empty first page during a scan is reported as "scanning" by
+// GET /claude-sessions/status, which the list already polls, and blocking
+// instead would mean a first-run user on a large corpus waits out the whole
+// scan and then times out anyway.
+//
+// A continuation — a request carrying a cursor — deliberately skips that check.
+// Freshness is a property of the scroll, decided when it starts; re-deciding it
+// per page would put four metadata queries behind every scroll tick to reach a
+// conclusion the first page already reached.
 func (c *Cache) ListPage(q SessionQuery) (SessionPage, error) {
-	c.ensureFresh()
+	if q.Cursor == "" {
+		c.ensureFresh()
+	}
 	return listSessionPage(c.db, c.logger, q)
 }
 

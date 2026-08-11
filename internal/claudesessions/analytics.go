@@ -226,8 +226,14 @@ type ProjectStat struct {
 	FoldedProjects int `json:"folded_projects,omitempty"`
 }
 
-// ProjectDayActivity is one project's activity on one local day, for the
-// "what did I work on when" strip.
+// ProjectDayActivity is one project's activity in one local time bucket, for
+// the "what did I work on when" strip.
+//
+// Named for the day because that is what it is at every window a reader
+// normally looks at; the bucket follows the report's granularity, so a
+// multi-year window aggregates by week or month. Following it rather than
+// staying daily is what bounds the strip: at eight charted projects a six-year
+// daily window would emit ~16,000 cells.
 type ProjectDayActivity struct {
 	Project  string  `json:"project"`
 	Date     string  `json:"date"`
@@ -849,8 +855,9 @@ func foldProjectTail(ranked []ProjectStat) []ProjectStat {
 	return append(head, other)
 }
 
-// buildProjectActivity is the project×day strip: which projects were worked on
-// which days, for the busiest projects in the window.
+// buildProjectActivity is the project×bucket strip: which projects were worked
+// on when, for the busiest projects in the window. The bucket is the report's
+// own granularity, so the strip cannot grow without bound as the window does.
 func buildProjectActivity(
 	sessions []ClaudeSessionSummary, ranked []ProjectStat, granularity string, loc *time.Location,
 ) []ProjectDayActivity {

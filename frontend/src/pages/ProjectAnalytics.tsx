@@ -75,11 +75,16 @@ function ProjectTable({ projects }: Readonly<{ projects: ProjectStat[] }>) {
 }
 
 /**
- * A project × day strip: one row per project, one cell per day, shaded by that
- * day's spend.
+ * A project × time strip: one row per project, one cell per bucket, shaded by
+ * that bucket's spend.
  *
- * Spend rather than session count, because a day with one expensive session is
- * the day a reader is looking for. The scale is per-strip so the busiest cell
+ * The bucket is whatever granularity the report was built at — a day at the
+ * windows a reader normally looks at, a week or a month on a multi-year one,
+ * which is what keeps the strip from growing with the calendar. The cells are
+ * laid out from the dates actually present, so no width is assumed here.
+ *
+ * Spend rather than session count, because a bucket with one expensive session
+ * is the one a reader is looking for. The scale is per-strip so the busiest cell
  * is always full-strength; comparing absolute shades across two different
  * windows is not something this chart claims to support.
  */
