@@ -1,12 +1,19 @@
-import { useState, useEffect, useCallback, useMemo } from 'react'
-import { Eye, EyeOff, Search } from 'lucide-react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { Search, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import { Checkbox } from '@/components/ui/checkbox'
 import { settingsApi, claudeSessionsApi } from '@/lib/api'
 import type { SettingsResponse, ClaudeProject } from '@/types'
 import { DEFAULT_IDLE_GAP_MINUTES, MIN_IDLE_GAP_MINUTES, MAX_IDLE_GAP_MINUTES } from '@/types'
+
+/**
+ * How many matches the picker renders at once. A corpus can hold several
+ * hundred projects, so the list is a set of suggestions to choose from rather
+ * than an inventory to scroll: past a handful, typing one more character beats
+ * any amount of scrolling, and the count of what was left out says so.
+ */
+const MAX_SUGGESTIONS = 8
 
 /**
  * Data & Analytics settings: which projects Agento reports on, and what counts
@@ -16,17 +23,24 @@ import { DEFAULT_IDLE_GAP_MINUTES, MIN_IDLE_GAP_MINUTES, MAX_IDLE_GAP_MINUTES } 
  * says in a line what it does — and the idle threshold additionally says that
  * saving it recomputes stored figures, because that takes time and the user
  * would otherwise see durations shift with no explanation.
+ *
+ * Exclusions are shown as a list of exceptions with a search box to add to it,
+ * not as a checkbox per project: hiding a project is rare and a corpus can hold
+ * hundreds, so the useful question is "what am I leaving out" rather than "here
+ * is everything you have, find the two you meant".
  */
 export default function DataAnalyticsTab() {
   const [resp, setResp] = useState<SettingsResponse | null>(null)
   const [projects, setProjects] = useState<ClaudeProject[]>([])
-  const [hidden, setHidden] = useState<Set<string>>(new Set())
+  const [hidden, setHidden] = useState<string[]>([])
   const [idleGap, setIdleGap] = useState(DEFAULT_IDLE_GAP_MINUTES)
-  const [filter, setFilter] = useState('')
+  const [query, setQuery] = useState('')
+  const [pickerOpen, setPickerOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const pickerRef = useRef<HTMLDivElement>(null)
 
   const showToast = (msg: string) => {
     setToast(msg)
@@ -35,15 +49,15 @@ export default function DataAnalyticsTab() {
 
   const load = useCallback(async () => {
     try {
-      // include_hidden: the list must offer every project, or an already
-      // hidden one could never be unhidden from here.
+      // include_hidden: the picker must know about every project, or one that
+      // is already excluded could never be found and restored from here.
       const [settings, allProjects] = await Promise.all([
         settingsApi.get(),
         claudeSessionsApi.projects(true),
       ])
       setResp(settings)
       setProjects(allProjects)
-      setHidden(new Set(settings.settings.hidden_projects ?? []))
+      setHidden(settings.settings.hidden_projects ?? [])
       setIdleGap(settings.settings.idle_gap_threshold_minutes || DEFAULT_IDLE_GAP_MINUTES)
     } catch {
       setError('Failed to load data settings')
@@ -56,40 +70,38 @@ export default function DataAnalyticsTab() {
     load()
   }, [load])
 
-  const toggleProject = (path: string) => {
-    setHidden(prev => {
-      const next = new Set(prev)
-      if (next.has(path)) {
-        next.delete(path)
-      } else {
-        next.add(path)
-      }
-      return next
-    })
+  // Clicking away closes the suggestions. Without this the list stays open over
+  // the rest of the form after a selection is made elsewhere on the page.
+  useEffect(() => {
+    if (!pickerOpen) return
+    const onPointerDown = (e: MouseEvent) => {
+      if (!pickerRef.current?.contains(e.target as Node)) setPickerOpen(false)
+    }
+    document.addEventListener('mousedown', onPointerDown)
+    return () => document.removeEventListener('mousedown', onPointerDown)
+  }, [pickerOpen])
+
+  const sessionCounts = useMemo(
+    () => new Map(projects.map(p => [p.decoded_path, p.session_count])),
+    [projects],
+  )
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    const excluded = new Set(hidden)
+    const candidates = projects.filter(
+      p => !excluded.has(p.decoded_path) && (!q || p.decoded_path.toLowerCase().includes(q)),
+    )
+    return { shown: candidates.slice(0, MAX_SUGGESTIONS), total: candidates.length }
+  }, [projects, hidden, query])
+
+  const exclude = (path: string) => {
+    setHidden(prev => (prev.includes(path) ? prev : [...prev, path]))
+    setQuery('')
+    setPickerOpen(false)
   }
 
-  const filtered = useMemo(() => {
-    const q = filter.trim().toLowerCase()
-    if (!q) return projects
-    return projects.filter(p => p.decoded_path.toLowerCase().includes(q))
-  }, [projects, filter])
-
-  // Bulk actions apply to what is on screen, not to everything: with a filter
-  // active, "Hide all" that also swept away projects the user cannot see would
-  // be a change they did not ask for and cannot review.
-  const setAllVisible = (visible: boolean) => {
-    setHidden(prev => {
-      const next = new Set(prev)
-      for (const p of filtered) {
-        if (visible) {
-          next.delete(p.decoded_path)
-        } else {
-          next.add(p.decoded_path)
-        }
-      }
-      return next
-    })
-  }
+  const include = (path: string) => setHidden(prev => prev.filter(p => p !== path))
 
   const idleGapChanged =
     (resp?.settings.idle_gap_threshold_minutes || DEFAULT_IDLE_GAP_MINUTES) !== idleGap
@@ -103,7 +115,7 @@ export default function DataAnalyticsTab() {
     try {
       const updated = await settingsApi.update({
         ...resp?.settings,
-        hidden_projects: [...hidden],
+        hidden_projects: hidden,
         idle_gap_threshold_minutes: idleGap,
       })
       setResp(updated)
@@ -172,84 +184,133 @@ export default function DataAnalyticsTab() {
         )}
       </div>
 
-      {/* Hidden projects */}
+      {/* Excluded projects */}
       <div className="flex flex-col gap-1.5">
-        <Label className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
-          Visible Projects
+        <Label
+          htmlFor="project-search"
+          className="text-sm font-medium text-zinc-700 dark:text-zinc-300"
+        >
+          Excluded Projects
         </Label>
         <p className="text-xs text-zinc-400">
-          Unchecked projects are excluded everywhere: their sessions disappear from the list, and
-          their tokens, costs and metrics are left out of every chart and total. Nothing is deleted
-          — re-checking a project brings its data straight back.
+          Sessions from these projects disappear from the list, and their tokens, costs and metrics
+          are left out of every chart and total. Nothing is deleted — removing a project from this
+          list brings its data straight back.
         </p>
 
-        {projects.length === 0 ? (
-          <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">
-            No Claude Code projects found in ~/.claude/projects.
-          </p>
-        ) : (
-          <>
-            <div className="mt-2 flex items-center gap-2">
-              <div className="relative flex-1">
-                <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400 pointer-events-none" />
-                <Input
-                  value={filter}
-                  onChange={e => setFilter(e.target.value)}
-                  placeholder="Filter projects"
-                  aria-label="Filter projects"
-                  className="pl-8 text-sm"
-                />
-              </div>
-              <Button variant="outline" size="sm" onClick={() => setAllVisible(true)}>
-                <Eye className="h-3.5 w-3.5 mr-1.5" />
-                Show all
-              </Button>
-              <Button variant="outline" size="sm" onClick={() => setAllVisible(false)}>
-                <EyeOff className="h-3.5 w-3.5 mr-1.5" />
-                Hide all
-              </Button>
-            </div>
+        <div ref={pickerRef} className="relative mt-2">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400 pointer-events-none" />
+          <Input
+            id="project-search"
+            value={query}
+            onChange={e => {
+              setQuery(e.target.value)
+              setPickerOpen(true)
+            }}
+            onFocus={() => setPickerOpen(true)}
+            onKeyDown={e => {
+              if (e.key === 'Escape') setPickerOpen(false)
+              // Enter takes the top match, so excluding a project you can name
+              // never requires reaching for the mouse.
+              if (e.key === 'Enter' && matches.shown.length > 0) {
+                e.preventDefault()
+                exclude(matches.shown[0].decoded_path)
+              }
+            }}
+            placeholder={
+              projects.length === 0
+                ? 'No Claude Code projects found in ~/.claude/projects'
+                : 'Search a project to exclude…'
+            }
+            disabled={projects.length === 0}
+            className="pl-8 text-sm"
+            role="combobox"
+            aria-expanded={pickerOpen}
+            aria-controls="project-suggestions"
+            autoComplete="off"
+          />
 
-            <div className="mt-2 max-h-80 overflow-y-auto rounded-md border border-zinc-200 dark:border-zinc-700">
-              {filtered.map(project => {
-                const isHidden = hidden.has(project.decoded_path)
-                return (
-                  <label
-                    key={project.decoded_path}
-                    className="flex cursor-pointer items-center gap-3 border-b border-zinc-100 px-3 py-2 last:border-b-0 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/50"
-                  >
-                    <Checkbox
-                      checked={!isHidden}
-                      onCheckedChange={() => toggleProject(project.decoded_path)}
-                      aria-label={`Include ${project.decoded_path} in analytics`}
-                    />
-                    <span
-                      className={`flex-1 truncate font-mono text-xs ${
-                        isHidden
-                          ? 'text-zinc-400 line-through dark:text-zinc-600'
-                          : 'text-zinc-700 dark:text-zinc-300'
-                      }`}
-                      title={project.decoded_path}
-                    >
-                      {project.decoded_path}
-                    </span>
-                    <span className="shrink-0 text-xs text-zinc-400">
-                      {project.session_count} session{project.session_count === 1 ? '' : 's'}
-                    </span>
-                  </label>
-                )
-              })}
-              {filtered.length === 0 && (
-                <p className="px-3 py-4 text-sm text-zinc-500 dark:text-zinc-400">
-                  No project matches “{filter}”.
+          {pickerOpen && projects.length > 0 && (
+            <div
+              id="project-suggestions"
+              role="listbox"
+              className="absolute z-20 mt-1 w-full overflow-hidden rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+            >
+              {matches.shown.map(project => (
+                <button
+                  key={project.decoded_path}
+                  type="button"
+                  role="option"
+                  aria-selected={false}
+                  onClick={() => exclude(project.decoded_path)}
+                  className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-zinc-50 dark:hover:bg-zinc-800"
+                >
+                  <span className="flex-1 truncate font-mono text-xs text-zinc-700 dark:text-zinc-300">
+                    {project.decoded_path}
+                  </span>
+                  <span className="shrink-0 text-xs text-zinc-400">
+                    {project.session_count} session{project.session_count === 1 ? '' : 's'}
+                  </span>
+                </button>
+              ))}
+
+              {matches.total === 0 && (
+                <p className="px-3 py-2 text-xs text-zinc-500 dark:text-zinc-400">
+                  {query.trim()
+                    ? `No project matches “${query.trim()}”.`
+                    : 'Every project is already excluded.'}
+                </p>
+              )}
+
+              {matches.total > matches.shown.length && (
+                <p className="border-t border-zinc-100 px-3 py-1.5 text-xs text-zinc-400 dark:border-zinc-800">
+                  {matches.total - matches.shown.length} more — keep typing to narrow it down.
                 </p>
               )}
             </div>
-            <p className="mt-1 text-xs text-zinc-400">
-              {hidden.size === 0
-                ? `All ${projects.length} projects included.`
-                : `${hidden.size} of ${projects.length} projects excluded.`}
-            </p>
+          )}
+        </div>
+
+        {hidden.length === 0 ? (
+          <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+            Nothing is excluded: every project counts towards the figures Agento reports.
+          </p>
+        ) : (
+          <>
+            <ul className="mt-2 divide-y divide-zinc-100 rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-700">
+              {hidden.map(path => (
+                <li key={path} className="flex items-center gap-3 px-3 py-2">
+                  <span
+                    className="flex-1 truncate font-mono text-xs text-zinc-700 dark:text-zinc-300"
+                    title={path}
+                  >
+                    {path}
+                  </span>
+                  {/* A path with no count is one that is no longer on disk. It
+                      stays listed so it can still be removed. */}
+                  <span className="shrink-0 text-xs text-zinc-400">
+                    {sessionCounts.has(path)
+                      ? `${sessionCounts.get(path)} session${sessionCounts.get(path) === 1 ? '' : 's'}`
+                      : 'not found on disk'}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => include(path)}
+                    aria-label={`Stop excluding ${path}`}
+                    className="shrink-0 rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <button
+              type="button"
+              onClick={() => setHidden([])}
+              className="mt-1 self-start text-xs text-zinc-500 underline-offset-2 hover:underline dark:text-zinc-400"
+            >
+              Clear all {hidden.length} exclusions
+            </button>
           </>
         )}
       </div>
