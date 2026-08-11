@@ -431,34 +431,74 @@ func IncrementalScanWithNotify(
 		return nil, err
 	}
 
-	// A scanner-version bump means the cached rows are missing data the current
-	// reader extracts, so mtime comparison would wrongly report them unchanged.
-	// Dropping the cached set makes every file look new for exactly one scan.
-	staleReader := storedScannerVersion(db) < CurrentScannerVersion
-	liveRev, stalePricing := pricingStaleness(db)
-	liveIdleMs, staleIdle := idleThresholdStaleness(db)
-
-	if staleReader || stalePricing || staleIdle {
-		invalidateCachedMtimes(cached, logger, staleReader, stalePricing, staleIdle)
-	}
-	if staleIdle {
-		invalidateInsightsForIdleThreshold(db, logger)
-	}
+	stale := detectStaleness(db)
+	stale.invalidate(db, cached, logger)
 
 	diff := diffDiskAndCache(onDisk, cached)
 	applyChangesWithNotify(db, logger, onDisk, diff, notify)
 
 	updateLastScanned(db, logger)
-	if staleReader {
+	stale.record(db, logger)
+	return loadAllSessions(db, logger)
+}
+
+// cacheStaleness collects every reason the cached rows may no longer describe
+// what the current code would produce from the same files. All three share one
+// remedy — re-read every transcript, since no file mtime changed — and one
+// ordering rule: the new marker is written only after the re-read that earns
+// it, so a failed scan leaves the drift recorded and retryable.
+type cacheStaleness struct {
+	// reader is a CurrentScannerVersion bump: cached rows are missing data the
+	// current reader extracts, so mtime comparison wrongly reports them
+	// unchanged.
+	reader bool
+	// pricing is a catalog edit (#188 stores cost per row, so a rate change
+	// reaches nothing on its own).
+	pricing    bool
+	pricingRev int64
+	// idle is a change to the user's idle-gap threshold, which redefines every
+	// stored active duration and the insight rows derived from them.
+	idle   bool
+	idleMs int64
+}
+
+func detectStaleness(db *sql.DB) cacheStaleness {
+	rev, stalePricing := pricingStaleness(db)
+	idleMs, staleIdle := idleThresholdStaleness(db)
+	return cacheStaleness{
+		reader:     storedScannerVersion(db) < CurrentScannerVersion,
+		pricing:    stalePricing,
+		pricingRev: rev,
+		idle:       staleIdle,
+		idleMs:     idleMs,
+	}
+}
+
+func (s cacheStaleness) any() bool { return s.reader || s.pricing || s.idle }
+
+// invalidate forces the re-read each kind of staleness needs, plus the insight
+// reprocessing that only a threshold change implies.
+func (s cacheStaleness) invalidate(db *sql.DB, cached map[string]cachedEntry, logger *slog.Logger) {
+	if !s.any() {
+		return
+	}
+	invalidateCachedMtimes(cached, logger, s.reader, s.pricing, s.idle)
+	if s.idle {
+		invalidateInsightsForIdleThreshold(db, logger)
+	}
+}
+
+// record stores the markers the next scan compares against.
+func (s cacheStaleness) record(db *sql.DB, logger *slog.Logger) {
+	if s.reader {
 		recordScannerVersion(db, logger)
 	}
-	if stalePricing {
-		recordPricingRevision(db, logger, liveRev)
+	if s.pricing {
+		recordPricingRevision(db, logger, s.pricingRev)
 	}
-	if staleIdle {
-		recordIdleThreshold(db, logger, liveIdleMs)
+	if s.idle {
+		recordIdleThreshold(db, logger, s.idleMs)
 	}
-	return loadAllSessions(db, logger)
 }
 
 // invalidateCachedMtimes zeroes every cached mtime so the next diff treats all
