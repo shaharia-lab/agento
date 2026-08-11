@@ -179,6 +179,7 @@ func (s *Server) mountExtensionRoutes(r chi.Router) {
 // mountClaudeSessionRoutes registers Claude Code session and analytics routes.
 func (s *Server) mountClaudeSessionRoutes(r chi.Router) {
 	r.Get("/claude-sessions", s.handleListClaudeSessions)
+	r.Get("/claude-sessions/facets", s.handleGetClaudeSessionFacets)
 	r.Get("/claude-sessions/projects", s.handleListClaudeProjects)
 	r.Post("/claude-sessions/refresh", s.handleRefreshClaudeSessionCache)
 	r.Get("/claude-sessions/status", s.handleGetClaudeSessionStatus)

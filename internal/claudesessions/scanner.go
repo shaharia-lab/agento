@@ -1292,11 +1292,10 @@ func updateLastScanned(db *sql.DB, logger *slog.Logger) {
 	}
 }
 
-// sessionSummarySelect loads every cached session with its sub-agent roll-up
-// folded in. The aggregate is a grouped sub-select rather than a join against
-// the raw rows so a session with several sub-agents is not multiplied out, and
-// COALESCE keeps the LEFT JOIN's NULLs from reaching the int scans.
-const sessionSummaryFrom = `
+// sessionSummaryColumns is the projection every reader of a session summary
+// shares, so the list, the detail page and the paged query cannot drift into
+// reporting different figures for the same row.
+const sessionSummaryColumns = `
 	SELECT c.session_id, c.project_path, c.preview, c.custom_title, c.is_favorite,
 	       c.start_time, c.last_activity, c.message_count, c.event_count,
 	       c.input_tokens, c.output_tokens, c.cache_creation_tokens, c.cache_read_tokens,
@@ -1313,7 +1312,17 @@ const sessionSummaryFrom = `
 	       COALESCE(sa.c5m, 0), COALESCE(sa.c1h, 0),
 	       COALESCE(sa.ic, 0), COALESCE(sa.oc, 0), COALESCE(sa.crc, 0),
 	       COALESCE(sa.cwc, 0), COALESCE(sa.tc, 0), COALESCE(sa.ut, 0),
-	       COALESCE(sa.um, ''), COALESCE(sa.adm, 0)
+	       COALESCE(sa.um, ''), COALESCE(sa.adm, 0)`
+
+// sessionSummarySource is the FROM/JOIN half, split out so an aggregate can
+// reuse it without the projection.
+//
+// The sub-agent roll-up is a grouped sub-select rather than a join against the
+// raw rows so a session with several sub-agents is not multiplied out, and
+// COALESCE keeps the LEFT JOIN's NULLs from reaching the int scans. Its column
+// aliases (it, ot, tc, adm, …) are what session_query.go's metric expressions
+// are written against.
+const sessionSummarySource = `
 	FROM claude_session_cache c
 	LEFT JOIN (
 		SELECT parent_session_id,
@@ -1337,6 +1346,9 @@ const sessionSummaryFrom = `
 		FROM claude_subagent_cache
 		GROUP BY parent_session_id
 	) sa ON sa.parent_session_id = c.session_id`
+
+// sessionSummaryFrom is the full unfiltered projection.
+const sessionSummaryFrom = sessionSummaryColumns + sessionSummarySource
 
 const sessionSummarySelect = sessionSummaryFrom + `
 	ORDER BY c.last_activity DESC`
@@ -1558,10 +1570,21 @@ type timeRange struct {
 	last  time.Time
 }
 
+// update widens the range to include ts, normalized to UTC.
+//
+// The normalization is what makes the stored bounds orderable. SQLite holds
+// them as the driver's rendering of time.Time — "2026-08-11 07:54:00.097 +0000
+// UTC" — and both the ORDER BY behind the sessions list and the keyset
+// predicate behind its pagination compare that as text. Lexical order matches
+// chronological order only while every value carries the same zone suffix, so a
+// transcript written with a non-UTC offset would sort itself into the wrong
+// place. Claude Code writes Z-suffixed timestamps, so in practice this changes
+// no stored value — which is why it needs no scanner-version bump.
 func (tr *timeRange) update(ts time.Time) {
 	if ts.IsZero() {
 		return
 	}
+	ts = ts.UTC()
 	if tr.start.IsZero() || ts.Before(tr.start) {
 		tr.start = ts
 	}

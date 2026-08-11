@@ -275,15 +275,7 @@ func (c *Cache) LastScannedAt() time.Time {
 // made rate edits a routine UI action. Callers distinguish the two states via
 // CostsStale/ScanInProgress and label the figures rather than stalling on them.
 func (c *Cache) List() []ClaudeSessionSummary {
-	// A rate edit must not wait for the hourly TTL to reach the cost figures,
-	// so pick up a new catalog snapshot before deciding anything.
-	c.refreshPricingResolver()
-
-	var done <-chan struct{}
-	if !c.isFresh() || c.pricingChanged() || c.idleThresholdChanged() {
-		done = c.EnsureScan()
-	}
-
+	done := c.ensureFresh()
 	sessions := c.loadOrEmpty()
 	if len(sessions) > 0 || done == nil {
 		return sessions
@@ -300,6 +292,25 @@ func (c *Cache) List() []ClaudeSessionSummary {
 			"waited", coldStartScanWait)
 		return sessions
 	}
+}
+
+// ensureFresh picks up a new pricing catalog and starts a background rescan if
+// the cached figures were computed under different inputs than the ones now
+// configured. It returns the channel of the in-flight scan, or nil when nothing
+// needed rescanning; it never waits.
+//
+// Every read path goes through it — the corpus load behind analytics and the
+// paged list alike — so a rate edit or a threshold change reaches the figures
+// whichever surface the user happens to open, and so the "one scan at a time"
+// admission is decided in one place.
+func (c *Cache) ensureFresh() <-chan struct{} {
+	// A rate edit must not wait for the hourly TTL to reach the cost figures,
+	// so pick up a new catalog snapshot before deciding anything.
+	c.refreshPricingResolver()
+	if !c.isFresh() || c.pricingChanged() || c.idleThresholdChanged() {
+		return c.EnsureScan()
+	}
+	return nil
 }
 
 // loadOrEmpty reads the cached rows, degrading to an empty slice on error so

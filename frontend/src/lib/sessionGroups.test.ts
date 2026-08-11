@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { ClaudeSessionSummary } from '../types'
-import { dayLabel, groupSessionsByDay, tokenBarReference } from './sessionGroups'
+import { dayLabel, groupSessionsByDay } from './sessionGroups'
 
 const zeroUsage = {
   input_tokens: 0,
@@ -40,30 +40,6 @@ function session(over: Partial<ClaudeSessionSummary> = {}): ClaudeSessionSummary
 
 /** Local noon, so the assertions never straddle a UTC day boundary. */
 const at = (y: number, m: number, d: number, h = 12) => new Date(y, m - 1, d, h).toISOString()
-
-describe('tokenBarReference', () => {
-  const withTokens = (n: number) =>
-    session({ usage: { ...zeroUsage, input_tokens: n, output_tokens: 0 } })
-
-  it('ignores a lone outlier so the rest stay visible', () => {
-    const rows = [
-      ...Array(9)
-        .fill(0)
-        .map(() => withTokens(100_000)),
-      withTokens(75_000_000),
-    ]
-    // p90 of the sorted list, not the 75M maximum.
-    expect(tokenBarReference(rows)).toBe(100_000)
-  })
-
-  it('is zero for an empty list, so callers draw no bar', () => {
-    expect(tokenBarReference([])).toBe(0)
-  })
-
-  it('handles a single session', () => {
-    expect(tokenBarReference([withTokens(5_000)])).toBe(5_000)
-  })
-})
 
 describe('dayLabel', () => {
   const now = new Date(2026, 7, 9, 15) // Sun 9 Aug 2026, local

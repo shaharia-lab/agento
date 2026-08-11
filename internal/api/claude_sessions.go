@@ -2,7 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,40 +15,188 @@ import (
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 )
 
-// handleListClaudeSessions returns all Claude Code sessions with optional filtering.
-// Query params:
-//   - project: filter by decoded project path (exact match)
-//   - q: search by session ID prefix or preview text (case-insensitive substring)
+// handleListClaudeSessions returns one page of Claude Code sessions.
+//
+// It used to return every session as a bare, unpaginated array and leave the
+// browser to filter, sort, group and render all of them. That shipped 1.33 MB
+// and ~54k DOM nodes on the reference corpus and projected to ~8.3 MB and
+// ~340k nodes at 5,000 sessions, where a single keystroke in the search box
+// freezes the tab for seconds. Every predicate the client applied is now SQL,
+// and the response is an envelope carrying one keyset-paged page.
+//
+// See sessionQueryFromRequest for the parameters.
 func (s *Server) handleListClaudeSessions(w http.ResponseWriter, r *http.Request) {
-	sessions := s.claudeSessionCache.List()
-
-	project := r.URL.Query().Get("project")
-	if project != "" {
-		var filtered []claudesessions.ClaudeSessionSummary
-		for _, sess := range sessions {
-			if sess.ProjectPath == project {
-				filtered = append(filtered, sess)
-			}
+	q, err := sessionQueryFromRequest(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	page, err := s.claudeSessionCache.ListPage(q)
+	if err != nil {
+		if errors.Is(err, claudesessions.ErrCursorMismatch) {
+			s.writeError(w, http.StatusBadRequest, err.Error())
+			return
 		}
-		sessions = filtered
+		s.logger.Error("list claude sessions failed", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "failed to list sessions")
+		return
 	}
+	s.writeJSON(w, http.StatusOK, page)
+}
 
-	q := strings.ToLower(r.URL.Query().Get("q"))
-	if q != "" {
-		var filtered []claudesessions.ClaudeSessionSummary
-		for _, sess := range sessions {
-			if strings.Contains(strings.ToLower(sess.SessionID), q) ||
-				strings.Contains(strings.ToLower(sess.Preview), q) {
-				filtered = append(filtered, sess)
-			}
+// handleGetClaudeSessionFacets returns the aggregate a single page cannot
+// answer: the totals across the whole filtered set, and the options the filter
+// controls offer.
+//
+// A separate endpoint rather than a field on the page, because the two have
+// different lifetimes: the totals change when the filter changes, the pages
+// change as the user scrolls, and folding them together would recompute a
+// corpus-wide aggregate on every scroll tick.
+func (s *Server) handleGetClaudeSessionFacets(w http.ResponseWriter, r *http.Request) {
+	q, err := sessionQueryFromRequest(r)
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	facets, err := s.claudeSessionCache.Facets(q)
+	if err != nil {
+		s.logger.Error("claude session facets failed", "error", err)
+		s.writeError(w, http.StatusInternalServerError, "failed to compute facets")
+		return
+	}
+	s.writeJSON(w, http.StatusOK, facets)
+}
+
+// sessionQueryFromRequest reads the sessions list's filter, sort and page
+// parameters. Both the list and the facets endpoint parse through it, so the
+// counter in the toolbar and the rows below it are always describing the same
+// predicate.
+//
+// Query params:
+//
+//	project           decoded project path, exact match
+//	q                 case-insensitive substring over ID, titles, preview, path
+//	favorites         "true" to keep only starred sessions
+//	links             "with" | "without"
+//	permission_mode   exact match
+//	model             exact match
+//	messages_min/max  inclusive bounds on conversational turns
+//	duration_min/max  inclusive bounds on active duration, in minutes
+//	tokens_in_min/max, tokens_out_min/max, cost_min/max
+//	from, to          RFC3339; bound the session's activity window by overlap
+//	windows           "fromMs-toMs,…" drill-down windows; replaces from/to
+//	sort              recent | cost | tokens | duration | messages
+//	limit             page size, clamped to MaxPageSize
+//	cursor            continues a previous page
+//
+// A malformed numeric bound is ignored rather than rejected: these arrive from
+// number inputs a user is mid-way through typing, and refusing the request
+// would blank the list between keystrokes.
+func sessionQueryFromRequest(r *http.Request) (claudesessions.SessionQuery, error) {
+	v := r.URL.Query()
+	q := claudesessions.SessionQuery{
+		Project:         v.Get("project"),
+		Search:          v.Get("q"),
+		FavoritesOnly:   v.Get("favorites") == "true",
+		Links:           claudesessions.LinkFilter(v.Get("links")),
+		PermissionMode:  v.Get("permission_mode"),
+		Model:           v.Get("model"),
+		Messages:        numericRange(v, "messages"),
+		DurationMinutes: numericRange(v, "duration"),
+		TokensIn:        numericRange(v, "tokens_in"),
+		TokensOut:       numericRange(v, "tokens_out"),
+		Cost:            numericRange(v, "cost"),
+		Sort:            claudesessions.SessionSort(v.Get("sort")),
+		Cursor:          v.Get("cursor"),
+	}
+	if q.Links != claudesessions.LinksAny &&
+		q.Links != claudesessions.LinksWith && q.Links != claudesessions.LinksWithout {
+		return claudesessions.SessionQuery{}, fmt.Errorf("invalid links filter %q", v.Get("links"))
+	}
+	if raw := v.Get("limit"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return claudesessions.SessionQuery{}, fmt.Errorf("invalid limit %q", raw)
 		}
-		sessions = filtered
+		q.Limit = n
 	}
+	q.From = optionalTime(v.Get("from"))
+	q.To = optionalTime(v.Get("to"))
+	windows, err := parseDrilldownWindows(v.Get("windows"))
+	if err != nil {
+		return claudesessions.SessionQuery{}, err
+	}
+	q.Windows = windows
+	return q, nil
+}
 
-	if sessions == nil {
-		sessions = []claudesessions.ClaudeSessionSummary{}
+// numericRange reads "<name>_min" and "<name>_max" into an inclusive range.
+func numericRange(v url.Values, name string) claudesessions.NumericRange {
+	return claudesessions.NumericRange{
+		Min: optionalFloat(v.Get(name + "_min")),
+		Max: optionalFloat(v.Get(name + "_max")),
 	}
-	s.writeJSON(w, http.StatusOK, sessions)
+}
+
+// optionalFloat returns nil for an absent or unparseable value, which the
+// filter reads as "unbounded on that side" — distinct from zero, which is a
+// real bound.
+func optionalFloat(raw string) *float64 {
+	if raw == "" {
+		return nil
+	}
+	n, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return nil
+	}
+	return &n
+}
+
+func optionalTime(raw string) *time.Time {
+	if raw == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return nil
+	}
+	return &t
+}
+
+// parseDrilldownWindows decodes the "fromMs-toMs,fromMs-toMs" form the
+// analytics charts link with, mirroring the client's encodeWindows.
+//
+// A malformed window is an error rather than a silent drop: the windows *are*
+// the filter when a drill-down is active, and quietly discarding half of them
+// would show a plausible-looking but wrong set of sessions.
+func parseDrilldownWindows(raw string) ([]claudesessions.TimeWindow, error) {
+	if raw == "" {
+		return nil, nil
+	}
+	parts := strings.Split(raw, ",")
+	windows := make([]claudesessions.TimeWindow, 0, len(parts))
+	for _, part := range parts {
+		from, to, ok := strings.Cut(part, "-")
+		if !ok {
+			return nil, fmt.Errorf("invalid drill-down window %q", part)
+		}
+		fromMs, err := strconv.ParseInt(from, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid drill-down window start %q", from)
+		}
+		toMs, err := strconv.ParseInt(to, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("invalid drill-down window end %q", to)
+		}
+		if toMs <= fromMs {
+			return nil, fmt.Errorf("drill-down window %q ends before it starts", part)
+		}
+		windows = append(windows, claudesessions.TimeWindow{
+			From: time.UnixMilli(fromMs).UTC(),
+			To:   time.UnixMilli(toMs).UTC(),
+		})
+	}
+	return windows, nil
 }
 
 // handleListClaudeProjects returns all distinct project directories containing sessions.

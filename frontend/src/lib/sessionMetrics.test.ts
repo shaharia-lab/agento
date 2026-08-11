@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import type { ClaudeSessionSummary } from '../types'
 import {
@@ -92,5 +94,64 @@ describe('session metrics', () => {
     expect(sessionOutputTokens(bare)).toBe(0)
     expect(sessionTokens(bare)).toBe(0)
     expect(sessionCost(bare)).toBe(0)
+  })
+})
+
+/**
+ * The other half of the cross-language parity check.
+ *
+ * internal/claudesessions/session_page_test.go reads this same fixture and
+ * asserts the SQL the server filters and sorts by; this asserts the TypeScript
+ * the columns are rendered from. Together they are what stops a rendered figure
+ * and the filter that hides its row from disagreeing — the bug this module was
+ * extracted to prevent, which moving the filtering into SQL would otherwise
+ * have reopened in a second language.
+ */
+describe('shared metric vectors — parity with the Go implementation', () => {
+  interface Vector {
+    name: string
+    session: Record<string, number>
+    expect: Record<string, number>
+  }
+
+  // Resolved from the Vitest root (frontend/) rather than import.meta.url,
+  // which the jsdom environment reports as an http URL.
+  const vectorsPath = resolve(
+    process.cwd(),
+    '../internal/claudesessions/testdata/session_metric_vectors.json',
+  )
+  const vectors: { cases: Vector[] } = JSON.parse(readFileSync(vectorsPath, 'utf8'))
+
+  it('declares at least one case', () => {
+    expect(vectors.cases.length).toBeGreaterThan(0)
+  })
+
+  it.each(vectors.cases)('$name', tc => {
+    const s = session({
+      usage: {
+        ...zeroUsage,
+        input_tokens: tc.session.input_tokens,
+        output_tokens: tc.session.output_tokens,
+      },
+      subagent_usage: {
+        ...zeroUsage,
+        input_tokens: tc.session.subagent_input_tokens,
+        output_tokens: tc.session.subagent_output_tokens,
+      },
+      cost: { ...zeroCost, total_usd: tc.session.total_cost_usd },
+      subagent_cost: { ...zeroCost, total_usd: tc.session.subagent_cost_usd },
+      active_duration_ms: tc.session.active_duration_ms,
+      subagent_active_duration_ms: tc.session.subagent_active_duration_ms,
+      message_count: tc.session.message_count,
+    })
+
+    expect(sessionInputTokens(s)).toBe(tc.expect.input_tokens)
+    expect(sessionOutputTokens(s)).toBe(tc.expect.output_tokens)
+    expect(sessionTokens(s)).toBe(tc.expect.tokens)
+    expect(sessionCost(s)).toBeCloseTo(tc.expect.cost_usd, 9)
+    expect(sessionDurationMs(s)).toBe(tc.expect.duration_ms)
+    expect(sessionDurationMinutes(s)).toBeCloseTo(tc.expect.duration_minutes, 9)
+    // Message count is deliberately main-thread only, matching the column.
+    expect(s.message_count).toBe(tc.expect.messages)
   })
 })

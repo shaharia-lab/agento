@@ -21,21 +21,6 @@ export interface SessionDayGroup {
   cost: number
 }
 
-/**
- * Reference length for the token bars: the 90th percentile of what is on
- * screen, not the maximum.
- *
- * A single 75M-token session against a corpus whose median is ~100K would push
- * every other bar below one pixel, turning the column into a blank strip with
- * one outlier. Sessions at or above the reference simply fill the bar; the
- * figure beside it stays the authoritative number.
- */
-export function tokenBarReference(sessions: readonly ClaudeSessionSummary[]): number {
-  if (sessions.length === 0) return 0
-  const sorted = sessions.map(sessionTokens).sort((a, b) => a - b)
-  return sorted[Math.floor(0.9 * (sorted.length - 1))]
-}
-
 function dayKey(d: Date): string {
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
@@ -62,6 +47,13 @@ export function dayLabel(d: Date, now: Date): string {
 
 /**
  * Groups sessions into newest-first day buckets with per-day roll-ups.
+ *
+ * Grouping stays client-side even though filtering and paging moved to SQL. It
+ * operates on the pages loaded so far, which is bounded, and it is the only
+ * arrangement under which a day header's roll-up is exactly the sum of the rows
+ * beneath it. A server-side `GROUP BY date(last_activity)` would report the
+ * whole day's totals above however many of its rows had been paged in, so the
+ * header and its rows would disagree on every day split across a page boundary.
  *
  * Sorting happens here rather than relying on the API order: the day headers
  * carry totals, and a single out-of-order row would silently split one day into

@@ -633,6 +633,46 @@ export interface ClaudeSessionCost {
 
 /** A pull request a session produced, from a `pr-link` event. */
 /** Cache freshness for the Claude sessions list (#208). */
+/**
+ * One page of the sessions list.
+ *
+ * The endpoint used to return a bare array of every session, which the browser
+ * then filtered, sorted, grouped and rendered in full. This envelope is what
+ * bounds the browser to a single page.
+ */
+export interface ClaudeSessionPage {
+  items: ClaudeSessionSummary[]
+  /** Continues the list; empty on the last page. */
+  next_cursor: string
+  has_more: boolean
+}
+
+/**
+ * The aggregate a single page cannot answer: the totals across the whole
+ * filtered set, and the options the filter controls offer.
+ */
+export interface ClaudeSessionFacets {
+  /** Sessions matching the current filter — the toolbar's counter. */
+  total: number
+  total_tokens: number
+  total_cost_usd: number
+  /**
+   * The 90th percentile of input+output tokens across the filtered set: the
+   * reference length for the token bars, so one outlier session cannot flatten
+   * every other bar to nothing.
+   */
+  token_p90: number
+  /**
+   * Dropdown options, derived from every visible session rather than the
+   * filtered set — a dropdown that removes the option you just picked cannot
+   * be un-picked.
+   */
+  models: string[]
+  permission_modes: string[]
+  has_favorites: boolean
+  has_prs: boolean
+}
+
 export interface ClaudeSessionStatus {
   /**
    * The served costs were computed under an older pricing catalog and a
