@@ -8,12 +8,13 @@ import type { SettingsResponse, ClaudeProject } from '@/types'
 import { DEFAULT_IDLE_GAP_MINUTES, MIN_IDLE_GAP_MINUTES, MAX_IDLE_GAP_MINUTES } from '@/types'
 
 /**
- * How many matches the picker renders at once. A corpus can hold several
- * hundred projects, so the list is a set of suggestions to choose from rather
- * than an inventory to scroll: past a handful, typing one more character beats
- * any amount of scrolling, and the count of what was left out says so.
+ * How many matches the picker renders at once. The list scrolls, so this is
+ * not a limit on what can be reached by browsing — it is a bound on how much
+ * gets rendered per keystroke for a corpus that can hold several hundred
+ * projects. Past this many, the count of what was left out tells the user to
+ * type instead, which finds a project faster than any amount of scrolling.
  */
-const MAX_SUGGESTIONS = 8
+const MAX_SUGGESTIONS = 50
 
 /**
  * Data & Analytics settings: which projects Agento reports on, and what counts
@@ -234,7 +235,7 @@ export default function DataAnalyticsTab() {
             <div
               id="project-suggestions"
               role="listbox"
-              className="absolute z-20 mt-1 w-full overflow-hidden rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+              className="absolute z-20 mt-1 max-h-64 w-full overflow-y-auto rounded-md border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
             >
               {matches.shown.map(project => (
                 <button
@@ -277,7 +278,7 @@ export default function DataAnalyticsTab() {
           </p>
         ) : (
           <>
-            <ul className="mt-2 divide-y divide-zinc-100 rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-700">
+            <ul className="mt-2 max-h-64 divide-y divide-zinc-100 overflow-y-auto rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-700">
               {hidden.map(path => (
                 <li key={path} className="flex items-center gap-3 px-3 py-2">
                   <span

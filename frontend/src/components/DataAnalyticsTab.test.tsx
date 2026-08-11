@@ -122,7 +122,8 @@ describe('DataAnalyticsTab', () => {
   })
 
   // The reason this is a search box rather than a checkbox per project: a
-  // corpus can hold hundreds, and rendering them all is unusable.
+  // corpus can hold hundreds, and rendering them all is unusable. The list
+  // scrolls, so the cap bounds rendering per keystroke rather than reach.
   it('caps the suggestions and says how many were left out', async () => {
     const user = userEvent.setup()
     vi.mocked(claudeSessionsApi.projects).mockResolvedValue(manyProjects)
@@ -130,8 +131,8 @@ describe('DataAnalyticsTab', () => {
 
     await user.click(await screen.findByLabelText('Excluded Projects'))
 
-    expect(suggestions()).toHaveLength(8)
-    expect(screen.getByText(/492 more/)).toBeInTheDocument()
+    expect(suggestions()).toHaveLength(50)
+    expect(screen.getByText(/450 more/)).toBeInTheDocument()
 
     await user.type(screen.getByLabelText('Excluded Projects'), 'p497')
     expect(suggestions()).toHaveLength(1)
