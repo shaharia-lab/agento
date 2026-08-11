@@ -279,8 +279,15 @@ export default function ClaudeSessionsPage() {
   // depending on its identity: reload changes whenever the filter or the sort
   // does, and an effect keyed on it would tear the poll down and start a fresh
   // one — an extra request and a reset timer — on every filter change.
+  //
+  // Assigned in an effect rather than during render, which is the documented
+  // way to keep a latest-value ref: a render can be discarded, and a discarded
+  // render must not leave a ref pointing at a callback that was never used.
   const reloadRef = useRef(reload)
-  reloadRef.current = reload
+  useEffect(() => {
+    reloadRef.current = reload
+  }, [reload])
+
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
