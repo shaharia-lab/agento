@@ -17,7 +17,9 @@ import path from 'path';
 
 const AGENTO_BINARY = path.resolve(__dirname, '../agento');
 const DATA_DIR = '/tmp/agento-e2e-test';
-const PORT = 8990;
+// Overridable so the suite can run beside a development instance, which
+// occupies the default port. The specs read it from the same variable.
+const PORT = Number(process.env.AGENTO_E2E_PORT ?? 8990);
 const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({
@@ -48,7 +50,7 @@ export default defineConfig({
   ],
 
   webServer: {
-    command: `AGENTO_DATA_DIR=${DATA_DIR} ${AGENTO_BINARY} web --no-browser`,
+    command: `AGENTO_DATA_DIR=${DATA_DIR} ${AGENTO_BINARY} web --no-browser --port ${PORT}`,
     url: BASE_URL,
     reuseExistingServer: false,
     timeout: 30_000,
