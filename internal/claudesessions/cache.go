@@ -92,13 +92,19 @@ type Cache struct {
 	logger  *slog.Logger
 	bus     eventbus.EventBus // optional; publishes session events on scan
 	pricing *pricing.Store    // optional; enables catalog-backed cost computation
+
+	// analytics memoizes built reports. See analytics_cache.go: the report is
+	// a dozen passes over a full corpus load, and a dashboard fires two or
+	// three of them per open.
+	analytics *analyticsMemo
 }
 
 // NewCache creates a new Cache backed by the given SQLite database.
 func NewCache(db *sql.DB, logger *slog.Logger) *Cache {
 	return &Cache{
-		db:     db,
-		logger: logger,
+		db:        db,
+		logger:    logger,
+		analytics: newAnalyticsMemo(),
 	}
 }
 

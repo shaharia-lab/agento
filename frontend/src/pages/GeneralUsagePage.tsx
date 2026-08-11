@@ -524,7 +524,11 @@ function GeneralUsageContent({
         <KPICard
           icon={CalendarDays}
           label="Avg Sessions / Day"
-          value={avgSessionsPerDay(summary.total_sessions, report?.time_series ?? [])}
+          value={avgSessionsPerDay(
+            summary.total_sessions,
+            report?.time_series ?? [],
+            report?.granularity,
+          )}
           sub={
             observedSpan > 0
               ? `over ${observedSpan} day${observedSpan === 1 ? '' : 's'} with activity`
@@ -658,7 +662,7 @@ export default function GeneralUsagePage() {
     [from, to, project, navigate],
   )
 
-  const observedSpan = observedDaySpan(report?.time_series ?? [])
+  const observedSpan = observedDaySpan(report?.time_series ?? [], report?.granularity)
 
   const summary: AnalyticsSummary = report?.summary ?? {
     total_sessions: 0,

@@ -19,6 +19,19 @@ export function shortProject(path: string): string {
   return parts.slice(-2).join('/') || path
 }
 
+/**
+ * Names the folded tail row.
+ *
+ * Beyond the top 20 the backend sums the remaining projects into one row rather
+ * than dropping them, so the table's total stays the window's total. Stating
+ * how many it stands for is the point: a table showing 20 of 500 rows without
+ * saying so reads as the whole picture.
+ */
+function projectLabel(p: ProjectStat): string {
+  if (!p.folded_projects) return shortProject(p.project)
+  return `${p.project} (${p.folded_projects})`
+}
+
 function ProjectTable({ projects }: Readonly<{ projects: ProjectStat[] }>) {
   return (
     <div className="overflow-x-auto">
@@ -36,10 +49,14 @@ function ProjectTable({ projects }: Readonly<{ projects: ProjectStat[] }>) {
           {projects.map(p => (
             <tr key={p.project}>
               <td
-                className="py-1.5 pr-4 font-mono text-zinc-700 dark:text-zinc-300"
-                title={p.project}
+                className={`py-1.5 pr-4 text-zinc-700 dark:text-zinc-300 ${
+                  p.folded_projects ? 'italic text-zinc-500 dark:text-zinc-400' : 'font-mono'
+                }`}
+                title={
+                  p.folded_projects ? `${p.folded_projects} further projects, summed` : p.project
+                }
               >
-                {shortProject(p.project)}
+                {projectLabel(p)}
               </td>
               <td className="py-1.5 pr-4 text-right tabular-nums">{p.sessions}</td>
               <td className="py-1.5 pr-4 text-right tabular-nums">{formatTokens(p.tokens)}</td>

@@ -1187,7 +1187,23 @@ export interface InsightCard {
 }
 
 /** One project's activity over the window. */
+/**
+ * The bucket width an analytics report was built at, as the backend names it.
+ *
+ * It travels with the report because a bucket key no longer says how wide its
+ * bucket is: weekly and monthly buckets are both keyed by their first day, so a
+ * span derived from the first and last populated key would stop at the last
+ * bucket's *start* and understate the extent by up to a month.
+ */
+export type Granularity = 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly'
+
 export interface ProjectStat {
+  /**
+   * Non-zero only on the folded "Other projects" row, and says how many
+   * projects it stands for. Beyond the top 20 the tail is summed into one row
+   * rather than dropped, so the table's total stays the window's total.
+   */
+  folded_projects?: number
   project: string
   sessions: number
   /** Conversation tokens (input+output). */
@@ -1276,6 +1292,12 @@ export interface AnalyticsReport {
   insight_cards: InsightCard[]
   cost_over_time_by_model: StackedCostPoint[]
   project_breakdown: ProjectStat[]
+  /**
+   * The bucket width every series in this report was built at. Long windows
+   * are coarsened rather than truncated, so an all-time range is ~80 monthly
+   * buckets instead of 2,400 daily ones.
+   */
+  granularity: Granularity
   project_activity: ProjectDayActivity[]
   top_sessions: TopSessions
   most_active_days: DayActivity[]

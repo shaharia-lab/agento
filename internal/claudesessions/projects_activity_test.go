@@ -193,7 +193,7 @@ func TestBuildProjectActivity(t *testing.T) {
 	}
 
 	stats := buildProjectBreakdown(sessions)
-	activity := buildProjectActivity(sessions, stats, time.UTC)
+	activity := buildProjectActivity(sessions, stats, GranularityDaily, time.UTC)
 
 	if len(stats) != topProjectsCharted+3 {
 		t.Errorf("the table must keep every project, got %d", len(stats))
