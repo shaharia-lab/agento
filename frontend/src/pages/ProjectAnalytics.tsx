@@ -19,6 +19,19 @@ export function shortProject(path: string): string {
   return parts.slice(-2).join('/') || path
 }
 
+/**
+ * Names the folded tail row.
+ *
+ * Beyond the top 20 the backend sums the remaining projects into one row rather
+ * than dropping them, so the table's total stays the window's total. Stating
+ * how many it stands for is the point: a table showing 20 of 500 rows without
+ * saying so reads as the whole picture.
+ */
+function projectLabel(p: ProjectStat): string {
+  if (!p.folded_projects) return shortProject(p.project)
+  return `${p.project} (${p.folded_projects})`
+}
+
 function ProjectTable({ projects }: Readonly<{ projects: ProjectStat[] }>) {
   return (
     <div className="overflow-x-auto">
@@ -36,10 +49,14 @@ function ProjectTable({ projects }: Readonly<{ projects: ProjectStat[] }>) {
           {projects.map(p => (
             <tr key={p.project}>
               <td
-                className="py-1.5 pr-4 font-mono text-zinc-700 dark:text-zinc-300"
-                title={p.project}
+                className={`py-1.5 pr-4 text-zinc-700 dark:text-zinc-300 ${
+                  p.folded_projects ? 'italic text-zinc-500 dark:text-zinc-400' : 'font-mono'
+                }`}
+                title={
+                  p.folded_projects ? `${p.folded_projects} further projects, summed` : p.project
+                }
               >
-                {shortProject(p.project)}
+                {projectLabel(p)}
               </td>
               <td className="py-1.5 pr-4 text-right tabular-nums">{p.sessions}</td>
               <td className="py-1.5 pr-4 text-right tabular-nums">{formatTokens(p.tokens)}</td>
@@ -58,11 +75,16 @@ function ProjectTable({ projects }: Readonly<{ projects: ProjectStat[] }>) {
 }
 
 /**
- * A project × day strip: one row per project, one cell per day, shaded by that
- * day's spend.
+ * A project × time strip: one row per project, one cell per bucket, shaded by
+ * that bucket's spend.
  *
- * Spend rather than session count, because a day with one expensive session is
- * the day a reader is looking for. The scale is per-strip so the busiest cell
+ * The bucket is whatever granularity the report was built at — a day at the
+ * windows a reader normally looks at, a week or a month on a multi-year one,
+ * which is what keeps the strip from growing with the calendar. The cells are
+ * laid out from the dates actually present, so no width is assumed here.
+ *
+ * Spend rather than session count, because a bucket with one expensive session
+ * is the one a reader is looking for. The scale is per-strip so the busiest cell
  * is always full-strength; comparing absolute shades across two different
  * windows is not something this chart claims to support.
  */

@@ -4,6 +4,7 @@ import {
   useCallback,
   useMemo,
   useRef,
+  memo,
   type KeyboardEvent,
   type ReactNode,
 } from 'react'
@@ -33,6 +34,7 @@ import {
   Shield,
   ChevronRight,
   ChevronDown,
+  ArrowDownWideNarrow,
   SlidersHorizontal,
   Cpu,
   Copy,
@@ -43,22 +45,37 @@ import { formatCost, formatTokens, formatDuration, shortPath } from '@/lib/forma
 import { resolvePresetRange, type TimePreset } from '@/lib/timefilter'
 import { decodeWindows } from '@/lib/drilldown'
 import {
-  matchesFilters,
-  permissionModesOf,
-  modelsOf,
-  hasPRs as sessionsHavePRs,
-  hasFavorites as hasFavoriteSessions,
-  isBounded,
+  countActiveFilters,
+  filterActive,
+  groupsByDay,
+  toQueryParams,
+  NO_FILTERS,
   UNBOUNDED,
+  SORT_LABELS,
   type LinkFilter,
   type NumericRange,
-} from '@/lib/sessionFilters'
-import { groupSessionsByDay, tokenBarReference } from '@/lib/sessionGroups'
+  type SessionFilters,
+  type SessionSort,
+} from '@/lib/sessionQuery'
+import { groupSessionsByDay, type SessionDayGroup } from '@/lib/sessionGroups'
 import { sessionCost, sessionDurationMs } from '@/lib/sessionMetrics'
+import { useDebounced } from '@/lib/useDebounced'
+import { useSessionPages, useDraftMatchCount } from '@/lib/useSessionPages'
 
 // How often to re-check whether the background re-cost finished. Slow enough
 // to be free, fast enough that a ~18s corpus rescan is noticed promptly.
 const STATUS_POLL_MS = 3000
+
+/**
+ * How long a keystroke waits before it becomes a request.
+ *
+ * Long enough that typing a word is one request rather than one per letter,
+ * short enough to feel immediate. Before the filtering moved server-side every
+ * keystroke re-ran two full predicate passes and two array sorts over the whole
+ * corpus and re-rendered every row; the debounce is what keeps the replacement
+ * from simply moving that cost onto the network.
+ */
+const SEARCH_DEBOUNCE_MS = 250
 
 const TIME_PRESET_LABELS: Record<TimePreset, string> = {
   all: 'All time',
@@ -141,12 +158,7 @@ const ADVANCED_RANGES = [
 
 /** How many advanced filters are narrowing the list, for the button's badge. */
 function countActive(a: AdvancedFilters): number {
-  return (
-    (a.permissionMode === 'all' ? 0 : 1) +
-    (a.model === 'all' ? 0 : 1) +
-    (a.links === 'all' ? 0 : 1) +
-    ADVANCED_RANGES.filter(k => isBounded(a[k])).length
-  )
+  return countActiveFilters({ ...NO_FILTERS, ...a })
 }
 
 const LINK_OPTIONS: { value: LinkFilter; label: string }[] = [
@@ -162,12 +174,10 @@ export default function ClaudeSessionsPage() {
   const drilldownWindows = useMemo(() => decodeWindows(searchParams.get('windows')), [searchParams])
   const drilldownLabel = searchParams.get('label')
   const drilldownActive = drilldownWindows.length > 0
-  const [sessions, setSessions] = useState<ClaudeSessionSummary[]>([])
   const [projects, setProjects] = useState<ClaudeProject[]>([])
-  const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
-  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState('')
+  const [sort, setSort] = useState<SessionSort>('recent')
   const [filterProject, setFilterProject] = useState(searchParams.get('project') ?? 'all')
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
 
@@ -197,29 +207,87 @@ export default function ClaudeSessionsPage() {
   const [customFrom, setCustomFrom] = useState('')
   const [customTo, setCustomTo] = useState('')
 
-  const load = useCallback(async () => {
-    try {
-      const [s, p] = await Promise.all([claudeSessionsApi.list(), claudeSessionsApi.projects()])
-      setSessions(s)
-      setProjects(p)
-      setError(null)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load sessions')
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  // Only what is acted on is delayed; the input itself stays immediate.
+  const debouncedSearch = useDebounced(search, SEARCH_DEBOUNCE_MS)
 
+  /**
+   * The whole filter state, resolved. Everything the server needs to narrow
+   * the list is derived from this one object, so the page, the facet aggregate
+   * and the draft preview cannot be narrowed by three different predicates.
+   */
+  const filters = useMemo<SessionFilters>(() => {
+    const { from, to } = resolvePresetRange(timePreset, customFrom, customTo)
+    return {
+      ...NO_FILTERS,
+      ...advanced,
+      project: filterProject,
+      search: debouncedSearch,
+      favorites: filterFavorites,
+      from,
+      to,
+      drilldownWindows,
+    }
+  }, [
+    advanced,
+    filterProject,
+    debouncedSearch,
+    filterFavorites,
+    timePreset,
+    customFrom,
+    customTo,
+    drilldownWindows,
+  ])
+
+  // The pages, the totals and the paging state. Everything the list renders
+  // comes from one filter object, so the page and the facet aggregate cannot be
+  // narrowed by two slightly different query strings.
+  const {
+    sessions,
+    facets,
+    loading,
+    loadingMore,
+    hasMore,
+    error,
+    reload,
+    loadMore,
+    patchSession,
+    setError,
+  } = useSessionPages(filters, sort)
+
+  // The project picker's options. Loaded once: unlike the sessions they do not
+  // depend on the filter, and re-reading them per filter change would put a
+  // directory walk behind every keystroke.
   useEffect(() => {
-    load()
-  }, [load])
+    claudeSessionsApi
+      .projects()
+      .then(setProjects)
+      .catch(err => setError(err instanceof Error ? err.message : 'Failed to load projects'))
+  }, [setError])
 
   // Since #208 the list is served from cache even when the pricing catalog
   // moved, so the costs on screen may predate it while a rescan runs. Poll the
   // cheap status endpoint until that clears, then reload once so the figures
   // update without the user having to do anything.
   const [recosting, setRecosting] = useState(false)
+  // A cold cache no longer blocks the request (the scan can take minutes on a
+  // large corpus), so an empty list has two meanings and the empty state has to
+  // say which: "nothing here" or "not scanned yet".
+  const [scanning, setScanning] = useState(false)
+  const [scanProgress, setScanProgress] = useState({ done: 0, total: 0 })
   const wasPending = useRef(false)
+  // Held in a ref so the poll below can call the current reload without
+  // depending on its identity: reload changes whenever the filter or the sort
+  // does, and an effect keyed on it would tear the poll down and start a fresh
+  // one — an extra request and a reset timer — on every filter change.
+  //
+  // Assigned in an effect rather than during render, which is the documented
+  // way to keep a latest-value ref: a render can be discarded, and a discarded
+  // render must not leave a ref pointing at a callback that was never used.
+  const reloadRef = useRef(reload)
+  useEffect(() => {
+    reloadRef.current = reload
+  }, [reload])
+
   useEffect(() => {
     let cancelled = false
     let timer: ReturnType<typeof setTimeout>
@@ -238,8 +306,10 @@ export default function ClaudeSessionsPage() {
       const pending = status.costs_stale || status.scan_in_progress
       // Tracked in a ref, not read out of the state updater: an updater must
       // stay pure, and React may invoke it twice in development.
-      if (wasPending.current && !pending) load()
+      if (wasPending.current && !pending) reloadRef.current()
       wasPending.current = pending
+      setScanning(status.scan_in_progress)
+      setScanProgress({ done: status.files_done ?? 0, total: status.files_total ?? 0 })
       setRecosting(pending)
       if (pending) timer = setTimeout(poll, STATUS_POLL_MS)
     }
@@ -249,7 +319,7 @@ export default function ClaudeSessionsPage() {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [load])
+  }, [])
 
   const handleRefresh = async () => {
     setRefreshing(true)
@@ -257,24 +327,27 @@ export default function ClaudeSessionsPage() {
       await claudeSessionsApi.refresh()
       // Brief pause so the background rescan has time to start.
       await new Promise(r => setTimeout(r, 800))
-      await load()
+      await reload()
     } catch {
-      // Ignore refresh errors — load() will surface them if needed.
+      // Ignore refresh errors — reload() will surface them if needed.
     } finally {
       setRefreshing(false)
     }
   }
 
-  const applyFavorite = (sessionId: string, value: boolean) => (prev: ClaudeSessionSummary[]) =>
-    prev.map(s => (s.session_id === sessionId ? { ...s, is_favorite: value } : s))
-
-  const handleToggleFavorite = (sessionId: string, isFavorite: boolean) => {
-    const next = !isFavorite
-    setSessions(applyFavorite(sessionId, next))
-    claudeSessionsApi
-      .toggleFavorite(sessionId, next)
-      .catch(() => setSessions(applyFavorite(sessionId, !next)))
-  }
+  // Every row handler is stable, so React.memo on SessionRow actually holds:
+  // a callback rebuilt per render would make each row's props differ on every
+  // render and defeat the memo entirely.
+  const handleToggleFavorite = useCallback(
+    (sessionId: string, isFavorite: boolean) => {
+      const next = !isFavorite
+      patchSession(sessionId, { is_favorite: next })
+      claudeSessionsApi
+        .toggleFavorite(sessionId, next)
+        .catch(() => patchSession(sessionId, { is_favorite: !next }))
+    },
+    [patchSession],
+  )
 
   const handleToggleExpanded = useCallback((sessionId: string) => {
     setExpanded(prev => {
@@ -284,12 +357,26 @@ export default function ClaudeSessionsPage() {
     })
   }, [])
 
-  const hasFavorites = hasFavoriteSessions(sessions)
-  const hasPRs = sessionsHavePRs(sessions)
-  // Only offer the permission-mode filter once more than one mode is present —
-  // a single-value dropdown filters nothing.
-  const permissionModes = useMemo(() => permissionModesOf(sessions), [sessions])
-  const models = useMemo(() => modelsOf(sessions), [sessions])
+  const handleOpen = useCallback(
+    (sessionId: string) => navigate(`/claude-sessions/${sessionId}`),
+    [navigate],
+  )
+  const handleJourney = useCallback(
+    (sessionId: string) => navigate(`/claude-sessions/${sessionId}/journey`),
+    [navigate],
+  )
+
+  // The filter options and the toggle gates come from the facet aggregate
+  // rather than from four passes over the loaded rows: a page is a page, and
+  // deriving "does any session have a PR" from fifty of five thousand would
+  // hide the control from most users most of the time.
+  // The loaded rows are consulted as well as the aggregate: starring the first
+  // session in a corpus must reveal the toggle immediately, and the facets are
+  // not refetched for a star.
+  const hasFavorites = (facets?.has_favorites ?? false) || sessions.some(s => s.is_favorite)
+  const hasPRs = facets?.has_prs ?? false
+  const permissionModes = facets?.permission_modes ?? []
+  const models = facets?.models ?? []
   const activeAdvanced = countActive(advanced)
 
   const timeFilterActive = drilldownActive || timePreset !== 'all'
@@ -303,57 +390,42 @@ export default function ClaudeSessionsPage() {
     setSearchParams(next, { replace: true })
   }
 
-  // The filters outside the advanced panel, built once rather than per session.
-  const baseFilters = useMemo(() => {
-    const { from, to } = resolvePresetRange(timePreset, customFrom, customTo)
-    return {
-      project: filterProject,
-      search,
-      favorites: filterFavorites,
-      from,
-      to,
-      drilldownActive,
-      drilldownWindows,
-    }
-  }, [
-    search,
-    filterProject,
-    filterFavorites,
-    timePreset,
-    customFrom,
-    customTo,
-    drilldownActive,
-    drilldownWindows,
-  ])
+  // Day headers are grouped over the pages loaded so far, which keeps each
+  // header's roll-up exactly equal to the rows beneath it. Only under the
+  // recency sort: under any other, two adjacent rows can be weeks apart.
+  const grouped = groupsByDay(sort)
+  const groups = useMemo(() => (grouped ? groupSessionsByDay(sessions) : []), [grouped, sessions])
 
-  const filtered = useMemo(
-    () => sessions.filter(s => matchesFilters(s, { ...baseFilters, ...advanced })),
-    [sessions, baseFilters, advanced],
-  )
+  // The totals describe the whole filtered set, not the pages on screen — the
+  // counter beside a filter has to answer "how much is there", not "how much
+  // have I scrolled past".
+  const totalSessions = facets?.total ?? 0
+  const totalTokens = facets?.total_tokens ?? 0
+  const totalCost = facets?.total_cost_usd ?? 0
+
+  // The token bar's reference is the filtered set's 90th percentile, computed
+  // server-side: taking it from the loaded pages would make every bar rescale
+  // as the user scrolls a new outlier into view.
+  const tokenRef = facets?.token_p90 ?? 0
 
   // What the panel's unapplied draft would leave, so "Apply" is never a leap in
-  // the dark. Only counted while the panel is open.
-  const draftMatchCount = useMemo(() => {
-    if (!advancedOpen) return 0
-    return sessions.filter(s => matchesFilters(s, { ...baseFilters, ...advancedDraft })).length
-  }, [advancedOpen, sessions, baseFilters, advancedDraft])
-
-  const groups = useMemo(() => groupSessionsByDay(filtered), [filtered])
-
-  const totals = useMemo(
-    () =>
-      groups.reduce((acc, g) => ({ tokens: acc.tokens + g.tokens, cost: acc.cost + g.cost }), {
-        tokens: 0,
-        cost: 0,
-      }),
-    [groups],
+  // the dark. One cheap aggregate rather than a second full predicate pass;
+  // only while the panel is open, and debounced so a half-typed bound is not a
+  // request.
+  const draftFilters = useMemo<SessionFilters>(
+    () => ({ ...filters, ...advancedDraft }),
+    [filters, advancedDraft],
   )
+  const draftKey = useDebounced(
+    useMemo(
+      () => (advancedOpen ? toQueryParams(draftFilters).toString() : null),
+      [advancedOpen, draftFilters],
+    ),
+    SEARCH_DEBOUNCE_MS,
+  )
+  const draftMatchCount = useDraftMatchCount(draftKey)
 
-  // The token bar is a comparison within what is on screen, scaled so a single
-  // outlier session cannot flatten every other bar to nothing.
-  const tokenRef = useMemo(() => tokenBarReference(filtered), [filtered])
-
-  if (loading) {
+  if (loading && sessions.length === 0) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-sm text-zinc-400">Scanning Claude sessions…</div>
@@ -361,70 +433,32 @@ export default function ClaudeSessionsPage() {
     )
   }
 
-  let listContent: ReactNode
-  if (sessions.length === 0) {
-    listContent = (
-      <div className="flex flex-col items-center justify-center py-20 text-center">
-        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 mb-4">
-          <History className="h-5 w-5 text-zinc-400" />
-        </div>
-        <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
-          No Claude sessions found
-        </h2>
-        <p className="text-xs text-zinc-500 mb-4 max-w-xs">
-          Sessions will appear here once you run Claude Code on this machine.
-        </p>
-      </div>
+  const rows = (
+    <SessionRows
+      sessions={sessions}
+      groups={groups}
+      grouped={grouped}
+      tokenRef={tokenRef}
+      expanded={expanded}
+      onToggle={handleToggleExpanded}
+      onOpen={handleOpen}
+      onJourney={handleJourney}
+      onToggleFavorite={handleToggleFavorite}
+    />
+  )
+  const listContent: ReactNode =
+    sessions.length > 0 ? (
+      rows
+    ) : (
+      <EmptyList
+        scanning={scanning}
+        progress={scanProgress}
+        filtered={filterActive(filters)}
+        timeFiltered={timeFilterActive}
+        drilldownActive={drilldownActive}
+        onClearDrilldown={clearDrilldown}
+      />
     )
-  } else if (filtered.length === 0) {
-    listContent = (
-      <div className="flex flex-col items-center justify-center py-16 text-center">
-        <p className="text-sm text-zinc-400">
-          {timeFilterActive
-            ? 'No sessions active in the selected time range.'
-            : 'No sessions match your filters.'}
-        </p>
-        {drilldownActive && (
-          <button
-            onClick={clearDrilldown}
-            className="mt-3 text-xs text-indigo-500 hover:text-indigo-600 dark:hover:text-indigo-400"
-          >
-            Clear time filter
-          </button>
-        )}
-      </div>
-    )
-  } else {
-    listContent = groups.map(group => (
-      <div key={group.key}>
-        <div className="flex items-center gap-3 px-4 py-[7px] bg-zinc-50 dark:bg-zinc-800/60 border-b border-zinc-200 dark:border-zinc-700/60">
-          <span className="text-xs font-bold uppercase tracking-[0.04em] text-zinc-900 dark:text-zinc-100">
-            {group.label}
-          </span>
-          <span className="text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
-            {group.sessions.length} session{group.sessions.length === 1 ? '' : 's'} ·{' '}
-            {group.messageCount} msgs · {formatTokens(group.tokens)} tokens
-          </span>
-          <div className="flex-1" />
-          <span className="text-xs font-bold tabular-nums text-zinc-900 dark:text-zinc-100">
-            {formatCost(group.cost)}
-          </span>
-        </div>
-        {group.sessions.map(session => (
-          <SessionRow
-            key={session.session_id}
-            session={session}
-            tokenRef={tokenRef}
-            open={expanded.has(session.session_id)}
-            onToggle={() => handleToggleExpanded(session.session_id)}
-            onOpen={() => navigate(`/claude-sessions/${session.session_id}`)}
-            onJourney={() => navigate(`/claude-sessions/${session.session_id}/journey`)}
-            onToggleFavorite={() => handleToggleFavorite(session.session_id, !!session.is_favorite)}
-          />
-        ))}
-      </div>
-    ))
-  }
 
   return (
     <div className="flex flex-col h-full">
@@ -435,7 +469,7 @@ export default function ClaudeSessionsPage() {
             Claude Sessions
           </h1>
           <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-0.5">
-            {sessions.length} session{sessions.length === 1 ? '' : 's'} from{' '}
+            {totalSessions} session{totalSessions === 1 ? '' : 's'} from{' '}
             <span className="font-mono">~/.claude</span>
           </p>
         </div>
@@ -468,7 +502,7 @@ export default function ClaudeSessionsPage() {
           <p className="text-xs text-indigo-700 dark:text-indigo-300 truncate">
             Showing sessions active {drilldownLabel ?? 'in the selected hours'} ·{' '}
             <span className="text-indigo-500 dark:text-indigo-400">
-              {filtered.length} match{filtered.length === 1 ? '' : 'es'}
+              {totalSessions} match{totalSessions === 1 ? '' : 'es'}
             </span>
           </p>
           <button
@@ -591,10 +625,25 @@ export default function ClaudeSessionsPage() {
                 Favorites
               </ToolbarToggle>
             )}
+            <Select value={sort} onValueChange={v => setSort(v as SessionSort)}>
+              <SelectTrigger className="w-full sm:w-44 h-[34px] text-xs">
+                <ArrowDownWideNarrow className="h-3.5 w-3.5 text-zinc-400 dark:text-zinc-500 mr-1.5 shrink-0" />
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {(Object.keys(SORT_LABELS) as SessionSort[]).map(s => (
+                  <SelectItem key={s} value={s} className="text-xs">
+                    {SORT_LABELS[s]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <div className="flex-1" />
+            {/* The totals describe the whole filtered set, not the pages loaded
+                so far — a counter beside a filter answers "how much is there". */}
             <div className="text-xs text-zinc-500 dark:text-zinc-400 tabular-nums shrink-0">
-              {filtered.length} session{filtered.length === 1 ? '' : 's'} ·{' '}
-              {formatTokens(totals.tokens)} tokens · {formatCost(totals.cost)}
+              {totalSessions} session{totalSessions === 1 ? '' : 's'} · {formatTokens(totalTokens)}{' '}
+              tokens · {formatCost(totalCost)}
             </div>
           </div>
 
@@ -615,7 +664,7 @@ export default function ClaudeSessionsPage() {
           {/* Column headers and rows share one horizontal scroll box, sized by a
               single min-width wrapper so every track lines up when it scrolls. */}
           <div className="flex-1 min-h-0 overflow-auto">
-            {filtered.length > 0 ? (
+            {sessions.length > 0 ? (
               <div style={{ minWidth: ROW_MIN_WIDTH }}>
                 <div
                   className="sticky top-0 z-10 grid items-center gap-3 px-4 py-2 border-b border-zinc-200 dark:border-zinc-700/60 bg-zinc-50 dark:bg-zinc-800/80 text-[11px] font-semibold uppercase tracking-[0.06em] text-zinc-500 dark:text-zinc-400"
@@ -632,6 +681,13 @@ export default function ClaudeSessionsPage() {
                   <div className="text-right">Last</div>
                 </div>
                 {listContent}
+                <LoadMore
+                  hasMore={hasMore}
+                  loading={loadingMore}
+                  loaded={sessions.length}
+                  total={totalSessions}
+                  onLoadMore={loadMore}
+                />
               </div>
             ) : (
               listContent
@@ -639,6 +695,214 @@ export default function ClaudeSessionsPage() {
           </div>
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * The end of the loaded pages: a sentinel that fetches the next one as it
+ * scrolls into view, and a footer stating how far through the set the reader is.
+ *
+ * Auto-loading on intersection rather than a button, because that is what the
+ * list did before it was paged — the change is meant to bound the browser's
+ * memory, not to add a click per fifty rows. The count is stated because with a
+ * paged list "50 of 5,000" is no longer visible from the scrollbar.
+ */
+function LoadMore({
+  hasMore,
+  loading,
+  loaded,
+  total,
+  onLoadMore,
+}: Readonly<{
+  hasMore: boolean
+  loading: boolean
+  loaded: number
+  total: number
+  onLoadMore: () => void
+}>) {
+  const sentinel = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const el = sentinel.current
+    if (!el || !hasMore) return
+    // Rebuilt whenever onLoadMore changes, which is once per page — the cursor
+    // is part of its identity. Cheap, and it avoids a ref that would have to be
+    // written during render.
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries.some(e => e.isIntersecting)) onLoadMore()
+      },
+      // A page ahead of the fold, so the next rows are usually there before
+      // the reader reaches the end of the current ones.
+      { rootMargin: '400px' },
+    )
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [hasMore, onLoadMore])
+
+  return (
+    <div
+      ref={sentinel}
+      className="flex items-center justify-center gap-2 py-4 text-xs text-zinc-400"
+    >
+      {loading && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+      {hasMore ? (
+        <button
+          type="button"
+          onClick={onLoadMore}
+          disabled={loading}
+          className="text-zinc-500 dark:text-zinc-400 hover:text-zinc-800 dark:hover:text-zinc-100 disabled:pointer-events-none"
+        >
+          {loading ? 'Loading…' : `Load more — showing ${loaded} of ${total}`}
+        </button>
+      ) : (
+        <span className="tabular-nums">
+          {total > 0 && `All ${total} session${total === 1 ? '' : 's'} shown`}
+        </span>
+      )}
+    </div>
+  )
+}
+
+/**
+ * The rows, grouped by day under the recency sort and flat under every other.
+ *
+ * Grouping only makes sense for recency: under "highest cost" two adjacent rows
+ * can be weeks apart, and a day header would be a heading over nothing.
+ */
+function SessionRows({
+  sessions,
+  groups,
+  grouped,
+  tokenRef,
+  expanded,
+  onToggle,
+  onOpen,
+  onJourney,
+  onToggleFavorite,
+}: Readonly<{
+  sessions: readonly ClaudeSessionSummary[]
+  groups: readonly SessionDayGroup[]
+  grouped: boolean
+  tokenRef: number
+  expanded: ReadonlySet<string>
+  onToggle: (sessionId: string) => void
+  onOpen: (sessionId: string) => void
+  onJourney: (sessionId: string) => void
+  onToggleFavorite: (sessionId: string, isFavorite: boolean) => void
+}>) {
+  const row = (session: ClaudeSessionSummary) => (
+    <SessionRow
+      key={session.session_id}
+      session={session}
+      tokenRef={tokenRef}
+      open={expanded.has(session.session_id)}
+      onToggle={onToggle}
+      onOpen={onOpen}
+      onJourney={onJourney}
+      onToggleFavorite={onToggleFavorite}
+    />
+  )
+  if (!grouped) return <>{sessions.map(row)}</>
+  return (
+    <>
+      {groups.map(group => (
+        <div key={group.key}>
+          <div className="flex items-center gap-3 px-4 py-[7px] bg-zinc-50 dark:bg-zinc-800/60 border-b border-zinc-200 dark:border-zinc-700/60">
+            <span className="text-xs font-bold uppercase tracking-[0.04em] text-zinc-900 dark:text-zinc-100">
+              {group.label}
+            </span>
+            <span className="text-xs text-zinc-500 dark:text-zinc-400 tabular-nums">
+              {group.sessions.length} session{group.sessions.length === 1 ? '' : 's'} ·{' '}
+              {group.messageCount} msgs · {formatTokens(group.tokens)} tokens
+            </span>
+            <div className="flex-1" />
+            <span className="text-xs font-bold tabular-nums text-zinc-900 dark:text-zinc-100">
+              {formatCost(group.cost)}
+            </span>
+          </div>
+          {group.sessions.map(row)}
+        </div>
+      ))}
+    </>
+  )
+}
+
+/**
+ * What an empty list means.
+ *
+ * With the corpus in the browser this was derivable from the loaded array:
+ * nothing loaded meant nothing existed. A paged list gives back an empty page
+ * for three unrelated reasons — the scan has not finished, this machine has no
+ * sessions, or the filter excludes them all — so the message has to be chosen
+ * from the request rather than from the result.
+ */
+function EmptyList({
+  scanning,
+  progress,
+  filtered,
+  timeFiltered,
+  drilldownActive,
+  onClearDrilldown,
+}: Readonly<{
+  scanning: boolean
+  progress: { done: number; total: number }
+  filtered: boolean
+  timeFiltered: boolean
+  drilldownActive: boolean
+  onClearDrilldown: () => void
+}>) {
+  if (scanning) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center">
+        <RefreshCw className="h-5 w-5 animate-spin text-zinc-400 mb-3" />
+        <p className="text-sm text-zinc-500 dark:text-zinc-400">
+          Scanning ~/.claude…
+          {progress.total > 0 && (
+            <span className="tabular-nums">
+              {' '}
+              {progress.done} / {progress.total} transcripts
+            </span>
+          )}
+        </p>
+        <p className="text-xs text-zinc-400 mt-1 max-w-xs">
+          The first scan reads every transcript on this machine. Sessions appear as soon as it
+          finishes.
+        </p>
+      </div>
+    )
+  }
+  if (!filtered) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center">
+        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-zinc-100 dark:bg-zinc-800 mb-4">
+          <History className="h-5 w-5 text-zinc-400" />
+        </div>
+        <h2 className="text-lg font-semibold text-zinc-900 dark:text-zinc-100 mb-1">
+          No Claude sessions found
+        </h2>
+        <p className="text-xs text-zinc-500 mb-4 max-w-xs">
+          Sessions will appear here once you run Claude Code on this machine.
+        </p>
+      </div>
+    )
+  }
+  return (
+    <div className="flex flex-col items-center justify-center py-16 text-center">
+      <p className="text-sm text-zinc-400">
+        {timeFiltered
+          ? 'No sessions active in the selected time range.'
+          : 'No sessions match your filters.'}
+      </p>
+      {drilldownActive && (
+        <button
+          onClick={onClearDrilldown}
+          className="mt-3 text-xs text-indigo-500 hover:text-indigo-600 dark:hover:text-indigo-400"
+        >
+          Clear time filter
+        </button>
+      )}
     </div>
   )
 }
@@ -1040,7 +1304,16 @@ function DetailField({ label, value }: Readonly<{ label: string; value: string }
   )
 }
 
-function SessionRow({
+/**
+ * One row of the sessions list.
+ *
+ * Memoized, and its callbacks take the session ID rather than closing over it,
+ * so a parent re-render — a keystroke, a page appended, a favourite toggled —
+ * re-renders only the rows whose data actually changed. A collapsed row is ~68
+ * elements and an expanded one ~94; without this, appending a page re-rendered
+ * every row already on screen.
+ */
+const SessionRow = memo(function SessionRow({
   session,
   tokenRef,
   open,
@@ -1052,10 +1325,10 @@ function SessionRow({
   session: ClaudeSessionSummary
   tokenRef: number
   open: boolean
-  onToggle: () => void
-  onOpen: () => void
-  onJourney: () => void
-  onToggleFavorite: () => void
+  onToggle: (sessionId: string) => void
+  onOpen: (sessionId: string) => void
+  onJourney: (sessionId: string) => void
+  onToggleFavorite: (sessionId: string, isFavorite: boolean) => void
 }>) {
   const inTokens = (session.usage?.input_tokens ?? 0) + (session.subagent_usage?.input_tokens ?? 0)
   const outTokens =
@@ -1080,7 +1353,7 @@ function SessionRow({
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault()
-      onToggle()
+      onToggle(session.session_id)
     }
   }
 
@@ -1090,7 +1363,7 @@ function SessionRow({
         role="button"
         tabIndex={0}
         aria-expanded={open}
-        onClick={onToggle}
+        onClick={() => onToggle(session.session_id)}
         onKeyDown={handleKeyDown}
         className="group/row grid items-center gap-3 px-4 h-11 text-[13px] cursor-pointer hover:bg-zinc-50 dark:hover:bg-zinc-800/50 transition-colors"
         style={{ gridTemplateColumns: ROW_GRID }}
@@ -1108,7 +1381,7 @@ function SessionRow({
             type="button"
             onClick={e => {
               e.stopPropagation()
-              onToggleFavorite()
+              onToggleFavorite(session.session_id, !!session.is_favorite)
             }}
             title={session.is_favorite ? 'Remove from favorites' : 'Add to favorites'}
             className={`shrink-0 transition-opacity ${
@@ -1267,14 +1540,14 @@ function SessionRow({
           <div className="flex gap-2 items-start justify-end">
             <button
               type="button"
-              onClick={onJourney}
+              onClick={() => onJourney(session.session_id)}
               className="h-8 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-[13px] text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors"
             >
               Journey
             </button>
             <button
               type="button"
-              onClick={onOpen}
+              onClick={() => onOpen(session.session_id)}
               className="h-8 px-4 rounded-lg bg-zinc-900 dark:bg-zinc-100 text-[13px] font-medium text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-zinc-200 transition-colors"
             >
               Open
@@ -1284,4 +1557,4 @@ function SessionRow({
       )}
     </div>
   )
-}
+})

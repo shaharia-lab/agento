@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shaharia-lab/agento/internal/eventbus"
@@ -92,13 +93,26 @@ type Cache struct {
 	logger  *slog.Logger
 	bus     eventbus.EventBus // optional; publishes session events on scan
 	pricing *pricing.Store    // optional; enables catalog-backed cost computation
+
+	// analytics memoizes built reports. See analytics_cache.go: the report is
+	// a dozen passes over a full corpus load, and a dashboard fires two or
+	// three of them per open.
+	analytics *analyticsMemo
+
+	// filesDone and filesTotal report the running scan's progress. Atomics
+	// rather than mutex-guarded fields because the status endpoint polls them
+	// every few seconds while the scan writes them once per batch, and neither
+	// should ever wait on the other.
+	filesDone  atomic.Int64
+	filesTotal atomic.Int64
 }
 
 // NewCache creates a new Cache backed by the given SQLite database.
 func NewCache(db *sql.DB, logger *slog.Logger) *Cache {
 	return &Cache{
-		db:     db,
-		logger: logger,
+		db:        db,
+		logger:    logger,
+		analytics: newAnalyticsMemo(),
 	}
 }
 
@@ -225,7 +239,10 @@ func (c *Cache) EnsureScan() <-chan struct{} {
 			close(done)
 		}()
 		c.logger.Info("claude sessions: starting background scan")
-		if _, err := IncrementalScanWithNotify(c.db, c.logger, c.notify); err != nil {
+		if _, err := IncrementalScanWith(c.db, c.logger, ScanOptions{
+			Notify:   c.notify,
+			Progress: c.recordProgress,
+		}); err != nil {
 			// pricing_rev and scanner_version are advanced inside the scan and
 			// only after it applies its changes, so a failure leaves the drift
 			// recorded and the next read retries it.
@@ -235,6 +252,22 @@ func (c *Cache) EnsureScan() <-chan struct{} {
 		c.logger.Info("claude sessions: background scan complete")
 	}()
 	return done
+}
+
+// recordProgress publishes the running scan's position for the status endpoint.
+func (c *Cache) recordProgress(done, total int) {
+	c.filesDone.Store(int64(done))
+	c.filesTotal.Store(int64(total))
+}
+
+// ScanProgress reports how many transcripts the running scan has written and
+// how many it has to write.
+//
+// Both are zero when no scan is running or when the last one had nothing to do.
+// A first run on a large corpus takes minutes, and since the list no longer
+// blocks on it, silence for that long is indistinguishable from a hang.
+func (c *Cache) ScanProgress() (done, total int) {
+	return int(c.filesDone.Load()), int(c.filesTotal.Load())
 }
 
 // ScanInProgress reports whether a background scan is currently running.
@@ -275,15 +308,7 @@ func (c *Cache) LastScannedAt() time.Time {
 // made rate edits a routine UI action. Callers distinguish the two states via
 // CostsStale/ScanInProgress and label the figures rather than stalling on them.
 func (c *Cache) List() []ClaudeSessionSummary {
-	// A rate edit must not wait for the hourly TTL to reach the cost figures,
-	// so pick up a new catalog snapshot before deciding anything.
-	c.refreshPricingResolver()
-
-	var done <-chan struct{}
-	if !c.isFresh() || c.pricingChanged() || c.idleThresholdChanged() {
-		done = c.EnsureScan()
-	}
-
+	done := c.ensureFresh()
 	sessions := c.loadOrEmpty()
 	if len(sessions) > 0 || done == nil {
 		return sessions
@@ -300,6 +325,25 @@ func (c *Cache) List() []ClaudeSessionSummary {
 			"waited", coldStartScanWait)
 		return sessions
 	}
+}
+
+// ensureFresh picks up a new pricing catalog and starts a background rescan if
+// the cached figures were computed under different inputs than the ones now
+// configured. It returns the channel of the in-flight scan, or nil when nothing
+// needed rescanning; it never waits.
+//
+// Every read path goes through it — the corpus load behind analytics and the
+// paged list alike — so a rate edit or a threshold change reaches the figures
+// whichever surface the user happens to open, and so the "one scan at a time"
+// admission is decided in one place.
+func (c *Cache) ensureFresh() <-chan struct{} {
+	// A rate edit must not wait for the hourly TTL to reach the cost figures,
+	// so pick up a new catalog snapshot before deciding anything.
+	c.refreshPricingResolver()
+	if !c.isFresh() || c.pricingChanged() || c.idleThresholdChanged() {
+		return c.EnsureScan()
+	}
+	return nil
 }
 
 // loadOrEmpty reads the cached rows, degrading to an empty slice on error so

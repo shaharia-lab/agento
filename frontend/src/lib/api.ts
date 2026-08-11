@@ -21,7 +21,8 @@ import type {
   ClaudeSettingsProfileDetail,
   ClaudeProject,
   ClaudeSessionStatus,
-  ClaudeSessionSummary,
+  ClaudeSessionPage,
+  ClaudeSessionFacets,
   ClaudeSessionDetail,
   SessionJourney,
   AnalyticsReport,
@@ -43,6 +44,7 @@ import type {
   PricingRate,
   PricingRateInput,
 } from '../types'
+import type { SessionSort } from './sessionQuery'
 
 const BASE = '/api'
 
@@ -210,15 +212,37 @@ export const filesystemApi = {
 
 export const claudeSessionsApi = {
   /**
-   * List all Claude Code sessions, optionally filtered by project path or search query.
+   * One page of Claude Code sessions.
+   *
+   * `filters` is the serialized filter state (see lib/sessionQuery); `sort`,
+   * `limit` and `cursor` page through it. Every predicate runs server-side —
+   * the browser holds one page, never the corpus.
    */
-  list: (params?: { project?: string; q?: string }) => {
-    const qs = new URLSearchParams()
-    if (params?.project) qs.set('project', params.project)
-    if (params?.q) qs.set('q', params.q)
+  list: (params?: {
+    filters?: URLSearchParams
+    sort?: SessionSort
+    limit?: number
+    cursor?: string
+  }) => {
+    const qs = new URLSearchParams(params?.filters)
+    if (params?.sort) qs.set('sort', params.sort)
+    if (params?.limit) qs.set('limit', String(params.limit))
+    if (params?.cursor) qs.set('cursor', params.cursor)
     const query = qs.toString()
-    const suffix = query ? `?${query}` : ''
-    return request<ClaudeSessionSummary[]>(`/claude-sessions${suffix}`)
+    return request<ClaudeSessionPage>(`/claude-sessions${query ? `?${query}` : ''}`)
+  },
+
+  /**
+   * The totals and filter options for the same filter the list is narrowed by.
+   *
+   * Separate from the page because the two have different lifetimes: the
+   * totals change when the filter changes, the pages change as the user
+   * scrolls, and folding them together would recompute a corpus-wide aggregate
+   * on every scroll tick.
+   */
+  facets: (filters?: URLSearchParams) => {
+    const query = new URLSearchParams(filters).toString()
+    return request<ClaudeSessionFacets>(`/claude-sessions/facets${query ? `?${query}` : ''}`)
   },
 
   /**

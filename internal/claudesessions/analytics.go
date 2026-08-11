@@ -114,6 +114,13 @@ type AnalyticsReport struct {
 	CostOverTime        []CostPoint            `json:"cost_over_time"`
 	CostSummary         CostSummary            `json:"cost_summary"`
 	Projects            []string               `json:"projects"`
+	// Granularity is the bucket width every series in this report was built at
+	// — "hourly", "daily", "weekly" or "monthly". It travels with the report
+	// because a bucket key alone no longer says how wide its bucket is: a
+	// weekly and a monthly bucket are both keyed by a YYYY-MM-DD, and a reader
+	// deriving a span from the first and last populated key needs to know how
+	// far past the last one the data actually reaches.
+	Granularity string `json:"granularity"`
 }
 
 // AnalyticsSummary holds the top-level KPI values.
@@ -212,10 +219,21 @@ type ProjectStat struct {
 	Cost         SessionCost `json:"cost"`
 	Percentage   float64     `json:"percentage"` // share of the window's cost
 	LastActivity time.Time   `json:"last_activity"`
+	// FoldedProjects is non-zero only on the "Other projects" row, and says how
+	// many projects it stands for. The UI states it rather than presenting a
+	// bucket as a project — a chart that showed 20 of 500 bars without saying
+	// so would read as the whole picture.
+	FoldedProjects int `json:"folded_projects,omitempty"`
 }
 
-// ProjectDayActivity is one project's activity on one local day, for the
-// "what did I work on when" strip.
+// ProjectDayActivity is one project's activity in one local time bucket, for
+// the "what did I work on when" strip.
+//
+// Named for the day because that is what it is at every window a reader
+// normally looks at; the bucket follows the report's granularity, so a
+// multi-year window aggregates by week or month. Following it rather than
+// staying daily is what bounds the strip: at eight charted projects a six-year
+// daily window would emit ~16,000 cells.
 type ProjectDayActivity struct {
 	Project  string  `json:"project"`
 	Date     string  `json:"date"`
@@ -311,12 +329,56 @@ func (p AnalyticsParams) location() *time.Location {
 	return p.Loc
 }
 
-// Granularity returns "hourly" when the range is ≤7 days, "daily" otherwise.
+// The bucket widths a time series can be reported at, coarsest last.
+const (
+	GranularityHourly  = "hourly"
+	GranularityDaily   = "daily"
+	GranularityWeekly  = "weekly"
+	GranularityMonthly = "monthly"
+	GranularityYearly  = "yearly"
+)
+
+// maxBuckets is the ceiling every series is designed to stay under, and what
+// the granularity thresholds below are chosen to satisfy.
+//
+// It is not enforced by truncation — a truncated series would be a lie about
+// the window — it is a property of the thresholds: 7 days of hours is 169
+// buckets, 120 days is 121, 3 years of weeks is 157, 12 years of months is 145,
+// and beyond that a year is one bucket. A test walks every one of those bands
+// and asserts it, so a threshold edited without the arithmetic fails rather
+// than quietly reintroducing a 790 KB payload.
+//
+// The yearly band exists only because from/to come from a query string: no UI
+// offers a twelve-year window, but nothing stops one being typed, and a series
+// should degrade in resolution rather than in size.
+const maxBuckets = 200
+
+// Granularity picks the bucket width from the window's length.
+//
+// Before this, every window longer than a week was reported daily: "all time"
+// starts in 2020, so an all-time request emitted 2,415 buckets across four
+// series — 790 KB of JSON and four Recharts SVGs with thousands of points, on a
+// corpus of 798 sessions. That payload grows with the calendar, not with the
+// corpus, so it was already the wrong size on the machine it was measured on.
+//
+// Coarsening rather than truncating: a reader asking for six years wants six
+// years, at whatever resolution six years can be read at. Every width still
+// produces a YYYY-MM-DD-shaped key (weekly and monthly buckets are keyed by
+// their first day), which is the contract analyticsMetrics.ts parses.
 func (p AnalyticsParams) Granularity() string {
-	if p.To.Sub(p.From) <= 7*24*time.Hour {
-		return "hourly"
+	span := p.To.Sub(p.From)
+	switch {
+	case span <= 7*24*time.Hour:
+		return GranularityHourly
+	case span <= 120*24*time.Hour:
+		return GranularityDaily
+	case span <= 3*365*24*time.Hour:
+		return GranularityWeekly
+	case span <= 12*365*24*time.Hour:
+		return GranularityMonthly
+	default:
+		return GranularityYearly
 	}
-	return "daily"
 }
 
 // ─── AggregateAnalytics ───────────────────────────────────────────────────────
@@ -338,11 +400,11 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 	loc := p.location()
 	filtered := FilterSessions(sessions, p)
 
+	granularity := p.Granularity()
 	if len(filtered) == 0 {
-		return emptyReport(projects, loc)
+		return emptyReport(projects, loc, granularity)
 	}
 
-	granularity := p.Granularity()
 	summary, costSummary := buildSummary(filtered)
 	projectBreakdown := buildProjectBreakdown(filtered)
 	costByModel := buildCostByModel(filtered)
@@ -357,7 +419,7 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 		InsightCards:        buildInsightCards(filtered, costByModel),
 		CostOverTimeByModel: buildCostOverTimeByModel(filtered, p.From, p.To, granularity, loc),
 		ProjectBreakdown:    projectBreakdown,
-		ProjectActivity:     buildProjectActivity(filtered, projectBreakdown, loc),
+		ProjectActivity:     buildProjectActivity(filtered, projectBreakdown, granularity, loc),
 		TopSessions:         buildTopSessions(filtered),
 		SessionsPerModel:    buildSessionsPerModel(filtered),
 		MostActiveDays:      buildMostActiveDays(filtered, loc),
@@ -366,6 +428,7 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 		CostOverTime:        buildCostOverTime(filtered, p.From, p.To, granularity, loc),
 		CostSummary:         costSummary,
 		Projects:            projects,
+		Granularity:         granularity,
 	}
 }
 
@@ -375,7 +438,7 @@ func AggregateAnalytics(sessions []ClaudeSessionSummary, p AnalyticsParams) Anal
 // has to distinguish "no data" from "field missing". Projects is still
 // populated: the picker must keep offering every project, or a user who filters
 // into an empty window cannot filter back out of it.
-func emptyReport(projects []string, loc *time.Location) AnalyticsReport {
+func emptyReport(projects []string, loc *time.Location, granularity string) AnalyticsReport {
 	return AnalyticsReport{
 		TimeSeries:          []TimeSeriesPoint{},
 		CacheEfficiency:     []CacheEfficiencyPoint{},
@@ -395,7 +458,8 @@ func emptyReport(projects []string, loc *time.Location) AnalyticsReport {
 			ByDuration: []SessionRanking{},
 			ByTokens:   []SessionRanking{},
 		},
-		Projects: projects,
+		Projects:    projects,
+		Granularity: granularity,
 	}
 }
 
@@ -748,13 +812,54 @@ func buildProjectBreakdown(sessions []ClaudeSessionSummary) []ProjectStat {
 		// by name then keeps the response stable across requests.
 		return out[i].Project < out[j].Project
 	})
-	return out
+	return foldProjectTail(out)
 }
 
-// buildProjectActivity is the project×day strip: which projects were worked on
-// which days, for the busiest projects in the window.
+// topProjectsListed bounds the project table. Beyond it the tail is folded into
+// one row rather than dropped: at 500 projects the table is neither readable
+// nor cheap, but a total that quietly excluded 480 of them would be wrong.
+const topProjectsListed = 20
+
+// OtherProjectsLabel names the folded tail row. Exported because the UI has to
+// recognize it: it is a bucket, not a project, so it must not be clickable as a
+// filter and must say how many projects it stands for.
+const OtherProjectsLabel = "Other projects"
+
+// foldProjectTail keeps the top projects by spend and sums the rest into one
+// row, preserving every figure's total.
+//
+// Folding rather than truncating, per the no-silent-caps convention: a chart
+// that shows 20 of 500 bars without saying so reads as "these are all the
+// projects". The row carries the count it stands for so the UI can state it.
+func foldProjectTail(ranked []ProjectStat) []ProjectStat {
+	if len(ranked) <= topProjectsListed+1 {
+		// +1 because folding a single project into "Other (1 project)" is
+		// strictly worse than naming it.
+		return ranked
+	}
+	head := ranked[:topProjectsListed]
+	tail := ranked[topProjectsListed:]
+
+	other := ProjectStat{Project: OtherProjectsLabel, FoldedProjects: len(tail)}
+	for _, p := range tail {
+		other.Sessions += p.Sessions
+		other.Tokens += p.Tokens
+		other.TotalTokens += p.TotalTokens
+		other.Cost.Add(p.Cost)
+		other.Percentage += p.Percentage
+		if p.LastActivity.After(other.LastActivity) {
+			other.LastActivity = p.LastActivity
+		}
+	}
+	other.Percentage = math.Round(other.Percentage*10) / 10
+	return append(head, other)
+}
+
+// buildProjectActivity is the project×bucket strip: which projects were worked
+// on when, for the busiest projects in the window. The bucket is the report's
+// own granularity, so the strip cannot grow without bound as the window does.
 func buildProjectActivity(
-	sessions []ClaudeSessionSummary, ranked []ProjectStat, loc *time.Location,
+	sessions []ClaudeSessionSummary, ranked []ProjectStat, granularity string, loc *time.Location,
 ) []ProjectDayActivity {
 	charted := map[string]struct{}{}
 	for i, p := range ranked {
@@ -770,7 +875,7 @@ func buildProjectActivity(
 		if _, ok := charted[s.ProjectPath]; !ok {
 			continue
 		}
-		k := key{s.ProjectPath, bucketKey(s.LastActivity, "daily", loc)}
+		k := key{s.ProjectPath, bucketKey(s.LastActivity, granularity, loc)}
 		if cells[k] == nil {
 			cells[k] = &ProjectDayActivity{Project: k.project, Date: k.date}
 		}
@@ -1021,15 +1126,49 @@ func buildCostOverTime(
 
 // ─── Time bucket helpers ──────────────────────────────────────────────────────
 
+// bucketStart truncates an instant to the start of the bucket that contains it,
+// in loc.
+//
+// One definition serves both bucketKey and walkBuckets, which is what keeps a
+// session's bucket and the walked series aligned. When they were separate the
+// walk started at the raw window edge, so a weekly or monthly series would emit
+// keys no session could ever land in and drop the ones they did.
+//
+// Weeks start on Monday, matching ISO-8601 and every other weekday-aware figure
+// on the dashboard.
+func bucketStart(t time.Time, granularity string, loc *time.Location) time.Time {
+	t = t.In(loc)
+	switch granularity {
+	case GranularityHourly:
+		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, loc)
+	case GranularityWeekly:
+		// Sunday is 0 in Go's numbering; shift so Monday is the week's first day.
+		offset := (int(t.Weekday()) + 6) % 7
+		day := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
+		return day.AddDate(0, 0, -offset)
+	case GranularityMonthly:
+		return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, loc)
+	case GranularityYearly:
+		return time.Date(t.Year(), 1, 1, 0, 0, 0, 0, loc)
+	default:
+		return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, loc)
+	}
+}
+
 // bucketKey derives a session's bucket in loc. Format renders in the time's own
 // location, so the conversion has to happen here rather than at the edges — an
 // instant is only a day or an hour once you say whose day you mean.
+//
+// Weekly and monthly buckets are keyed by their first day rather than by a
+// "2026-W32" or "2026-08" form, so every key a series can carry still parses as
+// the YYYY-MM-DD (optionally T-suffixed with an hour) that analyticsMetrics.ts
+// splits and reads.
 func bucketKey(t time.Time, granularity string, loc *time.Location) string {
-	t = t.In(loc)
-	if granularity == "hourly" {
-		return t.Format("2006-01-02T15")
+	start := bucketStart(t, granularity, loc)
+	if granularity == GranularityHourly {
+		return start.Format("2006-01-02T15")
 	}
-	return t.Format("2006-01-02")
+	return start.Format("2006-01-02")
 }
 
 func bucketLabel(t time.Time, granularity string, loc *time.Location) string {
@@ -1039,19 +1178,29 @@ func bucketLabel(t time.Time, granularity string, loc *time.Location) string {
 // walkBuckets calls fn once per bucket from `from` to `to` inclusive, stepping
 // in loc.
 //
-// Daily steps advance the calendar day rather than adding 24 hours: across a
+// Steps advance the calendar unit rather than adding a fixed duration: across a
 // DST transition a local day is 23 or 25 hours long, and a fixed 24h step drifts
-// off the wall clock, duplicating one day key and skipping another.
+// off the wall clock, duplicating one key and skipping another. The same applies
+// to weeks, and months are not a fixed length at all.
 func walkBuckets(from, to time.Time, granularity string, loc *time.Location, fn func(string, time.Time)) {
-	cur := from.In(loc)
+	// Start at the containing bucket, not the raw window edge: a window
+	// beginning mid-week must still emit the week its first sessions key into.
+	cur := bucketStart(from, granularity, loc)
 	end := to.In(loc)
 	for !cur.After(end) {
 		fn(bucketKey(cur, granularity, loc), cur)
-		if granularity == "hourly" {
+		switch granularity {
+		case GranularityHourly:
 			cur = cur.Add(time.Hour)
-			continue
+		case GranularityWeekly:
+			cur = cur.AddDate(0, 0, 7)
+		case GranularityMonthly:
+			cur = cur.AddDate(0, 1, 0)
+		case GranularityYearly:
+			cur = cur.AddDate(1, 0, 0)
+		default:
+			cur = cur.AddDate(0, 0, 1)
 		}
-		cur = cur.AddDate(0, 0, 1)
 	}
 }
 

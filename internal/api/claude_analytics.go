@@ -19,9 +19,11 @@ import (
 //	        (default: UTC). Timestamps stay UTC on the wire either way.
 func (s *Server) handleGetClaudeAnalytics(w http.ResponseWriter, r *http.Request) {
 	params := parseAnalyticsParams(r)
-	sessions := s.claudeSessionCache.List()
-	report := claudesessions.AggregateAnalytics(sessions, params)
-	s.writeJSON(w, http.StatusOK, report)
+	// Memoized on the window plus every input that can change what it answers
+	// (see claudesessions/analytics_cache.go). The dashboards fire two or three
+	// of these per open — the current window and the one before it — and every
+	// one of them used to rebuild the report from a full corpus load.
+	s.writeJSON(w, http.StatusOK, s.claudeSessionCache.Analytics(params))
 }
 
 // parseAnalyticsParams reads the window, project and timezone every

@@ -1,4 +1,4 @@
-.PHONY: build build-frontend build-go dev-frontend dev-backend run-serve run-ask tidy lint test generate clean e2e e2e-setup
+.PHONY: build build-frontend build-go dev-frontend dev-backend run-serve run-ask tidy lint test bench-scale generate clean e2e e2e-setup
 
 BINARY := agento
 
@@ -46,6 +46,15 @@ lint:
 
 test:
 	go test ./...
+
+# Scale harness: generates a synthetic ~/.claude corpus and asserts the scan,
+# sessions-list and analytics budgets against it. Excluded from `make test` by
+# the `scale` build tag — the large corpus writes ~1 GB and takes minutes.
+#   make bench-scale             ~800 sessions / 34 projects (the audited corpus)
+#   make bench-scale SCALE=large 5,000 sessions / 500 projects (the target)
+SCALE ?= medium
+bench-scale:
+	SCALE=$(SCALE) go test -tags scale -timeout 60m -v ./internal/claudesessions -run TestScale
 
 # ── E2E tests (local only — requires built binary) ────────────────────────────
 # First-time setup: installs Playwright + downloads Chromium

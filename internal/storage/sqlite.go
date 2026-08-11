@@ -595,6 +595,28 @@ ALTER TABLE user_settings ADD COLUMN idle_gap_threshold_minutes INTEGER NOT NULL
 ALTER TABLE claude_cache_metadata ADD COLUMN idle_threshold_ms INTEGER NOT NULL DEFAULT 600000;
 `,
 	},
+	{
+		version: 26,
+		sql: `
+-- Indexes the paged sessions list made load-bearing.
+--
+-- The list is now a keyset scan ordered by (last_activity DESC, session_id
+-- DESC) rather than a full-corpus load filtered in the browser, so the ordering
+-- column has to be indexed or every page re-sorts the whole table. The
+-- tiebreak is part of the index because it is part of the order: a covering
+-- (last_activity, session_id) index lets SQLite satisfy both the ORDER BY and
+-- the keyset predicate from one traversal.
+CREATE INDEX IF NOT EXISTS idx_claude_session_cache_activity
+	ON claude_session_cache(last_activity DESC, session_id DESC);
+
+-- deleteCachedFile resolves a removed transcript by its path, once per deleted
+-- file per scan. Unindexed that is a full table scan each time. The sub-agent
+-- table has carried idx_subagent_file_path since it was created; the session
+-- table never got the equivalent.
+CREATE INDEX IF NOT EXISTS idx_claude_session_cache_file_path
+	ON claude_session_cache(file_path);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

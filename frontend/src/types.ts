@@ -633,6 +633,46 @@ export interface ClaudeSessionCost {
 
 /** A pull request a session produced, from a `pr-link` event. */
 /** Cache freshness for the Claude sessions list (#208). */
+/**
+ * One page of the sessions list.
+ *
+ * The endpoint used to return a bare array of every session, which the browser
+ * then filtered, sorted, grouped and rendered in full. This envelope is what
+ * bounds the browser to a single page.
+ */
+export interface ClaudeSessionPage {
+  items: ClaudeSessionSummary[]
+  /** Continues the list; empty on the last page. */
+  next_cursor: string
+  has_more: boolean
+}
+
+/**
+ * The aggregate a single page cannot answer: the totals across the whole
+ * filtered set, and the options the filter controls offer.
+ */
+export interface ClaudeSessionFacets {
+  /** Sessions matching the current filter — the toolbar's counter. */
+  total: number
+  total_tokens: number
+  total_cost_usd: number
+  /**
+   * The 90th percentile of input+output tokens across the filtered set: the
+   * reference length for the token bars, so one outlier session cannot flatten
+   * every other bar to nothing.
+   */
+  token_p90: number
+  /**
+   * Dropdown options, derived from every visible session rather than the
+   * filtered set — a dropdown that removes the option you just picked cannot
+   * be un-picked.
+   */
+  models: string[]
+  permission_modes: string[]
+  has_favorites: boolean
+  has_prs: boolean
+}
+
 export interface ClaudeSessionStatus {
   /**
    * The served costs were computed under an older pricing catalog and a
@@ -642,6 +682,16 @@ export interface ClaudeSessionStatus {
   costs_stale: boolean
   /** A background scan is running right now. */
   scan_in_progress: boolean
+  /**
+   * The running scan's position. Both zero when nothing is running or the scan
+   * had nothing to re-read.
+   *
+   * The list no longer blocks on a cold-start scan — at 5,000 sessions that
+   * would be minutes and then a timeout — so an empty list during a first run
+   * needs something to say beyond "no sessions".
+   */
+  files_done: number
+  files_total: number
   /** RFC3339; empty when the cache has never been scanned. */
   last_scanned_at: string
 }
@@ -1147,7 +1197,23 @@ export interface InsightCard {
 }
 
 /** One project's activity over the window. */
+/**
+ * The bucket width an analytics report was built at, as the backend names it.
+ *
+ * It travels with the report because a bucket key no longer says how wide its
+ * bucket is: weekly and monthly buckets are both keyed by their first day, so a
+ * span derived from the first and last populated key would stop at the last
+ * bucket's *start* and understate the extent by up to a month.
+ */
+export type Granularity = 'hourly' | 'daily' | 'weekly' | 'monthly' | 'yearly'
+
 export interface ProjectStat {
+  /**
+   * Non-zero only on the folded "Other projects" row, and says how many
+   * projects it stands for. Beyond the top 20 the tail is summed into one row
+   * rather than dropped, so the table's total stays the window's total.
+   */
+  folded_projects?: number
   project: string
   sessions: number
   /** Conversation tokens (input+output). */
@@ -1236,6 +1302,12 @@ export interface AnalyticsReport {
   insight_cards: InsightCard[]
   cost_over_time_by_model: StackedCostPoint[]
   project_breakdown: ProjectStat[]
+  /**
+   * The bucket width every series in this report was built at. Long windows
+   * are coarsened rather than truncated, so an all-time range is ~80 monthly
+   * buckets instead of 2,400 daily ones.
+   */
+  granularity: Granularity
   project_activity: ProjectDayActivity[]
   top_sessions: TopSessions
   most_active_days: DayActivity[]

@@ -26,13 +26,32 @@ export function toolSummary(block: ClaudeNormalizedBlock): string {
   return str(firstString)
 }
 
-/** Everything in a message that a transcript search should look at. */
+/**
+ * Everything in a message that a transcript search should look at, lowercased.
+ *
+ * `JSON.stringify` on every tool input is the expensive part, and the search
+ * box used to call this for every message on every keystroke — the whole
+ * transcript re-serialized per letter typed, over a session whose median here
+ * is 1,219 messages. Build it once with `searchIndex` and match against that.
+ */
 export function messageText(msg: ClaudeMessage): string {
   const blocks = msg.blocks ?? []
   const fromBlocks = blocks
     .map(b => `${b.name ?? ''} ${b.text ?? ''} ${b.input ? JSON.stringify(b.input) : ''}`)
     .join(' ')
   return `${msg.content ?? ''} ${fromBlocks}`.toLowerCase()
+}
+
+/**
+ * The searchable text of every message, aligned by index.
+ *
+ * Computed once per transcript rather than once per keystroke per message.
+ * Aligned by index rather than keyed by uuid because the caller already has
+ * the index and a Map lookup per message per keystroke is the cost this exists
+ * to remove.
+ */
+export function searchIndex(messages: readonly ClaudeMessage[]): string[] {
+  return messages.map(messageText)
 }
 
 /** Whether a message carries any renderable prose (as opposed to only tool calls). */

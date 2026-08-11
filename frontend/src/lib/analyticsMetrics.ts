@@ -4,7 +4,7 @@
  * They live here rather than inside a page component so they can be tested:
  * every function in this file was, at some point, a KPI tile that read wrong.
  */
-import type { TimeSeriesPoint } from '@/types'
+import type { Granularity, TimeSeriesPoint } from '@/types'
 
 /** A bucket key is "YYYY-MM-DD" or "YYYY-MM-DDTHH", already in the browser's zone. */
 function bucketDay(key: string): string {
@@ -33,6 +33,44 @@ function inclusiveDaySpan(a: Date, b: Date): number {
 }
 
 /**
+ * The last day a bucket starting on `start` covers.
+ *
+ * Hourly and daily buckets are one day wide, so the start is also the end. A
+ * weekly bucket runs six further days and a monthly one to the end of its
+ * month — without this a monthly all-time report would divide by a span up to
+ * 30 days short and overstate every per-day average.
+ */
+function bucketEnd(start: Date, granularity: Granularity): Date {
+  switch (granularity) {
+    case 'weekly':
+      return new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6)
+    case 'monthly':
+      // Day 0 of the next month is the last day of this one.
+      return new Date(start.getFullYear(), start.getMonth() + 1, 0)
+    case 'yearly':
+      return new Date(start.getFullYear(), 11, 31)
+    default:
+      return start
+  }
+}
+
+/**
+ * The first and last calendar day the populated buckets cover, or null when
+ * none are populated.
+ */
+function populatedExtent(
+  series: TimeSeriesPoint[],
+  granularity: Granularity,
+): { first: Date; last: Date } | null {
+  const populated = series.filter(p => p.sessions > 0).map(p => bucketDay(p.date))
+  if (populated.length === 0) return null
+  const first = parseLocalDay(populated[0])
+  const lastStart = parseLocalDay(populated[populated.length - 1])
+  if (!first || !lastStart) return null
+  return { first, last: bucketEnd(lastStart, granularity) }
+}
+
+/**
  * Average sessions per day across the days the data actually spans.
  *
  * The denominator is the observed extent — first to last bucket that contains a
@@ -48,15 +86,15 @@ function inclusiveDaySpan(a: Date, b: Date): number {
  * Returns "—" when the range holds no sessions at all, rather than 0.00, which
  * reads as a measurement rather than an absence.
  */
-export function avgSessionsPerDay(totalSessions: number, series: TimeSeriesPoint[]): string {
-  const populated = series.filter(p => p.sessions > 0).map(p => bucketDay(p.date))
-  if (totalSessions === 0 || populated.length === 0) return '—'
+export function avgSessionsPerDay(
+  totalSessions: number,
+  series: TimeSeriesPoint[],
+  granularity: Granularity = 'daily',
+): string {
+  const extent = populatedExtent(series, granularity)
+  if (totalSessions === 0 || !extent) return '—'
 
-  const first = parseLocalDay(populated[0])
-  const last = parseLocalDay(populated[populated.length - 1])
-  if (!first || !last) return '—'
-
-  const days = Math.max(1, inclusiveDaySpan(first, last))
+  const days = Math.max(1, inclusiveDaySpan(extent.first, extent.last))
   const avg = totalSessions / days
   return avg < 1 ? avg.toFixed(2) : avg.toFixed(1)
 }
@@ -116,11 +154,11 @@ export function withPreviousSeries<T, R extends Record<string, unknown>>(
  * The observed extent as a human-readable hint for the tile that uses it, so a
  * reader can see which denominator produced the average.
  */
-export function observedDaySpan(series: TimeSeriesPoint[]): number {
-  const populated = series.filter(p => p.sessions > 0).map(p => bucketDay(p.date))
-  if (populated.length === 0) return 0
-  const first = parseLocalDay(populated[0])
-  const last = parseLocalDay(populated[populated.length - 1])
-  if (!first || !last) return 0
-  return Math.max(1, inclusiveDaySpan(first, last))
+export function observedDaySpan(
+  series: TimeSeriesPoint[],
+  granularity: Granularity = 'daily',
+): number {
+  const extent = populatedExtent(series, granularity)
+  if (!extent) return 0
+  return Math.max(1, inclusiveDaySpan(extent.first, extent.last))
 }
