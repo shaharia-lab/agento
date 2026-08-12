@@ -395,7 +395,13 @@ type cachedEntry struct {
 // (session_id, project_path), claude_subagent_cache on
 // (parent_session_id, agent_id) — so the key is built per kind. The isSubagent
 // prefix keeps the two populations disjoint rather than relying on the shapes
-// of the values never colliding.
+// of the values never colliding: a sub-agent row carries its *parent's* id in
+// sessionID, so without the prefix it could alias the parent session's own key.
+//
+// The sub-agent branch exists to make the index correct by construction, not
+// because any notification depends on it — recordPending always reports a
+// sub-agent as isNew=false, and a sub-agent's path only moves when its parent's
+// does, where the parent's own notification dominates.
 func rowKey(isSubagent bool, sessionID, projectPath, agentID string) string {
 	if isSubagent {
 		return "s\x00" + sessionID + "\x00" + agentID
@@ -966,8 +972,13 @@ func diffDiskAndCache(
 	// the path it currently sits at. A session present in two config dirs can
 	// change owner between scans — an unmounted drive, say — and the newly
 	// owning path is absent from the path view even though its row exists.
-	// Without this it is classified as an insert and notified isNew=true, which
-	// re-runs the whole insight pipeline for a session that was never new.
+	// Without this it is classified as an insert and notified isNew=true, so a
+	// session cached for months is announced as a discovery.
+	//
+	// This is a correctness fix for what isNew *means*, not a performance one:
+	// the insight worker subscribes to discovered and updated alike, and the
+	// scanner re-reads a toUpdate transcript exactly as it re-reads a toInsert
+	// one, so the work done is the same either way.
 	byKey := make(map[string]struct{}, len(cached))
 	for _, ce := range cached {
 		byKey[ce.key()] = struct{}{}

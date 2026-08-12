@@ -369,6 +369,18 @@ func TestIncrementalScan_ClaimShiftIsNotADiscovery(t *testing.T) {
 		t.Fatalf("first scan reported %v as new, want [%s]", got, sessionID)
 	}
 
+	// User-owned columns, which a rescan deliberately preserves. They are what
+	// makes the write-then-delete ordering load-bearing: if deleteCachedFiles
+	// ran before the upsert, the row at the vacated path would be removed and
+	// re-inserted fresh, silently clearing both — while the row count and the
+	// isNew classification stayed exactly as asserted above.
+	if err := c.UpdateCustomTitle(sessionID, "mine"); err != nil {
+		t.Fatalf("setting title: %v", err)
+	}
+	if err := c.UpdateFavorite(sessionID, true); err != nil {
+		t.Fatalf("setting favorite: %v", err)
+	}
+
 	// Unmount the owning dir: ownership moves to the copy.
 	moved := filepath.Join(home, ".claude-unmounted")
 	if err := os.Rename(defaultDir, moved); err != nil {
@@ -386,9 +398,18 @@ func TestIncrementalScan_ClaimShiftIsNotADiscovery(t *testing.T) {
 		t.Errorf("remount reported %v as newly discovered; the row already existed", got)
 	}
 
-	// The row and its user-owned columns are intact throughout.
 	if got := countRows(t, c, "claude_session_cache"); got != 1 {
 		t.Errorf("rows = %d, want 1", got)
+	}
+	var title string
+	var favorite bool
+	if err := c.db.QueryRowContext(context.Background(),
+		"SELECT custom_title, is_favorite FROM claude_session_cache").Scan(&title, &favorite); err != nil {
+		t.Fatalf("reading user columns: %v", err)
+	}
+	if title != "mine" || !favorite {
+		t.Errorf("custom_title=%q is_favorite=%v — a claim shift must not reset user-owned columns",
+			title, favorite)
 	}
 }
 
