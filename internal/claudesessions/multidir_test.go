@@ -330,3 +330,82 @@ func TestIncrementalScan_StampsConfigDirOnPreexistingRows(t *testing.T) {
 		t.Errorf("config_dir = %q, want %q — the version bump must re-stamp existing rows", got, want)
 	}
 }
+
+// collectNotifies runs a scan and returns the session ids reported as new.
+func collectNotifies(t *testing.T, c *Cache) []string {
+	t.Helper()
+	var isNew []string
+	_, err := IncrementalScanWithNotify(c.db, testLogger,
+		func(sessionID, _ string, new bool) {
+			if new {
+				isNew = append(isNew, sessionID)
+			}
+		})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	return isNew
+}
+
+// A session present in two config dirs changes owner when one is unmounted.
+// The row already exists — the upsert merely conflicts on its primary key — so
+// reporting it as discovered re-runs the insight pipeline for the whole
+// session, parent and every sub-agent, for nothing.
+func TestIncrementalScan_ClaimShiftIsNotADiscovery(t *testing.T) {
+	home := t.TempDir()
+	copyRoot := t.TempDir()
+	copyDir := filepath.Join(copyRoot, ".claude-copy")
+	at := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+
+	const project, sessionID = "-home-dev-repo", "shared-1"
+	defaultDir := filepath.Join(home, ".claude")
+	writeSessionIn(t, defaultDir, project, sessionID, at)
+	writeSessionIn(t, copyDir, project, sessionID, at)
+
+	useConfigDirs(t, home, copyDir)
+	c := newScanCache(t)
+
+	if got := collectNotifies(t, c); len(got) != 1 || got[0] != sessionID {
+		t.Fatalf("first scan reported %v as new, want [%s]", got, sessionID)
+	}
+
+	// Unmount the owning dir: ownership moves to the copy.
+	moved := filepath.Join(home, ".claude-unmounted")
+	if err := os.Rename(defaultDir, moved); err != nil {
+		t.Fatalf("unmounting: %v", err)
+	}
+	if got := collectNotifies(t, c); len(got) != 0 {
+		t.Errorf("unmount reported %v as newly discovered; the row already existed", got)
+	}
+
+	// Remount: ownership moves back.
+	if err := os.Rename(moved, defaultDir); err != nil {
+		t.Fatalf("remounting: %v", err)
+	}
+	if got := collectNotifies(t, c); len(got) != 0 {
+		t.Errorf("remount reported %v as newly discovered; the row already existed", got)
+	}
+
+	// The row and its user-owned columns are intact throughout.
+	if got := countRows(t, c, "claude_session_cache"); got != 1 {
+		t.Errorf("rows = %d, want 1", got)
+	}
+}
+
+// The control: suppressing every notification would satisfy the test above.
+func TestIncrementalScan_GenuinelyNewSessionStillNotifies(t *testing.T) {
+	home := t.TempDir()
+	at := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	writeSessionIn(t, filepath.Join(home, ".claude"), "-home-dev-repo", "first", at)
+	useConfigDirs(t, home)
+
+	c := newScanCache(t)
+	if got := collectNotifies(t, c); len(got) != 1 || got[0] != "first" {
+		t.Fatalf("first scan reported %v, want [first]", got)
+	}
+
+	writeSessionIn(t, filepath.Join(home, ".claude"), "-home-dev-repo", "second", at.Add(time.Minute))
+	if got := collectNotifies(t, c); len(got) != 1 || got[0] != "second" {
+		t.Errorf("a genuinely new session reported %v, want [second]", got)
+	}
+}
