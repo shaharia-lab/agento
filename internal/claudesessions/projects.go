@@ -102,8 +102,13 @@ func ListProjects() ([]ClaudeProject, error) {
 	return walkProjects()
 }
 
-// walkProjects reads the project directories directly. It counts the .jsonl
-// files in each, which is the same count projectsFromDiskFiles derives.
+// walkProjects reads the project directories directly, as the fallback before
+// the first scan publishes a list.
+//
+// It counts distinct session ids, matching what projectsFromDiskFiles derives
+// for every project that has one. The one divergence is a readable but empty
+// project directory, which appears here with a count of zero and is absent from
+// the scan-derived list — cosmetic, and pre-dates the multi-dir fan-out.
 func walkProjects() ([]ClaudeProject, error) {
 	// Projects are keyed by their encoded directory name, so the same project
 	// worked on under two config dirs folds into one entry — the project is one

@@ -239,3 +239,62 @@ type stubSettingsStore struct{ saved UserSettings }
 
 func (s *stubSettingsStore) Load() (UserSettings, error) { return s.saved, nil }
 func (s *stubSettingsStore) Save(v UserSettings) error   { s.saved = v; return nil }
+
+// A relative value has two different meanings at once — the server stats it
+// against its own working directory, the subprocess resolves --settings against
+// its own — so no resolver may return one. The agent-side guard alone was not
+// enough: a relative global run dir defeated it via the fallback.
+func TestClaudeDirs_RelativePathsAreNeverResolved(t *testing.T) {
+	home := resetClaudeDirs(t)
+	def := filepath.Join(home, ".claude")
+
+	ApplyClaudeDirs("relative/run", []string{"also/relative"})
+	if got := ClaudeRunConfigDir(); got != def {
+		t.Errorf("relative run dir = %q, want the default %q", got, def)
+	}
+	if got := ClaudeConfigDirs(); len(got) != 1 || got[0] != def {
+		t.Errorf("indexed dirs = %v, want only the default", got)
+	}
+
+	// A relative override must not be honored, and must not be rescued by a
+	// relative global either.
+	agent := &AgentConfig{ClaudeConfigDir: "relative/agent"}
+	if got := ResolveAgentClaudeDir(agent); got != def {
+		t.Errorf("relative agent override = %q, want the default %q", got, def)
+	}
+
+	// Same for the environment, which no service validation ever sees.
+	t.Setenv(ClaudeConfigDirEnvVar, "relative/env")
+	if got := ClaudeRunConfigDir(); got != def {
+		t.Errorf("relative env value = %q, want the default %q", got, def)
+	}
+}
+
+// The reported defect: a CLAUDE_CONFIG_DIR naming a directory Claude Code has
+// not created yet must not make every settings save fail — including saves of
+// unrelated fields, on a field the UI renders read-only.
+func TestSettingsManager_EnvLockedMissingDirDoesNotBlockSaves(t *testing.T) {
+	home := resetClaudeDirs(t)
+	missing := filepath.Join(home, "not-created-yet")
+	t.Setenv(ClaudeConfigDirEnvVar, missing)
+
+	m, err := NewSettingsManager(&stubSettingsStore{}, &AppConfig{})
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	if got := m.Get().ClaudeConfigDir; got != missing {
+		t.Fatalf("value = %q, want the env value even though it does not exist", got)
+	}
+
+	// A save of an entirely unrelated field must go through.
+	if err := m.Update(UserSettings{AppearanceDarkMode: true}); err != nil {
+		t.Fatalf("unrelated save was blocked by a nonexistent locked dir: %v", err)
+	}
+	if !m.Get().AppearanceDarkMode {
+		t.Error("the unrelated field was not persisted")
+	}
+	// A genuinely new bad dir is still rejected.
+	if err := m.Update(UserSettings{ClaudeConfigDirs: []string{"/definitely/not/here"}}); err == nil {
+		t.Error("a new nonexistent indexed dir should still be rejected")
+	}
+}

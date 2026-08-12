@@ -280,3 +280,53 @@ func TestIncrementalScan_UnreadableProjectProtectsOnlyItself(t *testing.T) {
 		t.Errorf("surviving row = %q, want bad-1", id)
 	}
 }
+
+// Migration 27 cannot backfill config_dir — the home directory is not a SQL
+// constant — and a scan only re-reads a file whose mtime changed. Without the
+// v13 scanner-version bump an upgraded corpus would keep an empty config_dir
+// forever, and the account filter would match none of it.
+func TestIncrementalScan_StampsConfigDirOnPreexistingRows(t *testing.T) {
+	home := t.TempDir()
+	at := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	writeSessionIn(t, filepath.Join(home, ".claude"), "-home-dev-repo", "legacy-1", at)
+	useConfigDirs(t, home)
+
+	c := newScanCache(t)
+	if _, err := IncrementalScan(c.db, testLogger); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+
+	// Recreate the post-migration state: a row cached by an older scanner,
+	// with no config_dir and the file untouched since.
+	ctx := context.Background()
+	if _, err := c.db.ExecContext(ctx,
+		`UPDATE claude_session_cache SET config_dir = ''`); err != nil {
+		t.Fatalf("blanking config_dir: %v", err)
+	}
+	// Pinned to the literal version that shipped before config_dir existed,
+	// not to CurrentScannerVersion-1: a relative rewind would keep passing if
+	// the bump were reverted, which is the one thing this test exists to catch.
+	const versionBeforeConfigDir = 12
+	if _, err := c.db.ExecContext(ctx,
+		`UPDATE claude_cache_metadata SET scanner_version = ?`,
+		versionBeforeConfigDir); err != nil {
+		t.Fatalf("rewinding scanner version: %v", err)
+	}
+	if CurrentScannerVersion <= versionBeforeConfigDir {
+		t.Fatalf("CurrentScannerVersion = %d, want > %d so cached rows are re-stamped",
+			CurrentScannerVersion, versionBeforeConfigDir)
+	}
+
+	if _, err := IncrementalScan(c.db, testLogger); err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+
+	var got string
+	if err := c.db.QueryRowContext(ctx,
+		`SELECT config_dir FROM claude_session_cache`).Scan(&got); err != nil {
+		t.Fatalf("reading config_dir: %v", err)
+	}
+	if want := filepath.Join(home, ".claude"); got != want {
+		t.Errorf("config_dir = %q, want %q — the version bump must re-stamp existing rows", got, want)
+	}
+}

@@ -135,7 +135,7 @@ func dedupeDirs(dirs []string) []string {
 	seen := make(map[string]struct{}, len(dirs))
 	out := make([]string, 0, len(dirs))
 	for _, d := range dirs {
-		d = NormalizeClaudeConfigDir(d)
+		d = absoluteDir(NormalizeClaudeConfigDir(d))
 		if d == "" {
 			continue
 		}
@@ -148,16 +148,37 @@ func dedupeDirs(dirs []string) []string {
 	return out
 }
 
+// absoluteDir returns p when it is an absolute path, and "" otherwise.
+//
+// Every resolver funnels through this, because a relative config dir has two
+// different meanings at once: Agento stats a file in it against the *server's*
+// working directory, while Claude Code resolves the --settings path it is given
+// against the *subprocess's*. The file checked would not be the file loaded, and
+// under a per-agent working directory that second path lands inside the user's
+// checked-out repository — where a settings.json carrying hooks and env would be
+// read as trusted configuration. There is no correct interpretation of a
+// relative value here, so it is discarded rather than guessed at.
+//
+// It is enforced here rather than only at the API boundary because the value
+// can arrive from an agent YAML file, the FS→SQLite import, a hand-edited row,
+// or the environment — none of which pass through the service validation.
+func absoluteDir(p string) string {
+	if p == "" || !filepath.IsAbs(p) {
+		return ""
+	}
+	return p
+}
+
 // ClaudeRunConfigDir returns the config dir agent runs target by default:
 // CLAUDE_CONFIG_DIR, else the configured run dir, else the default.
 func ClaudeRunConfigDir() string {
-	if env := ClaudeConfigDirFromEnv(); env != "" {
+	if env := absoluteDir(ClaudeConfigDirFromEnv()); env != "" {
 		return env
 	}
 	claudeDirs.RLock()
 	run := claudeDirs.runOverride
 	claudeDirs.RUnlock()
-	if run != "" {
+	if run := absoluteDir(run); run != "" {
 		return run
 	}
 	return DefaultClaudeConfigDir()
@@ -170,14 +191,9 @@ func ClaudeRunConfigDir() string {
 // agent config (the CLI's one-shot path) need no special case.
 func ResolveAgentClaudeDir(agentCfg *AgentConfig) string {
 	if agentCfg != nil {
-		dir := NormalizeClaudeConfigDir(agentCfg.ClaudeConfigDir)
-		// Defense in depth: the service rejects a relative override on save,
-		// but a row written before that check — or by hand, or by the YAML
-		// import path — must not reach the runner. A relative dir is resolved
-		// against a different working directory by the server (which stats the
-		// settings file) than by the subprocess (which loads it), so the file
-		// checked would not be the file used.
-		if dir != "" && filepath.IsAbs(dir) {
+		// The service rejects a relative override on save; absoluteDir is the
+		// backstop for a value that never passed through it.
+		if dir := absoluteDir(NormalizeClaudeConfigDir(agentCfg.ClaudeConfigDir)); dir != "" {
 			return dir
 		}
 	}
