@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -86,9 +87,27 @@ func TestApplyStoredClaudeDirs_UnreadableDatabaseDegrades(t *testing.T) {
 	config.ApplyClaudeDirs("", nil)
 	t.Cleanup(func() { config.ApplyClaudeDirs("", nil) })
 
-	// Nonexistent path, and a path that is not a database.
-	applyStoredClaudeDirs(filepath.Join(home, "nope", "agento.db"))
-	if got, want := config.ClaudeRunConfigDir(), filepath.Join(home, ".claude"); got != want {
-		t.Errorf("after a missing database, resolved = %q, want the default %q", got, want)
+	def := filepath.Join(home, ".claude")
+
+	// A path that does not exist. This is the ordinary state for someone who
+	// has only ever used the CLI, so it must also be silent — asserted by the
+	// stray-file check below rather than by capturing stderr.
+	missing := filepath.Join(home, "nope", "agento.db")
+	applyStoredClaudeDirs(missing)
+	if got := config.ClaudeRunConfigDir(); got != def {
+		t.Errorf("after a missing database, resolved = %q, want the default %q", got, def)
+	}
+	if _, err := os.Stat(filepath.Dir(missing)); err == nil {
+		t.Error("reading settings created a directory for a database that does not exist")
+	}
+
+	// A file that exists but is not a database.
+	corrupt := filepath.Join(home, "corrupt.db")
+	if err := os.WriteFile(corrupt, []byte("this is not sqlite"), 0o600); err != nil {
+		t.Fatalf("writing corrupt file: %v", err)
+	}
+	applyStoredClaudeDirs(corrupt)
+	if got := config.ClaudeRunConfigDir(); got != def {
+		t.Errorf("after a corrupt database, resolved = %q, want the default %q", got, def)
 	}
 }

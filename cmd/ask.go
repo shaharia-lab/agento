@@ -110,11 +110,22 @@ func runAsk(
 // was the behavior before this existed. It is never a reason to refuse to
 // answer a question.
 func applyStoredClaudeDirs(dbPath string) {
+	// No database yet is the ordinary state for someone who has only used the
+	// CLI, so it is silent. Anything else — a corrupt file, a schema predating
+	// the column, a permissions problem — means the run may target a different
+	// Claude account than the UI would, and that must be visible: `ask` wires
+	// no logger, so a slog line at any level would go nowhere.
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		return
+	}
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	settings, err := storage.LoadUserSettingsReadOnly(dbPath, logger)
 	if err != nil {
-		slog.Debug("ask: could not read stored settings; using the default Claude config dir",
-			"db", dbPath, "error", err)
+		fmt.Fprintf(os.Stderr,
+			"warning: could not read settings from %s (%v);\n"+
+				"         using the default Claude config dir %s\n",
+			dbPath, err, config.ClaudeRunConfigDir())
 		return
 	}
 	config.ApplyClaudeDirs(settings.ClaudeConfigDir, settings.ClaudeConfigDirs)

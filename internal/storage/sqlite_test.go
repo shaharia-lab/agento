@@ -710,10 +710,8 @@ func mustJSON(t *testing.T, v interface{}) string {
 // owning the schema's lifecycle: a command that migrated could upgrade a
 // database out from under a running `agento web`.
 func TestLoadUserSettingsReadOnly(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "agento.db")
+	dbPath := filepath.Join(t.TempDir(), "agento.db")
 
-	// A migrated database with settings saved through the normal path.
 	db, _, err := NewSQLiteDB(dbPath, slog.Default())
 	if err != nil {
 		t.Fatalf("creating db: %v", err)
@@ -724,11 +722,6 @@ func TestLoadUserSettingsReadOnly(t *testing.T) {
 	}
 	if err := NewSQLiteSettingsStore(db).Save(want); err != nil {
 		t.Fatalf("saving: %v", err)
-	}
-	var before int
-	if err := db.QueryRowContext(context.Background(),
-		"SELECT MAX(version) FROM schema_migrations").Scan(&before); err != nil {
-		t.Fatalf("reading version: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("closing: %v", err)
@@ -744,35 +737,70 @@ func TestLoadUserSettingsReadOnly(t *testing.T) {
 	if len(got.ClaudeConfigDirs) != 1 || got.ClaudeConfigDirs[0] != "/opt/second/.claude" {
 		t.Errorf("ClaudeConfigDirs = %v, want %v", got.ClaudeConfigDirs, want.ClaudeConfigDirs)
 	}
+}
 
-	// The load must not have migrated anything.
-	reopened, _, err := NewSQLiteDB(dbPath, slog.Default())
+// schemaVersion reads the recorded migration version without migrating, which
+// is the whole point: reading it back through NewSQLiteDB would migrate the
+// database and report head no matter what the loader did.
+func schemaVersion(t *testing.T, dbPath string) int {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
-		t.Fatalf("reopening: %v", err)
+		t.Fatalf("opening %s: %v", dbPath, err)
 	}
-	defer func() { _ = reopened.Close() }()
-	var after int
-	if err := reopened.QueryRowContext(context.Background(),
-		"SELECT MAX(version) FROM schema_migrations").Scan(&after); err != nil {
-		t.Fatalf("reading version: %v", err)
+	defer func() { _ = db.Close() }()
+	var v int
+	if err := db.QueryRowContext(context.Background(),
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&v); err != nil {
+		t.Fatalf("reading schema version: %v", err)
 	}
-	if after != before {
-		t.Errorf("schema version moved from %d to %d — the read-only load migrated", before, after)
+	return v
+}
+
+// The load must never migrate. #244 forbids it because `agento ask` shares the
+// file with a possibly-running `agento web`, and upgrading a schema out from
+// under a live server is not a CLI's business.
+//
+// The fixture is an *old* database, and the version is read back with a plain
+// sql.Open. Both matter: against a head database, or read back through
+// NewSQLiteDB, the assertion passes even for a loader that does migrate.
+func TestLoadUserSettingsReadOnly_DoesNotMigrate(t *testing.T) {
+	const oldVersion = 19
+	dbPath := filepath.Join(t.TempDir(), "agento.db")
+
+	db, err := ApplyMigrationsUpTo(dbPath, oldVersion)
+	if err != nil {
+		t.Fatalf("building an old database: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("closing: %v", err)
+	}
+	if got := schemaVersion(t, dbPath); got != oldVersion {
+		t.Fatalf("fixture is at version %d, want %d", got, oldVersion)
+	}
+
+	// The read itself fails — v19 predates the column — which is exactly the
+	// degradation path the caller relies on.
+	if _, err := LoadUserSettingsReadOnly(dbPath, slog.Default()); err == nil {
+		t.Error("expected an error reading settings from a schema that predates the column")
+	}
+
+	if got := schemaVersion(t, dbPath); got != oldVersion {
+		t.Errorf("schema moved from %d to %d — the read-only load migrated", oldVersion, got)
 	}
 }
 
-// An unmigrated or absent database must yield an error the caller can ignore,
-// never a panic and never a partially-created schema.
+// An absent database must yield an error the caller can ignore, never a panic
+// and never a migrated schema.
 func TestLoadUserSettingsReadOnly_UnmigratedDatabase(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "fresh.db")
 
-	// The file does not exist: openSQLiteDB creates it, but user_settings does
-	// not, so the read fails and the caller falls back.
 	if _, err := LoadUserSettingsReadOnly(dbPath, slog.Default()); err == nil {
 		t.Error("expected an error reading settings from an unmigrated database")
 	}
 
-	// And it must not have left a migrated schema behind.
+	// `fresh` is "migration 1 was applied in this call", so a loader that had
+	// migrated would make it false.
 	db, fresh, err := NewSQLiteDB(dbPath, slog.Default())
 	if err != nil {
 		t.Fatalf("opening: %v", err)
