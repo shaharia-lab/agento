@@ -232,6 +232,22 @@ func initDatabase(cfg *config.AppConfig, sysLogger *slog.Logger) (*sql.DB, func(
 	return db, cleanup, nil
 }
 
+// newHTTPServer assembles the HTTP server with the deployment-shaped settings
+// the router's guards need.
+func newHTTPServer(
+	cfg *config.AppConfig, result *buildAPIServerResult, sysLogger *slog.Logger,
+	monitoringMgr *telemetry.MonitoringManager, settingsMgr *config.SettingsManager,
+) *server.Server {
+	return server.New(result.apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr,
+		result.webhookHandler, server.Options{
+			BindAddress: cfg.BindAddress,
+			PublicURL:   cfg.PublicURL,
+			// Read per request: the stored value is editable in the UI, and
+			// snapshotting it here would 403 the browser until a restart.
+			PublicURLFunc: func() string { return settingsMgr.Get().PublicURL },
+		})
+}
+
 func buildWebServer(
 	ctx context.Context, cfg *config.AppConfig,
 	db *sql.DB, sysLogger *slog.Logger,
@@ -288,7 +304,7 @@ func buildWebServer(
 	if err != nil {
 		return nil, nil, err
 	}
-	srv := server.New(result.apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr, result.webhookHandler)
+	srv := newHTTPServer(cfg, result, sysLogger, monitoringMgr, settingsMgr)
 
 	// On shutdown: clean up pairing sessions, close the event bus so no further
 	// events are enqueued, then wait for in-flight worker goroutines to finish.

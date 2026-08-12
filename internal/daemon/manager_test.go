@@ -758,3 +758,50 @@ func TestRenderOmitsUnsetClaudeConfigDir(t *testing.T) {
 		}
 	}
 }
+
+// A service runs detached from any shell, so AGENTO_BIND exported in a profile
+// never reaches it. Without this a user who set 0.0.0.0 to reach Agento from
+// their phone would silently be returned to loopback by `agento service`.
+func TestRenderPropagatesBindAddress(t *testing.T) {
+	opts := testOptions()
+	opts.BindAddress = "0.0.0.0"
+
+	unit, err := render("agento.service.tmpl", opts)
+	if err != nil {
+		t.Fatalf("render systemd: %v", err)
+	}
+	if !strings.Contains(string(unit), `Environment="AGENTO_BIND=0.0.0.0"`) {
+		t.Errorf("systemd unit missing AGENTO_BIND:\n%s", unit)
+	}
+
+	plist, err := render("agento.plist.tmpl", opts)
+	if err != nil {
+		t.Fatalf("render launchd: %v", err)
+	}
+	if !strings.Contains(string(plist), "<key>AGENTO_BIND</key>") ||
+		!strings.Contains(string(plist), "<string>0.0.0.0</string>") {
+		t.Errorf("plist missing AGENTO_BIND:\n%s", plist)
+	}
+	if err := xml.Unmarshal(plist, new(struct {
+		XMLName xml.Name `xml:"plist"`
+	})); err != nil {
+		t.Errorf("plist is not well-formed: %v", err)
+	}
+}
+
+// Unset must emit nothing, so an install that never wants LAN access produces
+// exactly the unit it produced before and inherits the loopback default.
+func TestRenderOmitsUnsetBindAddress(t *testing.T) {
+	opts := testOptions()
+	opts.BindAddress = ""
+
+	for _, tmpl := range []string{"agento.service.tmpl", "agento.plist.tmpl"} {
+		out, err := render(tmpl, opts)
+		if err != nil {
+			t.Fatalf("render %s: %v", tmpl, err)
+		}
+		if strings.Contains(string(out), "AGENTO_BIND") {
+			t.Errorf("%s mentions AGENTO_BIND when unset:\n%s", tmpl, out)
+		}
+	}
+}

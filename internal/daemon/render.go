@@ -22,6 +22,7 @@ type templateData struct {
 	LogPath         string
 	Port            int
 	ExtraPath       string
+	BindAddress     string
 	ClaudeConfigDir string
 }
 
@@ -85,6 +86,7 @@ func render(name string, opts Options) ([]byte, error) {
 		LogPath:         opts.LogPath,
 		Port:            opts.Port,
 		ExtraPath:       opts.ExtraPath,
+		BindAddress:     opts.BindAddress,
 		ClaudeConfigDir: opts.ClaudeConfigDir,
 	}
 	var buf bytes.Buffer

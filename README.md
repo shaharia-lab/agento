@@ -223,6 +223,8 @@ Nothing needs configuring. Everything below is optional, and environment variabl
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8990` | HTTP server port |
+| `AGENTO_BIND` | `127.0.0.1` | Interface to listen on (both loopback families). Set `0.0.0.0` to reach Agento from another device — see below |
+| `CLAUDE_CONFIG_DIR` | `~/.claude` | Which Claude Code account agents run as. Claude Code's own variable |
 | `AGENTO_DATA_DIR` | `~/.agento` | Root directory for agents, chats, and logs. Supports `~` expansion |
 | `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
 | `ANTHROPIC_API_KEY` | none | Use the Anthropic API directly instead of Claude Code CLI authentication |
@@ -267,6 +269,20 @@ See [docs/development.md](docs/development.md) for the architecture overview and
 </details>
 
 <br>
+
+### Reaching Agento from another device
+
+Agento listens on **loopback only** by default, and has **no authentication** — it is meant to run on the machine you are working at. The API can create an agent and run it, so anything that can reach it can run commands on that machine.
+
+To use it from a phone, tablet or another computer:
+
+```bash
+AGENTO_BIND=0.0.0.0 agento web
+```
+
+Only do that on a network you trust, or put a proxy that authenticates in front of it. If you reach Agento under a hostname rather than an IP — through a reverse proxy or a tunnel — set **Public URL** in Settings (or `AGENTO_PUBLIC_URL`) to that address, or requests will be refused.
+
+> **Upgrading?** This used to listen on every interface. If you reach Agento from another device and it stopped working, set `AGENTO_BIND=0.0.0.0`. The startup log names the interface it bound.
 
 ## Documentation
 
