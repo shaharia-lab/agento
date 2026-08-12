@@ -705,3 +705,80 @@ func mustJSON(t *testing.T, v interface{}) string {
 	}
 	return string(b)
 }
+
+// LoadUserSettingsReadOnly exists so a CLI can read a stored preference without
+// owning the schema's lifecycle: a command that migrated could upgrade a
+// database out from under a running `agento web`.
+func TestLoadUserSettingsReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "agento.db")
+
+	// A migrated database with settings saved through the normal path.
+	db, _, err := NewSQLiteDB(dbPath, slog.Default())
+	if err != nil {
+		t.Fatalf("creating db: %v", err)
+	}
+	want := config.UserSettings{
+		ClaudeConfigDir:  "/opt/personal/.claude",
+		ClaudeConfigDirs: []string{"/opt/second/.claude"},
+	}
+	if err := NewSQLiteSettingsStore(db).Save(want); err != nil {
+		t.Fatalf("saving: %v", err)
+	}
+	var before int
+	if err := db.QueryRowContext(context.Background(),
+		"SELECT MAX(version) FROM schema_migrations").Scan(&before); err != nil {
+		t.Fatalf("reading version: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("closing: %v", err)
+	}
+
+	got, err := LoadUserSettingsReadOnly(dbPath, slog.Default())
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got.ClaudeConfigDir != want.ClaudeConfigDir {
+		t.Errorf("ClaudeConfigDir = %q, want %q", got.ClaudeConfigDir, want.ClaudeConfigDir)
+	}
+	if len(got.ClaudeConfigDirs) != 1 || got.ClaudeConfigDirs[0] != "/opt/second/.claude" {
+		t.Errorf("ClaudeConfigDirs = %v, want %v", got.ClaudeConfigDirs, want.ClaudeConfigDirs)
+	}
+
+	// The load must not have migrated anything.
+	reopened, _, err := NewSQLiteDB(dbPath, slog.Default())
+	if err != nil {
+		t.Fatalf("reopening: %v", err)
+	}
+	defer func() { _ = reopened.Close() }()
+	var after int
+	if err := reopened.QueryRowContext(context.Background(),
+		"SELECT MAX(version) FROM schema_migrations").Scan(&after); err != nil {
+		t.Fatalf("reading version: %v", err)
+	}
+	if after != before {
+		t.Errorf("schema version moved from %d to %d — the read-only load migrated", before, after)
+	}
+}
+
+// An unmigrated or absent database must yield an error the caller can ignore,
+// never a panic and never a partially-created schema.
+func TestLoadUserSettingsReadOnly_UnmigratedDatabase(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "fresh.db")
+
+	// The file does not exist: openSQLiteDB creates it, but user_settings does
+	// not, so the read fails and the caller falls back.
+	if _, err := LoadUserSettingsReadOnly(dbPath, slog.Default()); err == nil {
+		t.Error("expected an error reading settings from an unmigrated database")
+	}
+
+	// And it must not have left a migrated schema behind.
+	db, fresh, err := NewSQLiteDB(dbPath, slog.Default())
+	if err != nil {
+		t.Fatalf("opening: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if !fresh {
+		t.Error("the read-only load created schema it should not have")
+	}
+}
