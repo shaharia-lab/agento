@@ -67,36 +67,48 @@ func hostOf(rawURL string) string {
 // type forces a preflight, which same-origin CORS then refuses. Binding to
 // loopback does not help here, because the browser is already inside.
 //
-// GET, HEAD and OPTIONS carry no body and are untouched. A body-less request
-// of any method is untouched too, so a DELETE that sends nothing still works.
+// GET, HEAD and OPTIONS carry no body and are untouched.
+//
+// A body-less request is deliberately NOT exempt. Several state-changing
+// endpoints take no body at all — /chats/{id}/stop, /webhook/regenerate-secret,
+// /webhook/register, /duplicate, /claude-sessions/refresh — and a cross-origin
+// POST with no body and no Content-Type is itself a simple request, so exempting
+// them would leave exactly the hole this middleware exists to close. The UI
+// sends the header on every request regardless of body (frontend/src/lib/api.ts),
+// so requiring it always costs nothing.
 func requireJSONContentType(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !isStateChanging(r.Method) || r.ContentLength == 0 {
+		if !isStateChanging(r.Method) {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		raw := r.Header.Get("Content-Type")
-		mediaType, _, err := mime.ParseMediaType(raw)
+		mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 		if err != nil {
 			writeGuardError(w, http.StatusUnsupportedMediaType,
-				"a Content-Type header is required on requests with a body")
+				"a Content-Type of application/json is required")
 			return
 		}
-		switch mediaType {
-		case "application/json":
+		if mediaType == "application/json" {
 			next.ServeHTTP(w, r)
-		case "multipart/form-data":
-			// File upload is the one endpoint that legitimately posts
-			// something else. Multipart is itself a simple content type, so it
-			// is admitted here and the upload handler validates its own input.
-			next.ServeHTTP(w, r)
-		default:
-			writeGuardError(w, http.StatusUnsupportedMediaType,
-				"Content-Type must be application/json")
+			return
 		}
+		// multipart/form-data is itself a CORS-simple type, so it is admitted
+		// only for the one endpoint that legitimately posts it. Admitting it
+		// everywhere would leave every other handler reachable cross-origin,
+		// relying on nothing but a JSON decode failing to prevent the side
+		// effect — which is not a security boundary.
+		if mediaType == "multipart/form-data" && r.URL.Path == uploadPath {
+			next.ServeHTTP(w, r)
+			return
+		}
+		writeGuardError(w, http.StatusUnsupportedMediaType,
+			"Content-Type must be application/json")
 	})
 }
+
+// uploadPath is the one route that legitimately receives multipart bodies.
+const uploadPath = "/api/uploads"
 
 // isStateChanging reports whether the method can have side effects.
 func isStateChanging(method string) bool {

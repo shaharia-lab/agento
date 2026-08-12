@@ -26,6 +26,7 @@ func TestRequireJSONContentType(t *testing.T) {
 	tests := []struct {
 		name        string
 		method      string
+		path        string
 		contentType string
 		body        string
 		wantStatus  int
@@ -70,12 +71,23 @@ func TestRequireJSONContentType(t *testing.T) {
 		{
 			// File upload is the one endpoint that legitimately posts
 			// something else.
-			name:        "multipart upload is admitted",
+			name:        "multipart is admitted on the upload endpoint",
 			method:      http.MethodPost,
+			path:        uploadPath,
 			contentType: "multipart/form-data; boundary=x",
 			body:        body,
 			wantStatus:  http.StatusOK,
 			wantReached: true,
+		},
+		{
+			// multipart/form-data is itself a CORS-simple type, so admitting it
+			// anywhere else would leave every handler reachable cross-origin
+			// with nothing but a JSON decode failure standing in the way.
+			name:        "multipart is refused everywhere else",
+			method:      http.MethodPost,
+			contentType: "multipart/form-data; boundary=x",
+			body:        body,
+			wantStatus:  http.StatusUnsupportedMediaType,
 		},
 		{
 			name:        "PUT is guarded too",
@@ -91,19 +103,38 @@ func TestRequireJSONContentType(t *testing.T) {
 			wantReached: true,
 		},
 		{
-			// A DELETE that sends nothing declares no content type and must
-			// still work.
-			name:        "a body-less DELETE is untouched",
-			method:      http.MethodDelete,
+			// Body-less is NOT exempt. /chats/{id}/stop,
+			// /webhook/regenerate-secret and friends take no body, and a
+			// cross-origin POST with neither body nor Content-Type is itself a
+			// simple request — exempting it would leave the hole open.
+			name:       "a body-less POST is still refused without the header",
+			method:     http.MethodPost,
+			wantStatus: http.StatusUnsupportedMediaType,
+		},
+		{
+			// The UI sends the header on every request regardless of body, so
+			// requiring it always costs nothing.
+			name:        "a body-less POST with the header is admitted",
+			method:      http.MethodPost,
+			contentType: "application/json",
 			wantStatus:  http.StatusOK,
 			wantReached: true,
+		},
+		{
+			name:       "a body-less DELETE is refused without the header",
+			method:     http.MethodDelete,
+			wantStatus: http.StatusUnsupportedMediaType,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var reached bool
-			req := httptest.NewRequest(tc.method, "/api/agents", strings.NewReader(tc.body))
+			path := tc.path
+			if path == "" {
+				path = "/api/agents"
+			}
+			req := httptest.NewRequest(tc.method, path, strings.NewReader(tc.body))
 			if tc.contentType != "" {
 				req.Header.Set("Content-Type", tc.contentType)
 			}
