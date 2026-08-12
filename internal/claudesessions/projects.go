@@ -106,10 +106,15 @@ func ListProjects() ([]ClaudeProject, error) {
 // files in each, which is the same count projectsFromDiskFiles derives.
 func walkProjects() ([]ClaudeProject, error) {
 	// Projects are keyed by their encoded directory name, so the same project
-	// worked on under two config dirs folds into one entry with the counts
-	// summed — which is what a project list should say, since the project is
-	// one project whichever account opened it.
-	byName := make(map[string]int)
+	// worked on under two config dirs folds into one entry — the project is one
+	// project whichever account opened it.
+	//
+	// Session ids are counted in a set rather than summed per dir, so a corpus
+	// copied between config dirs is counted once. Summing would disagree with
+	// the scan-published list, which dedupes the same way (claimSession), and
+	// the fallback would report doubled counts for exactly the setup this
+	// supports until the first scan replaced them.
+	byName := make(map[string]map[string]struct{})
 	var order []string
 	for _, dir := range ClaudeHomes() {
 		if err := walkProjectsIn(dir, byName, &order); err != nil {
@@ -122,16 +127,17 @@ func walkProjects() ([]ClaudeProject, error) {
 		projects = append(projects, ClaudeProject{
 			EncodedName:  name,
 			DecodedPath:  DecodeProjectPath(name),
-			SessionCount: byName[name],
+			SessionCount: len(byName[name]),
 		})
 	}
 	sortProjects(projects)
 	return projects, nil
 }
 
-// walkProjectsIn accumulates one config dir's projects into byName, appending
-// newly seen encoded names to order so the result is deterministic.
-func walkProjectsIn(configDir string, byName map[string]int, order *[]string) error {
+// walkProjectsIn accumulates one config dir's projects into byName — a set of
+// session ids per encoded project name — appending newly seen names to order so
+// the result is deterministic.
+func walkProjectsIn(configDir string, byName map[string]map[string]struct{}, order *[]string) error {
 	projectsDir := filepath.Join(configDir, "projects")
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
@@ -145,30 +151,33 @@ func walkProjectsIn(configDir string, byName map[string]int, order *[]string) er
 		if !e.IsDir() {
 			continue
 		}
-		count := countTranscripts(filepath.Join(projectsDir, e.Name()))
-		if count < 0 {
+		ids := transcriptIDs(filepath.Join(projectsDir, e.Name()))
+		if ids == nil {
 			continue
 		}
 		if _, seen := byName[e.Name()]; !seen {
 			*order = append(*order, e.Name())
+			byName[e.Name()] = make(map[string]struct{}, len(ids))
 		}
-		byName[e.Name()] += count
+		for _, id := range ids {
+			byName[e.Name()][id] = struct{}{}
+		}
 	}
 	return nil
 }
 
-// countTranscripts returns the number of .jsonl files directly in dir, or -1
-// when the directory cannot be listed.
-func countTranscripts(dir string) int {
+// transcriptIDs returns the session ids of the .jsonl files directly in dir, or
+// nil when the directory cannot be listed.
+func transcriptIDs(dir string) []string {
 	files, err := os.ReadDir(dir)
 	if err != nil {
-		return -1
+		return nil
 	}
-	count := 0
+	ids := make([]string, 0, len(files))
 	for _, f := range files {
 		if !f.IsDir() && strings.HasSuffix(f.Name(), jsonlExt) {
-			count++
+			ids = append(ids, strings.TrimSuffix(f.Name(), jsonlExt))
 		}
 	}
-	return count
+	return ids
 }

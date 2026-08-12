@@ -634,8 +634,11 @@ CREATE INDEX IF NOT EXISTS idx_claude_session_cache_file_path
 -- is therefore given a meaning instead: readers treat it as the default dir
 -- (rowReconcilable, config.IsIndexedClaudeDir), which is where every existing
 -- row necessarily came from, since no other dir could be configured until now.
--- Rows acquire a real value as the next scan re-reads them; no install has to
--- re-read anything to arrive at the figures it already had.
+-- Rows acquire a real value from the re-read that CurrentScannerVersion v13
+-- forces on the next scan. That bump is required, not incidental: a scan
+-- otherwise only re-reads a file whose mtime changed, so a finished session
+-- would keep an empty config_dir forever and the account filter would match
+-- none of it.
 ALTER TABLE claude_session_cache  ADD COLUMN config_dir TEXT NOT NULL DEFAULT '';
 ALTER TABLE claude_subagent_cache ADD COLUMN config_dir TEXT NOT NULL DEFAULT '';
 

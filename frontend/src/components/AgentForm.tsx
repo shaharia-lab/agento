@@ -344,7 +344,9 @@ export default function AgentForm({ agent, isEdit = false }: AgentFormProps) {
           />
           <p className="text-xs text-muted-foreground">
             Which Claude Code account this agent runs as — the directory holding its credentials,
-            projects and settings. Set this to run a second account alongside the default one.
+            projects and settings. Leave empty to use the global default from Settings. To see this
+            account&apos;s sessions in Analytics, add the same directory under Settings → Data &amp;
+            Analytics.
           </p>
         </div>
         <div className="space-y-1.5">

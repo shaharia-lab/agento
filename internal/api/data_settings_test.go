@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/shaharia-lab/agento/internal/claudesessions"
+	"github.com/shaharia-lab/agento/internal/config"
 )
 
 // setupProjectDirs points HOME at a temp Claude home holding two projects with
@@ -121,4 +122,66 @@ func TestUpdateSettings_AppliesIdleThreshold(t *testing.T) {
 	require.Equal(t, http.StatusOK, h.do(req).Code)
 
 	assert.Equal(t, 25.0, claudesessions.IdleGapThreshold().Minutes())
+}
+
+// The config-dir equivalent of TestUpdateSettings_AppliesIdleThreshold: the
+// snapshot is what the scanner, the projects list and the agent runner read, so
+// a stored-but-not-applied dir would take a restart to mean anything.
+func TestUpdateSettings_AppliesClaudeConfigDirs(t *testing.T) {
+	_, _ = setupProjectDirs(t)
+	h := newHarness(t)
+	h.settingsStore.On("Save", mock.Anything).Return(nil)
+
+	second := t.TempDir()
+	t.Cleanup(func() { config.ApplyClaudeDirs("", nil) })
+
+	req := httptest.NewRequest(http.MethodPut, "/settings",
+		strings.NewReader(`{"claude_config_dirs":["`+second+`"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	require.Equal(t, http.StatusOK, h.do(req).Code)
+
+	assert.Contains(t, claudesessions.ClaudeHomes(), second)
+}
+
+// A run dir that conflicts with a set CLAUDE_CONFIG_DIR is refused. The status
+// is 400, not 409: this repo has no EnvLockedError in the settings path — that
+// is the monitoring manager's convention — and UserSettings expresses env locks
+// through the `locked` map plus a plain error from SettingsManager.Update.
+func TestUpdateSettings_RejectsEnvLockedClaudeConfigDir(t *testing.T) {
+	_, _ = setupProjectDirs(t)
+	envDir := t.TempDir()
+	t.Setenv(config.ClaudeConfigDirEnvVar, envDir)
+	h := newHarness(t)
+
+	req := httptest.NewRequest(http.MethodPut, "/settings",
+		strings.NewReader(`{"claude_config_dir":"`+t.TempDir()+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := h.do(req)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "claude_config_dir")
+	h.settingsStore.AssertNotCalled(t, "Save", mock.Anything)
+}
+
+// The endpoint behind the config-dir editor: the resolved set, the default, and
+// candidates found beside it — which must be offered without being indexed.
+func TestClaudeConfigDirs_ReportsIndexedAndCandidates(t *testing.T) {
+	_, _ = setupProjectDirs(t)
+	h := newHarness(t)
+
+	w := h.do(httptest.NewRequest(http.MethodGet, "/settings/claude-config-dirs", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var got struct {
+		Indexed    []string `json:"indexed"`
+		Candidates []string `json:"candidates"`
+		Default    string   `json:"default"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+
+	assert.Equal(t, config.DefaultClaudeConfigDir(), got.Default)
+	assert.Contains(t, got.Indexed, got.Default, "the default dir is always indexed")
+	for _, c := range got.Candidates {
+		assert.NotContains(t, got.Indexed, c, "a candidate must not already be indexed")
+	}
 }

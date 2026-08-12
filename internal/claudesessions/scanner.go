@@ -76,7 +76,13 @@ const (
 	// IdleGapThreshold. Sessions are resumable, so the start/last span counts
 	// every idle day between sittings; rows written before v12 hold 0, which is
 	// indistinguishable from a single-event session.
-	CurrentScannerVersion = 12
+	// v13: every row records the Claude config dir it was indexed from
+	// (config_dir). Migration 27 cannot backfill it — the home directory is not
+	// a SQL constant — and a row is otherwise only rewritten when its file
+	// mtime changes, so without this bump an existing corpus would keep an
+	// empty config_dir indefinitely and filtering the sessions list by account
+	// would match none of it.
+	CurrentScannerVersion = 13
 )
 
 // rawEvent is the raw JSON structure of a single line in a Claude Code session JSONL file.
@@ -432,7 +438,7 @@ func IncrementalScanWith(
 	stale := detectStaleness(db)
 	stale.invalidate(db, cached, logger)
 
-	diff := diffDiskAndCache(onDisk, cached, walk.walked)
+	diff := diffDiskAndCache(onDisk, cached, walk)
 	applyChangesWithNotify(db, logger, onDisk, diff, opts.Notify, opts.Progress)
 
 	// The scan has just walked every project directory, so the project list it
@@ -660,6 +666,12 @@ func recordScannerVersion(db *sql.DB, logger *slog.Logger) {
 type diskWalk struct {
 	files  map[string]diskFile
 	walked map[string]struct{}
+	// protected are directory paths whose contents could not be fully listed.
+	// Rows under them are excluded from the delete pass. Kept per project
+	// rather than per config dir so one unreadable project — a root-owned
+	// directory, say — does not stop every *other* project's genuinely deleted
+	// transcripts from ever being reconciled away.
+	protected []string
 }
 
 // walkAllDiskFiles walks every configured config dir into one set.
@@ -677,21 +689,31 @@ func walkAllDiskFiles(dirs []string, logger *slog.Logger) diskWalk {
 	claimed := make(map[string]string)
 
 	for _, dir := range dirs {
-		if walkOneDir(dir, w.files, claimed, logger) {
+		failed := walkOneDir(dir, w.files, claimed, logger)
+		if failed == nil {
 			w.walked[dir] = struct{}{}
+			continue
 		}
+		if len(failed) == 0 {
+			// The config dir itself could not be listed; protect all of it.
+			w.protected = append(w.protected, dir)
+			continue
+		}
+		w.walked[dir] = struct{}{}
+		w.protected = append(w.protected, failed...)
 	}
 	return w
 }
 
-// walkOneDir collects one config dir's transcripts, reporting whether it was
-// listed end to end.
+// walkOneDir collects one config dir's transcripts.
 //
-// Only a dir listed completely may have its rows reconciled: reconciling a
-// partial listing deletes sessions that are present but could not be seen.
+// It returns nil when the dir was listed end to end, an empty non-nil slice
+// when the config dir itself could not be listed, and otherwise the project
+// directories that failed. Only what was actually seen may be reconciled:
+// reconciling a listing with a hole in it deletes sessions that are present.
 func walkOneDir(
 	dir string, onDisk map[string]diskFile, claimed map[string]string, logger *slog.Logger,
-) bool {
+) []string {
 	projectsDir := filepath.Join(dir, "projects")
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
@@ -701,27 +723,23 @@ func walkOneDir(
 		// itself missing or unreadable is a different thing entirely — the
 		// user may have unplugged a drive — and must protect its rows.
 		if os.IsNotExist(err) && dirExists(dir) {
-			return true
+			return nil
 		}
 		logger.Warn("claude sessions: skipping unreadable config dir",
 			"config_dir", dir, "error", err)
-		return false
+		return []string{}
 	}
 
-	complete := true
+	var failed []string
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		if !collectProjectDiskFiles(dir, projectsDir, e.Name(), onDisk, claimed, logger) {
-			complete = false
+			failed = append(failed, filepath.Join(projectsDir, e.Name()))
 		}
 	}
-	if !complete {
-		logger.Warn("claude sessions: config dir listed incompletely, "+
-			"its cached rows are preserved this scan", "config_dir", dir)
-	}
-	return complete
+	return failed
 }
 
 // dirExists reports whether path is an existing directory.
@@ -899,7 +917,7 @@ type diskDiff struct {
 // blank predates the column and belongs to the default dir, which is always in
 // the walk set when it is readable.
 func diffDiskAndCache(
-	onDisk map[string]diskFile, cached map[string]cachedEntry, walked map[string]struct{},
+	onDisk map[string]diskFile, cached map[string]cachedEntry, walk diskWalk,
 ) diskDiff {
 	var d diskDiff
 	for fp, df := range onDisk {
@@ -915,7 +933,7 @@ func diffDiskAndCache(
 		if _, exists := onDisk[fp]; exists {
 			continue
 		}
-		if !rowReconcilable(ce.configDir, walked) {
+		if !rowReconcilable(ce, walk) {
 			continue
 		}
 		d.toDelete = append(d.toDelete, ce)
@@ -925,15 +943,25 @@ func diffDiskAndCache(
 
 // rowReconcilable reports whether a cached row's absence from disk can be
 // trusted as a deletion.
-func rowReconcilable(configDir string, walked map[string]struct{}) bool {
+func rowReconcilable(ce cachedEntry, walk diskWalk) bool {
+	configDir := ce.configDir
 	if configDir == "" {
-		// Pre-migration rows carry the default dir after the backfill; a blank
-		// here means a row written by a path that did not stamp one. Trust the
-		// default dir's walk for it, which is the dir it must have come from.
+		// Rows written before the config_dir column carry a blank one until a
+		// rescan stamps them. Trust the default dir's walk for those, which is
+		// the dir they must have come from — no other dir could be configured.
 		configDir = config.DefaultClaudeConfigDir()
 	}
-	_, ok := walked[configDir]
-	return ok
+	if _, ok := walk.walked[configDir]; !ok {
+		return false
+	}
+	// A project directory that could not be listed hides its transcripts from
+	// onDisk, which is indistinguishable from their deletion.
+	for _, dir := range walk.protected {
+		if strings.HasPrefix(ce.filePath, dir+string(filepath.Separator)) {
+			return false
+		}
+	}
+	return true
 }
 
 // insertCacheRow writes the session's own row. custom_title and is_favorite are
@@ -1955,6 +1983,13 @@ func GetSessionDetail(sessionID string, logger *slog.Logger) (*ClaudeSessionDeta
 // list lives beside its transcript, under that same dir's todos/ — resolving it
 // against the default dir would return another account's todos, or none.
 func findSessionFile(sessionID string) (configDir, projectPath, filePath string) {
+	// Validated here rather than in each caller: this is the one place a
+	// session id becomes a filesystem path, and GetSessionDetail — unlike
+	// GetSessionJourney — never checked it, so a route param containing ".."
+	// could walk out of the projects directory.
+	if !validSessionID.MatchString(sessionID) {
+		return "", "", ""
+	}
 	for _, dir := range ClaudeHomes() {
 		projectsDir := filepath.Join(dir, "projects")
 		entries, err := os.ReadDir(projectsDir)
@@ -2192,6 +2227,11 @@ func extractTextContent(raw json.RawMessage) string {
 // configDir falls back to the run default so callers that never located a file
 // behave as before.
 func loadTodos(configDir, sessionID string) []ClaudeTodo {
+	// The id reaches a path here too, and this is reachable independently of
+	// findSessionFile's guard.
+	if !validSessionID.MatchString(sessionID) {
+		return nil
+	}
 	if configDir == "" {
 		configDir = ClaudeHome()
 	}

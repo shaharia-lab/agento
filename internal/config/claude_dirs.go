@@ -170,7 +170,14 @@ func ClaudeRunConfigDir() string {
 // agent config (the CLI's one-shot path) need no special case.
 func ResolveAgentClaudeDir(agentCfg *AgentConfig) string {
 	if agentCfg != nil {
-		if dir := NormalizeClaudeConfigDir(agentCfg.ClaudeConfigDir); dir != "" {
+		dir := NormalizeClaudeConfigDir(agentCfg.ClaudeConfigDir)
+		// Defense in depth: the service rejects a relative override on save,
+		// but a row written before that check — or by hand, or by the YAML
+		// import path — must not reach the runner. A relative dir is resolved
+		// against a different working directory by the server (which stats the
+		// settings file) than by the subprocess (which loads it), so the file
+		// checked would not be the file used.
+		if dir != "" && filepath.IsAbs(dir) {
 			return dir
 		}
 	}
@@ -205,10 +212,12 @@ func ClaudeConfigDirs() []string {
 // dir is a display choice, and re-adding it must not cost a full re-read of a
 // corpus that is still cached and still correct.
 //
-// The empty string reports true: rows written before the config_dir column
-// existed carry the default dir after the migration backfill, but a row written
-// by some future path that leaves it blank should stay visible rather than
-// silently vanish from every figure.
+// The empty string reports true. Migration 27 cannot backfill the column — the
+// home directory is not a SQL constant — so rows written before it carry a
+// blank until the v13 re-read stamps them, and they belong to the default dir
+// because no other dir could be configured then. Admitting blanks also keeps a
+// row written by some future path that leaves it unset visible rather than
+// silently absent from every figure.
 func IsIndexedClaudeDir(dir string) bool {
 	dir = NormalizeClaudeConfigDir(dir)
 	if dir == "" {

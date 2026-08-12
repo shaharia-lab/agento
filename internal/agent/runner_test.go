@@ -42,14 +42,17 @@ func TestAppendSettingsOpts(t *testing.T) {
 	withoutSettings := newConfigDir(t, false)
 
 	tests := []struct {
-		name         string
-		runDir       string
-		agentDir     string
-		workingDir   string
-		wantSources  []claude.SettingSource
-		wantSettings string
-		wantCWD      string
-		wantEnvDir   string
+		name       string
+		runDir     string
+		agentDir   string
+		workingDir string
+		// defaultHasJSON writes a settings.json into the temp HOME's default
+		// config dir; wantSettings is then matched as a suffix.
+		defaultHasJSON bool
+		wantSources    []claude.SettingSource
+		wantSettings   string
+		wantCWD        string
+		wantEnvDir     string
 	}{
 		{
 			// The default dir has no settings.json under a temp HOME, so no
@@ -71,6 +74,15 @@ func TestAppendSettingsOpts(t *testing.T) {
 			runDir:       withoutSettings,
 			wantSettings: "",
 			wantEnvDir:   withoutSettings,
+		},
+		{
+			// The default dir is where an ordinary single-account install runs,
+			// and it does have a settings.json — so this case pins that the
+			// common path still passes --settings.
+			name:           "default config dir with settings.json — it is passed",
+			runDir:         "",
+			defaultHasJSON: true,
+			wantSettings:   "settings.json",
 		},
 		{
 			name:        "working dir set — project source and CWD",
@@ -95,6 +107,20 @@ func TestAppendSettingsOpts(t *testing.T) {
 			t.Setenv(config.ClaudeConfigDirEnvVar, "")
 			config.ApplyClaudeDirs(tc.runDir, nil)
 
+			wantSettings := tc.wantSettings
+			if tc.defaultHasJSON {
+				def := config.DefaultClaudeConfigDir()
+				if err := os.MkdirAll(def, 0o750); err != nil {
+					t.Fatalf("creating default dir: %v", err)
+				}
+				if err := os.WriteFile(
+					filepath.Join(def, "settings.json"), []byte(`{}`), 0o600,
+				); err != nil {
+					t.Fatalf("writing settings.json: %v", err)
+				}
+				wantSettings = filepath.Join(def, "settings.json")
+			}
+
 			var agentCfg *config.AgentConfig
 			if tc.agentDir != "" {
 				agentCfg = &config.AgentConfig{ClaudeConfigDir: tc.agentDir}
@@ -111,8 +137,8 @@ func TestAppendSettingsOpts(t *testing.T) {
 					t.Errorf("SettingSources[%d] = %q, want %q", i, o.SettingSources[i], want)
 				}
 			}
-			if o.Settings != tc.wantSettings {
-				t.Errorf("Settings = %q, want %q", o.Settings, tc.wantSettings)
+			if o.Settings != wantSettings {
+				t.Errorf("Settings = %q, want %q", o.Settings, wantSettings)
 			}
 			if o.CWD != tc.wantCWD {
 				t.Errorf("CWD = %q, want %q", o.CWD, tc.wantCWD)

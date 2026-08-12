@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 
 	"github.com/shaharia-lab/agento/internal/claudesessions"
 	"github.com/shaharia-lab/agento/internal/config"
@@ -22,9 +23,9 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
-// applyDataSettings installs the saved Data & Analytics preferences into the
-// snapshot every reader consults, and starts the rescan a changed idle-gap
-// threshold needs.
+// applyDataSettings installs the saved Data & Analytics preferences and the
+// Claude config-dir preferences into the snapshots every reader consults, and
+// starts whichever rescan the change needs.
 //
 // Hiding a project takes effect on the next read — it is a filter over cached
 // rows. Changing the threshold does not: active duration is stored per
@@ -33,6 +34,10 @@ func (s *Server) handleGetSettings(w http.ResponseWriter, _ *http.Request) {
 // something else happens to trigger a scan; it is idempotent, since the scanner
 // compares the stored threshold itself and Cache.EnsureScan admits exactly one
 // scan at a time.
+//
+// Adding a config dir is the same class as changing the threshold rather than
+// as hiding a project: there are no cached rows to filter, because that dir has
+// never been walked. Removing one is the filter case and needs no scan.
 func (s *Server) applyDataSettings(previousIdleGap int, previousDirs []string) {
 	current := s.settingsMgr.Get()
 	claudesessions.ApplyDataSettings(current.IdleGapThresholdMinutes, current.HiddenProjects)
@@ -52,25 +57,12 @@ func (s *Server) applyDataSettings(previousIdleGap int, previousDirs []string) {
 	// filter. Removing one needs no scan — its rows are filtered out, not
 	// deleted — but the comparison is on the resolved set either way, so an
 	// unchanged save costs nothing.
-	if dirsDiffer(previousDirs, claudesessions.ClaudeHomes()) {
+	// Order-sensitive on purpose: it decides which dir wins a duplicated session.
+	if !slices.Equal(previousDirs, claudesessions.ClaudeHomes()) {
 		s.logger.Info("claude sessions: config dirs changed; indexing",
 			"from", previousDirs, "to", claudesessions.ClaudeHomes())
 		s.claudeSessionCache.EnsureScan()
 	}
-}
-
-// dirsDiffer reports whether two resolved config-dir sets differ. Order is
-// significant: it decides which dir wins a duplicated session.
-func dirsDiffer(a, b []string) bool {
-	if len(a) != len(b) {
-		return true
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Server) handleUpdateSettings(w http.ResponseWriter, r *http.Request) {

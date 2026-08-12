@@ -1,6 +1,7 @@
 package claudesessions
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -201,5 +202,81 @@ func TestFindSessionFile_SearchesEveryDir(t *testing.T) {
 	// rather than in another account's todos/.
 	if dir != second {
 		t.Errorf("config dir = %q, want %q", dir, second)
+	}
+}
+
+// GetSessionJourney validated its session id; GetSessionDetail never did, and
+// both now resolve through findSessionFile. A route param is not a filename.
+func TestFindSessionFile_RejectsTraversal(t *testing.T) {
+	home := t.TempDir()
+	useConfigDirs(t, home)
+
+	for _, id := range []string{
+		"../../../etc/passwd",
+		"..",
+		"a/b",
+		"foo\x00bar",
+	} {
+		dir, project, path := findSessionFile(id)
+		if dir != "" || project != "" || path != "" {
+			t.Errorf("findSessionFile(%q) = (%q,%q,%q), want all empty", id, dir, project, path)
+		}
+		if todos := loadTodos(filepath.Join(home, ".claude"), id); todos != nil {
+			t.Errorf("loadTodos(%q) returned %v, want nil", id, todos)
+		}
+	}
+}
+
+// Protection is per project, not per config dir. One unreadable project — a
+// root-owned directory, say — must not stop every other project's genuinely
+// deleted transcripts from ever being reconciled away.
+func TestIncrementalScan_UnreadableProjectProtectsOnlyItself(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	home := t.TempDir()
+	at := time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC)
+	claudeDir := filepath.Join(home, ".claude")
+	good := writeSessionIn(t, claudeDir, "-home-dev-good", "good-1", at)
+	writeSessionIn(t, claudeDir, "-home-dev-bad", "bad-1", at)
+	useConfigDirs(t, home)
+
+	c := newScanCache(t)
+	if _, err := IncrementalScan(c.db, testLogger); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	if got := countRows(t, c, "claude_session_cache"); got != 2 {
+		t.Fatalf("expected 2 rows, got %d", got)
+	}
+
+	badDir := filepath.Join(claudeDir, "projects", "-home-dev-bad")
+	if err := os.Chmod(badDir, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	// Restored so t.TempDir's cleanup can remove it.
+	// #nosec G302 -- a directory needs the execute bit to be traversable.
+	t.Cleanup(func() { _ = os.Chmod(badDir, 0o750) })
+
+	// Delete a transcript in the *healthy* project.
+	if err := os.Remove(good); err != nil {
+		t.Fatalf("removing transcript: %v", err)
+	}
+	if _, err := IncrementalScan(c.db, testLogger); err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+
+	// good-1 is reconciled away; bad-1 is preserved because its project could
+	// not be listed and absence there means "we could not look".
+	if got := countRows(t, c, "claude_session_cache"); got != 1 {
+		t.Fatalf("rows = %d, want 1 (bad-1 preserved, good-1 reconciled)", got)
+	}
+	var id string
+	if err := c.db.QueryRowContext(
+		context.Background(), "SELECT session_id FROM claude_session_cache",
+	).Scan(&id); err != nil {
+		t.Fatalf("reading row: %v", err)
+	}
+	if id != "bad-1" {
+		t.Errorf("surviving row = %q, want bad-1", id)
 	}
 }

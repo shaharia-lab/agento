@@ -80,12 +80,6 @@ func LoadProfilesMetadata() (ProfilesMetadata, error) {
 	return m, nil
 }
 
-// LoadProfileFilePath returns the settings file path for the given profile ID,
-// resolved in the run default config dir.
-func LoadProfileFilePath(profileID string) (string, error) {
-	return LoadProfileFilePathIn(ClaudeRunConfigDir(), profileID), nil
-}
-
 // LoadProfileFilePathIn returns the settings file path for the given profile
 // ID, resolved inside dir.
 //

@@ -288,7 +288,7 @@ func TestIncrementalScan_SubagentIncremental(t *testing.T) {
 	// Stored mtimes alone only show the rows are stable; assert directly that
 	// the scan selected exactly one file to re-read.
 	walk := walkAllDiskFiles(ClaudeHomes(), testLogger)
-	d := diffDiskAndCache(walk.files, before, walk.walked)
+	d := diffDiskAndCache(walk.files, before, walk)
 	if len(d.toInsert) != 0 {
 		t.Errorf("expected no inserts on rescan, got %v", d.toInsert)
 	}

@@ -92,8 +92,12 @@ func (m *analyticsMemo) put(key string, report AnalyticsReport) {
 // invalidation inputs are the same ones the scan already tracks — a rate edit
 // moves pricingRev and forces a re-read, a threshold change moves
 // idleThresholdMs and does the same, and any re-read moves lastScanned — plus
-// the hidden-project set, which is process state rather than cached state and
-// therefore has to be fingerprinted here.
+// the hidden-project set and the indexed config-dir set, which are process
+// state rather than cached state and therefore have to be fingerprinted here.
+// Removing a config dir deliberately triggers no rescan — its rows are filtered
+// out, not deleted — so lastScanned does not move and this is the only thing
+// standing between the user and a report that still counts the account they
+// just removed.
 type analyticsCacheKey struct {
 	from, to        time.Time
 	project         string
@@ -102,12 +106,14 @@ type analyticsCacheKey struct {
 	pricingRev      int64
 	idleThresholdMs int64
 	hidden          string
+	configDirs      string
 }
 
 func (k analyticsCacheKey) String() string {
-	return fmt.Sprintf("%d|%d|%s|%s|%d|%d|%d|%s",
+	return fmt.Sprintf("%d|%d|%s|%s|%d|%d|%d|%s|%s",
 		k.from.UnixNano(), k.to.UnixNano(), k.project, k.tz,
-		k.lastScanned.UnixNano(), k.pricingRev, k.idleThresholdMs, k.hidden)
+		k.lastScanned.UnixNano(), k.pricingRev, k.idleThresholdMs, k.hidden,
+		k.configDirs)
 }
 
 // Analytics returns the report for p, from the memo when nothing that could
@@ -133,6 +139,7 @@ func (c *Cache) Analytics(p AnalyticsParams) AnalyticsReport {
 		pricingRev:      currentPricingRevision(),
 		idleThresholdMs: IdleGapThreshold().Milliseconds(),
 		hidden:          strings.Join(HiddenProjects(), "\x00"),
+		configDirs:      strings.Join(ClaudeHomes(), "\x00"),
 	}.String()
 
 	if report, ok := c.analytics.get(key); ok {

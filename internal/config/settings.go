@@ -209,12 +209,31 @@ func validateIdleGapThreshold(minutes int) error {
 // one. A blank run dir is allowed and means "use the default"; blank entries in
 // the list are dropped rather than rejected, so a half-filled row in the UI is
 // not an error the user has to clear before saving anything else.
-func validateClaudeConfigDirs(s UserSettings) error {
-	if err := ValidateClaudeConfigDir(s.ClaudeConfigDir); err != nil {
-		return err
+//
+// Only values the caller is actually *changing* are checked, against current.
+// A directory that existed when it was stored can stop existing — an unmounted
+// volume, or a CLAUDE_CONFIG_DIR exported in a shell profile that Claude Code
+// has not created yet — and validating an unchanged value would then reject
+// every save, including saves of unrelated fields, naming a field the user was
+// not touching and (when env-locked) cannot even edit. That is also the rule the
+// scanner already follows: an unreadable dir is tolerated at scan time.
+func validateClaudeConfigDirs(incoming, current UserSettings) error {
+	if NormalizeClaudeConfigDir(incoming.ClaudeConfigDir) !=
+		NormalizeClaudeConfigDir(current.ClaudeConfigDir) {
+		if err := ValidateClaudeConfigDir(incoming.ClaudeConfigDir); err != nil {
+			return err
+		}
 	}
-	for _, d := range s.ClaudeConfigDirs {
+
+	existing := make(map[string]struct{}, len(current.ClaudeConfigDirs))
+	for _, d := range current.ClaudeConfigDirs {
+		existing[NormalizeClaudeConfigDir(d)] = struct{}{}
+	}
+	for _, d := range incoming.ClaudeConfigDirs {
 		if strings.TrimSpace(d) == "" {
+			continue
+		}
+		if _, kept := existing[NormalizeClaudeConfigDir(d)]; kept {
 			continue
 		}
 		if err := ValidateClaudeConfigDir(d); err != nil {
@@ -260,7 +279,7 @@ func (m *SettingsManager) Update(incoming UserSettings) error {
 	if err := validateIdleGapThreshold(incoming.IdleGapThresholdMinutes); err != nil {
 		return err
 	}
-	if err := validateClaudeConfigDirs(incoming); err != nil {
+	if err := validateClaudeConfigDirs(incoming, m.settings); err != nil {
 		return err
 	}
 
