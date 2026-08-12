@@ -378,6 +378,45 @@ type cachedEntry struct {
 	mtime      time.Time
 	isSubagent bool
 	configDir  string
+
+	// The row's own primary key, so a file that moved between config dirs can
+	// be recognized as the row it already is. sessionID is the parent's id for
+	// a sub-agent row; projectPath and agentID are each populated only for the
+	// table that has them.
+	sessionID   string
+	projectPath string
+	agentID     string
+}
+
+// rowKey identifies the cache row a file belongs to, as opposed to the path it
+// currently sits at.
+//
+// The two tables are keyed differently — claude_session_cache on
+// (session_id, project_path), claude_subagent_cache on
+// (parent_session_id, agent_id) — so the key is built per kind. The isSubagent
+// prefix keeps the two populations disjoint rather than relying on the shapes
+// of the values never colliding: a sub-agent row carries its *parent's* id in
+// sessionID, so without the prefix it could alias the parent session's own key.
+//
+// The sub-agent branch exists to make the index correct by construction, not
+// because any notification depends on it — recordPending always reports a
+// sub-agent as isNew=false, and a sub-agent's path only moves when its parent's
+// does, where the parent's own notification dominates.
+func rowKey(isSubagent bool, sessionID, projectPath, agentID string) string {
+	if isSubagent {
+		return "s\x00" + sessionID + "\x00" + agentID
+	}
+	return "p\x00" + sessionID + "\x00" + projectPath
+}
+
+// key returns the cached row's identity.
+func (ce cachedEntry) key() string {
+	return rowKey(ce.isSubagent, ce.sessionID, ce.projectPath, ce.agentID)
+}
+
+// key returns the identity of the row this file will be written to.
+func (df diskFile) key() string {
+	return rowKey(df.isSubagent, df.sessionID, df.projectPath, df.agentID)
 }
 
 // IncrementalScan walks ~/.claude/projects/, compares files on disk with the
@@ -880,9 +919,15 @@ func loadCachedEntries(db *sql.DB, logger *slog.Logger) (map[string]cachedEntry,
 func loadCachedEntriesFrom(
 	db *sql.DB, logger *slog.Logger, table string, isSubagent bool, cached map[string]cachedEntry,
 ) error {
-	// #nosec G202 -- table is a package-internal constant, never user input.
+	// The key columns differ per table, so the projection does too. Everything
+	// else is shared.
+	keyCols := "session_id, project_path"
+	if isSubagent {
+		keyCols = "parent_session_id, agent_id"
+	}
+	// #nosec G202 -- table and keyCols are package-internal constants, never user input.
 	rows, err := db.QueryContext(context.Background(),
-		"SELECT file_path, file_mtime, config_dir FROM "+table)
+		"SELECT file_path, file_mtime, config_dir, "+keyCols+" FROM "+table)
 	if err != nil {
 		return err
 	}
@@ -894,7 +939,11 @@ func loadCachedEntriesFrom(
 
 	for rows.Next() {
 		ce := cachedEntry{isSubagent: isSubagent}
-		if err := rows.Scan(&ce.filePath, &ce.mtime, &ce.configDir); err != nil {
+		second := &ce.projectPath
+		if isSubagent {
+			second = &ce.agentID
+		}
+		if err := rows.Scan(&ce.filePath, &ce.mtime, &ce.configDir, &ce.sessionID, second); err != nil {
 			return err
 		}
 		cached[ce.filePath] = ce
@@ -919,11 +968,34 @@ type diskDiff struct {
 func diffDiskAndCache(
 	onDisk map[string]diskFile, cached map[string]cachedEntry, walk diskWalk,
 ) diskDiff {
+	// A second view of the cache, keyed by the row's identity rather than by
+	// the path it currently sits at. A session present in two config dirs can
+	// change owner between scans — an unmounted drive, say — and the newly
+	// owning path is absent from the path view even though its row exists.
+	// Without this it is classified as an insert and notified isNew=true, so a
+	// session cached for months is announced as a discovery.
+	//
+	// This is a correctness fix for what isNew *means*, not a performance one:
+	// the insight worker subscribes to discovered and updated alike, and the
+	// scanner re-reads a toUpdate transcript exactly as it re-reads a toInsert
+	// one, so the work done is the same either way.
+	byKey := make(map[string]struct{}, len(cached))
+	for _, ce := range cached {
+		byKey[ce.key()] = struct{}{}
+	}
+
 	var d diskDiff
 	for fp, df := range onDisk {
 		ce, exists := cached[fp]
 		switch {
 		case !exists:
+			if _, known := byKey[df.key()]; known {
+				// The row exists; only its path moved. The upsert will conflict
+				// on the primary key and the old path is reconciled away by the
+				// delete pass, which runs after the writes.
+				d.toUpdate = append(d.toUpdate, fp)
+				continue
+			}
 			d.toInsert = append(d.toInsert, fp)
 		case !ce.mtime.Equal(df.mtime):
 			d.toUpdate = append(d.toUpdate, fp)
