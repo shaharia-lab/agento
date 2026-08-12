@@ -224,6 +224,7 @@ Nothing needs configuring. Everything below is optional, and environment variabl
 |----------|---------|-------------|
 | `PORT` | `8990` | HTTP server port |
 | `AGENTO_BIND` | `127.0.0.1` | Interface to listen on (both loopback families). Set `0.0.0.0` to reach Agento from another device — see below |
+| `AGENTO_PUBLIC_URL` | none | Externally reachable URL, for a reverse proxy, a tunnel, or Telegram webhooks |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Which Claude Code account agents run as. Claude Code's own variable |
 | `AGENTO_DATA_DIR` | `~/.agento` | Root directory for agents, chats, and logs. Supports `~` expansion |
 | `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
@@ -287,9 +288,12 @@ Only do that on a network you trust, or put a proxy that authenticates in front 
 ## Documentation
 
 - [Getting started](docs/getting-started.md): setup and a first-run walkthrough
+- [Claude sessions](docs/claude-sessions.md): what is scanned, how cost and duration are measured, and the analytics built on top
 - [Agents](docs/agents.md): system prompts, models, tools and template variables
-- [Integrations](docs/integrations.md): connecting Google, GitHub, Slack, Jira, Confluence and Telegram
+- [Tasks](docs/tasks.md): running agents on a schedule, and job history
+- [Integrations](docs/integrations.md): connecting Google, GitHub, Slack, Jira, Confluence, Telegram and WhatsApp
 - [Pricing](docs/pricing.md): how cost is calculated and how to maintain the catalog
+- [Security](docs/security.md): network exposure, the API guards, and where your data lives
 - [Monitoring](docs/monitoring.md): OpenTelemetry traces, metrics and logs
 - [Development](docs/development.md): architecture and contribution guidelines
 
