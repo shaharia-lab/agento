@@ -1,5 +1,9 @@
 # Getting Started
 
+**Requirements:** the [Claude Code CLI](https://claude.ai/code), installed and
+authenticated. If `claude` runs in your terminal, Agento works — it uses the
+authentication Claude Code already has, so no Anthropic API key is needed.
+
 ## Install
 
 **Homebrew (macOS and Linux)**
@@ -43,6 +47,29 @@ This starts Agento on port **8990** and opens your browser automatically.
 
 Visit [http://localhost:8990](http://localhost:8990) in your browser.
 
+Agento binds to **loopback only** and ships **without authentication** — it is
+meant to run on the machine you are working at. To reach it from a phone or
+another computer, see [Security](security.md#reaching-agento-from-another-device).
+
+---
+
+## What happens on first run
+
+Agento finds the Claude Code history already on your disk and starts indexing
+it. On a large corpus the first scan takes a few minutes; the sessions list shows
+its progress while it runs, and everything else is usable in the meantime.
+
+When it finishes you have a searchable history of every Claude Code session,
+cost analytics and productivity insights — see
+[Claude Sessions](claude-sessions.md). Nothing is uploaded; the transcripts are
+read where they already are and cached locally.
+
+From there:
+
+- Build an [agent](agents.md) and chat with it
+- Put it on a [schedule](tasks.md)
+- Connect [integrations](integrations.md) so agents can use your tools
+
 ---
 
 ## Options
@@ -51,13 +78,20 @@ Visit [http://localhost:8990](http://localhost:8990) in your browser.
 |------|---------------------|---------|-------------|
 | `--port` | `PORT` | `8990` | HTTP server port |
 | `--no-browser` | — | false | Do not open the browser on startup |
-| — | `AGENTO_DATA_DIR` | `~/.agento` | Directory where agents, chats, and logs are stored |
-| — | `AGENTO_DEFAULT_MODEL` | Claude Sonnet | Claude model used for direct (no-agent) chat |
+| — | `AGENTO_BIND` | `127.0.0.1` | Interface to listen on. `0.0.0.0` exposes an unauthenticated API to your whole network — read [Security](security.md) first |
+| — | `AGENTO_PUBLIC_URL` | — | The externally reachable URL, when Agento is behind a reverse proxy, a tunnel, or serving Telegram webhooks |
+| — | `AGENTO_DATA_DIR` | `~/.agento` | Directory where agents, chats, and logs are stored. `~` is expanded |
+| — | `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code's own variable — which account agent runs authenticate as |
+| — | `AGENTO_DEFAULT_MODEL` | `sonnet` | Claude model used for direct (no-agent) chat |
+| — | `ANTHROPIC_DEFAULT_SONNET_MODEL` | — | Anthropic's standard variable, used as a soft default when the above is unset |
 | — | `LOG_LEVEL` | `info` | Log level: `debug`, `info`, `warn`, `error` |
 | — | `AGENTO_WORKING_DIR` | `/tmp/agento/work` | Default working directory for agent sessions |
 | — | `ANTHROPIC_API_KEY` | — | Anthropic API key (optional if already stored by the Claude CLI) |
 | — | `OTEL_EXPORTER_OTLP_ENDPOINT` | — | OTLP gRPC endpoint for traces/metrics/logs (see [Monitoring](monitoring.md)) |
 | — | `OTEL_METRICS_EXPORTER` | — | `otlp` or `prometheus` (see [Monitoring](monitoring.md)) |
+
+Most of these also have a field in **Settings**. An environment variable always
+wins, and the UI shows the field as locked when one is set.
 
 **Example: run on a different port**
 
@@ -118,3 +152,32 @@ When Agento runs as a background service (see above), a successful `agento updat
 ```bash
 agento --version
 ```
+
+---
+
+## Command reference
+
+```
+agento web [--port int] [--no-browser]              Start the web UI
+agento ask [--agent slug] [--no-thinking]           Ask an agent a one-off question
+           [--agents-dir path] [--mcps-file path]
+           <question> [session-id]
+agento update [-y] [--no-restart]                   Update to the latest release
+agento service <install|uninstall|start|stop|restart|status|logs>
+agento service logs [-f] [-n lines]                 Read the service log
+```
+
+Passing a session ID to `agento ask` continues that conversation.
+
+---
+
+## Where to go next
+
+- [Claude Sessions](claude-sessions.md) — the analytics built from your Claude Code history
+- [Agents](agents.md) — system prompts, models, tools, template variables
+- [Tasks](tasks.md) — running agents on a schedule
+- [Integrations](integrations.md) — Google, GitHub, Slack, Jira, Confluence, Telegram, WhatsApp
+- [Pricing](pricing.md) — how cost is calculated and how to maintain the catalog
+- [Security](security.md) — network exposure, guards, and where your data lives
+- [Monitoring](monitoring.md) — OpenTelemetry traces, metrics and logs
+- [Development](development.md) — architecture and contribution workflow

@@ -27,9 +27,11 @@ Opening an issue first gives the community the opportunity to discuss the proble
 Before making code changes, read the developer documentation in the [`docs/`](docs/) directory:
 
 - [Getting Started](docs/getting-started.md)
-- [Development](docs/development.md)
+- [Development](docs/development.md) — layout, tests, and the conventions that bite (migrations, cache version constants, metrics defined in two languages)
 - [Agents](docs/agents.md)
+- [Claude Sessions](docs/claude-sessions.md)
 - [Integrations](docs/integrations.md)
+- [Security](docs/security.md)
 
 ### Prerequisites
 
@@ -70,9 +72,13 @@ make dev-frontend
 ```bash
 make test          # Run all Go tests
 make lint          # Run Go linters
+cd frontend && npm run test       # Vitest
 cd frontend && npm run lint       # Frontend linting
 cd frontend && npm run typecheck  # TypeScript checks
 ```
+
+End-to-end tests (`make e2e-setup` once, then `make e2e`) and the scale harness
+(`make bench-scale`) are local-only — see [Development](docs/development.md#run-tests).
 
 ## Pull Request Guidelines
 

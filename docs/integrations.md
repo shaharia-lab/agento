@@ -6,11 +6,15 @@ Currently supported:
 - **Google** — Calendar, Gmail, Drive (OAuth 2.0)
 - **GitHub** — Repos, issues, pull requests, actions, releases (Personal Access Token)
 - **Slack** — Channels, messages, users (Bot Token / OAuth)
-- **Jira** — Issues, projects, boards (API Token)
+- **Jira** — Issues, projects, transitions, comments (API Token)
 - **Confluence** — Pages, spaces, search (API Token)
-- **Telegram** — Messages, chats, media (Bot Token)
+- **Telegram** — Messages, chats, media (Bot Token) — and inbound [triggers](#triggers-run-an-agent-from-an-incoming-message)
+- **WhatsApp** — Messages, media, contacts (paired device, QR code)
 
 All integrations are managed from the **Integrations** page in the UI. Each has its own setup flow — click the service card to configure credentials, enable tools, and connect.
+
+> **Credentials are stored unencrypted** in `~/.agento/agento.db`, which is only
+> as protected as your home directory. See [Security](security.md#where-your-data-lives).
 
 ---
 
@@ -171,6 +175,10 @@ A Jira API Token and your Atlassian site URL (e.g., `https://yoursite.atlassian.
 | `search_issues` | Search issues with JQL |
 | `get_issue` | Get issue details by key (e.g., PROJ-123) |
 | `create_issue` | Create a new issue |
+| `update_issue` | Update an existing issue |
+| `add_comment` | Add a comment to an issue |
+| `list_transitions` | List the workflow transitions available on an issue |
+| `transition_issue` | Move an issue through a workflow transition |
 
 ---
 
@@ -196,6 +204,7 @@ A Confluence API Token and your Atlassian site URL.
 | `search_content` | Search content with CQL |
 | `get_page` | Get page content and metadata by ID |
 | `create_page` | Create a new page in a space |
+| `update_page` | Update an existing page |
 
 ---
 
@@ -221,3 +230,76 @@ A Telegram Bot Token from [@BotFather](https://t.me/botfather).
 | `send_location` | Send a geographic location |
 | `create_poll` | Create a poll in a chat |
 | `read_messages` | Read recent messages (bot updates) |
+| `get_chat_info` | Get details of a chat |
+| `get_chat_members` | List administrators/members of a chat |
+| `forward_message` | Forward a message to another chat |
+| `edit_message` | Edit a message the bot sent |
+| `delete_message` | Delete a message |
+| `pin_message` | Pin a message in a chat |
+
+---
+
+## WhatsApp Integration
+
+WhatsApp connects by **pairing a device**, the same way WhatsApp Web does —
+there is no token to create.
+
+### Setup
+
+1. Go to **Integrations** and click the **WhatsApp** card
+2. Enter a name and save
+3. Start pairing — a QR code appears
+4. Scan it from **WhatsApp → Linked devices** on your phone
+5. The card shows **Connected** once the device is linked
+
+If the session drops, reconnect from the integration page; if the link was
+removed on the phone, pair again to get a fresh QR code.
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `send_message` | Send a text message to a phone number or group JID |
+| `send_media` | Send an image or document by URL |
+| `get_contacts` | List contacts from the linked device |
+
+---
+
+## Triggers: run an agent from an incoming message
+
+A trigger runs one of your [agents](agents.md) when a message arrives on
+Telegram, and replies in the same chat. Trigger rules are configured on the
+Telegram integration's page.
+
+### Rule fields
+
+| Field | Purpose |
+|-------|---------|
+| Name | Label for the rule |
+| Agent | Which agent handles a matching message |
+| Enabled | Turn the rule off without deleting it |
+| Prefix filter | Only messages starting with this text match (case-insensitive) |
+| Keyword filter | Only messages containing one of these keywords match |
+| Chat ID filter | Only messages from these chats match |
+
+Empty filters match everything. All configured filters must pass for a rule to
+fire, and runs are dispatched with bounded concurrency so a burst of messages
+cannot spawn unlimited agent runs.
+
+### Webhook setup
+
+Telegram delivers messages over a webhook, so Agento must be reachable from the
+internet:
+
+1. Set **Public URL** in **Settings → General** (or `AGENTO_PUBLIC_URL`) to the
+   address Telegram should call.
+2. Register the webhook from the Telegram integration page and check its status
+   there.
+
+Registration generates a secret token that Telegram returns on every delivery;
+Agento verifies it and rejects anything else. Regenerate it from the same page
+if it may have leaked. See [Security](security.md#inbound-webhooks).
+
+A trigger runs unattended, so mind the agent's
+[permission mode](security.md#agent-permission-modes) — anyone who can message
+the bot and pass the filters can start a run.

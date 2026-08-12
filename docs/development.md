@@ -63,7 +63,38 @@ The binary includes version info from the current git state:
 ## Run tests
 
 ```bash
-make test
+make test                                        # all Go tests
+go test ./internal/service/... -run TestChatService   # a single Go test
+
+cd frontend && npm run test                      # Vitest, run once
+cd frontend && npm run test:watch                # the watcher
+
+make e2e-setup                                   # first time: Playwright + Chromium
+make e2e                                         # Playwright against the built binary
+```
+
+Two suites need a word of explanation:
+
+- **`make bench-scale`** runs the scale harness against a generated `~/.claude`
+  corpus and asserts the scan, sessions-list and analytics budgets against it.
+  `SCALE=medium` (default) is ~800 sessions; `SCALE=large` is 5,000 sessions
+  across 500 projects and writes about a gigabyte. It sits behind the `scale`
+  build tag, so `make test` never runs it.
+- **The Claude Sessions e2e specs read the machine's real `~/.claude`** and skip
+  when it is too small to exercise what they check. They exist because two
+  behaviours cannot be verified through a CDP-driven Chrome tab, which reports
+  `visibilityState: "hidden"`: the list's infinite-scroll sentinel
+  (IntersectionObserver stops delivering) and the transcript's timeline jump
+  (smooth scrolling does not animate).
+
+Frontend tests run under jsdom with `src/test/setup.ts` loaded for every suite,
+which registers jest-dom's matchers and an `afterEach(cleanup)` — a break there
+breaks every file at once, not just the one you edited.
+
+Regenerate mocks after changing an interface:
+
+```bash
+make generate    # mockery, reads .mockery.yaml
 ```
 
 ---
@@ -71,10 +102,17 @@ make test
 ## Lint
 
 ```bash
-make lint
+make lint                          # golangci-lint over ./...
+cd frontend && npm run lint        # ESLint
+cd frontend && npm run typecheck   # tsc -b
+cd frontend && npm run format      # Prettier
 ```
 
-Runs `go vet`, `golangci-lint` (Go), and ESLint + Prettier (TypeScript).
+`npm run typecheck` uses `tsc -b` deliberately: the root `tsconfig.json` is a
+solution file with `"files": []`, so a plain `tsc --noEmit` checks nothing and
+exits 0.
+
+Pre-commit hooks enforce all of the above on every commit.
 
 ---
 
@@ -82,28 +120,66 @@ Runs `go vet`, `golangci-lint` (Go), and ESLint + Prettier (TypeScript).
 
 ```
 agento/
-├── cmd/              # Cobra commands (web, ask, update)
+├── cmd/              # Cobra commands (web, ask, update, service)
 ├── frontend/         # React + TypeScript UI
 ├── internal/
-│   ├── agent/        # SDK integration, RunOptions, session execution
-│   ├── api/          # HTTP handlers
-│   ├── build/        # Build-time version variables
-│   ├── config/       # AppConfig, AgentConfig, MCP config
-│   ├── logger/       # Structured slog loggers (system + per-session), log rotation
-│   ├── server/       # HTTP server wiring
+│   ├── agent/          # SDK integration, RunOptions, session execution
+│   ├── api/            # HTTP handlers
+│   ├── build/          # Build-time version variables
 │   ├── claudesessions/ # Claude session scanner, analytics, processor pipeline, journey
+│   ├── config/         # AppConfig, AgentConfig, MCP config, Claude config dirs, settings
+│   ├── daemon/         # `agento service` — launchd / systemd user units
 │   ├── eventbus/       # In-process event bus
-│   ├── integrations/   # Integration registry + MCP servers (Google, GitHub, Slack, Jira, Confluence, Telegram)
+│   ├── integrations/   # Integration registry + in-process MCP servers
+│   │                   #   (Google, GitHub, Slack, Jira, Confluence, Telegram, WhatsApp)
+│   ├── logger/         # Structured slog loggers (system + per-session), log rotation
 │   ├── notification/   # Notification system (SMTP email)
+│   ├── pricing/        # Effective-dated model pricing catalog and resolver
 │   ├── scheduler/      # Task scheduler and job executor
-│   ├── service/        # Business logic (AgentService, ChatService, TaskService, NotificationService, etc.)
-│   ├── storage/        # SQLite persistence (~/.agento/agento.db)
-│   ├── telemetry/      # OpenTelemetry traces, metrics, logs (config, providers, hot-reload manager)
-│   └── tools/          # Local MCP tool server
+│   ├── server/         # HTTP server wiring, router, API guards
+│   ├── service/        # Business logic (AgentService, ChatService, TaskService, …)
+│   ├── storage/        # SQLite persistence (~/.agento/agento.db) and migrations
+│   ├── telemetry/      # OpenTelemetry traces, metrics, logs (config, providers, hot-reload)
+│   ├── tools/          # Local MCP tool server
+│   ├── trigger/        # Inbound-message dispatcher (Telegram triggers)
+│   └── updater/        # Release check and in-place self-update
+├── e2e/              # Playwright end-to-end tests
 ├── docs/             # Documentation
 ├── .goreleaser.yaml  # Release configuration
 └── Makefile
 ```
+
+**Import rule:** `config` ← `service` ← `api`, never the reverse.
+
+---
+
+## Conventions worth knowing before you change things
+
+**Database migrations** are appended to the migrations slice in
+`internal/storage/`; each one must also bump the hardcoded expected version in
+`sqlite_test.go`. Migrations are forward-only.
+
+**Cached-figure version constants.** Anything the scanner or the insight
+pipeline *stores* per session is only recomputed when the data looks stale.
+Changing how a stored figure is derived therefore means bumping the matching
+constant — `CurrentScannerVersion` for scanner output, `CurrentProcessorVersion`
+for insight output — to force a re-read. Some predicates are shared by both
+sides (turn segmentation is the notable one), and a change there needs **both**
+bumped, or the two halves drift apart.
+
+User-caused staleness works the same way but cannot be a constant: the pricing
+catalog revision and the idle threshold are recorded alongside the cache, and a
+drift in either invalidates it.
+
+**Per-session metrics are defined twice, deliberately** — in SQL
+(`internal/claudesessions/session_query.go`, which the list filters and sorts on)
+and in TypeScript (`frontend/src/lib/sessionMetrics.ts`, which renders the row).
+They must agree, or a row showing $36.30 gets hidden by "cost at most $40".
+`internal/claudesessions/testdata/session_metric_vectors.json` is read by both
+languages' tests so a change to one definition fails the other's.
+
+**API types are mirrored** in `frontend/src/types.ts`; keep them in step when
+changing a response shape.
 
 ---
 

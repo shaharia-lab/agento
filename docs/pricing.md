@@ -4,6 +4,10 @@ Agento estimates Claude Code session cost from the pricing catalog in
 `internal/pricing/`: a SQLite table (`model_pricing`) of effective-dated rates,
 seeded from the embedded `catalog.json` on startup.
 
+Cost is computed per assistant message, at that message's own model and
+timestamp, and stored on the session — see
+[Claude Sessions → Cost](claude-sessions.md#cost) for what is done with it.
+
 ## Why effective dating
 
 A rate row carries an `effective_from` timestamp, and cost lookups take
@@ -36,12 +40,18 @@ instead), and correcting refuses to create one. Reaching for "correct" when the
 price merely changed is how a user silently rewrites their own history, and the
 API is shaped to make that hard.
 
+A rate can also be **deleted** — for a row that should never have existed. That
+leaves the usage it covered priced by whatever earlier rate now wins, or unpriced
+if there is none.
+
 Models seen in your sessions with no rate at all appear at the top of the tab —
 their tokens are excluded from every cost total until priced, so that list is
 the tab's most useful starting point.
 
 Saving any change bumps the catalog revision, which invalidates the cached
-session costs; they recompute on the next scan. Rows you edit are marked
+session costs; they recompute on the next scan — a **full re-read of every
+transcript**, because re-pricing needs each message's own model and timestamp.
+On a large corpus that takes a few minutes. Rows you edit are marked
 user-modified and survive upgrades untouched.
 
 ## Maintaining rates
@@ -90,19 +100,57 @@ Two flags qualify a match:
   concrete model, so they are priced at that tier's current flagship and say
   so. The resolver also sets this when usage predates every row for a pattern.
 
+## Context-length rate tiers
+
+Some providers charge more for a long request. A rate can therefore carry
+**bands**, each keyed by an inclusive upper bound on the request's input tokens:
+
+```json
+"tiers": [
+  { "max_input_tokens": 256000,  "input": 0.40, "output": 1.60, "cache_read": 0.04 },
+  { "max_input_tokens": 1000000, "input": 1.20, "output": 4.80, "cache_read": 0.12 }
+]
+```
+
+Four things about how bands behave:
+
+- **A band is selected, not accumulated.** Alibaba bills every token of a request
+  at the chosen band's rate, so there is no progressive-bracket arithmetic. A
+  request larger than every declared bound uses the highest band.
+- **The boundary counts all input-side tokens** — fresh input plus cache reads
+  plus cache writes. The providers state how cached tokens are billed but not
+  whether they count toward the bound; this reading is documented in the code and
+  changed only there.
+- **A rate with no bands is unaffected.** The flat arithmetic did not move; an
+  empty band list simply skips band selection.
+- **The UI shows bands read-only.** Editing them is deliberately not offered —
+  and because a band is picked *before* any price is applied, correcting a tiered
+  rate by hand would otherwise save and then change nothing at any request size.
+  Correcting a rate therefore **clears its bands** and makes it flat: your value
+  wins, which is the same rule `user_modified` encodes elsewhere.
+
+Bands live in their own table, so the `UNIQUE(model_pattern, effective_from)`
+identity — and with it the add-vs-correct semantics above — is untouched. The
+catalog revision hashes them, so a band correction re-prices stored costs like
+any other change.
+
 ## Non-Anthropic providers
 
 Claude Code is routinely pointed at Anthropic-API-compatible backends, so the
-catalog is not Anthropic-only. Seeded as of 2026-08-09, International endpoints:
+catalog is not Anthropic-only. Seeded as of 2026-08-09, International endpoints,
+USD per million tokens:
 
-| Provider | Pattern | Input | Output | Cache read |
-|---|---|---|---|---|
-| Moonshot | `k3` (exact), `kimi-k3` | 3.00 | 15.00 | 0.30 |
-| Z.ai / Zhipu | `glm-5.2` | 1.40 | 4.40 | 0.26 |
-| Alibaba | `qwen3.5-397b-a17b` | 0.60 | 3.60 | 0.06 |
-| Alibaba | `qwen3.5-plus` | 0.40 | 2.40 | 0.04 |
-| Alibaba | `qwen3.5-flash` | 0.10 | 0.40 | 0.01 |
-| Alibaba | `qwen3-max` | 1.20 | 6.00 | 0.12 |
+| Provider | Pattern | Input | Output | Cache read | Context bands |
+|---|---|---|---|---|---|
+| Moonshot | `k3` (exact), `kimi-k3` | 3.00 | 15.00 | 0.30 | — |
+| Z.ai / Zhipu | `glm-5.2` | 1.40 | 4.40 | 0.26 | — |
+| Alibaba | `qwen3.7-max` | 2.50 | 7.50 | 0.25 | — |
+| Alibaba | `qwen3.7-plus` | 0.40 | 1.60 | 0.04 | ≤256K, then 1.20 / 4.80 |
+| Alibaba | `qwen3.6-flash` | 0.25 | 1.50 | 0.025 | ≤256K, then 1.00 / 4.00 |
+| Alibaba | `qwen3.5-397b-a17b` | 0.60 | 3.60 | 0.06 | — |
+| Alibaba | `qwen3.5-plus` | 0.40 | 2.40 | 0.04 | ≤256K, then 0.50 / 3.00 |
+| Alibaba | `qwen3.5-flash` | 0.10 | 0.40 | 0.01 | — |
+| Alibaba | `qwen3-max` | 1.20 | 6.00 | 0.12 | ≤32K, ≤128K 2.40 / 12.00, ≤256K 3.00 / 15.00 |
 
 Notes for the next refresh:
 
@@ -112,12 +160,13 @@ Notes for the next refresh:
 - **Alibaba prices caching as a percentage rule**, not per model: explicit-cache
   creation is 125% of input and hits are 10%. Their rows encode that, which is
   also why their 1-hour column is 1.25× rather than the Anthropic 2×.
-- **Alibaba tiers by context length** and the catalog has no context dimension.
-  The base tier is seeded; `qwen3.5-plus` costs $0.50/$3.00 above 256K and
-  `qwen3-max` $2.40/$12.00 above 32K, so long-context usage under-reports.
+- **Band bounds use the provider's own K/M labels read as decimal** (256K =
+  256,000). The pricing pages do not say whether K means 1000 or 1024, and
+  inventing the binary reading would be precision they never published.
 - Several Alibaba models carry a "Limited-time X% off" against a separate list
-  price. Capture those with an `effective_from` so the expiry does not silently
-  misprice history.
+  price. Where an expiry is published, capture it with an `effective_from` so
+  the reversion does not silently misprice history; where none is published, no
+  boundary row is seeded rather than guessing one.
 - **Qwen3.8-Max is deliberately absent.** It appears on Alibaba's marketplace
   but on no pricing page, with two competing IDs in circulation and no
   published rate — seeding it would be a guess. A missing row costs nothing and

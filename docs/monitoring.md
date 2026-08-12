@@ -19,7 +19,9 @@ Go to **Settings → Monitoring**, toggle **Enable monitoring**, fill in your ex
 | Insecure | Enable when the collector does not use TLS (typical for local setups) |
 | Metric export interval | How often to push metrics, in milliseconds (default: 60 000) |
 
-> **Note:** If any `OTEL_*` environment variable is set, the UI shows an amber lock banner and the fields become read-only. Unset the env vars to use the UI instead.
+> **Note:** If any `OTEL_*` environment variable is set, the UI shows an amber lock banner and the fields become read-only (a write is rejected with `409 Conflict`). Unset the env vars to use the UI instead.
+
+Telemetry is **off unless you configure it**. Nothing is exported anywhere by default.
 
 ### Option 2 — Environment variables
 
@@ -48,6 +50,11 @@ export OTEL_METRICS_EXPORTER=prometheus
 agento web
 # Metrics available at http://localhost:8990/metrics
 ```
+
+`/metrics` and `/health` sit outside the API and its
+[guards](security.md#browser-based-protections), so a scraper does not need to
+send JSON or a matching `Host`. They are still only reachable wherever Agento is
+bound — loopback by default.
 
 ---
 
