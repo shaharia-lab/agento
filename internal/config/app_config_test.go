@@ -168,3 +168,35 @@ func TestLoad_DefaultModel_Priority(t *testing.T) {
 		})
 	}
 }
+
+// Agento has no authentication by design, so the default must not be every
+// interface — that put an API which can run arbitrary Bash on every network
+// the machine joins.
+func TestBindAddress_DefaultsToLoopback(t *testing.T) {
+	// envconfig treats an explicitly-empty variable as set, which would
+	// override the default — the real default path is the variable being
+	// absent, so unset it rather than blanking it.
+	if prev, ok := os.LookupEnv("AGENTO_BIND"); ok {
+		t.Cleanup(func() { _ = os.Setenv("AGENTO_BIND", prev) })
+	}
+	if err := os.Unsetenv("AGENTO_BIND"); err != nil {
+		t.Fatalf("unsetting: %v", err)
+	}
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if cfg.BindAddress != "127.0.0.1" {
+		t.Errorf("BindAddress = %q, want 127.0.0.1", cfg.BindAddress)
+	}
+
+	t.Setenv("AGENTO_BIND", "0.0.0.0")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	if cfg.BindAddress != "0.0.0.0" {
+		t.Errorf("BindAddress = %q, want the override to apply", cfg.BindAddress)
+	}
+}

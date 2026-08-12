@@ -307,6 +307,12 @@ export default function SettingsPage() {
                       inbound webhooks.
                     </p>
                   )}
+                  {publicUrl.trim() !== '' && (
+                    <p className="text-xs text-amber-600 dark:text-amber-500">
+                      Agento has no authentication. Anyone who can reach this URL can run agents on
+                      this machine. Put it behind a proxy that authenticates, or a private network.
+                    </p>
+                  )}
                 </div>
 
                 {error && (

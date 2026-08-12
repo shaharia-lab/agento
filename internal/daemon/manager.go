@@ -69,6 +69,12 @@ type Options struct {
 	// minimal environment can still find the Claude Code CLI and node.
 	ExtraPath string
 
+	// BindAddress is the interface the service should listen on. Empty means
+	// the built-in default (loopback). Carried because a service runs detached
+	// from any shell, so AGENTO_BIND exported in a profile never reaches it —
+	// which would silently return a user who wants LAN access to loopback.
+	BindAddress string
+
 	// ClaudeConfigDir is CLAUDE_CONFIG_DIR as seen when the service was
 	// installed. The service runs detached from any shell, so a variable the
 	// user exported in their profile never reaches it — without this, pointing
@@ -143,6 +149,7 @@ func DefaultOptions(cfg *config.AppConfig) (Options, error) {
 		LogPath:         ServiceLogPath(cfg),
 		Port:            cfg.Port,
 		ExtraPath:       os.Getenv("PATH"),
+		BindAddress:     os.Getenv("AGENTO_BIND"),
 		ClaudeConfigDir: os.Getenv(config.ClaudeConfigDirEnvVar),
 	}, nil
 }

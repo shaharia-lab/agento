@@ -10,6 +10,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,8 @@ type Server struct {
 	apiServer      *api.Server
 	frontendFS     fs.FS // nil in dev mode
 	port           int
+	bindAddress    string
+	publicHost     string
 	logger         *slog.Logger
 	httpServer     *http.Server
 	monitoringMgr  *telemetry.MonitoringManager
@@ -50,11 +53,14 @@ func New(
 	apiSrv *api.Server, frontendFS fs.FS, port int, logger *slog.Logger,
 	monitoringMgr *telemetry.MonitoringManager,
 	webhookHandler WebhookMounter,
+	opts Options,
 ) *Server {
 	s := &Server{
 		apiServer:      apiSrv,
 		frontendFS:     frontendFS,
 		port:           port,
+		bindAddress:    opts.BindAddress,
+		publicHost:     hostOf(opts.PublicURL),
 		logger:         logger,
 		monitoringMgr:  monitoringMgr,
 		webhookHandler: webhookHandler,
@@ -78,8 +84,17 @@ func New(
 	// Metrics endpoint: serves Prometheus metrics when enabled, 503 otherwise.
 	r.Get("/metrics", s.metricsHandler())
 
-	// API routes
+	// API routes.
+	//
+	// The two guards below are scoped here rather than applied globally, and
+	// deliberately: POST /webhooks/telegram/{id} is mounted at the root, arrives
+	// from Telegram's servers with a foreign Host, and would be broken by
+	// either. It is not a hole — it authenticates with its own secret token.
+	// /health, /metrics and the SPA are likewise left alone; the attack this
+	// closes needs /api.
 	r.Route("/api", func(r chi.Router) {
+		r.Use(s.validateHost)
+		r.Use(requireJSONContentType)
 		apiSrv.Mount(r)
 	})
 
@@ -92,7 +107,7 @@ func New(
 	r.Get("/*", s.spaHandler())
 
 	s.httpServer = &http.Server{
-		Addr:              fmt.Sprintf(":%d", port),
+		Addr:              net.JoinHostPort(s.listenHost(), strconv.Itoa(port)),
 		Handler:           otelhttp.NewHandler(r, "agento"),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -105,6 +120,17 @@ func (s *Server) Run(ctx context.Context) error {
 	ln, err := lc.Listen(ctx, "tcp", s.httpServer.Addr)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", s.httpServer.Addr, err)
+	}
+
+	// Name the interface explicitly. The default changed to loopback, so a user
+	// who used to reach Agento from another device needs to see why they cannot.
+	if s.IsLoopbackBind() {
+		s.logger.Info("listening on loopback only; set AGENTO_BIND=0.0.0.0 to allow other devices",
+			"addr", s.httpServer.Addr)
+	} else {
+		s.logger.Warn("listening on a non-loopback address; Agento has no authentication, "+
+			"so anyone who can reach this address can run agents on this machine",
+			"addr", s.httpServer.Addr)
 	}
 
 	errCh := make(chan error, 1)

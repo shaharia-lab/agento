@@ -19,6 +19,15 @@ type AppConfig struct {
 	// Port is the HTTP server port. Defaults to 8990.
 	Port int `envconfig:"PORT" default:"8990"`
 
+	// BindAddress is the interface the HTTP server listens on. It defaults to
+	// loopback because Agento has no authentication by design: it is a
+	// single-user desktop app, and a default of 0.0.0.0 put an API that can
+	// run arbitrary Bash on every network the machine joins.
+	//
+	// Set AGENTO_BIND=0.0.0.0 to reach Agento from a phone or another machine,
+	// accepting that anyone else on that network can reach it too.
+	BindAddress string `envconfig:"AGENTO_BIND" default:"127.0.0.1"`
+
 	// DataDir is the root data directory. Defaults to ~/.agento.
 	DataDir string `envconfig:"AGENTO_DATA_DIR"`
 

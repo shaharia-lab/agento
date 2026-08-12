@@ -232,6 +232,30 @@ func initDatabase(cfg *config.AppConfig, sysLogger *slog.Logger) (*sql.DB, func(
 	return db, cleanup, nil
 }
 
+// newHTTPServer assembles the HTTP server with the deployment-shaped settings
+// the router's guards need.
+func newHTTPServer(
+	cfg *config.AppConfig, result *buildAPIServerResult, sysLogger *slog.Logger,
+	monitoringMgr *telemetry.MonitoringManager, settingsMgr *config.SettingsManager,
+) *server.Server {
+	return server.New(result.apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr,
+		result.webhookHandler, server.Options{
+			BindAddress: cfg.BindAddress,
+			PublicURL:   resolvePublicURL(cfg, settingsMgr),
+		})
+}
+
+// resolvePublicURL returns the externally reachable URL, env winning over the
+// stored setting — the same precedence triggerService.publicURL applies. Its
+// host is the one non-loopback name validateHost accepts, so a reverse proxy or
+// a tunnel keeps working.
+func resolvePublicURL(cfg *config.AppConfig, settingsMgr *config.SettingsManager) string {
+	if cfg.PublicURL != "" {
+		return cfg.PublicURL
+	}
+	return settingsMgr.Get().PublicURL
+}
+
 func buildWebServer(
 	ctx context.Context, cfg *config.AppConfig,
 	db *sql.DB, sysLogger *slog.Logger,
@@ -288,7 +312,7 @@ func buildWebServer(
 	if err != nil {
 		return nil, nil, err
 	}
-	srv := server.New(result.apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr, result.webhookHandler)
+	srv := newHTTPServer(cfg, result, sysLogger, monitoringMgr, settingsMgr)
 
 	// On shutdown: clean up pairing sessions, close the event bus so no further
 	// events are enqueued, then wait for in-flight worker goroutines to finish.
