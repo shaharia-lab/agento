@@ -11,6 +11,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // Pure Go SQLite driver.
+
+	"github.com/shaharia-lab/agento/internal/config"
 )
 
 // migration represents a single schema migration step.
@@ -680,6 +682,36 @@ func NewSQLiteDB(dbPath string, logger *slog.Logger) (*sql.DB, bool, error) {
 	}
 
 	return db, freshDB, nil
+}
+
+// LoadUserSettingsReadOnly reads the persisted user settings without migrating.
+//
+// It exists for command-line paths that need a stored preference but have no
+// business owning the database's schema lifecycle: `agento ask` must honor the
+// Claude config dir chosen in the UI, but a CLI that migrated could upgrade a
+// file out from under a running `agento web`. openSQLiteDB is deliberately
+// separate from runMigrations for exactly this reason, and this never calls the
+// latter.
+//
+// Every failure is the caller's to ignore — a database that does not exist yet,
+// a schema predating the column, a file held by another process. The caller's
+// existing behavior is the floor, so a settings load that cannot happen must
+// degrade rather than fail the command.
+//
+// Note this is not a read-only open in the SQLite sense: openSQLiteDB sets
+// journal_mode=WAL, which writes. That is idempotent against an existing
+// database and is why the error is returned rather than swallowed here.
+func LoadUserSettingsReadOnly(dbPath string, logger *slog.Logger) (config.UserSettings, error) {
+	db, err := openSQLiteDB(context.Background(), dbPath, logger)
+	if err != nil {
+		return config.UserSettings{}, err
+	}
+	defer func() {
+		if cerr := db.Close(); cerr != nil {
+			logger.Debug("closing settings database", "error", cerr)
+		}
+	}()
+	return NewSQLiteSettingsStore(db).Load()
 }
 
 // openSQLiteDB creates the parent directory, opens the database and configures

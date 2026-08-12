@@ -3,6 +3,8 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/shaharia-lab/agento/internal/agent"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/storage"
 	"github.com/shaharia-lab/agento/internal/tools"
 )
 
@@ -44,7 +47,8 @@ Examples:
 			if cmd.Flags().Changed("mcps-file") {
 				resolvedMCPsFile = expandHome(mcpsFile)
 			}
-			return runAsk(args, agentSlug, noThinking, resolvedAgentsDir, resolvedMCPsFile)
+			return runAsk(args, agentSlug, noThinking,
+				resolvedAgentsDir, resolvedMCPsFile, cfg.DatabasePath())
 		},
 	}
 
@@ -57,7 +61,9 @@ Examples:
 	return cmd
 }
 
-func runAsk(args []string, agentSlug string, noThinking bool, agentsDir, mcpsFile string) error {
+func runAsk(
+	args []string, agentSlug string, noThinking bool, agentsDir, mcpsFile, dbPath string,
+) error {
 	question := args[0]
 	sessionID := ""
 	if len(args) == 2 {
@@ -66,6 +72,8 @@ func runAsk(args []string, agentSlug string, noThinking bool, agentsDir, mcpsFil
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
+
+	applyStoredClaudeDirs(dbPath)
 
 	agentCfg, mcpRegistry, localToolsMCP, err := loadAskDependencies(ctx, agentSlug, agentsDir, mcpsFile)
 	if err != nil {
@@ -86,6 +94,41 @@ func runAsk(args []string, agentSlug string, noThinking bool, agentsDir, mcpsFil
 
 	consumeAskStream(stream)
 	return nil
+}
+
+// applyStoredClaudeDirs installs the Claude config dir chosen in the UI, so a
+// CLI run targets the same account the web app does.
+//
+// Without it the resolver sees no configured value and falls through to
+// CLAUDE_CONFIG_DIR or $HOME/.claude — so a user who pointed Agento at a second
+// account in Settings would silently get the first one here, writing the
+// transcript into the wrong corpus under the wrong credentials.
+//
+// Every failure is ignored on purpose. The database may not exist yet, may
+// predate the column, or may be held by a running `agento web`; in each case
+// the resolver's own precedence (env, then default) is the correct answer and
+// was the behavior before this existed. It is never a reason to refuse to
+// answer a question.
+func applyStoredClaudeDirs(dbPath string) {
+	// No database yet is the ordinary state for someone who has only used the
+	// CLI, so it is silent. Anything else — a corrupt file, a schema predating
+	// the column, a permissions problem — means the run may target a different
+	// Claude account than the UI would, and that must be visible: `ask` wires
+	// no logger, so a slog line at any level would go nowhere.
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		return
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	settings, err := storage.LoadUserSettingsReadOnly(dbPath, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr,
+			"warning: could not read settings from %s (%v);\n"+
+				"         using the default Claude config dir %s\n",
+			dbPath, err, config.ClaudeRunConfigDir())
+		return
+	}
+	config.ApplyClaudeDirs(settings.ClaudeConfigDir, settings.ClaudeConfigDirs)
 }
 
 func loadAskDependencies(
