@@ -119,9 +119,19 @@ func New(
 // Run starts the HTTP server and blocks until ctx is canceled.
 func (s *Server) Run(ctx context.Context) error {
 	lc := &net.ListenConfig{}
-	ln, err := lc.Listen(ctx, "tcp", s.httpServer.Addr)
-	if err != nil {
-		return fmt.Errorf("listening on %s: %w", s.httpServer.Addr, err)
+	listeners := make([]net.Listener, 0, 2)
+	for _, addr := range s.listenAddrs() {
+		ln, lnErr := lc.Listen(ctx, "tcp", addr)
+		if lnErr != nil {
+			// The second loopback family is best-effort: a host with IPv6
+			// disabled must still start. Failing to bind the first is fatal.
+			if len(listeners) == 0 {
+				return fmt.Errorf("listening on %s: %w", addr, lnErr)
+			}
+			s.logger.Debug("skipping listener", "addr", addr, "error", lnErr)
+			continue
+		}
+		listeners = append(listeners, ln)
 	}
 
 	// Name the interface explicitly. The default changed to loopback, so a user
@@ -135,12 +145,14 @@ func (s *Server) Run(ctx context.Context) error {
 			"addr", s.httpServer.Addr)
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		if err := s.httpServer.Serve(ln); err != nil && err != http.ErrServerClosed {
-			errCh <- err
-		}
-	}()
+	errCh := make(chan error, len(listeners))
+	for _, ln := range listeners {
+		go func(l net.Listener) {
+			if err := s.httpServer.Serve(l); err != nil && err != http.ErrServerClosed {
+				errCh <- err
+			}
+		}(ln)
+	}
 
 	select {
 	case <-ctx.Done():

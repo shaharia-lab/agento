@@ -223,7 +223,7 @@ Nothing needs configuring. Everything below is optional, and environment variabl
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `8990` | HTTP server port |
-| `AGENTO_BIND` | `127.0.0.1` | Interface to listen on. Set `0.0.0.0` to reach Agento from another device — see below |
+| `AGENTO_BIND` | `127.0.0.1` | Interface to listen on (both loopback families). Set `0.0.0.0` to reach Agento from another device — see below |
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Which Claude Code account agents run as. Claude Code's own variable |
 | `AGENTO_DATA_DIR` | `~/.agento` | Root directory for agents, chats, and logs. Supports `~` expansion |
 | `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |

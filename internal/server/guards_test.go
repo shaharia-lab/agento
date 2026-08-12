@@ -309,3 +309,34 @@ func TestIsLoopbackBind_HostnameForms(t *testing.T) {
 		}
 	}
 }
+
+// Binding ":port" used to accept IPv4 and IPv6 alike. Narrowing the default to
+// 127.0.0.1 silently broke http://[::1]:port, and on a host where "localhost"
+// resolves to ::1 first a client that does not fall back gets connection-refused
+// on a server that looks fine — a second breaking change nobody asked for.
+func TestListenAddrs_LoopbackCoversBothFamilies(t *testing.T) {
+	got := (&Server{port: 8990}).listenAddrs()
+	want := []string{"127.0.0.1:8990", "[::1]:8990"}
+	if len(got) != len(want) {
+		t.Fatalf("listenAddrs() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("listenAddrs() = %v, want %v", got, want)
+		}
+	}
+
+	// An explicit loopback value behaves the same.
+	if addrs := (&Server{port: 1, bindAddress: "localhost"}).listenAddrs(); len(addrs) != 2 {
+		t.Errorf("localhost bind = %v, want both families", addrs)
+	}
+
+	// Anything else is used verbatim — 0.0.0.0 and :: already cover what the
+	// user asked for, and a specific address means that address.
+	for _, bind := range []string{"0.0.0.0", "192.168.1.10"} {
+		addrs := (&Server{port: 8990, bindAddress: bind}).listenAddrs()
+		if len(addrs) != 1 {
+			t.Errorf("bind %q = %v, want exactly one address", bind, addrs)
+		}
+	}
+}

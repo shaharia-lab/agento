@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 )
 
@@ -235,4 +236,29 @@ func writeGuardError(w http.ResponseWriter, status int, msg string) {
 	if _, err := w.Write([]byte(`{"error":"` + msg + `"}`)); err != nil {
 		return
 	}
+}
+
+// listenAddrs returns every address to listen on.
+//
+// A loopback bind covers **both** loopback families. Binding ":port" used to
+// accept IPv4 and IPv6 alike, so narrowing the default to 127.0.0.1 silently
+// broke http://[::1]:port — and on a host where "localhost" resolves to ::1
+// first, a client that does not fall back gets connection-refused on what looks
+// like a working server. That is a second breaking change nobody asked for, so
+// loopback means loopback rather than IPv4 loopback.
+//
+// Any other bind is used verbatim: 0.0.0.0 and :: already cover what the user
+// asked for, and a specific address means that address.
+func (s *Server) listenAddrs() []string {
+	host := s.listenHost()
+	port := strconv.Itoa(s.port)
+
+	ip := net.ParseIP(host)
+	if strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback()) {
+		return []string{
+			net.JoinHostPort("127.0.0.1", port),
+			net.JoinHostPort("::1", port),
+		}
+	}
+	return []string{net.JoinHostPort(host, port)}
 }
