@@ -68,6 +68,13 @@ type Options struct {
 	// ExtraPath is the invoking shell's PATH, baked in so the service's
 	// minimal environment can still find the Claude Code CLI and node.
 	ExtraPath string
+
+	// ClaudeConfigDir is CLAUDE_CONFIG_DIR as seen when the service was
+	// installed. The service runs detached from any shell, so a variable the
+	// user exported in their profile never reaches it — without this, pointing
+	// Agento at a second Claude account simply has no effect under
+	// `agento service`. Empty means unset, and no variable is written.
+	ClaudeConfigDir string
 }
 
 // Status describes the installed/enabled/running state of the service. It
@@ -131,11 +138,12 @@ func DefaultOptions(cfg *config.AppConfig) (Options, error) {
 		return Options{}, err
 	}
 	return Options{
-		BinaryPath: binary,
-		DataDir:    cfg.DataDir,
-		LogPath:    ServiceLogPath(cfg),
-		Port:       cfg.Port,
-		ExtraPath:  os.Getenv("PATH"),
+		BinaryPath:      binary,
+		DataDir:         cfg.DataDir,
+		LogPath:         ServiceLogPath(cfg),
+		Port:            cfg.Port,
+		ExtraPath:       os.Getenv("PATH"),
+		ClaudeConfigDir: os.Getenv(config.ClaudeConfigDirEnvVar),
 	}, nil
 }
 

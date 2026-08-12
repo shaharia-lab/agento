@@ -617,6 +617,46 @@ CREATE INDEX IF NOT EXISTS idx_claude_session_cache_file_path
 	ON claude_session_cache(file_path);
 `,
 	},
+	{
+		version: 27,
+		sql: `
+-- Multi Claude-config-dir support.
+--
+-- Claude Code keeps credentials, projects and settings under CLAUDE_CONFIG_DIR,
+-- and running two accounts side by side by pointing it at a second directory is
+-- ordinary. Agento indexes every configured dir into one corpus, so each cached
+-- row has to record which dir it came from — for attribution and filtering, and
+-- because a dir that cannot be walked must have its rows preserved rather than
+-- read as "every session was deleted".
+--
+-- The column defaults to empty rather than to the default dir because the
+-- home directory is not a SQL constant and cannot be written into DDL. Empty
+-- is therefore given a meaning instead: readers treat it as the default dir
+-- (rowReconcilable, config.IsIndexedClaudeDir), which is where every existing
+-- row necessarily came from, since no other dir could be configured until now.
+-- Rows acquire a real value from the re-read that CurrentScannerVersion v13
+-- forces on the next scan. That bump is required, not incidental: a scan
+-- otherwise only re-reads a file whose mtime changed, so a finished session
+-- would keep an empty config_dir forever and the account filter would match
+-- none of it.
+ALTER TABLE claude_session_cache  ADD COLUMN config_dir TEXT NOT NULL DEFAULT '';
+ALTER TABLE claude_subagent_cache ADD COLUMN config_dir TEXT NOT NULL DEFAULT '';
+
+-- The sessions list filters by config dir the same way it filters by project.
+CREATE INDEX IF NOT EXISTS idx_claude_session_cache_config_dir
+	ON claude_session_cache(config_dir);
+
+-- Which Claude config dir agent runs target, and any extra dirs to index.
+-- Empty means "not chosen": the run dir resolves to the default and the extra
+-- list is empty, which is exactly the behavior before this migration.
+ALTER TABLE user_settings ADD COLUMN claude_config_dir  TEXT NOT NULL DEFAULT '';
+ALTER TABLE user_settings ADD COLUMN claude_config_dirs TEXT NOT NULL DEFAULT '[]';
+
+-- A per-agent override, so a work agent and a personal agent can be live in one
+-- Agento instance. Empty means the global default.
+ALTER TABLE agents ADD COLUMN claude_config_dir TEXT NOT NULL DEFAULT '';
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

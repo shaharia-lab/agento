@@ -192,6 +192,36 @@ func TestAgentService_Create(t *testing.T) {
 			},
 		},
 		{
+			// The global run dir is validated in SettingsManager; a per-agent
+			// override reaches the same filesystem resolution and must not be
+			// the one path that accepts anything. A relative value is the
+			// dangerous shape: the runner stats it against the server's working
+			// directory while the subprocess resolves --settings against its
+			// own, so the file checked would not be the file loaded.
+			name: "rejects a relative claude config dir",
+			input: &config.AgentConfig{
+				Name:            "Relative Dir",
+				ClaudeConfigDir: "relative/dir",
+			},
+			// Validation runs before the store is consulted at all.
+			setupMock:   func(_ *mocks.MockAgentStore) {},
+			wantErr:     true,
+			errType:     &ValidationError{},
+			errContains: "claude_config_dir",
+		},
+		{
+			name: "rejects a claude config dir that does not exist",
+			input: &config.AgentConfig{
+				Name:            "Missing Dir",
+				ClaudeConfigDir: "/definitely/not/here",
+			},
+			// Validation runs before the store is consulted at all.
+			setupMock:   func(_ *mocks.MockAgentStore) {},
+			wantErr:     true,
+			errType:     &ValidationError{},
+			errContains: "claude_config_dir",
+		},
+		{
 			name: "creates agent with explicit slug",
 			input: &config.AgentConfig{
 				Name: "My Agent",

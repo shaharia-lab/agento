@@ -131,6 +131,9 @@ const maxDrilldownWindows = 512
 type SessionQuery struct {
 	// Project matches ClaudeSessionSummary.ProjectPath exactly. Empty = all.
 	Project string
+	// ConfigDir narrows to one Claude config dir — the account a session was
+	// run under. Empty = every indexed dir.
+	ConfigDir string
 	// Search matches the session ID, the resolved titles, the preview or the
 	// project path, case-insensitively, as a substring.
 	Search string
@@ -230,8 +233,12 @@ func buildFilter(q SessionQuery) (*clause, error) {
 	for _, p := range HiddenProjects() {
 		c.add("c.project_path != ?", p)
 	}
+	addConfigDirScope(c)
 	if q.Project != "" {
 		c.add("c.project_path = ?", q.Project)
+	}
+	if q.ConfigDir != "" {
+		c.add("c.config_dir = ?", q.ConfigDir)
 	}
 	if q.FavoritesOnly {
 		c.add("c.is_favorite = 1")
@@ -256,6 +263,27 @@ func buildFilter(q SessionQuery) (*clause, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// addConfigDirScope restricts results to the config dirs currently indexed.
+//
+// Removing a dir from the set hides its sessions rather than deleting them —
+// the same rule hidden projects follow, and for the same reason: the rows stay
+// cached and correct, so re-adding the dir is immediate and costs no re-read.
+// The empty string is always admitted, since rows written before the column
+// existed carry it and belong to the default dir.
+func addConfigDirScope(c *clause) {
+	dirs := ClaudeHomes()
+	if len(dirs) == 0 {
+		return
+	}
+	placeholders := make([]string, 0, len(dirs))
+	args := make([]any, 0, len(dirs))
+	for _, d := range dirs {
+		placeholders = append(placeholders, "?")
+		args = append(args, d)
+	}
+	c.add("(c.config_dir = '' OR c.config_dir IN ("+strings.Join(placeholders, ", ")+"))", args...)
 }
 
 // addSearch matches the same four fields the client-side predicate did.

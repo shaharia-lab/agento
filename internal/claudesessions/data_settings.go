@@ -107,18 +107,19 @@ func HiddenProjects() []string {
 // there — so a hidden project disappears from the list and from every figure
 // derived from it in one place rather than in each consumer.
 func VisibleSessions(sessions []ClaudeSessionSummary) []ClaudeSessionSummary {
-	dataSettings.RLock()
-	hiddenCount := len(dataSettings.hidden)
-	dataSettings.RUnlock()
-	if hiddenCount == 0 {
-		return sessions
-	}
-
 	visible := make([]ClaudeSessionSummary, 0, len(sessions))
 	for _, s := range sessions {
-		if !IsProjectHidden(s.ProjectPath) {
-			visible = append(visible, s)
+		// Both scopes are applied here and reproduced in SQL by buildFilter,
+		// because the paged list never loads the corpus and so cannot inherit
+		// an in-memory filter. The two must agree or a row would be counted in
+		// a total it is not listed in.
+		if IsProjectHidden(s.ProjectPath) {
+			continue
 		}
+		if !config.IsIndexedClaudeDir(s.ConfigDir) {
+			continue
+		}
+		visible = append(visible, s)
 	}
 	return visible
 }

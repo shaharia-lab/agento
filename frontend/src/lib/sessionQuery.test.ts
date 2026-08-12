@@ -22,7 +22,9 @@ describe('toQueryParams', () => {
 
   it('omits the "all" sentinels rather than sending them', () => {
     // `model=all` would filter for a model literally named "all".
-    expect(params(filters({ project: 'all', model: 'all', permissionMode: 'all' }))).toEqual({})
+    expect(
+      params(filters({ project: 'all', model: 'all', permissionMode: 'all', configDir: 'all' })),
+    ).toEqual({})
   })
 
   it('sends the exact-match filters', () => {
@@ -30,6 +32,7 @@ describe('toQueryParams', () => {
       params(
         filters({
           project: '/home/dev/repo',
+          configDir: '/home/dev/.claude-personal',
           model: 'claude-opus-5',
           permissionMode: 'plan',
           links: 'with',
@@ -38,6 +41,7 @@ describe('toQueryParams', () => {
       ),
     ).toEqual({
       project: '/home/dev/repo',
+      config_dir: '/home/dev/.claude-personal',
       model: 'claude-opus-5',
       permission_mode: 'plan',
       links: 'with',
@@ -108,6 +112,7 @@ describe('filterActive', () => {
 
   it.each([
     ['a project', { project: '/home/dev/repo' }],
+    ['a config dir', { configDir: '/home/dev/.claude-personal' }],
     ['a search', { search: 'parser' }],
     ['favorites', { favorites: true }],
     ['a range start', { from: new Date() }],

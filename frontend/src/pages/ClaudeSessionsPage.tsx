@@ -179,6 +179,7 @@ export default function ClaudeSessionsPage() {
   const [search, setSearch] = useState('')
   const [sort, setSort] = useState<SessionSort>('recent')
   const [filterProject, setFilterProject] = useState(searchParams.get('project') ?? 'all')
+  const [filterConfigDir, setFilterConfigDir] = useState('all')
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(() => new Set())
 
   // Keep the project filter in sync when arriving via a new drill-down URL
@@ -221,6 +222,7 @@ export default function ClaudeSessionsPage() {
       ...NO_FILTERS,
       ...advanced,
       project: filterProject,
+      configDir: filterConfigDir,
       search: debouncedSearch,
       favorites: filterFavorites,
       from,
@@ -377,6 +379,8 @@ export default function ClaudeSessionsPage() {
   const hasPRs = facets?.has_prs ?? false
   const permissionModes = facets?.permission_modes ?? []
   const models = facets?.models ?? []
+  // Only offered when the corpus actually spans more than one account.
+  const configDirs = facets?.config_dirs?.filter(Boolean) ?? []
   const activeAdvanced = countActive(advanced)
 
   const timeFilterActive = drilldownActive || timePreset !== 'all'
@@ -548,6 +552,21 @@ export default function ClaudeSessionsPage() {
                     <SelectItem key={p.encoded_name} value={p.decoded_path} className="text-xs">
                       <span className="font-mono">{shortPath(p.decoded_path)}</span>
                       <span className="ml-1.5 text-zinc-400">({p.session_count})</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            {configDirs.length > 1 && (
+              <Select value={filterConfigDir} onValueChange={setFilterConfigDir}>
+                <SelectTrigger className="w-full sm:w-52 h-[34px] text-xs">
+                  <SelectValue placeholder="All accounts" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All accounts</SelectItem>
+                  {configDirs.map(d => (
+                    <SelectItem key={d} value={d} className="text-xs">
+                      <span className="font-mono">{shortPath(d)}</span>
                     </SelectItem>
                   ))}
                 </SelectContent>

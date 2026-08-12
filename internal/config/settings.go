@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const defaultModel = "sonnet"
@@ -39,6 +40,19 @@ type UserSettings struct {
 	// actually ran. Zero means "not chosen" and resolves to the built-in
 	// default; anything else is validated against the bounds below.
 	IdleGapThresholdMinutes int `json:"idle_gap_threshold_minutes"`
+
+	// ClaudeConfigDir is the Claude Code config dir agent runs target unless an
+	// agent overrides it — where Claude Code keeps credentials, projects and
+	// settings. Empty means the default ($HOME/.claude). Locked by
+	// CLAUDE_CONFIG_DIR, because the surrounding environment has already chosen.
+	ClaudeConfigDir string `json:"claude_config_dir"`
+
+	// ClaudeConfigDirs are additional config dirs to index. Reading is a set
+	// and running is a choice: analytics is retrospective, so a machine with
+	// two accounts wants both corpora in every total, while a run
+	// authenticates as exactly one account by definition. The default dir and
+	// ClaudeConfigDir are always indexed and need not be listed here.
+	ClaudeConfigDirs []string `json:"claude_config_dirs"`
 }
 
 // Bounds for UserSettings.IdleGapThresholdMinutes, defined here because this
@@ -103,6 +117,14 @@ func (m *SettingsManager) detectLockedFields(cfg *AppConfig) {
 	if cfg.PublicURL != "" && os.Getenv("AGENTO_PUBLIC_URL") != "" {
 		m.locked["public_url"] = "AGENTO_PUBLIC_URL"
 	}
+	// CLAUDE_CONFIG_DIR is Claude Code's own variable rather than one of ours,
+	// so there is no AppConfig field gating it — its presence in the
+	// environment is the whole condition. Claude Code has already made the
+	// choice for every subprocess we spawn; a stored value that disagreed
+	// would be silently ineffective, which is worse than being read-only.
+	if ClaudeConfigDirFromEnv() != "" {
+		m.locked["claude_config_dir"] = ClaudeConfigDirEnvVar
+	}
 }
 
 // applyEnvOverrides sets field values from AppConfig for locked fields.
@@ -121,6 +143,10 @@ func (m *SettingsManager) applyEnvOverrides(cfg *AppConfig) {
 
 	if _, ok := m.locked["public_url"]; ok {
 		m.settings.PublicURL = cfg.PublicURL
+	}
+
+	if _, ok := m.locked["claude_config_dir"]; ok {
+		m.settings.ClaudeConfigDir = ClaudeConfigDirFromEnv()
 	}
 }
 
@@ -179,32 +205,86 @@ func validateIdleGapThreshold(minutes int) error {
 	return nil
 }
 
+// validateClaudeConfigDirs rejects a run dir or an indexed dir that cannot be
+// one. A blank run dir is allowed and means "use the default"; blank entries in
+// the list are dropped rather than rejected, so a half-filled row in the UI is
+// not an error the user has to clear before saving anything else.
+//
+// Only values the caller is actually *changing* are checked, against current.
+// A directory that existed when it was stored can stop existing — an unmounted
+// volume, or a CLAUDE_CONFIG_DIR exported in a shell profile that Claude Code
+// has not created yet — and validating an unchanged value would then reject
+// every save, including saves of unrelated fields, naming a field the user was
+// not touching and (when env-locked) cannot even edit. That is also the rule the
+// scanner already follows: an unreadable dir is tolerated at scan time.
+func validateClaudeConfigDirs(incoming, current UserSettings) error {
+	if NormalizeClaudeConfigDir(incoming.ClaudeConfigDir) !=
+		NormalizeClaudeConfigDir(current.ClaudeConfigDir) {
+		if err := ValidateClaudeConfigDir(incoming.ClaudeConfigDir); err != nil {
+			return err
+		}
+	}
+
+	existing := make(map[string]struct{}, len(current.ClaudeConfigDirs))
+	for _, d := range current.ClaudeConfigDirs {
+		existing[NormalizeClaudeConfigDir(d)] = struct{}{}
+	}
+	for _, d := range incoming.ClaudeConfigDirs {
+		if strings.TrimSpace(d) == "" {
+			continue
+		}
+		if _, kept := existing[NormalizeClaudeConfigDir(d)]; kept {
+			continue
+		}
+		if err := ValidateClaudeConfigDir(d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// normalizeClaudeConfigDirs cleans the stored list so the persisted value is
+// the same one every reader compares against.
+func normalizeClaudeConfigDirs(dirs []string) []string {
+	if len(dirs) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(dirs))
+	seen := make(map[string]struct{}, len(dirs))
+	for _, d := range dirs {
+		d = NormalizeClaudeConfigDir(d)
+		if d == "" {
+			continue
+		}
+		if _, dup := seen[d]; dup {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // Update persists allowed fields, skipping any locked ones. Returns an error if
 // the caller attempts to change a locked field.
 func (m *SettingsManager) Update(incoming UserSettings) error {
-	if _, ok := m.locked["default_model"]; ok {
-		if incoming.DefaultModel != "" && incoming.DefaultModel != m.settings.DefaultModel {
-			return fmt.Errorf("default_model is locked by environment variable %s", m.locked["default_model"])
-		}
-		// Keep the env value.
-		incoming.DefaultModel = m.settings.DefaultModel
-	}
-	if _, ok := m.locked["default_working_dir"]; ok {
-		if incoming.DefaultWorkingDir != "" && incoming.DefaultWorkingDir != m.settings.DefaultWorkingDir {
-			return fmt.Errorf("default_working_dir is locked by environment variable %s", m.locked["default_working_dir"])
-		}
-		incoming.DefaultWorkingDir = m.settings.DefaultWorkingDir
-	}
-	if _, ok := m.locked["public_url"]; ok {
-		if incoming.PublicURL != "" && incoming.PublicURL != m.settings.PublicURL {
-			return fmt.Errorf("public_url is locked by environment variable %s", m.locked["public_url"])
-		}
-		incoming.PublicURL = m.settings.PublicURL
+	incoming, err := m.applyLockedFields(incoming)
+	if err != nil {
+		return err
 	}
 
 	if err := validateIdleGapThreshold(incoming.IdleGapThresholdMinutes); err != nil {
 		return err
 	}
+	if err := validateClaudeConfigDirs(incoming, m.settings); err != nil {
+		return err
+	}
+
+	incoming.ClaudeConfigDir = NormalizeClaudeConfigDir(incoming.ClaudeConfigDir)
+	incoming.ClaudeConfigDirs = normalizeClaudeConfigDirs(incoming.ClaudeConfigDirs)
 
 	m.settings = incoming
 
@@ -212,4 +292,59 @@ func (m *SettingsManager) Update(incoming UserSettings) error {
 		return fmt.Errorf("persisting settings: %w", err)
 	}
 	return nil
+}
+
+// applyLockedFields rejects an attempt to change an env-locked field and pins
+// each locked value to what the environment chose.
+//
+// A blank incoming value is never a conflict: the settings form posts the whole
+// object back from every tab, so a client that does not know about a field must
+// not be read as asking to clear it.
+func (m *SettingsManager) applyLockedFields(incoming UserSettings) (UserSettings, error) {
+	type lockedField struct {
+		name    string
+		current string
+		set     func(string)
+		// equal compares an incoming value with the current one. Nil means
+		// plain string equality.
+		equal func(incoming, current string) bool
+	}
+
+	fields := []lockedField{
+		{"default_model", m.settings.DefaultModel, func(v string) { incoming.DefaultModel = v }, nil},
+		{"default_working_dir", m.settings.DefaultWorkingDir,
+			func(v string) { incoming.DefaultWorkingDir = v }, nil},
+		{"public_url", m.settings.PublicURL, func(v string) { incoming.PublicURL = v }, nil},
+		{"claude_config_dir", m.settings.ClaudeConfigDir,
+			func(v string) { incoming.ClaudeConfigDir = v },
+			// Compared after normalization so "~/.claude" and "$HOME/.claude"
+			// are not read as a conflicting change.
+			func(in, cur string) bool {
+				return NormalizeClaudeConfigDir(in) == NormalizeClaudeConfigDir(cur)
+			}},
+	}
+
+	values := map[string]string{
+		"default_model":       incoming.DefaultModel,
+		"default_working_dir": incoming.DefaultWorkingDir,
+		"public_url":          incoming.PublicURL,
+		"claude_config_dir":   incoming.ClaudeConfigDir,
+	}
+
+	for _, f := range fields {
+		envVar, locked := m.locked[f.name]
+		if !locked {
+			continue
+		}
+		in := values[f.name]
+		same := in == f.current
+		if f.equal != nil {
+			same = f.equal(in, f.current)
+		}
+		if in != "" && !same {
+			return incoming, fmt.Errorf("%s is locked by environment variable %s", f.name, envVar)
+		}
+		f.set(f.current)
+	}
+	return incoming, nil
 }

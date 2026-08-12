@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -57,10 +58,11 @@ type RunOptions struct {
 	// behavior and may block (e.g. to ask a human before a tool runs).
 	PermissionHandler claude.PermissionHandler
 
-	// SettingsFilePath is the absolute path to the Claude settings JSON file
-	// for this session. When set, it is passed to the subprocess via
-	// WithSettings so it loads the profile's configuration directly.
-	SettingsFilePath string
+	// SettingsProfileID names the Claude settings profile this session runs
+	// under. It is resolved to a file path at run time rather than by the
+	// caller, because the path depends on which Claude config dir the run
+	// targets and only the runner knows the agent's override.
+	SettingsProfileID string
 
 	// WorkingDir is the project directory for the agent session. When set,
 	// it is passed to the SDK via WithCWD (which sets exec.Cmd.Dir on the
@@ -175,16 +177,36 @@ func buildSDKOptions(
 	return sdkOpts
 }
 
-func appendSettingsOpts(sdkOpts []claude.Option, opts RunOptions, _ *config.AgentConfig) []claude.Option {
+func appendSettingsOpts(sdkOpts []claude.Option, opts RunOptions, agentCfg *config.AgentConfig) []claude.Option {
 	if opts.WorkingDir != "" {
 		sdkOpts = append(sdkOpts, claude.WithCWD(opts.WorkingDir))
 		sdkOpts = append(sdkOpts, claude.WithSettingSources(claude.SettingSourceProject))
 	}
-	if opts.SettingsFilePath != "" {
-		// WithSettings passes the file path directly to the subprocess via
-		// --settings, replacing the older WithSettingSources(SettingSourceUser)
-		// approach which required the file to be in a well-known location.
-		sdkOpts = append(sdkOpts, claude.WithSettings(opts.SettingsFilePath))
+
+	// Resolving the config dir here rather than in each caller is what makes
+	// every run path honor it — chat, scheduled tasks, Telegram triggers and
+	// the one-shot CLI all funnel through buildSDKOptions, and two of those
+	// populate no settings fields at all.
+	configDir := config.ResolveAgentClaudeDir(agentCfg)
+	if configDir != config.DefaultClaudeConfigDir() || config.ClaudeConfigDirFromEnv() != "" {
+		// WithEnv overrides the inherited parent value, which is what lets a
+		// per-agent override win over the CLAUDE_CONFIG_DIR the server itself
+		// was started with.
+		sdkOpts = append(sdkOpts, claude.WithEnv(map[string]string{
+			config.ClaudeConfigDirEnvVar: configDir,
+		}))
+	}
+
+	if settingsPath := config.LoadProfileFilePathIn(configDir, opts.SettingsProfileID); settingsPath != "" {
+		// Only name a file that exists. A config dir Claude Code has never
+		// written has no settings.json, and passing --settings for a missing
+		// path is an error rather than a no-op.
+		if info, err := os.Stat(settingsPath); err == nil && !info.IsDir() {
+			// WithSettings passes the file path directly to the subprocess via
+			// --settings, replacing the older WithSettingSources(SettingSourceUser)
+			// approach which required the file to be in a well-known location.
+			sdkOpts = append(sdkOpts, claude.WithSettings(settingsPath))
+		}
 	}
 
 	return sdkOpts

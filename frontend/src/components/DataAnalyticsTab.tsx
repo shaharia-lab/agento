@@ -4,7 +4,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { settingsApi, claudeSessionsApi } from '@/lib/api'
-import type { SettingsResponse, ClaudeProject } from '@/types'
+import type { SettingsResponse, ClaudeProject, ClaudeConfigDirsResponse } from '@/types'
 import { DEFAULT_IDLE_GAP_MINUTES, MIN_IDLE_GAP_MINUTES, MAX_IDLE_GAP_MINUTES } from '@/types'
 
 /**
@@ -35,6 +35,9 @@ export default function DataAnalyticsTab() {
   const [projects, setProjects] = useState<ClaudeProject[]>([])
   const [hidden, setHidden] = useState<string[]>([])
   const [idleGap, setIdleGap] = useState(DEFAULT_IDLE_GAP_MINUTES)
+  const [configDirs, setConfigDirs] = useState<string[]>([])
+  const [dirInfo, setDirInfo] = useState<ClaudeConfigDirsResponse | null>(null)
+  const [newDir, setNewDir] = useState('')
   const [query, setQuery] = useState('')
   const [pickerOpen, setPickerOpen] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -52,14 +55,17 @@ export default function DataAnalyticsTab() {
     try {
       // include_hidden: the picker must know about every project, or one that
       // is already excluded could never be found and restored from here.
-      const [settings, allProjects] = await Promise.all([
+      const [settings, allProjects, dirs] = await Promise.all([
         settingsApi.get(),
         claudeSessionsApi.projects(true),
+        settingsApi.claudeConfigDirs(),
       ])
       setResp(settings)
       setProjects(allProjects)
       setHidden(settings.settings.hidden_projects ?? [])
       setIdleGap(settings.settings.idle_gap_threshold_minutes || DEFAULT_IDLE_GAP_MINUTES)
+      setConfigDirs(settings.settings.claude_config_dirs ?? [])
+      setDirInfo(dirs)
     } catch {
       setError('Failed to load data settings')
     } finally {
@@ -118,8 +124,15 @@ export default function DataAnalyticsTab() {
         ...resp?.settings,
         hidden_projects: hidden,
         idle_gap_threshold_minutes: idleGap,
+        claude_config_dirs: configDirs,
       })
       setResp(updated)
+      // The resolved set changes with the save, so the candidate list must be
+      // re-read or a dir just added would still be offered as a suggestion.
+      settingsApi
+        .claudeConfigDirs()
+        .then(setDirInfo)
+        .catch(() => undefined)
       showToast(
         idleGapChanged
           ? 'Saved. Recomputing session durations in the background'
@@ -181,6 +194,101 @@ export default function DataAnalyticsTab() {
           <p className="text-xs text-amber-600 dark:text-amber-500">
             Saving re-reads every transcript to recompute stored durations. This runs in the
             background and can take a minute on a large history.
+          </p>
+        )}
+      </div>
+
+      {/* Claude config dirs */}
+      <div className="flex flex-col gap-1.5">
+        <Label
+          htmlFor="new-config-dir"
+          className="text-sm font-medium text-zinc-700 dark:text-zinc-300"
+        >
+          Claude Config Directories
+        </Label>
+        <p className="text-xs text-zinc-500 dark:text-zinc-400">
+          Every directory listed here is indexed into one corpus, so totals and cost cover all your
+          Claude Code accounts rather than whichever one is selected. The default (
+          {dirInfo?.default ?? '~/.claude'}) is always included.
+        </p>
+
+        {dirInfo && dirInfo.indexed.length > 0 && (
+          <ul aria-label="Indexed Claude config directories" className="mt-1 flex flex-col gap-1">
+            {dirInfo.indexed.map(dir => {
+              const removable = configDirs.includes(dir)
+              return (
+                <li
+                  key={dir}
+                  className="flex items-center justify-between gap-2 rounded border
+                    border-zinc-200 px-2 py-1 dark:border-zinc-700"
+                >
+                  <span className="truncate font-mono text-xs">{dir}</span>
+                  {removable ? (
+                    <button
+                      type="button"
+                      aria-label={`Stop indexing ${dir}`}
+                      onClick={() => setConfigDirs(prev => prev.filter(d => d !== dir))}
+                      className="shrink-0 text-zinc-400 hover:text-zinc-600
+                        dark:hover:text-zinc-200"
+                    >
+                      <X className="h-3.5 w-3.5" />
+                    </button>
+                  ) : (
+                    <span className="shrink-0 text-[11px] text-zinc-400">always indexed</span>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        )}
+
+        {dirInfo && dirInfo.candidates.length > 0 && (
+          <div className="mt-1 flex flex-col gap-1">
+            <span className="text-xs text-zinc-500 dark:text-zinc-400">
+              Found beside your default directory:
+            </span>
+            <div className="flex flex-wrap gap-1.5">
+              {dirInfo.candidates.map(dir => (
+                <Button
+                  key={dir}
+                  variant="outline"
+                  size="sm"
+                  className="h-7 font-mono text-xs"
+                  onClick={() =>
+                    setConfigDirs(prev => (prev.includes(dir) ? prev : [...prev, dir]))
+                  }
+                >
+                  + {dir}
+                </Button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-1 flex gap-2">
+          <Input
+            id="new-config-dir"
+            value={newDir}
+            onChange={e => setNewDir(e.target.value)}
+            placeholder="/path/to/another/.claude"
+            className="flex-1 font-mono text-sm"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={!newDir.trim()}
+            onClick={() => {
+              const dir = newDir.trim()
+              setConfigDirs(prev => (prev.includes(dir) ? prev : [...prev, dir]))
+              setNewDir('')
+            }}
+          >
+            Add
+          </Button>
+        </div>
+        {configDirs.some(d => !(dirInfo?.indexed ?? []).includes(d)) && (
+          <p className="text-xs text-amber-600 dark:text-amber-500">
+            Save to start indexing the directories you added.
           </p>
         )}
       </div>
@@ -278,7 +386,10 @@ export default function DataAnalyticsTab() {
           </p>
         ) : (
           <>
-            <ul className="mt-2 max-h-64 divide-y divide-zinc-100 overflow-y-auto rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-700">
+            <ul
+              aria-label="Excluded projects"
+              className="mt-2 max-h-64 divide-y divide-zinc-100 overflow-y-auto rounded-md border border-zinc-200 dark:divide-zinc-800 dark:border-zinc-700"
+            >
               {hidden.map(path => (
                 <li key={path} className="flex items-center gap-3 px-3 py-2">
                   <span

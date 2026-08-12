@@ -209,22 +209,15 @@ func (s *Scheduler) createInitialJobHistory(
 
 // buildRunOptions constructs the agent RunOptions for a task.
 func (s *Scheduler) buildRunOptions(task *storage.ScheduledTask) agent.RunOptions {
-	opts := agent.RunOptions{
+	return agent.RunOptions{
 		LocalToolsMCP:       s.cfg.LocalMCP,
 		MCPRegistry:         s.cfg.MCPRegistry,
 		IntegrationRegistry: s.cfg.IntegrationRegistry,
 		WorkingDir:          task.WorkingDirectory,
+		// Resolved to a path inside the runner, which knows the agent's
+		// Claude config dir; an empty ID means the dir's own settings.json.
+		SettingsProfileID: task.SettingsProfileID,
 	}
-
-	if task.SettingsProfileID != "" {
-		filePath, err := config.LoadProfileFilePath(task.SettingsProfileID)
-		if err != nil {
-			s.logger.Warn("failed to resolve settings profile", "error", err)
-		} else {
-			opts.SettingsFilePath = filePath
-		}
-	}
-	return opts
 }
 
 // saveSessionResults updates the chat session with agent results and stores messages.

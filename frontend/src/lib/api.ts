@@ -1,4 +1,5 @@
 import type {
+  ClaudeConfigDirsResponse,
   Agent,
   ChatSession,
   ChatDetail,
@@ -143,6 +144,10 @@ export const settingsApi = {
       method: 'PUT',
       body: JSON.stringify(data),
     }),
+
+  /** Indexed Claude config dirs plus unconfigured candidates found beside the default. */
+  claudeConfigDirs: (): Promise<ClaudeConfigDirsResponse> =>
+    request<ClaudeConfigDirsResponse>('/settings/claude-config-dirs'),
 }
 
 // ── Claude Code settings (~/.claude/settings.json) ────────────────────────────

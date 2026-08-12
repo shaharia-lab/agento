@@ -189,7 +189,11 @@ type ClaudeProject struct {
 type ClaudeSessionSummary struct {
 	SessionID   string `json:"session_id"`
 	ProjectPath string `json:"project_path"`
-	Preview     string `json:"preview"` // first user message text, truncated
+	// ConfigDir is the Claude config dir this session was indexed from — the
+	// account it ran under. Empty on rows written before the column existed,
+	// which belong to the default dir.
+	ConfigDir string `json:"config_dir,omitempty"`
+	Preview   string `json:"preview"` // first user message text, truncated
 	// previewIsFallback marks a Preview taken from an injected wrapper because
 	// no genuine prompt had been seen yet. Scan-local only (never stored or
 	// serialized): it lets a later real prompt replace the placeholder.

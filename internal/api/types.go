@@ -18,6 +18,9 @@ type AgentRequest struct {
 	Thinking     string                   `json:"thinking"`
 	SystemPrompt string                   `json:"system_prompt"`
 	Capabilities config.AgentCapabilities `json:"capabilities"`
+	// ClaudeConfigDir overrides which Claude config dir this agent's runs
+	// target. Empty means the global default.
+	ClaudeConfigDir string `json:"claude_config_dir"`
 }
 
 // ─── Task request types ────────────────────────────────────────────────────────

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
@@ -19,59 +21,112 @@ func applyOpts(opts []claude.Option) claude.Options {
 	return o
 }
 
+// newConfigDir creates a Claude config dir, optionally containing a
+// settings.json, and returns its path.
+func newConfigDir(t *testing.T, withSettings bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	if withSettings {
+		if err := os.WriteFile(
+			filepath.Join(dir, "settings.json"), []byte(`{}`), 0o600,
+		); err != nil {
+			t.Fatalf("writing settings.json: %v", err)
+		}
+	}
+	return dir
+}
+
 func TestAppendSettingsOpts(t *testing.T) {
 	anyDir := t.TempDir()
+	withSettings := newConfigDir(t, true)
+	withoutSettings := newConfigDir(t, false)
 
 	tests := []struct {
-		name             string
-		settingsFilePath string
-		workingDir       string
-		wantSources      []claude.SettingSource
-		wantSettings     string
-		wantCWD          string
+		name       string
+		runDir     string
+		agentDir   string
+		workingDir string
+		// defaultHasJSON writes a settings.json into the temp HOME's default
+		// config dir; wantSettings is then matched as a suffix.
+		defaultHasJSON bool
+		wantSources    []claude.SettingSource
+		wantSettings   string
+		wantCWD        string
+		wantEnvDir     string
 	}{
 		{
-			name:             "no settings file, no working dir — isolation mode",
-			settingsFilePath: "",
-			workingDir:       "",
-			wantSources:      nil,
-			wantSettings:     "",
-			wantCWD:          "",
+			// The default dir has no settings.json under a temp HOME, so no
+			// --settings is passed and no env override is needed.
+			name:        "default config dir, no working dir — isolation mode",
+			wantSources: nil,
+			wantCWD:     "",
 		},
 		{
-			name:             "with settings file, no working dir — WithSettings used",
-			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
-			workingDir:       "",
-			wantSources:      nil,
-			wantSettings:     "/home/user/.claude/settings_myprofile.json",
-			wantCWD:          "",
+			name:         "run dir has settings.json — it is passed",
+			runDir:       withSettings,
+			wantSettings: filepath.Join(withSettings, "settings.json"),
+			wantEnvDir:   withSettings,
 		},
 		{
-			name:             "working dir set — project source and CWD",
-			settingsFilePath: "",
-			workingDir:       anyDir,
-			wantSources:      []claude.SettingSource{claude.SettingSourceProject},
-			wantSettings:     "",
-			wantCWD:          anyDir,
+			// The regression this issue exists for: a config dir Claude Code
+			// has never written must not be handed another dir's settings.
+			name:         "run dir has no settings.json — none is passed",
+			runDir:       withoutSettings,
+			wantSettings: "",
+			wantEnvDir:   withoutSettings,
 		},
 		{
-			name:             "both settings file and working dir — project source + WithSettings",
-			settingsFilePath: "/home/user/.claude/settings_myprofile.json",
-			workingDir:       anyDir,
-			wantSources:      []claude.SettingSource{claude.SettingSourceProject},
-			wantSettings:     "/home/user/.claude/settings_myprofile.json",
-			wantCWD:          anyDir,
+			// The default dir is where an ordinary single-account install runs,
+			// and it does have a settings.json — so this case pins that the
+			// common path still passes --settings.
+			name:           "default config dir with settings.json — it is passed",
+			runDir:         "",
+			defaultHasJSON: true,
+			wantSettings:   "settings.json",
+		},
+		{
+			name:        "working dir set — project source and CWD",
+			workingDir:  anyDir,
+			wantSources: []claude.SettingSource{claude.SettingSourceProject},
+			wantCWD:     anyDir,
+		},
+		{
+			// A per-agent override beats the global run dir, which is what
+			// lets a work agent and a personal agent be live at once.
+			name:         "agent overrides the run dir",
+			runDir:       withoutSettings,
+			agentDir:     withSettings,
+			wantSettings: filepath.Join(withSettings, "settings.json"),
+			wantEnvDir:   withSettings,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			opts := RunOptions{
-				SettingsFilePath: tc.settingsFilePath,
-				WorkingDir:       tc.workingDir,
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv(config.ClaudeConfigDirEnvVar, "")
+			config.ApplyClaudeDirs(tc.runDir, nil)
+
+			wantSettings := tc.wantSettings
+			if tc.defaultHasJSON {
+				def := config.DefaultClaudeConfigDir()
+				if err := os.MkdirAll(def, 0o750); err != nil {
+					t.Fatalf("creating default dir: %v", err)
+				}
+				if err := os.WriteFile(
+					filepath.Join(def, "settings.json"), []byte(`{}`), 0o600,
+				); err != nil {
+					t.Fatalf("writing settings.json: %v", err)
+				}
+				wantSettings = filepath.Join(def, "settings.json")
 			}
-			sdkOpts := appendSettingsOpts(nil, opts, nil)
-			o := applyOpts(sdkOpts)
+
+			var agentCfg *config.AgentConfig
+			if tc.agentDir != "" {
+				agentCfg = &config.AgentConfig{ClaudeConfigDir: tc.agentDir}
+			}
+			opts := RunOptions{WorkingDir: tc.workingDir}
+			o := applyOpts(appendSettingsOpts(nil, opts, agentCfg))
 
 			if len(o.SettingSources) != len(tc.wantSources) {
 				t.Fatalf("SettingSources length = %d, want %d; got %v",
@@ -82,11 +137,14 @@ func TestAppendSettingsOpts(t *testing.T) {
 					t.Errorf("SettingSources[%d] = %q, want %q", i, o.SettingSources[i], want)
 				}
 			}
-			if o.Settings != tc.wantSettings {
-				t.Errorf("Settings = %q, want %q", o.Settings, tc.wantSettings)
+			if o.Settings != wantSettings {
+				t.Errorf("Settings = %q, want %q", o.Settings, wantSettings)
 			}
 			if o.CWD != tc.wantCWD {
 				t.Errorf("CWD = %q, want %q", o.CWD, tc.wantCWD)
+			}
+			if got := o.Env[config.ClaudeConfigDirEnvVar]; got != tc.wantEnvDir {
+				t.Errorf("Env[%s] = %q, want %q", config.ClaudeConfigDirEnvVar, got, tc.wantEnvDir)
 			}
 		})
 	}
@@ -99,10 +157,12 @@ func TestBuildSDKOptions_WorkingDirWithSettingsProfile(t *testing.T) {
 		Model:    "claude-sonnet-4-6",
 		Thinking: "adaptive",
 	}
-	opts := RunOptions{
-		WorkingDir:       workDir,
-		SettingsFilePath: "/home/user/.claude/settings_default.json",
-	}
+	configDir := newConfigDir(t, true)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv(config.ClaudeConfigDirEnvVar, "")
+	config.ApplyClaudeDirs(configDir, nil)
+
+	opts := RunOptions{WorkingDir: workDir}
 
 	sdkOpts := buildSDKOptions(context.Background(), agentCfg, opts, "You are helpful.")
 	o := applyOpts(sdkOpts)
@@ -116,8 +176,8 @@ func TestBuildSDKOptions_WorkingDirWithSettingsProfile(t *testing.T) {
 	if !hasProject {
 		t.Error("SettingSources missing SettingSourceProject when working dir is set")
 	}
-	if o.Settings != "/home/user/.claude/settings_default.json" {
-		t.Errorf("Settings = %q, want settings file path", o.Settings)
+	if want := filepath.Join(configDir, "settings.json"); o.Settings != want {
+		t.Errorf("Settings = %q, want %q", o.Settings, want)
 	}
 
 	if o.CWD != workDir {

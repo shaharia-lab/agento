@@ -102,6 +102,18 @@ func (s *agentService) Create(ctx context.Context, agent *config.AgentConfig) (*
 	default:
 		return nil, &ValidationError{Field: "permission_mode", Message: "must be bypass or default"}
 	}
+	// The global equivalent is validated in SettingsManager; an agent override
+	// reaches the same filesystem resolution and must not be the one path that
+	// accepts anything. A relative value is the dangerous shape: the runner
+	// stats it against the server's working directory while the subprocess
+	// resolves --settings against its own, so the file checked and the file
+	// loaded would be different ones.
+	if agent.ClaudeConfigDir != "" {
+		if err := config.ValidateClaudeConfigDir(agent.ClaudeConfigDir); err != nil {
+			return nil, &ValidationError{Field: "claude_config_dir", Message: err.Error()}
+		}
+		agent.ClaudeConfigDir = config.NormalizeClaudeConfigDir(agent.ClaudeConfigDir)
+	}
 
 	existing, err := s.repo.Get(ctx, agent.Slug)
 	if err != nil {
@@ -153,6 +165,18 @@ func (s *agentService) Update(
 		// valid
 	default:
 		return nil, &ValidationError{Field: "permission_mode", Message: "must be bypass or default"}
+	}
+	// The global equivalent is validated in SettingsManager; an agent override
+	// reaches the same filesystem resolution and must not be the one path that
+	// accepts anything. A relative value is the dangerous shape: the runner
+	// stats it against the server's working directory while the subprocess
+	// resolves --settings against its own, so the file checked and the file
+	// loaded would be different ones.
+	if agent.ClaudeConfigDir != "" {
+		if err := config.ValidateClaudeConfigDir(agent.ClaudeConfigDir); err != nil {
+			return nil, &ValidationError{Field: "claude_config_dir", Message: err.Error()}
+		}
+		agent.ClaudeConfigDir = config.NormalizeClaudeConfigDir(agent.ClaudeConfigDir)
 	}
 	if agent.Thinking == "" {
 		agent.Thinking = "adaptive"

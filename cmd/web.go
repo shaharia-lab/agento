@@ -265,6 +265,10 @@ func buildWebServer(
 	// figures the user did not ask for and only correct them on the next pass.
 	saved := settingsMgr.Get()
 	claudesessions.ApplyDataSettings(saved.IdleGapThresholdMinutes, saved.HiddenProjects)
+	// Likewise before anything resolves a Claude path: the settings-profile
+	// service, the scanner and the agent runner all read this snapshot, and a
+	// run that started on the default would target the wrong account.
+	config.ApplyClaudeDirs(saved.ClaudeConfigDir, saved.ClaudeConfigDirs)
 
 	monitoringMgr := initMonitoringManager(cfg.DataDir, otelProviders, otelCfg, sysLogger)
 

@@ -123,6 +123,7 @@ func (s *Server) Mount(r chi.Router) {
 	// Agento settings
 	r.Get("/settings", s.handleGetSettings)
 	r.Put("/settings", s.handleUpdateSettings)
+	r.Get("/settings/claude-config-dirs", s.handleClaudeConfigDirs)
 
 	// Claude Code settings (~/.claude/settings.json)
 	r.Get("/claude-settings", s.handleGetClaudeSettings)

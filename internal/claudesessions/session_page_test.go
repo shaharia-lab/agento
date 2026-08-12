@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/shaharia-lab/agento/internal/config"
 )
 
 // testSession is the subset of a cached row these tests vary. Everything else
@@ -22,6 +24,7 @@ type testSession struct {
 	favorite       bool
 	permissionMode string
 	model          string
+	configDir      string
 	start          time.Time
 	last           time.Time
 	messages       int
@@ -56,12 +59,13 @@ func insertTestSession(t *testing.T, db *sql.DB, s testSession) {
 			session_id, project_path, file_path, file_mtime,
 			preview, custom_title, is_favorite, permission_mode, model,
 			start_time, last_activity, message_count,
-			input_tokens, output_tokens, total_cost_usd, active_duration_ms
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			input_tokens, output_tokens, total_cost_usd, active_duration_ms,
+			config_dir
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		s.id, s.project, "/tmp/"+s.id+".jsonl", s.last,
 		s.preview, s.customTitle, s.favorite, s.permissionMode, s.model,
 		s.start, s.last, s.messages,
-		s.inputTokens, s.outputTokens, s.costUSD, s.activeMs)
+		s.inputTokens, s.outputTokens, s.costUSD, s.activeMs, s.configDir)
 	if err != nil {
 		t.Fatalf("inserting session %s: %v", s.id, err)
 	}
@@ -694,5 +698,61 @@ func TestSessionMetricSQL_MatchesTheSharedVectors(t *testing.T) {
 		if got := float64(durationMs) / 60_000; math.Abs(got-tc.Expect.DurationMinutes) > 1e-9 {
 			t.Errorf("%s: duration = %v min, want %v", tc.Name, got, tc.Expect.DurationMinutes)
 		}
+	}
+}
+
+// The SQL half of the config-dir scope. The paged path never loads the corpus,
+// so it cannot inherit the filter Cache.loadOrEmpty applies — the same reason
+// TestListPage_HiddenProjectsAreFilteredHereToo exists for hidden projects.
+func TestListPage_ConfigDirScopeIsAppliedHereToo(t *testing.T) {
+	// newPageCache points HOME at its own temp dir, so the config dirs are
+	// installed after it and the default is read back from there.
+	c := newPageCache(t)
+	second := filepath.Join(t.TempDir(), ".claude-personal")
+	t.Setenv(config.ClaudeConfigDirEnvVar, "")
+	config.ApplyClaudeDirs("", []string{second})
+	t.Cleanup(func() { config.ApplyClaudeDirs("", nil) })
+
+	insertTestSession(t, c.db, testSession{id: "default-dir", configDir: config.DefaultClaudeConfigDir()})
+	insertTestSession(t, c.db, testSession{id: "second-dir", configDir: second})
+	insertTestSession(t, c.db, testSession{id: "removed-dir", configDir: "/dir/nobody/configured"})
+	insertTestSession(t, c.db, testSession{id: "legacy"}) // pre-migration row, blank dir
+
+	page, err := c.ListPage(SessionQuery{})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	got := ids(page)
+	if len(got) != 3 {
+		t.Fatalf("page = %v, want the three indexed rows (removed-dir excluded)", got)
+	}
+	for _, id := range got {
+		if id == "removed-dir" {
+			t.Error("a session from an unconfigured dir leaked into the page")
+		}
+	}
+
+	facets, err := c.Facets(SessionQuery{})
+	if err != nil {
+		t.Fatalf("facets: %v", err)
+	}
+	if facets.Total != 3 {
+		t.Errorf("facets counted %d, want 3 — totals must match the rows", facets.Total)
+	}
+
+	// Narrowing to one account returns exactly that account's sessions.
+	narrowed, err := c.ListPage(SessionQuery{ConfigDir: second})
+	if err != nil {
+		t.Fatalf("list narrowed: %v", err)
+	}
+	if got := ids(narrowed); len(got) != 1 || got[0] != "second-dir" {
+		t.Errorf("ConfigDir filter returned %v, want [second-dir]", got)
+	}
+	narrowedFacets, err := c.Facets(SessionQuery{ConfigDir: second})
+	if err != nil {
+		t.Fatalf("facets narrowed: %v", err)
+	}
+	if narrowedFacets.Total != 1 {
+		t.Errorf("narrowed facets total = %d, want 1", narrowedFacets.Total)
 	}
 }
