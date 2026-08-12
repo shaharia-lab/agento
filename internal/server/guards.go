@@ -12,10 +12,18 @@ import (
 type Options struct {
 	// BindAddress is the interface to listen on. Empty means loopback.
 	BindAddress string
-	// PublicURL is the externally reachable URL, when the user has configured
-	// one. Its host is accepted by validateHost, since a reverse proxy or a
-	// Telegram webhook reaches Agento under that name rather than localhost.
+	// PublicURL is the externally reachable URL configured by environment. Its
+	// host is accepted by validateHost, since a reverse proxy or a tunnel
+	// reaches Agento under that name rather than localhost.
 	PublicURL string
+
+	// PublicURLFunc resolves the *stored* public URL on each request. The
+	// setting is editable in the UI at runtime, and reading it once at startup
+	// meant a user who set it got a Telegram webhook registered under the new
+	// host immediately while their browser 403'd on every /api call until the
+	// process restarted — with nothing saying why. triggerService.publicURL
+	// re-reads it per call for the same reason. Optional; nil is treated as "".
+	PublicURLFunc func() string
 }
 
 // defaultBindAddress is loopback because Agento ships without authentication
@@ -33,16 +41,49 @@ func (s *Server) listenHost() string {
 
 // IsLoopbackBind reports whether the server is listening on loopback only.
 // Used to phrase the startup log.
+//
+// A hostname bind is resolved rather than assumed non-loopback, so
+// AGENTO_BIND=localhost does not trigger the "anyone who can reach this
+// address" warning — that line is the one users will read when the default
+// changes, and crying wolf on the safest possible value is worse than useless.
 func (s *Server) IsLoopbackBind() bool {
-	ip := net.ParseIP(s.listenHost())
-	return ip != nil && ip.IsLoopback()
+	host := s.listenHost()
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	// A hostname bind is not resolved — that would be a DNS lookup on a startup
+	// path, for a log line. "localhost" is the only hostname anyone binds to
+	// mean loopback, and anything else is treated as non-loopback, which errs
+	// toward warning rather than reassuring.
+	return strings.EqualFold(host, "localhost")
+}
+
+// currentPublicHost returns the public hostname to admit: the environment's,
+// else whatever is stored now.
+func (s *Server) currentPublicHost() string {
+	if s.publicHost != "" {
+		return s.publicHost
+	}
+	if s.publicURLFunc == nil {
+		return ""
+	}
+	return hostOf(s.publicURLFunc())
 }
 
 // hostOf extracts the hostname from a configured URL, or "" when absent or
 // unparseable — an unusable value must not widen what validateHost accepts.
+//
+// A scheme-less value is tolerated: neither the Settings field nor
+// SettingsManager validates it, so "agento.example.com" is a realistic entry
+// and url.Parse reports an empty Hostname for it. Rejecting that silently would
+// leave the user staring at a 403 wall with a setting that looks correct.
 func hostOf(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
 	if rawURL == "" {
 		return ""
+	}
+	if !strings.Contains(rawURL, "//") {
+		rawURL = "//" + rawURL
 	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -156,16 +197,33 @@ func (s *Server) hostAllowed(rawHost string) bool {
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		return true
 	}
-	// The configured public name, for a reverse proxy or a tunnel.
-	if s.publicHost != "" && host == s.publicHost {
+	// The configured public name, for a reverse proxy or a tunnel. Resolved per
+	// request so a value set in the UI takes effect without a restart.
+	if ph := s.currentPublicHost(); ph != "" && host == ph {
 		return true
 	}
-	// A deliberately non-loopback bind names the address it listens on, so
-	// reaching it over the LAN by IP works when the user asked for that.
-	if s.bindAddress != "" && host == strings.ToLower(s.bindAddress) {
-		return true
+	return s.boundAddressAllows(host)
+}
+
+// boundAddressAllows reports whether a deliberately non-loopback bind should
+// admit this Host.
+//
+// Without it AGENTO_BIND would be a setting that does nothing: the SPA loads
+// over the LAN and every /api call behind it 403s, with nothing saying why.
+//
+// An unspecified bind (0.0.0.0 or ::) is the documented way to allow other
+// devices, and no client ever dials that literal — they dial the machine's LAN
+// address, which varies. So any Host that is a bare IP literal is admitted.
+// That keeps the rebinding property intact, because rebinding requires a *name*
+// whose DNS the attacker controls and a name is never an IP literal.
+func (s *Server) boundAddressAllows(host string) bool {
+	if s.bindAddress == "" {
+		return false
 	}
-	return false
+	if ip := net.ParseIP(s.bindAddress); ip != nil && ip.IsUnspecified() {
+		return net.ParseIP(host) != nil
+	}
+	return host == strings.ToLower(s.bindAddress)
 }
 
 // writeGuardError emits a JSON error in the shape the API already uses.

@@ -221,3 +221,91 @@ func TestHostOf(t *testing.T) {
 		}
 	}
 }
+
+// AGENTO_BIND=0.0.0.0 is the documented way to reach Agento from another
+// device. Admitting only the literal "0.0.0.0" — which no client ever dials —
+// made that setting do nothing: the SPA loaded over the LAN and every /api call
+// behind it 403'd, with nothing saying why.
+func TestValidateHost_UnspecifiedBindAdmitsIPLiterals(t *testing.T) {
+	for _, bind := range []string{"0.0.0.0", "::"} {
+		t.Run(bind, func(t *testing.T) {
+			srv := &Server{bindAddress: bind}
+
+			for _, host := range []string{"192.168.1.5:8990", "10.0.0.7", "[fd00::1]:8990"} {
+				if !srv.hostAllowed(host) {
+					t.Errorf("hostAllowed(%q) = false with bind %q, want true — "+
+						"the documented escape hatch must work", host, bind)
+				}
+			}
+			// The rebinding property survives: an attacker needs a *name* whose
+			// DNS he controls, and a name is never an IP literal.
+			if srv.hostAllowed("rebind.evil.example:8990") {
+				t.Error("an unspecified bind must not admit arbitrary names")
+			}
+		})
+	}
+}
+
+// A specific non-loopback bind admits only that address.
+func TestValidateHost_SpecificBindIsNarrow(t *testing.T) {
+	srv := &Server{bindAddress: "192.168.1.10"}
+	if !srv.hostAllowed("192.168.1.10:8990") {
+		t.Error("the bound address must be reachable by that address")
+	}
+	if srv.hostAllowed("192.168.1.99:8990") {
+		t.Error("a specific bind must not admit other addresses")
+	}
+}
+
+// The Public URL setting is editable at runtime. Reading it once at startup
+// meant setting it registered a Telegram webhook under the new host while the
+// browser 403'd on every /api call until a restart.
+func TestValidateHost_StoredPublicURLIsReadPerRequest(t *testing.T) {
+	stored := ""
+	srv := &Server{bindAddress: "127.0.0.1", publicURLFunc: func() string { return stored }}
+
+	if srv.hostAllowed("agento.example.com") {
+		t.Fatal("nothing stored yet, so the host must be refused")
+	}
+
+	stored = "https://agento.example.com"
+	if !srv.hostAllowed("agento.example.com") {
+		t.Error("a stored Public URL must take effect without a restart")
+	}
+}
+
+// Neither the Settings field nor SettingsManager validates the value, so a
+// scheme-less entry is realistic. url.Parse reports an empty Hostname for it,
+// which would leave the user at a 403 wall with a setting that looks right.
+func TestHostOf_ToleratesASchemelessValue(t *testing.T) {
+	cases := map[string]string{
+		"agento.example.com":         "agento.example.com",
+		"agento.example.com:8443":    "agento.example.com",
+		"https://Agento.Example.com": "agento.example.com",
+		"  ":                         "",
+	}
+	for in, want := range cases {
+		if got := hostOf(in); got != want {
+			t.Errorf("hostOf(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The startup log is the one line users read when the default changes; crying
+// wolf on the safest possible value is worse than useless.
+func TestIsLoopbackBind_HostnameForms(t *testing.T) {
+	cases := map[string]bool{
+		"":             true, // default
+		"127.0.0.1":    true,
+		"::1":          true,
+		"localhost":    true,
+		"LocalHost":    true,
+		"0.0.0.0":      false,
+		"192.168.1.10": false,
+	}
+	for bind, want := range cases {
+		if got := (&Server{bindAddress: bind}).IsLoopbackBind(); got != want {
+			t.Errorf("IsLoopbackBind(%q) = %v, want %v", bind, got, want)
+		}
+	}
+}

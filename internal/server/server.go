@@ -41,6 +41,7 @@ type Server struct {
 	port           int
 	bindAddress    string
 	publicHost     string
+	publicURLFunc  func() string
 	logger         *slog.Logger
 	httpServer     *http.Server
 	monitoringMgr  *telemetry.MonitoringManager
@@ -61,6 +62,7 @@ func New(
 		port:           port,
 		bindAddress:    opts.BindAddress,
 		publicHost:     hostOf(opts.PublicURL),
+		publicURLFunc:  opts.PublicURLFunc,
 		logger:         logger,
 		monitoringMgr:  monitoringMgr,
 		webhookHandler: webhookHandler,

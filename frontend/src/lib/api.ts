@@ -49,10 +49,20 @@ import type { SessionSort } from './sessionQuery'
 
 const BASE = '/api'
 
+/**
+ * The server refuses a state-changing request that does not declare a JSON body
+ * (415). That is what stops a cross-origin `POST` reaching the API: any other
+ * content type would be a CORS "simple request" and travel without a preflight.
+ * Every mutating call must carry this, including the ones with no body at all.
+ */
+export const JSON_HEADERS = { 'Content-Type': 'application/json' } as const
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
     ...options,
+    // After the spread, not before: a caller passing its own `headers` used to
+    // drop Content-Type silently, which the server now rejects outright.
+    headers: { ...JSON_HEADERS, ...options?.headers },
   })
   if (!res.ok) {
     const body = await res.json().catch(() => ({ error: res.statusText }))
@@ -75,7 +85,7 @@ export const agentsApi = {
     request<Agent>(`/agents/${slug}`, { method: 'PUT', body: JSON.stringify(data) }),
 
   delete: (slug: string) =>
-    fetch(`${BASE}/agents/${slug}`, { method: 'DELETE' }).then(res => {
+    fetch(`${BASE}/agents/${slug}`, { method: 'DELETE', headers: JSON_HEADERS }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
 }
@@ -114,7 +124,7 @@ export const chatsApi = {
     }),
 
   delete: (id: string) =>
-    fetch(`${BASE}/chats/${id}`, { method: 'DELETE' }).then(res => {
+    fetch(`${BASE}/chats/${id}`, { method: 'DELETE', headers: JSON_HEADERS }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
 
@@ -182,7 +192,10 @@ export const claudeSettingsProfilesApi = {
     }),
 
   delete: (id: string) =>
-    fetch(`${BASE}/claude-settings/profiles/${id}`, { method: 'DELETE' }).then(res => {
+    fetch(`${BASE}/claude-settings/profiles/${id}`, {
+      method: 'DELETE',
+      headers: JSON_HEADERS,
+    }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
 
@@ -276,9 +289,11 @@ export const claudeSessionsApi = {
 
   /** Invalidate the server-side session cache and trigger a background rescan. */
   refresh: () =>
-    fetch(`${BASE}/claude-sessions/refresh`, { method: 'POST' }).then(res => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    }),
+    fetch(`${BASE}/claude-sessions/refresh`, { method: 'POST', headers: JSON_HEADERS }).then(
+      res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      },
+    ),
 
   /**
    * Create a new Agento chat session that inherits the given Claude Code session ID,
@@ -536,12 +551,15 @@ export const integrationsApi = {
     request<Integration>(`/integrations/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
   delete: (id: string) =>
-    fetch(`${BASE}/integrations/${id}`, { method: 'DELETE' }).then(res => {
+    fetch(`${BASE}/integrations/${id}`, { method: 'DELETE', headers: JSON_HEADERS }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
 
   startOAuth: (id: string) =>
-    request<{ auth_url: string }>(`/integrations/${id}/auth/start`, { method: 'POST' }),
+    request<{ auth_url: string }>(`/integrations/${id}/auth/start`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+    }),
 
   getAuthStatus: (id: string) =>
     request<{ authenticated: boolean }>(`/integrations/${id}/auth/status`),
@@ -549,14 +567,17 @@ export const integrationsApi = {
   validateAuth: (id: string) =>
     request<{ valid: boolean; validated?: boolean; error?: string }>(
       `/integrations/${id}/auth/validate`,
-      { method: 'POST' },
+      { method: 'POST', headers: JSON_HEADERS },
     ),
 
   availableTools: () => request<AvailableTool[]>('/integrations/available-tools'),
 
   // WhatsApp QR code pairing
   startWhatsAppPairing: (id: string) =>
-    request<{ qr_code: string }>(`/integrations/${id}/whatsapp/pair`, { method: 'POST' }),
+    request<{ qr_code: string }>(`/integrations/${id}/whatsapp/pair`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+    }),
 
   getWhatsAppQR: (id: string) =>
     request<{ status: string; qr_code?: string; phone?: string; error?: string }>(
@@ -567,7 +588,10 @@ export const integrationsApi = {
     request<{ connected: boolean; logged_in: boolean }>(`/integrations/${id}/whatsapp/status`),
 
   whatsAppReconnect: (id: string) =>
-    request<{ status: string }>(`/integrations/${id}/whatsapp/reconnect`, { method: 'POST' }),
+    request<{ status: string }>(`/integrations/${id}/whatsapp/reconnect`, {
+      method: 'POST',
+      headers: JSON_HEADERS,
+    }),
 }
 
 // ── Trigger Rules ─────────────────────────────────────────────────────────────
@@ -591,6 +615,7 @@ export const triggerRulesApi = {
   delete: (integrationId: string, ruleId: string) =>
     fetch(`${BASE}/integrations/${integrationId}/triggers/${ruleId}`, {
       method: 'DELETE',
+      headers: JSON_HEADERS,
     }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
@@ -607,6 +632,7 @@ export const webhookApi = {
   remove: (integrationId: string) =>
     fetch(`${BASE}/integrations/${integrationId}/webhook/register`, {
       method: 'DELETE',
+      headers: JSON_HEADERS,
     }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
@@ -631,7 +657,8 @@ export const notificationsApi = {
       body: JSON.stringify(data),
     }),
 
-  sendTest: () => request<{ status: string }>('/notifications/test', { method: 'POST' }),
+  sendTest: () =>
+    request<{ status: string }>('/notifications/test', { method: 'POST', headers: JSON_HEADERS }),
 
   listLog: (limit?: number) => {
     const params = new URLSearchParams()
@@ -655,13 +682,15 @@ export const tasksApi = {
     request<ScheduledTask>(`/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
 
   delete: (id: string) =>
-    fetch(`${BASE}/tasks/${id}`, { method: 'DELETE' }).then(res => {
+    fetch(`${BASE}/tasks/${id}`, { method: 'DELETE', headers: JSON_HEADERS }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
 
-  pause: (id: string) => request<ScheduledTask>(`/tasks/${id}/pause`, { method: 'POST' }),
+  pause: (id: string) =>
+    request<ScheduledTask>(`/tasks/${id}/pause`, { method: 'POST', headers: JSON_HEADERS }),
 
-  resume: (id: string) => request<ScheduledTask>(`/tasks/${id}/resume`, { method: 'POST' }),
+  resume: (id: string) =>
+    request<ScheduledTask>(`/tasks/${id}/resume`, { method: 'POST', headers: JSON_HEADERS }),
 
   jobHistory: (id: string, limit?: number) => {
     const params = new URLSearchParams()
@@ -685,7 +714,7 @@ export const jobHistoryApi = {
   get: (id: string) => request<JobHistoryEntry>(`/job-history/${id}`),
 
   delete: (id: string) =>
-    fetch(`${BASE}/job-history/${id}`, { method: 'DELETE' }).then(res => {
+    fetch(`${BASE}/job-history/${id}`, { method: 'DELETE', headers: JSON_HEADERS }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     }),
 
@@ -730,7 +759,10 @@ export const pricingApi = {
       model_pattern: modelPattern,
       effective_from: effectiveFrom,
     })
-    return fetch(`${BASE}/pricing/rates?${qs.toString()}`, { method: 'DELETE' }).then(res => {
+    return fetch(`${BASE}/pricing/rates?${qs.toString()}`, {
+      method: 'DELETE',
+      headers: JSON_HEADERS,
+    }).then(res => {
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
     })
   },

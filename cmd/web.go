@@ -241,19 +241,11 @@ func newHTTPServer(
 	return server.New(result.apiSrv, WebFS, cfg.Port, sysLogger, monitoringMgr,
 		result.webhookHandler, server.Options{
 			BindAddress: cfg.BindAddress,
-			PublicURL:   resolvePublicURL(cfg, settingsMgr),
+			PublicURL:   cfg.PublicURL,
+			// Read per request: the stored value is editable in the UI, and
+			// snapshotting it here would 403 the browser until a restart.
+			PublicURLFunc: func() string { return settingsMgr.Get().PublicURL },
 		})
-}
-
-// resolvePublicURL returns the externally reachable URL, env winning over the
-// stored setting — the same precedence triggerService.publicURL applies. Its
-// host is the one non-loopback name validateHost accepts, so a reverse proxy or
-// a tunnel keeps working.
-func resolvePublicURL(cfg *config.AppConfig, settingsMgr *config.SettingsManager) string {
-	if cfg.PublicURL != "" {
-		return cfg.PublicURL
-	}
-	return settingsMgr.Get().PublicURL
 }
 
 func buildWebServer(
