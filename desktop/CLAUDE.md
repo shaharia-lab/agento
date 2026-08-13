@@ -115,8 +115,13 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        read-only SQLite handle on the file the Go server owns
+    settings.rs  user preferences + Claude config dirs a read is scoped to
     pricing.rs   GET /api/pricing/catalog
+    sessions/    GET /api/claude-sessions and /facets
     diff.rs      byte comparison + reporting for shadow mode
+
+scripts/
+  parity-instance.sh   Go server built from THIS checkout, on a copy of the DB
 
 parity/          cross-language fixtures, asserted by both Go and Rust tests
 ```
@@ -202,13 +207,35 @@ only a byte comparison catches all four.
 3. Prove it three ways:
    - a fixture both languages build, compared against a golden file Go wrote
      (`desktop/parity/`, `go test ./desktop/parity/ -update-golden`);
-   - the live diff, against the user's own data:
-     `cargo test --test live_parity -- --ignored --nocapture`;
+   - the live diff, against real data **and a Go server built from this
+     checkout**:
+     ```bash
+     eval "$(./scripts/parity-instance.sh start)"
+     (cd src-tauri && cargo test --test live_parity -- --ignored --nocapture)
+     ./scripts/parity-instance.sh stop
+     ```
    - optionally `AGENTO_DESKTOP_NATIVE=diff npm run app`, which compares every
      real request the UI makes.
 4. Only then leave it claimed.
 
+### Never diff against the installed server
+
+`parity-instance.sh` exists because the Agento on `:8990` is whatever binary the
+developer installed, which drifts behind the repo. The first sessions-list diff
+"failed" purely because that instance predated `config_dir` joining the summary
+— the port was right and the baseline was stale. The reverse is worse: an old
+server that happens to agree hides a real divergence. The script builds the
+server from the checkout and runs it against a **copy** of `~/.agento` (the
+current source may carry migrations the installed one has never applied, and
+applying them to the real file would upgrade it under a running instance).
+
 ### Known encoder divergence
+
+`serde_json`'s float **parser** is not bit-exact by default — `0.36238800000000004`
+in a stored JSON column decodes to a different double and re-encodes as
+`0.362388`. `Cargo.toml` enables its `float_roundtrip` feature to fix that; do
+not remove it. (Rust's own `str::parse` was always correct; only serde_json's
+fast path was not.)
 
 `serde_json` turns NaN and infinity into `null`; Go fails the encode outright
 (after `writeJSON` has already committed a 200, so the client gets a truncated
@@ -221,7 +248,7 @@ rather than expecting the encoder to notice.
 | Phase | Subsystem | Go source | Notes |
 |---|---|---|---|
 | 1 ✅ | Sidecar + proxy | — | done |
-| 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `GET /api/pricing/catalog` is native and diffs clean. Next: the rest of `/api/pricing/*` reads, then `/api/claude-analytics`. |
+| 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions` and `/api/claude-sessions/facets` are native and diff clean. Next: `/api/claude-analytics`, then the per-session reads. |
 | 3 | Storage + tasks | `internal/storage`, `internal/scheduler` | 27 SQLite migrations; reuse the same DB file and schema. Scheduler is cron/interval. |
 | 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. WhatsApp (`whatsmeow`) is the blocker — port it last or keep it in Go. |
 | 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. Hardest, highest risk. |
@@ -409,7 +436,7 @@ axum proxy streams `/api` through with the `Host` rewrite the Go guard needs.
 All nine views are wired to the real API, typecheck clean, and were verified
 against live data — including a real chat turn streamed end to end over SSE.
 
-**Phase 2 started.** `GET /api/pricing/catalog` is answered by Rust
+**Phase 2 in progress.** `GET /api/pricing/catalog` is answered by Rust
 (`native/pricing.rs`), reading the same SQLite file the sidecar writes. It is
 byte-identical to Go on the reference instance — 46,681 bytes both sides, 36
 models, matching FNV revision — and on the shared fixture in `parity/`. The
@@ -417,8 +444,21 @@ infrastructure it brought is what the rest of the phase rides on: `gojson.rs`
 (Go's encoder in Rust), `gotime.rs`, `paths.rs`, the read-only DB handle, the
 three-mode seam and the two parity harnesses.
 
+The sessions list and its facets followed (`native/sessions/`), diffed across 21
+filter and sort combinations plus four pages of cursor interoperability per
+sort — each page continuing from the cursor **Go** minted, so the two have to
+agree on the cursor's bytes as well as the page's.
+
 Nothing else is ported. Every write path, all of analytics and every other read
 still forwards to Go.
+
+**Reading is what keeps the corpus fresh.** `Cache.ensureFresh` runs on every Go
+read path and starts a background rescan when the TTL expires, the pricing
+catalog moves, or the idle threshold changes. A ported read removes that trigger
+and nothing would say so — transcripts would stop being re-read and a rate edit
+would never reach stored costs. `native/sessions/freshness_probe` puts it back by
+firing one cheap request at the sidecar, so the *rules* stay in the code that
+owns them rather than being reimplemented and left to drift.
 
 Verified but not exercised against real data: task/job writes, integration
 OAuth and WhatsApp pairing, and agent CRUD — the reference instance has none of
