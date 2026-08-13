@@ -1,0 +1,427 @@
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { api, qs } from "../lib/api";
+import type { JobHistory, JobStatus } from "../lib/types";
+import { describeError, usePoll, useResource } from "../lib/hooks";
+import {
+  compactNumber,
+  dateTime,
+  duration,
+  groupByRecency,
+  integer,
+  relativeTime,
+} from "../lib/format";
+import { Icon } from "../lib/icons";
+import { Empty, InspGroup, InspRow, Search, Segmented, Splitter } from "../components/ui";
+import { StatusBadge } from "./TasksView";
+import "../styles/tasks.css";
+
+const PAGE = 50;
+const POLL_MS = 5_000;
+
+type Filter = "all" | JobStatus;
+
+const FILTERS: { value: Filter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "running", label: "Running" },
+  { value: "success", label: "Success" },
+  { value: "failed", label: "Failed" },
+];
+
+function totalTokens(j: JobHistory): number {
+  return (
+    (j.total_input_tokens ?? 0) +
+    (j.total_output_tokens ?? 0) +
+    (j.total_cache_creation_tokens ?? 0) +
+    (j.total_cache_read_tokens ?? 0)
+  );
+}
+
+/** A running job has no duration_ms yet, so show how long it has been going. */
+function runDuration(j: JobHistory): string {
+  if (j.duration_ms > 0) return duration(j.duration_ms);
+  if (j.status !== "running") return "—";
+  const started = new Date(j.started_at).getTime();
+  return isFinite(started) ? duration(Date.now() - started) : "—";
+}
+
+export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
+  // The first page is a live resource so polling only ever re-fetches it;
+  // later pages are appended once and left alone.
+  const head = useResource<JobHistory[] | null>(
+    (signal) => api.get(`/job-history${qs({ limit: PAGE, offset: 0 })}`, signal),
+    []
+  );
+
+  const [tail, setTail] = useState<JobHistory[]>([]);
+  const [exhausted, setExhausted] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [pageError, setPageError] = useState<string>();
+
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<Filter>("all");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [focusedId, setFocusedId] = useState<string | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string>();
+
+  const rows = useMemo(() => {
+    // A new run arriving shifts the offset window, so the same record can come
+    // back twice across pages.
+    const seen = new Set<string>();
+    const out: JobHistory[] = [];
+    for (const j of [...(head.data ?? []), ...tail]) {
+      if (seen.has(j.id)) continue;
+      seen.add(j.id);
+      out.push(j);
+    }
+    return out;
+  }, [head.data, tail]);
+
+  const anyRunning = rows.some((j) => j.status === "running");
+  usePoll(head.reload, POLL_MS, anyRunning);
+
+  const refresh = useCallback(() => {
+    setTail([]);
+    setExhausted(false);
+    setPageError(undefined);
+    head.reload();
+  }, [head]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return rows.filter((j) => {
+      if (filter !== "all" && j.status !== filter) return false;
+      if (!q) return true;
+      return [j.task_name, j.agent_slug, j.model, j.prompt_preview]
+        .join(" ")
+        .toLowerCase()
+        .includes(q);
+    });
+  }, [rows, query, filter]);
+
+  const groups = useMemo(
+    () => groupByRecency(filtered, (j) => j.started_at),
+    [filtered]
+  );
+
+  // Keep the inspector pointed at something that still exists.
+  useEffect(() => {
+    if (filtered.length === 0) {
+      if (focusedId !== null) setFocusedId(null);
+      return;
+    }
+    if (!focusedId || !filtered.some((j) => j.id === focusedId)) {
+      setFocusedId(filtered[0].id);
+      setSelected(new Set([filtered[0].id]));
+    }
+  }, [filtered, focusedId]);
+
+  // The list rows already carry the whole record, but the detail endpoint is
+  // the authority — and it picks up a running job's output as it lands.
+  const detail = useResource<JobHistory | null>(
+    (signal) =>
+      focusedId ? api.get(`/job-history/${focusedId}`, signal) : Promise.resolve(null),
+    [focusedId]
+  );
+
+  const focusedRow = focusedId ? rows.find((j) => j.id === focusedId) ?? null : null;
+  const job = detail.data ?? focusedRow;
+
+  // A running job's output and timing land after the row was first read.
+  usePoll(detail.reload, POLL_MS, job?.status === "running");
+
+  async function loadMore() {
+    setLoadingMore(true);
+    setPageError(undefined);
+    try {
+      const batch = await api.get<JobHistory[] | null>(
+        `/job-history${qs({ limit: PAGE, offset: rows.length })}`
+      );
+      const list = batch ?? [];
+      if (list.length < PAGE) setExhausted(true);
+      setTail((t) => [...t, ...list]);
+    } catch (err) {
+      setPageError(describeError(err));
+    } finally {
+      setLoadingMore(false);
+    }
+  }
+
+  function onRowClick(e: React.MouseEvent, j: JobHistory) {
+    setConfirming(false);
+    if (e.metaKey || e.ctrlKey) {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(j.id)) next.delete(j.id);
+        else next.add(j.id);
+        return next;
+      });
+    } else {
+      setSelected(new Set([j.id]));
+    }
+    setFocusedId(j.id);
+  }
+
+  async function remove() {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setBusy(true);
+    setActionError(undefined);
+    try {
+      if (ids.length === 1) await api.del(`/job-history/${ids[0]}`);
+      else await api.del("/job-history", { ids });
+      setSelected(new Set());
+      setFocusedId(null);
+      setConfirming(false);
+      refresh();
+    } catch (err) {
+      setActionError(describeError(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const loading = head.loading && !head.data;
+  const failedCount = rows.filter((j) => j.status === "failed").length;
+  const hasMore = !exhausted && rows.length >= PAGE;
+
+  return (
+    <div className="panes">
+      <div className="pane-detail">
+        <div className="toolbar">
+          <div style={{ width: 240 }}>
+            <Search value={query} onChange={setQuery} placeholder="Search runs" />
+          </div>
+          <Segmented<Filter> value={filter} options={FILTERS} onChange={setFilter} />
+          <div className="spacer" />
+
+          {confirming ? (
+            <div className="confirm">
+              <span className="confirm__text">
+                Delete {selected.size} {selected.size === 1 ? "run" : "runs"}?
+              </span>
+              <button className="btn btn--ghost" onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+              <button className="btn btn--danger" onClick={remove} disabled={busy}>
+                Delete
+              </button>
+            </div>
+          ) : (
+            <>
+              {actionError && <span className="formerror">{actionError}</span>}
+              <span className="toolbar__sub tnum">
+                {rows.length} {rows.length === 1 ? "run" : "runs"}
+                {failedCount > 0 ? ` · ${failedCount} failed` : ""}
+                {anyRunning ? " · live" : ""}
+              </span>
+              <div className="toolbar__sep" />
+              <button
+                className="iconbtn"
+                title={selected.size > 1 ? `Delete ${selected.size} runs` : "Delete run"}
+                onClick={() => setConfirming(true)}
+                disabled={selected.size === 0}
+              >
+                <Icon name="trash" size={14} />
+              </button>
+              <button className="iconbtn" title="Refresh" onClick={refresh}>
+                <Icon name="refresh" size={14} />
+              </button>
+            </>
+          )}
+        </div>
+
+        {loading ? (
+          <div className="statepane">Loading runs…</div>
+        ) : head.error && !head.data ? (
+          <Empty
+            icon="alert"
+            title="Couldn't load run history"
+            text={head.error}
+            action={
+              <button className="btn" onClick={refresh}>
+                <Icon name="refresh" size={13} />
+                Retry
+              </button>
+            }
+          />
+        ) : rows.length === 0 ? (
+          <Empty
+            icon="history"
+            title="No runs yet"
+            text="Every scheduled task run lands here with its output, timing and token use."
+          />
+        ) : filtered.length === 0 ? (
+          <Empty
+            icon="search"
+            title="No matching runs"
+            text="Nothing matches the current search and filter."
+            action={
+              <button
+                className="btn"
+                onClick={() => {
+                  setQuery("");
+                  setFilter("all");
+                }}
+              >
+                Clear filters
+              </button>
+            }
+          />
+        ) : (
+          <div className="scroll" style={{ flex: 1, minHeight: 0 }}>
+            <table className="table table--striped">
+              <thead>
+                <tr>
+                  <th style={{ width: "32%" }}>Task</th>
+                  <th style={{ width: 160 }}>Agent</th>
+                  <th style={{ width: 108 }}>Started</th>
+                  <th className="num" style={{ width: 92 }}>
+                    Duration
+                  </th>
+                  <th className="num" style={{ width: 82 }}>
+                    Tokens
+                  </th>
+                  <th style={{ width: 100 }}>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groups.map(([group, items]) => (
+                  <Fragment key={group}>
+                    <tr className="rowgroup">
+                      <td colSpan={6}>
+                        {group} · {items.length} {items.length === 1 ? "run" : "runs"}
+                      </td>
+                    </tr>
+                    {items.map((j) => (
+                      <tr
+                        key={j.id}
+                        className={selected.has(j.id) ? "is-selected" : ""}
+                        onClick={(e) => onRowClick(e, j)}
+                      >
+                        <td>{j.task_name || "—"}</td>
+                        <td style={{ color: "var(--fg-secondary)" }}>
+                          {j.agent_slug || "—"}
+                        </td>
+                        <td className="tnum" title={dateTime(j.started_at)}>
+                          {relativeTime(j.started_at)}
+                        </td>
+                        <td className="num tnum">{runDuration(j)}</td>
+                        <td className="num tnum" title={integer(totalTokens(j))}>
+                          {totalTokens(j) ? compactNumber(totalTokens(j)) : "—"}
+                        </td>
+                        <td>
+                          <StatusBadge status={j.status} />
+                        </td>
+                      </tr>
+                    ))}
+                  </Fragment>
+                ))}
+              </tbody>
+            </table>
+
+            {(hasMore || pageError) && (
+              <div className="loadmore">
+                {pageError && <span className="formerror">{pageError}</span>}
+                <button className="btn" onClick={loadMore} disabled={loadingMore}>
+                  {loadingMore ? "Loading…" : `Load ${PAGE} more`}
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {inspectorOpen && (
+        <>
+          <Splitter variable="--inspector-w" min={220} max={420} invert />
+          <aside className="pane-inspector">
+            <div className="inspector__head">Run</div>
+            <div className="inspector__scroll scroll">
+              {!job ? (
+                <div className="statepane">Nothing selected</div>
+              ) : (
+                <>
+                  <InspGroup title="Overview">
+                    <InspRow label="Task">{job.task_name || "—"}</InspRow>
+                    <InspRow label="Agent">{job.agent_slug || "—"}</InspRow>
+                    <InspRow label="Model">{job.model || "—"}</InspRow>
+                    <InspRow label="Status">
+                      <StatusBadge status={job.status} />
+                    </InspRow>
+                    <InspRow label="Started">
+                      <span title={dateTime(job.started_at)}>
+                        {dateTime(job.started_at)}
+                      </span>
+                    </InspRow>
+                    <InspRow label="Finished">
+                      {job.finished_at ? dateTime(job.finished_at) : "—"}
+                    </InspRow>
+                    <InspRow label="Duration">{runDuration(job)}</InspRow>
+                  </InspGroup>
+
+                  <InspGroup title="Tokens">
+                    <InspRow label="Input">
+                      <span className="tnum">{integer(job.total_input_tokens)}</span>
+                    </InspRow>
+                    <InspRow label="Output">
+                      <span className="tnum">{integer(job.total_output_tokens)}</span>
+                    </InspRow>
+                    <InspRow label="Cache write">
+                      <span className="tnum">
+                        {integer(job.total_cache_creation_tokens)}
+                      </span>
+                    </InspRow>
+                    <InspRow label="Cache read">
+                      <span className="tnum">{integer(job.total_cache_read_tokens)}</span>
+                    </InspRow>
+                    <InspRow label="Total">
+                      <span className="tnum">{integer(totalTokens(job))}</span>
+                    </InspRow>
+                  </InspGroup>
+
+                  {job.prompt_preview && (
+                    <InspGroup title="Prompt">
+                      <div className="logblock selectable">{job.prompt_preview}</div>
+                    </InspGroup>
+                  )}
+
+                  {job.error_message && (
+                    <InspGroup title="Error">
+                      <div className="logblock logblock--error selectable">
+                        {job.error_message}
+                      </div>
+                    </InspGroup>
+                  )}
+
+                  {job.response_text && (
+                    <InspGroup title="Output">
+                      <div className="logblock selectable">{job.response_text}</div>
+                    </InspGroup>
+                  )}
+
+                  {!job.response_text && !job.error_message && (
+                    <InspGroup title="Output">
+                      <div className="runrow">
+                        {job.status === "running"
+                          ? "Still running…"
+                          : "No output was saved for this run."}
+                      </div>
+                    </InspGroup>
+                  )}
+
+                  {job.chat_session_id && (
+                    <InspGroup title="Session">
+                      <div className="logblock selectable">{job.chat_session_id}</div>
+                    </InspGroup>
+                  )}
+                </>
+              )}
+            </div>
+          </aside>
+        </>
+      )}
+    </div>
+  );
+}

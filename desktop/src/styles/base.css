@@ -1,0 +1,157 @@
+/* ============================================================================
+   Base — desktop application shell resets.
+   A desktop window is not a document: it never scrolls as a whole, text is not
+   selectable by default, and there is no native browser affordance anywhere.
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  color: var(--fg);
+  background: var(--bg-window);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-synthesis: none;
+
+  /* Chrome-like text selection is a web tell. Opt in per element instead. */
+  user-select: none;
+  -webkit-user-select: none;
+
+  /* No rubber-band / pull-to-refresh inside an app window. */
+  overscroll-behavior: none;
+  cursor: default;
+}
+
+/* Content the user genuinely reads or copies opts back in. */
+.selectable,
+input,
+textarea,
+[contenteditable="true"] {
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: auto;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  outline: none;
+}
+
+button {
+  cursor: default;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+/* Native focus: keyboard only. Mouse clicks must not leave a ring behind. */
+:focus {
+  outline: none;
+}
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--r-sm);
+}
+
+/* --- Scrollbars: overlay style, appear on hover, never reserve layout ----- */
+.scroll {
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color var(--dur-med);
+}
+.scroll:hover {
+  scrollbar-color: var(--fg-quaternary) transparent;
+}
+.scroll::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scroll::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: var(--r-full);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+.scroll:hover::-webkit-scrollbar-thumb {
+  background: var(--fg-quaternary);
+  background-clip: content-box;
+}
+.scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-tertiary);
+  background-clip: content-box;
+}
+.scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* --- Utility ------------------------------------------------------------- */
+.row {
+  display: flex;
+  align-items: center;
+}
+.col {
+  display: flex;
+  flex-direction: column;
+}
+.grow {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.spacer {
+  flex: 1;
+}
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-ligatures: none;
+}
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

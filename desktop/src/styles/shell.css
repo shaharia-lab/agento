@@ -1,0 +1,360 @@
+/* ============================================================================
+   Window shell — titlebar, source list, panes, status bar.
+
+   Layout model (top to bottom):
+     ┌──────────────────────────────────────────────┐
+     │ titlebar (drag region + window controls)      │
+     ├─────────┬────────────────────────────────────┤
+     │ sidebar │ toolbar                            │
+     │ (source ├──────────┬─────────────────────────┤
+     │  list)  │ list     │ detail  │ inspector     │
+     ├─────────┴──────────┴─────────────────────────┤
+     │ status bar                                   │
+     └──────────────────────────────────────────────┘
+   ========================================================================== */
+
+.window {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-window);
+}
+
+/* --- Titlebar ------------------------------------------------------------ */
+.titlebar {
+  height: var(--titlebar-h);
+  flex: 0 0 var(--titlebar-h);
+  display: flex;
+  align-items: center;
+  padding-left: var(--sp-4);
+  background: var(--bg-window);
+  -webkit-app-region: drag;
+  app-region: drag;
+  position: relative;
+  z-index: 40;
+}
+
+/* Everything interactive inside the drag region must opt out of dragging. */
+.titlebar button,
+.titlebar input,
+.titlebar .no-drag {
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.titlebar__title {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+  letter-spacing: 0.005em;
+  pointer-events: none;
+}
+
+.titlebar__title small {
+  font-weight: var(--weight-normal);
+  color: var(--fg-tertiary);
+}
+
+/* Window controls — right-aligned (Windows/Linux GNOME convention). */
+.wincontrols {
+  display: flex;
+  align-items: stretch;
+  height: 100%;
+  margin-left: auto;
+}
+
+.wincontrol {
+  width: 44px;
+  display: grid;
+  place-items: center;
+  color: var(--fg-secondary);
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.wincontrol:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.wincontrol--close:hover {
+  background: #e5484d;
+  color: #fff;
+}
+
+/* --- Body: sidebar + main ------------------------------------------------ */
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+/* --- Sidebar (source list) ----------------------------------------------- */
+.sidebar {
+  width: var(--sidebar-w);
+  flex: 0 0 var(--sidebar-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-sidebar);
+  padding: 0 var(--sp-5) var(--sp-3);
+  transition: width var(--dur-med) var(--ease-out),
+    flex-basis var(--dur-med) var(--ease-out),
+    opacity var(--dur-fast);
+  overflow: hidden;
+}
+.sidebar--hidden {
+  width: 0;
+  flex-basis: 0;
+  padding-left: 0;
+  padding-right: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebar__scroll {
+  flex: 1;
+  min-height: 0;
+  margin: 0 calc(var(--sp-5) * -1);
+  padding: 0 var(--sp-5);
+}
+
+/* Section captions: uppercase micro-labels, the source-list idiom. */
+.sidebar__caption {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--fg-tertiary);
+  padding: var(--sp-6) var(--sp-3) var(--sp-2);
+  user-select: none;
+}
+
+.srcitem {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  width: 100%;
+  height: var(--row-h);
+  padding: 0 var(--sp-3);
+  border-radius: var(--r-md);
+  color: var(--fg-secondary);
+  font-size: var(--text-base);
+  font-weight: var(--weight-normal);
+  text-align: left;
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.srcitem + .srcitem {
+  margin-top: 1px;
+}
+.srcitem:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.srcitem--active {
+  background: var(--bg-select);
+  color: var(--fg);
+  font-weight: var(--weight-medium);
+}
+/* When the window has focus the selection takes the accent fill. */
+.window--focused .srcitem--active {
+  background: var(--bg-select-focus);
+  color: var(--fg-select-focus);
+}
+.window--focused .srcitem--active .srcitem__icon,
+.window--focused .srcitem--active .badge {
+  color: var(--fg-select-focus);
+  opacity: 0.95;
+}
+
+.srcitem__icon {
+  flex: 0 0 16px;
+  display: grid;
+  place-items: center;
+  color: var(--fg-tertiary);
+  transition: color var(--dur-fast);
+}
+.srcitem:hover .srcitem__icon,
+.srcitem--active .srcitem__icon {
+  color: currentColor;
+}
+
+.srcitem__count {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-tertiary);
+}
+.window--focused .srcitem--active .srcitem__count {
+  color: var(--fg-select-focus);
+  opacity: 0.8;
+}
+
+/* --- Main region --------------------------------------------------------- */
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-content);
+  border-top-left-radius: var(--r-lg);
+  border-left: 0.5px solid var(--line);
+  border-top: 0.5px solid var(--line);
+  overflow: hidden;
+  box-shadow: -1px -1px 3px rgba(0, 0, 0, 0.03);
+}
+
+/* --- Toolbar ------------------------------------------------------------- */
+.toolbar {
+  height: var(--toolbar-h);
+  flex: 0 0 var(--toolbar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-5);
+  border-bottom: 0.5px solid var(--line);
+  background: var(--bg-content);
+}
+
+.toolbar__title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+}
+
+.toolbar__sub {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+}
+
+.toolbar__sep {
+  width: 0.5px;
+  height: 16px;
+  background: var(--line-strong);
+  margin: 0 var(--sp-2);
+}
+
+/* --- Panes --------------------------------------------------------------- */
+.panes {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.pane-list {
+  width: var(--list-w);
+  flex: 0 0 var(--list-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-list);
+  border-right: 0.5px solid var(--line);
+  min-height: 0;
+}
+
+.pane-detail {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-content);
+  min-height: 0;
+}
+
+.pane-inspector {
+  width: var(--inspector-w);
+  flex: 0 0 var(--inspector-w);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-list);
+  border-left: 0.5px solid var(--line);
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Draggable split handle — 1px visual, 7px hit area. */
+.splitter {
+  flex: 0 0 1px;
+  width: 1px;
+  background: var(--line);
+  position: relative;
+  cursor: col-resize;
+  z-index: 5;
+}
+.splitter::after {
+  content: "";
+  position: absolute;
+  inset: 0 -3px;
+}
+.splitter:hover,
+.splitter--dragging {
+  background: var(--accent);
+}
+
+/* --- Status bar ---------------------------------------------------------- */
+.statusbar {
+  height: var(--statusbar-h);
+  flex: 0 0 var(--statusbar-h);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: 0 var(--sp-5);
+  background: var(--bg-window);
+  border-top: 0.5px solid var(--line);
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  user-select: none;
+}
+
+.statusbar__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  white-space: nowrap;
+}
+
+.statusbar__item--button {
+  padding: 0 var(--sp-3);
+  height: 17px;
+  border-radius: var(--r-sm);
+  transition: background var(--dur-fast), color var(--dur-fast);
+}
+.statusbar__item--button:hover {
+  background: var(--bg-hover);
+  color: var(--fg-secondary);
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  flex: none;
+}
+.dot--green {
+  background: var(--green);
+  box-shadow: 0 0 0 2.5px var(--green-soft);
+}
+.dot--amber {
+  background: var(--amber);
+  box-shadow: 0 0 0 2.5px var(--amber-soft);
+}
+.dot--red {
+  background: var(--red);
+  box-shadow: 0 0 0 2.5px var(--red-soft);
+}
+.dot--idle {
+  background: var(--fg-quaternary);
+}
+
+.dot--pulse {
+  animation: pulse 1.9s var(--ease-out) infinite;
+}
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}

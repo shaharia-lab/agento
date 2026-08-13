@@ -1,0 +1,91 @@
+name: Desktop CI
+
+# Checks for the Tauri desktop app. Until `desktop` merges into `main`, this is
+# the integration branch: desktop PRs target it, and desktop releases are tagged
+# from it.
+#
+# Scoped to desktop/ so the Go server's own CI is untouched — and skipped
+# entirely for changes that cannot affect the app.
+
+on:
+  pull_request:
+    branches: [desktop]
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop-*.yml"
+      - "go.mod"
+      - "go.sum"
+      - "internal/**"
+  push:
+    branches: [desktop]
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop-*.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck, lint and build
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            build-essential file
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri -> target
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: desktop
+        run: npm ci
+
+      - name: Typecheck and build frontend
+        working-directory: desktop
+        run: npm run build
+
+      - name: Rust formatting
+        working-directory: desktop/src-tauri
+        run: cargo fmt --check
+
+      - name: Rust lints
+        working-directory: desktop/src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The sidecar has to exist before the Rust build: `externalBin` resolves
+      # it by filename at bundle time.
+      - name: Build Go sidecar
+        working-directory: desktop
+        run: ./scripts/build-sidecar.sh
+
+      # A full `tauri build` here would double CI time; compiling the release
+      # profile is what actually catches the `cfg(not(debug_assertions))` code
+      # that never builds during development.
+      - name: Compile Rust (release)
+        working-directory: desktop/src-tauri
+        run: cargo build --release

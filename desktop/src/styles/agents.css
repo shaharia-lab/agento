@@ -1,0 +1,128 @@
+/* ============================================================================
+   Agents view — only what the shared sheets do not already cover.
+   ========================================================================== */
+
+/* A real <select>: .select gives the chrome, the native control fills it so
+   the popup stays the platform's own. */
+.agents-select {
+  display: flex;
+  width: 100%;
+  max-width: 260px;
+}
+.agents-select--wide {
+  max-width: none;
+}
+.agents-select select {
+  flex: 1;
+  min-width: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  font-size: inherit;
+  cursor: default;
+}
+
+/* --- Capability pickers --------------------------------------------------- */
+.agents-caps {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(152px, 1fr));
+  gap: var(--sp-1) var(--sp-5);
+}
+
+.agents-cap {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-sm);
+  min-width: 0;
+}
+.agents-cap:hover {
+  background: var(--bg-hover);
+}
+.agents-cap__label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-base);
+}
+.agents-cap--gone .agents-cap__label {
+  color: var(--fg-tertiary);
+  text-decoration: line-through;
+}
+
+.agents-group + .agents-group {
+  margin-top: var(--sp-6);
+}
+.agents-group__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: 0 var(--sp-3) var(--sp-3);
+}
+.agents-group__name {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+}
+.agents-group__sub {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+/* --- Notes / inline states ------------------------------------------------ */
+.agents-note {
+  padding: var(--sp-6) var(--sp-7);
+  font-size: var(--text-base);
+  color: var(--fg-tertiary);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  line-height: var(--leading-normal);
+}
+
+.agents-hint {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  line-height: var(--leading-normal);
+}
+
+/* --- Save / revert bar ---------------------------------------------------- */
+.agents-savebar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-7);
+  border-top: 0.5px solid var(--line);
+  background: var(--bg-content);
+  box-shadow: 0 -1px 3px rgba(0, 0, 0, 0.04);
+}
+.agents-savebar__msg {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+.agents-savebar__msg--error {
+  color: var(--red);
+}
+
+/* --- Inline delete confirmation (never window.confirm — it blocks the
+   webview and stalls the whole window). --------------------------------- */
+.agents-confirm {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-7);
+  border-bottom: 0.5px solid var(--line);
+  background: var(--red-soft);
+  font-size: var(--text-base);
+}
+.agents-confirm__icon {
+  color: var(--red);
+}
