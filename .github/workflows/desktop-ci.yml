@@ -69,6 +69,13 @@ jobs:
         working-directory: desktop
         run: npm run build
 
+      # Must precede anything that compiles the crate — including clippy.
+      # Tauri's build script resolves `externalBin` by filename and fails the
+      # build when the sidecar is absent, so this is not just a bundling step.
+      - name: Build Go sidecar
+        working-directory: desktop
+        run: ./scripts/build-sidecar.sh
+
       - name: Rust formatting
         working-directory: desktop/src-tauri
         run: cargo fmt --check
@@ -76,12 +83,6 @@ jobs:
       - name: Rust lints
         working-directory: desktop/src-tauri
         run: cargo clippy --all-targets -- -D warnings
-
-      # The sidecar has to exist before the Rust build: `externalBin` resolves
-      # it by filename at bundle time.
-      - name: Build Go sidecar
-        working-directory: desktop
-        run: ./scripts/build-sidecar.sh
 
       # A full `tauri build` here would double CI time; compiling the release
       # profile is what actually catches the `cfg(not(debug_assertions))` code
