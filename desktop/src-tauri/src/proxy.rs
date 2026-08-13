@@ -10,6 +10,9 @@
 //! It is also the migration seam. `route_is_native` decides, per request,
 //! whether Rust answers or the Go sidecar does — so a subsystem can be ported
 //! one endpoint at a time with both implementations running side by side.
+//! `AGENTO_DESKTOP_NATIVE` steers that: `on` (the default), `off` to forward
+//! everything, and `diff` to let Go answer while the Rust result is computed
+//! alongside and compared byte for byte. See `native/`.
 
 use std::net::SocketAddr;
 
@@ -18,6 +21,8 @@ use axum::extract::State;
 use axum::http::{header, HeaderValue, Request, Response, StatusCode};
 use axum::routing::any;
 use axum::Router;
+
+use crate::native;
 
 #[derive(Clone)]
 pub struct ProxyState {
@@ -66,11 +71,11 @@ pub async fn serve(upstream_port: u16, port: u16) -> Result<u16, String> {
 
 /// Whether this request is served by ported Rust code instead of the Go server.
 ///
-/// Empty through phase 1 — every route forwards. As subsystems move over, their
-/// paths get claimed here, and `diff.rs` can replay the same request against
-/// both to prove the answers match before the route is switched.
-fn route_is_native(_method: &axum::http::Method, _path: &str) -> bool {
-    false
+/// The route table lives in `native::claims` next to the handlers it selects,
+/// so claiming a route and implementing it are one edit rather than two files
+/// that can disagree.
+fn route_is_native(method: &axum::http::Method, path: &str) -> bool {
+    native::mode() != native::Mode::Off && native::claims(method, path)
 }
 
 async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response<Body> {
@@ -94,8 +99,40 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
     }
 
     if route_is_native(req.method(), &path) {
-        // Phase 2+ dispatches here.
-        return error_response(StatusCode::NOT_IMPLEMENTED, "route not yet ported");
+        // Reading SQLite is blocking work; keeping it off the axum worker means
+        // one slow read cannot stall an SSE stream sharing the runtime.
+        let method = req.method().clone();
+        let native_body = {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || native::serve(&method, &path))
+                .await
+                .unwrap_or_else(|e| Err(format!("native handler panicked: {e}")))
+        };
+
+        match (native::mode(), native_body) {
+            // Go stays authoritative in shadow mode; Rust is only compared.
+            (native::Mode::Diff, native) => {
+                let (go_response, go_body) = match forward_buffered(&state, req).await {
+                    Ok(buffered) => buffered,
+                    Err(e) => {
+                        log::error!("proxy error for {path}: {e}");
+                        return error_response(StatusCode::BAD_GATEWAY, &e);
+                    }
+                };
+                match native {
+                    Ok(body) => {
+                        native::diff::report(&path, &native::diff::compare(&go_body, &body))
+                    }
+                    Err(e) => log::error!("native diff {path}: native handler failed: {e}"),
+                }
+                return go_response;
+            }
+            (_, Ok(body)) => return native::response(body),
+            // A native failure is never surfaced to the UI: the request falls
+            // through to the Go sidecar, which is still running and still
+            // correct. A ported route can only be as broken as an unported one.
+            (_, Err(e)) => log::warn!("native handler for {path} failed, forwarding to Go: {e}"),
+        }
     }
 
     match forward(&state, req).await {
@@ -189,6 +226,23 @@ async fn forward(state: &ProxyState, req: Request<Body>) -> Result<Response<Body
     builder
         .body(body)
         .map_err(|e| format!("building response: {e}"))
+}
+
+/// Forward, and also hand back the response body as bytes.
+///
+/// Only shadow-diff mode uses this. Buffering would break SSE, but a claimed
+/// route is by definition one Rust can answer in full, so there is nothing to
+/// stream — and comparing two bodies requires having both of them.
+async fn forward_buffered(
+    state: &ProxyState,
+    req: Request<Body>,
+) -> Result<(Response<Body>, Vec<u8>), String> {
+    let (parts, body) = forward(state, req).await?.into_parts();
+    let bytes = axum::body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|e| format!("buffering upstream body: {e}"))?;
+    let replayed = Response::from_parts(parts, Body::from(bytes.clone()));
+    Ok((replayed, bytes.to_vec()))
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response<Body> {

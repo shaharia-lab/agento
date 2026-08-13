@@ -1,4 +1,8 @@
 mod menu;
+// `native` and `paths` are public so `tests/live_parity.rs` can diff a ported
+// endpoint against the running Go server without going through a window.
+pub mod native;
+pub mod paths;
 mod proxy;
 mod sidecar;
 
