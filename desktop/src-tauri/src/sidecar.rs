@@ -62,10 +62,15 @@ pub async fn spawn(app: &AppHandle, port: u16) -> Result<Sidecar, String> {
     // would be re-registered out from under whichever instance registered it
     // last. Release builds keep the default path — there the desktop app is
     // the user's Agento, not a second copy of it.
+    //
+    // Either way the directory comes from `paths::data_dir`, which the ported
+    // endpoints in `native/` also use to open this same database: in debug it
+    // is handed to the child explicitly, and in release it mirrors the
+    // resolution the child makes from its own inherited environment. One
+    // answer, so the two halves of the app cannot end up on different files.
     #[cfg(debug_assertions)]
     {
-        let dev_dir = dirs_home().map(|h| h.join(".agento-desktop-dev"));
-        if let Some(dir) = dev_dir {
+        if let Some(dir) = crate::paths::data_dir() {
             sidecar = sidecar.env("AGENTO_DATA_DIR", dir.to_string_lossy().to_string());
         }
     }
@@ -133,11 +138,6 @@ async fn wait_until_healthy(port: u16) -> Result<(), String> {
         "agento server did not become healthy on port {port} within {}s",
         ATTEMPTS * INTERVAL.as_millis() as u32 / 1000
     ))
-}
-
-#[cfg(debug_assertions)]
-fn dirs_home() -> Option<std::path::PathBuf> {
-    std::env::var_os("HOME").map(std::path::PathBuf::from)
 }
 
 /// Kill the sidecar held in Tauri's state, if any.

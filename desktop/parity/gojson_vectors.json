@@ -1,0 +1,135 @@
+{
+  "_comment": [
+    "Cross-language encoder parity vectors for the Go-\u003eRust desktop port.",
+    "Generated from Go's encoding/json, then frozen. Read by",
+    "desktop/parity/gojson_parity_test.go (Go) and by",
+    "desktop/src-tauri/src/native/gojson.rs (Rust): 'want' is the exact",
+    "text Go's encoder produces for 'value', so a divergence fails one",
+    "language's tests against the other's real output rather than against",
+    "a belief about it. Add a vector here when a port turns up a new shape."
+  ],
+  "floats": [
+    {
+      "value": 0,
+      "want": "0"
+    },
+    {
+      "value": 3,
+      "want": "3"
+    },
+    {
+      "value": -3,
+      "want": "-3"
+    },
+    {
+      "value": 0.3,
+      "want": "0.3"
+    },
+    {
+      "value": 1.25,
+      "want": "1.25"
+    },
+    {
+      "value": 0.26,
+      "want": "0.26"
+    },
+    {
+      "value": 15,
+      "want": "15"
+    },
+    {
+      "value": 0.0000025,
+      "want": "0.0000025"
+    },
+    {
+      "value": 0.000001,
+      "want": "0.000001"
+    },
+    {
+      "value": 1e-7,
+      "want": "1e-7"
+    },
+    {
+      "value": 1.5e-7,
+      "want": "1.5e-7"
+    },
+    {
+      "value": 1e-10,
+      "want": "1e-10"
+    },
+    {
+      "value": 100000000000000000000,
+      "want": "100000000000000000000"
+    },
+    {
+      "value": 1e+21,
+      "want": "1e+21"
+    },
+    {
+      "value": 1.5e+21,
+      "want": "1.5e+21"
+    },
+    {
+      "value": 0.1,
+      "want": "0.1"
+    },
+    {
+      "value": 1.0000000000000002,
+      "want": "1.0000000000000002"
+    },
+    {
+      "value": 123456.789,
+      "want": "123456.789"
+    }
+  ],
+  "strings": [
+    {
+      "value": "",
+      "want": "\"\""
+    },
+    {
+      "value": "plain",
+      "want": "\"plain\""
+    },
+    {
+      "value": "\u003csynthetic\u003e",
+      "want": "\"\\u003csynthetic\\u003e\""
+    },
+    {
+      "value": "a \u0026 b",
+      "want": "\"a \\u0026 b\""
+    },
+    {
+      "value": "quote\" and \\ backslash",
+      "want": "\"quote\\\" and \\\\ backslash\""
+    },
+    {
+      "value": "tab\tnewline\nreturn\r",
+      "want": "\"tab\\tnewline\\nreturn\\r\""
+    },
+    {
+      "value": "bell\u0007",
+      "want": "\"bell\\u0007\""
+    },
+    {
+      "value": "backspace\b formfeed\f",
+      "want": "\"backspace\\b formfeed\\f\""
+    },
+    {
+      "value": "slash / not escaped",
+      "want": "\"slash / not escaped\""
+    },
+    {
+      "value": "unicode é ✓ 😀",
+      "want": "\"unicode é ✓ 😀\""
+    },
+    {
+      "value": "sep\u2028and\u2029",
+      "want": "\"sep\\u2028and\\u2029\""
+    },
+    {
+      "value": "mixedbread-ai/mxbai-embed-large-v1",
+      "want": "\"mixedbread-ai/mxbai-embed-large-v1\""
+    }
+  ]
+}
