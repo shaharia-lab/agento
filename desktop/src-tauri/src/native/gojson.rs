@@ -51,6 +51,49 @@ where
     Ok(buf)
 }
 
+/// Encode as Go's `json.Marshal` does: same escaping and float spelling, but
+/// no trailing newline.
+///
+/// `writeJSON` uses an Encoder and so terminates with one; values marshalled
+/// *into* something else — the sessions list's keyset cursor, a JSON column —
+/// use `Marshal` and must not.
+pub fn to_vec_marshal<T>(value: &T) -> Result<Vec<u8>, serde_json::Error>
+where
+    T: ?Sized + Serialize,
+{
+    let mut buf = Vec::with_capacity(256);
+    let mut ser = Serializer::with_formatter(&mut buf, GoFormatter);
+    value.serialize(&mut ser)?;
+    Ok(buf)
+}
+
+/// Render a float as `strconv.FormatFloat(f, 'g', -1, 64)`.
+///
+/// This is NOT the spelling `encoding/json` uses, and the difference is not
+/// cosmetic: `'g'` switches to exponent form at 1e6 rather than 1e21 and pads
+/// the exponent to two digits without trimming, so 1000000 is `1e+06` here and
+/// `1000000` in JSON. The sessions list's cursor is built with it, and a cursor
+/// is compared against the one the other implementation minted.
+pub fn format_g(value: f64) -> String {
+    if !value.is_finite() {
+        return format!("{value}");
+    }
+    let scientific = format!("{value:e}");
+    let (mantissa, exp) = match scientific.split_once('e') {
+        Some(parts) => parts,
+        None => return scientific,
+    };
+    let exp10: i32 = exp.parse().unwrap_or(0);
+
+    // Go's ftoa with the shortest representation fixes eprec at 6, so exponent
+    // form is used when the decimal exponent is below -4 or at least 6.
+    if !(-4..6).contains(&exp10) {
+        let sign = if exp10 < 0 { '-' } else { '+' };
+        return format!("{mantissa}e{sign}{:02}", exp10.abs());
+    }
+    format!("{value}")
+}
+
 /// The parts of Go's encoder that `serde_json` spells differently.
 struct GoFormatter;
 
@@ -140,6 +183,7 @@ mod tests {
     struct Vectors {
         floats: Vec<FloatVector>,
         strings: Vec<StringVector>,
+        cursor_floats: Vec<FloatVector>,
     }
 
     #[derive(serde::Deserialize)]
@@ -181,6 +225,24 @@ mod tests {
         for v in vectors().strings {
             assert_eq!(encoded(&v.value), v.want, "string {:?}", v.value);
         }
+    }
+
+    /// `strconv.FormatFloat(_, 'g', -1, 64)`, which the sessions list's cursor
+    /// uses and which is deliberately not the JSON spelling: exponent form
+    /// starts at 1e6 rather than 1e21, and the exponent is padded to two digits
+    /// rather than trimmed.
+    #[test]
+    fn cursor_floats_match_gos_g_format() {
+        for v in vectors().cursor_floats {
+            assert_eq!(format_g(v.value), v.want, "format_g({})", v.value);
+        }
+    }
+
+    #[test]
+    fn the_two_float_spellings_really_do_differ() {
+        // Guards the pair above from being "fixed" into one function.
+        assert_eq!(encoded(&1_000_000.0_f64), "1000000");
+        assert_eq!(format_g(1_000_000.0), "1e+06");
     }
 
     #[test]

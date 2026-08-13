@@ -1,12 +1,75 @@
 {
   "_comment": [
-    "Cross-language encoder parity vectors for the Go-\u003eRust desktop port.",
-    "Generated from Go's encoding/json, then frozen. Read by",
-    "desktop/parity/gojson_parity_test.go (Go) and by",
-    "desktop/src-tauri/src/native/gojson.rs (Rust): 'want' is the exact",
-    "text Go's encoder produces for 'value', so a divergence fails one",
-    "language's tests against the other's real output rather than against",
-    "a belief about it. Add a vector here when a port turns up a new shape."
+    "Cross-language parity vectors for the Go-\u003eRust desktop port.",
+    "Generated from Go, then frozen. Read by",
+    "desktop/parity/gojson_parity_test.go (Go) and by the Rust tests in",
+    "desktop/src-tauri/src/native/. 'want' is exactly what Go produces for",
+    "'value', so a divergence fails one language's tests against the",
+    "other's real output rather than against a belief about it.",
+    "floats/strings: encoding/json. cursor_floats: strconv.FormatFloat(v,'g',-1,64).",
+    "go_times: time.Time.String() parsed back, re-rendered as RFC3339Nano."
+  ],
+  "cursor_floats": [
+    {
+      "value": 0,
+      "want": "0"
+    },
+    {
+      "value": 1,
+      "want": "1"
+    },
+    {
+      "value": 36.3,
+      "want": "36.3"
+    },
+    {
+      "value": 0.5,
+      "want": "0.5"
+    },
+    {
+      "value": 15.308084000000003,
+      "want": "15.308084000000003"
+    },
+    {
+      "value": 1234.5,
+      "want": "1234.5"
+    },
+    {
+      "value": 0.00001,
+      "want": "1e-05"
+    },
+    {
+      "value": 0.000001,
+      "want": "1e-06"
+    },
+    {
+      "value": 0.0001234,
+      "want": "0.0001234"
+    },
+    {
+      "value": 999999,
+      "want": "999999"
+    },
+    {
+      "value": 1000000,
+      "want": "1e+06"
+    },
+    {
+      "value": 1234567,
+      "want": "1.234567e+06"
+    },
+    {
+      "value": 1e+21,
+      "want": "1e+21"
+    },
+    {
+      "value": 22.349290000000025,
+      "want": "22.349290000000025"
+    },
+    {
+      "value": 0.000001234,
+      "want": "1.234e-06"
+    }
   ],
   "floats": [
     {
@@ -80,6 +143,28 @@
     {
       "value": 123456.789,
       "want": "123456.789"
+    }
+  ],
+  "go_times": [
+    {
+      "value": "2026-06-14 18:25:20.492 +0000 UTC",
+      "want": "2026-06-14T18:25:20.492Z"
+    },
+    {
+      "value": "2026-06-14 19:00:29.177 +0000 UTC",
+      "want": "2026-06-14T19:00:29.177Z"
+    },
+    {
+      "value": "2020-01-01 00:00:00 +0000 UTC",
+      "want": "2020-01-01T00:00:00Z"
+    },
+    {
+      "value": "2026-08-13 21:51:41.123456789 +0000 UTC",
+      "want": "2026-08-13T21:51:41.123456789Z"
+    },
+    {
+      "value": "0001-01-01 00:00:00 +0000 UTC",
+      "want": "0001-01-01T00:00:00Z"
     }
   ],
   "strings": [
