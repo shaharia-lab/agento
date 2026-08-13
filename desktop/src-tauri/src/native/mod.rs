@@ -16,6 +16,8 @@ pub mod diff;
 pub mod gojson;
 pub mod gotime;
 pub mod pricing;
+pub mod sessions;
+pub mod settings;
 
 use axum::body::Body;
 use axum::http::{header, Method, Response, StatusCode};
@@ -61,19 +63,64 @@ pub fn mode() -> Mode {
 /// which chi treats as a different route — falls through to Go and keeps
 /// whatever answer Go gives it.
 pub fn claims(method: &Method, path: &str) -> bool {
-    matches!((method.as_str(), path), ("GET", "/api/pricing/catalog"))
+    matches!(
+        (method.as_str(), path),
+        (
+            "GET",
+            "/api/pricing/catalog" | "/api/claude-sessions" | "/api/claude-sessions/facets"
+        )
+    )
+}
+
+/// A claimed request: the parts a native handler needs.
+pub struct Request<'a> {
+    pub method: &'a Method,
+    pub path: &'a str,
+    /// The raw query string without its leading `?`.
+    pub query: &'a str,
+}
+
+/// What a native handler produced: the response body, plus any request the
+/// proxy should fire at the sidecar afterwards to keep the corpus fresh.
+pub struct Answer {
+    pub body: Vec<u8>,
+    pub probe: Option<&'static str>,
 }
 
 /// Answer a claimed request. `Err` means "fall back to the Go sidecar".
-pub fn serve(method: &Method, path: &str) -> Result<Vec<u8>, String> {
-    match (method.as_str(), path) {
+pub fn serve(req: &Request) -> Result<Answer, String> {
+    let db_path = paths::database_path().ok_or("no home directory to resolve the data dir")?;
+
+    match (req.method.as_str(), req.path) {
         ("GET", "/api/pricing/catalog") => {
-            let db_path =
-                paths::database_path().ok_or("no home directory to resolve the data dir")?;
             let catalog = pricing::catalog(&db_path)?;
-            gojson::to_vec(&catalog).map_err(|e| format!("encoding pricing catalog: {e}"))
+            Ok(Answer {
+                body: gojson::to_vec(&catalog)
+                    .map_err(|e| format!("encoding pricing catalog: {e}"))?,
+                probe: None,
+            })
         }
-        _ => Err(format!("{method} {path} is claimed but has no handler")),
+        ("GET", path @ ("/api/claude-sessions" | "/api/claude-sessions/facets")) => {
+            let q = sessions::query::SessionQuery::parse(req.query)?;
+            let conn = db::open_read_only(&db_path)?;
+            let data_settings = settings::load(&conn);
+
+            let body = if path == "/api/claude-sessions" {
+                let page = sessions::page::list_page(&conn, &data_settings, &q)?;
+                gojson::to_vec(&page).map_err(|e| format!("encoding session page: {e}"))?
+            } else {
+                let facets = sessions::page::facets(&conn, &data_settings, &q)?;
+                gojson::to_vec(&facets).map_err(|e| format!("encoding session facets: {e}"))?
+            };
+            Ok(Answer {
+                body,
+                probe: sessions::freshness_probe(path, &q),
+            })
+        }
+        _ => Err(format!(
+            "{} {} is claimed but has no handler",
+            req.method, req.path
+        )),
     }
 }
 
@@ -94,22 +141,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_pricing_catalog_is_claimed_and_its_siblings_are_not() {
+    fn the_ported_reads_are_claimed_and_their_siblings_are_not() {
         assert!(claims(&Method::GET, "/api/pricing/catalog"));
+        assert!(claims(&Method::GET, "/api/claude-sessions"));
+        assert!(claims(&Method::GET, "/api/claude-sessions/facets"));
 
         // Writes stay with Go until phase 3 moves the storage layer.
         assert!(!claims(&Method::POST, "/api/pricing/rates"));
-        assert!(!claims(&Method::PUT, "/api/pricing/rates"));
-        assert!(!claims(&Method::DELETE, "/api/pricing/rates"));
+        assert!(!claims(&Method::POST, "/api/claude-sessions/refresh"));
+        // Scan lifecycle stays with Go while the scanner does.
+        assert!(!claims(&Method::GET, "/api/claude-sessions/status"));
         // Not a prefix match: an unported endpoint under the same namespace
-        // must not be swallowed.
-        assert!(!claims(&Method::GET, "/api/pricing/catalog/extra"));
-        assert!(!claims(&Method::GET, "/api/pricing/catalog/"));
+        // must not be swallowed. A session ID is a path segment, not a suffix.
+        assert!(!claims(&Method::GET, "/api/claude-sessions/abc-123"));
+        assert!(!claims(&Method::GET, "/api/claude-sessions/"));
         assert!(!claims(&Method::GET, "/api/claude-analytics"));
     }
 
     #[test]
     fn an_unhandled_claim_is_an_error_so_the_proxy_falls_back() {
-        assert!(serve(&Method::GET, "/api/nothing-here").is_err());
+        assert!(serve(&Request {
+            method: &Method::GET,
+            path: "/api/nothing-here",
+            query: "",
+        })
+        .is_err());
     }
 }

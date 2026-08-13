@@ -102,12 +102,31 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
         // Reading SQLite is blocking work; keeping it off the axum worker means
         // one slow read cannot stall an SSE stream sharing the runtime.
         let method = req.method().clone();
-        let native_body = {
+        let query = req.uri().query().unwrap_or_default().to_string();
+        let native_answer = {
             let path = path.clone();
-            tokio::task::spawn_blocking(move || native::serve(&method, &path))
-                .await
-                .unwrap_or_else(|e| Err(format!("native handler panicked: {e}")))
+            tokio::task::spawn_blocking(move || {
+                native::serve(&native::Request {
+                    method: &method,
+                    path: &path,
+                    query: &query,
+                })
+            })
+            .await
+            .unwrap_or_else(|e| Err(format!("native handler panicked: {e}")))
         };
+
+        // Some ported reads are what kept the corpus fresh on the Go side, so
+        // answering them here removes the trigger. The probe puts it back by
+        // asking the sidecar a cheap question that runs its own freshness
+        // check — fire-and-forget, because the page never waited for the
+        // rescan it started either.
+        if let Ok(answer) = &native_answer {
+            if let Some(probe) = answer.probe {
+                spawn_freshness_probe(&state, probe);
+            }
+        }
+        let native_body = native_answer.map(|answer| answer.body);
 
         match (native::mode(), native_body) {
             // Go stays authoritative in shadow mode; Rust is only compared.
@@ -243,6 +262,29 @@ async fn forward_buffered(
         .map_err(|e| format!("buffering upstream body: {e}"))?;
     let replayed = Response::from_parts(parts, Body::from(bytes.clone()));
     Ok((replayed, bytes.to_vec()))
+}
+
+/// Ask the Go sidecar a question that runs its freshness check, and ignore the
+/// answer.
+///
+/// This goes straight to the sidecar rather than back through the proxy, so it
+/// cannot recurse into the native handler that scheduled it.
+fn spawn_freshness_probe(state: &ProxyState, path: &str) {
+    let url = format!("{}{path}", state.upstream);
+    let client = state.client.clone();
+    tauri::async_runtime::spawn(async move {
+        // A short deadline on purpose: the request only has to *start* the
+        // scan, and the scan itself runs in the background on the Go side.
+        match client
+            .get(&url)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+        {
+            Ok(resp) => log::debug!("freshness probe {url} -> {}", resp.status()),
+            Err(e) => log::warn!("freshness probe {url} failed: {e}"),
+        }
+    });
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response<Body> {

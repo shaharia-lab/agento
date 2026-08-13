@@ -19,8 +19,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 const vectorsFile = "gojson_vectors.json"
@@ -34,6 +36,14 @@ type gojsonVectors struct {
 		Value string `json:"value"`
 		Want  string `json:"want"`
 	} `json:"strings"`
+	CursorFloats []struct {
+		Value float64 `json:"value"`
+		Want  string  `json:"want"`
+	} `json:"cursor_floats"`
+	GoTimes []struct {
+		Value string `json:"value"`
+		Want  string `json:"want"`
+	} `json:"go_times"`
 }
 
 // encode is exactly what internal/api.Server.writeJSON does, minus the newline
@@ -57,8 +67,9 @@ func loadVectors(t *testing.T) gojsonVectors {
 	if err := json.Unmarshal(raw, &v); err != nil {
 		t.Fatalf("parsing %s: %v", vectorsFile, err)
 	}
-	if len(v.Floats) == 0 || len(v.Strings) == 0 {
-		t.Fatalf("%s has no vectors to check", vectorsFile)
+	if len(v.Floats) == 0 || len(v.Strings) == 0 ||
+		len(v.CursorFloats) == 0 || len(v.GoTimes) == 0 {
+		t.Fatalf("%s is missing a whole section of vectors", vectorsFile)
 	}
 	return v
 }
@@ -75,6 +86,36 @@ func TestGoJSONVectors_Strings(t *testing.T) {
 	for _, tc := range loadVectors(t).Strings {
 		if got := encode(t, tc.Value); got != tc.Want {
 			t.Errorf("encode(%q) = %s, want %s", tc.Value, got, tc.Want)
+		}
+	}
+}
+
+// TestGoJSONVectors_CursorFloats pins strconv.FormatFloat(_, 'g', -1, 64), the
+// spelling the sessions list's keyset cursor uses. It is deliberately not the
+// one encoding/json uses — 'g' switches to exponent form at 1e6 rather than
+// 1e21 and pads the exponent instead of trimming it — and a cursor minted by
+// one implementation is parsed by the other, so the bytes have to agree.
+func TestGoJSONVectors_CursorFloats(t *testing.T) {
+	for _, tc := range loadVectors(t).CursorFloats {
+		if got := strconv.FormatFloat(tc.Value, 'g', -1, 64); got != tc.Want {
+			t.Errorf("FormatFloat(%v, 'g') = %s, want %s", tc.Value, got, tc.Want)
+		}
+	}
+}
+
+// TestGoJSONVectors_GoTimes pins the DATETIME round trip. Every timestamp in
+// the database is stored as time.Time.String() by the driver, not as RFC 3339,
+// so a Rust reader has to parse that layout and render the wire form from it.
+func TestGoJSONVectors_GoTimes(t *testing.T) {
+	const layout = "2006-01-02 15:04:05.999999999 -0700 MST"
+	for _, tc := range loadVectors(t).GoTimes {
+		parsed, err := time.Parse(layout, tc.Value)
+		if err != nil {
+			t.Errorf("parsing %q: %v", tc.Value, err)
+			continue
+		}
+		if got := parsed.UTC().Format(time.RFC3339Nano); got != tc.Want {
+			t.Errorf("%q -> %s, want %s", tc.Value, got, tc.Want)
 		}
 	}
 }
