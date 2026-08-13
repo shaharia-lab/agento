@@ -117,6 +117,7 @@ src-tauri/src/
     db.rs        read-only SQLite handle on the file the Go server owns
     settings.rs  user preferences + Claude config dirs a read is scoped to
     pricing.rs   GET /api/pricing/catalog
+    agents.rs    GET /api/agents and /api/agents/{slug}
     sessions/    GET /api/claude-sessions and /facets
     diff.rs      byte comparison + reporting for shadow mode
 
@@ -204,7 +205,11 @@ only a byte comparison catches all four.
 2. Implement it, mirroring the Go source's ordering and grouping exactly —
    including anything hashed, since a fingerprint over rows in a different
    order is a different fingerprint for identical data.
-3. Prove it three ways:
+3. Seed the scratch instance if the endpoint has no data on this machine. It is
+   a *copy*, so writing to it is safe and it is the only way to diff a shape the
+   developer's own install does not contain — the agents list was empty here, so
+   the first "identical" meant nothing until two agents were created through it.
+4. Prove it three ways:
    - a fixture both languages build, compared against a golden file Go wrote
      (`desktop/parity/`, `go test ./desktop/parity/ -update-golden`);
    - the live diff, against real data **and a Go server built from this
@@ -216,7 +221,7 @@ only a byte comparison catches all four.
      ```
    - optionally `AGENTO_DESKTOP_NATIVE=diff npm run app`, which compares every
      real request the UI makes.
-4. Only then leave it claimed.
+5. Only then leave it claimed.
 
 ### Never diff against the installed server
 
@@ -248,7 +253,7 @@ rather than expecting the encoder to notice.
 | Phase | Subsystem | Go source | Notes |
 |---|---|---|---|
 | 1 ✅ | Sidecar + proxy | — | done |
-| 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions` and `/api/claude-sessions/facets` are native and diff clean. Next: `/api/claude-analytics`, then the per-session reads. |
+| 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets` and the agent reads are native and diff clean. Next: `/api/claude-analytics`. |
 | 3 | Storage + tasks | `internal/storage`, `internal/scheduler` | 27 SQLite migrations; reuse the same DB file and schema. Scheduler is cron/interval. |
 | 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. WhatsApp (`whatsmeow`) is the blocker — port it last or keep it in Go. |
 | 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. Hardest, highest risk. |
@@ -448,6 +453,12 @@ The sessions list and its facets followed (`native/sessions/`), diffed across 21
 filter and sort combinations plus four pages of cursor interoperability per
 sort — each page continuing from the cursor **Go** minted, so the two have to
 agree on the cursor's bytes as well as the page's.
+
+The agent reads followed (`native/agents.rs`), which is where the **nil-versus-
+empty** rule bites: Go marshals a nil slice as `null` and an empty one as `[]`,
+and `capabilities.built_in` is stored as whichever the writer produced. Every
+list field there is an `Option` for that reason — a `Vec` defaulting to empty
+would change the wire for every agent.
 
 Nothing else is ported. Every write path, all of analytics and every other read
 still forwards to Go.

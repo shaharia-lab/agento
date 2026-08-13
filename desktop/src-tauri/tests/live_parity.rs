@@ -25,7 +25,7 @@ use std::path::PathBuf;
 
 use agento_lib::native::sessions::page;
 use agento_lib::native::sessions::query::SessionQuery;
-use agento_lib::native::{db, diff, gojson, pricing, settings};
+use agento_lib::native::{agents, db, diff, gojson, pricing, settings};
 
 fn live_url() -> String {
     std::env::var("AGENTO_LIVE_URL").unwrap_or_else(|_| "http://127.0.0.1:8990".to_string())
@@ -207,4 +207,43 @@ async fn a_cursor_from_another_sort_is_refused() {
     let q = SessionQuery::parse(&format!("limit=2&sort=recent&cursor={cursor}")).expect("parse");
     let err = page::list_page(&conn, &data_settings, &q).expect_err("mismatch");
     assert!(err.contains("does not match the requested sort"), "{err}");
+}
+
+/// The agents list and every agent it names, against real stored rows.
+///
+/// The per-agent read is driven from the list rather than from a hardcoded
+/// slug, so the case only tests what the instance actually has — and covers
+/// every capability shape stored there rather than the one a fixture imagines.
+#[tokio::test]
+#[ignore = "needs a running Agento instance and its database"]
+async fn agents_match_the_live_go_responses() {
+    let db_path = live_db();
+
+    let go = fetch("/api/agents").await;
+    let native = gojson::to_vec(&agents::list(&db_path).expect("native list")).expect("encode");
+    assert_identical("agents", &go, &native);
+
+    let listed: serde_json::Value = serde_json::from_slice(&go).expect("json");
+    let slugs: Vec<String> = listed
+        .as_array()
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|a| a["slug"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if slugs.is_empty() {
+        println!("no agents configured; per-agent read not exercised");
+        return;
+    }
+
+    for slug in slugs {
+        let go = fetch(&format!("/api/agents/{slug}")).await;
+        let agent = agents::get(&db_path, &slug)
+            .expect("native get")
+            .expect("agent");
+        let native = gojson::to_vec(&agent).expect("encode");
+        assert_identical(&format!("agent {slug}"), &go, &native);
+    }
 }
