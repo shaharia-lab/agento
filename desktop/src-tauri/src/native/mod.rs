@@ -11,6 +11,7 @@
 //! unported one, and a schema change that outruns the Rust reader degrades to
 //! the behaviour the app had before the port instead of a 500.
 
+pub mod agents;
 pub mod db;
 pub mod diff;
 pub mod gojson;
@@ -63,13 +64,29 @@ pub fn mode() -> Mode {
 /// which chi treats as a different route — falls through to Go and keeps
 /// whatever answer Go gives it.
 pub fn claims(method: &Method, path: &str) -> bool {
+    if method != Method::GET {
+        return false;
+    }
     matches!(
-        (method.as_str(), path),
-        (
-            "GET",
-            "/api/pricing/catalog" | "/api/claude-sessions" | "/api/claude-sessions/facets"
-        )
-    )
+        path,
+        "/api/pricing/catalog"
+            | "/api/claude-sessions"
+            | "/api/claude-sessions/facets"
+            | "/api/agents"
+    ) || agent_slug(path).is_some()
+}
+
+/// The slug in `/api/agents/{slug}`, or `None` for anything else.
+///
+/// One segment only: `/api/agents/{slug}/duplicate` is a different route with a
+/// different method, and a prefix match would swallow it. An empty slug is not
+/// a match either — chi routes `/api/agents/` to nothing, and so does this.
+fn agent_slug(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/agents/")?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest)
 }
 
 /// A claimed request: the parts a native handler needs.
@@ -100,6 +117,11 @@ pub fn serve(req: &Request) -> Result<Answer, String> {
                 probe: None,
             })
         }
+        ("GET", "/api/agents") => Ok(Answer {
+            body: gojson::to_vec(&agents::list(&db_path)?)
+                .map_err(|e| format!("encoding agents: {e}"))?,
+            probe: None,
+        }),
         ("GET", path @ ("/api/claude-sessions" | "/api/claude-sessions/facets")) => {
             let q = sessions::query::SessionQuery::parse(req.query)?;
             let conn = db::open_read_only(&db_path)?;
@@ -116,6 +138,18 @@ pub fn serve(req: &Request) -> Result<Answer, String> {
                 body,
                 probe: sessions::freshness_probe(path, &q),
             })
+        }
+        ("GET", path) if agent_slug(path).is_some() => {
+            let slug = agent_slug(path).unwrap_or_default();
+            match agents::get(&db_path, slug)? {
+                Some(agent) => Ok(Answer {
+                    body: gojson::to_vec(&agent).map_err(|e| format!("encoding agent: {e}"))?,
+                    probe: None,
+                }),
+                // Falling back lets Go answer the 404, rather than this having
+                // to reproduce its body and status.
+                None => Err(format!("agent {slug:?} not found")),
+            }
         }
         _ => Err(format!(
             "{} {} is claimed but has no handler",
@@ -156,6 +190,15 @@ mod tests {
         assert!(!claims(&Method::GET, "/api/claude-sessions/abc-123"));
         assert!(!claims(&Method::GET, "/api/claude-sessions/"));
         assert!(!claims(&Method::GET, "/api/claude-analytics"));
+
+        // Agents: the two reads, and nothing that writes or nests.
+        assert!(claims(&Method::GET, "/api/agents"));
+        assert!(claims(&Method::GET, "/api/agents/my-agent"));
+        assert!(!claims(&Method::POST, "/api/agents"));
+        assert!(!claims(&Method::PUT, "/api/agents/my-agent"));
+        assert!(!claims(&Method::DELETE, "/api/agents/my-agent"));
+        assert!(!claims(&Method::GET, "/api/agents/my-agent/duplicate"));
+        assert!(!claims(&Method::GET, "/api/agents/"));
     }
 
     #[test]
