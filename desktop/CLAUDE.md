@@ -106,9 +106,19 @@ src/
 
 src-tauri/src/
   lib.rs         setup: ports, sidecar, proxy, window, menu
+  paths.rs       data dir + database path; shared by the sidecar and native/
   sidecar.rs     spawn + health-wait + shutdown of the Go server
   proxy.rs       axum reverse proxy; route_is_native() is the porting switch
   menu.rs        native menu → menu://action events
+  native/        ported endpoints (phase 2+)
+    mod.rs       route table, mode switch, response shaping
+    gojson.rs    Go-compatible JSON encoder — read this before porting anything
+    gotime.rs    Go's time.Time on the wire
+    db.rs        read-only SQLite handle on the file the Go server owns
+    pricing.rs   GET /api/pricing/catalog
+    diff.rs      byte comparison + reporting for shadow mode
+
+parity/          cross-language fixtures, asserted by both Go and Rust tests
 ```
 
 ---
@@ -156,26 +166,62 @@ for months.
 ### The seam
 
 `proxy.rs::route_is_native(method, path)` decides per request whether Rust
-answers or the Go sidecar does. Today it returns `false` for everything.
+answers or the Go sidecar does. The route table itself is `native::claims`,
+next to the handlers it selects, so claiming a route and implementing it are
+one edit rather than two files that can disagree.
 
-```rust
-fn route_is_native(method: &Method, path: &str) -> bool {
-    matches!(method, &Method::GET) && path.starts_with("/api/pricing/")
-}
-```
+`AGENTO_DESKTOP_NATIVE` steers the whole seam:
 
-Because both implementations can run at once, a ported route is verifiable:
-replay the same request against Rust and against Go and diff the JSON. Do that
-before flipping a route, and keep the Go path reachable until the diff is
-clean. **Byte-identical JSON is the bar** — the frontend is shared, so any
-field-name or rounding drift is a regression.
+| value | behaviour |
+|---|---|
+| unset / `on` | claimed routes are answered by Rust |
+| `off` | nothing is claimed; everything forwards to Go |
+| `diff` | Go answers, Rust computes alongside, bytes are compared and mismatches logged |
+
+**A native failure is never surfaced.** Handlers return `Result`, and an `Err`
+is logged and forwarded to Go rather than turned into a 500 — a ported route
+can only ever be as broken as an unported one. That is what makes flipping a
+route safe: the worst case is the behaviour the app had before.
+
+Because both implementations run at once, a ported route is verifiable:
+replay the same request against Rust and against Go and diff the JSON.
+**Byte-identical JSON is the bar** — the frontend is shared, so any
+field-name, key-order, escaping or float-spelling drift is a regression, and
+only a byte comparison catches all four.
+
+### How to port a route
+
+1. Read `native/gojson.rs` first. Rust's natural JSON is *not* Go's, and the
+   differences (`3` vs `3.0`, `<` vs `<`, the encoder's trailing newline)
+   are on nearly every response. Encode through `gojson::to_vec`, keep struct
+   fields in the Go struct's declaration order, and use
+   `skip_serializing_if` for `omitempty`.
+2. Implement it, mirroring the Go source's ordering and grouping exactly —
+   including anything hashed, since a fingerprint over rows in a different
+   order is a different fingerprint for identical data.
+3. Prove it three ways:
+   - a fixture both languages build, compared against a golden file Go wrote
+     (`desktop/parity/`, `go test ./desktop/parity/ -update-golden`);
+   - the live diff, against the user's own data:
+     `cargo test --test live_parity -- --ignored --nocapture`;
+   - optionally `AGENTO_DESKTOP_NATIVE=diff npm run app`, which compares every
+     real request the UI makes.
+4. Only then leave it claimed.
+
+### Known encoder divergence
+
+`serde_json` turns NaN and infinity into `null`; Go fails the encode outright
+(after `writeJSON` has already committed a 200, so the client gets a truncated
+body). Nothing read from SQLite can be either — SQLite stores NaN as NULL — but
+a *computed* average or ratio can be, so guard the division at the source
+rather than expecting the encoder to notice.
 
 ### Phase order (easiest → hardest)
 
 | Phase | Subsystem | Go source | Notes |
 |---|---|---|---|
 | 1 ✅ | Sidecar + proxy | — | done |
-| 2 | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. Start here. |
+| 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `GET /api/pricing/catalog` is native and diffs clean. Next: the rest of `/api/pricing/*` reads, then `/api/claude-analytics`. |
 | 3 | Storage + tasks | `internal/storage`, `internal/scheduler` | 27 SQLite migrations; reuse the same DB file and schema. Scheduler is cron/interval. |
 | 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. WhatsApp (`whatsmeow`) is the blocker — port it last or keep it in Go. |
 | 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. Hardest, highest risk. |
@@ -362,6 +408,17 @@ runtime — that is phase 5 of the port, not a packaging change.
 axum proxy streams `/api` through with the `Host` rewrite the Go guard needs.
 All nine views are wired to the real API, typecheck clean, and were verified
 against live data — including a real chat turn streamed end to end over SSE.
+
+**Phase 2 started.** `GET /api/pricing/catalog` is answered by Rust
+(`native/pricing.rs`), reading the same SQLite file the sidecar writes. It is
+byte-identical to Go on the reference instance — 46,681 bytes both sides, 36
+models, matching FNV revision — and on the shared fixture in `parity/`. The
+infrastructure it brought is what the rest of the phase rides on: `gojson.rs`
+(Go's encoder in Rust), `gotime.rs`, `paths.rs`, the read-only DB handle, the
+three-mode seam and the two parity harnesses.
+
+Nothing else is ported. Every write path, all of analytics and every other read
+still forwards to Go.
 
 Verified but not exercised against real data: task/job writes, integration
 OAuth and WhatsApp pairing, and agent CRUD — the reference instance has none of

@@ -84,6 +84,13 @@ jobs:
         working-directory: desktop/src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
+      # Covers the ported endpoints, including the cross-language parity
+      # fixtures in desktop/parity/ that the Go suite asserts from the other
+      # side. The live-instance diff is #[ignore]d and does not run here.
+      - name: Rust tests
+        working-directory: desktop/src-tauri
+        run: cargo test
+
       # A full `tauri build` here would double CI time; compiling the release
       # profile is what actually catches the `cfg(not(debug_assertions))` code
       # that never builds during development.

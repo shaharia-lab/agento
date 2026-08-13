@@ -35,6 +35,15 @@ tauri-plugin-opener = "2.5.4"
 tauri-plugin-updater = "2.0.0-rc.4"
 tauri-plugin-process = "2.0.0-rc.1"
 
+# Ported endpoints (phase 2 onward) read the same SQLite file the Go server
+# owns. `bundled` compiles SQLite from source rather than linking the system
+# library: Windows has none, and every release target builds on its own native
+# runner, so there is no C cross-toolchain to arrange.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Effective-dated rates are timestamps, and their wire format has to match Go's
+# byte for byte. `clock` is only for "which rate is in force now".
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+
 [profile.release]
 codegen-units = 1
 lto = true
