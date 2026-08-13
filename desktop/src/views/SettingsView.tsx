@@ -11,6 +11,13 @@ import { describeError, useResource } from "../lib/hooks";
 import { dateTime, relativeTime, tildePath, usd } from "../lib/format";
 import { Icon, type IconName } from "../lib/icons";
 import { Checkbox, Empty, FormRow, Switch } from "../components/ui";
+import { useHostInfo } from "../lib/host";
+import {
+  UPDATE_PREF_OPTIONS,
+  loadUpdatePref,
+  saveUpdatePref,
+  type UpdatePref,
+} from "../lib/updatePref";
 import type {
   ClaudeSettingsProfile,
   FSEntry,
@@ -528,6 +535,10 @@ function GeneralPane({
         </FormRow>
       </div>
 
+      <div className="divider" />
+
+      <UpdatesSection />
+
       {browsing && (
         <DirBrowser
           start={user.default_working_dir}
@@ -539,6 +550,62 @@ function GeneralPane({
         />
       )}
     </>
+  );
+}
+
+/**
+ * Update behaviour is stored locally, not in user_settings: it describes this
+ * install rather than this user, and a .deb install cannot honour the same
+ * choice an AppImage can.
+ */
+function UpdatesSection() {
+  const host = useHostInfo();
+  const [pref, setPref] = useState<UpdatePref>(loadUpdatePref);
+
+  const change = (value: UpdatePref) => {
+    setPref(value);
+    saveUpdatePref(value);
+  };
+
+  const managed = host !== undefined && !host.can_self_update;
+
+  return (
+    <div className="formsec">
+      <div className="formsec__title">Updates</div>
+
+      {managed ? (
+        <FormRow
+          label="Managed by"
+          help="This copy was installed from a system package, so your package manager owns updates. Agento will still tell you when a new version is out."
+        >
+          <span className="badge">
+            {host?.install_kind === "package" ? "System package manager" : "External"}
+          </span>
+        </FormRow>
+      ) : null}
+
+      <FormRow
+        label="When an update is available"
+        help={UPDATE_PREF_OPTIONS.find((o) => o.value === pref)?.help}
+      >
+        <div className="col" style={{ gap: "var(--sp-3)" }}>
+          {UPDATE_PREF_OPTIONS.filter(
+            // "Install automatically" is not offerable when the app cannot
+            // replace itself; showing it would promise something we can't do.
+            (o) => !(managed && o.value === "auto")
+          ).map((o) => (
+            <label
+              key={o.value}
+              className="row"
+              style={{ gap: "var(--sp-4)", cursor: "default" }}
+            >
+              <Checkbox on={pref === o.value} onChange={() => change(o.value)} />
+              <span>{o.label}</span>
+            </label>
+          ))}
+        </div>
+      </FormRow>
+    </div>
   );
 }
 

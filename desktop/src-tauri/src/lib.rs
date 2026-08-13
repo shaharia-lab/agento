@@ -25,6 +25,12 @@ pub struct HostInfo {
     pub api_base: String,
     /// Resolved path to the Claude Code CLI, or null when it is not installed.
     pub claude_cli: Option<String>,
+    /// Whether this install can replace itself, which decides between offering
+    /// an in-app update and merely announcing one.
+    pub can_self_update: bool,
+    /// How this copy was installed, for the update wording ("appimage",
+    /// "package", "dmg", "installer").
+    pub install_kind: String,
 }
 
 #[tauri::command]
@@ -36,6 +42,38 @@ fn host_info(state: tauri::State<'_, AppPorts>) -> HostInfo {
         controls_on_left: cfg!(target_os = "macos"),
         api_base: format!("http://127.0.0.1:{}", state.proxy),
         claude_cli: find_claude_cli(),
+        can_self_update: install_kind() != "package",
+        install_kind: install_kind().to_string(),
+    }
+}
+
+/// How this copy was installed.
+///
+/// This has to be decided at runtime, not build time: one `tauri build` on
+/// Linux emits the .deb, .rpm and .AppImage from the *same* executable, so a
+/// compile-time flag could not tell them apart. The AppImage runtime is the
+/// only one that identifies itself, via the APPIMAGE variable it exports.
+///
+/// It matters because dpkg and rpm own the files they installed. An updater
+/// that overwrote them would leave the package database describing a version
+/// that is no longer on disk, so those installs are notify-only and update
+/// through apt/dnf like everything else on the system.
+fn install_kind() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var_os("APPIMAGE").is_some() {
+            "appimage"
+        } else {
+            "package"
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "dmg"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "installer"
     }
 }
 
@@ -96,6 +134,9 @@ pub fn run() {
         // own webview there is no address bar to check who is asking, and the
         // provider's session would live in a container we throw away.
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // Relaunching after an update is the only reason this is here.
+        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)

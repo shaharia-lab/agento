@@ -1,40 +1,76 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { useResource } from "../lib/hooks";
+import { useHostInfo } from "../lib/host";
 import type { VersionInfo } from "../lib/types";
 import { Icon } from "../lib/icons";
 import { dateTime } from "../lib/format";
-
-interface UpdateCheck {
-  update_available?: boolean;
-  latest_version?: string;
-  release_url?: string;
-  current_version?: string;
-}
+import { IS_TAURI } from "../lib/tauri";
+import {
+  RELEASES_URL,
+  checkForUpdate,
+  installUpdate,
+  type UpdateState,
+} from "../lib/updater";
+import {
+  UPDATE_PREF_KEY,
+  loadUpdatePref,
+  type UpdatePref,
+} from "../lib/updatePref";
 
 export function AboutView() {
   const version = useResource<VersionInfo>(
     (signal) => api.get<VersionInfo>("/version", signal),
     []
   );
+  const host = useHostInfo();
 
-  const [check, setCheck] = useState<UpdateCheck>();
-  const [checking, setChecking] = useState(false);
-  const [checkError, setCheckError] = useState<string>();
+  const [state, setState] = useState<UpdateState>({ kind: "idle" });
+  const [pref, setPref] = useState<UpdatePref>(loadUpdatePref);
 
-  const checkForUpdates = async () => {
-    setChecking(true);
-    setCheckError(undefined);
+  // Keep in step with the Settings pane, which writes the same key.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === UPDATE_PREF_KEY) setPref(loadUpdatePref());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  const check = useCallback(async () => {
+    setState({ kind: "checking" });
     try {
-      setCheck(await api.get<UpdateCheck>("/version/update-check"));
+      const update = await checkForUpdate();
+      setState(update ? { kind: "available", update } : { kind: "current" });
     } catch (err) {
-      setCheckError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setChecking(false);
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, []);
+
+  // Check once on open unless the user has turned checks off entirely.
+  useEffect(() => {
+    if (!IS_TAURI || pref === "never") return;
+    check();
+  }, [check, pref]);
+
+  const install = async () => {
+    setState({ kind: "downloading", percent: 0 });
+    try {
+      await installUpdate((percent) => setState({ kind: "downloading", percent }));
+      setState({ kind: "installed" });
+    } catch (err) {
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
     }
   };
 
   const open = (url: string) => window.open(url, "_blank", "noopener");
+  const busy = state.kind === "checking" || state.kind === "downloading";
 
   return (
     <div className="panes">
@@ -106,20 +142,13 @@ export function AboutView() {
             and keeping every conversation and job on your own machine.
           </p>
 
-          {check && (
-            <div
-              className={`badge ${
-                check.update_available ? "badge--amber" : "badge--green"
-              }`}
-            >
-              {check.update_available
-                ? `Update available: ${check.latest_version}`
-                : "Up to date"}
-            </div>
-          )}
-          {checkError && (
-            <div className="badge badge--red">{checkError}</div>
-          )}
+          <UpdateStatus
+            state={state}
+            canSelfUpdate={host?.can_self_update ?? false}
+            installKind={host?.install_kind}
+            onInstall={install}
+            onOpenReleases={() => open(RELEASES_URL)}
+          />
 
           <div className="row" style={{ gap: "var(--sp-4)", marginTop: "var(--sp-4)" }}>
             <button
@@ -129,26 +158,20 @@ export function AboutView() {
               <Icon name="star" size={14} />
               Star on GitHub
             </button>
-            <button
-              className="btn btn--lg"
-              onClick={() =>
-                open(
-                  check?.release_url ??
-                    "https://github.com/shaharia-lab/agento/releases"
-                )
-              }
-            >
+            <button className="btn btn--lg" onClick={() => open(RELEASES_URL)}>
               <Icon name="external" size={14} />
               Release notes
             </button>
-            <button
-              className="btn btn--lg btn--primary"
-              onClick={checkForUpdates}
-              disabled={checking}
-            >
-              <Icon name="refresh" size={14} />
-              {checking ? "Checking…" : "Check for updates"}
-            </button>
+            {IS_TAURI && (
+              <button
+                className="btn btn--lg btn--primary"
+                onClick={check}
+                disabled={busy}
+              >
+                <Icon name="refresh" size={14} />
+                {state.kind === "checking" ? "Checking…" : "Check for updates"}
+              </button>
+            )}
           </div>
 
           <div
@@ -162,6 +185,100 @@ export function AboutView() {
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+function UpdateStatus({
+  state,
+  canSelfUpdate,
+  installKind,
+  onInstall,
+  onOpenReleases,
+}: {
+  state: UpdateState;
+  canSelfUpdate: boolean;
+  installKind: string | undefined;
+  onInstall(): void;
+  onOpenReleases(): void;
+}) {
+  if (state.kind === "idle") return null;
+
+  if (state.kind === "checking") {
+    return <span className="badge">Checking for updates…</span>;
+  }
+
+  if (state.kind === "current") {
+    return <span className="badge badge--green">Up to date</span>;
+  }
+
+  if (state.kind === "error") {
+    return (
+      <div className="col" style={{ gap: "var(--sp-3)", alignItems: "center" }}>
+        <span className="badge badge--red">Update check failed</span>
+        <span style={{ fontSize: "var(--text-sm)", color: "var(--fg-tertiary)" }}>
+          {state.message}
+        </span>
+      </div>
+    );
+  }
+
+  if (state.kind === "downloading") {
+    return (
+      <div className="col" style={{ gap: "var(--sp-3)", alignItems: "center", width: 260 }}>
+        <span className="badge badge--accent">
+          {state.percent === null
+            ? "Downloading…"
+            : `Downloading ${Math.round(state.percent)}%`}
+        </span>
+        <div className="meter" style={{ width: "100%", display: "block" }}>
+          <div
+            className="meter__fill"
+            style={{
+              width: state.percent === null ? "100%" : `${state.percent}%`,
+              opacity: state.percent === null ? 0.5 : 1,
+            }}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (state.kind === "installed") {
+    return <span className="badge badge--green">Installed — restarting…</span>;
+  }
+
+  // available
+  return (
+    <div className="col" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
+      <span className="badge badge--amber">
+        Version {state.update.version} is available
+      </span>
+      {canSelfUpdate ? (
+        <button className="btn btn--primary btn--lg" onClick={onInstall}>
+          <Icon name="arrowDown" size={14} />
+          Install and restart
+        </button>
+      ) : (
+        <div className="col" style={{ gap: "var(--sp-3)", alignItems: "center" }}>
+          <span
+            style={{
+              fontSize: "var(--text-sm)",
+              color: "var(--fg-tertiary)",
+              maxWidth: 380,
+              lineHeight: "var(--leading-normal)",
+            }}
+          >
+            {installKind === "package"
+              ? "This copy was installed from a system package, so your package manager owns the update. Run your usual upgrade command, or download the new release directly."
+              : "Download the new release to update."}
+          </span>
+          <button className="btn btn--lg" onClick={onOpenReleases}>
+            <Icon name="external" size={14} />
+            Open releases
+          </button>
+        </div>
+      )}
     </div>
   );
 }

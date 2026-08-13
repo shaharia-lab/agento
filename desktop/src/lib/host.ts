@@ -13,6 +13,10 @@ export interface HostInfo {
   api_base: string;
   /** Path to the Claude Code CLI, or null when it is not installed. */
   claude_cli: string | null;
+  /** Whether this install can replace itself, or only announce updates. */
+  can_self_update: boolean;
+  /** "appimage" | "package" | "dmg" | "installer" */
+  install_kind: string;
 }
 
 /**
