@@ -232,6 +232,7 @@ export default function ClaudeSessionsPage() {
   }, [
     advanced,
     filterProject,
+    filterConfigDir,
     debouncedSearch,
     filterFavorites,
     timePreset,
