@@ -1,0 +1,351 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { TitleBar } from "./components/TitleBar";
+import { Sidebar } from "./components/Sidebar";
+import { StatusBar } from "./components/StatusBar";
+import { CommandPalette, type Command } from "./components/CommandPalette";
+import { ChatsView } from "./views/ChatsView";
+import { AgentsView } from "./views/AgentsView";
+import { IntegrationsView } from "./views/IntegrationsView";
+import { TasksView } from "./views/TasksView";
+import { JobsView } from "./views/JobsView";
+import { SessionsView } from "./views/SessionsView";
+import { AnalyticsView } from "./views/AnalyticsView";
+import { SettingsView } from "./views/SettingsView";
+import { AboutView } from "./views/AboutView";
+import { SECTIONS, VIEW_TITLES, type ViewId } from "./lib/nav";
+import { useAppStats } from "./lib/stats";
+import { useHostInfo } from "./lib/host";
+import { compactNumber, usd } from "./lib/format";
+import { Icon } from "./lib/icons";
+import { MOD, onMenuAction, onWindowFocus } from "./lib/tauri";
+
+type Theme = "light" | "dark" | "system";
+
+export default function App() {
+  const [view, setView] = useState<ViewId>("chats");
+  const [history, setHistory] = useState<ViewId[]>(["chats"]);
+  const [cursor, setCursor] = useState(0);
+
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [focused, setFocused] = useState(true);
+  const [theme, setTheme] = useState<Theme>(
+    () => (localStorage.getItem("agento.theme") as Theme) || "system"
+  );
+
+  /* --- Theme ------------------------------------------------------------- */
+  useEffect(() => {
+    const root = document.documentElement;
+    if (theme === "system") root.removeAttribute("data-theme");
+    else root.setAttribute("data-theme", theme);
+    localStorage.setItem("agento.theme", theme);
+  }, [theme]);
+
+  /* --- Window focus drives the selection highlight ----------------------- */
+  useEffect(() => onWindowFocus(setFocused), []);
+
+  /* --- Navigation with history ------------------------------------------- */
+  const navigate = useCallback(
+    (id: ViewId) => {
+      setView(id);
+      setHistory((h) => {
+        const trimmed = h.slice(0, cursor + 1);
+        if (trimmed[trimmed.length - 1] === id) return trimmed;
+        setCursor(trimmed.length);
+        return [...trimmed, id];
+      });
+    },
+    [cursor]
+  );
+
+  const goBack = useCallback(() => {
+    if (cursor === 0) return;
+    const next = cursor - 1;
+    setCursor(next);
+    setView(history[next]);
+  }, [cursor, history]);
+
+  const goForward = useCallback(() => {
+    if (cursor >= history.length - 1) return;
+    const next = cursor + 1;
+    setCursor(next);
+    setView(history[next]);
+  }, [cursor, history]);
+
+  const stats = useAppStats();
+  const host = useHostInfo();
+
+  // Only warn once the check has actually run — `undefined` means "not yet".
+  const claudeMissing = host !== undefined && host.claude_cli === null;
+  const [claudeNoticeDismissed, setClaudeNoticeDismissed] = useState(false);
+
+  /* --- Commands ---------------------------------------------------------- */
+  const commands = useMemo<Command[]>(() => {
+    const nav: Command[] = SECTIONS.flatMap((s) => s.items).map((item) => ({
+      id: `go:${item.id}`,
+      label: `Go to ${item.label}`,
+      group: "Navigate",
+      icon: item.icon,
+      run: () => navigate(item.id),
+    }));
+
+    return [
+      {
+        id: "new-chat",
+        label: "New Chat",
+        group: "Actions",
+        icon: "plus",
+        shortcut: `${MOD} N`,
+        run: () => navigate("chats"),
+      },
+      {
+        id: "toggle-sidebar",
+        label: "Toggle Sidebar",
+        group: "View",
+        icon: "sidebar",
+        shortcut: `${MOD} B`,
+        run: () => setSidebarOpen((s) => !s),
+      },
+      {
+        id: "toggle-inspector",
+        label: "Toggle Inspector",
+        group: "View",
+        icon: "inspector",
+        shortcut: `${MOD} I`,
+        run: () => setInspectorOpen((s) => !s),
+      },
+      {
+        id: "theme-light",
+        label: "Appearance: Light",
+        group: "View",
+        icon: "palette",
+        run: () => setTheme("light"),
+      },
+      {
+        id: "theme-dark",
+        label: "Appearance: Dark",
+        group: "View",
+        icon: "palette",
+        run: () => setTheme("dark"),
+      },
+      {
+        id: "theme-system",
+        label: "Appearance: Match System",
+        group: "View",
+        icon: "palette",
+        run: () => setTheme("system"),
+      },
+      {
+        id: "settings",
+        label: "Open Settings",
+        group: "Actions",
+        icon: "gear",
+        shortcut: `${MOD} ,`,
+        run: () => navigate("settings"),
+      },
+      ...nav,
+    ];
+  }, [navigate]);
+
+  /* --- Global shortcuts -------------------------------------------------- */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+
+      const k = e.key.toLowerCase();
+      if (k === "k") {
+        e.preventDefault();
+        setPaletteOpen((p) => !p);
+      } else if (k === "b") {
+        e.preventDefault();
+        setSidebarOpen((s) => !s);
+      } else if (k === "i") {
+        e.preventDefault();
+        setInspectorOpen((s) => !s);
+      } else if (k === ",") {
+        e.preventDefault();
+        navigate("settings");
+      } else if (k === "n") {
+        e.preventDefault();
+        navigate("chats");
+      } else if (k === "[") {
+        e.preventDefault();
+        goBack();
+      } else if (k === "]") {
+        e.preventDefault();
+        goForward();
+      } else if (k >= "1" && k <= "7") {
+        e.preventDefault();
+        const flat = SECTIONS.flatMap((s) => s.items);
+        const target = flat[Number(k) - 1];
+        if (target) navigate(target.id);
+      }
+    };
+
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [goBack, goForward, navigate]);
+
+  /* --- Native menu ------------------------------------------------------- */
+  useEffect(
+    () =>
+      onMenuAction((id) => {
+        if (id.startsWith("go:")) {
+          navigate(id.slice(3) as ViewId);
+          return;
+        }
+        switch (id) {
+          case "new_chat":
+            navigate("chats");
+            break;
+          case "new_agent":
+            navigate("agents");
+            break;
+          case "new_task":
+            navigate("tasks");
+            break;
+          case "settings":
+            navigate("settings");
+            break;
+          case "toggle_sidebar":
+            setSidebarOpen((s) => !s);
+            break;
+          case "toggle_inspector":
+            setInspectorOpen((s) => !s);
+            break;
+          case "palette":
+            setPaletteOpen(true);
+            break;
+          case "theme_light":
+            setTheme("light");
+            break;
+          case "theme_dark":
+            setTheme("dark");
+            break;
+          case "theme_system":
+            setTheme("system");
+            break;
+          case "go_back":
+            goBack();
+            break;
+          case "go_forward":
+            goForward();
+            break;
+        }
+      }),
+    [goBack, goForward, navigate]
+  );
+
+  const counts: Partial<Record<ViewId, number>> = {
+    chats: stats.chats,
+    agents: stats.agents,
+    tasks: stats.activeTasks,
+  };
+
+  return (
+    <div className={`window ${focused ? "window--focused" : ""}`}>
+      <TitleBar
+        title={VIEW_TITLES[view]}
+        subtitle={subtitleFor(view, stats)}
+        sidebarOpen={sidebarOpen}
+        onToggleSidebar={() => setSidebarOpen((s) => !s)}
+        onOpenPalette={() => setPaletteOpen(true)}
+        onBack={goBack}
+        onForward={goForward}
+        canBack={cursor > 0}
+        canForward={cursor < history.length - 1}
+      />
+
+      <div className="body">
+        <Sidebar
+          open={sidebarOpen}
+          active={view}
+          onSelect={navigate}
+          counts={counts}
+          onNewChat={() => navigate("chats")}
+        />
+
+        <main className="main">
+          {claudeMissing && !claudeNoticeDismissed && (
+            <div className="banner">
+              <Icon name="alert" size={14} />
+              <span>
+                Claude Code is not installed, so agents cannot run. Install it
+                with <code>npm i -g @anthropic-ai/claude-code</code>, sign in
+                with <code>claude</code>, then restart Agento.
+              </span>
+              <button
+                className="iconbtn"
+                style={{ marginLeft: "auto" }}
+                onClick={() => setClaudeNoticeDismissed(true)}
+                title="Dismiss"
+              >
+                <Icon name="close" size={13} />
+              </button>
+            </div>
+          )}
+          {view === "chats" && <ChatsView inspectorOpen={inspectorOpen} />}
+          {view === "agents" && <AgentsView inspectorOpen={inspectorOpen} />}
+          {view === "integrations" && (
+            <IntegrationsView inspectorOpen={inspectorOpen} />
+          )}
+          {view === "tasks" && <TasksView inspectorOpen={inspectorOpen} />}
+          {view === "jobs" && <JobsView inspectorOpen={inspectorOpen} />}
+          {view === "sessions" && <SessionsView inspectorOpen={inspectorOpen} />}
+          {(view === "tokens" || view === "usage" || view === "insights") && (
+            <AnalyticsView mode={view} inspectorOpen={inspectorOpen} />
+          )}
+          {view === "settings" && (
+            <SettingsView theme={theme} onThemeChange={setTheme} />
+          )}
+          {view === "about" && <AboutView />}
+        </main>
+      </div>
+
+      <StatusBar
+        running={stats.runningJobs}
+        connected={stats.connected}
+        model={stats.model}
+        tokensToday={compactNumber(stats.tokensToday)}
+        costToday={usd(stats.costToday)}
+        inspectorOpen={inspectorOpen}
+        onToggleInspector={() => setInspectorOpen((s) => !s)}
+        theme={theme}
+        onCycleTheme={() =>
+          setTheme((t) =>
+            t === "system" ? "light" : t === "light" ? "dark" : "system"
+          )
+        }
+      />
+
+      {paletteOpen && (
+        <CommandPalette
+          commands={commands}
+          onClose={() => setPaletteOpen(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function subtitleFor(
+  view: ViewId,
+  stats: { chats: number; agents: number; activeTasks: number }
+): string | undefined {
+  switch (view) {
+    case "chats":
+      return plural(stats.chats, "conversation");
+    case "agents":
+      return plural(stats.agents, "agent");
+    case "tasks":
+      return `${stats.activeTasks} active`;
+    default:
+      return undefined;
+  }
+}
+
+function plural(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}

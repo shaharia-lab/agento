@@ -1,0 +1,148 @@
+//! Supervises the bundled `agento` Go server.
+//!
+//! Phase 1 of the migration runs the original Go binary as a Tauri sidecar, so
+//! the desktop app has exactly the backend behaviour the web app has — same
+//! code, so there is nothing to keep in sync. Later phases move endpoints into
+//! `proxy.rs`, which decides per-route whether to answer natively or forward
+//! here.
+
+use std::sync::Mutex;
+use std::time::Duration;
+
+use tauri::{AppHandle, Manager};
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tauri_plugin_shell::ShellExt;
+
+/// Handle to the running Go process, so it can be killed on window close.
+/// Tauri kills sidecars on a clean exit, but not when the app is force-quit,
+/// and an orphaned server would hold the SQLite lock against the next launch.
+pub struct Sidecar {
+    child: Mutex<Option<CommandChild>>,
+}
+
+impl Sidecar {
+    pub fn shutdown(&self) {
+        if let Some(child) = self.child.lock().unwrap().take() {
+            let _ = child.kill();
+        }
+    }
+}
+
+/// Ask the OS for a free TCP port by binding to :0 and immediately releasing.
+///
+/// This races in principle — another process could take the port between the
+/// probe and the server's own bind. In practice the window is microseconds and
+/// the alternative (a fixed port) fails far more often, because a second Agento
+/// instance or a leftover process would collide every time.
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|l| l.local_addr())
+        .map(|a| a.port())
+        .expect("no free TCP port available")
+}
+
+/// Spawn the Go server and block until it answers /health.
+pub async fn spawn(app: &AppHandle, port: u16) -> Result<Sidecar, String> {
+    // Only the debug build reassigns this, to point at the dev data directory.
+    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    let mut sidecar = app
+        .shell()
+        .sidecar("agento-server")
+        .map_err(|e| format!("sidecar binary not found: {e}"))?
+        .args(["web", "--port", &port.to_string(), "--no-browser"])
+        // Bind loopback only. The Go server defaults to this too, but the
+        // desktop app must never widen it, whatever the user's environment says.
+        .env("AGENTO_BIND", "127.0.0.1")
+        .env("PORT", port.to_string());
+
+    // Development runs against its own data directory.
+    //
+    // Two Agento processes sharing ~/.agento share one SQLite file *and* one
+    // scheduler, so a scheduled task would fire twice and the Telegram webhook
+    // would be re-registered out from under whichever instance registered it
+    // last. Release builds keep the default path — there the desktop app is
+    // the user's Agento, not a second copy of it.
+    #[cfg(debug_assertions)]
+    {
+        let dev_dir = dirs_home().map(|h| h.join(".agento-desktop-dev"));
+        if let Some(dir) = dev_dir {
+            sidecar = sidecar.env("AGENTO_DATA_DIR", dir.to_string_lossy().to_string());
+        }
+    }
+
+    let (mut rx, child) = sidecar
+        .spawn()
+        .map_err(|e| format!("failed to start agento server: {e}"))?;
+
+    // Drain the sidecar's output into the Rust log. Without a reader the pipe
+    // fills and the Go process blocks on its own stdout once it has logged
+    // enough — a hang that looks like a backend freeze.
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line) => {
+                    log::debug!("[agento] {}", String::from_utf8_lossy(&line).trim_end());
+                }
+                CommandEvent::Stderr(line) => {
+                    log::warn!("[agento] {}", String::from_utf8_lossy(&line).trim_end());
+                }
+                CommandEvent::Terminated(payload) => {
+                    log::error!("[agento] server exited: {:?}", payload.code);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    wait_until_healthy(port).await?;
+
+    Ok(Sidecar {
+        child: Mutex::new(Some(child)),
+    })
+}
+
+/// Poll /health until the server responds or the budget runs out.
+///
+/// First launch is the slow case: the Go server runs 27 SQLite migrations and
+/// seeds the pricing catalog before it listens, so the budget has to cover a
+/// cold start on a slow disk rather than a warm one.
+async fn wait_until_healthy(port: u16) -> Result<(), String> {
+    const ATTEMPTS: u32 = 150;
+    const INTERVAL: Duration = Duration::from_millis(200);
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{port}/health");
+
+    for attempt in 0..ATTEMPTS {
+        if let Ok(resp) = client
+            .get(&url)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                log::info!("agento server healthy on port {port} after {attempt} attempts");
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(INTERVAL).await;
+    }
+
+    Err(format!(
+        "agento server did not become healthy on port {port} within {}s",
+        ATTEMPTS * INTERVAL.as_millis() as u32 / 1000
+    ))
+}
+
+#[cfg(debug_assertions)]
+fn dirs_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").map(std::path::PathBuf::from)
+}
+
+/// Kill the sidecar held in Tauri's state, if any.
+pub fn shutdown(app: &AppHandle) {
+    if let Some(sidecar) = app.try_state::<Sidecar>() {
+        sidecar.shutdown();
+    }
+}

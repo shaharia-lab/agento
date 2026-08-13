@@ -1,0 +1,269 @@
+/* ============================================================================
+   Analytics view — layout and chart chrome.
+
+   Everything here composes on top of the shared primitives (.card, .tile,
+   .table, .legend, .stackbar). Charts are inline SVG driven by the theme
+   tokens, so no colour is ever hard-coded: a swatch is always a var().
+   ========================================================================== */
+
+/* --- Toolbar controls ---------------------------------------------------- */
+
+/* A real <select> wearing the .select skin. The shared <Select> is decorative,
+   and the project filter has to actually change the request. */
+.a-select {
+  appearance: none;
+  border: 0;
+  outline: 0;
+  font-family: inherit;
+  cursor: default;
+  max-width: 220px;
+  text-overflow: ellipsis;
+}
+.a-select:focus-visible {
+  box-shadow: 0 0 0 0.5px var(--line-strong), var(--focus-ring);
+}
+/* The native control paints its own arrow, so the .select padding for the
+   decorative chevron would leave a gap. */
+.a-select.select--sm {
+  padding-right: var(--sp-6);
+}
+
+.a-date {
+  height: var(--control-h);
+  padding: 0 var(--sp-3);
+  background: var(--bg-raised);
+  border: 0;
+  border-radius: var(--r-md);
+  box-shadow: 0 0 0 0.5px var(--line-strong), var(--shadow-sm);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+}
+.a-date:focus-visible {
+  outline: 0;
+  box-shadow: 0 0 0 0.5px var(--line-strong), var(--focus-ring);
+}
+
+/* --- Dashboard grids ----------------------------------------------------- */
+
+/* .dash is a flex column, and .card sets overflow:hidden — so a card's
+   min-content height is 0 and every card past the first screenful collapses to
+   a 2px sliver. The dashboard scrolls, so nothing here may shrink. */
+.a-dash > * {
+  flex: 0 0 auto;
+}
+
+.a-grid {
+  display: grid;
+  gap: var(--sp-6);
+  align-items: start;
+}
+.a-grid--2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.a-grid--wide {
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+}
+.a-grid--3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 1100px) {
+  .a-grid--2,
+  .a-grid--wide,
+  .a-grid--3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Cards holding a table drop their body padding — the table draws its own. */
+.a-card--table > .card__body {
+  padding: 0;
+  overflow-x: auto;
+}
+
+.a-note {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  line-height: var(--leading-normal);
+}
+
+/* --- Charts -------------------------------------------------------------- */
+
+.a-chart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.a-chart__plot {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+
+/* Axis labels live in HTML rather than in the SVG: the plot is stretched with
+   preserveAspectRatio="none", which would distort any text inside it. */
+.a-chart__axis {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+  font-variant-numeric: tabular-nums;
+}
+.a-chart__axis span {
+  white-space: nowrap;
+}
+
+/* The plot has no drawn y-axis, so the top gridline is captioned instead. */
+.a-chart__scale {
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.a-chart__hit {
+  fill: transparent;
+}
+.a-chart__hit:hover {
+  fill: var(--fg);
+  fill-opacity: 0.06;
+}
+
+/* --- Heatmap ------------------------------------------------------------- */
+
+.a-heat {
+  display: grid;
+  grid-template-columns: 28px repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  align-items: center;
+}
+.a-heat__label {
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+  text-align: right;
+  padding-right: var(--sp-3);
+  white-space: nowrap;
+}
+.a-heat__cell {
+  aspect-ratio: 1;
+  border-radius: 2px;
+  background: var(--bg-active);
+  min-width: 0;
+}
+.a-heat__cell--on {
+  background: var(--accent);
+}
+.a-heat__hours {
+  display: grid;
+  grid-template-columns: 28px repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  margin-top: var(--sp-3);
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+  font-variant-numeric: tabular-nums;
+}
+.a-heat__hour {
+  text-align: center;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* --- Ranked lists (insights) --------------------------------------------- */
+
+.a-rank {
+  display: flex;
+  flex-direction: column;
+}
+.a-rank__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-6);
+}
+.a-rank__row + .a-rank__row {
+  border-top: 0.5px solid var(--line-soft);
+}
+.a-rank__name {
+  font-size: var(--text-sm);
+  min-width: 0;
+}
+.a-rank__bar {
+  height: 3px;
+  border-radius: var(--r-full);
+  background: var(--bg-active);
+  overflow: hidden;
+  margin-top: 4px;
+}
+.a-rank__fill {
+  height: 100%;
+  border-radius: var(--r-full);
+  background: var(--accent);
+}
+.a-rank__count {
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  color: var(--fg-secondary);
+  text-align: right;
+}
+
+/* --- Insight cards ------------------------------------------------------- */
+
+.a-insights {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--sp-5);
+}
+.a-insight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-5);
+  background: var(--bg-list);
+  border: 0.5px solid var(--line);
+  border-radius: var(--r-lg);
+}
+.a-insight__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+.a-insight__amount {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+.a-insight__text {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  line-height: var(--leading-normal);
+}
+
+/* --- States -------------------------------------------------------------- */
+
+.a-state {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  padding: var(--sp-9);
+  font-size: var(--text-base);
+  color: var(--fg-tertiary);
+}
+
+.a-banner--error {
+  background: var(--red-soft);
+}
+
+/* A refresh that keeps the previous data on screen shouldn't blank the page,
+   just dim it. */
+.a-dash--stale {
+  opacity: 0.55;
+  transition: opacity var(--dur-med) var(--ease-out);
+}

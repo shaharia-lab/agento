@@ -1,0 +1,233 @@
+/* ============================================================================
+   Agento Desktop — design tokens
+
+   Calibrated to native desktop conventions rather than web conventions:
+   13px base type, 22–28px control heights, hairline borders, and a source-list
+   sidebar that sits visually *behind* the content panes.
+   ========================================================================== */
+
+:root {
+  /* --- Typography -------------------------------------------------------- */
+  --font-ui: system-ui, -apple-system, "Segoe UI Variable Text", "Segoe UI",
+    Cantarell, Ubuntu, "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Mono",
+    "Roboto Mono", Menlo, Consolas, monospace;
+
+  /* Desktop apps run denser than the web. 13px is the native baseline. */
+  --text-xs: 10.5px;
+  --text-sm: 11.5px;
+  --text-base: 13px;
+  --text-md: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 26px;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.45;
+  --leading-relaxed: 1.6;
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  /* --- Spacing (4px grid, tuned tight) ----------------------------------- */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 10px;
+  --sp-6: 12px;
+  --sp-7: 16px;
+  --sp-8: 20px;
+  --sp-9: 24px;
+  --sp-10: 32px;
+  --sp-11: 40px;
+
+  /* --- Control metrics --------------------------------------------------- */
+  --row-h: 26px;           /* sidebar / list row */
+  --row-h-lg: 56px;        /* chat list row with preview text */
+  --control-h: 24px;       /* buttons, inputs in toolbars */
+  --control-h-lg: 30px;    /* primary form fields */
+  --titlebar-h: 38px;
+  --toolbar-h: 40px;
+  --statusbar-h: 24px;
+  --sidebar-w: 216px;
+  --list-w: 288px;
+  --inspector-w: 268px;
+
+  /* --- Radii ------------------------------------------------------------- */
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 8px;
+  --r-xl: 12px;
+  --r-full: 999px;
+
+  /* --- Motion ------------------------------------------------------------ */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 90ms;
+  --dur-med: 160ms;
+}
+
+/* ============================================================================
+   LIGHT — the default palette lives on bare :root so a page with no theme
+   attribute and no media match still renders fully.
+   ========================================================================== */
+:root {
+  /* Surfaces, back to front */
+  --bg-window: #ececed;        /* the window itself / sidebar ground */
+  --bg-sidebar: #f2f2f3;
+  --bg-content: #ffffff;       /* raised content panes */
+  --bg-list: #fbfbfc;
+  --bg-inset: #f5f5f6;         /* wells, code blocks, inputs */
+  --bg-raised: #ffffff;        /* popovers, menus, cards */
+  --bg-hover: rgba(0, 0, 0, 0.045);
+  --bg-active: rgba(0, 0, 0, 0.075);
+
+  /* Selection — native source lists fill the whole row */
+  --bg-select: #d8dade;
+  --bg-select-focus: var(--accent);
+  --fg-select-focus: #ffffff;
+
+  /* Text */
+  --fg: #1c1c1e;
+  --fg-secondary: #5c5c60;
+  --fg-tertiary: #8a8a8e;
+  --fg-quaternary: #b0b0b4;
+  --fg-inverse: #ffffff;
+
+  /* Lines — hairlines, not web's heavy 1px gray */
+  --line: rgba(0, 0, 0, 0.11);
+  --line-strong: rgba(0, 0, 0, 0.18);
+  --line-soft: rgba(0, 0, 0, 0.06);
+
+  /* Accent */
+  --accent: #2f6feb;
+  --accent-hover: #2860d4;
+  --accent-soft: rgba(47, 111, 235, 0.12);
+  --accent-fg: #ffffff;
+
+  /* Semantic */
+  --green: #1a8a45;
+  --green-soft: rgba(26, 138, 69, 0.13);
+  --amber: #a86400;
+  --amber-soft: rgba(199, 122, 0, 0.15);
+  --red: #c8352c;
+  --red-soft: rgba(200, 53, 44, 0.12);
+  --purple: #7048c4;
+  --purple-soft: rgba(112, 72, 196, 0.13);
+  --teal: #0d7f8f;
+  --teal-soft: rgba(13, 127, 143, 0.13);
+
+  /* Elevation — desktop shadows are tight and low-opacity */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.07);
+  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.09), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.16), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
+  --shadow-pane: 0 0 0 0.5px rgba(0, 0, 0, 0.09), 0 1px 3px rgba(0, 0, 0, 0.05);
+
+  --focus-ring: 0 0 0 3px var(--accent-soft), 0 0 0 1px var(--accent);
+  color-scheme: light;
+}
+
+/* ============================================================================
+   DARK — applied for the explicit dark attribute and for system-dark when the
+   user has not forced light.
+   ========================================================================== */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg-window: #1b1b1d;
+    --bg-sidebar: #202022;
+    --bg-content: #262628;
+    --bg-list: #232325;
+    --bg-inset: #2d2d30;
+    --bg-raised: #313134;
+    --bg-hover: rgba(255, 255, 255, 0.055);
+    --bg-active: rgba(255, 255, 255, 0.09);
+
+    --bg-select: #3a3a3e;
+    --bg-select-focus: var(--accent);
+    --fg-select-focus: #ffffff;
+
+    --fg: #f2f2f4;
+    --fg-secondary: #a8a8ae;
+    --fg-tertiary: #78787e;
+    --fg-quaternary: #58585e;
+    --fg-inverse: #1c1c1e;
+
+    --line: rgba(255, 255, 255, 0.1);
+    --line-strong: rgba(255, 255, 255, 0.17);
+    --line-soft: rgba(255, 255, 255, 0.055);
+
+    --accent: #4c8dff;
+    --accent-hover: #629bff;
+    --accent-soft: rgba(76, 141, 255, 0.2);
+    --accent-fg: #ffffff;
+
+    --green: #3ecf72;
+    --green-soft: rgba(62, 207, 114, 0.16);
+    --amber: #e0a231;
+    --amber-soft: rgba(224, 162, 49, 0.17);
+    --red: #ff6b5f;
+    --red-soft: rgba(255, 107, 95, 0.16);
+    --purple: #a888ff;
+    --purple-soft: rgba(168, 136, 255, 0.17);
+    --teal: #3ec0d4;
+    --teal-soft: rgba(62, 192, 212, 0.16);
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 0 0.5px rgba(255, 255, 255, 0.07);
+    --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 0 0.5px rgba(255, 255, 255, 0.09);
+    --shadow-pane: 0 0 0 0.5px rgba(255, 255, 255, 0.07), 0 1px 3px rgba(0, 0, 0, 0.3);
+
+    color-scheme: dark;
+  }
+}
+
+/* Explicit dark wins in both directions (system-light + user-picked-dark). */
+:root[data-theme="dark"] {
+  --bg-window: #1b1b1d;
+  --bg-sidebar: #202022;
+  --bg-content: #262628;
+  --bg-list: #232325;
+  --bg-inset: #2d2d30;
+  --bg-raised: #313134;
+  --bg-hover: rgba(255, 255, 255, 0.055);
+  --bg-active: rgba(255, 255, 255, 0.09);
+
+  --bg-select: #3a3a3e;
+  --bg-select-focus: var(--accent);
+  --fg-select-focus: #ffffff;
+
+  --fg: #f2f2f4;
+  --fg-secondary: #a8a8ae;
+  --fg-tertiary: #78787e;
+  --fg-quaternary: #58585e;
+  --fg-inverse: #1c1c1e;
+
+  --line: rgba(255, 255, 255, 0.1);
+  --line-strong: rgba(255, 255, 255, 0.17);
+  --line-soft: rgba(255, 255, 255, 0.055);
+
+  --accent: #4c8dff;
+  --accent-hover: #629bff;
+  --accent-soft: rgba(76, 141, 255, 0.2);
+  --accent-fg: #ffffff;
+
+  --green: #3ecf72;
+  --green-soft: rgba(62, 207, 114, 0.16);
+  --amber: #e0a231;
+  --amber-soft: rgba(224, 162, 49, 0.17);
+  --red: #ff6b5f;
+  --red-soft: rgba(255, 107, 95, 0.16);
+  --purple: #a888ff;
+  --purple-soft: rgba(168, 136, 255, 0.17);
+  --teal: #3ec0d4;
+  --teal-soft: rgba(62, 192, 212, 0.16);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 0 0.5px rgba(255, 255, 255, 0.07);
+  --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 0 0.5px rgba(255, 255, 255, 0.09);
+  --shadow-pane: 0 0 0 0.5px rgba(255, 255, 255, 0.07), 0 1px 3px rgba(0, 0, 0, 0.3);
+
+  color-scheme: dark;
+}
