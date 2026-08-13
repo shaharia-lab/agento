@@ -17,6 +17,7 @@ import {
   Clock,
   Play,
   Loader2,
+  RefreshCw,
   Star,
   Activity,
   Search,
@@ -675,6 +676,7 @@ export default function ClaudeSessionDetailPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [continuing, setContinuing] = useState(false)
+  const [refreshing, setRefreshing] = useState(false)
   const [editingTitle, setEditingTitle] = useState(false)
   const [titleDraft, setTitleDraft] = useState('')
   const titleInputRef = useRef<HTMLInputElement>(null)
@@ -694,6 +696,23 @@ export default function ClaudeSessionDetailPage() {
   useEffect(() => {
     load()
   }, [load])
+
+  // Mirrors the sessions list's Refresh: this is not a page reload — it asks the
+  // server to rescan Claude's transcripts (POST /claude-sessions/refresh), then
+  // re-fetches the detail so the freshly-scanned figures (cost, sub-agents) show
+  // alongside the live token counts. The brief pause lets the rescan start.
+  const handleRefresh = async () => {
+    setRefreshing(true)
+    try {
+      await claudeSessionsApi.refresh()
+      await new Promise(r => setTimeout(r, 800))
+      await load()
+    } catch {
+      // Ignore refresh errors — load() surfaces them if the reload itself fails.
+    } finally {
+      setRefreshing(false)
+    }
+  }
 
   const startEditingTitle = () => {
     if (!detail) return
@@ -876,6 +895,15 @@ export default function ClaudeSessionDetailPage() {
               }`}
             >
               <Star className={`h-4 w-4 ${detail.is_favorite ? 'fill-amber-400' : ''}`} />
+            </button>
+            <button
+              onClick={() => handleRefresh()}
+              disabled={refreshing}
+              title="Rescan this session from Claude and reload"
+              className="flex items-center gap-1.5 h-[34px] px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-[13px] text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50 transition-colors"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+              Refresh
             </button>
             <button
               onClick={() => navigate(`/claude-sessions/${id ?? ''}/journey`)}
