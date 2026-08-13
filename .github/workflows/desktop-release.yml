@@ -1,12 +1,13 @@
 name: Desktop Release
 
-# Builds the native installers for the Tauri desktop app.
+# Builds the native installers for the Tauri desktop app and publishes the
+# update manifest the in-app updater reads.
 #
 # Tauri cannot cross-compile its bundles: a .dmg needs macOS, an .msi needs
 # Windows, a .deb needs Linux. So the matrix is one runner per target OS.
 # The Go sidecar is the opposite — it is pure Go (modernc.org/sqlite, no CGO),
 # so each runner cross-compiles its own sidecar with no extra toolchain.
-
+#
 # Releases are cut from the `desktop` branch, not `main`, until the two merge.
 # Tag with `desktop-v0.1.0` on `desktop` to publish.
 on:
@@ -37,6 +38,13 @@ jobs:
           - label: linux-x86_64
             os: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
+          # Native ARM runners are free for public repositories, so this needs
+          # no cross-compilation or emulation.
+          - label: linux-aarch64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          # macos-14 is Apple Silicon, macos-13 is Intel. Both ship: a
+          # universal binary would be simpler but doubles every download.
           - label: macos-aarch64
             os: macos-14
             target: aarch64-apple-darwin
@@ -97,23 +105,25 @@ jobs:
         working-directory: desktop
         run: npx tauri build --target ${{ matrix.target }}
         env:
-          # Signing is opt-in: forks and dry runs build unsigned rather than
-          # failing on absent secrets.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # Signs the updater artifacts. This is Tauri's own minisign key, not
+          # an Apple or Microsoft certificate — it only proves an update came
+          # from us. Without it the build still succeeds but produces no .sig,
+          # and the manifest job will fail loudly rather than ship unverifiable
+          # updates.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
 
-      - name: Collect installers
+      - name: Collect artifacts
         shell: bash
         run: |
           mkdir -p out
           base="desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
-          find "$base" -maxdepth 2 -type f \
+          # Installers users download, plus the updater payloads and their
+          # signatures. macOS updates ship as .app.tar.gz, not as the .dmg.
+          find "$base" -type f \
             \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
-               -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
+               -o -name '*.dmg' -o -name '*-setup.exe' \
+               -o -name '*.app.tar.gz' -o -name '*.sig' \) \
             -exec cp {} out/ \;
           ls -lh out
 
@@ -129,27 +139,66 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
 
-      - name: Publish
+      - name: Build update manifest
+        id: manifest
+        run: |
+          python3 .github/scripts/build-update-manifest.py \
+            --artifacts artifacts \
+            --tag "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --output artifacts/latest.json
+          cat artifacts/latest.json
+
+      # The versioned release: what people download.
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: |
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.AppImage
+            artifacts/*.dmg
+            artifacts/*-setup.exe
+            artifacts/*.app.tar.gz
+            artifacts/*.sig
           draft: true
           generate_release_notes: true
           body: |
             Desktop builds of Agento.
 
-            | Platform | File |
-            |---|---|
-            | Debian / Ubuntu | `.deb` |
-            | Fedora / RHEL | `.rpm` |
-            | Other Linux | `.AppImage` |
-            | macOS | `.dmg` (Apple Silicon and Intel) |
-            | Windows | `.msi` or `-setup.exe` |
+            | Platform | File | Updates |
+            |---|---|---|
+            | Linux (any distro) | `.AppImage` | automatic, in-app |
+            | Debian / Ubuntu | `.deb` | via apt — the app notifies |
+            | Fedora / RHEL | `.rpm` | via dnf — the app notifies |
+            | macOS | `.dmg` (Apple Silicon and Intel) | automatic, in-app |
+            | Windows | `-setup.exe` | automatic, in-app |
 
-            **Requires the Claude Code CLI** to be installed and signed in —
-            the app runs your agents through it. See the README.
+            macOS builds are not notarised. On first launch macOS will say it
+            cannot verify the developer: open **System Settings → Privacy &
+            Security** and choose **Open Anyway**. Installing via Homebrew
+            (`brew install --cask --no-quarantine …`) skips this.
+
+            Requires the Claude Code CLI to be installed and signed in.
+
+      # A fixed tag so the updater has a stable manifest URL. Marked as a
+      # prerelease so it never displaces the real "Latest release" on the repo
+      # page — asset download URLs work for prereleases just the same.
+      - name: Publish update manifest
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/latest.json
+          tag_name: desktop-latest
+          name: Desktop update manifest
+          body: |
+            Machine-readable manifest the Agento desktop updater polls.
+            Not a download — see the `desktop-v*` releases for installers.
+          prerelease: true
+          draft: false

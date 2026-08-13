@@ -3,6 +3,7 @@
   "productName": "Agento",
   "version": "0.1.0",
   "identifier": "com.shaharialab.agento",
+  "mainBinaryName": "agento-desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -70,6 +71,15 @@
       "webviewInstallMode": {
         "type": "offlineInstaller"
       }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVDNUFGN0YxQUNBRUEyMkMKUldRc29xNnM4ZmRhN0YvYkdDWlA2c3IwcTFJNWVlZ3dKR0QrSFI2M0E4ZG5wOWsxUXVDNHI4d3gK",
+      "endpoints": [
+        "https://github.com/shaharia-lab/agento/releases/download/desktop-latest/latest.json"
+      ]
     }
   }
 }

@@ -15,6 +15,7 @@ import { AboutView } from "./views/AboutView";
 import { SECTIONS, VIEW_TITLES, type ViewId } from "./lib/nav";
 import { useAppStats } from "./lib/stats";
 import { useHostInfo } from "./lib/host";
+import { useBackgroundUpdate } from "./lib/useBackgroundUpdate";
 import { compactNumber, usd } from "./lib/format";
 import { Icon } from "./lib/icons";
 import { MOD, onMenuAction, onWindowFocus } from "./lib/tauri";
@@ -75,6 +76,7 @@ export default function App() {
 
   const stats = useAppStats();
   const host = useHostInfo();
+  const update = useBackgroundUpdate(host?.can_self_update);
 
   // Only warn once the check has actually run — `undefined` means "not yet".
   const claudeMissing = host !== undefined && host.claude_cli === null;
@@ -268,6 +270,33 @@ export default function App() {
         />
 
         <main className="main">
+          {update.available && (
+            <div className="banner">
+              <Icon name="sparkle" size={14} />
+              <span>
+                {update.installing
+                  ? `Installing version ${update.available.version} — Agento will restart.`
+                  : `Version ${update.available.version} is available.`}
+              </span>
+              {!update.installing && (
+                <button
+                  className="btn"
+                  style={{ marginLeft: "auto", height: 20 }}
+                  onClick={() => navigate("about")}
+                >
+                  Details
+                </button>
+              )}
+              <button
+                className="iconbtn"
+                style={update.installing ? { marginLeft: "auto" } : undefined}
+                onClick={update.dismiss}
+                title="Dismiss"
+              >
+                <Icon name="close" size={13} />
+              </button>
+            </div>
+          )}
           {claudeMissing && !claudeNoticeDismissed && (
             <div className="banner">
               <Icon name="alert" size={14} />
