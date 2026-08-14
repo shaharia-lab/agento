@@ -67,6 +67,10 @@ const EVENT_CHANNEL_CAPACITY: usize = 32;
 /// CLI, spawned by us.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
+/// How long to wait for stderr to reach end of stream once the process has
+/// exited, before reporting whatever was captured.
+const STDERR_DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How long a terminating process is given before it is killed outright.
 const SIGKILL_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -219,8 +223,14 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
 
     // Capture stderr. Each line goes to the callback when one is set, and every
     // line is buffered for error reporting on an unexpected exit.
+    //
+    // The join handle is kept, not detached: `Child::wait` reaps the process but
+    // does **not** wait for this task, so reading the buffer straight after it
+    // races the last lines out of the pipe — and those lines are the entire
+    // content of the error the user sees. (Go does not have the race: its
+    // `cmd.Wait` waits for the goroutine copying into the buffer.)
     let stderr_buf = Arc::new(StdMutex::new(String::new()));
-    if let Some(stderr) = stderr {
+    let stderr_task = stderr.map(|stderr| {
         let buf = stderr_buf.clone();
         let sink = opts.stderr.clone();
         tokio::spawn(async move {
@@ -234,8 +244,8 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
                     buf.push('\n');
                 }
             }
-        });
-    }
+        })
+    });
 
     let (event_tx, event_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
     // A watch rather than a oneshot: the shutdown task waits on it twice —
@@ -288,6 +298,7 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
         let shared = shared.clone();
         let opts_for_reader = opts.clone();
         let stderr_buf = stderr_buf.clone();
+        let stderr_task = stderr_task;
         tokio::spawn(async move {
             let session_mode = opts_for_reader.session_mode;
             let mut reader = BufReader::new(stdout);
@@ -374,6 +385,17 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
             // Surface stderr on an unexpected exit (bad flag, auth error,
             // crash). Suppressed when the caller asked us to stop.
             let exit = child.wait().await;
+
+            // Drain stderr before reading the buffer, so the message is the
+            // whole of what the CLI said rather than whatever had arrived by
+            // now. Bounded, because the pipe stays open as long as any process
+            // holds it — `claude` spawning a longer-lived grandchild would
+            // otherwise wedge this task, and with it the caller's stream. Go
+            // waits unbounded here and can hang for the same reason.
+            if let Some(task) = stderr_task {
+                let _ = tokio::time::timeout(STDERR_DRAIN_GRACE, task).await;
+            }
+
             let shutting_down = shared.shutdown_fired.load(Ordering::SeqCst);
             if !got_result && !shutting_down {
                 let failed = match &exit {
