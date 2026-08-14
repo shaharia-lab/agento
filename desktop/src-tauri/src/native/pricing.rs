@@ -24,7 +24,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
 
@@ -105,7 +105,7 @@ pub fn catalog(db_path: &Path) -> Result<Catalog, String> {
 ///
 /// The `ORDER BY` is `Snapshot`'s, character for character: SQLite's default
 /// BINARY collation makes it the same total order on both sides.
-fn snapshot(conn: &Connection) -> Result<Vec<Rate>, String> {
+pub fn snapshot(conn: &Connection) -> Result<Vec<Rate>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, provider, model_pattern, match_type, display_name,
@@ -364,6 +364,133 @@ fn read_unpriced(conn: &Connection) -> Result<Vec<String>, String> {
         }
     }
     Ok(seen.into_iter().collect())
+}
+
+// ─── Resolver ─────────────────────────────────────────────────────────────────
+
+/// A rate lookup result. Mirrors `pricing.Resolved`.
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    pub rate: Rate,
+    /// True when the spend predates every row for the matched pattern, or the
+    /// matched rate is itself a best-effort one.
+    #[allow(dead_code)]
+    pub estimated: bool,
+}
+
+/// Answers `(model_id, spent_at)` lookups against a snapshot of the catalog.
+/// Mirrors `internal/pricing/resolver.go`, whose two-stage selection this
+/// reproduces exactly — including that the snapshot's row order breaks ties.
+///
+/// Only the cache-savings insight card needs this: it is the one figure
+/// anywhere that prices a counterfactual (what cache reads would have cost at
+/// input rates) and so cannot read a stored total. Every other cost figure in
+/// analytics is the value the scanner already stored.
+pub struct Resolver {
+    rates: Vec<Rate>,
+}
+
+impl Resolver {
+    /// Build a resolver over the catalog the Go server would have snapshotted.
+    pub fn load(conn: &Connection) -> Result<Self, String> {
+        Ok(Self {
+            rates: snapshot(conn)?,
+        })
+    }
+
+    /// The rate governing `model_id` at `at`, or `None` when no pattern matches
+    /// at all — the caller accounts those tokens as unpriced rather than
+    /// inventing a cost.
+    pub fn resolve(&self, model_id: &str, at: DateTime<Utc>) -> Option<Resolved> {
+        let lower = model_id.trim().to_lowercase();
+        if lower.is_empty() {
+            return None;
+        }
+        let best = self.most_specific(&lower)?;
+        Some(self.effective_at(best, at))
+    }
+
+    /// Exact beats prefix, ties broken by the longer pattern, and a tie on both
+    /// by the earlier row — which is why the snapshot's `ORDER BY` is part of
+    /// this answer rather than an implementation detail.
+    fn most_specific(&self, lower: &str) -> Option<usize> {
+        let (mut best, mut best_exact, mut best_len) = (None, false, -1i64);
+        for (i, rate) in self.rates.iter().enumerate() {
+            if !matches(rate, lower) {
+                continue;
+            }
+            let len = rate.model_pattern.to_lowercase().len() as i64;
+            let exact = rate.match_type == "exact";
+            if exact && (!best_exact || best_len < len) {
+                best = Some(i);
+                best_exact = true;
+                best_len = len;
+            } else if !exact && !best_exact && best_len < len {
+                best = Some(i);
+                best_len = len;
+            }
+        }
+        best
+    }
+
+    /// Among the rows sharing the winning pattern, the newest not after `at` —
+    /// falling back to the earliest, marked estimated, when the spend predates
+    /// every row.
+    fn effective_at(&self, best: usize, at: DateTime<Utc>) -> Resolved {
+        let pattern = self.rates[best].model_pattern.to_lowercase();
+        let match_type = self.rates[best].match_type.clone();
+
+        let mut winner: Option<&Rate> = None;
+        let mut earliest: Option<&Rate> = None;
+        for cand in &self.rates {
+            if cand.model_pattern.to_lowercase() != pattern || cand.match_type != match_type {
+                continue;
+            }
+            // Written as a match rather than `is_none_or`, which this crate's
+            // MSRV predates.
+            let earlier = match earliest {
+                None => true,
+                Some(e) => cand.effective_from.instant() < e.effective_from.instant(),
+            };
+            if earlier {
+                earliest = Some(cand);
+            }
+            if cand.effective_from.instant() > at {
+                continue;
+            }
+            let newer = match winner {
+                None => true,
+                Some(w) => cand.effective_from.instant() > w.effective_from.instant(),
+            };
+            if newer {
+                winner = Some(cand);
+            }
+        }
+        match winner {
+            Some(w) => Resolved {
+                rate: w.clone(),
+                estimated: w.estimated,
+            },
+            // `earliest` is always set: `best` matched, so at least one row
+            // shares its pattern.
+            None => Resolved {
+                rate: earliest
+                    .cloned()
+                    .unwrap_or_else(|| self.rates[best].clone()),
+                estimated: true,
+            },
+        }
+    }
+}
+
+/// Whether a rate's pattern applies to an already-lowercased model ID.
+fn matches(rate: &Rate, lower: &str) -> bool {
+    let pattern = rate.model_pattern.to_lowercase();
+    if rate.match_type == "exact" {
+        lower == pattern
+    } else {
+        lower.starts_with(&pattern)
+    }
 }
 
 #[cfg(test)]

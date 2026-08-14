@@ -23,6 +23,7 @@
 //! never waits for it, exactly as `ListPage` never waits for the rescan it
 //! starts.
 
+pub mod corpus;
 pub mod page;
 pub mod query;
 pub mod summary;
@@ -48,7 +49,11 @@ pub fn freshness_probe(path: &str, q: &query::SessionQuery) -> Option<&'static s
 /// The cheapest request that still runs `ensureFresh`: one page of one row,
 /// unfiltered. The filter is irrelevant — freshness is a property of the
 /// corpus, not of the query.
-const PROBE_PATH: &str = "/api/claude-sessions?limit=1";
+///
+/// Public because every ported corpus read needs it, not just this one:
+/// `Cache.Analytics` calls `ensureFresh` too, so `/api/claude-analytics` fires
+/// the same probe.
+pub const PROBE_PATH: &str = "/api/claude-sessions?limit=1";
 
 #[cfg(test)]
 mod tests {

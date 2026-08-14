@@ -32,6 +32,24 @@ pub struct DataSettings {
     pub indexed_config_dirs: Vec<String>,
 }
 
+impl DataSettings {
+    /// `config.IsIndexedClaudeDir`: whether a cached row's config dir is still
+    /// one Agento reports on.
+    ///
+    /// An **empty** dir is always indexed. Migration 27 defaults the column to
+    /// `''` rather than to the default dir, because a home directory is not a
+    /// SQL constant — so every reader gives empty the meaning "the default
+    /// dir", and treating it as un-indexed would hide the whole pre-migration
+    /// corpus.
+    pub fn is_indexed_config_dir(&self, dir: &str) -> bool {
+        let dir = normalize(dir);
+        if dir.is_empty() {
+            return true;
+        }
+        self.indexed_config_dirs.contains(&dir)
+    }
+}
+
 /// Read the settings row. A missing row, a missing column, or malformed JSON
 /// all degrade to defaults rather than failing the request — exactly as Go's
 /// snapshot starts at its defaults before `ApplyDataSettings` runs.
