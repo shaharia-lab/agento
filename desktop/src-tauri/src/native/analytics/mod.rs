@@ -38,13 +38,38 @@ pub mod report;
 #[cfg(test)]
 mod tests_golden;
 
+use axum::http::Method;
 use rusqlite::Connection;
 
 use self::params::AnalyticsParams;
 use self::report::AnalyticsReport;
 use crate::native::pricing::Resolver;
-use crate::native::sessions::corpus;
+use crate::native::sessions::{self, corpus};
 use crate::native::settings::DataSettings;
+use crate::native::{db, gojson, settings, Answer, Ctx, Endpoint, Request};
+
+/// This module's entry in `native::ENDPOINTS`.
+pub const ENDPOINT: Endpoint = Endpoint {
+    name: "claude analytics",
+    claims,
+    serve,
+};
+
+fn claims(method: &Method, path: &str) -> bool {
+    method == Method::GET && path == "/api/claude-analytics"
+}
+
+fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
+    let conn = db::open_read_only(&ctx.db_path)?;
+    let data_settings = settings::load(&conn);
+    let report = analytics(&conn, &data_settings, req.query)?;
+    Ok(Answer {
+        body: gojson::to_vec(&report).map_err(|e| format!("encoding claude analytics: {e}"))?,
+        // Cache.Analytics runs ensureFresh before it answers, so a dashboard
+        // opened after a rate edit starts the re-cost.
+        probe: Some(sessions::PROBE_PATH),
+    })
+}
 
 /// Build the report for one request's query string.
 pub fn analytics(
