@@ -21,9 +21,11 @@
 //! freshness probe, belongs to phase 3, when storage moves and the sidecar
 //! stops being a writer.
 
+pub mod apply;
 pub mod cost;
 pub mod diff;
 pub mod staleness;
+pub mod store;
 pub mod summary_file;
 pub mod walk;
 
