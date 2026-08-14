@@ -367,7 +367,7 @@ fn empty_report(projects: Vec<String>, loc: Tz, granularity: Granularity) -> Ana
 /// has to agree on this, and the insights summary answering it with its own SQL
 /// predicate over `start_time` is what made two dashboards report different
 /// totals for one window.
-fn filter_sessions<'a>(
+pub fn filter_sessions<'a>(
     sessions: &'a [SessionSummary],
     p: &AnalyticsParams,
 ) -> Vec<&'a SessionSummary> {

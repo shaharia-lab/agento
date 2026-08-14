@@ -367,6 +367,101 @@ fn read_unpriced(conn: &Connection) -> Result<Vec<String>, String> {
     Ok(seen.into_iter().collect())
 }
 
+// ─── Pricing arithmetic ───────────────────────────────────────────────────────
+
+/// Token counts as a rate prices them. Mirrors `pricing.Usage`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PricedUsage {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cache_creation_5m_tokens: i64,
+    pub cache_creation_1h_tokens: i64,
+    pub cache_read_tokens: i64,
+}
+
+impl PricedUsage {
+    /// The count a tiered rate's band is chosen by: **all** input-side tokens,
+    /// fresh plus cache-read plus cache-write.
+    ///
+    /// Alibaba states how cached tokens are billed but not whether they count
+    /// toward the context-length bound. The reading that they do is encoded
+    /// here, in one place, and is the only place to change it.
+    fn tier_input_tokens(&self) -> i64 {
+        self.input_tokens
+            + self.cache_read_tokens
+            + self.cache_creation_5m_tokens
+            + self.cache_creation_1h_tokens
+    }
+}
+
+/// USD cost of one priced unit. Mirrors `pricing.Cost`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Cost {
+    pub input_cost_usd: f64,
+    pub output_cost_usd: f64,
+    pub cache_read_cost_usd: f64,
+    pub cache_write_cost_usd: f64,
+    pub total_cost_usd: f64,
+}
+
+impl Cost {
+    /// Accumulate another cost, component by component, in Go's order.
+    pub fn add(&mut self, o: &Cost) {
+        self.input_cost_usd += o.input_cost_usd;
+        self.output_cost_usd += o.output_cost_usd;
+        self.cache_read_cost_usd += o.cache_read_cost_usd;
+        self.cache_write_cost_usd += o.cache_write_cost_usd;
+        self.total_cost_usd += o.total_cost_usd;
+    }
+}
+
+impl Rate {
+    /// The cost of `u` under this rate.
+    ///
+    /// Bands are **selected, not accumulated** — a provider that tiers by
+    /// context length bills every token of a request at the chosen band's
+    /// rate, so there is no progressive-bracket arithmetic — and a request
+    /// above every declared bound uses the highest band rather than falling
+    /// back to flat or to zero.
+    pub fn price(&self, u: PricedUsage) -> Cost {
+        let band = self.tier_for(u.tier_input_tokens());
+        let mut c = Cost {
+            input_cost_usd: u.input_tokens as f64 / 1_000_000.0 * band.input_per_mtok,
+            output_cost_usd: u.output_tokens as f64 / 1_000_000.0 * band.output_per_mtok,
+            cache_read_cost_usd: u.cache_read_tokens as f64 / 1_000_000.0
+                * band.cache_read_per_mtok,
+            cache_write_cost_usd: u.cache_creation_5m_tokens as f64 / 1_000_000.0
+                * band.cache_write_5m_per_mtok
+                + u.cache_creation_1h_tokens as f64 / 1_000_000.0 * band.cache_write_1h_per_mtok,
+            total_cost_usd: 0.0,
+        };
+        c.total_cost_usd =
+            c.input_cost_usd + c.output_cost_usd + c.cache_read_cost_usd + c.cache_write_cost_usd;
+        c
+    }
+
+    /// The prices governing a request of the given input size. An untiered rate
+    /// is one empty-slice check and nothing else, so the flat path is unchanged.
+    fn tier_for(&self, input_tokens: i64) -> TierRate {
+        let flat = TierRate {
+            max_input_tokens: 0,
+            input_per_mtok: self.input_per_mtok,
+            output_per_mtok: self.output_per_mtok,
+            cache_write_5m_per_mtok: self.cache_write_5m_per_mtok,
+            cache_write_1h_per_mtok: self.cache_write_1h_per_mtok,
+            cache_read_per_mtok: self.cache_read_per_mtok,
+        };
+        let Some(highest) = self.tiers.last() else {
+            return flat;
+        };
+        self.tiers
+            .iter()
+            .find(|t| input_tokens <= t.max_input_tokens)
+            .unwrap_or(highest)
+            .clone()
+    }
+}
+
 // ─── The seam ─────────────────────────────────────────────────────────────────
 
 /// This module's entry in `native::ENDPOINTS`.
