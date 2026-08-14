@@ -116,9 +116,14 @@ src-tauri/src/
     gotime.rs    Go's time.Time on the wire
     db.rs        read-only SQLite handle on the file the Go server owns
     settings.rs  user preferences + Claude config dirs a read is scoped to
-    pricing.rs   GET /api/pricing/catalog
+    pricing.rs   GET /api/pricing/catalog, plus the rate Resolver
     agents.rs    GET /api/agents and /api/agents/{slug}
-    sessions/    GET /api/claude-sessions and /facets
+    sessions/    GET /api/claude-sessions and /facets; corpus.rs loads the lot
+    analytics/   GET /api/claude-analytics
+      buckets.rs Go's time.Date/AddDate and the bucket walks, in the request's tz
+      params.rs  from/to/project/tz, and the granularity the window picks
+      report.rs  every aggregate in the payload
+      cards.rs   the Insights cards
     diff.rs      byte comparison + reporting for shadow mode
 
 scripts/
@@ -211,7 +216,10 @@ only a byte comparison catches all four.
    the first "identical" meant nothing until two agents were created through it.
 4. Prove it three ways:
    - a fixture both languages build, compared against a golden file Go wrote
-     (`desktop/parity/`, `go test ./desktop/parity/ -update-golden`);
+     (`desktop/parity/`, `go test ./desktop/parity/ -update-golden`). Build the
+     fixture with **no ties on any sort key** — see below; a tie makes the
+     golden flaky in Go before Rust ever sees it, which is why
+     `TestAnalyticsFixtureHasNoTiesOnAnySortKey` asserts the property;
    - the live diff, against real data **and a Go server built from this
      checkout**:
      ```bash
@@ -234,6 +242,26 @@ server from the checkout and runs it against a **copy** of `~/.agento` (the
 current source may carry migrations the installed one has never applied, and
 applying them to the real file would upgrade it under a running instance).
 
+### Go itself is not always byte-stable
+
+**Where a Go map feeds an unstable sort, Go's own response differs run to run**,
+and no port can be byte-identical to all of it. Several analytics builders
+collect into a map — random iteration order — and then call `sort.Slice`, which
+is pdqsort and unstable, so two rows tying on the sort key come out in either
+order. It is observable on the reference corpus: `sessions_per_model` has two
+models with one session each, and repeated *uncached* requests swap them. (The
+memo in `analytics_cache.go` hides this: the same query string returns the same
+bytes until the entry is evicted, which takes 21 distinct windows.)
+
+The Rust port collects into a `BTreeMap` and sorts stably, so a tie breaks on the
+model or project name and the response is reproducible — strictly better, but it
+matches only *one* of the orderings Go produces. `fetch_analytics_until` in the
+live parity test therefore re-asks Go, evicting the memo between attempts, and
+reports which attempt matched. A real divergence still fails, with the byte
+offset and surrounding context.
+
+Before assuming a diff is your bug, **ask Go the same question twice**.
+
 ### Known encoder divergence
 
 `serde_json`'s float **parser** is not bit-exact by default — `0.36238800000000004`
@@ -253,7 +281,7 @@ rather than expecting the encoder to notice.
 | Phase | Subsystem | Go source | Notes |
 |---|---|---|---|
 | 1 ✅ | Sidecar + proxy | — | done |
-| 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets` and the agent reads are native and diff clean. Next: `/api/claude-analytics`. |
+| 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics` and the agent reads are native and diff clean. Next: `/api/claude-sessions/insights/summary`. |
 | 3 | Storage + tasks | `internal/storage`, `internal/scheduler` | 27 SQLite migrations; reuse the same DB file and schema. Scheduler is cron/interval. |
 | 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. WhatsApp (`whatsmeow`) is the blocker — port it last or keep it in Go. |
 | 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. Hardest, highest risk. |
@@ -460,8 +488,36 @@ and `capabilities.built_in` is stored as whichever the writer produced. Every
 list field there is an `Option` for that reason — a `Vec` defaulting to empty
 would change the wire for every agent.
 
-Nothing else is ported. Every write path, all of analytics and every other read
-still forwards to Go.
+`GET /api/claude-analytics` followed (`native/analytics/`) — the largest single
+endpoint in the plan, byte-identical across fifteen live cases: every
+granularity band, four timezones, a window spanning the EU spring-forward, an
+empty window, RFC 3339 and bare-date bounds, a project filter and the default
+window. Three things it brought:
+
+- **`buckets.rs` is Go's `time` package, not `chrono`'s.** `go_date` reproduces
+  `time.Date`'s two-lookup zone resolution, so a wall clock the DST gap removed
+  still resolves to a real instant instead of `LocalResult::None`; steps advance
+  the calendar unit, because a local day is 23 or 25 hours across a transition.
+  `chrono-tz` supplies the offsets `time.LoadLocation` would.
+- **An unknown timezone is an error, not a fallback.** Go answers in UTC for a
+  zone it cannot load, but *its* tzdata may know a zone this build's does not,
+  and answering in UTC where Go answers in Asia/Kathmandu is a wrong answer
+  rather than a missing one. Returning `Err` forwards to Go, which gives
+  whichever answer Go would have given.
+- **Accumulation order is part of the answer.** Go's summary sums the four cost
+  categories separately and totals them; the cache-savings card sums `total_usd`
+  per session. On the reference corpus that is $30775.990068829993 against
+  $30775.990068829982 for the same money, and both spellings ship. Float
+  addition is not associative — reproduce the loop, not the arithmetic.
+
+It is deliberately **not memoized**. Go's LRU (`analytics_cache.go`) exists
+because a rebuild is a full corpus load and a dozen walks over it, fired two or
+three times per dashboard open; measured, that rebuild is ~50 ms, and this port
+does the same work. A cache is a second thing to invalidate correctly and
+nothing about the response depends on one.
+
+Nothing else is ported. Every write path, the insights summary, the per-session
+reads and every other read still forward to Go.
 
 **Reading is what keeps the corpus fresh.** `Cache.ensureFresh` runs on every Go
 read path and starts a background rescan when the TTL expires, the pricing

@@ -123,6 +123,19 @@ fn format_go_string(t: &DateTime<Utc>) -> String {
     out
 }
 
+/// Go's zero `time.Time`, which marshals as `0001-01-01T00:00:00Z`.
+///
+/// Reachable on the wire: an aggregate that tracks a maximum timestamp starts
+/// from the zero value, and a group with nothing in it keeps it.
+impl Default for GoTime {
+    fn default() -> Self {
+        let naive = chrono::NaiveDate::from_ymd_opt(1, 1, 1)
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .expect("year 1 is representable");
+        GoTime(naive.and_utc().fixed_offset())
+    }
+}
+
 impl Serialize for GoTime {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         serializer.serialize_str(&format_go_rfc3339(&self.0))
