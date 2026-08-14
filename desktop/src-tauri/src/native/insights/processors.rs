@@ -33,6 +33,7 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 
 use super::transcript::{self, is_turn_start, parse_content_blocks, Event};
+use crate::native::active_time::ActiveTimeTracker;
 use crate::native::pricing::{Cost, PricedUsage, Resolver};
 
 /// Bumped whenever any processor's logic changes; rows below it are reprocessed.
@@ -373,19 +374,22 @@ fn split_mcp_tool_name(name: &str) -> Option<(&str, &str)> {
 /// the idle threshold and is the figure dashboards average.
 /// `claude_working_time_ms` is the subset of that ending at an assistant event.
 struct TimeProfile {
-    idle_gap_ms: i64,
     first: Option<DateTime<Utc>>,
     last: Option<DateTime<Utc>>,
-    stamps: Vec<(DateTime<Utc>, bool)>,
+    /// The capped-gap walk itself lives in `native::active_time`, shared with
+    /// the scanner: the same session's active duration is stored on both
+    /// `session_insights` and `claude_session_cache`, and two implementations
+    /// of one rule is how they would drift — invisibly, since the threshold is
+    /// user-configurable.
+    active: ActiveTimeTracker,
 }
 
 impl TimeProfile {
     fn new(idle_gap_ms: i64) -> Self {
         TimeProfile {
-            idle_gap_ms,
             first: None,
             last: None,
-            stamps: Vec::new(),
+            active: ActiveTimeTracker::new(idle_gap_ms),
         }
     }
 }
@@ -399,50 +403,16 @@ impl Processor for TimeProfile {
         if self.last.is_none_or_later(ts) {
             self.last = Some(ts);
         }
-        self.stamps.push((ts, ev.event_type == "assistant"));
+        self.active.observe(ts, ev.event_type == "assistant");
     }
 
     fn finalize(&self, insight: &mut SessionInsight) {
         if let (Some(first), Some(last)) = (self.first, self.last) {
             insight.total_duration_ms = (last - first).num_milliseconds();
         }
-        let (active, assistant) = self.durations();
+        let (active, assistant) = self.active.durations();
         insight.active_duration_ms = active;
         insight.claude_working_time_ms = assistant;
-    }
-}
-
-impl TimeProfile {
-    /// Sum the capped inter-event gaps.
-    ///
-    /// Sorted first because the pipeline feeds parent-then-sub-agent
-    /// transcripts whose timestamps interleave — which is also what credits a
-    /// 40-minute delegated run instead of collapsing the parent's `Task` wait
-    /// to one capped gap.
-    ///
-    /// A **stable** sort where Go uses `sort.Slice`: with two events sharing a
-    /// timestamp but differing in whether they are assistant events, the gap
-    /// *into* the pair is attributed to whichever sorts first, so Go's result
-    /// is order-dependent there. Stable keeps file order, which is the order
-    /// the events were written in.
-    fn durations(&self) -> (i64, i64) {
-        if self.stamps.len() < 2 {
-            return (0, 0);
-        }
-        let mut sorted = self.stamps.clone();
-        sorted.sort_by_key(|(ts, _)| *ts);
-
-        let (mut active, mut assistant) = (0i64, 0i64);
-        for pair in sorted.windows(2) {
-            let gap = (pair[1].0 - pair[0].0)
-                .num_milliseconds()
-                .min(self.idle_gap_ms);
-            active += gap;
-            if pair[1].1 {
-                assistant += gap;
-            }
-        }
-        (active, assistant)
     }
 }
 

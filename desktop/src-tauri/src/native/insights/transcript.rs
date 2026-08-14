@@ -73,6 +73,90 @@ pub struct Event {
     /// The reasoning-effort tier the turn ran at.
     #[serde(default)]
     pub effort: String,
+
+    // ── Fields the scanner reads (issue #270) ───────────────────────────────
+    //
+    // The insight pipeline ignores all of these; they are here because this is
+    // the one decoder for this file format, and a second struct over the same
+    // lines is how two readers of one format drift apart.
+    /// First non-empty value wins — the session's working directory.
+    #[serde(default)]
+    pub cwd: String,
+    #[serde(default, rename = "gitBranch")]
+    pub git_branch: String,
+
+    /// Title events carry no timestamp and no message — only these fields.
+    /// Claude Code re-appends them on every resume, so last-in-file wins.
+    #[serde(default, rename = "customTitle")]
+    pub custom_title: String,
+    /// Claude Code's own auto-title, distinct from a user rename.
+    #[serde(default, rename = "aiTitle")]
+    pub ai_title: String,
+
+    /// `pr-link`: the pull request a session produced. Unlike the other
+    /// metadata events this one carries a **real** timestamp, which is why
+    /// `bounds_session_time_range` has to exclude it explicitly.
+    #[serde(default, rename = "prNumber")]
+    pub pr_number: i64,
+    #[serde(default, rename = "prUrl")]
+    pub pr_url: String,
+    #[serde(default, rename = "prRepository")]
+    pub pr_repository: String,
+
+    /// Session metadata events. Like the title events these carry no timestamp
+    /// and are re-appended on every resume, so the last one in the file wins.
+    #[serde(default, rename = "agentName")]
+    pub agent_name: String,
+    #[serde(default, rename = "permissionMode")]
+    pub permission_mode: String,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default, rename = "relocatedCwd")]
+    pub relocated_cwd: String,
+    #[serde(default, rename = "worktreeSession")]
+    pub worktree_session: Option<WorktreeSession>,
+
+    /// `system` events: the subtype selects the payload, and only
+    /// `compact_boundary` carries compaction metadata.
+    #[serde(default)]
+    pub subtype: String,
+    #[serde(default, rename = "compactMetadata")]
+    pub compact_metadata: Option<CompactMetadata>,
+}
+
+/// The payload of a `worktree-state` event: the throwaway worktree a session
+/// ran in, plus where it came from.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorktreeSession {
+    #[serde(default, rename = "worktreeName")]
+    pub worktree_name: String,
+    #[serde(default, rename = "worktreeBranch")]
+    pub worktree_branch: String,
+    #[serde(default, rename = "originalBranch")]
+    pub original_branch: String,
+    #[serde(default, rename = "originalCwd")]
+    pub original_cwd: String,
+    #[serde(default, rename = "originalHeadCommit")]
+    pub original_head_commit: String,
+}
+
+/// The payload of a `system`/`compact_boundary` event.
+///
+/// `cumulative_dropped_tokens` is a **running total** across the session, not a
+/// delta — the largest value seen is the session's figure, and summing would
+/// multiply-count it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct CompactMetadata {
+    #[serde(default)]
+    pub trigger: String,
+    #[serde(default, rename = "preTokens")]
+    pub pre_tokens: i64,
+    #[serde(default, rename = "postTokens")]
+    pub post_tokens: i64,
+    #[serde(default, rename = "cumulativeDroppedTokens")]
+    pub cumulative_dropped_tokens: i64,
+    #[serde(default, rename = "durationMs")]
+    pub duration_ms: i64,
 }
 
 /// The message payload of a user or assistant event.
@@ -203,7 +287,11 @@ const INJECTED_ARRAY_TURN_MARKERS: [&str; 2] = [
 
 /// Whether content is one of Claude Code's own injections rather than something
 /// a person typed. Handles both shapes the harness writes.
-fn is_injected_user_content(content: &serde_json::Value) -> bool {
+///
+/// Public because the scanner's *preview* rule is deliberately weaker than
+/// its turn rule: an injected wrapper is not a turn, but it is still a
+/// preview candidate when nothing better ever arrives.
+pub fn is_injected_user_content(content: &serde_json::Value) -> bool {
     if let Some(s) = content.as_str() {
         return has_injected_prefix(s.trim(), &INJECTED_TURN_MARKERS);
     }
@@ -227,15 +315,24 @@ fn is_injected_user_content(content: &serde_json::Value) -> bool {
 /// person could type. Hand-written rather than pulling in a regex crate for one
 /// anchored pattern.
 fn is_skill_preamble(text: &str) -> bool {
+    skill_preamble_path(text).is_some()
+}
+
+/// The `(\S+)` capture of `skillPreamblePattern` — the skill's directory.
+///
+/// The scanner turns it into a readable preview label; the turn predicate
+/// only cares whether it matched at all. One implementation so the two
+/// cannot disagree about what counts as a preamble.
+pub fn skill_preamble_path(text: &str) -> Option<String> {
     const PREFIX: &str = "Base directory for this skill:";
-    let Some(rest) = text.strip_prefix(PREFIX) else {
-        return false;
-    };
+    let rest = text.strip_prefix(PREFIX)?;
     // `\s*` then `\S+`: at least one non-space character must follow.
-    rest.trim_start()
+    let token: String = rest
+        .trim_start()
         .chars()
-        .next()
-        .is_some_and(|c| !c.is_whitespace())
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    (!token.is_empty()).then_some(token)
 }
 
 fn has_injected_prefix(s: &str, markers: &[&str]) -> bool {
@@ -415,5 +512,57 @@ mod tests {
         assert!(parse_content_blocks(&bad).is_empty());
         // …so it is not seen as a carrier, exactly as on the Go side.
         assert!(is_user_turn_content(&bad));
+    }
+}
+
+/// Plain text from a message's content field, which is either a JSON string or
+/// an array of content blocks. Ported from `extractTextContent` in
+/// `scanner.go`; text blocks are joined with newlines and everything else is
+/// dropped.
+pub fn extract_text_content(content: &serde_json::Value) -> String {
+    if let Some(s) = content.as_str() {
+        return s.to_string();
+    }
+    if !content.is_array() {
+        return String::new();
+    }
+    parse_content_blocks(content)
+        .iter()
+        .filter(|b| b.block_type == "text" && !b.text.is_empty())
+        .map(|b| b.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod scanner_shared_tests {
+    use super::*;
+
+    #[test]
+    fn a_skill_preamble_yields_its_path_and_a_bare_colon_does_not() {
+        assert_eq!(
+            skill_preamble_path("Base directory for this skill: /a/b/skills/x"),
+            Some("/a/b/skills/x".to_string())
+        );
+        // Ordinary prose a person could type must not match.
+        assert_eq!(skill_preamble_path("Base directory for this skill:"), None);
+        assert_eq!(
+            skill_preamble_path("Base directory for this skill:   "),
+            None
+        );
+    }
+
+    #[test]
+    fn text_is_extracted_from_both_content_shapes() {
+        assert_eq!(extract_text_content(&serde_json::json!("plain")), "plain");
+        assert_eq!(
+            extract_text_content(&serde_json::json!([
+                {"type": "text", "text": "one"},
+                {"type": "tool_use", "name": "Bash"},
+                {"type": "text", "text": "two"}
+            ])),
+            "one\ntwo"
+        );
+        assert_eq!(extract_text_content(&serde_json::json!({"a": 1})), "");
     }
 }
