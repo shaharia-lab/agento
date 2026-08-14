@@ -339,6 +339,52 @@ async fn a_rejected_initialize_is_reported_as_a_rejection() {
     }
 }
 
+#[tokio::test]
+async fn a_cli_that_dies_during_startup_is_reported_at_once() {
+    if python3().is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("stdin.jsonl");
+    // Exits before acknowledging — an unusable --settings path, a bad flag, a
+    // failed auth all look like this.
+    let exe = fake_cli(
+        dir.path(),
+        &log,
+        r#"    sys.stderr.write("invalid settings file\n")
+    sys.stderr.flush()
+    sys.exit(2)"#,
+    );
+
+    // A generous handshake timeout, so the assertion below is about the process
+    // dying and not about the clock.
+    let opts = Options::new()
+        .with_claude_executable(exe.to_string_lossy().into_owned())
+        .with_init_timeout(Duration::from_secs(60));
+
+    let started = std::time::Instant::now();
+    let err = query_err("hello", opts).await;
+    let elapsed = started.elapsed();
+
+    match err {
+        claude::Error::Initialize { timeout, message } => {
+            assert!(!timeout, "the CLI answered by exiting, it did not go quiet");
+            assert!(
+                message.contains("invalid settings file"),
+                "stderr is the only clue the user gets: {message}"
+            );
+        }
+        other => panic!("expected an initialize failure, got {other}"),
+    }
+    // The pending sender lives in the shared state, not in the reader task, so
+    // nothing else would ever report this — without the race against process
+    // exit the caller waits out the whole timeout for an answer already known.
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "a dead CLI must not cost the full handshake timeout, took {elapsed:?}"
+    );
+}
+
 // ─── A turn end to end ───────────────────────────────────────────────────────
 
 #[tokio::test]

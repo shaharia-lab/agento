@@ -57,8 +57,14 @@ const EVENT_CHANNEL_CAPACITY: usize = 32;
 /// Ceiling on one stdout line. Go sets the same figure on its `bufio.Scanner`
 /// because assistant messages with long content are large; Rust's reader has no
 /// default limit at all, so the cap is imposed deliberately rather than
-/// inherited. A line beyond it is reported as a read error, exactly as Go's
-/// scanner does.
+/// inherited, and an over-long line ends the stream with a read error the way
+/// Go's scanner does.
+///
+/// It bounds what is *accepted*, not what is *allocated*: `read_until` has
+/// already grown its buffer to the newline by the time the length is checked,
+/// where Go's scanner refuses past its fixed buffer. That is a real difference
+/// and would matter against a hostile writer; the writer here is the `claude`
+/// CLI, spawned by us.
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
 /// How long a terminating process is given before it is killed outright.
@@ -232,24 +238,47 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
     }
 
     let (event_tx, event_rx) = mpsc::channel::<Event>(EVENT_CHANNEL_CAPACITY);
-    let (proc_done_tx, proc_done_rx) = oneshot::channel::<()>();
+    // A watch rather than a oneshot: the shutdown task waits on it twice —
+    // once for the shutdown-vs-exit race, once for the SIGTERM grace period —
+    // and a oneshot receiver is consumed by its first await.
+    let (proc_done_tx, proc_done_rx) = tokio::sync::watch::channel(false);
+    // A second view for the handshake wait below, so a process that dies during
+    // startup is reported at once instead of at the timeout.
+    let proc_done_watch = proc_done_rx.clone();
 
     // Graceful shutdown task, mirroring the TypeScript SDK's close():
     //   stdin.end() → SIGTERM → SIGKILL after 5s.
+    //
+    // Both waits are raced against the process actually exiting, and both are
+    // `biased` toward that branch. **Never signal a pid that has already been
+    // reaped**: the reader task calls `wait()`, after which the kernel is free
+    // to hand that pid to an unrelated process, and a stray SIGTERM/SIGKILL
+    // would land on it. Go guards the same two points with `select` on
+    // `procDone` for exactly this reason. `biased` matters because on the
+    // ordinary path — result received, child reaped, stream dropped — both
+    // branches are ready at once and an unbiased select would sometimes pick
+    // the signalling one.
     {
         let shared = shared.clone();
+        let mut proc_done = proc_done_rx;
         tokio::spawn(async move {
             tokio::select! {
+                biased;
+                _ = proc_done.changed() => return,
                 _ = shutdown_rx => {}
-                _ = proc_done_rx => return,
             }
             shared.close_stdin().await;
+
+            if *proc_done.borrow() {
+                return;
+            }
             terminate(pid);
-            tokio::time::sleep(SIGKILL_GRACE).await;
-            // The process reaper races this; killing a pid that has already
-            // been reaped is a no-op error we deliberately ignore, exactly as
-            // Go ignores the error from cmd.Process.Kill().
-            kill(pid);
+
+            tokio::select! {
+                biased;
+                _ = proc_done.changed() => {}
+                _ = tokio::time::sleep(SIGKILL_GRACE) => kill(pid),
+            }
         });
     }
 
@@ -368,7 +397,7 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
                 }
             }
 
-            let _ = proc_done_tx.send(());
+            let _ = proc_done_tx.send(true);
         });
     }
 
@@ -391,35 +420,61 @@ pub(crate) async fn spawn_and_stream(opts: Options, prompt: &str) -> Result<Stre
         return Err(Error::wrap("initialize", e));
     }
 
-    let init_response = match tokio::time::timeout(opts.init_timeout(), init_rx).await {
-        Ok(Ok(response)) => {
-            if !response.success {
+    // The wait races three outcomes rather than Go's two. Go waits only for the
+    // acknowledgement or the timeout, so a CLI that dies during startup — an
+    // unusable `--settings` path, a bad flag, a failed auth — costs the caller
+    // the full 60s before it hears anything, even though the answer was known
+    // in milliseconds. The pending sender lives in `shared`, not in the reader
+    // task, so nothing else would report it either. `biased` puts the
+    // acknowledgement first: a reply already in flight when the process exits
+    // is still a successful handshake.
+    let mut init_proc_done = proc_done_watch;
+    let init_response = {
+        let outcome = tokio::select! {
+            biased;
+            reply = init_rx => Some(reply),
+            _ = init_proc_done.changed() => None,
+            _ = tokio::time::sleep(opts.init_timeout()) => {
                 shared.shutdown();
                 return Err(Error::Initialize {
-                    message: response.error,
+                    message: format!(
+                        "the CLI did not acknowledge initialize within {:?}",
+                        opts.init_timeout()
+                    ),
+                    timeout: true,
+                });
+            }
+        };
+
+        match outcome {
+            Some(Ok(response)) => {
+                if !response.success {
+                    shared.shutdown();
+                    return Err(Error::Initialize {
+                        message: response.error,
+                        timeout: false,
+                    });
+                }
+                decode_initialize_response(response.body.as_deref())
+            }
+            // The process exited, or its sender was dropped, before
+            // acknowledging. Either way the session never started.
+            _ => {
+                shared.shutdown();
+                let stderr = stderr_buf
+                    .lock()
+                    .map(|b| b.trim().to_string())
+                    .unwrap_or_default();
+                let message = if stderr.is_empty() {
+                    "the CLI exited before acknowledging initialize".to_string()
+                } else {
+                    format!("the CLI exited before acknowledging initialize: {stderr}")
+                };
+                return Err(Error::Initialize {
+                    message,
                     timeout: false,
                 });
             }
-            decode_initialize_response(response.body.as_deref())
-        }
-        // The sender was dropped: the reader task ended before acknowledging,
-        // which means the process died during startup.
-        Ok(Err(_)) => {
-            shared.shutdown();
-            return Err(Error::Initialize {
-                message: "the CLI exited before acknowledging initialize".to_string(),
-                timeout: false,
-            });
-        }
-        Err(_) => {
-            shared.shutdown();
-            return Err(Error::Initialize {
-                message: format!(
-                    "the CLI did not acknowledge initialize within {:?}",
-                    opts.init_timeout()
-                ),
-                timeout: true,
-            });
         }
     };
 

@@ -277,7 +277,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 200);
-        let body: serde_json::Value = response.json().await.unwrap();
+        // Parsed by hand rather than via reqwest's `json` feature: this is
+        // the only caller, and the feature would ship in the release binary.
+        let body: serde_json::Value =
+            serde_json::from_str(&response.text().await.unwrap()).unwrap();
         assert_eq!(body["id"], 1);
         assert_eq!(body["result"]["echo"], "tools/list");
 
