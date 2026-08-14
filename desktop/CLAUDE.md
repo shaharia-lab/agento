@@ -120,6 +120,15 @@ src-tauri/src/
     mcp.rs       loopback HTTP host for in-process MCP servers
     lenient.rs   Go's partial-decode semantics, which serde does not have
   native/        ported endpoints (phase 2+)
+    active_time.rs the capped-gap rule, shared by the scanner and the pipeline
+    scanner/     the Claude session scanner (issue #270) — computes, never writes
+      summary_file.rs one transcript → one cache row
+      walk.rs      config dirs, project dirs, claim_session, walked vs protected
+      diff.rs      insert/update/delete, and why a moved path is not a discovery
+      staleness.rs the three markers that force a full re-read
+      store.rs     the cache tables' reads and writes
+      apply.rs     parallel read, batched write
+      cost.rs      per-message pricing
     mod.rs       endpoint registry, mode switch, response shaping
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
@@ -325,6 +334,54 @@ rather than expecting the encoder to notice.
 | 3 | Storage + tasks | `internal/storage`, `internal/scheduler` | 27 SQLite migrations; reuse the same DB file and schema. Scheduler is cron/interval. |
 | 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. WhatsApp (`whatsmeow`) is the blocker — port it last or keep it in Go. |
 | 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. **The SDK underneath it is ported** (`src/claude/`, below); what remains is the runner, the chat service and the SSE handler on top of it. |
+
+### The session scanner (`src-tauri/src/native/scanner/`)
+
+`scanner.go` + `scan_apply.go` in Rust: the walk, the diff, the staleness
+rules, the transcript→row reader and the parallel-read/batched-write apply.
+
+**It computes; it does not write.** `native/db.rs` opens the database
+read-only on purpose, and the Go sidecar runs its own scanner on every read
+path — two processes writing one SQLite file is what that read-only flag
+exists to prevent. So this follows the precedent #263 set for the insight
+processors: port the logic, verify it against the rows Go already wrote.
+Wiring it in, and with it retiring `freshness_probe`, belongs to phase 3.
+
+**Parity is the stored rows, not a response.** Every
+`claude_session_cache` and `claude_subagent_cache` row is recomputed from
+its own transcript and compared field by field — 926 and 920 rows on the
+reference corpus (`tests/parity_scanner.rs`). The row records the mtime it
+was read at, so "has this file grown since" is exact; rows that moved on
+are skipped, because every figure would read as "computed is larger",
+which is also what an over-counting bug looks like.
+
+Four rules that are silent when wrong:
+
+- **"No file on disk" and "we could not look" are different answers.** A
+  config dir that failed to list is left out of `walked` and its rows are
+  excluded from the delete pass; an unmounted drive would otherwise wipe an
+  account's corpus, `custom_title` and `is_favorite` included. A dir that
+  exists but has no `projects/` is the case that looks like a failure and
+  is not. Protection is per project, not per config dir.
+- **A moved path is an update, not a discovery** (#245). Rows key on
+  `(session_id, project_path)` while `file_path` is a non-unique index, so
+  a claim shift legitimately brings the same row under a new path. The diff
+  indexes the cache twice — by path and by row key — to tell them apart.
+- **`custom_title` and `is_favorite` are in neither write list.** They are
+  the only columns here the user typed.
+- **Three markers force a full re-read with nothing changed on disk**:
+  scanner version, pricing revision, idle threshold. The last cannot be a
+  version constant but makes the same rows stale. Invalidation zeroes
+  mtimes rather than dropping rows, so a re-read is an update.
+
+Two encodings to get wrong: `cost_by_model` is JSON but empty stores as
+`""`, and `unpriced_models` is newline-joined rather than JSON, because a
+model id may contain a slash but never a newline.
+
+`transcript.rs` and `native/active_time.rs` are shared with the insight
+pipeline deliberately — `is_user_turn_content` decides `message_count`,
+`turn_count` and the journey's turns at once, and the same session's active
+duration is stored in two tables under a user-configurable threshold.
 
 ### The Claude Agent SDK (`src-tauri/src/claude/`)
 
