@@ -12,6 +12,7 @@
 //! the behaviour the app had before the port instead of a 500.
 
 pub mod agents;
+pub mod analytics;
 pub mod db;
 pub mod diff;
 pub mod gojson;
@@ -72,6 +73,7 @@ pub fn claims(method: &Method, path: &str) -> bool {
         "/api/pricing/catalog"
             | "/api/claude-sessions"
             | "/api/claude-sessions/facets"
+            | "/api/claude-analytics"
             | "/api/agents"
     ) || agent_slug(path).is_some()
 }
@@ -139,6 +141,18 @@ pub fn serve(req: &Request) -> Result<Answer, String> {
                 probe: sessions::freshness_probe(path, &q),
             })
         }
+        ("GET", "/api/claude-analytics") => {
+            let conn = db::open_read_only(&db_path)?;
+            let data_settings = settings::load(&conn);
+            let report = analytics::analytics(&conn, &data_settings, req.query)?;
+            Ok(Answer {
+                body: gojson::to_vec(&report)
+                    .map_err(|e| format!("encoding claude analytics: {e}"))?,
+                // Cache.Analytics runs ensureFresh before it answers, so a
+                // dashboard opened after a rate edit starts the re-cost.
+                probe: Some(sessions::PROBE_PATH),
+            })
+        }
         ("GET", path) if agent_slug(path).is_some() => {
             let slug = agent_slug(path).unwrap_or_default();
             match agents::get(&db_path, slug)? {
@@ -179,6 +193,7 @@ mod tests {
         assert!(claims(&Method::GET, "/api/pricing/catalog"));
         assert!(claims(&Method::GET, "/api/claude-sessions"));
         assert!(claims(&Method::GET, "/api/claude-sessions/facets"));
+        assert!(claims(&Method::GET, "/api/claude-analytics"));
 
         // Writes stay with Go until phase 3 moves the storage layer.
         assert!(!claims(&Method::POST, "/api/pricing/rates"));
@@ -189,7 +204,12 @@ mod tests {
         // must not be swallowed. A session ID is a path segment, not a suffix.
         assert!(!claims(&Method::GET, "/api/claude-sessions/abc-123"));
         assert!(!claims(&Method::GET, "/api/claude-sessions/"));
-        assert!(!claims(&Method::GET, "/api/claude-analytics"));
+        // The insights summary is a different endpoint with different empty-array
+        // conventions, and is not ported yet.
+        assert!(!claims(
+            &Method::GET,
+            "/api/claude-sessions/insights/summary"
+        ));
 
         // Agents: the two reads, and nothing that writes or nests.
         assert!(claims(&Method::GET, "/api/agents"));

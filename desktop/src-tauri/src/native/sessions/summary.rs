@@ -147,6 +147,83 @@ impl SessionSummary {
     pub fn total_active_duration_ms(&self) -> i64 {
         self.active_duration_ms + self.subagent_active_duration_ms
     }
+
+    /// Main-thread plus delegated token usage — what aggregate reporting reads,
+    /// since `usage` deliberately excludes delegated work.
+    pub fn total_usage(&self) -> TokenUsage {
+        TokenUsage {
+            input_tokens: self.usage.input_tokens + self.subagent_usage.input_tokens,
+            output_tokens: self.usage.output_tokens + self.subagent_usage.output_tokens,
+            cache_creation_tokens: self.usage.cache_creation_tokens
+                + self.subagent_usage.cache_creation_tokens,
+            cache_creation_5m_tokens: self.usage.cache_creation_5m_tokens
+                + self.subagent_usage.cache_creation_5m_tokens,
+            cache_creation_1h_tokens: self.usage.cache_creation_1h_tokens
+                + self.subagent_usage.cache_creation_1h_tokens,
+            cache_read_tokens: self.usage.cache_read_tokens + self.subagent_usage.cache_read_tokens,
+        }
+    }
+
+    /// Main-thread plus delegated cost. The component order matters: the
+    /// summary adds the four categories separately and totals them, while the
+    /// cache-savings card sums `total_usd` per session, and the two arrive at
+    /// *different* doubles for the same money. Both are reproduced as written.
+    pub fn total_cost(&self) -> SessionCost {
+        let mut total = self.cost.clone();
+        total.add(&self.subagent_cost);
+        total
+    }
+
+    /// The session's whole cost keyed by the model that spent it — main-thread
+    /// and delegated together, which is the attribution rule delegated tokens
+    /// already follow.
+    pub fn total_cost_by_model(&self) -> BTreeMap<String, SessionCost> {
+        let mut out: BTreeMap<String, SessionCost> = BTreeMap::new();
+        for breakdown in [&self.cost_by_model, &self.subagent_cost_by_model] {
+            for (model, cost) in breakdown {
+                out.entry(model.clone()).or_default().add(cost);
+            }
+        }
+        out
+    }
+
+    /// The token counterpart. Main-thread usage is attributed to the session's
+    /// own model; delegated usage to each sub-agent's. A session that delegated
+    /// but has no per-model breakdown loaded falls back to the parent's model
+    /// rather than dropping the tokens.
+    pub fn total_usage_by_model(&self) -> BTreeMap<String, TokenUsage> {
+        let mut out: BTreeMap<String, TokenUsage> = BTreeMap::new();
+        let mut add = |model: &str, u: &TokenUsage| {
+            let entry = out.entry(display_model(model)).or_default();
+            entry.input_tokens += u.input_tokens;
+            entry.output_tokens += u.output_tokens;
+            entry.cache_creation_tokens += u.cache_creation_tokens;
+            entry.cache_creation_5m_tokens += u.cache_creation_5m_tokens;
+            entry.cache_creation_1h_tokens += u.cache_creation_1h_tokens;
+            entry.cache_read_tokens += u.cache_read_tokens;
+        };
+
+        add(&self.model, &self.usage);
+        if !self.subagent_usage_by_model.is_empty() {
+            for (model, u) in &self.subagent_usage_by_model {
+                add(model, u);
+            }
+            return out;
+        }
+        add(&self.model, &self.subagent_usage);
+        out
+    }
+}
+
+impl SessionCost {
+    /// Accumulate another breakdown, component by component, in Go's order.
+    pub fn add(&mut self, o: &SessionCost) {
+        self.input_usd += o.input_usd;
+        self.output_usd += o.output_usd;
+        self.cache_read_usd += o.cache_read_usd;
+        self.cache_write_usd += o.cache_write_usd;
+        self.total_usd += o.total_usd;
+    }
 }
 
 /// The projection every reader of a session summary shares, so the list, the
