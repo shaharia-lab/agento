@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use axum::http::Method;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
@@ -115,6 +116,50 @@ fn scan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
         })?,
         claude_config_dir: row.get(8)?,
     })
+}
+
+// ─── The seam ─────────────────────────────────────────────────────────────────
+
+/// This module's entry in `native::ENDPOINTS`. Covers both reads, because the
+/// list and the per-agent read share this file and a registry entry is per
+/// area, not per path.
+pub const ENDPOINT: super::Endpoint = super::Endpoint {
+    name: "agents",
+    claims,
+    serve,
+};
+
+fn claims(method: &Method, path: &str) -> bool {
+    method == Method::GET && (path == "/api/agents" || slug_of(path).is_some())
+}
+
+/// The slug in `/api/agents/{slug}`, or `None` for anything else.
+///
+/// One segment only: `/api/agents/{slug}/duplicate` is a different route with a
+/// different method, and a prefix match would swallow it. An empty slug is not
+/// a match either — chi routes `/api/agents/` to nothing, and so does this.
+fn slug_of(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/agents/")?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    Some(rest)
+}
+
+fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
+    let body = match slug_of(req.path) {
+        None => super::gojson::to_vec(&list(&ctx.db_path)?)
+            .map_err(|e| format!("encoding agents: {e}"))?,
+        Some(slug) => match get(&ctx.db_path, slug)? {
+            Some(agent) => {
+                super::gojson::to_vec(&agent).map_err(|e| format!("encoding agent: {e}"))?
+            }
+            // Falling back lets Go answer the 404, rather than this having to
+            // reproduce its body and status.
+            None => return Err(format!("agent {slug:?} not found")),
+        },
+    };
+    Ok(super::Answer { body, probe: None })
 }
 
 #[cfg(test)]

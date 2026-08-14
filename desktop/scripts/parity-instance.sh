@@ -19,13 +19,36 @@
 #
 # Typical use:
 #   eval "$(./scripts/parity-instance.sh start)"
-#   (cd src-tauri && cargo test --test live_parity -- --ignored --nocapture)
+#   (cd src-tauri && cargo test --test parity_analytics -- --ignored --nocapture)
 #   ./scripts/parity-instance.sh stop
+#
+# CONCURRENCY. Several ports run at once, so the scratch state is per checkout:
+# the work dir defaults to a name derived from this script's own repo root, and
+# `start` kills only the server recorded in *that* dir. Two agents in separate
+# worktrees therefore need no coordination at all. Two agents sharing one
+# checkout still would, so set AGENTO_PARITY_DIR (or AGENTO_PARITY_WORKER for
+# just a suffix) to separate them. Every invocation echoes the dir it used, and
+# `start` exports AGENTO_PARITY_DIR alongside the URL so a later `stop` in
+# another shell finds the same instance even if the default changes.
+#
+# The port is already per instance — it is asked of the OS, not hardcoded — and
+# recorded in the work dir, so `url` can report a running instance without
+# restarting it.
 
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-WORK_DIR="${AGENTO_PARITY_DIR:-${TMPDIR:-/tmp}/agento-parity}"
+
+# A stable fingerprint of the checkout, so one worktree's scratch database can
+# never be clobbered by another's. cksum rather than md5sum/shasum: it is POSIX
+# and present on both macOS and Linux, and this only has to be distinct, not
+# cryptographic.
+checkout_id() {
+  printf '%s' "$REPO_ROOT" | cksum | cut -d' ' -f1
+}
+
+WORKER_SUFFIX="${AGENTO_PARITY_WORKER:+-$AGENTO_PARITY_WORKER}"
+WORK_DIR="${AGENTO_PARITY_DIR:-${TMPDIR:-/tmp}/agento-parity-$(checkout_id)$WORKER_SUFFIX}"
 DATA_DIR="$WORK_DIR/data"
 BIN="$WORK_DIR/agento-parity"
 PID_FILE="$WORK_DIR/server.pid"
@@ -40,8 +63,11 @@ free_port() {
 start() {
   stop >/dev/null 2>&1 || true
   mkdir -p "$DATA_DIR"
+  echo "parity work dir: $WORK_DIR" >&2
 
-  # Build from the checkout, not from PATH.
+  # Build from the checkout, not from PATH. The output lives in this instance's
+  # own work dir, so a concurrent worker's build cannot replace the binary
+  # underneath a running server.
   (cd "$REPO_ROOT" && go build -o "$BIN" .) >&2
 
   # A copy, so the scratch instance's migrations and scans cannot touch the
@@ -85,10 +111,27 @@ start() {
     sleep 1
   done
 
+  # AGENTO_PARITY_DIR travels with the URL so a `stop` from another shell — or
+  # after the default changes — targets this instance rather than guessing.
   echo "export AGENTO_LIVE_URL=http://127.0.0.1:$port"
   echo "export AGENTO_LIVE_DB=$DATA_DIR/agento.db"
+  echo "export AGENTO_PARITY_DIR=$WORK_DIR"
 }
 
+# Report a running instance without disturbing it, for a shell that lost the
+# exports. Silent and non-zero when nothing is running here.
+url() {
+  [ -f "$PORT_FILE" ] || return 1
+  local port
+  port="$(cat "$PORT_FILE")"
+  curl -fsS "http://127.0.0.1:$port/health" >/dev/null 2>&1 || return 1
+  echo "export AGENTO_LIVE_URL=http://127.0.0.1:$port"
+  echo "export AGENTO_LIVE_DB=$DATA_DIR/agento.db"
+  echo "export AGENTO_PARITY_DIR=$WORK_DIR"
+}
+
+# Only ever this work dir's server: a `pkill agento-parity` would take a
+# concurrent worker's instance down with it.
 stop() {
   if [ -f "$PID_FILE" ]; then
     kill "$(cat "$PID_FILE")" 2>/dev/null || true
@@ -100,8 +143,9 @@ stop() {
 case "${1:-start}" in
 start) start ;;
 stop) stop ;;
+url) url ;;
 *)
-  echo "usage: $0 [start|stop]" >&2
+  echo "usage: $0 [start|stop|url]" >&2
   exit 2
   ;;
 esac

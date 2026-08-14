@@ -24,6 +24,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
+use axum::http::Method;
 use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use serde::Serialize;
@@ -364,6 +365,28 @@ fn read_unpriced(conn: &Connection) -> Result<Vec<String>, String> {
         }
     }
     Ok(seen.into_iter().collect())
+}
+
+// ─── The seam ─────────────────────────────────────────────────────────────────
+
+/// This module's entry in `native::ENDPOINTS`.
+pub const ENDPOINT: super::Endpoint = super::Endpoint {
+    name: "pricing",
+    claims,
+    serve,
+};
+
+fn claims(method: &Method, path: &str) -> bool {
+    method == Method::GET && path == "/api/pricing/catalog"
+}
+
+fn serve(ctx: &super::Ctx, _req: &super::Request) -> Result<super::Answer, String> {
+    let catalog = catalog(&ctx.db_path)?;
+    Ok(super::Answer {
+        body: super::gojson::to_vec(&catalog)
+            .map_err(|e| format!("encoding pricing catalog: {e}"))?,
+        probe: None,
+    })
 }
 
 // ─── Resolver ─────────────────────────────────────────────────────────────────
