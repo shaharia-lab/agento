@@ -30,7 +30,20 @@ pub struct DataSettings {
     /// load-bearing on the Go side (it decides which dir owns a session present
     /// in two); here it only has to contain the same set.
     pub indexed_config_dirs: Vec<String>,
+    /// The user's definition of "still working", in milliseconds — the largest
+    /// gap between two consecutive transcript events that still counts as
+    /// continuous work.
+    ///
+    /// Every consumer of "how long did this actually run" shares this one
+    /// value — the scanner, the insight processors and the journey builder — so
+    /// no two pages can disagree about what active time means.
+    pub idle_gap_ms: i64,
 }
+
+/// Ten minutes: long enough to keep reading a long reply or manually testing a
+/// change inside a sitting, short enough to exclude everything a person would
+/// not call working time. `config.DefaultIdleGapThresholdMinutes`.
+pub const DEFAULT_IDLE_GAP_MS: i64 = 10 * 60 * 1000;
 
 impl DataSettings {
     /// `config.IsIndexedClaudeDir`: whether a cached row's config dir is still
@@ -54,14 +67,15 @@ impl DataSettings {
 /// all degrade to defaults rather than failing the request — exactly as Go's
 /// snapshot starts at its defaults before `ApplyDataSettings` runs.
 pub fn load(conn: &Connection) -> DataSettings {
-    let row: Option<(String, String, String)> = conn
+    let row: Option<(String, String, String, i64)> = conn
         .query_row(
             "SELECT COALESCE(hidden_projects, ''),
                     COALESCE(claude_config_dir, ''),
-                    COALESCE(claude_config_dirs, '')
+                    COALESCE(claude_config_dirs, ''),
+                    COALESCE(idle_gap_threshold_minutes, 0)
              FROM user_settings WHERE id = 1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .unwrap_or_else(|e| {
@@ -69,10 +83,17 @@ pub fn load(conn: &Connection) -> DataSettings {
             None
         });
 
-    let (hidden_raw, run_override, extra_raw) = row.unwrap_or_default();
+    let (hidden_raw, run_override, extra_raw, idle_minutes) = row.unwrap_or_default();
     DataSettings {
         hidden_projects: decode_string_array(&hidden_raw),
         indexed_config_dirs: claude_config_dirs(&run_override, &decode_string_array(&extra_raw)),
+        // Zero is "unset", not "no idle time at all": the column defaults to 0
+        // and the setting is bounded to 1–240 minutes when the user does set it.
+        idle_gap_ms: if idle_minutes > 0 {
+            idle_minutes * 60 * 1000
+        } else {
+            DEFAULT_IDLE_GAP_MS
+        },
     }
 }
 

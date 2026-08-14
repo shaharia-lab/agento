@@ -17,6 +17,7 @@ pub mod db;
 pub mod diff;
 pub mod gojson;
 pub mod gotime;
+pub mod insights;
 pub mod pricing;
 pub mod sessions;
 pub mod settings;
@@ -111,6 +112,7 @@ const ENDPOINTS: &[Endpoint] = &[
     agents::ENDPOINT,
     sessions::ENDPOINT,
     analytics::ENDPOINT,
+    insights::ENDPOINT,
 ];
 
 /// Whether this request is answered by ported Rust code.
@@ -170,12 +172,12 @@ mod tests {
         // must not be swallowed. A session ID is a path segment, not a suffix.
         assert!(!claims(&Method::GET, "/api/claude-sessions/abc-123"));
         assert!(!claims(&Method::GET, "/api/claude-sessions/"));
-        // The insights summary is a different endpoint with different empty-array
-        // conventions, and is not ported yet.
-        assert!(!claims(
+        assert!(claims(
             &Method::GET,
             "/api/claude-sessions/insights/summary"
         ));
+        // The per-session insight record is a different route and stays with Go.
+        assert!(!claims(&Method::GET, "/api/claude-sessions/abc/insights"));
 
         // Agents: the two reads, and nothing that writes or nests.
         assert!(claims(&Method::GET, "/api/agents"));
@@ -207,6 +209,7 @@ mod tests {
             "/api/claude-sessions",
             "/api/claude-sessions/facets",
             "/api/claude-analytics",
+            "/api/claude-sessions/insights/summary",
             "/api/agents",
             "/api/agents/my-agent",
         ];
@@ -229,6 +232,7 @@ mod tests {
             "/api/claude-sessions",
             "/api/claude-sessions/facets",
             "/api/claude-analytics",
+            "/api/claude-sessions/insights/summary",
             "/api/agents",
             "/api/agents/my-agent",
         ];

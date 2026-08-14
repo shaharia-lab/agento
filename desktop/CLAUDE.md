@@ -124,6 +124,10 @@ src-tauri/src/
       params.rs  from/to/project/tz, and the granularity the window picks
       report.rs  every aggregate in the payload
       cards.rs   the Insights cards
+    insights/    GET /api/claude-sessions/insights/summary
+      transcript.rs the session JSONL, decoded — the scanner port builds on this
+      processors.rs the nine passes that produce a session_insights row
+      summary.rs    the aggregate the endpoint answers with
     diff.rs      byte comparison + reporting for shadow mode
 
 scripts/
@@ -308,7 +312,7 @@ rather than expecting the encoder to notice.
 | Phase | Subsystem | Go source | Notes |
 |---|---|---|---|
 | 1 ✅ | Sidecar + proxy | — | done |
-| 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics` and the agent reads are native and diff clean. Next: `/api/claude-sessions/insights/summary`. |
+| 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
 | 3 | Storage + tasks | `internal/storage`, `internal/scheduler` | 27 SQLite migrations; reuse the same DB file and schema. Scheduler is cron/interval. |
 | 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. WhatsApp (`whatsmeow`) is the blocker — port it last or keep it in Go. |
 | 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. Hardest, highest risk. |
@@ -366,8 +370,14 @@ rather than expecting the encoder to notice.
 - **Go `omitempty` drops zero values** the JSON otherwise implies are always
   present (`InsightCard.percent/count/model`, `ProjectBreakdown.folded_projects`,
   `SessionFacets.config_dirs`). Default with `?? 0`; do not trust the type.
-- **Empty arrays are inconsistent**: `/claude-analytics` sends `[]`, but
-  `/claude-sessions/insights/summary` sends `null` for every `top_*` list.
+- **`null` vs `[]` is a real distinction, but not the one this file used to
+  claim.** The insights summary sends `[]` for every empty `top_*` list, on both
+  paths that reach the zero case — `sortedToolCounts` builds with
+  `make([]toolCount, 0, len)` and the zero branch returns explicit empty slices,
+  so no code path yields a nil one. What *does* send `null` is the **analytics**
+  report's zero-valued summary, whose `unknown_pricing_models` is a genuine nil
+  slice. Verified against a Go server built from the checkout; a port written to
+  the old claim would have been wrong.
 - **`summary.total_tokens` is conversation-only** (input + output). Cache read
   is a separate, much larger number — do not add them for a "total".
 - Every ranked insights entry keys its label **`tool`**, whatever the list is of.
@@ -543,8 +553,37 @@ three times per dashboard open; measured, that rebuild is ~50 ms, and this port
 does the same work. A cache is a second thing to invalidate correctly and
 nothing about the response depends on one.
 
-Nothing else is ported. Every write path, the insights summary, the per-session
-reads and every other read still forward to Go.
+`GET /api/claude-sessions/insights/summary` followed, together with the nine
+insight processors behind the rows it reads (`native/insights/`). Two things
+about that port are worth knowing:
+
+**The processors write nothing, deliberately.** On the Go side
+`insight_worker.go` is a background writer, and porting the *upsert* now would
+put two processes on one SQLite file — the sidecar's worker and ours — racing
+over the same rows. So they are ported as what they are: a function from a
+transcript to a `SessionInsight`. That is the whole of the logic, and it is
+verifiable without writing anything. The worker is a loop around it when the
+storage layer moves.
+
+**Their parity bar is the stored rows, not a response.** Every
+`session_insights` row at the current processor version is recomputed from its
+own transcript and compared field by field — ~900 sessions and ~1 GB of real
+JSONL on the reference corpus, which is a far stronger check than any fixture.
+It found nothing wrong with the port and two things about the *method*: a
+transcript that has grown since its row was written makes every figure read
+"computed is larger" (exactly what an over-counting bug looks like), so rows are
+anchored on `session_insights.scanned_at`; and `claude_working_time_ms` is not
+reproducible at all where two events share a timestamp and differ on whether
+they are assistant events, because the gap leading into the tied pair is
+credited by an unstable sort's order. Three sessions are in that state.
+
+`native/insights/transcript.rs` is deliberately about the *file format* rather
+than about insights: the scanner port (issue #270) needs the same decoder and
+the same `isUserTurnContent` predicate, and two readers of one format is exactly
+how `message_count` and `turn_count` would drift apart.
+
+Nothing else is ported. Every write path, the per-session reads and every other
+read still forward to Go.
 
 **Reading is what keeps the corpus fresh.** `Cache.ensureFresh` runs on every Go
 read path and starts a background rescan when the TTL expires, the pricing
