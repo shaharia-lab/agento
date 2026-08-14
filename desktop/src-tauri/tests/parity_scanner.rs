@@ -28,7 +28,7 @@ use std::path::Path;
 
 use agento_lib::native::gotime::GoTime;
 use agento_lib::native::pricing;
-use agento_lib::native::scanner::summary_file::read_session_summary;
+use agento_lib::native::scanner::summary_file::{read_session_summary, read_subagent_summary};
 use agento_lib::native::scanner::CURRENT_SCANNER_VERSION;
 use agento_lib::native::sessions::summary::{SessionCost, SessionSummary};
 use agento_lib::native::{db, settings};
@@ -407,4 +407,231 @@ fn close_enough(a: f64, b: f64) -> bool {
     }
     let scale = a.abs().max(b.abs()).max(1e-9);
     (a - b).abs() / scale < 1e-9
+}
+
+/// One stored sub-agent row, in the columns `upsertSubagentRow` writes.
+struct StoredSubagent {
+    parent_session_id: String,
+    agent_id: String,
+    file_path: String,
+    file_mtime: String,
+    summary: SessionSummary,
+}
+
+#[test]
+#[ignore = "needs a running Agento instance and its database"]
+fn every_stored_subagent_row_recomputes_to_the_same_values() {
+    let db_path = live_db();
+    let conn = db::open_read_only(&db_path).expect("open database");
+
+    let (stored_version, stored_threshold): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(scanner_version, 0), COALESCE(idle_threshold_ms, 0)
+             FROM claude_cache_metadata WHERE id = 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("cache metadata");
+    assert_eq!(
+        stored_version, CURRENT_SCANNER_VERSION,
+        "the corpus was scanned by a different scanner version; rescan before comparing"
+    );
+
+    let resolver = pricing::Resolver::load(&conn).expect("pricing catalog");
+    let rows = load_stored_subagents(&conn);
+    if rows.is_empty() {
+        println!("no sub-agent rows on this corpus; nothing to compare");
+        return;
+    }
+    println!("comparing {} stored sub-agent rows", rows.len());
+
+    let mut mismatches: Vec<String> = Vec::new();
+    let (mut compared, mut skipped) = (0usize, 0usize);
+
+    for row in &rows {
+        let path = Path::new(&row.file_path);
+        let Ok(meta) = std::fs::metadata(path) else {
+            skipped += 1;
+            continue;
+        };
+        if !mtime_matches(&meta, &row.file_mtime) {
+            skipped += 1;
+            continue;
+        }
+
+        // Every event in a sub-agent transcript carries `isSidechain`. Reading
+        // one with the parent's rule would count no user turns at all, so
+        // `message_count` would silently degrade to assistant-only — which is
+        // exactly what this comparison would catch.
+        let got = match read_subagent_summary(
+            &row.parent_session_id,
+            "",
+            path,
+            Some(&resolver),
+            stored_threshold,
+        ) {
+            Ok(Some(summary)) => summary,
+            Ok(None) => {
+                mismatches.push(format!(
+                    "{}/{}: recomputed to no row, but a row is stored",
+                    row.parent_session_id, row.agent_id
+                ));
+                continue;
+            }
+            Err(e) => {
+                mismatches.push(format!("{}/{}: {e}", row.parent_session_id, row.agent_id));
+                continue;
+            }
+        };
+
+        compared += 1;
+        if let Some(detail) = describe_subagent_mismatch(&row.summary, &got) {
+            mismatches.push(format!(
+                "{}/{} ({}):\n{detail}",
+                row.parent_session_id, row.agent_id, row.file_path
+            ));
+        }
+    }
+
+    println!("compared {compared}, skipped {skipped}");
+    assert!(compared > 0, "every sub-agent row was skipped");
+    if !mismatches.is_empty() {
+        let shown: Vec<&str> = mismatches.iter().take(10).map(String::as_str).collect();
+        panic!(
+            "{} of {compared} sub-agent rows diverged:\n\n{}\n\n(showing up to 10)",
+            mismatches.len(),
+            shown.join("\n\n")
+        );
+    }
+}
+
+fn load_stored_subagents(conn: &rusqlite::Connection) -> Vec<StoredSubagent> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT parent_session_id, agent_id, file_path, file_mtime,
+                    start_time, last_activity, message_count, event_count,
+                    input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+                    cache_creation_5m_tokens, cache_creation_1h_tokens, model,
+                    input_cost_usd, output_cost_usd, cache_read_cost_usd,
+                    cache_write_cost_usd, total_cost_usd, unpriced_tokens,
+                    active_duration_ms
+             FROM claude_subagent_cache",
+        )
+        .expect("prepare");
+
+    stmt.query_map([], |r| {
+        let mut summary = SessionSummary {
+            message_count: r.get(6)?,
+            event_count: r.get(7)?,
+            model: r.get(14)?,
+            unpriced_tokens: r.get(20)?,
+            active_duration_ms: r.get(21)?,
+            start_time: parse(r.get::<_, String>(4)?),
+            last_activity: parse(r.get::<_, String>(5)?),
+            ..Default::default()
+        };
+        summary.usage.input_tokens = r.get(8)?;
+        summary.usage.output_tokens = r.get(9)?;
+        summary.usage.cache_creation_tokens = r.get(10)?;
+        summary.usage.cache_read_tokens = r.get(11)?;
+        summary.usage.cache_creation_5m_tokens = r.get(12)?;
+        summary.usage.cache_creation_1h_tokens = r.get(13)?;
+        summary.cost = SessionCost {
+            input_usd: r.get(15)?,
+            output_usd: r.get(16)?,
+            cache_read_usd: r.get(17)?,
+            cache_write_usd: r.get(18)?,
+            total_usd: r.get(19)?,
+        };
+        Ok(StoredSubagent {
+            parent_session_id: r.get(0)?,
+            agent_id: r.get(1)?,
+            file_path: r.get(2)?,
+            file_mtime: r.get(3)?,
+            summary,
+        })
+    })
+    .expect("query")
+    .filter_map(Result::ok)
+    .collect()
+}
+
+/// The sub-agent table stores a subset of the session columns — no preview, no
+/// titles, no cwd, no `cost_by_model` — so only what it holds is compared.
+fn describe_subagent_mismatch(want: &SessionSummary, got: &SessionSummary) -> Option<String> {
+    let mut out = Vec::new();
+
+    for (label, a, b) in [
+        ("message_count", want.message_count, got.message_count),
+        ("event_count", want.event_count, got.event_count),
+        (
+            "active_duration_ms",
+            want.active_duration_ms,
+            got.active_duration_ms,
+        ),
+        ("unpriced_tokens", want.unpriced_tokens, got.unpriced_tokens),
+        (
+            "usage.input_tokens",
+            want.usage.input_tokens,
+            got.usage.input_tokens,
+        ),
+        (
+            "usage.output_tokens",
+            want.usage.output_tokens,
+            got.usage.output_tokens,
+        ),
+        (
+            "usage.cache_creation_tokens",
+            want.usage.cache_creation_tokens,
+            got.usage.cache_creation_tokens,
+        ),
+        (
+            "usage.cache_read_tokens",
+            want.usage.cache_read_tokens,
+            got.usage.cache_read_tokens,
+        ),
+        (
+            "usage.cache_creation_5m_tokens",
+            want.usage.cache_creation_5m_tokens,
+            got.usage.cache_creation_5m_tokens,
+        ),
+        (
+            "usage.cache_creation_1h_tokens",
+            want.usage.cache_creation_1h_tokens,
+            got.usage.cache_creation_1h_tokens,
+        ),
+    ] {
+        if a != b {
+            out.push(format!("  {label}: stored {a} vs computed {b}"));
+        }
+    }
+
+    if want.model != got.model {
+        out.push(format!(
+            "  model: stored {:?} vs computed {:?}",
+            want.model, got.model
+        ));
+    }
+    if want.start_time.instant() != got.start_time.instant() {
+        out.push(format!(
+            "  start_time: stored {} vs computed {}",
+            want.start_time.rfc3339_nano_utc(),
+            got.start_time.rfc3339_nano_utc()
+        ));
+    }
+    if want.last_activity.instant() != got.last_activity.instant() {
+        out.push(format!(
+            "  last_activity: stored {} vs computed {}",
+            want.last_activity.rfc3339_nano_utc(),
+            got.last_activity.rfc3339_nano_utc()
+        ));
+    }
+    if !close_enough(want.cost.total_usd, got.cost.total_usd) {
+        out.push(format!(
+            "  cost.total_usd: stored {} vs computed {}",
+            want.cost.total_usd, got.cost.total_usd
+        ));
+    }
+
+    (!out.is_empty()).then(|| out.join("\n"))
 }

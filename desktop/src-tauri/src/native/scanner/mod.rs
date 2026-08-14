@@ -22,7 +22,10 @@
 //! stops being a writer.
 
 pub mod cost;
+pub mod diff;
+pub mod staleness;
 pub mod summary_file;
+pub mod walk;
 
 /// Bumped whenever the scanner extracts something new from a transcript that
 /// already-cached rows would be missing.
