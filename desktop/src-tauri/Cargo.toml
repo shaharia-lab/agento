@@ -30,8 +30,27 @@ log = "0.4"
 # Local reverse proxy in front of the Go sidecar. No TLS backend: every hop is
 # loopback, and pulling in rustls here would cost build time for nothing.
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+# `process` and `io-util` are for the Claude Agent SDK port (`src/claude/`),
+# which spawns the `claude` CLI and reads its stdout line by line. The sidecar
+# goes through tauri-plugin-shell instead, but that only launches binaries
+# declared as Tauri sidecars — the agent CLI is an arbitrary executable resolved
+# on PATH, so it needs a real process API.
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "process",
+    "io-util",
+    "io-std",
+    "sync",
+] }
 reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+
+# Control requests are correlated by a v4 UUID, and hook callbacks are
+# registered under one. Go generates them from crypto/rand by hand; the format
+# on the wire is the standard lowercase hyphenated one either way.
+uuid = { version = "1", features = ["v4"] }
 
 # Release builds serve the frontend from the proxy so the page is same-origin
 # with the API.
@@ -54,6 +73,12 @@ chrono = { version = "0.4.45", default-features = false, features = ["std", "clo
 # its own embedded tzdata through `time.LoadLocation`; this is the equivalent.
 chrono-tz = "0.10"
 form_urlencoded = "1.2.2"
+
+# Graceful shutdown of the `claude` subprocess is close stdin → SIGTERM →
+# SIGKILL after 5s, mirroring the TypeScript SDK's close(). Tokio's own
+# `Child::kill` is SIGKILL only, so the SIGTERM step needs raw kill(2).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 codegen-units = 1

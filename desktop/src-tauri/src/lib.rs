@@ -1,3 +1,8 @@
+// The Claude Agent SDK, ported from Go. Public because it is a library in its
+// own right — the agent runtime, the integrations' MCP servers and the chat SSE
+// all build on it — and because its tests drive it against a scripted CLI from
+// outside the crate.
+pub mod claude;
 mod menu;
 // `native` and `paths` are public so `tests/live_parity.rs` can diff a ported
 // endpoint against the running Go server without going through a window.

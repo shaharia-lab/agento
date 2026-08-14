@@ -110,6 +110,15 @@ src-tauri/src/
   sidecar.rs     spawn + health-wait + shutdown of the Go server
   proxy.rs       axum reverse proxy; route_is_native() is the porting switch
   menu.rs        native menu → menu://action events
+  claude/        the Claude Agent SDK, ported from Go (phase 5's foundation)
+    process.rs   spawn, the control protocol, and the initialize handshake
+    client.rs    Stream (events) + StreamControl (interrupt, set_model, …)
+    session.rs   persistent multi-turn conversations on one subprocess
+    options.rs   every option, and which of the two channels it travels on
+    messages.rs  the wire types and parse_line
+    permissions.rs / hooks.rs   the two callback round trips
+    mcp.rs       loopback HTTP host for in-process MCP servers
+    lenient.rs   Go's partial-decode semantics, which serde does not have
   native/        ported endpoints (phase 2+)
     mod.rs       endpoint registry, mode switch, response shaping
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
@@ -315,7 +324,66 @@ rather than expecting the encoder to notice.
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
 | 3 | Storage + tasks | `internal/storage`, `internal/scheduler` | 27 SQLite migrations; reuse the same DB file and schema. Scheduler is cron/interval. |
 | 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. WhatsApp (`whatsmeow`) is the blocker — port it last or keep it in Go. |
-| 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. Hardest, highest risk. |
+| 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. **The SDK underneath it is ported** (`src/claude/`, below); what remains is the runner, the chat service and the SSE handler on top of it. |
+
+### The Claude Agent SDK (`src-tauri/src/claude/`)
+
+`github.com/shaharia-lab/claude-agent-sdk-go` reimplemented in Rust — the
+library every agent run goes through, and the thing phases 4 and 5 both sit on
+(every Agento integration is an in-process MCP server, which is this SDK's
+`StartInProcessMCPServer`). Read `~/Projects/claude-agent-sdk-go` as the spec;
+it is our own OSS project and carries the protocol decisions in its comments.
+
+It is **not an API client**: it spawns the `claude` CLI and speaks stream-json
+over stdio plus a control protocol, so there is no inference to reimplement and
+no API key — the CLI's own sign-in is the credential. Nothing calls it yet.
+
+**The parity bar is different here.** There is no JSON response to diff, so
+`parity-instance.sh` has nothing to say about it. What must hold is the **SSE
+stream**: raw CLI JSON lines passed through verbatim plus Agento's two synthetic
+events (`user_input_required`, `permission_request`). `Event::raw` is what makes
+that possible and is why every message keeps its bytes.
+
+The tests are a **scripted fake CLI** (`tests/claude_sdk.rs`) — a Python program
+that logs every stdin line and replies to order. That is the only way to test
+the things that are properties of a *sequence* rather than of a function, and
+all four failure modes below are silent without it.
+
+Four protocol facts that cost real time, all of them re-discoverable only the
+hard way:
+
+- **The handshake order is load-bearing.** Reader task live → register the
+  request id → write `initialize` → *block* on the acknowledgement → only then
+  the first user message. A `control_response` cannot be routed before something
+  reads stdout, and MCP servers, agents and hooks are configured during the
+  acknowledgement. Getting it wrong races rather than fails.
+- **`sdkMcpServers` is never sent.** The CLI accepts only an array of strings
+  there, and a rejection fails the *entire* initialize — silently taking hooks,
+  agents, the system prompt and the output format with it. Naming a server there
+  also marks it SDK-hosted, so the CLI drops its transport and routes tool calls
+  back over `mcp_message`, which this SDK does not implement. Every MCP server
+  travels as `--mcp-config` instead.
+- **`control_response` routes on the *nested* `response.request_id`**, and the
+  caller gets the *innermost* payload. There is no top-level fallback; inventing
+  one is what broke this before. An absent inner payload is a success with no
+  data, not an error.
+- **Every inbound `control_request` must be answered.** A missing reply hangs
+  the CLI with no error on either side — including for the requests we only
+  acknowledge. `can_use_tool` with no handler is answered with an *error*, never
+  an allow: fail closed.
+
+Four places where a mechanical port would have been wrong, each documented at
+its site: Go's partial-decode semantics (`lenient.rs`), the `Stream` /
+`StreamControl` split (reading a channel needs `&mut self`), async callbacks
+(Go blocks a goroutine inline; blocking a runtime worker is a bug), and handle
+lifetimes standing in for `context.Context`.
+
+One deliberate scope call: `start_in_process_mcp_server` takes an `McpService`
+trait rather than an `rmcp` server. Go hands its MCP SDK's `*mcp.Server` to its
+own streamable-HTTP handler; the equivalent here would pin `rmcp`'s API to
+satisfy no caller, since nothing has an MCP server to host until phase 4. The
+seam sits exactly where Go's does — the SDK owns the listener, the caller owns
+the tools — and an `rmcp` adapter is one impl away.
 
 ### Things that will bite
 
@@ -582,8 +650,18 @@ than about insights: the scanner port (issue #270) needs the same decoder and
 the same `isUserTurnContent` predicate, and two readers of one format is exactly
 how `message_count` and `turn_count` would drift apart.
 
-Nothing else is ported. Every write path, the per-session reads and every other
-read still forward to Go.
+**The Claude Agent SDK is ported** (`src/claude/`, see above) — the whole of
+`claude-agent-sdk-go`'s surface Agento uses: the session lifecycle, all the
+options, the control protocol including permission and hook round trips and
+interrupt, and in-process MCP servers. It is a library with no caller yet: the
+agent runner, the chat service and the SSE handler that would sit on it are
+still Go, and nothing in `native/` routes to it. It is here first because phases
+4 and 5 both need it — every integration is one of its MCP servers — and because
+its correctness is testable in isolation, against a scripted CLI, in a way it
+would not be once a route depends on it.
+
+Nothing else is ported. Every endpoint not listed above — every write path, the
+per-session reads and every other read — still forwards to Go.
 
 **Reading is what keeps the corpus fresh.** `Cache.ensureFresh` runs on every Go
 read path and starts a background rescan when the TTL expires, the pricing
