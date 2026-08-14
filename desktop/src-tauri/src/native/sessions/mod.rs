@@ -28,6 +28,39 @@ pub mod page;
 pub mod query;
 pub mod summary;
 
+use axum::http::Method;
+
+use crate::native::{db, gojson, settings, Answer, Ctx, Endpoint, Request};
+
+/// This module's entry in `native::ENDPOINTS`.
+pub const ENDPOINT: Endpoint = Endpoint {
+    name: "claude sessions",
+    claims,
+    serve,
+};
+
+fn claims(method: &Method, path: &str) -> bool {
+    method == Method::GET && matches!(path, "/api/claude-sessions" | "/api/claude-sessions/facets")
+}
+
+fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
+    let q = query::SessionQuery::parse(req.query)?;
+    let conn = db::open_read_only(&ctx.db_path)?;
+    let data_settings = settings::load(&conn);
+
+    let body = if req.path == "/api/claude-sessions" {
+        let page = page::list_page(&conn, &data_settings, &q)?;
+        gojson::to_vec(&page).map_err(|e| format!("encoding session page: {e}"))?
+    } else {
+        let facets = page::facets(&conn, &data_settings, &q)?;
+        gojson::to_vec(&facets).map_err(|e| format!("encoding session facets: {e}"))?
+    };
+    Ok(Answer {
+        body,
+        probe: freshness_probe(req.path, &q),
+    })
+}
+
 #[cfg(test)]
 mod tests_db;
 

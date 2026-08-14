@@ -111,7 +111,7 @@ src-tauri/src/
   proxy.rs       axum reverse proxy; route_is_native() is the porting switch
   menu.rs        native menu → menu://action events
   native/        ported endpoints (phase 2+)
-    mod.rs       route table, mode switch, response shaping
+    mod.rs       endpoint registry, mode switch, response shaping
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        read-only SQLite handle on the file the Go server owns
@@ -129,6 +129,7 @@ src-tauri/src/
 scripts/
   parity-instance.sh   Go server built from THIS checkout, on a copy of the DB
 
+src-tauri/tests/ one live-diff suite per area, plus parity_common/ shared by all
 parity/          cross-language fixtures, asserted by both Go and Rust tests
 ```
 
@@ -177,9 +178,23 @@ for months.
 ### The seam
 
 `proxy.rs::route_is_native(method, path)` decides per request whether Rust
-answers or the Go sidecar does. The route table itself is `native::claims`,
-next to the handlers it selects, so claiming a route and implementing it are
-one edit rather than two files that can disagree.
+answers or the Go sidecar does. Behind it is a **registry**: each ported module
+declares its own `claims` and `serve` as a `native::Endpoint`, and `ENDPOINTS`
+in `native/mod.rs` lists them.
+
+Two properties, both load-bearing:
+
+- **Claiming a route and implementing it are one edit.** The pair lives in the
+  module it belongs to, so a route cannot end up claimed by a handler that does
+  not exist — which fails as a *silent* fallback to Go, not as a compile error.
+- **Adding an endpoint is one appended line** in `ENDPOINTS` plus its own file.
+  `native/mod.rs` used to hold a single `match` over every route, so two ports
+  in flight always collided in the same hunk. Nothing in `mod.rs` knows what a
+  module does, and no module knows about another.
+
+`no_two_endpoints_claim_the_same_request` guards the one thing a registry can
+get wrong that a match statement could not: two modules claiming one path, where
+the first listed silently wins and the other's tests keep passing.
 
 `AGENTO_DESKTOP_NATIVE` steers the whole seam:
 
@@ -224,9 +239,12 @@ only a byte comparison catches all four.
      checkout**:
      ```bash
      eval "$(./scripts/parity-instance.sh start)"
-     (cd src-tauri && cargo test --test live_parity -- --ignored --nocapture)
+     (cd src-tauri && cargo test --test parity_analytics -- --ignored --nocapture)
      ./scripts/parity-instance.sh stop
      ```
+     One suite per area (`tests/parity_<area>.rs`, sharing `tests/parity_common/`),
+     so a port runs its own diff and two ports do not edit one file. Drop the
+     `--test` flag to run them all.
    - optionally `AGENTO_DESKTOP_NATIVE=diff npm run app`, which compares every
      real request the UI makes.
 5. Only then leave it claimed.
@@ -241,6 +259,15 @@ server that happens to agree hides a real divergence. The script builds the
 server from the checkout and runs it against a **copy** of `~/.agento` (the
 current source may carry migrations the installed one has never applied, and
 applying them to the real file would upgrade it under a running instance).
+
+**It is safe to run concurrently.** The work dir defaults to a name derived from
+the checkout's own path, and `stop` kills only the PID recorded in that dir — so
+two agents in separate worktrees need no coordination, and neither can clobber
+the other's scratch database or replace the binary underneath a running server.
+Two agents sharing one checkout still collide; set `AGENTO_PARITY_WORKER=<id>`
+(a suffix) or `AGENTO_PARITY_DIR=<path>` to separate them. `start` exports
+`AGENTO_PARITY_DIR` alongside the URL, and `parity-instance.sh url` re-prints
+the exports for a shell that lost them, without restarting anything.
 
 ### Go itself is not always byte-stable
 

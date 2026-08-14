@@ -59,38 +59,6 @@ pub fn mode() -> Mode {
     })
 }
 
-/// Whether this request is answered by ported Rust code.
-///
-/// Matched on the exact path, so an unported sibling — or a trailing slash,
-/// which chi treats as a different route — falls through to Go and keeps
-/// whatever answer Go gives it.
-pub fn claims(method: &Method, path: &str) -> bool {
-    if method != Method::GET {
-        return false;
-    }
-    matches!(
-        path,
-        "/api/pricing/catalog"
-            | "/api/claude-sessions"
-            | "/api/claude-sessions/facets"
-            | "/api/claude-analytics"
-            | "/api/agents"
-    ) || agent_slug(path).is_some()
-}
-
-/// The slug in `/api/agents/{slug}`, or `None` for anything else.
-///
-/// One segment only: `/api/agents/{slug}/duplicate` is a different route with a
-/// different method, and a prefix match would swallow it. An empty slug is not
-/// a match either — chi routes `/api/agents/` to nothing, and so does this.
-fn agent_slug(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix("/api/agents/")?;
-    if rest.is_empty() || rest.contains('/') {
-        return None;
-    }
-    Some(rest)
-}
-
 /// A claimed request: the parts a native handler needs.
 pub struct Request<'a> {
     pub method: &'a Method,
@@ -106,70 +74,68 @@ pub struct Answer {
     pub probe: Option<&'static str>,
 }
 
+/// What every handler needs to reach the data the Go server owns.
+///
+/// Deliberately not an open connection: the modules differ in what they want —
+/// one read-only handle, two, or a path passed through to a helper that opens
+/// its own — and pre-opening one here would make the registry decide something
+/// only the handler knows.
+pub struct Ctx {
+    pub db_path: std::path::PathBuf,
+}
+
+/// One ported area of the API: whether it claims a request, and how it answers.
+///
+/// The pair travels together so claiming a route and implementing it are the
+/// same edit. Splitting them across two files is how a route ends up claimed by
+/// a handler that does not exist, which fails as a fallback to Go — silently.
+pub struct Endpoint {
+    /// Shown when a claimed request has no handler. Not on the wire.
+    pub name: &'static str,
+    pub claims: fn(&Method, &str) -> bool,
+    pub serve: fn(&Ctx, &Request) -> Result<Answer, String>,
+}
+
+/// Every ported area, in match order.
+///
+/// **Adding an endpoint is one appended line here plus its own module.** That
+/// is the point: this file used to hold one `match` covering every route, so
+/// two ports in flight at once always collided in the same hunk. Nothing here
+/// knows what any module does, and no module knows about any other.
+///
+/// Order matters only where two entries could claim the same path, which is a
+/// mistake rather than a feature — `an_endpoint_claims_at_most_one_path`
+/// asserts none do.
+const ENDPOINTS: &[Endpoint] = &[
+    pricing::ENDPOINT,
+    agents::ENDPOINT,
+    sessions::ENDPOINT,
+    analytics::ENDPOINT,
+];
+
+/// Whether this request is answered by ported Rust code.
+///
+/// Each module matches on the exact path, so an unported sibling — or a
+/// trailing slash, which chi treats as a different route — falls through to Go
+/// and keeps whatever answer Go gives it.
+pub fn claims(method: &Method, path: &str) -> bool {
+    ENDPOINTS.iter().any(|e| (e.claims)(method, path))
+}
+
 /// Answer a claimed request. `Err` means "fall back to the Go sidecar".
 pub fn serve(req: &Request) -> Result<Answer, String> {
-    let db_path = paths::database_path().ok_or("no home directory to resolve the data dir")?;
-
-    match (req.method.as_str(), req.path) {
-        ("GET", "/api/pricing/catalog") => {
-            let catalog = pricing::catalog(&db_path)?;
-            Ok(Answer {
-                body: gojson::to_vec(&catalog)
-                    .map_err(|e| format!("encoding pricing catalog: {e}"))?,
-                probe: None,
-            })
+    let ctx = Ctx {
+        db_path: paths::database_path().ok_or("no home directory to resolve the data dir")?,
+    };
+    for endpoint in ENDPOINTS {
+        if (endpoint.claims)(req.method, req.path) {
+            return (endpoint.serve)(&ctx, req);
         }
-        ("GET", "/api/agents") => Ok(Answer {
-            body: gojson::to_vec(&agents::list(&db_path)?)
-                .map_err(|e| format!("encoding agents: {e}"))?,
-            probe: None,
-        }),
-        ("GET", path @ ("/api/claude-sessions" | "/api/claude-sessions/facets")) => {
-            let q = sessions::query::SessionQuery::parse(req.query)?;
-            let conn = db::open_read_only(&db_path)?;
-            let data_settings = settings::load(&conn);
-
-            let body = if path == "/api/claude-sessions" {
-                let page = sessions::page::list_page(&conn, &data_settings, &q)?;
-                gojson::to_vec(&page).map_err(|e| format!("encoding session page: {e}"))?
-            } else {
-                let facets = sessions::page::facets(&conn, &data_settings, &q)?;
-                gojson::to_vec(&facets).map_err(|e| format!("encoding session facets: {e}"))?
-            };
-            Ok(Answer {
-                body,
-                probe: sessions::freshness_probe(path, &q),
-            })
-        }
-        ("GET", "/api/claude-analytics") => {
-            let conn = db::open_read_only(&db_path)?;
-            let data_settings = settings::load(&conn);
-            let report = analytics::analytics(&conn, &data_settings, req.query)?;
-            Ok(Answer {
-                body: gojson::to_vec(&report)
-                    .map_err(|e| format!("encoding claude analytics: {e}"))?,
-                // Cache.Analytics runs ensureFresh before it answers, so a
-                // dashboard opened after a rate edit starts the re-cost.
-                probe: Some(sessions::PROBE_PATH),
-            })
-        }
-        ("GET", path) if agent_slug(path).is_some() => {
-            let slug = agent_slug(path).unwrap_or_default();
-            match agents::get(&db_path, slug)? {
-                Some(agent) => Ok(Answer {
-                    body: gojson::to_vec(&agent).map_err(|e| format!("encoding agent: {e}"))?,
-                    probe: None,
-                }),
-                // Falling back lets Go answer the 404, rather than this having
-                // to reproduce its body and status.
-                None => Err(format!("agent {slug:?} not found")),
-            }
-        }
-        _ => Err(format!(
-            "{} {} is claimed but has no handler",
-            req.method, req.path
-        )),
     }
+    Err(format!(
+        "{} {} is claimed but has no handler",
+        req.method, req.path
+    ))
 }
 
 /// Wrap a native body in the response `writeJSON` would have produced.
@@ -229,5 +195,49 @@ mod tests {
             query: "",
         })
         .is_err());
+    }
+
+    /// Two modules claiming one path is a merge accident, not a feature: the
+    /// registry would silently hand the request to whichever was listed first,
+    /// and the other module's tests would keep passing.
+    #[test]
+    fn no_two_endpoints_claim_the_same_request() {
+        let paths = [
+            "/api/pricing/catalog",
+            "/api/claude-sessions",
+            "/api/claude-sessions/facets",
+            "/api/claude-analytics",
+            "/api/agents",
+            "/api/agents/my-agent",
+        ];
+        for path in paths {
+            let owners: Vec<&str> = ENDPOINTS
+                .iter()
+                .filter(|e| (e.claims)(&Method::GET, path))
+                .map(|e| e.name)
+                .collect();
+            assert_eq!(owners.len(), 1, "{path} is claimed by {owners:?}");
+        }
+    }
+
+    /// Every entry must be reachable. An endpoint appended to `ENDPOINTS` whose
+    /// `claims` never fires is dead code that reads as a shipped port.
+    #[test]
+    fn every_registered_endpoint_claims_something() {
+        let probes = [
+            "/api/pricing/catalog",
+            "/api/claude-sessions",
+            "/api/claude-sessions/facets",
+            "/api/claude-analytics",
+            "/api/agents",
+            "/api/agents/my-agent",
+        ];
+        for endpoint in ENDPOINTS {
+            assert!(
+                probes.iter().any(|p| (endpoint.claims)(&Method::GET, p)),
+                "{} claims none of the probe paths; add one when you add a route",
+                endpoint.name
+            );
+        }
     }
 }
