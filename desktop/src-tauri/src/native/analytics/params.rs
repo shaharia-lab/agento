@@ -98,6 +98,14 @@ impl AnalyticsParams {
     }
 }
 
+/// One query parameter, with `url.Values.Get` semantics.
+///
+/// Shared with the insights summary, which reads `ids` alongside the window
+/// this module parses.
+pub fn query_value(query: &str, key: &str) -> String {
+    first_values(query).remove(key).unwrap_or_default()
+}
+
 /// `url.Values.Get` semantics: the first occurrence of each key wins.
 fn first_values(query: &str) -> HashMap<String, String> {
     let mut out = HashMap::new();

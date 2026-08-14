@@ -356,7 +356,7 @@ fn hidden_projects_are_excluded_from_both_the_page_and_the_totals() {
     ]);
     let settings = DataSettings {
         hidden_projects: vec!["/home/u/secret".to_string()],
-        indexed_config_dirs: Vec::new(),
+        ..Default::default()
     };
 
     let q = SessionQuery::default();
@@ -424,8 +424,8 @@ fn the_config_dir_scope_admits_blank_rows() {
     // Rows written before migration 27 carry a blank config dir and belong to
     // the default dir, so a scope that excluded them would hide real history.
     let settings = DataSettings {
-        hidden_projects: Vec::new(),
         indexed_config_dirs: vec!["/home/u/.claude".to_string()],
+        ..Default::default()
     };
     let page = list_page(&conn, &settings, &SessionQuery::default()).expect("page");
     assert_eq!(page.items.len(), 1);

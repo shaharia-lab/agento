@@ -48,7 +48,7 @@ tauri-plugin-process = "2.0.0-rc.1"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 # Effective-dated rates are timestamps, and their wire format has to match Go's
 # byte for byte. `clock` is only for "which rate is in force now".
-chrono = { version = "0.4.45", default-features = false, features = ["std", "clock"] }
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
 # Analytics buckets days, hours and weekdays in the *request's* timezone, so an
 # IANA name has to resolve to real offsets and real DST transitions. Go reaches
 # its own embedded tzdata through `time.LoadLocation`; this is the equivalent.
