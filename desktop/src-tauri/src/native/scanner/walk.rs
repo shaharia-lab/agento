@@ -305,54 +305,77 @@ fn mtime_utc(meta: &std::fs::Metadata) -> DateTime<Utc> {
 
 /// Turns Claude Code's dash-encoded project directory name back into a path.
 ///
-/// The encoding is lossy — every `/` and every `.` became a `-` — so this
-/// resolves greedily against the filesystem, preferring a segment that exists.
-/// A name that resolves to nothing is returned unchanged, which is what the
-/// sessions list stores for such projects.
+/// The encoding is lossy: `/` and `.` both became `-`, so the only way back is
+/// to walk the filesystem and prefer whichever split actually exists. Segments
+/// accumulate until one resolves, then the walk advances.
+///
+/// This mirrors `DecodeProjectPath` exactly, because `project_path` is half of
+/// `claude_session_cache`'s primary key — a different answer here writes rows
+/// under a different key than Go does. Four details are load-bearing and each
+/// was got wrong once in this port:
+///
+/// * **Only one leading `-` is stripped.** `--claude` is a hidden directory,
+///   and the second dash is what `find_existing_dir`'s dot-prefixed variant
+///   recovers.
+/// * **Empty tokens are skipped**, not folded into the segment: consecutive
+///   hyphens come from an encoded `.` or `/` and the next token continues the
+///   segment as if they were not there.
+/// * **Only directories match.** A file of the right name is not a path
+///   component.
+/// * **The fallback tests the final result**, not whether anything resolved
+///   along the way; a partial resolution that lands nowhere returns the raw
+///   encoded name, which is what the sessions list then stores.
 pub fn decode_project_path(encoded: &str) -> String {
-    if !encoded.starts_with('-') {
-        return encoded.to_string();
-    }
+    // TrimPrefix, not trim_start_matches: exactly one dash.
+    let trimmed = encoded.strip_prefix('-').unwrap_or(encoded);
 
-    let mut current = String::from("/");
-    let mut segment = String::new();
-    let mut resolved_any = false;
+    let mut current_path = String::new();
+    let mut current_segment = String::new();
 
-    for part in encoded.trim_start_matches('-').split('-') {
-        let candidate = if segment.is_empty() {
-            part.to_string()
+    for token in trimmed.split('-') {
+        // Empty tokens come from consecutive hyphens. Skipping them lets the
+        // next token continue the segment, and the dot-prefixed variant below
+        // covers the hidden directories that produced them.
+        if token.is_empty() {
+            continue;
+        }
+
+        if current_segment.is_empty() {
+            current_segment = token.to_string();
         } else {
-            format!("{segment}-{part}")
-        };
+            current_segment.push('-');
+            current_segment.push_str(token);
+        }
 
-        if let Some(found) = find_existing_dir(&current, &candidate) {
-            current = join_path(&current, &found);
-            segment.clear();
-            resolved_any = true;
-        } else {
-            segment = candidate;
+        // Greedily advance when the accumulated segment names a real directory.
+        if let Some(next) = find_existing_dir(&current_path, &current_segment) {
+            current_path = next;
+            current_segment.clear();
         }
     }
 
-    if !segment.is_empty() {
-        current = join_path(&current, &segment);
-    }
-    if resolved_any || Path::new(&current).exists() {
-        current
+    let result = if current_segment.is_empty() {
+        current_path
+    } else {
+        format!("{current_path}/{current_segment}")
+    };
+
+    if Path::new(&result).exists() {
+        result
     } else {
         encoded.to_string()
     }
 }
 
-/// Tries `segment` and `.segment`, since a leading dot also encodes as a dash.
+/// Whether `parent/segment` or `parent/.segment` is an existing **directory**.
+///
+/// The dot-prefixed variant recovers hidden directories such as `.claude`,
+/// which Claude Code encodes with the same `-` it uses for a path separator.
 fn find_existing_dir(parent: &str, segment: &str) -> Option<String> {
     [segment.to_string(), format!(".{segment}")]
         .into_iter()
-        .find(|candidate| Path::new(parent).join(candidate).exists())
-}
-
-fn join_path(parent: &str, child: &str) -> String {
-    Path::new(parent).join(child).to_string_lossy().into_owned()
+        .map(|name| format!("{parent}/{name}"))
+        .find(|candidate| Path::new(candidate).is_dir())
 }
 
 #[cfg(test)]
@@ -489,6 +512,48 @@ mod tests {
         );
         // A name that was never encoded passes through untouched.
         assert_eq!(decode_project_path("plain"), "plain");
+    }
+
+    #[test]
+    fn only_one_leading_dash_is_stripped_so_hidden_dirs_survive() {
+        // `--claude` is `/.claude`: the first dash is the root, the second is
+        // the dot. Stripping both loses the hidden directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let hidden = tmp.path().join(".claude");
+        std::fs::create_dir_all(&hidden).unwrap();
+
+        let root = tmp.path().to_string_lossy().replace('/', "-");
+        assert_eq!(
+            decode_project_path(&format!("{root}--claude")),
+            hidden.to_string_lossy().into_owned()
+        );
+    }
+
+    #[test]
+    fn a_file_of_the_right_name_is_not_a_path_component() {
+        // Only directories may resolve a segment.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("notadir"), "x").unwrap();
+
+        let root = tmp.path().to_string_lossy().replace('/', "-");
+        let encoded = format!("{root}-notadir-deeper");
+        assert_eq!(
+            decode_project_path(&encoded),
+            encoded,
+            "nothing resolved, so the raw name is kept"
+        );
+    }
+
+    #[test]
+    fn a_partial_resolution_that_lands_nowhere_keeps_the_raw_name() {
+        // The fallback tests the *final* result, not whether anything resolved
+        // along the way.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("real")).unwrap();
+
+        let root = tmp.path().to_string_lossy().replace('/', "-");
+        let encoded = format!("{root}-real-missing-deeper");
+        assert_eq!(decode_project_path(&encoded), encoded);
     }
 
     #[test]

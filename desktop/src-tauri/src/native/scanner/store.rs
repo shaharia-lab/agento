@@ -250,16 +250,14 @@ pub struct SubagentMeta {
 /// A missing or malformed sidecar yields the zero value rather than an error:
 /// the transcript is the data, and the sidecar is a label for it.
 pub fn read_subagent_meta(transcript: &std::path::Path) -> SubagentMeta {
-    let path = transcript.with_extension("").with_extension("meta.json");
-    // `.jsonl` → `.meta.json`, matching Go's TrimSuffix + append.
-    let path = if path.exists() {
-        path
-    } else {
-        PathBuf::from(format!(
-            "{}.meta.json",
-            transcript.to_string_lossy().trim_end_matches(".jsonl")
-        ))
-    };
+    // Trim the suffix and append, rather than swapping extensions: an agent id
+    // containing a dot — `agent-1.2.jsonl` — would lose its last component to
+    // `with_extension`, and the sidecar would be looked for under a name that
+    // does not exist.
+    let path = PathBuf::from(format!(
+        "{}.meta.json",
+        transcript.to_string_lossy().trim_end_matches(".jsonl")
+    ));
 
     std::fs::read_to_string(&path)
         .ok()
@@ -440,6 +438,22 @@ mod tests {
         assert_eq!(meta.agent_type, "Explore");
         assert_eq!(meta.description, "map it");
         assert_eq!(meta.tool_use_id, "tu_1");
+    }
+
+    #[test]
+    fn an_agent_id_containing_a_dot_still_finds_its_sidecar() {
+        // `with_extension` would turn `agent-1.2.jsonl` into `agent-1.meta.json`
+        // and quietly find nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("agent-1.2.jsonl");
+        std::fs::write(&transcript, "{}\n").unwrap();
+        std::fs::write(
+            dir.path().join("agent-1.2.meta.json"),
+            r#"{"agentType":"Explore"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_subagent_meta(&transcript).agent_type, "Explore");
     }
 
     #[test]

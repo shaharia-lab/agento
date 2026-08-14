@@ -133,8 +133,11 @@ pub fn apply_changes(
             let work_rx = &work_rx;
             scope.spawn(move || {
                 loop {
-                    // The lock is held only to take the next unit, never across
-                    // the read itself.
+                    // The lock spans the wait for the next unit, so only one
+                    // reader queues for work at a time — but it is released
+                    // before the read, which is where all the time goes.
+                    // Handing out a unit is nanoseconds against decoding a
+                    // transcript, so the readers still overlap fully.
                     let unit = {
                         let rx = work_rx.lock().expect("work queue");
                         rx.recv()
