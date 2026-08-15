@@ -148,13 +148,16 @@ pub fn verify(conn: &Connection) -> Result<(), String> {
 /// DDL. `BEGIN IMMEDIATE` takes the write lock up front rather than on first
 /// write, which is what makes that re-read authoritative.
 pub fn apply(conn: &mut Connection) -> Result<(), String> {
-    // The re-read below is only half the race fix. `BEGIN IMMEDIATE` takes the
-    // write lock *now*, and on a database another process already holds it
-    // returns `SQLITE_BUSY` **immediately** unless this connection has a busy
-    // timeout — so without one the loser fails on the lock instead of failing
-    // on duplicate DDL, which is the same outcome this function exists to
-    // avoid. `db::open_read_write` sets it, but `apply` takes any `Connection`
-    // (its tests open bare ones), so it is set here rather than assumed.
+    // `BEGIN IMMEDIATE` takes the write lock up front, so a contended database
+    // needs a busy timeout or the loser fails on the lock rather than waiting
+    // for it — which would be the same failure this function exists to avoid,
+    // one layer down.
+    //
+    // rusqlite already sets 5000 ms on every `Connection::open`
+    // (`InnerConnection::open_with_flags`), so this is **explicitness, not a
+    // fix**: it states the value the correctness argument depends on instead of
+    // inheriting it from a dependency's default, which a version bump could
+    // change without anything here noticing.
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(|e| format!("setting busy_timeout: {e}"))?;
 

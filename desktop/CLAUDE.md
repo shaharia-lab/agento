@@ -286,7 +286,13 @@ only a byte comparison catches all four.
      ```
      One suite per area (`tests/parity_<area>.rs`, sharing `tests/parity_common/`),
      so a port runs its own diff and two ports do not edit one file. Drop the
-     `--test` flag to run them all.
+     `--test` flag to run them all — but note that `parity_writes` **mutates**,
+     unlike every other suite. It creates, renames and deletes rows, so it
+     refuses to run unless `AGENTO_LIVE_URL` is set rather than falling back to
+     the `:8990` default the read suites use. Start the scratch instance first.
+     It also compares differently: a write cannot be asked of both
+     implementations at once, so it pins Go's answers — status *and* bytes — as
+     literals, and the unit tests assert the same literals against Rust;
    - optionally `AGENTO_DESKTOP_NATIVE=diff npm run app`, which compares every
      real request the UI makes.
 5. Only then leave it claimed.

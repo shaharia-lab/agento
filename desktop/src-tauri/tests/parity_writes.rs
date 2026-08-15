@@ -180,10 +180,6 @@ async fn the_chat_write_answers_match_go() {
         .expect("updated_at")
         .to_string();
 
-    // Second precision in the stored rendering, so a same-second patch could
-    // not be told apart from a stale read.
-    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-
     let patched = go_answer(
         Method::PATCH,
         &format!("/api/chats/{id}"),

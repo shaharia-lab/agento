@@ -474,10 +474,11 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
 
 /// `handleUpdateChat`: rename and/or favourite.
 ///
-/// Every failure here is a **400**, not a 422 — the checks are in the handler
-/// rather than the service, and the chats handlers never call `httpErr`. A
-/// missing chat is a 404 with the fixed string `chat not found`, not the
-/// service's `NotFoundError` wording.
+/// Two statuses, and the split is not the usual one. A missing chat is a
+/// **404** with the fixed string `chat not found` — not the service's
+/// `NotFoundError` wording, and not the 400 the other checks give. Everything
+/// else here is a **400** rather than a 422, because these checks live in the
+/// handler and the chats handlers never call `httpErr`.
 fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteError> {
     let req = decode_body::<PatchChatRequest>(body)?;
     if req.title.is_none() && req.is_favorite.is_none() {
@@ -1032,10 +1033,6 @@ mod tests {
         let file = migrated();
         let id = created_id(&create(file.path(), b"{}").expect("create"));
         let before = get(file.path(), &id).expect("get").unwrap().session;
-
-        // The stored rendering has second precision, so a same-second patch
-        // would be indistinguishable from a stale read.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
 
         let answer = patch(file.path(), &id, br#"{"title":"New"}"#).expect("patch");
         let body: serde_json::Value =
