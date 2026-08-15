@@ -50,6 +50,12 @@ pub enum WriteError {
     /// [`WriteError::NotFound`] — which would render `chat "abc" not found` —
     /// is the wrong shape, and `BadRequest` is the wrong *status*.
     NotFoundMessage(String),
+    /// A 403 with a fixed message, written by the handler rather than raised by
+    /// the service. The trigger-rule routes use it for a rule that exists but
+    /// belongs to a different integration — note they check that *before*
+    /// decoding the body, so a malformed payload on someone else's rule is this
+    /// and not a 400.
+    Forbidden(String),
     /// Not reproducible here: let the sidecar answer.
     Fallback(String),
 }
@@ -70,6 +76,7 @@ impl WriteError {
             Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::NotFound { .. } | Self::NotFoundMessage(_) => StatusCode::NOT_FOUND,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Fallback(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -97,6 +104,7 @@ impl WriteError {
             // `service.NotFoundError.Error()`.
             Self::NotFound { resource, id } => format!("{resource} {:?} not found", id),
             Self::NotFoundMessage(m) => m.clone(),
+            Self::Forbidden(m) => m.clone(),
             Self::Fallback(m) => m.clone(),
         }
     }

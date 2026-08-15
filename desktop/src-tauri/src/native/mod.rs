@@ -23,6 +23,7 @@ pub mod gojson;
 pub mod gopath;
 pub mod gotime;
 pub mod insights;
+pub mod integration_credentials;
 pub mod integrations;
 pub mod migrate;
 pub mod monitoring;
@@ -447,14 +448,18 @@ mod tests {
         assert!(!claims(&Method::POST, "/api/uploads"));
         assert!(!claims(&Method::GET, "/api/uploads"));
 
-        // Integrations: the four reads. Everything that writes, dials a remote
-        // service, or reads in-memory OAuth state stays with Go.
+        // Integrations: the four reads, plus the writes with no live-server
+        // effect. Anything that reloads an MCP server, dials a remote service,
+        // or reads in-memory OAuth state stays with Go.
         assert!(claims(&Method::GET, "/api/integrations"));
         assert!(claims(&Method::GET, "/api/integrations/available-tools"));
         assert!(claims(&Method::GET, "/api/integrations/abc"));
         assert!(claims(&Method::GET, "/api/integrations/abc/triggers"));
-        assert!(!claims(&Method::POST, "/api/integrations"));
+        assert!(claims(&Method::POST, "/api/integrations"));
+        assert!(claims(&Method::PUT, "/api/integrations/abc/triggers/r1"));
+        // Still Go's: these start and stop the live MCP server (#282).
         assert!(!claims(&Method::PUT, "/api/integrations/abc"));
+        assert!(!claims(&Method::DELETE, "/api/integrations/abc"));
         assert!(!claims(&Method::GET, "/api/integrations/abc/auth/status"));
         assert!(!claims(
             &Method::GET,

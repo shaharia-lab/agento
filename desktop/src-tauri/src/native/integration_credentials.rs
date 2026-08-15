@@ -1,0 +1,581 @@
+//! Credential validation for `POST /api/integrations`.
+//!
+//! Mirrors `validateIntegrationCredentials` and the seven per-type validators
+//! it dispatches to (`internal/service/integration_service.go`).
+//!
+//! # Why this is a module of its own
+//!
+//! It is the one part of the integration write path that is pure logic with no
+//! SQL, and it is where the parity risk concentrates: seven types, each with its
+//! own required fields and its own **exact** error strings, all of which ship to
+//! the client as a 422 body.
+//!
+//! # Where the port deliberately gives up
+//!
+//! Two of Go's failure paths embed an error string this port cannot reproduce,
+//! and both **forward** rather than guess:
+//!
+//! - A credentials blob that is present but does not unmarshal. Go ships
+//!   `invalid google credentials: ` plus `encoding/json`'s own message, which
+//!   names Go types (`json: cannot unmarshal number into Go struct field
+//!   GoogleCredentials.client_id of type string`). There is no Rust spelling of
+//!   that.
+//! - A `site_url` that `net/url` rejects outright, whose message comes from
+//!   `url.Parse`.
+//!
+//! Both are `Fallback`, so Go answers them exactly. Everything else — the far
+//! commoner "you left a field blank" — is reproduced here.
+//!
+//! # The three traps
+//!
+//! 1. **Empty and `null` are different.** Go tests `len(cfg.Credentials) == 0`,
+//!    which is true only when the key is *absent*. A literal `"credentials":
+//!    null` is four bytes, so it unmarshals to the zero value and reports the
+//!    *field* error rather than "credentials are empty". Hence
+//!    [`super::gojson::captured_raw`] on the request field, and hence
+//!    `null_is_zero_value` on every string below — `{"client_id": null}` is `""`
+//!    to Go and a type error to serde.
+//! 2. **Jira rewrites what it stores.** It trims the trailing slash and calls
+//!    `SetCredentials`, which re-marshals the *struct* — so unknown keys the
+//!    caller sent are silently dropped and the three known ones are re-emitted
+//!    in declaration order. Confluence does not do this, despite sharing the
+//!    credential type. Reproduced in [`validate`]'s return value.
+//! 3. **Confluence demands HTTPS; Jira accepts either.** Same struct, two
+//!    different URL rules, and two different messages.
+
+use serde::Deserialize;
+use serde_json::value::RawValue;
+
+use super::gojson::null_is_zero_value;
+use super::writes::WriteError;
+
+const FIELD_CREDENTIALS: &str = "credentials";
+const FIELD_SITE_URL: &str = "credentials.site_url";
+const FIELD_BOT_TOKEN: &str = "credentials.bot_token";
+
+/// Validate an integration's credentials for its type.
+///
+/// `Ok(Some(json))` means the stored credentials must be **replaced** with
+/// `json` — only Jira does this. `Ok(None)` means store what the caller sent,
+/// byte for byte.
+pub fn validate(
+    integration_type: &str,
+    credentials: Option<&RawValue>,
+) -> Result<Option<String>, WriteError> {
+    match integration_type {
+        "google" => validate_google(credentials).map(|()| None),
+        "confluence" => validate_confluence(credentials).map(|()| None),
+        "telegram" => validate_telegram(credentials).map(|()| None),
+        "jira" => validate_jira(credentials).map(Some),
+        "github" => validate_github(credentials).map(|()| None),
+        "slack" => validate_slack(credentials).map(|()| None),
+        "whatsapp" => validate_whatsapp(credentials).map(|()| None),
+        // Go's `default` arm: any other type just needs *something*. Note it
+        // checks length only — it never looks at the content.
+        _ => {
+            if raw_is_absent(credentials) {
+                return Err(WriteError::validation(
+                    FIELD_CREDENTIALS,
+                    "credentials are required",
+                ));
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// `len(cfg.Credentials) == 0` — absent, not `null`.
+fn raw_is_absent(credentials: Option<&RawValue>) -> bool {
+    credentials.map(|c| c.get().is_empty()).unwrap_or(true)
+}
+
+/// `cfg.ParseCredentials(&creds)`.
+///
+/// The empty case is Go's own `fmt.Errorf("credentials are empty")`, which is a
+/// fixed string and so reproducible. A real unmarshal failure is not, and
+/// forwards.
+fn parse<T>(kind: &str, credentials: Option<&RawValue>) -> Result<T, WriteError>
+where
+    T: for<'de> Deserialize<'de> + Default,
+{
+    let Some(raw) = credentials.filter(|c| !c.get().is_empty()) else {
+        return Err(WriteError::validation(
+            FIELD_CREDENTIALS,
+            format!("invalid {kind} credentials: credentials are empty"),
+        ));
+    };
+    // Through `Option<T>` rather than straight to `T`: a literal `null` is a
+    // *type error* to serde but leaves the zero value in Go, so a direct
+    // deserialize would forward `"credentials": null` instead of reporting the
+    // first missing field the way Go does.
+    serde_json::from_str::<Option<T>>(raw.get())
+        .map(Option::unwrap_or_default)
+        .map_err(|e| {
+            WriteError::Fallback(format!(
+                "{kind} credentials do not decode ({e}); Go's json error text is not reproducible here"
+            ))
+        })
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct GoogleCredentials {
+    #[serde(deserialize_with = "null_is_zero_value")]
+    client_id: String,
+    #[serde(deserialize_with = "null_is_zero_value")]
+    client_secret: String,
+}
+
+fn validate_google(credentials: Option<&RawValue>) -> Result<(), WriteError> {
+    let creds: GoogleCredentials = parse("google", credentials)?;
+    if creds.client_id.is_empty() {
+        return Err(WriteError::validation(
+            "credentials.client_id",
+            "client_id is required",
+        ));
+    }
+    if creds.client_secret.is_empty() {
+        return Err(WriteError::validation(
+            "credentials.client_secret",
+            "client_secret is required",
+        ));
+    }
+    Ok(())
+}
+
+/// `config.AtlassianCredentials`, shared by Confluence and Jira.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct AtlassianCredentials {
+    #[serde(deserialize_with = "null_is_zero_value")]
+    site_url: String,
+    #[serde(deserialize_with = "null_is_zero_value")]
+    email: String,
+    #[serde(deserialize_with = "null_is_zero_value")]
+    api_token: String,
+}
+
+fn validate_confluence(credentials: Option<&RawValue>) -> Result<(), WriteError> {
+    let creds: AtlassianCredentials = parse("confluence", credentials)?;
+    if creds.site_url.is_empty() {
+        return Err(WriteError::validation(
+            FIELD_SITE_URL,
+            "site_url is required",
+        ));
+    }
+    // `confluence.ValidateSiteURL`: HTTPS only, and a hostname is required.
+    let (scheme, host) = split_url(&creds.site_url)?;
+    if scheme != "https" {
+        return Err(WriteError::validation(
+            FIELD_SITE_URL,
+            // Go's `%q`. A scheme is ASCII, so this is a plain quoted string.
+            format!("site URL must use HTTPS (got {scheme:?})"),
+        ));
+    }
+    if host.is_empty() {
+        return Err(WriteError::validation(
+            FIELD_SITE_URL,
+            "site URL must include a hostname",
+        ));
+    }
+    atlassian_tail(&creds)
+}
+
+/// Jira's own URL rule, plus the normalization Confluence does not do.
+fn validate_jira(credentials: Option<&RawValue>) -> Result<String, WriteError> {
+    let mut creds: AtlassianCredentials = parse("jira", credentials)?;
+    if creds.site_url.is_empty() {
+        return Err(WriteError::validation(
+            FIELD_SITE_URL,
+            "site_url is required",
+        ));
+    }
+    let (scheme, host) = split_url(&creds.site_url)?;
+    if (scheme != "https" && scheme != "http") || host.is_empty() {
+        return Err(WriteError::validation(
+            FIELD_SITE_URL,
+            "site_url must be a valid http or https URL",
+        ));
+    }
+    // `strings.TrimRight(creds.SiteURL, "/")` — every trailing slash, not one.
+    creds.site_url = creds.site_url.trim_end_matches('/').to_string();
+    atlassian_tail(&creds)?;
+    // `cfg.SetCredentials(creds)` re-marshals the struct: declaration order, no
+    // `omitempty` on any of the three, and anything else the caller sent is
+    // gone. This is the stored value from here on.
+    Ok(format!(
+        r#"{{"site_url":{},"email":{},"api_token":{}}}"#,
+        json_string(&creds.site_url),
+        json_string(&creds.email),
+        json_string(&creds.api_token),
+    ))
+}
+
+/// The email/api_token checks both Atlassian validators end with, in order.
+fn atlassian_tail(creds: &AtlassianCredentials) -> Result<(), WriteError> {
+    if creds.email.is_empty() {
+        return Err(WriteError::validation(
+            "credentials.email",
+            "email is required",
+        ));
+    }
+    if creds.api_token.is_empty() {
+        return Err(WriteError::validation(
+            "credentials.api_token",
+            "api_token is required",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct TelegramCredentials {
+    #[serde(deserialize_with = "null_is_zero_value")]
+    bot_token: String,
+}
+
+fn validate_telegram(credentials: Option<&RawValue>) -> Result<(), WriteError> {
+    let creds: TelegramCredentials = parse("telegram", credentials)?;
+    if creds.bot_token.is_empty() {
+        return Err(WriteError::validation(
+            FIELD_BOT_TOKEN,
+            "bot_token is required",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct GitHubCredentials {
+    #[serde(deserialize_with = "null_is_zero_value")]
+    auth_mode: String,
+    #[serde(deserialize_with = "null_is_zero_value")]
+    personal_access_token: String,
+}
+
+fn validate_github(credentials: Option<&RawValue>) -> Result<(), WriteError> {
+    let creds: GitHubCredentials = parse("github", credentials)?;
+    // Note this rejects `oauth` and `app` even though the struct carries fields
+    // for both — the upstream comment says only `pat` is wired up.
+    if creds.auth_mode != "pat" {
+        return Err(WriteError::validation(
+            "credentials.auth_mode",
+            "only 'pat' auth mode is currently supported",
+        ));
+    }
+    if creds.personal_access_token.is_empty() {
+        return Err(WriteError::validation(
+            "credentials.personal_access_token",
+            "personal_access_token is required",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct SlackCredentials {
+    #[serde(deserialize_with = "null_is_zero_value")]
+    auth_mode: String,
+    #[serde(deserialize_with = "null_is_zero_value")]
+    bot_token: String,
+    #[serde(deserialize_with = "null_is_zero_value")]
+    client_id: String,
+    #[serde(deserialize_with = "null_is_zero_value")]
+    client_secret: String,
+}
+
+fn validate_slack(credentials: Option<&RawValue>) -> Result<(), WriteError> {
+    let creds: SlackCredentials = parse("slack", credentials)?;
+    match creds.auth_mode.as_str() {
+        "bot_token" => {
+            if creds.bot_token.is_empty() {
+                return Err(WriteError::validation(
+                    FIELD_BOT_TOKEN,
+                    "bot_token is required",
+                ));
+            }
+        }
+        "oauth" => {
+            if creds.client_id.is_empty() {
+                return Err(WriteError::validation(
+                    "credentials.client_id",
+                    "client_id is required",
+                ));
+            }
+            if creds.client_secret.is_empty() {
+                return Err(WriteError::validation(
+                    "credentials.client_secret",
+                    "client_secret is required",
+                ));
+            }
+        }
+        // Covers the empty string too, which is what an absent `auth_mode` is.
+        _ => {
+            return Err(WriteError::validation(
+                "credentials.auth_mode",
+                "auth_mode must be 'bot_token' or 'oauth'",
+            ))
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct WhatsAppCredentials {
+    #[serde(deserialize_with = "null_is_zero_value")]
+    #[allow(dead_code)] // Parsed only to reproduce Go's decode check.
+    phone: String,
+}
+
+/// WhatsApp pairs by QR, so credentials are **optional** — absent is valid.
+///
+/// Kept despite the desktop app dropping WhatsApp (#273) for the same reason
+/// `native/integrations.rs` still lists a `whatsapp` row: this is the API, not
+/// the picker, and diverging from Go here would be a divergence for no gain.
+fn validate_whatsapp(credentials: Option<&RawValue>) -> Result<(), WriteError> {
+    if raw_is_absent(credentials) {
+        return Ok(());
+    }
+    let _: WhatsAppCredentials = parse("whatsapp", credentials)?;
+    Ok(())
+}
+
+/// Scheme and host as `net/url` would report them, or `Fallback` when this port
+/// is not confident it agrees with Go.
+///
+/// Only the shapes an Atlassian site URL actually takes are decided here.
+/// Anything carrying a space, a control character or a malformed `%` escape is
+/// forwarded, because those are exactly the inputs `url.Parse` rejects with a
+/// message of its own — and a wrong *acceptance* here would store a URL Go
+/// would have refused.
+fn split_url(raw: &str) -> Result<(String, String), WriteError> {
+    let forward = || {
+        WriteError::Fallback(format!(
+            "site_url {raw:?} needs net/url's own parse result; forwarding"
+        ))
+    };
+    if raw.chars().any(|c| c.is_control() || c == ' ') {
+        return Err(forward());
+    }
+    for (i, b) in raw.bytes().enumerate() {
+        if b == b'%' {
+            let rest = raw.as_bytes().get(i + 1..i + 3).unwrap_or(b"");
+            if rest.len() != 2 || !rest.iter().all(|c| c.is_ascii_hexdigit()) {
+                return Err(forward());
+            }
+        }
+    }
+
+    // `url.Parse` takes the scheme only when what precedes the first ':' is a
+    // valid scheme; otherwise the whole string is an opaque path and Scheme is
+    // "". A bare `example.atlassian.net` therefore has no scheme and no host,
+    // which is why it fails the HTTPS check rather than the hostname one.
+    let Some((scheme, rest)) = raw.split_once(':') else {
+        return Ok((String::new(), String::new()));
+    };
+    let valid_scheme = !scheme.is_empty()
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+    if !valid_scheme {
+        return Ok((String::new(), String::new()));
+    }
+    // Go lowercases the scheme.
+    let scheme = scheme.to_ascii_lowercase();
+    // Without `//` the remainder is opaque and Host stays empty.
+    let Some(authority) = rest.strip_prefix("//") else {
+        return Ok((scheme, String::new()));
+    };
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
+    // Userinfo is not part of Host.
+    let host = match authority.rsplit_once('@') {
+        Some((_, host)) => host,
+        None => authority,
+    };
+    Ok((scheme, host.to_string()))
+}
+
+/// A Go-compatible JSON string literal.
+///
+/// `encoding/json` escapes `<`, `>` and `&` by default, which serde does not —
+/// and these values are re-marshalled into the stored column, so the escaping
+/// has to match or the bytes differ.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '<' => out.push_str("\\u003c"),
+            '>' => out.push_str("\\u003e"),
+            '&' => out.push_str("\\u0026"),
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn raw(s: &str) -> Box<RawValue> {
+        RawValue::from_string(s.to_string()).expect("valid JSON")
+    }
+
+    fn err(integration_type: &str, creds: &str) -> WriteError {
+        validate(integration_type, Some(&raw(creds))).expect_err("expected a validation failure")
+    }
+
+    fn message(integration_type: &str, creds: &str) -> String {
+        err(integration_type, creds).message()
+    }
+
+    /// An **absent** blob is "credentials are empty"; a literal `null` is four
+    /// bytes to Go, so it decodes to the zero value and reports the first
+    /// missing field instead. Getting these the same way round is the whole
+    /// reason the request field uses `captured_raw`.
+    #[test]
+    fn absent_credentials_and_null_credentials_fail_differently() {
+        let absent = validate("google", None).expect_err("absent must fail");
+        assert!(
+            absent.message().contains("credentials are empty"),
+            "{}",
+            absent.message()
+        );
+        assert!(
+            message("google", "null").contains("client_id is required"),
+            "a literal null is a zero value to Go, not an absent blob"
+        );
+        // `{}` behaves like `null` for the same reason.
+        assert!(message("google", "{}").contains("client_id is required"));
+    }
+
+    #[test]
+    fn each_type_reports_its_own_first_missing_field() {
+        assert!(message("google", r#"{"client_id":"a"}"#).contains("client_secret is required"));
+        assert!(message("telegram", "{}").contains("bot_token is required"));
+        assert!(message("github", r#"{"auth_mode":"oauth"}"#)
+            .contains("only 'pat' auth mode is currently supported"));
+        assert!(message("github", r#"{"auth_mode":"pat"}"#)
+            .contains("personal_access_token is required"));
+        assert!(message("slack", r#"{"auth_mode":"bot_token"}"#).contains("bot_token is required"));
+        assert!(message("slack", r#"{"auth_mode":"oauth"}"#).contains("client_id is required"));
+        assert!(message("slack", "{}").contains("auth_mode must be 'bot_token' or 'oauth'"));
+        // An unknown type checks length only, never content.
+        assert!(validate("madeup", Some(&raw(r#"{"anything":1}"#))).is_ok());
+        assert!(validate("madeup", None)
+            .expect_err("absent")
+            .message()
+            .contains("credentials are required"));
+    }
+
+    /// A JSON `null` in a string field is `""` to Go and a type error to serde.
+    #[test]
+    fn a_null_string_field_is_the_zero_value_not_an_error() {
+        assert!(message("telegram", r#"{"bot_token":null}"#).contains("bot_token is required"));
+    }
+
+    /// Confluence is HTTPS-only and quotes the scheme it got; Jira takes either
+    /// and has one message for every URL failure.
+    #[test]
+    fn the_two_atlassian_types_have_different_url_rules() {
+        assert!(message("confluence", r#"{"site_url":"http://x.net"}"#)
+            .contains(r#"site URL must use HTTPS (got "http")"#));
+        // No scheme at all: Go reports an empty scheme, not a missing hostname.
+        assert!(message("confluence", r#"{"site_url":"x.atlassian.net"}"#)
+            .contains(r#"site URL must use HTTPS (got "")"#));
+        assert!(message("confluence", r#"{"site_url":"https:"}"#)
+            .contains("site URL must include a hostname"));
+
+        // Jira accepts http.
+        assert!(validate(
+            "jira",
+            Some(&raw(
+                r#"{"site_url":"http://x.net","email":"e","api_token":"t"}"#
+            ))
+        )
+        .is_ok());
+        assert!(message("jira", r#"{"site_url":"ftp://x.net"}"#)
+            .contains("site_url must be a valid http or https URL"));
+    }
+
+    /// Jira rewrites the stored blob; confluence stores what it was given.
+    #[test]
+    fn jira_normalises_and_reserialises_but_confluence_does_not() {
+        let stored = validate(
+            "jira",
+            Some(&raw(
+                r#"{"email":"e@x","extra":"dropped","site_url":"https://x.net///","api_token":"t"}"#,
+            )),
+        )
+        .expect("valid")
+        .expect("jira replaces the stored credentials");
+        // Declaration order, every trailing slash gone, unknown key dropped.
+        assert_eq!(
+            stored,
+            r#"{"site_url":"https://x.net","email":"e@x","api_token":"t"}"#
+        );
+
+        let unchanged = validate(
+            "confluence",
+            Some(&raw(
+                r#"{"site_url":"https://x.net/","email":"e","api_token":"t"}"#,
+            )),
+        )
+        .expect("valid");
+        assert!(
+            unchanged.is_none(),
+            "confluence must store the caller's bytes verbatim, trailing slash and all"
+        );
+    }
+
+    /// Go's `encoding/json` escapes these; the re-marshalled Jira blob has to
+    /// match byte for byte.
+    #[test]
+    fn the_reserialised_blob_uses_gos_html_escaping() {
+        let stored = validate(
+            "jira",
+            Some(&raw(
+                r#"{"site_url":"https://x.net","email":"a&b<c>d","api_token":"t"}"#,
+            )),
+        )
+        .expect("valid")
+        .expect("replaced");
+        assert_eq!(
+            stored,
+            r#"{"site_url":"https://x.net","email":"a\u0026b\u003cc\u003ed","api_token":"t"}"#,
+            "serde would emit these three unescaped; encoding/json does not"
+        );
+    }
+
+    /// WhatsApp is the one type where absent credentials are fine.
+    #[test]
+    fn whatsapp_allows_absent_credentials() {
+        assert!(validate("whatsapp", None).is_ok());
+        assert!(validate("whatsapp", Some(&raw(r#"{"phone":"+1"}"#))).is_ok());
+    }
+
+    /// A blob that does not decode forwards rather than inventing Go's message.
+    #[test]
+    fn an_undecodable_blob_forwards() {
+        let e = err("google", r#"{"client_id":123}"#);
+        assert!(
+            matches!(e, WriteError::Fallback(_)),
+            "a type mismatch must forward, since Go's json error text names Go types"
+        );
+    }
+}
