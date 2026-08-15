@@ -20,11 +20,13 @@ pub mod diff;
 pub mod gojson;
 pub mod gotime;
 pub mod insights;
+pub mod monitoring;
 pub mod pricing;
 pub mod scanner;
 pub mod sessions;
 pub mod settings;
 pub mod tasks;
+pub mod version;
 
 use axum::body::Body;
 use axum::http::{header, Method, Response, StatusCode};
@@ -119,6 +121,9 @@ const ENDPOINTS: &[Endpoint] = &[
     insights::ENDPOINT,
     chats::ENDPOINT,
     tasks::ENDPOINT,
+    settings::ENDPOINT,
+    monitoring::ENDPOINT,
+    version::ENDPOINT,
 ];
 
 /// Whether this request is answered by ported Rust code.
@@ -221,6 +226,28 @@ mod tests {
         assert!(!claims(&Method::DELETE, "/api/job-history"));
         assert!(!claims(&Method::GET, "/api/tasks/"));
         assert!(!claims(&Method::GET, "/api/job-history/"));
+
+        // Settings: the row read. The write re-applies the process-wide
+        // snapshots and triggers a rescan, neither of which Rust can do while
+        // Go owns the database — and the config-dir editor probes the
+        // filesystem rather than reading this row.
+        assert!(claims(&Method::GET, "/api/settings"));
+        assert!(!claims(&Method::PUT, "/api/settings"));
+        assert!(!claims(&Method::GET, "/api/settings/claude-config-dirs"));
+        // A different tree entirely: Claude Code's own settings.json.
+        assert!(!claims(&Method::GET, "/api/claude-settings"));
+
+        // Monitoring: the read. The write hot-reloads the OTel providers and
+        // the test dials the collector over gRPC.
+        assert!(claims(&Method::GET, "/api/monitoring"));
+        assert!(!claims(&Method::PUT, "/api/monitoring"));
+        assert!(!claims(&Method::POST, "/api/monitoring/test"));
+
+        // Version: both reads are claimed, but the update check falls back for
+        // a stamped release — that branch is the self-updater, not a read.
+        assert!(claims(&Method::GET, "/api/version"));
+        assert!(claims(&Method::GET, "/api/version/update-check"));
+        assert!(!claims(&Method::GET, "/api/version/"));
     }
 
     #[test]
@@ -253,6 +280,10 @@ mod tests {
             "/api/tasks/abc-123/job-history",
             "/api/job-history",
             "/api/job-history/abc-123",
+            "/api/settings",
+            "/api/monitoring",
+            "/api/version",
+            "/api/version/update-check",
         ];
         for path in paths {
             let owners: Vec<&str> = ENDPOINTS
@@ -283,6 +314,10 @@ mod tests {
             "/api/tasks/abc-123/job-history",
             "/api/job-history",
             "/api/job-history/abc-123",
+            "/api/settings",
+            "/api/monitoring",
+            "/api/version",
+            "/api/version/update-check",
         ];
         for endpoint in ENDPOINTS {
             assert!(
