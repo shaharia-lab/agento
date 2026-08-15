@@ -17,7 +17,9 @@ pub mod analytics;
 pub mod chats;
 pub mod db;
 pub mod diff;
+pub mod fs;
 pub mod gojson;
+pub mod gopath;
 pub mod gotime;
 pub mod insights;
 pub mod monitoring;
@@ -126,6 +128,7 @@ const ENDPOINTS: &[Endpoint] = &[
     monitoring::ENDPOINT,
     version::ENDPOINT,
     notifications::ENDPOINT,
+    fs::ENDPOINT,
 ];
 
 /// Whether this request is answered by ported Rust code.
@@ -258,6 +261,13 @@ mod tests {
         assert!(!claims(&Method::PUT, "/api/notifications/settings"));
         assert!(!claims(&Method::POST, "/api/notifications/test"));
         assert!(!claims(&Method::GET, "/api/notifications"));
+
+        // The filesystem listing, on the platforms `gopath` speaks. Creating a
+        // directory is a write, and uploads has no read at all.
+        assert!(claims(&Method::GET, "/api/fs"));
+        assert!(!claims(&Method::POST, "/api/fs/mkdir"));
+        assert!(!claims(&Method::POST, "/api/uploads"));
+        assert!(!claims(&Method::GET, "/api/uploads"));
     }
 
     #[test]
@@ -296,6 +306,7 @@ mod tests {
             "/api/version/update-check",
             "/api/notifications/settings",
             "/api/notifications/log",
+            "/api/fs",
         ];
         for path in paths {
             let owners: Vec<&str> = ENDPOINTS
@@ -332,6 +343,7 @@ mod tests {
             "/api/version/update-check",
             "/api/notifications/settings",
             "/api/notifications/log",
+            "/api/fs",
         ];
         for endpoint in ENDPOINTS {
             assert!(

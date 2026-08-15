@@ -137,6 +137,8 @@ src-tauri/src/
     monitoring.rs GET /api/monitoring — monitoring.json and the OTEL_* locks, no exporters
     version.rs   GET /api/version and /version/update-check (dev builds only)
     notifications.rs GET /api/notifications/settings (password masked) and /log
+    fs.rs        GET /api/fs — the working-dir picker's listing (Unix; forwards on Windows)
+    gopath.rs    Go's filepath.Clean/Dir/Join, pinned to vectors generated from Go
     pricing.rs   GET /api/pricing/catalog, plus the rate Resolver
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
@@ -258,7 +260,11 @@ only a byte comparison catches all four.
    the first "identical" meant nothing until two agents were created through it.
 4. Prove it three ways:
    - a fixture both languages build, compared against a golden file Go wrote
-     (`desktop/parity/`, `go test ./desktop/parity/ -update-golden`). Build the
+     (`desktop/parity/`, `go test ./desktop/parity/ -update-golden`). A shared
+     *primitive* rather than a response takes the vector form instead —
+     `gopath_vectors.json` records what Go's `filepath.Clean`/`Dir`/`Join`
+     answer and both languages assert against it, which is how #268 found a
+     doubled separator the Rust `Clean` produced. Build the
      fixture with **no ties on any sort key** — see below; a tie makes the
      golden flaky in Go before Rust ever sees it, which is why
      `TestAnalyticsFixtureHasNoTiesOnAnySortKey` asserts the property;
