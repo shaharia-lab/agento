@@ -43,8 +43,13 @@ pub enum WriteError {
     Validation { field: String, message: String },
     /// `service.ConflictError` → 409.
     Conflict { resource: String, id: String },
-    /// `service.NotFoundError` → 404.
+    /// `service.NotFoundError` → 404, formatted as that error formats.
     NotFound { resource: String, id: String },
+    /// A 404 whose body is a fixed string rather than the service error's
+    /// wording. `handleUpdateChat` writes `chat not found` directly, so
+    /// [`WriteError::NotFound`] — which would render `chat "abc" not found` —
+    /// is the wrong shape, and `BadRequest` is the wrong *status*.
+    NotFoundMessage(String),
     /// Not reproducible here: let the sidecar answer.
     Fallback(String),
 }
@@ -64,7 +69,7 @@ impl WriteError {
             Self::InvalidBody | Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Conflict { .. } => StatusCode::CONFLICT,
-            Self::NotFound { .. } => StatusCode::NOT_FOUND,
+            Self::NotFound { .. } | Self::NotFoundMessage(_) => StatusCode::NOT_FOUND,
             Self::Fallback(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -91,6 +96,7 @@ impl WriteError {
             }
             // `service.NotFoundError.Error()`.
             Self::NotFound { resource, id } => format!("{resource} {:?} not found", id),
+            Self::NotFoundMessage(m) => m.clone(),
             Self::Fallback(m) => m.clone(),
         }
     }
@@ -242,6 +248,12 @@ mod tests {
             WriteError::BadRequest("no fields to update".into()).status(),
             StatusCode::BAD_REQUEST
         );
+        // …but a handler-level *404* is still a 404. `handleUpdateChat` writes
+        // one with a fixed message, and calling that a 400 was a real
+        // regression until it had its own variant.
+        let missing = WriteError::NotFoundMessage("chat not found".into());
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.message(), "chat not found");
     }
 
     #[test]

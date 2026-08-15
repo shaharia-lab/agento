@@ -1,0 +1,318 @@
+//! Live parity for the **writes** (#274): drive each ported write against a
+//! running Go server and against Rust, and compare the whole answer.
+//!
+//! ```sh
+//! cd desktop && eval "$(./scripts/parity-instance.sh start)"
+//! (cd src-tauri && cargo test --test parity_writes -- --ignored --nocapture)
+//! ./scripts/parity-instance.sh stop
+//! ```
+//!
+//! # Why this suite exists rather than trusting the unit tests
+//!
+//! The unit tests are good — real migrations rather than a fixture table, Go's
+//! byte-walk slug, the nil-versus-empty capability shapes. But they encode *this
+//! port's reading of Go*, and two divergences got through them anyway: a missing
+//! chat answered 400 where Go answers 404 (the test asserted the message and not
+//! the status), and the PATCH response carried the row's old `updated_at` where
+//! Go carries the write's (the test asserted the stored title and never looked
+//! at the body). Both are cases where the port and its tests were wrong in the
+//! same direction. Only asking the real server breaks that circularity.
+//!
+//! # These tests WRITE, so they need their own instance
+//!
+//! Every other parity suite is read-only and safe against anything.
+//! **This one is not.** It creates, renames and deletes rows, so it refuses to
+//! run unless `AGENTO_LIVE_URL` is set — which `parity-instance.sh start`
+//! exports, and which the default `:8990` fallback deliberately does not
+//! satisfy. `parity-instance.sh` runs a Go server built from this checkout
+//! against a **copy** of `~/.agento`, so the writes land on a scratch database.
+//!
+//! Each case cleans up after itself, and every id is prefixed so a leaked row is
+//! obviously this suite's.
+//!
+//! # What is compared, and how — this is NOT the read suites' shape
+//!
+//! The read suites ask Go and Rust the same question and diff the two bodies.
+//! A write cannot work that way: whichever implementation runs first changes
+//! the state the second would see, so there is no shared question to ask.
+//!
+//! So these tests **pin Go's real answers as literals** — status and exact
+//! bytes — and the unit tests in `native/agents.rs` and `native/chats.rs`
+//! assert the *same* literals against Rust. The comparison is real, it just
+//! happens across two suites instead of inside one, and this is the half that
+//! cannot be wrong about what Go does, because it asked.
+//!
+//! Status is checked as carefully as the body. A create answered 200 instead of
+//! 201 is a divergence no body comparison can see, and it is exactly what the
+//! seam's new status plumbing could get wrong.
+
+mod parity_common;
+
+use parity_common::*;
+
+use reqwest::Method;
+
+/// Refuse to run against anything but a scratch instance.
+///
+/// The read suites fall back to `:8990` — the developer's real Agento — which
+/// is harmless for a GET and would be data loss here.
+fn require_scratch_instance() {
+    assert!(
+        std::env::var("AGENTO_LIVE_URL").is_ok(),
+        "parity_writes mutates data and refuses to guess an instance. \
+         Run `eval \"$(./scripts/parity-instance.sh start)\"` first — it points \
+         AGENTO_LIVE_URL at a Go server running on a copy of ~/.agento."
+    );
+}
+
+/// Ask the Go server, and hand back exactly what it said.
+///
+/// `AGENTO_LIVE_URL` points at the Go parity instance, so this is Go's answer
+/// and nothing else — the assertions around each call are the record of it.
+async fn go_answer(method: Method, path: &str, body: Option<&str>) -> (u16, Vec<u8>) {
+    send(method, path, body).await
+}
+
+// ─── Agents ───────────────────────────────────────────────────────────────────
+
+/// Create, update and delete an agent, comparing every answer.
+///
+/// Driven as one case rather than three because the three share a lifecycle:
+/// the update needs something to update, and leaving a test agent behind on a
+/// scratch database would still be leaving it behind.
+#[tokio::test]
+#[ignore = "needs a running Agento instance and its database, and it writes"]
+async fn the_agent_write_answers_match_go() {
+    require_scratch_instance();
+
+    let slug = "parity-writes-agent";
+    // A previous failed run may have left it behind.
+    let _ = go_answer(Method::DELETE, &format!("/api/agents/{slug}"), None).await;
+
+    let created = go_answer(
+        Method::POST,
+        "/api/agents",
+        Some(&format!(
+            r#"{{"name":"Parity Writes","slug":"{slug}","description":"d","system_prompt":"p"}}"#
+        )),
+    )
+    .await;
+    assert_eq!(created.0, 201, "create must be 201, got {}", created.0);
+    println!("create: {}", String::from_utf8_lossy(&created.1));
+
+    // The defaults the *service* applies, visible on the wire: an empty model
+    // becomes claude-sonnet-4-6, empty thinking becomes adaptive, and
+    // permission_mode stays "" because the request type cannot carry one.
+    let body: serde_json::Value = serde_json::from_slice(&created.1).expect("json");
+    assert_eq!(body["model"], "claude-sonnet-4-6");
+    assert_eq!(body["thinking"], "adaptive");
+    assert_eq!(body["permission_mode"], "");
+
+    // A duplicate is a 409 with the service error's exact wording.
+    let conflict = go_answer(
+        Method::POST,
+        "/api/agents",
+        Some(&format!(r#"{{"name":"Again","slug":"{slug}"}}"#)),
+    )
+    .await;
+    assert_eq!(conflict.0, 409, "duplicate slug must be 409");
+    assert_eq!(
+        String::from_utf8_lossy(&conflict.1).trim_end(),
+        format!(r#"{{"error":"agent with id \"{slug}\" already exists"}}"#)
+    );
+
+    // A missing name is a 422 — not a 400, which is the distinction the port
+    // has to keep.
+    let invalid = go_answer(Method::POST, "/api/agents", Some(r#"{"description":"x"}"#)).await;
+    assert_eq!(invalid.0, 422, "a validation failure must be 422");
+    assert_eq!(
+        String::from_utf8_lossy(&invalid.1).trim_end(),
+        r#"{"error":"validation error for \"name\": name is required"}"#
+    );
+
+    // A JSON array body is a 400 in Go. This is the divergence serde's
+    // positional struct deserialization would have hidden.
+    let array_body = go_answer(Method::POST, "/api/agents", Some(r#"["Sneaky"]"#)).await;
+    assert_eq!(array_body.0, 400, "an array body must be 400, not a create");
+
+    let updated = go_answer(
+        Method::PUT,
+        &format!("/api/agents/{slug}"),
+        Some(r#"{"name":"Renamed","description":"changed"}"#),
+    )
+    .await;
+    assert_eq!(updated.0, 200, "update must be 200");
+    let body: serde_json::Value = serde_json::from_slice(&updated.1).expect("json");
+    assert_eq!(body["name"], "Renamed");
+    assert_eq!(body["slug"], slug, "the path slug wins over the body");
+
+    let deleted = go_answer(Method::DELETE, &format!("/api/agents/{slug}"), None).await;
+    assert_eq!(deleted.0, 204, "delete must be 204");
+    assert!(deleted.1.is_empty(), "204 carries no body");
+}
+
+// ─── Chats ────────────────────────────────────────────────────────────────────
+
+/// Create, patch and delete a chat.
+///
+/// The patch cases are the ones this suite was added for: both divergences the
+/// unit tests missed live here.
+#[tokio::test]
+#[ignore = "needs a running Agento instance and its database, and it writes"]
+async fn the_chat_write_answers_match_go() {
+    require_scratch_instance();
+
+    let created = go_answer(
+        Method::POST,
+        "/api/chats",
+        Some(r#"{"working_directory":"/tmp","model":"parity-writes"}"#),
+    )
+    .await;
+    assert_eq!(created.0, 201, "create must be 201");
+    let session: serde_json::Value = serde_json::from_slice(&created.1).expect("json");
+    let id = session["id"].as_str().expect("id").to_string();
+    assert_eq!(session["title"], "New Chat");
+    // omitempty: none of the zero counters is on the wire.
+    assert!(session.get("total_input_tokens").is_none());
+    assert!(session.get("is_favorite").is_none());
+    let created_updated_at = session["updated_at"]
+        .as_str()
+        .expect("updated_at")
+        .to_string();
+
+    // Second precision in the stored rendering, so a same-second patch could
+    // not be told apart from a stale read.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+
+    let patched = go_answer(
+        Method::PATCH,
+        &format!("/api/chats/{id}"),
+        Some(r#"{"title":"  Renamed  "}"#),
+    )
+    .await;
+    assert_eq!(patched.0, 200);
+    let body: serde_json::Value = serde_json::from_slice(&patched.1).expect("json");
+    assert_eq!(body["title"], "Renamed", "the title is stored trimmed");
+    // The divergence: Go's response carries the *write's* timestamp, because
+    // chatService.UpdateSession stamps the struct the handler then serializes.
+    assert_ne!(
+        body["updated_at"].as_str().expect("updated_at"),
+        created_updated_at,
+        "the PATCH response must carry the new updated_at, not the row's old one"
+    );
+
+    // The other divergence: a missing chat is a 404 with a bare message.
+    let missing = go_answer(
+        Method::PATCH,
+        "/api/chats/parity-writes-no-such-chat",
+        Some(r#"{"title":"x"}"#),
+    )
+    .await;
+    assert_eq!(missing.0, 404, "a missing chat must be 404, not 400");
+    assert_eq!(
+        String::from_utf8_lossy(&missing.1).trim_end(),
+        r#"{"error":"chat not found"}"#
+    );
+
+    // Handler-level rejections, which really are 400.
+    for (body, want) in [
+        ("{}", "no fields to update"),
+        (r#"{"title":"   "}"#, "title cannot be empty"),
+    ] {
+        let rejected = go_answer(Method::PATCH, &format!("/api/chats/{id}"), Some(body)).await;
+        assert_eq!(rejected.0, 400, "body {body} must be 400");
+        assert_eq!(
+            String::from_utf8_lossy(&rejected.1).trim_end(),
+            format!(r#"{{"error":"{want}"}}"#)
+        );
+    }
+
+    let deleted = go_answer(Method::DELETE, &format!("/api/chats/{id}"), None).await;
+    assert_eq!(deleted.0, 204);
+    assert!(deleted.1.is_empty());
+}
+
+/// The bulk delete, including its two bounds.
+#[tokio::test]
+#[ignore = "needs a running Agento instance and its database, and it writes"]
+async fn the_bulk_chat_delete_answers_match_go() {
+    require_scratch_instance();
+
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let created = go_answer(
+            Method::POST,
+            "/api/chats",
+            Some(r#"{"model":"parity-bulk"}"#),
+        )
+        .await;
+        let session: serde_json::Value = serde_json::from_slice(&created.1).expect("json");
+        ids.push(session["id"].as_str().expect("id").to_string());
+    }
+
+    for (body, want_status, want_error) in [
+        (
+            r#"{"ids":[]}"#.to_string(),
+            400,
+            Some("ids must not be empty"),
+        ),
+        (
+            format!(r#"{{"ids":[{}]}}"#, vec!["\"x\""; 501].join(",")),
+            400,
+            Some("too many ids (max 500)"),
+        ),
+    ] {
+        let rejected = go_answer(Method::DELETE, "/api/chats", Some(&body)).await;
+        assert_eq!(rejected.0, want_status);
+        if let Some(want) = want_error {
+            assert_eq!(
+                String::from_utf8_lossy(&rejected.1).trim_end(),
+                format!(r#"{{"error":"{want}"}}"#)
+            );
+        }
+    }
+
+    // An id that does not exist is not an error for the bulk delete, unlike the
+    // single one.
+    let payload = format!(
+        r#"{{"ids":["{}","{}","parity-writes-never-existed"]}}"#,
+        ids[0], ids[1]
+    );
+    let deleted = go_answer(Method::DELETE, "/api/chats", Some(&payload)).await;
+    assert_eq!(deleted.0, 204);
+    assert!(deleted.1.is_empty());
+}
+
+// ─── Job history ──────────────────────────────────────────────────────────────
+
+/// The one delete in this PR that is a genuine 404 rather than a forwarded 500,
+/// because its service checks the row exists first.
+#[tokio::test]
+#[ignore = "needs a running Agento instance and its database, and it writes"]
+async fn the_job_history_delete_answers_match_go() {
+    require_scratch_instance();
+
+    let missing = go_answer(
+        Method::DELETE,
+        "/api/job-history/parity-writes-no-such-entry",
+        None,
+    )
+    .await;
+    assert_eq!(missing.0, 404, "job history's delete really is a 404");
+    assert_eq!(
+        String::from_utf8_lossy(&missing.1).trim_end(),
+        r#"{"error":"job_history \"parity-writes-no-such-entry\" not found"}"#
+    );
+
+    for (body, want) in [
+        (r#"{"ids":[]}"#, "ids must not be empty"),
+        (r#"{}"#, "ids must not be empty"),
+    ] {
+        let rejected = go_answer(Method::DELETE, "/api/job-history", Some(body)).await;
+        assert_eq!(rejected.0, 400);
+        assert_eq!(
+            String::from_utf8_lossy(&rejected.1).trim_end(),
+            format!(r#"{{"error":"{want}"}}"#)
+        );
+    }
+}

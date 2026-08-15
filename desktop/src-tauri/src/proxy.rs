@@ -80,11 +80,13 @@ fn route_is_native(method: &axum::http::Method, path: &str) -> bool {
 
 /// How much request body a native handler will accept.
 ///
-/// The JSON writes are small — the largest is a settings document. Uploads are
-/// the only genuinely large body and they are not claimed (multipart, and the
-/// route writes to disk rather than to the database), so this is a guard
-/// against a malformed length header rather than a real limit. Go's own cap on
-/// the one route that takes bulk input is 100 MB; anything past this forwards.
+/// **Over this the request is answered 400, not forwarded** — and it cannot be
+/// forwarded, because `to_bytes` has already consumed the body by the time the
+/// limit is hit. That is the one place the seam's "a native failure just falls
+/// back" rule does not hold, so the cap is set well above anything a claimed
+/// route legitimately carries: the biggest is an agent's `system_prompt`, and
+/// 8 MiB of it would be about a million words. Uploads are the only genuinely
+/// large body in the API and they are not claimed.
 const MAX_NATIVE_BODY: usize = 8 << 20;
 
 async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response<Body> {
@@ -115,12 +117,15 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
         let (parts, body) = req.into_parts();
         let body_bytes = match axum::body::to_bytes(body, MAX_NATIVE_BODY).await {
             Ok(bytes) => bytes,
+            // Not forwarded: the body is gone. See `MAX_NATIVE_BODY`.
             Err(e) => {
-                log::warn!("native handler for {path}: reading body failed, forwarding: {e}");
+                log::warn!("native handler for {path}: reading body failed: {e}");
                 return error_response(StatusCode::BAD_REQUEST, "could not read request body");
             }
         };
-        let mut req = Request::from_parts(parts, Body::from(body_bytes.clone()));
+        // `req` keeps a complete copy of the body, so both forwards below can
+        // use it as-is; the handler gets the other copy.
+        let req = Request::from_parts(parts, Body::from(body_bytes.clone()));
 
         // Reading SQLite is blocking work; keeping it off the axum worker means
         // one slow read cannot stall an SSE stream sharing the runtime.
@@ -128,8 +133,6 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
         let query = req.uri().query().unwrap_or_default().to_string();
         let native_answer = {
             let path = path.clone();
-            let method = method.clone();
-            let body_bytes = body_bytes.clone();
             tokio::task::spawn_blocking(move || {
                 native::serve(&native::Request {
                     method: &method,
@@ -189,8 +192,6 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
             // safety, and it lives in the handlers because only they know it.
             (_, Err(e)) => {
                 log::warn!("native handler for {path} failed, forwarding to Go: {e}");
-                // Put the buffered body back for the forward.
-                req = Request::from_parts(req.into_parts().0, Body::from(body_bytes));
                 return match forward(&state, req).await {
                     Ok(resp) => resp,
                     Err(e) => {

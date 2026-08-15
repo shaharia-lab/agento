@@ -437,9 +437,11 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     )
     .map_err(|e| WriteError::Fallback(format!("creating session: {e}")))?;
 
-    tx.commit()
-        .map_err(|e| WriteError::Fallback(format!("commit chat create: {e}")))?;
-
+    // Everything fallible happens before the commit. After it, an `Err` would
+    // forward to Go, which would mint a fresh UUID and insert a *second* chat.
+    // A failing `commit` is the one safe exception: it rolls back, so
+    // forwarding is exactly right.
+    //
     // The handler answers with the session the store built, not a re-read — so
     // the timestamps are the ones just written, parsed back from the same text
     // rather than re-taken from the clock.
@@ -463,6 +465,10 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     };
     let body = super::gojson::to_vec(&session)
         .map_err(|e| WriteError::Fallback(format!("encoding chat: {e}")))?;
+
+    // Nothing below this line may return `Fallback`.
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit chat create: {e}")))?;
     Ok(super::Answer::json_status(StatusCode::CREATED, body))
 }
 
@@ -499,8 +505,9 @@ fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteEr
     let mut session = match get_session_tx(&tx, id)? {
         Some(session) => session,
         // `err != nil || session == nil` collapses both to the same 404 with a
-        // fixed message.
-        None => return Err(WriteError::BadRequest("chat not found".to_string())),
+        // fixed message — a **404**, not a 400: this check is in the handler but
+        // its status is not the handler's usual one.
+        None => return Err(WriteError::NotFoundMessage("chat not found".to_string())),
     };
 
     if let Some(title) = title {
@@ -538,13 +545,20 @@ fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteEr
     )
     .map_err(|e| WriteError::Fallback(format!("updating session {id:?}: {e}")))?;
 
-    tx.commit()
-        .map_err(|e| WriteError::Fallback(format!("commit chat patch: {e}")))?;
-
-    // The response is the in-memory session, whose `updated_at` the handler
-    // never refreshes — so it carries the value read from the row, not `now`.
+    // The response carries the **new** timestamp. `chatService.UpdateSession`
+    // sets `session.UpdatedAt = time.Now().UTC()` before handing the struct to
+    // the store, and the handler then serializes that same struct — so Go's 200
+    // body shows the write's time, not the row's previous one. Returning the
+    // stale value would put the wrong `updated_at` in the frontend's cache for
+    // a list that sorts on exactly that column.
+    session.updated_at = super::gotime::from_sql_text(&now, 0)
+        .map_err(|e| WriteError::Fallback(format!("re-reading the write timestamp: {e}")))?;
     let body = super::gojson::to_vec(&session)
         .map_err(|e| WriteError::Fallback(format!("encoding chat: {e}")))?;
+
+    // Nothing below this line may return `Fallback` — see `create`.
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit chat patch: {e}")))?;
     Ok(super::Answer::json(body))
 }
 
@@ -999,11 +1013,53 @@ mod tests {
         assert_eq!(err, WriteError::BadRequest("no fields to update".into()));
     }
 
+    /// A **404**, not a 400. The status was the whole finding here: the message
+    /// alone was asserted and passed while the status was wrong.
     #[test]
-    fn patching_a_missing_chat_says_chat_not_found() {
+    fn patching_a_missing_chat_is_404_with_the_fixed_message() {
         let file = migrated();
         let err = patch(file.path(), "ghost", br#"{"title":"x"}"#).unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
         assert_eq!(err.message(), "chat not found");
+    }
+
+    /// `chatService.UpdateSession` stamps `UpdatedAt` before writing, and the
+    /// handler serializes that same struct — so the 200 body carries the
+    /// write's timestamp, not the row's previous one. Returning the stale value
+    /// puts the wrong `updated_at` into a list that sorts on it.
+    #[test]
+    fn the_patch_response_carries_the_new_updated_at() {
+        let file = migrated();
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+        let before = get(file.path(), &id).expect("get").unwrap().session;
+
+        // The stored rendering has second precision, so a same-second patch
+        // would be indistinguishable from a stale read.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let answer = patch(file.path(), &id, br#"{"title":"New"}"#).expect("patch");
+        let body: serde_json::Value =
+            serde_json::from_slice(answer.body.as_deref().expect("body")).expect("json");
+        let responded = body["updated_at"].as_str().expect("updated_at");
+
+        let stored = get(file.path(), &id).expect("get").unwrap().session;
+        let stored_text = serde_json::to_value(&stored).expect("value")["updated_at"]
+            .as_str()
+            .expect("str")
+            .to_string();
+        let before_text = serde_json::to_value(&before).expect("value")["updated_at"]
+            .as_str()
+            .expect("str")
+            .to_string();
+
+        assert_ne!(
+            responded, before_text,
+            "the response must not be the old timestamp"
+        );
+        assert_eq!(
+            responded, stored_text,
+            "the response must match what was written"
+        );
     }
 
     #[test]

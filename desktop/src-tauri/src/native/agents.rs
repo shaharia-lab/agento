@@ -301,10 +301,15 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     }
 
     save(&tx, &agent)?;
+
+    // Encode *before* committing. Everything after the commit must be
+    // infallible: an `Err` there forwards to Go, which would create a second
+    // agent. A failing `commit` is the one safe exception — it rolls back, so
+    // forwarding is exactly right.
+    let answer = encode(StatusCode::CREATED, &agent)?;
     tx.commit()
         .map_err(|e| WriteError::Fallback(format!("commit agent create: {e}")))?;
-
-    encode(StatusCode::CREATED, &agent)
+    Ok(answer)
 }
 
 /// `agentService.Update`. Note it looks the agent up **before** validating the
@@ -339,10 +344,12 @@ fn update(db_path: &Path, slug: &str, body: &[u8]) -> Result<super::Answer, Writ
     normalize_config_dir(&mut agent)?;
 
     save(&tx, &agent)?;
+
+    // Encoded before the commit — see `create`.
+    let answer = encode(StatusCode::OK, &agent)?;
     tx.commit()
         .map_err(|e| WriteError::Fallback(format!("commit agent update: {e}")))?;
-
-    encode(StatusCode::OK, &agent)
+    Ok(answer)
 }
 
 /// `agentService.Delete`. A missing agent is a 500 in Go, so it forwards.

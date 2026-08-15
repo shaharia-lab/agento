@@ -148,6 +148,17 @@ pub fn verify(conn: &Connection) -> Result<(), String> {
 /// DDL. `BEGIN IMMEDIATE` takes the write lock up front rather than on first
 /// write, which is what makes that re-read authoritative.
 pub fn apply(conn: &mut Connection) -> Result<(), String> {
+    // The re-read below is only half the race fix. `BEGIN IMMEDIATE` takes the
+    // write lock *now*, and on a database another process already holds it
+    // returns `SQLITE_BUSY` **immediately** unless this connection has a busy
+    // timeout — so without one the loser fails on the lock instead of failing
+    // on duplicate DDL, which is the same outcome this function exists to
+    // avoid. `db::open_read_write` sets it, but `apply` takes any `Connection`
+    // (its tests open bare ones), so it is set here rather than assumed.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("setting busy_timeout: {e}"))?;
+
+    // Outside any transaction, like Go's. Harmless to race: `IF NOT EXISTS`.
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version    INTEGER PRIMARY KEY,
@@ -171,6 +182,8 @@ pub fn apply(conn: &mut Connection) -> Result<(), String> {
             )
             .map_err(|e| format!("reading schema version: {e}"))?;
         if migration.version <= current {
+            // `tx` is dropped here, and rusqlite's default drop behaviour is
+            // rollback — so this releases the write lock rather than leaking it.
             continue;
         }
 
@@ -287,6 +300,53 @@ mod tests {
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
         assert_eq!(current_version(&conn).expect("version"), 27);
+    }
+
+    /// The property this whole function exists for, and the one sequential
+    /// idempotence does **not** prove: two processes applying at once must both
+    /// succeed rather than one failing on duplicate DDL — which is exactly what
+    /// Go's runner does, because it reads the version outside the transaction
+    /// that applies the next migration.
+    #[test]
+    fn two_connections_applying_concurrently_both_succeed() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let path = file.path().to_path_buf();
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = std::sync::Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let mut conn = Connection::open(&path).expect("open");
+                    // WAL so the two do not serialize on the whole file, which
+                    // is the configuration the app actually runs.
+                    conn.pragma_update(None, "journal_mode", "WAL")
+                        .expect("wal");
+                    barrier.wait();
+                    apply(&mut conn)
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle
+                .join()
+                .expect("thread")
+                .expect("both must apply cleanly");
+        }
+
+        let conn = Connection::open(&path).expect("open");
+        assert_eq!(current_version(&conn).expect("version"), 27);
+        // Each migration recorded exactly once — a double-apply would have
+        // violated the primary key and failed above, but assert the end state
+        // rather than relying on that.
+        let recorded: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(recorded, 27);
     }
 
     #[test]

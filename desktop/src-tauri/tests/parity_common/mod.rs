@@ -103,3 +103,49 @@ pub async fn fetch_until(
     }
     (last, ATTEMPTS)
 }
+
+/// Send a state-changing request and hand back its status and body.
+///
+/// The reads only ever needed [`fetch`], so the harness only ever spoke `GET`.
+/// The writes need the **status** as well as the bytes — Go answers 201 on a
+/// create, 204 on a delete and 422/409/404 on the failure paths, and a create
+/// answered 200 is a divergence a body comparison cannot see.
+///
+/// `Content-Type: application/json` is not optional here the way it is for a
+/// GET: `requireJSONContentType` rejects a state-changing request without it
+/// with a 415 before any handler runs.
+pub async fn send(method: reqwest::Method, path: &str, body: Option<&str>) -> (u16, Vec<u8>) {
+    let url = format!("{}{path}", live_url());
+    let mut request = reqwest::Client::new()
+        .request(method.clone(), &url)
+        .header("Content-Type", "application/json");
+    if let Some(body) = body {
+        request = request.body(body.to_string());
+    }
+    let resp = request
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("{method} {url} failed — is Agento running? ({e})"));
+
+    let status = resp.status().as_u16();
+    let bytes = resp.bytes().await.expect("reading body").to_vec();
+    (status, bytes)
+}
+
+/// Compare a write's whole answer — status first, then bytes.
+///
+/// Status before body on purpose: a 500 and a 201 both have bodies, and being
+/// told "these 47 bytes differ" is far less useful than "Go said 201, Rust said
+/// 200".
+///
+/// Unused by `parity_writes` today, which pins Go's answers as literals because
+/// a write cannot be asked of both implementations at once — but a suite that
+/// *can* pair them (a read taken before and after a write, say) wants this.
+pub fn assert_same_answer(label: &str, go: (u16, Vec<u8>), native: (u16, Vec<u8>)) {
+    assert_eq!(
+        go.0, native.0,
+        "{label}: status differs — go {} vs native {}",
+        go.0, native.0
+    );
+    assert_identical(label, &go.1, &native.1);
+}
