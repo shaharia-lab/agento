@@ -217,16 +217,10 @@ pub fn list_log(db_path: &Path, limit: i64) -> Result<Option<Vec<NotificationLog
 pub fn log_limit(query: &str) -> i64 {
     const DEFAULT_LIMIT: i64 = 50;
 
-    // `form_urlencoded`, not a `strip_prefix` scan: it is what `tasks.rs` uses
-    // and what reproduces `r.URL.Query().Get` — percent-decoded, and the *first*
-    // value for a repeated key. `tasks::parse_query_int` itself is not reusable
-    // here because it clamps to `MAX_QUERY_LIMIT`, which this handler does not.
-    let raw = form_urlencoded::parse(query.as_bytes())
-        .find(|(k, _)| k == "limit")
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_default();
-
-    match raw.parse::<i64>() {
+    // The decoding is shared (`super::query`); only the rule on top is this
+    // handler's. `tasks::parse_query_int` is not reusable here because it also
+    // clamps to `MAX_QUERY_LIMIT`, which this handler does not.
+    match super::query::value(query, "limit").parse::<i64>() {
         Ok(n) if n > 0 => n,
         _ => DEFAULT_LIMIT,
     }

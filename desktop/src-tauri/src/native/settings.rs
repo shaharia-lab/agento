@@ -264,37 +264,23 @@ fn normalize(p: &str) -> String {
     clean(&expanded.unwrap_or_else(|| p.to_string()))
 }
 
-/// `filepath.Clean` for the subset of paths a config dir can be: collapse
-/// repeated separators, resolve `.` and `..`, and drop a trailing separator.
+/// `filepath.Clean`, delegated to [`super::gopath::clean`].
+///
+/// This used to be a split-and-rejoin of its own, adequate for the subset of
+/// paths a config dir can be. #268 needed the real thing for `GET /api/fs` and
+/// pinned it to vectors generated from Go, which promptly found a case the
+/// local version also got wrong (`/a/b/../c/`). One implementation, checked
+/// against Go, rather than two that agree by inspection.
+///
+/// The empty guard stays here: `NormalizeClaudeConfigDir` answers `""` for a
+/// blank input so callers can tell "not set" from a real value, while
+/// `filepath.Clean("")` is `"."`. The caller above never reaches this with an
+/// empty string, but the guard is what makes that safe to stop checking.
 fn clean(p: &str) -> String {
     if p.is_empty() {
         return String::new();
     }
-    let rooted = p.starts_with('/');
-    let mut parts: Vec<&str> = Vec::new();
-    for part in p.split('/') {
-        match part {
-            "" | "." => continue,
-            ".." => {
-                if let Some(last) = parts.last() {
-                    if *last != ".." {
-                        parts.pop();
-                        continue;
-                    }
-                }
-                if !rooted {
-                    parts.push("..");
-                }
-            }
-            other => parts.push(other),
-        }
-    }
-    let joined = parts.join("/");
-    match (rooted, joined.is_empty()) {
-        (true, _) => format!("/{joined}"),
-        (false, true) => ".".to_string(),
-        (false, false) => joined,
-    }
+    super::gopath::clean(p)
 }
 
 /// Absolute paths only. A relative config dir means two different things at

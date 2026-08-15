@@ -336,12 +336,7 @@ const DEFAULT_LIMIT: i64 = 50;
 /// falls back to the default rather than 400-ing, and anything above
 /// `maxQueryLimit` is clamped down to it.
 fn parse_query_int(query: &str, key: &str, default: i64) -> i64 {
-    // `r.URL.Query().Get` answers with the first value for a repeated key.
-    let raw = form_urlencoded::parse(query.as_bytes())
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_default();
-
+    let raw = super::query::value(query, key);
     if raw.is_empty() {
         return default;
     }
