@@ -137,6 +137,8 @@ src-tauri/src/
     monitoring.rs GET /api/monitoring — monitoring.json and the OTEL_* locks, no exporters
     version.rs   GET /api/version and /version/update-check (dev builds only)
     notifications.rs GET /api/notifications/settings (password masked) and /log
+    integrations.rs GET /api/integrations, /{id}, /available-tools, /{id}/triggers —
+                 credentials are never selected and auth is a bool made in SQL
     fs.rs        GET /api/fs — the working-dir picker's listing (Unix; forwards on Windows)
     gopath.rs    Go's filepath.Clean/Dir/Join, pinned to vectors generated from Go
     query.rs     one query parameter, read the way r.URL.Query().Get reads it

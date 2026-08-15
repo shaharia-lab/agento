@@ -22,6 +22,7 @@ pub mod gojson;
 pub mod gopath;
 pub mod gotime;
 pub mod insights;
+pub mod integrations;
 pub mod monitoring;
 pub mod notifications;
 pub mod pricing;
@@ -130,6 +131,7 @@ const ENDPOINTS: &[Endpoint] = &[
     version::ENDPOINT,
     notifications::ENDPOINT,
     fs::ENDPOINT,
+    integrations::ENDPOINT,
 ];
 
 /// Whether this request is answered by ported Rust code.
@@ -278,6 +280,21 @@ mod tests {
         assert!(!claims(&Method::POST, "/api/fs/mkdir"));
         assert!(!claims(&Method::POST, "/api/uploads"));
         assert!(!claims(&Method::GET, "/api/uploads"));
+
+        // Integrations: the four reads. Everything that writes, dials a remote
+        // service, or reads in-memory OAuth state stays with Go.
+        assert!(claims(&Method::GET, "/api/integrations"));
+        assert!(claims(&Method::GET, "/api/integrations/available-tools"));
+        assert!(claims(&Method::GET, "/api/integrations/abc"));
+        assert!(claims(&Method::GET, "/api/integrations/abc/triggers"));
+        assert!(!claims(&Method::POST, "/api/integrations"));
+        assert!(!claims(&Method::PUT, "/api/integrations/abc"));
+        assert!(!claims(&Method::GET, "/api/integrations/abc/auth/status"));
+        assert!(!claims(
+            &Method::GET,
+            "/api/integrations/abc/webhook/status"
+        ));
+        assert!(!claims(&Method::GET, "/api/integrations/abc/whatsapp/qr"));
     }
 
     #[test]
@@ -317,6 +334,10 @@ mod tests {
             "/api/notifications/settings",
             "/api/notifications/log",
             "/api/fs",
+            "/api/integrations",
+            "/api/integrations/available-tools",
+            "/api/integrations/abc",
+            "/api/integrations/abc/triggers",
         ];
         for path in paths {
             let owners: Vec<&str> = ENDPOINTS
@@ -354,6 +375,10 @@ mod tests {
             "/api/notifications/settings",
             "/api/notifications/log",
             "/api/fs",
+            "/api/integrations",
+            "/api/integrations/available-tools",
+            "/api/integrations/abc",
+            "/api/integrations/abc/triggers",
         ];
         for endpoint in ENDPOINTS {
             assert!(
