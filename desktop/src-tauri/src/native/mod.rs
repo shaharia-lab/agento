@@ -11,6 +11,7 @@
 //! unported one, and a schema change that outruns the Rust reader degrades to
 //! the behaviour the app had before the port instead of a 500.
 
+pub mod active_time;
 pub mod agents;
 pub mod analytics;
 pub mod db;
@@ -19,6 +20,7 @@ pub mod gojson;
 pub mod gotime;
 pub mod insights;
 pub mod pricing;
+pub mod scanner;
 pub mod sessions;
 pub mod settings;
 

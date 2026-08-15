@@ -56,7 +56,10 @@ pub struct SessionPR {
 }
 
 /// One session as the list renders it.
-#[derive(Debug, Clone, Serialize)]
+///
+/// `Default` exists for the scanner, which builds a row field by field from a
+/// transcript rather than from a query.
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SessionSummary {
     pub session_id: String,
     pub project_path: String,
