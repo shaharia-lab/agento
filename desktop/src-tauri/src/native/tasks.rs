@@ -26,6 +26,9 @@
 //! 3. **A bad `schedule_config` fails the whole request.** That is the opposite
 //!    of `chat_messages.blocks`, which swallows its decode error — the policy is
 //!    per column, so mirror the Go call site rather than the neighbouring port.
+//!    A stored `null` is *not* bad, though: Go decodes it into the struct's zero
+//!    value without complaint, so the task ships `{}` and a 200. See
+//!    [`scan_task`] — getting that wrong takes a whole list down over one row.
 
 use std::path::Path;
 
@@ -242,15 +245,24 @@ fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
         // Go fails the whole read on an unparsable schedule config rather than
         // serving a task whose schedule is unknown. So does this: the error
         // reaches the proxy, which falls back to Go.
-        schedule_config: serde_json::from_str(&config).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                10,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::other(format!(
-                    "parsing schedule config: {e}"
-                ))),
-            )
-        })?,
+        //
+        // `Option` is what keeps a stored `null` out of that arm. Go unmarshals
+        // a JSON `null` into a struct by leaving it at its zero value and
+        // returning no error, so the task ships `"schedule_config":{}` and a
+        // 200 — decoding straight into `ScheduleConfig` would reject it and
+        // take the whole list down to a fallback with it. Verified against a Go
+        // server built from this checkout.
+        schedule_config: serde_json::from_str::<Option<ScheduleConfig>>(&config)
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    10,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::other(format!(
+                        "parsing schedule config: {e}"
+                    ))),
+                )
+            })?
+            .unwrap_or_default(),
         stop_after_count: row.get(11)?,
         stop_after_time: nullable_timestamp(row, 12)?,
         save_output: row.get(13)?,
@@ -688,6 +700,31 @@ mod tests {
 
         assert!(list_tasks(file.path()).is_err());
         assert!(get_task(file.path(), "broken").is_err());
+    }
+
+    /// …but a stored JSON `null` is **not** unparsable. Go unmarshals `null`
+    /// into a struct by leaving it at its zero value and returning no error, so
+    /// the task ships `{}` and a 200. Decoding straight into `ScheduleConfig`
+    /// rejects it, which would drop the whole list to a fallback over one row.
+    #[test]
+    fn a_null_schedule_config_is_an_empty_one_not_a_failure() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute_batch(SCHEMA).expect("schema");
+        conn.execute_batch(
+            "INSERT INTO scheduled_tasks (id, name, prompt, schedule_config, created_at, updated_at)
+             VALUES ('nulled', 'Nulled', 'p', 'null',
+                     '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC');",
+        )
+        .expect("seed");
+
+        let task = get_task(file.path(), "nulled").expect("get").expect("task");
+        assert!(
+            encoded(&task).contains(r#""schedule_config":{},"#),
+            "{}",
+            encoded(&task)
+        );
+        assert_eq!(list_tasks(file.path()).expect("list").len(), 1);
     }
 
     #[test]

@@ -122,6 +122,10 @@ async fn task_and_job_history_reads_match_the_live_go_responses() {
         ("?limit=0", 50, 0),
         ("?limit=-3", 50, 0),
         ("?offset=-1", 50, 0),
+        // `offset` shares `parseQueryInt`, so it is clamped at 500 too — but a
+        // corpus this size cannot *prove* that, since 500 and 9999 both land
+        // past the last row. The unit tests pin the rule from the Go source;
+        // this case only shows the two agree on the result.
         ("?limit=9999&offset=9999", 500, 500),
     ] {
         let go = fetch(&format!("/api/job-history{query}")).await;
