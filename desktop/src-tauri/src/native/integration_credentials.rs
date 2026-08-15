@@ -408,24 +408,41 @@ fn split_url(raw: &str) -> Result<(String, String), WriteError> {
     };
     let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
 
-    // Everything below is a shape `parseHost` has a rule for that this port
-    // does not reimplement — userinfo validation, IPv6 bracket matching,
-    // percent-escapes (which a host may not contain at all), and port syntax.
-    // **Forwarding is the only safe answer for these**, because the failure
-    // mode of guessing is not a wrong message but a wrong *acceptance*: Rust
-    // would create an integration whose `site_url` Go's own parser can never
-    // read, and being native the request never reaches Go to be refused.
+    // Everything below is a rule `parseHost` has that this port does not
+    // reimplement — userinfo validation, IPv6 bracket matching, percent-escapes
+    // (a host may not carry one at all) and port syntax. **Forwarding is the
+    // only safe answer**, because the failure mode of guessing is not a wrong
+    // message but a wrong *acceptance*: Rust would create an integration whose
+    // `site_url` Go's own parser can never read, and being native the request
+    // never reaches Go to be refused.
     if authority.contains(['@', '[', ']', '%']) {
         return Err(forward());
     }
-    // A `:` in the authority introduces a port, which Go requires to be digits
-    // — and to appear at most once.
-    if let Some((host, port)) = authority.split_once(':') {
+    // `parseHost` enforces an **allowlist**, not a blocklist, so this has to be
+    // spelled the same way round. Enumerating every ASCII byte through
+    // `url.Parse` in host position, Go rejects exactly `\`, `^`, `` ` ``, `{`,
+    // `|` and `}` with `invalid character … in host name`, and accepts the rest
+    // of the printable set — including `!"$&'()*+,-.;<=>_~`, which look
+    // rejectable and are not. Bytes at or above 0x80 pass through unchanged, so
+    // a non-ASCII host such as `exämple.net` is Go's to accept.
+    const HOST_PUNCT: &[u8] = b":!\"$&'()*+,-.;<=>_~";
+    if authority
+        .bytes()
+        .any(|b| b < 0x80 && !b.is_ascii_alphanumeric() && !HOST_PUNCT.contains(&b))
+    {
+        return Err(forward());
+    }
+    // A `:` introduces a port, which Go requires to be digits.
+    if let Some((_, port)) = authority.split_once(':') {
         if !port.chars().all(|c| c.is_ascii_digit()) {
             return Err(forward());
         }
-        return Ok((scheme, host.to_string()));
     }
+    // The **whole authority**, port included: both Go validators test `u.Host`,
+    // which keeps the port. Returning only the pre-colon part made
+    // `https://:8080` — a valid `Host` of `:8080` to Go — look like no host at
+    // all and answer 422. Emptiness is the only thing the callers test, so
+    // including the port changes nothing else.
     Ok((scheme, authority.to_string()))
 }
 
@@ -638,6 +655,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `parseHost` enforces an allowlist, so the guard has to be one too.
+    ///
+    /// These six are the *complete* set of ASCII characters Go rejects in a
+    /// host. A guard built from shapes rather than from Go's own table missed
+    /// every one of them — testing `split_url` directly keeps the JSON escaping
+    /// of the outer credentials blob out of the way.
+    #[test]
+    fn the_six_characters_go_rejects_in_a_host_all_forward() {
+        for bad in ['\\', '^', '`', '{', '|', '}'] {
+            let url = format!("https://x.net{bad}a");
+            assert!(
+                split_url(&url).is_err(),
+                "{url:?} was accepted, but url.Parse rejects it"
+            );
+        }
+    }
+
+    /// The other side of the allowlist: punctuation that *looks* rejectable but
+    /// which Go accepts must not forward, or the port over-refuses.
+    #[test]
+    fn the_punctuation_go_allows_in_a_host_is_not_forwarded() {
+        for ok in [
+            '!', '"', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '<', '=', '>', '_', '~',
+        ] {
+            let url = format!("https://x.net{ok}a");
+            let (scheme, host) = split_url(&url)
+                .unwrap_or_else(|e| panic!("{url:?} forwarded, but Go accepts it: {e:?}"));
+            assert_eq!(scheme, "https");
+            assert_eq!(host, format!("x.net{ok}a"));
+        }
+        // Non-ASCII passes through unchanged in Go, so it must here too.
+        let (_, host) = split_url("https://ex\u{e4}mple.net").expect("non-ascii host");
+        assert_eq!(host, "ex\u{e4}mple.net");
+    }
+
+    /// Both Go validators test `u.Host`, which **includes the port** — so an
+    /// empty hostname with a valid port is not an empty host.
+    #[test]
+    fn a_port_with_no_hostname_is_still_a_host() {
+        let (_, host) = split_url("https://:8080").expect("valid to Go");
+        assert_eq!(
+            host, ":8080",
+            "Go reads Host as \":8080\", which is not empty"
+        );
+        // …and the whole authority is the host, port included.
+        let (_, host) = split_url("https://x.net:8443/wiki").expect("valid");
+        assert_eq!(host, "x.net:8443");
     }
 
     /// …but an ordinary port is not a shape to be unsure of, and must not make
