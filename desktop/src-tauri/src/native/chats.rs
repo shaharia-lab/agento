@@ -345,6 +345,10 @@ fn compact(src: &str) -> String {
         i += 1;
     }
 
+    // Unreachable: every byte dropped or inserted above is ASCII, and the one
+    // multi-byte sequence handled is replaced whole, so a valid `&str` in stays
+    // valid UTF-8 out. Returning the input uncompacted is the harmless
+    // direction if that ever stops being true.
     String::from_utf8(out).unwrap_or_else(|_| src.to_string())
 }
 
@@ -613,6 +617,61 @@ mod tests {
         assert_eq!(
             encoded(&blocks).trim_end(),
             r#"[{"type":"tool_use","id":"t","name":"X"}]"#
+        );
+    }
+
+    /// Vectors taken **verbatim from a running Go server** built from this
+    /// checkout: each input was written into a scratch instance's `blocks`
+    /// column and each expectation is the bytes `GET /api/chats/{id}` came back
+    /// with.
+    ///
+    /// `compact` is a hand-written reimplementation of `encoding/json`'s, so it
+    /// is the riskiest code in this module and the one place a silent
+    /// divergence would not surface as a failure anywhere else. Pinning the
+    /// live evidence here keeps it reproducible after the scratch database is
+    /// gone.
+    #[test]
+    fn a_raw_input_matches_the_bytes_go_actually_produced() {
+        // Numbers keep the digits they were stored with — exponent form in
+        // either case, negative zero, an integer past f64's exact range,
+        // trailing zeros — and so do `\/`, `\t` and `\n`. A
+        // `serde_json::Value` round trip respells every one of them.
+        let already_compact = r#"[{"type":"tool_use","id":"t4","name":"N","input":{"n":[1e10,-0.0,1E-7,123456789012345678,0.1000],"s":"quote \" back \\\\ slash \/ tab \t nl \n","deep":{"a":{"b":[{"c":null}]}},"empty_obj":{},"empty_arr":[],"t":true,"f":false}}]"#;
+        assert_eq!(
+            encoded(&decode_blocks(already_compact)).trim_end(),
+            already_compact
+        );
+
+        // HTML escaping applies to keys as well as values, at every depth, and
+        // the whitespace between them goes.
+        assert_eq!(
+            encoded(&decode_blocks(
+                r#"[{"type":"tool_use","id":"t5","name":"N","input":{ "a<k>&" : "v" , "nested" : { "x&y" : [ "<" , ">" , "&" ] } }}]"#
+            ))
+            .trim_end(),
+            r#"[{"type":"tool_use","id":"t5","name":"N","input":{"a\u003ck\u003e\u0026":"v","nested":{"x\u0026y":["\u003c","\u003e","\u0026"]}}}]"#
+        );
+
+        // An `input` need not be an object: a number, a string and an array all
+        // round-trip, and only the string is escaped.
+        assert_eq!(
+            encoded(&decode_blocks(
+                r#"[{"type":"tool_use","id":"t6","name":"N","input":42},{"type":"tool_use","id":"t7","name":"N","input":"a <string> & more"},{"type":"tool_use","id":"t8","name":"N","input":[ 1 , 2 ]}]"#
+            ))
+            .trim_end(),
+            r#"[{"type":"tool_use","id":"t6","name":"N","input":42},{"type":"tool_use","id":"t7","name":"N","input":"a \u003cstring\u003e \u0026 more"},{"type":"tool_use","id":"t8","name":"N","input":[1,2]}]"#
+        );
+
+        // U+2028/U+2029 on both paths at once: `text` goes through gojson's
+        // string escaping, `input` through this module's byte pass. The two are
+        // written with placeholders so the separators cannot be mistaken for
+        // spaces in an editor — which is exactly how they read.
+        let separators = r#"[{"type":"text","text":"para1@para2"},{"type":"tool_use","id":"t9","name":"N","input":{"sep":"a@b#c","emoji":"😀 ünïcödé"}}]"#
+            .replace('@', "\u{2028}")
+            .replace('#', "\u{2029}");
+        assert_eq!(
+            encoded(&decode_blocks(&separators)).trim_end(),
+            r#"[{"type":"text","text":"para1\u2028para2"},{"type":"tool_use","id":"t9","name":"N","input":{"sep":"a\u2028b\u2029c","emoji":"😀 ünïcödé"}}]"#
         );
     }
 
