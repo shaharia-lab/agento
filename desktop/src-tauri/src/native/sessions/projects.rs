@@ -108,6 +108,106 @@ pub fn include_hidden(raw_query: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A config dir with three projects, one of them delegating — so the
+    /// sub-agent exclusion, the fold by encoded name and the sort all have
+    /// something to do — plus a settings row hiding one of them.
+    fn corpus(hidden: &[&str]) -> (tempfile::TempDir, tempfile::NamedTempFile) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let projects = dir.path().join("projects");
+        for (encoded, sessions) in [("-zzz", 1), ("-aaa", 2), ("-mmm", 1)] {
+            let p = projects.join(encoded);
+            std::fs::create_dir_all(&p).expect("project dir");
+            for i in 0..sessions {
+                std::fs::write(p.join(format!("s{encoded}-{i}.jsonl")), "").expect("transcript");
+            }
+        }
+        // A delegated transcript, which must not be counted as a session.
+        let sub = projects.join("-aaa").join("s-aaa-0").join("subagents");
+        std::fs::create_dir_all(&sub).expect("subagent dir");
+        std::fs::write(sub.join("agent-1.jsonl"), "").expect("subagent transcript");
+
+        let db = tempfile::NamedTempFile::new().expect("temp file");
+        let conn = rusqlite::Connection::open(db.path()).expect("open");
+        conn.execute_batch(
+            "CREATE TABLE user_settings (
+                id INTEGER PRIMARY KEY, default_working_dir TEXT NOT NULL DEFAULT '',
+                default_model TEXT NOT NULL DEFAULT '', onboarding_complete INTEGER NOT NULL DEFAULT 0,
+                appearance_dark_mode INTEGER NOT NULL DEFAULT 0, appearance_font_size INTEGER NOT NULL DEFAULT 0,
+                appearance_font_family TEXT NOT NULL DEFAULT '', notification_settings TEXT NOT NULL DEFAULT '{}',
+                event_bus_worker_pool_size INTEGER NOT NULL DEFAULT 3, public_url TEXT NOT NULL DEFAULT '',
+                hidden_projects TEXT NOT NULL DEFAULT '[]', idle_gap_threshold_minutes INTEGER NOT NULL DEFAULT 0,
+                claude_config_dir TEXT NOT NULL DEFAULT '', claude_config_dirs TEXT NOT NULL DEFAULT '[]');",
+        )
+        .expect("schema");
+        // The config dir under test is an *extra* dir; the default one is
+        // always indexed too, and on a developer's machine it is real — so the
+        // assertions below look for these projects rather than at the length.
+        conn.execute(
+            "INSERT INTO user_settings (id, hidden_projects, claude_config_dirs) VALUES (1, ?1, ?2)",
+            rusqlite::params![
+                serde_json::to_string(hidden).expect("json"),
+                serde_json::to_string(&[dir.path().to_string_lossy()]).expect("json"),
+            ],
+        )
+        .expect("settings row");
+        (dir, db)
+    }
+
+    fn decoded(encoded: &str) -> String {
+        crate::native::scanner::walk::decode_project_path(encoded)
+    }
+
+    fn find<'a>(projects: &'a [ClaudeProject], encoded: &str) -> Option<&'a ClaudeProject> {
+        projects.iter().find(|p| p.encoded_name == encoded)
+    }
+
+    /// Sessions are counted per project, delegated transcripts are not sessions,
+    /// and the result is sorted by decoded path.
+    #[test]
+    fn projects_are_counted_and_sorted_the_way_a_scan_publishes_them() {
+        let (_dir, db) = corpus(&[]);
+        let projects = list(db.path(), false).expect("projects");
+
+        assert_eq!(find(&projects, "-aaa").map(|p| p.session_count), Some(2));
+        assert_eq!(find(&projects, "-mmm").map(|p| p.session_count), Some(1));
+        assert_eq!(
+            find(&projects, "-zzz").map(|p| p.session_count),
+            Some(1),
+            "the sub-agent transcript must not be counted as a session"
+        );
+        assert!(
+            find(&projects, "subagents").is_none(),
+            "a subagents/ directory is not a project"
+        );
+
+        let paths: Vec<&str> = projects.iter().map(|p| p.decoded_path.as_str()).collect();
+        let mut sorted = paths.clone();
+        sorted.sort();
+        assert_eq!(paths, sorted, "sorted by decoded path");
+
+        assert!(projects.iter().all(|p| !p.hidden));
+    }
+
+    /// A hidden project is omitted entirely, and returned flagged only when the
+    /// caller asks — the settings tab's one exception.
+    #[test]
+    fn a_hidden_project_is_omitted_unless_asked_for() {
+        let hidden = decoded("-mmm");
+        let (_dir, db) = corpus(&[&hidden]);
+
+        let visible = list(db.path(), false).expect("projects");
+        assert!(
+            find(&visible, "-mmm").is_none(),
+            "a hidden project must not reach a picker"
+        );
+        assert!(find(&visible, "-aaa").is_some());
+
+        let all = list(db.path(), true).expect("projects");
+        let flagged = find(&all, "-mmm").expect("hidden project when asked for");
+        assert!(flagged.hidden);
+        assert!(!find(&all, "-aaa").expect("visible project").hidden);
+    }
+
     #[test]
     fn only_the_exact_literal_includes_hidden_projects() {
         assert!(include_hidden("include_hidden=true"));

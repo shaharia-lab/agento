@@ -36,7 +36,6 @@
 //!    detail can therefore disagree about the preview of the same session, and
 //!    the detail's is the one the transcript just produced.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension};
@@ -441,7 +440,15 @@ fn load_todos(config_dir: &str, session_id: &str) -> Vec<SessionTodo> {
 
 /// The handler's own work: the columns the transcript cannot carry.
 fn patch_from_cache(conn: &Connection, session_id: &str, detail: &mut SessionDetail) {
-    detail.summary.custom_title = scalar(conn, "custom_title", session_id).unwrap_or_default();
+    detail.summary.custom_title = conn
+        .query_row(
+            "SELECT custom_title FROM claude_session_cache WHERE session_id = ?1",
+            [session_id],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .unwrap_or_default()
+        .unwrap_or_default();
     detail.summary.is_favorite = conn
         .query_row(
             "SELECT is_favorite FROM claude_session_cache WHERE session_id = ?1",
@@ -486,16 +493,6 @@ fn patch_from_cache(conn: &Connection, session_id: &str, detail: &mut SessionDet
         detail.summary.subagent_usage.cache_creation_tokens += sa.usage.cache_creation_tokens;
         detail.summary.subagent_usage.cache_read_tokens += sa.usage.cache_read_tokens;
     }
-}
-
-fn scalar(conn: &Connection, column: &str, session_id: &str) -> Option<String> {
-    conn.query_row(
-        &format!("SELECT {column} FROM claude_session_cache WHERE session_id = ?1"),
-        [session_id],
-        |r| r.get::<_, String>(0),
-    )
-    .optional()
-    .unwrap_or_default()
 }
 
 /// What `GetSummary` is consulted for. The four fields the handler copies, and
@@ -613,14 +610,256 @@ impl TimeRange {
     }
 }
 
-/// Placeholder so `BTreeMap` stays imported for the summary's by-model maps,
-/// which the detail leaves empty.
-#[allow(dead_code)]
-type ByModel = BTreeMap<String, TokenUsage>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A transcript with each shape the reader distinguishes, written to a
+    /// throwaway config dir so `find_session_file` and `load_todos` run for
+    /// real rather than being stubbed around.
+    fn corpus(session_id: &str, lines: &[&str], todos: Option<&str>) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project = dir.path().join("projects").join("-home-u-proj");
+        std::fs::create_dir_all(&project).expect("project dir");
+        std::fs::write(
+            project.join(format!("{session_id}.jsonl")),
+            lines.join("\n"),
+        )
+        .expect("transcript");
+        if let Some(todos) = todos {
+            let todo_dir = dir.path().join("todos");
+            std::fs::create_dir_all(&todo_dir).expect("todos dir");
+            std::fs::write(
+                todo_dir.join(format!("{session_id}-agent-{session_id}.json")),
+                todos,
+            )
+            .expect("todos");
+        }
+        dir
+    }
+
+    const SESSION: &str = "s1";
+
+    /// The two counters, the two asymmetries, and the metadata the reader picks
+    /// up on the way past.
+    #[test]
+    fn the_reader_counts_turns_and_events_the_way_go_counts_them() {
+        let lines = [
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-08-01T10:00:00Z","cwd":"/home/u/proj","gitBranch":"main","message":{"role":"user","content":"do the thing"}}"#,
+            // A `tool_result` carrier: rendered, but not a turn.
+            r#"{"type":"user","uuid":"u2","timestamp":"2026-08-01T10:00:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1"}]}}"#,
+            // A sidechain *user* event is skipped entirely…
+            r#"{"type":"user","uuid":"u3","isSidechain":true,"timestamp":"2026-08-01T10:00:06Z","message":{"role":"user","content":"delegated"}}"#,
+            // …while a sidechain *assistant* event is not.
+            r#"{"type":"assistant","uuid":"a1","isSidechain":true,"timestamp":"2026-08-01T10:00:07Z","message":{"role":"assistant","model":"opus","content":[{"type":"text","text":"from a sub-agent"}],"usage":{"input_tokens":3,"output_tokens":4}}}"#,
+            r#"{"type":"assistant","uuid":"a2","timestamp":"2026-08-01T10:00:10Z","message":{"role":"assistant","model":"sonnet","content":[{"type":"text","text":"done"}],"usage":{"input_tokens":10,"output_tokens":20,"cache_creation_input_tokens":30,"cache_read_input_tokens":40}}}"#,
+            r#"{"type":"agent-name","agentName":"reviewer"}"#,
+            r#"{"type":"custom-title","customTitle":"a native title"}"#,
+        ];
+        let dir = corpus(SESSION, &lines, None);
+        let root = dir.path().to_string_lossy().into_owned();
+        let (config_dir, project_path, file) =
+            find_session_file(std::slice::from_ref(&root), SESSION).expect("found");
+        assert_eq!(config_dir, root);
+        // Whatever `DecodeProjectPath` makes of the encoded name — it consults
+        // the filesystem to place the dashes, and this fixture's project does
+        // not exist. The decoder has its own tests; this asserts the plumbing.
+        assert_eq!(
+            project_path,
+            crate::native::scanner::walk::decode_project_path("-home-u-proj")
+        );
+
+        let d = read_detail(&config_dir, SESSION, &project_path, &file).expect("detail");
+
+        // The sidechain user event is gone; everything else is rendered.
+        assert_eq!(
+            d.messages
+                .iter()
+                .map(|m| m.uuid.as_str())
+                .collect::<Vec<_>>(),
+            vec!["u1", "u2", "a1", "a2"],
+            "a sidechain user event is skipped and a sidechain assistant event is not"
+        );
+        // Four events counted, and only the genuine turns counted as messages.
+        assert_eq!(d.summary.event_count, 4);
+        assert_eq!(
+            d.summary.message_count, 3,
+            "u1 + a1 + a2; the carrier is not a turn"
+        );
+
+        // The first assistant model wins, even from a sidechain event.
+        assert_eq!(d.summary.model, "opus");
+        // Usage accumulates across both assistant events.
+        assert_eq!(d.summary.usage.input_tokens, 13);
+        assert_eq!(d.summary.usage.output_tokens, 24);
+        assert_eq!(d.summary.usage.cache_creation_tokens, 30);
+        assert_eq!(d.summary.usage.cache_read_tokens, 40);
+
+        assert_eq!(d.summary.cwd, "/home/u/proj");
+        assert_eq!(d.summary.git_branch, "main");
+        assert_eq!(d.summary.agent_name, "reviewer");
+        assert_eq!(d.summary.native_title, "a native title");
+        assert_eq!(d.summary.preview, "do the thing");
+        assert_eq!(
+            d.summary.start_time.0.to_rfc3339(),
+            "2026-08-01T10:00:00+00:00"
+        );
+        assert_eq!(
+            d.summary.last_activity.0.to_rfc3339(),
+            "2026-08-01T10:00:10+00:00"
+        );
+    }
+
+    /// `parentUuid: null` is on the event that *starts* a conversation, so
+    /// rejecting it drops the first user message — the regression the live diff
+    /// caught. Pinned here so a future decoder change fails in CI.
+    #[test]
+    fn an_event_with_a_null_parent_uuid_is_not_dropped() {
+        let lines = [
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-08-01T10:00:00Z","message":{"role":"user","content":"the first message"}}"#,
+        ];
+        let dir = corpus(SESSION, &lines, None);
+        let root = dir.path().to_string_lossy().into_owned();
+        let (c, p, f) = find_session_file(&[root], SESSION).expect("found");
+        let d = read_detail(&c, SESSION, &p, &f).expect("detail");
+        assert_eq!(
+            d.messages.len(),
+            1,
+            "a null parentUuid must not drop the event"
+        );
+        assert_eq!(d.summary.preview, "the first message");
+        assert_eq!(d.messages[0].parent_uuid, "");
+    }
+
+    /// Todos resolve under the session's **own** config dir, and a malformed
+    /// file is an empty list rather than a failure.
+    #[test]
+    fn todos_come_from_the_sessions_own_config_dir() {
+        let lines = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-08-01T10:00:00Z","message":{"role":"user","content":"hi"}}"#,
+        ];
+        let dir = corpus(
+            SESSION,
+            &lines,
+            Some(r#"[{"content":"do it","status":"pending","activeForm":"doing it"}]"#),
+        );
+        let root = dir.path().to_string_lossy().into_owned();
+        assert_eq!(load_todos(&root, SESSION).len(), 1);
+        assert_eq!(load_todos(&root, SESSION)[0].content, "do it");
+
+        // A dir with no todos file, and an id that cannot become a path.
+        let empty = tempfile::tempdir().expect("temp dir");
+        assert!(load_todos(&empty.path().to_string_lossy(), SESSION).is_empty());
+        assert!(load_todos(&root, "../escape").is_empty());
+    }
+
+    /// `os.ReadDir` sorts, so a session id present under two project
+    /// directories resolves to the alphabetically first one — every time, and
+    /// the same one Go picks.
+    #[test]
+    fn a_duplicated_session_id_resolves_to_the_first_project_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        for name in ["zzz-project", "aaa-project"] {
+            let p = dir.path().join("projects").join(name);
+            std::fs::create_dir_all(&p).expect("project dir");
+            std::fs::write(p.join(format!("{SESSION}.jsonl")), "").expect("transcript");
+        }
+        let root = dir.path().to_string_lossy().into_owned();
+        let (_, _, file) = find_session_file(&[root], SESSION).expect("found");
+        assert!(
+            file.to_string_lossy().contains("aaa-project"),
+            "expected the first directory by name, got {}",
+            file.display()
+        );
+    }
+
+    /// Fifteen positional columns onto a struct: two adjacent `TEXT` ones
+    /// swapped would compile and pass every other test in this file.
+    #[test]
+    fn every_subagent_column_lands_on_its_own_field() {
+        let conn = Connection::open_in_memory().expect("db");
+        conn.execute_batch(
+            "CREATE TABLE claude_subagent_cache (
+                parent_session_id TEXT, agent_id TEXT, agent_type TEXT, description TEXT,
+                tool_use_id TEXT, start_time DATETIME, last_activity DATETIME,
+                message_count INTEGER, event_count INTEGER,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_creation_tokens INTEGER, cache_read_tokens INTEGER,
+                cache_creation_5m_tokens INTEGER, cache_creation_1h_tokens INTEGER, model TEXT);
+             INSERT INTO claude_subagent_cache VALUES
+               ('s1','agent-2','the-type','the-description','the-tool-use',
+                '2026-08-02 10:00:00 +0000 UTC','2026-08-02 10:05:00 +0000 UTC',
+                2, 9, 11, 22, 33, 44, 55, 66, 'the-model'),
+               ('s1','agent-1','t2','d2','tu2',
+                '2026-08-01 10:00:00 +0000 UTC','2026-08-01 10:05:00 +0000 UTC',
+                1, 3, 1, 2, 3, 4, 5, 6, 'm2'),
+               ('other','agent-3','','','',
+                '2026-08-03 10:00:00 +0000 UTC','2026-08-03 10:05:00 +0000 UTC',
+                1, 1, 7, 7, 7, 7, 7, 7, 'm3');",
+        )
+        .expect("schema");
+
+        let subagents = list_subagents(&conn, "s1");
+        // Ordered by start_time, and another session's rows are not included.
+        assert_eq!(
+            subagents
+                .iter()
+                .map(|s| s.agent_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["agent-1", "agent-2"]
+        );
+
+        let second = &subagents[1];
+        assert_eq!(second.agent_type, "the-type");
+        assert_eq!(second.description, "the-description");
+        assert_eq!(second.tool_use_id, "the-tool-use");
+        assert_eq!(second.message_count, 2);
+        assert_eq!(second.event_count, 9);
+        assert_eq!(second.usage.input_tokens, 11);
+        assert_eq!(second.usage.output_tokens, 22);
+        assert_eq!(second.usage.cache_creation_tokens, 33);
+        assert_eq!(second.usage.cache_read_tokens, 44);
+        assert_eq!(second.usage.cache_creation_5m_tokens, 55);
+        assert_eq!(second.usage.cache_creation_1h_tokens, 66);
+        assert_eq!(second.model, "the-model");
+    }
+
+    /// A missing table is an empty list, not a failure — the Go accessor logs
+    /// and returns `[]ClaudeSubagent{}`.
+    #[test]
+    fn an_unreadable_subagent_table_is_an_empty_list() {
+        let conn = Connection::open_in_memory().expect("db");
+        assert!(list_subagents(&conn, "s1").is_empty());
+    }
+
+    /// The embedded summary flattens into the same object rather than nesting
+    /// under a key — the one thing `#[serde(flatten)]` is here to do.
+    #[test]
+    fn the_summary_is_flattened_into_the_detail() {
+        let detail = SessionDetail {
+            summary: SessionSummary {
+                session_id: "s1".into(),
+                project_path: "/p".into(),
+                ..Default::default()
+            },
+            messages: Vec::new(),
+            todos: Vec::new(),
+            subagents: Vec::new(),
+        };
+        let json = String::from_utf8(crate::native::gojson::to_vec(&detail).expect("encode"))
+            .expect("utf8");
+        assert!(
+            json.starts_with(r#"{"session_id":"s1","project_path":"/p","#),
+            "{json}"
+        );
+        assert!(!json.contains(r#""summary":"#), "the summary must not nest");
+        // Empty collections are `[]`, matching the Go slices the handler always
+        // populates.
+        assert!(
+            json.contains(r#""messages":[],"todos":[],"subagents":[]}"#),
+            "{json}"
+        );
+    }
 
     #[test]
     fn a_session_id_that_could_become_a_path_is_rejected() {
