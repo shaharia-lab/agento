@@ -700,7 +700,10 @@ the three steering routes answer natively **only when Rust holds a live session
 for that chat** and forward otherwise. Go then answers — correctly, because it
 is the side that has the session.
 
-Five rules that are silent when broken, all pinned by `tests/chat_turn.rs`:
+Five rules that are silent when broken, all pinned by `tests/chat_turn.rs` —
+**except** the deny-with-the-user's-text half of `AskUserQuestion`, which is
+reached only through a `can_use_tool` control request the fake CLI does not yet
+issue. That gap is #298; do not read the list below as fully covered.
 
 - **`result` is not terminal.** With an `AskUserQuestion` pending the same
   subprocess carries on, so one HTTP request spans several turns and several
@@ -723,6 +726,15 @@ into `{"a":1,"z":1.5}` — sorted and respelled, with nothing to signal it.
 `tests/chat_turn.rs` caught it, which is also why that test's fake CLI emits
 literal bytes rather than `json.dumps`: Python normalises `1.50` to `1.5` and
 adds spaces, so a byte-exactness test cannot go through it.
+
+**A disconnect has to be raced explicitly, not inferred.** The permission
+handler is awaited *inline on the SDK's reader task*, so while it is parked no
+events arrive and the stream loop has nothing to send — a closed tab is
+invisible to every code path that would otherwise notice. All three unbounded
+waits (the loop, the post-result continuation, the permission round trip) race
+`Sender::closed` on the body channel, which is what Go gets from
+`r.Context().Done()`. Without it, closing a tab on an open prompt held the busy
+lock and leaked a `claude` subprocess for the life of the process.
 
 **`AGENTO_CLAUDE_EXECUTABLE`** overrides which binary is spawned, falling back to
 `find_claude_cli()` and then the bare name. The fallback matters — a GUI process

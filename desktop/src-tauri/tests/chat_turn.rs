@@ -299,10 +299,7 @@ async fn an_ask_user_question_keeps_the_stream_open_past_the_first_result() {
     elif msg.get("type") == "user":
         text = json.dumps(msg.get("message", {}).get("content", ""))
         if "second" not in text:
-            say({"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "id": "q1", "name": "AskUserQuestion",
-                 "input": {"question": "which one?"}}
-            ]}})
+            raw('{"type":"assistant","message":{"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"z":1.50,"question":"which one?"}}]}}')
             say({"type": "result", "subtype": "success", "is_error": False,
                  "result": "", "session_id": "sdk-1", "usage": {}})
         else:
@@ -334,10 +331,13 @@ async fn an_ask_user_question_keeps_the_stream_open_past_the_first_result() {
         "body was: {body}"
     );
 
-    let prompt = &frames[2].1;
-    assert!(
-        prompt.contains(r#""input":{"question":"which one?"}"#),
-        "the prompt carries the tool input verbatim: {prompt}"
+    // Byte for byte, including the out-of-order key and the trailing zero. A
+    // round trip through a `serde_json::Value` yields `{"question":…,"z":1.5}`
+    // — which is exactly what this path used to do, and what the single-key
+    // payload this test started with could not detect.
+    assert_eq!(
+        frames[2].1, r#"{"input":{"z":1.50,"question":"which one?"}}"#,
+        "the prompt must carry the tool input verbatim"
     );
 }
 
@@ -371,6 +371,75 @@ async fn a_mid_stream_failure_arrives_as_an_error_result_and_ends_the_turn() {
     assert!(
         !body.contains("error\ndata"),
         "there is no `error` event type on this path"
+    );
+}
+
+/// A client that disconnects while a prompt is pending must tear the turn down:
+/// release the busy lock, close the subprocess and let the commit run.
+///
+/// This is the case that had no coverage and no code. The permission handler is
+/// awaited **inline on the SDK's reader task**, so while it is parked nothing
+/// arrives and the stream loop has nothing to send — the disconnect is
+/// invisible unless something races it explicitly. Without that race, closing a
+/// tab left the chat answering `409 session is busy` for the life of the
+/// process and leaked a `claude` subprocess.
+///
+/// This drives the **post-result continuation** and the loop's own arm. The
+/// third wait — the `can_use_tool` permission round trip — needs the fake to
+/// issue a control request, which is #298.
+#[tokio::test]
+async fn a_disconnect_while_a_prompt_is_pending_releases_the_chat() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Asks a question and then says nothing more, so the turn parks exactly
+    // where a real one waits for the user.
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        raw('{"type":"assistant","message":{"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"question":"stuck?"}}]}}')
+        raw('{"type":"result","subtype":"success","is_error":false,"result":"","session_id":"sdk-1","usage":{}}')
+"#,
+    );
+
+    let id = unique_id("disconnect");
+    let file = migrated_with_chat(&id);
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    let response = agento_lib::native::chat::turn::run(
+        file.path().to_path_buf(),
+        id.clone(),
+        "hello".to_string(),
+    )
+    .await
+    .expect("the turn should stream");
+
+    // Drop the body without reading it to the end — a closed tab.
+    drop(response);
+
+    // The turn must notice and release. Poll rather than sleep a fixed amount:
+    // the teardown is asynchronous, and a fixed wait is either flaky or slow.
+    let mut released = false;
+    for _ in 0..200 {
+        if agento_lib::native::chat::live::registry()
+            .get(&id)
+            .is_none()
+            && agento_lib::native::chat::live::registry().try_lock(&id)
+        {
+            released = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        released,
+        "a disconnected turn must release the busy lock, or the chat is wedged"
     );
 }
 

@@ -8,7 +8,8 @@
 //! arrives from the CLI, the permission handler asks a question, the permission
 //! handler asks for an allow/deny, or the client disconnects. There is **no
 //! timeout** and **no heartbeat** — a long tool call sends nothing for minutes,
-//! by design.
+//! by design, which is exactly why the disconnect arm has to be explicit rather
+//! than inferred from a failed send.
 //!
 //! # Rules that are silent when broken
 //!
@@ -129,10 +130,14 @@ pub async fn run(
     let (notify_tx, notify_rx) = mpsc::channel::<Notify>(NOTIFY_CAPACITY);
     let (input_tx, input_rx) = mpsc::channel::<String>(1);
     let (perm_tx, perm_rx) = mpsc::channel::<bool>(1);
+    // Created here rather than after the spawn, because the permission handler
+    // needs a clone of the sender to detect a disconnect.
+    let (body_tx, body_rx) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>(32);
 
     let answers = Arc::new(Answers {
         input: tokio::sync::Mutex::new(input_rx),
         permission: tokio::sync::Mutex::new(perm_rx),
+        disconnect: body_tx.clone(),
     });
     let handler = build_permission_handler(notify_tx.clone(), Arc::clone(&answers));
 
@@ -177,7 +182,6 @@ pub async fn run(
     );
 
     let is_first_message = row.title == "New Chat";
-    let (body_tx, body_rx) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>(32);
 
     tokio::spawn(async move {
         let state = stream_events(&mut session, notify_rx, &body_tx, &answers).await;
@@ -230,6 +234,19 @@ impl Drop for LockGuard {
 struct Answers {
     input: tokio::sync::Mutex<mpsc::Receiver<String>>,
     permission: tokio::sync::Mutex<mpsc::Receiver<bool>>,
+    /// A clone of the body sender, used only for [`mpsc::Sender::closed`].
+    ///
+    /// This is how a waiting handler learns the client went away, and it is
+    /// **not** optional: the permission callback is awaited inline on the SDK's
+    /// reader task, so while it is parked no events arrive and the stream loop
+    /// has nothing to send — meaning nothing else would ever notice the
+    /// disconnect. Without it, closing a tab on an open prompt leaves the
+    /// subprocess alive, the busy lock held and the chat unusable for the life
+    /// of the process.
+    ///
+    /// Go reaches the same place through `r.Context().Done()`, which every one
+    /// of its waits selects on.
+    disconnect: mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
 }
 
 /// `buildPermissionHandler`: `AskUserQuestion` is answered by *denying* the tool
@@ -252,20 +269,42 @@ fn build_permission_handler(
                     // rather than fixed, so the two implementations agree.
                     let _ = notify.try_send(Notify::Question(raw));
                     let mut rx = answers.input.lock().await;
-                    return match rx.recv().await {
-                        // The answer travels as the *denial message*. That is how
-                        // it reaches the model without the tool ever executing.
-                        Some(answer) => PermissionResult::deny(answer),
-                        None => PermissionResult::deny("request canceled"),
+                    return tokio::select! {
+                        answer = rx.recv() => match answer {
+                            // The answer travels as the *denial message*. That
+                            // is how it reaches the model without the tool ever
+                            // executing.
+                            Some(answer) => PermissionResult::deny(answer),
+                            None => PermissionResult::deny("request canceled"),
+                        },
+                        // The client went away. This race is not optional: the
+                        // handler is awaited **inline on the SDK's reader
+                        // task**, so while it is parked no events arrive and
+                        // the stream loop has nothing to send — meaning its own
+                        // disconnect arm never fires either. Without this,
+                        // closing a tab on an open prompt leaves the subprocess
+                        // alive and the chat's busy lock held for the life of
+                        // the process. Go reaches the same place through
+                        // `r.Context().Done()`, and answers with this string.
+                        _ = answers.disconnect.closed() => {
+                            PermissionResult::deny("request canceled")
+                        }
                     };
                 }
 
                 let _ = notify.try_send(Notify::Permission(PermissionRequest { tool_name, input }));
                 let mut rx = answers.permission.lock().await;
-                match rx.recv().await {
-                    Some(true) => PermissionResult::allow(),
-                    Some(false) => PermissionResult::deny("Permission denied by user"),
-                    None => PermissionResult::deny("request canceled"),
+                tokio::select! {
+                    allow = rx.recv() => match allow {
+                        Some(true) => PermissionResult::allow(),
+                        Some(false) => PermissionResult::deny("Permission denied by user"),
+                        None => PermissionResult::deny("request canceled"),
+                    },
+                    // Same reason as above — this is the more likely one to be
+                    // hit, since a permission prompt is the common case.
+                    _ = answers.disconnect.closed() => {
+                        PermissionResult::deny("request canceled")
+                    }
                 }
             })
         },
@@ -322,6 +361,11 @@ async fn stream_events(
                     Err(e) => log::error!("encoding synthetic event: {e}"),
                 }
             }
+            // The client went away with nothing queued to send. Without this
+            // the loop would sit here forever: the two arms above are both
+            // waiting on something that will never arrive, and `out.send` —
+            // the only other place a disconnect is noticed — is never reached.
+            _ = out.closed() => return state,
             else => return state,
         }
     }
@@ -409,7 +453,12 @@ async fn handle_event(
             // shared `inputCh` does.
             let answer = {
                 let mut rx = answers.input.lock().await;
-                rx.recv().await
+                tokio::select! {
+                    answer = rx.recv() => answer,
+                    // Same disconnect race as the permission handler: this wait
+                    // is unbounded and the user may simply close the tab.
+                    _ = out.closed() => None,
+                }
             };
             let Some(answer) = answer else {
                 return Flow::Stop;
@@ -438,15 +487,46 @@ fn add_usage(state: &mut TurnState, result: &crate::claude::messages::Result) {
 }
 
 /// The input of the first `tool_use` named `AskUserQuestion`, if any.
+///
+/// # Borrowed, never round-tripped
+///
+/// This value goes straight into the `user_input_required` frame, so it is
+/// under the same rule as `append_assistant_blocks`: decoding it into a
+/// `serde_json::Value` sorts the keys and respells the floats, because
+/// `serde_json` is built without `preserve_order` and `Value::Object` is a
+/// `BTreeMap`. Go hands back the `json.RawMessage` untouched.
+///
+/// The first version of this function did round-trip, and the two producers of
+/// the same event then had different byte fidelity depending on which fired —
+/// the permission handler carried the SDK's raw bytes while this one had
+/// reordered them.
 fn extract_ask_user_question(raw: &[u8]) -> Option<Box<RawValue>> {
-    let value: serde_json::Value = serde_json::from_slice(raw).ok()?;
-    let content = value.get("message")?.get("content")?.as_array()?;
-    for block in content {
-        if block.get("type").and_then(|t| t.as_str()) == Some("tool_use")
-            && block.get("name").and_then(|n| n.as_str()) == Some("AskUserQuestion")
-        {
-            let input = block.get("input")?;
-            return RawValue::from_string(input.to_string()).ok();
+    #[derive(serde::Deserialize)]
+    struct Envelope<'a> {
+        #[serde(borrow)]
+        message: Option<Message<'a>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Message<'a> {
+        #[serde(borrow, default)]
+        content: Vec<Block<'a>>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Block<'a> {
+        #[serde(rename = "type", default)]
+        block_type: &'a str,
+        #[serde(default)]
+        name: Option<&'a str>,
+        #[serde(borrow, default)]
+        input: Option<&'a RawValue>,
+    }
+
+    let envelope: Envelope = serde_json::from_slice(raw).ok()?;
+    let message = envelope.message?;
+    for block in message.content {
+        if block.block_type == "tool_use" && block.name == Some("AskUserQuestion") {
+            let input = block.input?;
+            return RawValue::from_string(input.get().to_string()).ok();
         }
     }
     None
@@ -498,6 +578,19 @@ mod tests {
         ]}}"#;
         let found = extract_ask_user_question(raw).expect("found");
         assert_eq!(found.get(), r#"{"q":"which?"}"#);
+    }
+
+    /// The single-key string payload above cannot see a reordering or a
+    /// respelling. This one can: two out-of-order keys and a trailing zero,
+    /// which a `serde_json::Value` round trip turns into
+    /// `{"a":1,"z":1.5}`.
+    #[test]
+    fn the_question_input_keeps_its_key_order_and_number_spelling() {
+        let raw = br#"{"message":{"content":[
+            {"type":"tool_use","id":"t1","name":"AskUserQuestion","input":{"z":1.50,"a":1,"note":"a & b"}}
+        ]}}"#;
+        let found = extract_ask_user_question(raw).expect("found");
+        assert_eq!(found.get(), r#"{"z":1.50,"a":1,"note":"a & b"}"#);
     }
 
     #[test]
