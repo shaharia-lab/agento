@@ -48,7 +48,7 @@
 //! - A user who paired WhatsApp under the Go server has a row. Skipping it
 //!   would delete history from the list, which is not what "unavailable" means;
 //!   the UI renders it from the stored fields and explains itself instead
-//!   (`RETIRED_TYPES` in `IntegrationsView.tsx`).
+//!   (`unavailableCopy` in `views/integrations/catalog.ts`).
 //! - Filtering it out of `available-tools` would also be a **parity
 //!   regression**. Go's handler is type-agnostic, so a suppressed row is a
 //!   byte-level divergence on an endpoint whose bar is byte-identical JSON.
@@ -646,8 +646,8 @@ mod tests {
         assert!(get(file.path(), "wa-int").expect("get").is_some());
 
         // Its tools still reach the allowlist picker, exactly as Go reports
-        // them. They will never resolve at run time, and that is the accepted
-        // trade — not something this reader is allowed to paper over.
+        // them. While the sidecar is bundled they still resolve; they stop
+        // when it goes. Either way, not something this reader may paper over.
         let tools = available_tools(file.path()).expect("tools");
         let names: Vec<&str> = tools.iter().map(|t| t.tool_name.as_str()).collect();
         assert_eq!(names, ["send_message", "send_media"]);
