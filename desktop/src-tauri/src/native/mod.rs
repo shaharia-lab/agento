@@ -21,6 +21,7 @@ pub mod gojson;
 pub mod gotime;
 pub mod insights;
 pub mod monitoring;
+pub mod notifications;
 pub mod pricing;
 pub mod scanner;
 pub mod sessions;
@@ -124,6 +125,7 @@ const ENDPOINTS: &[Endpoint] = &[
     settings::ENDPOINT,
     monitoring::ENDPOINT,
     version::ENDPOINT,
+    notifications::ENDPOINT,
 ];
 
 /// Whether this request is answered by ported Rust code.
@@ -248,6 +250,14 @@ mod tests {
         assert!(claims(&Method::GET, "/api/version"));
         assert!(claims(&Method::GET, "/api/version/update-check"));
         assert!(!claims(&Method::GET, "/api/version/"));
+
+        // Notifications: the settings and log reads. The write and the test
+        // send stay with Go — the test opens an SMTP connection.
+        assert!(claims(&Method::GET, "/api/notifications/settings"));
+        assert!(claims(&Method::GET, "/api/notifications/log"));
+        assert!(!claims(&Method::PUT, "/api/notifications/settings"));
+        assert!(!claims(&Method::POST, "/api/notifications/test"));
+        assert!(!claims(&Method::GET, "/api/notifications"));
     }
 
     #[test]
@@ -284,6 +294,8 @@ mod tests {
             "/api/monitoring",
             "/api/version",
             "/api/version/update-check",
+            "/api/notifications/settings",
+            "/api/notifications/log",
         ];
         for path in paths {
             let owners: Vec<&str> = ENDPOINTS
@@ -318,6 +330,8 @@ mod tests {
             "/api/monitoring",
             "/api/version",
             "/api/version/update-check",
+            "/api/notifications/settings",
+            "/api/notifications/log",
         ];
         for endpoint in ENDPOINTS {
             assert!(
