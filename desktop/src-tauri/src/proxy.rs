@@ -75,7 +75,27 @@ pub async fn serve(upstream_port: u16, port: u16) -> Result<u16, String> {
 /// so claiming a route and implementing it are one edit rather than two files
 /// that can disagree.
 fn route_is_native(method: &axum::http::Method, path: &str) -> bool {
-    native::may_serve(native::mode(), method) && native::claims(method, path)
+    native::may_serve(native::mode(), method)
+        && native::claims(method, path)
+        // The streaming routes are handled above; `claims` is the union of both
+        // registries, so the buffered path has to exclude them or it would try
+        // to answer a chat turn with a `Vec<u8>`.
+        && !native::claims_stream(method, path)
+}
+
+/// Forward, turning a proxy failure into the 502 the caller would have written.
+async fn forward_or_bad_gateway(
+    state: &ProxyState,
+    req: Request<Body>,
+    path: &str,
+) -> Response<Body> {
+    match forward(state, req).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            log::error!("proxy error for {path}: {e}");
+            error_response(StatusCode::BAD_GATEWAY, &e)
+        }
+    }
 }
 
 /// How much request body a native handler will accept.
@@ -106,6 +126,51 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
                 StatusCode::NOT_FOUND,
                 "frontend is served by Vite in development",
             );
+        }
+    }
+
+    // The streaming half of the seam (#276). Checked before the buffered one
+    // because a chat turn must never be collected into a `Vec<u8>`: it is the
+    // one response whose whole point is arriving in pieces.
+    if native::may_serve(native::mode(), req.method()) && native::claims_stream(req.method(), &path)
+    {
+        let (parts, body) = req.into_parts();
+        let body_bytes = match axum::body::to_bytes(body, MAX_NATIVE_BODY).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                log::warn!("native stream for {path}: reading body failed: {e}");
+                return error_response(StatusCode::BAD_REQUEST, "could not read request body");
+            }
+        };
+        let req = Request::from_parts(parts, Body::from(body_bytes.clone()));
+
+        let stream_req = native::StreamRequest {
+            method: req.method().clone(),
+            path: path.clone(),
+            body: body_bytes.to_vec(),
+            db_path: match crate::paths::database_path() {
+                Some(path) => path,
+                None => {
+                    log::warn!("native stream for {path}: no data dir, forwarding");
+                    return forward_or_bad_gateway(&state, req, &path).await;
+                }
+            },
+        };
+
+        match native::serve_stream(stream_req).await {
+            Ok(response) => return response,
+            // Same rule as the buffered path, and the same obligation: a
+            // streaming handler must fail *before* it has any effect, or the
+            // forward spawns a second subprocess. Every check in `turn::run`
+            // happens before the CLI is started.
+            //
+            // This is also how `/input`, `/permission` and `/stop` hand a chat
+            // back when Rust holds no live session for it — Go may, and its
+            // answer is then the right one. See `native::chat`'s header.
+            Err(e) => {
+                log::warn!("native stream for {path} failed, forwarding to Go: {e}");
+                return forward_or_bad_gateway(&state, req, &path).await;
+            }
         }
     }
 
