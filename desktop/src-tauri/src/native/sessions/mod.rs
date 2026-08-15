@@ -121,71 +121,58 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
         let facets = page::facets(&conn, &data_settings, &q)?;
         gojson::to_vec(&facets).map_err(|e| format!("encoding session facets: {e}"))?
     };
-    let answer = Answer::json(body);
-    Ok(match freshness_probe(req.path, &q) {
-        Some(probe) => answer.with_probe(probe),
-        None => answer,
-    })
+    // Go's handler reaches the corpus through `Cache.List`, which calls
+    // `ensureFresh` on the way past — so answering natively used to remove the
+    // trigger, and the freshness probe existed to put it back by asking the
+    // sidecar. Now that Rust owns the scan, this starts it directly.
+    if triggers_scan(req.path, &q) {
+        super::scan::ensure_scan(ctx.db_path.clone());
+    }
+    Ok(Answer::json(body))
 }
 
 #[cfg(test)]
 mod tests_db;
 
-/// The request to fire at the Go sidecar to keep the corpus fresh, if this
-/// route is one that would have triggered a rescan.
+/// Whether this route is one that would have triggered a rescan in Go.
 ///
-/// A continuation — a request carrying a cursor — deliberately returns `None`,
+/// A continuation — a request carrying a cursor — deliberately returns `false`,
 /// matching `ListPage`: freshness is a property of the scroll, decided when it
 /// starts, and re-deciding it per page would put four metadata queries behind
 /// every scroll tick to reach a conclusion the first page already reached.
-pub fn freshness_probe(path: &str, q: &query::SessionQuery) -> Option<&'static str> {
+pub fn triggers_scan(path: &str, q: &query::SessionQuery) -> bool {
     match path {
-        "/api/claude-sessions" if q.cursor.is_empty() => Some(PROBE_PATH),
-        "/api/claude-sessions/facets" => Some(PROBE_PATH),
-        _ => None,
+        "/api/claude-sessions" => q.cursor.is_empty(),
+        "/api/claude-sessions/facets" => true,
+        _ => false,
     }
 }
-
-/// The cheapest request that still runs `ensureFresh`: one page of one row,
-/// unfiltered. The filter is irrelevant — freshness is a property of the
-/// corpus, not of the query.
-///
-/// Public because every ported corpus read needs it, not just this one:
-/// `Cache.Analytics` calls `ensureFresh` too, so `/api/claude-analytics` fires
-/// the same probe.
-pub const PROBE_PATH: &str = "/api/claude-sessions?limit=1";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_first_page_probes_and_a_continuation_does_not() {
+    fn a_first_page_scans_and_a_continuation_does_not() {
         let mut q = query::SessionQuery::default();
-        assert_eq!(
-            freshness_probe("/api/claude-sessions", &q),
-            Some(PROBE_PATH)
-        );
+        assert!(triggers_scan("/api/claude-sessions", &q));
 
         q.cursor = "abc".into();
-        assert_eq!(freshness_probe("/api/claude-sessions", &q), None);
+        assert!(!triggers_scan("/api/claude-sessions", &q));
     }
 
     #[test]
-    fn facets_always_probe_since_go_always_checks() {
+    fn facets_always_scan_since_go_always_checks() {
         let q = query::SessionQuery {
             cursor: "abc".into(),
             ..Default::default()
         };
-        assert_eq!(
-            freshness_probe("/api/claude-sessions/facets", &q),
-            Some(PROBE_PATH)
-        );
+        assert!(triggers_scan("/api/claude-sessions/facets", &q));
     }
 
     #[test]
-    fn an_unrelated_route_never_probes() {
+    fn an_unrelated_route_never_scans() {
         let q = query::SessionQuery::default();
-        assert_eq!(freshness_probe("/api/pricing/catalog", &q), None);
+        assert!(!triggers_scan("/api/pricing/catalog", &q));
     }
 }

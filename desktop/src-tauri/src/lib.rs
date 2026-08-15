@@ -180,6 +180,16 @@ pub fn run() {
                 handle.manage(sc);
                 handle.manage(AppPorts { proxy, upstream });
 
+                // The scan is ours now (#289): the sidecar is started with
+                // AGENTO_SCANNER=off, so nothing else will do this. Replaces the
+                // `sessionCache.StartBackgroundScan()` the Go server used to run
+                // on boot, and like it, it does not block startup — the window
+                // opens while the corpus is still being read, and the sessions
+                // list reports progress from `GET /api/claude-sessions/status`.
+                if let Some(db) = crate::paths::database_path() {
+                    crate::native::scan::ensure_scan(db);
+                }
+
                 // Release builds load the UI from the proxy, which makes the
                 // page same-origin with the API. Debug builds load Vite, which
                 // proxies /api to the same place.

@@ -36,7 +36,7 @@ pub mod transcript;
 
 use axum::http::Method;
 
-use crate::native::{db, gojson, sessions, settings, Answer, Ctx, Endpoint, Request};
+use crate::native::{db, gojson, settings, Answer, Ctx, Endpoint, Request};
 
 /// This module's entry in `native::ENDPOINTS`.
 pub const ENDPOINT: Endpoint = Endpoint {
@@ -54,8 +54,8 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
     let data_settings = settings::load(&conn);
     let summary = summary::summary(&conn, &data_settings, req.query)?;
     // It reads the corpus through Cache.List, which runs ensureFresh.
+    super::scan::ensure_scan(ctx.db_path.clone());
     Ok(Answer::json(
         gojson::to_vec(&summary).map_err(|e| format!("encoding insights summary: {e}"))?,
-    )
-    .with_probe(sessions::PROBE_PATH))
+    ))
 }

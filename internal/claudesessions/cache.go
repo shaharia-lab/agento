@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -206,6 +207,41 @@ func (c *Cache) notify(sessionID, filePath string, isNew bool) {
 
 // StartBackgroundScan runs an incremental scan in a background goroutine so
 // the server starts immediately while the cache is being populated.
+// scannerDisabled reports whether this process has been told not to scan.
+//
+// Read once: it is a deployment fact, not a setting, and re-reading it per call
+// would let a scan start halfway through a run.
+func scannerDisabled() bool {
+	scannerDisabledOnce.Do(func() {
+		scannerOff = scannerOffValue(os.Getenv("AGENTO_SCANNER"))
+	})
+	return scannerOff
+}
+
+// scannerOffValue is the parsing on its own, so it can be tested without the
+// sync.Once that makes the real reader deliberately un-resettable.
+//
+// Unset is **on**: a plain `agento web` must keep scanning, and only a process
+// that has been told otherwise stops. Anything unrecognized is also on, for the
+// same reason — a typo in the variable must not silently disable the scan.
+func scannerOffValue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "off", "0", "false", "disabled":
+		return true
+	default:
+		return false
+	}
+}
+
+var (
+	scannerDisabledOnce sync.Once
+	scannerOff          bool
+)
+
+// StartBackgroundScan kicks off the boot-time scan.
+//
+// A no-op when the process has been told not to scan (AGENTO_SCANNER=off),
+// because EnsureScan is where that is decided.
 func (c *Cache) StartBackgroundScan() {
 	c.EnsureScan()
 }
@@ -218,6 +254,24 @@ func (c *Cache) StartBackgroundScan() {
 // Moving the scan into a goroutine without this would only unblock the
 // triggering request — the next reader would wait on the mutex just as long.
 func (c *Cache) EnsureScan() <-chan struct{} {
+	// The desktop app owns the scan in its Rust shell (#289), and two writers on
+	// one SQLite file is exactly what that port has been avoiding since #274. The
+	// shell therefore starts this process with AGENTO_SCANNER=off.
+	//
+	// This is the single choke point: both the boot-time StartBackgroundScan and
+	// every read path's ensureFresh reach a scan only through here, so one guard
+	// disables all of them and no caller has to know.
+	//
+	// A **closed** channel rather than nil, because callers wait on the result —
+	// Cache.List blocks on it for coldStartScanWait — and a nil channel blocks
+	// forever. Closed means "the scan you asked for is already over", which is
+	// true: someone else ran it.
+	if scannerDisabled() {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+
 	c.mu.Lock()
 	if c.scanning {
 		done := c.scanDone

@@ -30,6 +30,7 @@ pub mod monitoring;
 pub mod notifications;
 pub mod pricing;
 pub mod query;
+pub mod scan;
 pub mod scanner;
 pub mod sessions;
 pub mod settings;
@@ -107,8 +108,6 @@ pub struct Answer {
     pub status: StatusCode,
     /// `None` sends no body and no `Content-Type`.
     pub body: Option<Vec<u8>>,
-    /// A request to fire at the sidecar afterwards, to keep the corpus fresh.
-    pub probe: Option<&'static str>,
 }
 
 impl Answer {
@@ -117,7 +116,6 @@ impl Answer {
         Self {
             status: StatusCode::OK,
             body: Some(body),
-            probe: None,
         }
     }
 
@@ -126,8 +124,14 @@ impl Answer {
         Self {
             status,
             body: Some(body),
-            probe: None,
         }
+    }
+
+    /// A status with **no body and no `Content-Type`**, for the handlers that
+    /// call `w.WriteHeader(...)` directly rather than going through `writeJSON`
+    /// — `POST /api/claude-sessions/refresh` answers `202` this way.
+    pub fn status_only(status: StatusCode) -> Self {
+        Self { status, body: None }
     }
 
     /// `204 No Content`: no body, no `Content-Type`.
@@ -135,14 +139,7 @@ impl Answer {
         Self {
             status: StatusCode::NO_CONTENT,
             body: None,
-            probe: None,
         }
-    }
-
-    /// Attach a freshness probe to fire at the sidecar after answering.
-    pub fn with_probe(mut self, probe: &'static str) -> Self {
-        self.probe = Some(probe);
-        self
     }
 }
 
@@ -250,6 +247,7 @@ const ENDPOINTS: &[Endpoint] = &[
     notifications::ENDPOINT,
     fs::ENDPOINT,
     integrations::ENDPOINT,
+    scan::ENDPOINT,
 ];
 
 /// Whether this request is answered by ported Rust code.
@@ -331,14 +329,16 @@ mod tests {
         assert!(claims(&Method::GET, "/api/claude-sessions/facets"));
         assert!(claims(&Method::GET, "/api/claude-analytics"));
 
-        // Writes stay with Go until phase 3 moves the storage layer.
         assert!(!claims(&Method::POST, "/api/pricing/rates"));
-        assert!(!claims(&Method::POST, "/api/claude-sessions/refresh"));
-        // Scan lifecycle stays with Go while the scanner does — and `status`
-        // and `refresh` are single segments, so the detail route has to exclude
-        // them by name rather than by shape.
-        assert!(!claims(&Method::GET, "/api/claude-sessions/status"));
+
+        // The scan lifecycle moved with the scan itself (#289). `status` and
+        // `refresh` are single segments, so the detail route still has to
+        // exclude them by name rather than by shape — and each is claimed for
+        // exactly one method.
+        assert!(claims(&Method::POST, "/api/claude-sessions/refresh"));
+        assert!(claims(&Method::GET, "/api/claude-sessions/status"));
         assert!(!claims(&Method::GET, "/api/claude-sessions/refresh"));
+        assert!(!claims(&Method::POST, "/api/claude-sessions/status"));
         // The detail read is claimed, but only as a single segment — a nested
         // path under the same namespace must not be swallowed.
         assert!(claims(&Method::GET, "/api/claude-sessions/abc-123"));
@@ -579,6 +579,7 @@ mod tests {
             "/api/pricing/catalog",
             "/api/claude-sessions",
             "/api/claude-sessions/facets",
+            "/api/claude-sessions/status",
             "/api/claude-analytics",
             "/api/claude-sessions/insights/summary",
             "/api/agents",

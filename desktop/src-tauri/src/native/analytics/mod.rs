@@ -44,7 +44,7 @@ use rusqlite::Connection;
 use self::params::AnalyticsParams;
 use self::report::AnalyticsReport;
 use crate::native::pricing::Resolver;
-use crate::native::sessions::{self, corpus};
+use crate::native::sessions::corpus;
 use crate::native::settings::DataSettings;
 use crate::native::{db, gojson, settings, Answer, Ctx, Endpoint, Request};
 
@@ -65,10 +65,10 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
     let report = analytics(&conn, &data_settings, req.query)?;
     // Cache.Analytics runs ensureFresh before it answers, so a dashboard
     // opened after a rate edit starts the re-cost.
+    super::scan::ensure_scan(ctx.db_path.clone());
     Ok(Answer::json(
         gojson::to_vec(&report).map_err(|e| format!("encoding claude analytics: {e}"))?,
-    )
-    .with_probe(sessions::PROBE_PATH))
+    ))
 }
 
 /// Build the report for one request's query string.

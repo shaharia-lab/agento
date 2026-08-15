@@ -210,17 +210,6 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
             .unwrap_or_else(|e| Err(format!("native handler panicked: {e}")))
         };
 
-        // Some ported reads are what kept the corpus fresh on the Go side, so
-        // answering them here removes the trigger. The probe puts it back by
-        // asking the sidecar a cheap question that runs its own freshness
-        // check — fire-and-forget, because the page never waited for the
-        // rescan it started either.
-        if let Ok(answer) = &native_answer {
-            if let Some(probe) = answer.probe {
-                spawn_freshness_probe(&state, probe);
-            }
-        }
-
         match (native::mode(), native_answer) {
             // Go stays authoritative in shadow mode; Rust is only compared.
             //
@@ -376,29 +365,6 @@ async fn forward_buffered(
         .map_err(|e| format!("buffering upstream body: {e}"))?;
     let replayed = Response::from_parts(parts, Body::from(bytes.clone()));
     Ok((replayed, bytes.to_vec()))
-}
-
-/// Ask the Go sidecar a question that runs its freshness check, and ignore the
-/// answer.
-///
-/// This goes straight to the sidecar rather than back through the proxy, so it
-/// cannot recurse into the native handler that scheduled it.
-fn spawn_freshness_probe(state: &ProxyState, path: &str) {
-    let url = format!("{}{path}", state.upstream);
-    let client = state.client.clone();
-    tauri::async_runtime::spawn(async move {
-        // A short deadline on purpose: the request only has to *start* the
-        // scan, and the scan itself runs in the background on the Go side.
-        match client
-            .get(&url)
-            .timeout(std::time::Duration::from_secs(10))
-            .send()
-            .await
-        {
-            Ok(resp) => log::debug!("freshness probe {url} -> {}", resp.status()),
-            Err(e) => log::warn!("freshness probe {url} failed: {e}"),
-        }
-    });
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response<Body> {
