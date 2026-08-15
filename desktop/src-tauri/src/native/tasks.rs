@@ -301,25 +301,15 @@ fn scan_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobHistory> {
 /// Read a DATETIME column as the `time.Time` the Go driver round-trips.
 fn timestamp(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<GoTime> {
     let text: String = row.get(index)?;
-    parse_timestamp(&text, index)
+    super::gotime::from_sql_text(&text, index)
 }
 
 /// The same, for a column Go scans through `sql.NullTime` into a `*time.Time`.
 fn nullable_timestamp(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<GoTime>> {
     match row.get::<_, Option<String>>(index)? {
-        Some(text) => parse_timestamp(&text, index).map(Some),
+        Some(text) => super::gotime::from_sql_text(&text, index).map(Some),
         None => Ok(None),
     }
-}
-
-fn parse_timestamp(text: &str, index: usize) -> rusqlite::Result<GoTime> {
-    GoTime::parse_any(text).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            index,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other(e)),
-        )
-    })
 }
 
 // ─── Query parameters ─────────────────────────────────────────────────────────

@@ -177,20 +177,10 @@ fn from_stored(stored: &UserSettings) -> DataSettings {
     }
 }
 
-/// Decode a JSON string array column the way `storage.decodeStringList` does:
-/// blank or unparseable is **nil** (`null` on the wire), a stored `[]` is an
-/// empty slice (`[]` on the wire).
+/// `storage.decodeStringList`, shared with every other module that meets a
+/// stored string-array column — see [`super::gojson::decode_string_list`].
 fn decode_string_list(raw: &str) -> Option<Vec<String>> {
-    if raw.trim().is_empty() {
-        return None;
-    }
-    match serde_json::from_str::<Vec<String>>(raw) {
-        Ok(values) => Some(values),
-        Err(e) => {
-            log::warn!("native settings: malformed string array {raw:?}: {e}");
-            None
-        }
-    }
+    super::gojson::decode_string_list(raw)
 }
 
 /// Every config dir Agento indexes, mirroring `config.ClaudeConfigDirs`:
