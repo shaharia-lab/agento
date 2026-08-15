@@ -37,6 +37,7 @@ use std::io;
 
 use serde::Serialize;
 use serde_json::ser::{Formatter, Serializer};
+use serde_json::value::RawValue;
 
 /// Encode exactly as the Go server's `writeJSON` does, newline included.
 pub fn to_vec<T>(value: &T) -> Result<Vec<u8>, serde_json::Error>
@@ -172,6 +173,119 @@ fn go_float(value: f64, fixed: String, exponential: String) -> String {
     }
 }
 
+// ─── `encoding/json`'s compact, for values carried verbatim ──────────────────
+//
+// A `json.RawMessage` is re-encoded by `Marshal` through `compact`, which
+// strips whitespace outside strings and HTML-escapes, and **changes nothing
+// else** — key order and number spelling survive. Any port that carries a
+// stored JSON value through to the wire needs this, so it lives beside the
+// encoder rather than in whichever module happened to need it first (chat
+// message blocks did; session-detail `tool_use` inputs do too).
+
+/// Decode a field the way Go does: a JSON `null` is the **zero value**, not a
+/// type error.
+///
+/// `json.Unmarshal` treats `null` as a no-op for every type Agento decodes, so
+/// `{"parentUuid":null}` leaves `""` and returns no error. `serde` rejects it,
+/// and the consequences are out of proportion to the cause: a rejected field
+/// fails its whole struct, a failed struct drops its whole event, and a dropped
+/// event is simply absent from a transcript with nothing to signal it. That is
+/// how the first user message of every conversation went missing from
+/// `GET /api/claude-sessions/{id}` in #271 — `parentUuid` is `null` on the
+/// event that starts one.
+///
+/// Genuinely unparseable input still fails, which is also what Go does.
+pub fn null_is_zero_value<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    use serde::Deserialize;
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Deserialize a value as-is, including an explicit `null`.
+///
+/// `Option<Box<RawValue>>`'s own impl turns `null` into `None`, which would drop
+/// a key Go emits: `omitempty` on a `json.RawMessage` tests the byte length, and
+/// the four bytes of `null` are not empty.
+pub fn captured_raw<'de, D>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Box::<RawValue>::deserialize(deserializer).map(Some)
+}
+
+/// with `json.Marshal`; this makes a hand-edited or older row match too.
+pub fn compact_raw(raw: Box<RawValue>) -> Box<RawValue> {
+    let compacted = compact(raw.get());
+    if compacted == raw.get() {
+        return raw;
+    }
+    // Compacting valid JSON leaves valid JSON, so the fallback is unreachable —
+    // and keeping the original is the harmless direction if it ever is not.
+    RawValue::from_string(compacted).unwrap_or(raw)
+}
+
+pub fn compact(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+
+    while i < bytes.len() {
+        let byte = bytes[i];
+
+        // U+2028 (E2 80 A8) and U+2029 (E2 80 A9): valid JSON, invalid
+        // JavaScript, so Go escapes both.
+        if byte == 0xE2
+            && i + 2 < bytes.len()
+            && bytes[i + 1] == 0x80
+            && (bytes[i + 2] & !1) == 0xA8
+        {
+            out.extend_from_slice(if bytes[i + 2] == 0xA8 {
+                b"\\u2028"
+            } else {
+                b"\\u2029"
+            });
+            i += 3;
+            continue;
+        }
+
+        match byte {
+            b'<' => out.extend_from_slice(b"\\u003c"),
+            b'>' => out.extend_from_slice(b"\\u003e"),
+            b'&' => out.extend_from_slice(b"\\u0026"),
+            b' ' | b'\t' | b'\n' | b'\r' if !in_string => {}
+            _ => out.push(byte),
+        }
+
+        // Track string context so whitespace *inside* a string survives. The
+        // three escaped bytes above can never change it.
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        }
+
+        i += 1;
+    }
+
+    // Unreachable: every byte dropped or inserted above is ASCII, and the one
+    // multi-byte sequence handled is replaced whole, so a valid `&str` in stays
+    // valid UTF-8 out. Returning the input uncompacted is the harmless
+    // direction if that ever stops being true.
+    String::from_utf8(out).unwrap_or_else(|_| src.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -276,5 +390,45 @@ mod tests {
     fn non_finite_floats_become_null_where_go_would_fail_the_encode() {
         assert_eq!(encoded(&f64::NAN), "null");
         assert_eq!(encoded(&f64::INFINITY), "null");
+    }
+    #[test]
+    fn compact_leaves_already_compact_json_untouched() {
+        let compact_json = r#"{"a":1,"b":[true,null],"s":"x y"}"#;
+        assert_eq!(compact(compact_json), compact_json);
+    }
+
+    /// Whitespace *inside* a string is content, not formatting.
+    #[test]
+    fn compact_keeps_whitespace_inside_strings() {
+        assert_eq!(
+            compact("{ \"k\" : \"a b\\tc\\n d\" }"),
+            "{\"k\":\"a b\\tc\\n d\"}"
+        );
+    }
+
+    /// A quote closes a string unless it is itself escaped — get that wrong and
+    /// every space after the first `\"` is stripped out of the payload.
+    #[test]
+    fn compact_tracks_escaped_quotes() {
+        assert_eq!(compact(r#"{"k":"a \" b"}"#), r#"{"k":"a \" b"}"#);
+        assert_eq!(compact(r#"{ "k" : "a \\" }"#), r#"{"k":"a \\"}"#);
+    }
+
+    #[test]
+    fn compact_escapes_the_characters_go_escapes() {
+        assert_eq!(compact(r#"{"k":"<&>"}"#), r#"{"k":"\u003c\u0026\u003e"}"#);
+        assert_eq!(
+            compact("{\"k\":\"a\u{2028}b\u{2029}c\"}"),
+            r#"{"k":"a\u2028b\u2029c"}"#
+        );
+    }
+
+    /// Multi-byte UTF-8 has to survive a byte-wise pass intact.
+    #[test]
+    fn compact_preserves_multibyte_content() {
+        assert_eq!(
+            compact(r#"{ "k" : "ünïcödé 😀" }"#),
+            r#"{"k":"ünïcödé 😀"}"#
+        );
     }
 }
