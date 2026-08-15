@@ -175,8 +175,19 @@ pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Wri
     let value: serde_json::Value =
         serde_json::from_slice(body).map_err(|_| WriteError::InvalidBody)?;
     match value {
+        // Deserialize from the **original bytes**, not from the `Value` just
+        // parsed. The `Value` is only a shape check.
+        //
+        // This is load-bearing for any field that captures raw JSON: serde_json
+        // is built without `preserve_order`, so a `Value::Object` is a
+        // `BTreeMap` — going through it sorts keys, respells numbers (`1.50` →
+        // `1.5`, `1e3` → `1000.0`) and strips interior whitespace. A
+        // `Box<RawValue>` field would then capture the *re-serialized* value
+        // rather than what the client sent, and
+        // `integrations.credentials` is stored verbatim by Go, so the two
+        // databases would diverge on every blob with more than one key.
         serde_json::Value::Object(_) => {
-            serde_json::from_value(value).map_err(|_| WriteError::InvalidBody)
+            serde_json::from_slice(body).map_err(|_| WriteError::InvalidBody)
         }
         // Go's no-op: the zero value, and the handler validates it.
         serde_json::Value::Null => {
@@ -190,6 +201,32 @@ pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Wri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A field that captures raw JSON must capture what the **client sent**,
+    /// not a re-serialization of it.
+    ///
+    /// `decode_body` shape-checks through a `serde_json::Value`, and serde_json
+    /// here has no `preserve_order` — so deserializing *from that `Value`*
+    /// silently sorted keys, respelled `1.50` as `1.5` and dropped interior
+    /// whitespace. `integrations.credentials` is stored verbatim by Go, so that
+    /// was a byte divergence on every blob with more than one key. Deserializing
+    /// from the original bytes is what fixes it, and this pins it at the level
+    /// the bug lived at rather than only at the one call site that noticed.
+    #[test]
+    fn a_captured_raw_field_keeps_the_bytes_the_client_sent() {
+        #[derive(serde::Deserialize)]
+        struct Body {
+            #[serde(default, deserialize_with = "super::super::gojson::captured_raw")]
+            blob: Option<Box<serde_json::value::RawValue>>,
+        }
+        let body = br#"{"blob":{"zebra":"z", "alpha":"a","rate":1.50,"n":1e3}}"#;
+        let decoded: Body = decode_body(body).expect("decodes");
+        assert_eq!(
+            decoded.blob.expect("present").get(),
+            r#"{"zebra":"z", "alpha":"a","rate":1.50,"n":1e3}"#,
+            "key order, number spelling and interior whitespace must all survive"
+        );
+    }
 
     /// These strings ship. `service.ValidationError.Error()` uses `%q`, which
     /// is Go's quoted form — so the field name arrives in quotes, and a port

@@ -111,8 +111,17 @@ where
     serde_json::from_str::<Option<T>>(raw.get())
         .map(Option::unwrap_or_default)
         .map_err(|e| {
+            // **The error is deliberately not included.** serde_json quotes the
+            // offending value, so a caller who sends
+            // `"credentials": "ghp_realtoken"` would have that token echoed into
+            // the message — which the seam logs on every forward. Go's own error
+            // names the type and never the value. The position is enough to
+            // debug with and carries nothing secret.
             WriteError::Fallback(format!(
-                "{kind} credentials do not decode ({e}); Go's json error text is not reproducible here"
+                "{kind} credentials do not decode at line {} column {}; \
+                 Go's json error text is not reproducible here, so this forwards",
+                e.line(),
+                e.column()
             ))
         })
 }
@@ -370,6 +379,12 @@ fn split_url(raw: &str) -> Result<(String, String), WriteError> {
         }
     }
 
+    // A leading `:` is `getScheme`'s own error (`missing protocol scheme`),
+    // not an empty scheme, so it must forward rather than answer.
+    if raw.starts_with(':') {
+        return Err(forward());
+    }
+
     // `url.Parse` takes the scheme only when what precedes the first ':' is a
     // valid scheme; otherwise the whole string is an opaque path and Scheme is
     // "". A bare `example.atlassian.net` therefore has no scheme and no host,
@@ -392,12 +407,26 @@ fn split_url(raw: &str) -> Result<(String, String), WriteError> {
         return Ok((scheme, String::new()));
     };
     let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
-    // Userinfo is not part of Host.
-    let host = match authority.rsplit_once('@') {
-        Some((_, host)) => host,
-        None => authority,
-    };
-    Ok((scheme, host.to_string()))
+
+    // Everything below is a shape `parseHost` has a rule for that this port
+    // does not reimplement — userinfo validation, IPv6 bracket matching,
+    // percent-escapes (which a host may not contain at all), and port syntax.
+    // **Forwarding is the only safe answer for these**, because the failure
+    // mode of guessing is not a wrong message but a wrong *acceptance*: Rust
+    // would create an integration whose `site_url` Go's own parser can never
+    // read, and being native the request never reaches Go to be refused.
+    if authority.contains(['@', '[', ']', '%']) {
+        return Err(forward());
+    }
+    // A `:` in the authority introduces a port, which Go requires to be digits
+    // — and to appear at most once.
+    if let Some((host, port)) = authority.split_once(':') {
+        if !port.chars().all(|c| c.is_ascii_digit()) {
+            return Err(forward());
+        }
+        return Ok((scheme, host.to_string()));
+    }
+    Ok((scheme, authority.to_string()))
 }
 
 /// A Go-compatible JSON string literal.
@@ -415,6 +444,10 @@ fn json_string(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            // Go uses the shorthand for these two and `\u00XX` for the rest,
+            // so the generic control-character arm below must not catch them.
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
             '<' => out.push_str("\\u003c"),
             '>' => out.push_str("\\u003e"),
             '&' => out.push_str("\\u0026"),
@@ -576,6 +609,83 @@ mod tests {
         assert!(
             matches!(e, WriteError::Fallback(_)),
             "a type mismatch must forward, since Go's json error text names Go types"
+        );
+    }
+
+    /// Accepting a URL Go would refuse is worse than forwarding one it would
+    /// accept: the row is created natively, so Go never sees the request and
+    /// never gets to say no — leaving a stored `site_url` its own parser cannot
+    /// read.
+    #[test]
+    fn every_url_shape_this_port_is_unsure_of_forwards_rather_than_accepting() {
+        // Each of these is an error from `url.Parse`, not a validation failure.
+        for url in [
+            "https://x.net:abc",     // invalid port
+            "https://x.net:80:90",   // two ports
+            "https://ex%41mple.net", // a host may not carry an escape
+            "https://[::1",          // unmatched bracket
+            "https://a\\\\b@x.net",  // invalid userinfo
+            "https://a[b@x.net",     // invalid userinfo
+            "://x.net",              // `missing protocol scheme`
+        ] {
+            let creds = format!(r#"{{"site_url":"{url}","email":"e","api_token":"t"}}"#);
+            for kind in ["confluence", "jira"] {
+                let e = validate(kind, Some(&raw(&creds))).expect_err("must not be accepted");
+                assert!(
+                    matches!(e, WriteError::Fallback(_)),
+                    "{kind} {url:?} answered {:?} instead of forwarding",
+                    e.message()
+                );
+            }
+        }
+    }
+
+    /// …but an ordinary port is not a shape to be unsure of, and must not make
+    /// the host look empty.
+    #[test]
+    fn a_numeric_port_is_understood_and_not_forwarded() {
+        assert!(validate(
+            "jira",
+            Some(&raw(
+                r#"{"site_url":"http://x.net:8080/","email":"e","api_token":"t"}"#
+            ))
+        )
+        .is_ok());
+        assert!(validate(
+            "confluence",
+            Some(&raw(
+                r#"{"site_url":"https://x.net:8443","email":"e","api_token":"t"}"#
+            ))
+        )
+        .is_ok());
+    }
+
+    /// `encoding/json` uses the two-character escapes for `0x08`/`0x0c` and
+    /// `\u00XX` for every other control character.
+    #[test]
+    fn backspace_and_formfeed_use_gos_shorthand() {
+        // `encoding/json` emits the two-character form for these two, and
+        // `\u00XX` for the other control characters — so a single `< 0x20` arm
+        // would be wrong for exactly this pair.
+        assert_eq!(json_string("a\u{8}b"), r#""a\bb""#);
+        assert_eq!(json_string("a\u{c}b"), r#""a\fb""#);
+        assert_eq!(json_string("a\u{1}b"), r#""a\u0001b""#);
+        // The ones serde also gets right, kept so the whole table is in one
+        // place.
+        assert_eq!(json_string("a\nb\tc\rd"), r#""a\nb\tc\rd""#);
+    }
+
+    /// The forward reason is logged by the seam, so it must not carry the
+    /// caller's bytes — serde_json's own message quotes the offending value.
+    #[test]
+    fn a_bad_credentials_blob_never_puts_the_secret_in_the_error() {
+        let e = validate("google", Some(&raw(r#""ghp_SUPERSECRETVALUE""#)))
+            .expect_err("a string is not a credentials object");
+        assert!(matches!(e, WriteError::Fallback(_)));
+        assert!(
+            !e.message().contains("ghp_SUPERSECRETVALUE"),
+            "the credential must not reach the log: {}",
+            e.message()
         );
     }
 }

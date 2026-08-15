@@ -378,7 +378,13 @@ async fn the_integration_write_answers_match_go() {
     let created = go_answer(
         Method::POST,
         "/api/integrations",
-        Some(r#"{"name":"Parity Writes","type":"telegram","credentials":{"bot_token":"tok"}}"#),
+        // Multi-key, out of order, with a trailing-zero decimal and interior
+        // whitespace: a single-key blob is a fixed point of a `Value` round
+        // trip and would prove nothing about verbatim storage.
+        Some(
+            r#"{"name":"Parity Writes","type":"telegram",
+                 "credentials":{"zebra":"z", "bot_token":"tok","rate":1.50}}"#,
+        ),
     )
     .await;
     assert_eq!(created.0, 201, "create must be 201, got {}", created.0);

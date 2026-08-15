@@ -36,10 +36,18 @@
 //! Everything below the "Secrets" note is about never *reading* credentials.
 //! That cannot hold for a create, because the caller supplies them in the
 //! request body and they have to reach the column. So `create` carries them as
-//! a borrowed `RawValue` from decode to `INSERT` — never through
-//! `serde_json::Value`, which would reorder the keys and respell any number —
-//! and the response is still built from [`ScrubbedIntegration`], which has no
-//! field to leak them through.
+//! a borrowed `RawValue` from decode to `INSERT`, and the response is still
+//! built from [`ScrubbedIntegration`], which has no field to leak them through.
+//!
+//! **That guarantee is not local to this module.** It also depends on
+//! `writes::decode_body` deserializing from the request's *original bytes*
+//! rather than from the `serde_json::Value` it shape-checks with — going
+//! through the `Value` sorts keys and respells numbers, so the captured
+//! `RawValue` would be a re-serialization and Go's verbatim column would
+//! differ on every blob with more than one key. `decode_body` has its own test
+//! for this; the one here asserts the stored bytes end to end. Both use a
+//! multi-key blob deliberately: a single-key one is a fixed point of the broken
+//! round trip and proves nothing.
 //!
 //! ## Secrets
 //!
@@ -1147,10 +1155,14 @@ mod tests {
     #[test]
     fn creating_an_integration_answers_201_and_stores_the_row() {
         let file = migrated();
+        // A **multi-key** blob, out of alphabetical order, with a trailing-zero
+        // decimal and interior whitespace. A single-key blob is a fixed point of
+        // a `serde_json::Value` round trip, so it would pass even if the bytes
+        // were being rebuilt — which is exactly the hole review found here.
         let answer = create(
             file.path(),
             br#"{"name":"Work","type":"telegram","enabled":true,
-                 "credentials":{"bot_token":"t"}}"#,
+                 "credentials":{"zebra":"z", "bot_token":"t","rate":1.50}}"#,
         )
         .expect("create should succeed");
 
@@ -1172,7 +1184,9 @@ mod tests {
         // necessarily handles a secret, because the caller supplies it.
         assert_eq!(
             stored(&file, "SELECT credentials FROM integrations"),
-            r#"{"bot_token":"t"}"#
+            r#"{"zebra":"z", "bot_token":"t","rate":1.50}"#,
+            "Go stores the RawMessage verbatim: key order, `1.50` and the space \
+             after the first comma all survive"
         );
     }
 
