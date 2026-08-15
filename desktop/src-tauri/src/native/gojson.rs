@@ -182,6 +182,27 @@ fn go_float(value: f64, fixed: String, exponential: String) -> String {
 // encoder rather than in whichever module happened to need it first (chat
 // message blocks did; session-detail `tool_use` inputs do too).
 
+/// Decode a stored JSON string array the way `storage.decodeStringList` does:
+/// blank or unparseable is **nil** (`null` on the wire), a stored `[]` is an
+/// empty slice (`[]`).
+///
+/// The distinction is stored, not cosmetic — `user_settings.hidden_projects` is
+/// `null` on an install that has never saved and `[]` on one that has — so the
+/// rule lives in one place rather than in each module that meets a such a
+/// column.
+pub fn decode_string_list(raw: &str) -> Option<Vec<String>> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    match serde_json::from_str::<Option<Vec<String>>>(raw) {
+        Ok(values) => values,
+        Err(e) => {
+            log::warn!("native: malformed stored string array {raw:?}: {e}");
+            None
+        }
+    }
+}
+
 /// Decode a field the way Go does: a JSON `null` is the **zero value**, not a
 /// type error.
 ///
