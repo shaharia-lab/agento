@@ -25,10 +25,10 @@ import type {
 import {
   PROVIDERS,
   providerFor,
+  unavailableCopy,
   type AuthMode,
   type Provider,
 } from "./integrations/catalog";
-import { encodeQR, qrPath } from "./integrations/qr";
 import "../styles/integrations.css";
 
 /* ============================================================================
@@ -234,11 +234,7 @@ export function IntegrationsView({ inspectorOpen }: { inspectorOpen: boolean }) 
             }}
           />
         ) : selected ? (
-          <Empty
-            icon="plug"
-            title={`Unknown provider “${selected.type}”`}
-            text="This integration was created by a newer version of Agento than this app knows about."
-          />
+          <Empty icon="plug" {...unavailableCopy(selected.type)} />
         ) : (
           <Empty icon="plug" title="Integrations" text="Choose an integration or a provider." />
         )}
@@ -430,17 +426,6 @@ function ConnectForm({
 
             <CredentialFields mode={mode} values={values} onChange={setValues} />
 
-            {mode.kind === "qr" && (
-              <div className="msgline">
-                <span className="msgline__icon">
-                  <Icon name="info" size={13} />
-                </span>
-                <span>
-                  WhatsApp needs no credentials. Create the integration, then scan the
-                  pairing code with the phone you want to send from.
-                </span>
-              </div>
-            )}
             {mode.kind === "oauth" && (
               <div className="msgline">
                 <span className="msgline__icon">
@@ -701,13 +686,6 @@ function IntegrationDetail({
         <div className="form">
           <AuthSection item={item} provider={provider} onChanged={onChanged} />
 
-          {provider.type === "whatsapp" && (
-            <>
-              <div className="divider" />
-              <WhatsAppPanel item={item} onChanged={onChanged} />
-            </>
-          )}
-
           {provider.supportsTriggers && (
             <>
               <div className="divider" />
@@ -842,7 +820,6 @@ function AuthSection({
   provider: Provider;
   onChanged(): void;
 }) {
-  const kind = provider.modes[0].kind;
   const isOAuth = provider.modes.some((m) => m.kind === "oauth");
 
   const [waiting, setWaiting] = useState(false);
@@ -926,8 +903,6 @@ function AuthSection({
     }
   }
 
-  if (kind === "qr") return null;
-
   return (
     <div className="formsec">
       <div className="formsec__title">Authorisation</div>
@@ -995,225 +970,6 @@ function AuthSection({
         </div>
       </div>
     </div>
-  );
-}
-
-/* --- WhatsApp ------------------------------------------------------------ */
-
-interface WhatsAppQR {
-  status: "pending" | "paired" | "no_session" | "error";
-  qr_code?: string;
-  phone?: string;
-  error?: string;
-}
-
-function WhatsAppPanel({
-  item,
-  onChanged,
-}: {
-  item: Integration;
-  onChanged(): void;
-}) {
-  const [pairing, setPairing] = useState(false);
-  const [qr, setQr] = useState<WhatsAppQR>();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string>();
-  const [notice, setNotice] = useState<string>();
-
-  const onChangedRef = useRef(onChanged);
-  onChangedRef.current = onChanged;
-
-  const status = useResource(
-    (signal) =>
-      api.get<{ connected: boolean; logged_in: boolean }>(
-        `/integrations/${item.id}/whatsapp/status`,
-        signal
-      ),
-    [item.id]
-  );
-
-  // The reference in a pairing code is short-lived and the server rotates it,
-  // so the code on screen is re-read rather than cached.
-  useEffect(() => {
-    if (!pairing) return;
-    let cancelled = false;
-
-    const poll = async () => {
-      try {
-        const res = await api.get<WhatsAppQR>(`/integrations/${item.id}/whatsapp/qr`);
-        if (cancelled) return;
-        setQr(res);
-        if (res.status === "paired") {
-          setPairing(false);
-          setNotice(res.phone ? `Paired with ${res.phone}.` : "Paired.");
-          onChangedRef.current();
-          status.reload();
-        } else if (res.status === "error") {
-          setPairing(false);
-          setError(res.error ?? "Pairing failed.");
-        } else if (res.status === "no_session") {
-          setPairing(false);
-        }
-      } catch {
-        /* transient — the next tick retries */
-      }
-    };
-
-    void poll();
-    const id = setInterval(poll, 2000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-    // `status` is a fresh object each render; only the id should restart polling.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pairing, item.id]);
-
-  async function startPairing() {
-    setBusy(true);
-    setError(undefined);
-    setNotice(undefined);
-    try {
-      const res = await api.post<{ qr_code: string }>(
-        `/integrations/${item.id}/whatsapp/pair`
-      );
-      setQr({ status: "pending", qr_code: res.qr_code });
-      setPairing(true);
-    } catch (err) {
-      setError(describeError(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function reconnect() {
-    setBusy(true);
-    setError(undefined);
-    setNotice(undefined);
-    try {
-      await api.post(`/integrations/${item.id}/whatsapp/reconnect`);
-      setNotice("Reconnecting…");
-      status.reload();
-    } catch (err) {
-      setError(describeError(err));
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="formsec">
-      <div className="formsec__title">Device pairing</div>
-      <div className="formrow">
-        <div className="formrow__label">Connection</div>
-        <div className="formrow__control">
-          <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
-            {item.authenticated ? (
-              <span className="badge badge--green">Paired</span>
-            ) : (
-              <span className="badge badge--amber">Not paired</span>
-            )}
-            {status.data?.connected ? (
-              <span className="badge badge--green">Socket up</span>
-            ) : (
-              <span className="badge">Socket down</span>
-            )}
-            {status.data?.logged_in && <span className="badge">Logged in</span>}
-            <button className="btn" onClick={startPairing} disabled={busy || pairing}>
-              <Icon name="grid" size={13} />
-              {item.authenticated ? "Pair again" : "Pair device"}
-            </button>
-            {item.authenticated && (
-              <button className="btn" onClick={reconnect} disabled={busy}>
-                <Icon name="refresh" size={13} />
-                Reconnect
-              </button>
-            )}
-          </div>
-
-          {pairing && qr?.qr_code && (
-            <div className="qr">
-              <QRCode value={qr.qr_code} />
-              <div className="qr__hint">
-                On your phone open WhatsApp → Settings → Linked devices → Link a device,
-                then scan this code. It refreshes every few seconds until you do.
-              </div>
-              <details style={{ width: "100%" }}>
-                <summary
-                  style={{
-                    fontSize: "var(--text-sm)",
-                    color: "var(--fg-tertiary)",
-                    cursor: "default",
-                  }}
-                >
-                  Raw pairing reference
-                </summary>
-                <div className="codebox selectable" style={{ marginTop: "var(--sp-3)" }}>
-                  {qr.qr_code}
-                </div>
-              </details>
-            </div>
-          )}
-          {pairing && !qr?.qr_code && (
-            <div className="msgline">
-              <span className="msgline__icon">
-                <Icon name="clock" size={13} />
-              </span>
-              <span>Waiting for a pairing code…</span>
-            </div>
-          )}
-          {pairing && (
-            <button
-              className="btn"
-              style={{ alignSelf: "flex-start" }}
-              onClick={() => setPairing(false)}
-            >
-              Stop pairing
-            </button>
-          )}
-
-          {error && <div className="msgline msgline--error">{error}</div>}
-          {notice && <div className="msgline msgline--ok">{notice}</div>}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function QRCode({ value, size = 236 }: { value: string; size?: number }) {
-  const matrix = useMemo(() => encodeQR(value), [value]);
-
-  if (!matrix) {
-    return (
-      <div className="msgline msgline--warn">
-        <span className="msgline__icon">
-          <Icon name="alert" size={13} />
-        </span>
-        <span>
-          This pairing reference is too long to draw as a code. Use the raw reference
-          below.
-        </span>
-      </div>
-    );
-  }
-
-  const n = matrix.length;
-  const quiet = 4; // The specified quiet zone; without it many scanners fail.
-  const span = n + quiet * 2;
-
-  return (
-    <svg
-      className="qr__code"
-      width={size}
-      height={size}
-      viewBox={`${-quiet} ${-quiet} ${span} ${span}`}
-      shapeRendering="crispEdges"
-      role="img"
-      aria-label="WhatsApp pairing QR code"
-    >
-      <rect x={-quiet} y={-quiet} width={span} height={span} fill="#fff" />
-      <path d={qrPath(matrix)} fill="currentColor" />
-    </svg>
   );
 }
 

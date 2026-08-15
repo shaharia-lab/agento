@@ -1,6 +1,6 @@
 /* ============================================================================
-   Integrations — the provider catalog, service/tool blocks, QR pairing and
-   trigger rules. Layers on controls.css / views.css rather than restating it.
+   Integrations — the provider catalog, service/tool blocks and trigger rules.
+   Layers on controls.css / views.css rather than restating it.
    ========================================================================== */
 
 /* --- Provider catalog ---------------------------------------------------- */
@@ -109,37 +109,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* --- QR pairing ---------------------------------------------------------- */
-
-.qr {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--sp-5);
-  padding: var(--sp-7);
-  border-radius: var(--r-lg);
-  background: var(--bg-list);
-  box-shadow: inset 0 0 0 0.5px var(--line);
-}
-
-/* Always drawn dark-on-white with the four-module quiet zone baked into the
-   viewBox — a themed background or a missing margin is the usual reason a
-   phone will not lock onto a code. */
-.qr__code {
-  display: block;
-  background: #fff;
-  border-radius: var(--r-md);
-  box-shadow: var(--shadow-sm);
-  color: #000;
-}
-.qr__hint {
-  font-size: var(--text-sm);
-  color: var(--fg-tertiary);
-  text-align: center;
-  line-height: var(--leading-normal);
-  max-width: 360px;
 }
 
 .codebox {
