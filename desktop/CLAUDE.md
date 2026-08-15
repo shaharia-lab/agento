@@ -136,6 +136,7 @@ src-tauri/src/
     settings.rs  GET /api/settings; also the preferences + config dirs a read is scoped to
     monitoring.rs GET /api/monitoring — monitoring.json and the OTEL_* locks, no exporters
     version.rs   GET /api/version and /version/update-check (dev builds only)
+    notifications.rs GET /api/notifications/settings (password masked) and /log
     pricing.rs   GET /api/pricing/catalog, plus the rate Resolver
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
