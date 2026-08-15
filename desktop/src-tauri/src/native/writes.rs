@@ -186,20 +186,29 @@ pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Wri
         // rather than what the client sent, and
         // `integrations.credentials` is stored verbatim by Go, so the two
         // databases would diverge on every blob with more than one key.
-        serde_json::Value::Object(_) => serde_json::from_slice(body).or_else(|_| {
-            // Falling back to the `Value` restores Go's answer for the one
-            // shape the strict path rejects and Go does not: **duplicate keys**.
-            // `encoding/json` takes the last occurrence; serde's derived impl
-            // errors with `duplicate field`, which would have been a 400 where
-            // Go answers 200 and creates the row. The `Value` already collapsed
-            // them last-wins, so decoding from it is exactly Go's result.
+        serde_json::Value::Object(_) => serde_json::from_slice(body).map_err(|_| {
+            // The strict path refuses one shape Go accepts — **duplicate keys**.
+            // serde's derived impl errors with `duplicate field`;
+            // `encoding/json` takes the last occurrence.
             //
-            // This can only *add* back acceptance, never remove it: a body both
-            // paths reject is still `InvalidBody`. The cost is that a
-            // duplicate-key request loses byte-verbatim raw capture — which is
-            // the right trade, since the alternative is refusing a request Go
-            // would have honoured.
-            serde_json::from_value(value).map_err(|_| WriteError::InvalidBody)
+            // The tempting repair is to decode the already-collapsed `Value`,
+            // but that is a *superset* of Go rather than a match: Go validates
+            // **every** occurrence, while the `Value` retained only the last. So
+            // `{"count":"notanumber","count":1}` is a 400 to Go and would decode
+            // cleanly here — an over-accept, which on `POST /api/integrations`
+            // means creating a row Go would have refused. It would also lose
+            // byte-verbatim raw capture, since the value came from the `Value`.
+            //
+            // Forwarding is exact in both directions and costs nothing: Go
+            // answers the well-typed duplicates and 400s the ill-typed ones. Safe
+            // because `decode_body` runs before any mutation in every caller.
+            if serde_json::from_value::<T>(value).is_ok() {
+                WriteError::Fallback(
+                    "duplicate keys: Go validates every occurrence, so only it can answer".into(),
+                )
+            } else {
+                WriteError::InvalidBody
+            }
         }),
         // Go's no-op: the zero value, and the handler validates it.
         serde_json::Value::Null => {
@@ -240,20 +249,52 @@ mod tests {
         );
     }
 
-    /// `encoding/json` accepts duplicate keys and keeps the **last**; serde's
-    /// derived impl errors with `duplicate field`. Deserializing from the raw
-    /// bytes made that a 400 where Go answers 200 and creates the row, so the
-    /// helper falls back to the collapsed `Value`.
+    /// Duplicate keys forward, because only Go can answer them.
+    ///
+    /// `encoding/json` keeps the **last** occurrence but type-checks **every**
+    /// one, so `{"n":"x","n":1}` is a 400 to Go even though the surviving value
+    /// is fine. serde's derived impl refuses duplicates outright, and the
+    /// collapsed `Value` has already thrown away the occurrences Go would have
+    /// judged — so neither local path can reproduce the answer. Handing it over
+    /// is exact in both directions.
     #[test]
-    fn duplicate_keys_take_the_last_value_as_go_does() {
-        #[derive(serde::Deserialize)]
+    fn duplicate_keys_forward_rather_than_being_guessed_at() {
+        #[derive(Debug, serde::Deserialize)]
         struct Body {
             #[serde(default)]
+            #[allow(dead_code)]
             s: String,
+            #[serde(default)]
+            #[allow(dead_code)]
+            n: u8,
         }
-        let decoded: Body =
-            decode_body(br#"{"s":"first","s":"last-wins"}"#).expect("Go accepts this");
-        assert_eq!(decoded.s, "last-wins");
+        // Go would accept this one…
+        assert!(matches!(
+            decode_body::<Body>(br#"{"s":"first","s":"last-wins"}"#).unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+        // …and 400 this one, because the *first* occurrence does not fit `u8`.
+        // Both forward, so Go makes that distinction rather than this helper.
+        assert!(matches!(
+            decode_body::<Body>(br#"{"n":999,"n":7}"#).unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+    }
+
+    /// Ordinary bodies must not touch the duplicate path — verbatim capture
+    /// still has to come from the strict decode.
+    #[test]
+    fn a_body_without_duplicates_never_takes_the_forward_path() {
+        #[derive(serde::Deserialize)]
+        struct Body {
+            #[serde(default, deserialize_with = "super::super::gojson::captured_raw")]
+            blob: Option<Box<serde_json::value::RawValue>>,
+        }
+        let decoded: Body = decode_body(br#"{"blob":{"z":"z", "a":"a","r":1.50}}"#).expect("ok");
+        assert_eq!(
+            decoded.blob.expect("present").get(),
+            r#"{"z":"z", "a":"a","r":1.50}"#
+        );
     }
 
     /// The fallback must not widen what is accepted beyond it.
