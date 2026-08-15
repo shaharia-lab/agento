@@ -279,7 +279,7 @@ fn serve(ctx: &super::Ctx, _req: &super::Request) -> Result<super::Answer, Strin
         .ok_or("no data directory beside the database")?;
     let body = super::gojson::to_vec(&response(data_dir))
         .map_err(|e| format!("encoding monitoring config: {e}"))?;
-    Ok(super::Answer { body, probe: None })
+    Ok(super::Answer::json(body))
 }
 
 #[cfg(test)]

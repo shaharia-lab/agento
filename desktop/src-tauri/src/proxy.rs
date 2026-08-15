@@ -75,8 +75,19 @@ pub async fn serve(upstream_port: u16, port: u16) -> Result<u16, String> {
 /// so claiming a route and implementing it are one edit rather than two files
 /// that can disagree.
 fn route_is_native(method: &axum::http::Method, path: &str) -> bool {
-    native::mode() != native::Mode::Off && native::claims(method, path)
+    native::may_serve(native::mode(), method) && native::claims(method, path)
 }
+
+/// How much request body a native handler will accept.
+///
+/// **Over this the request is answered 400, not forwarded** — and it cannot be
+/// forwarded, because `to_bytes` has already consumed the body by the time the
+/// limit is hit. That is the one place the seam's "a native failure just falls
+/// back" rule does not hold, so the cap is set well above anything a claimed
+/// route legitimately carries: the biggest is an agent's `system_prompt`, and
+/// 8 MiB of it would be about a million words. Uploads are the only genuinely
+/// large body in the API and they are not claimed.
+const MAX_NATIVE_BODY: usize = 8 << 20;
 
 async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response<Body> {
     let path = req.uri().path().to_string();
@@ -99,6 +110,23 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
     }
 
     if route_is_native(req.method(), &path) {
+        // A native handler needs the body, so it has to be read here — and
+        // reading it consumes the request, which is why the buffered bytes are
+        // put back before any forward below. Claimed routes are never the SSE
+        // ones, so nothing streaming is buffered by this.
+        let (parts, body) = req.into_parts();
+        let body_bytes = match axum::body::to_bytes(body, MAX_NATIVE_BODY).await {
+            Ok(bytes) => bytes,
+            // Not forwarded: the body is gone. See `MAX_NATIVE_BODY`.
+            Err(e) => {
+                log::warn!("native handler for {path}: reading body failed: {e}");
+                return error_response(StatusCode::BAD_REQUEST, "could not read request body");
+            }
+        };
+        // `req` keeps a complete copy of the body, so both forwards below can
+        // use it as-is; the handler gets the other copy.
+        let req = Request::from_parts(parts, Body::from(body_bytes.clone()));
+
         // Reading SQLite is blocking work; keeping it off the axum worker means
         // one slow read cannot stall an SSE stream sharing the runtime.
         let method = req.method().clone();
@@ -110,6 +138,7 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
                     method: &method,
                     path: &path,
                     query: &query,
+                    body: &body_bytes,
                 })
             })
             .await
@@ -126,10 +155,13 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
                 spawn_freshness_probe(&state, probe);
             }
         }
-        let native_body = native_answer.map(|answer| answer.body);
 
-        match (native::mode(), native_body) {
+        match (native::mode(), native_answer) {
             // Go stays authoritative in shadow mode; Rust is only compared.
+            //
+            // A write never reaches here — `route_is_native` refuses to run one
+            // natively in this mode, because computing it "alongside" means
+            // applying it twice. See `native::may_serve`.
             (native::Mode::Diff, native) => {
                 let (go_response, go_body) = match forward_buffered(&state, req).await {
                     Ok(buffered) => buffered,
@@ -139,18 +171,35 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
                     }
                 };
                 match native {
-                    Ok(body) => {
-                        native::diff::report(&path, &native::diff::compare(&go_body, &body))
-                    }
+                    Ok(answer) => native::diff::report(
+                        &path,
+                        &native::diff::compare(&go_body, answer.body.as_deref().unwrap_or(&[])),
+                    ),
                     Err(e) => log::error!("native diff {path}: native handler failed: {e}"),
                 }
                 return go_response;
             }
-            (_, Ok(body)) => return native::response(body),
+            (_, Ok(answer)) => return native::response(answer),
             // A native failure is never surfaced to the UI: the request falls
             // through to the Go sidecar, which is still running and still
             // correct. A ported route can only be as broken as an unported one.
-            (_, Err(e)) => log::warn!("native handler for {path} failed, forwarding to Go: {e}"),
+            //
+            // **A write handler must therefore fail before it mutates**, or the
+            // fallback re-applies what already happened. Every write below runs
+            // its validation and its schema check first and does the whole
+            // mutation in one transaction, so an `Err` means nothing was
+            // written. That invariant is the write path's half of the seam's
+            // safety, and it lives in the handlers because only they know it.
+            (_, Err(e)) => {
+                log::warn!("native handler for {path} failed, forwarding to Go: {e}");
+                return match forward(&state, req).await {
+                    Ok(resp) => resp,
+                    Err(e) => {
+                        log::error!("proxy error for {path}: {e}");
+                        error_response(StatusCode::BAD_GATEWAY, &e)
+                    }
+                };
+            }
         }
     }
 

@@ -430,7 +430,7 @@ fn serve(ctx: &super::Ctx, _req: &super::Request) -> Result<super::Answer, Strin
     let conn = super::db::open_read_only(&ctx.db_path)?;
     let body = super::gojson::to_vec(&resolve(load_stored(&conn)))
         .map_err(|e| format!("encoding settings: {e}"))?;
-    Ok(super::Answer { body, probe: None })
+    Ok(super::Answer::json(body))
 }
 
 #[cfg(test)]

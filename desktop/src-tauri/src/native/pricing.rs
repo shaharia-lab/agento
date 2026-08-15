@@ -477,11 +477,9 @@ fn claims(method: &Method, path: &str) -> bool {
 
 fn serve(ctx: &super::Ctx, _req: &super::Request) -> Result<super::Answer, String> {
     let catalog = catalog(&ctx.db_path)?;
-    Ok(super::Answer {
-        body: super::gojson::to_vec(&catalog)
-            .map_err(|e| format!("encoding pricing catalog: {e}"))?,
-        probe: None,
-    })
+    Ok(super::Answer::json(
+        super::gojson::to_vec(&catalog).map_err(|e| format!("encoding pricing catalog: {e}"))?,
+    ))
 }
 
 // ─── Resolver ─────────────────────────────────────────────────────────────────

@@ -172,7 +172,7 @@ fn serve(_ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, Strin
         },
         other => return Err(format!("{other} is not a version read")),
     };
-    Ok(super::Answer { body, probe: None })
+    Ok(super::Answer::json(body))
 }
 
 #[cfg(test)]

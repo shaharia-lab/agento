@@ -23,6 +23,7 @@ pub mod gopath;
 pub mod gotime;
 pub mod insights;
 pub mod integrations;
+pub mod migrate;
 pub mod monitoring;
 pub mod notifications;
 pub mod pricing;
@@ -32,6 +33,7 @@ pub mod sessions;
 pub mod settings;
 pub mod tasks;
 pub mod version;
+pub mod writes;
 
 use axum::body::Body;
 use axum::http::{header, Method, Response, StatusCode};
@@ -77,13 +79,69 @@ pub struct Request<'a> {
     pub path: &'a str,
     /// The raw query string without its leading `?`.
     pub query: &'a str,
+    /// The request body, already buffered. Empty for a GET, and empty for the
+    /// several writes Go accepts with no payload at all.
+    pub body: &'a [u8],
 }
 
-/// What a native handler produced: the response body, plus any request the
-/// proxy should fire at the sidecar afterwards to keep the corpus fresh.
+/// What a native handler produced.
+///
+/// # Why the status is here and not implied
+///
+/// Reads were all `200`, so the seam did not carry a status at all. The writes
+/// are not: Go answers `201` on every create, `204` on every delete, `202` on
+/// the scan refresh, and `400`/`404`/`409`/`422` on the failure paths — and a
+/// created agent answered `200` would be a wire divergence the frontend can
+/// see. The handler is the only thing that knows which, so it says.
+///
+/// # `body: None` is not the same as an empty body
+///
+/// Go's deletes call `w.WriteHeader(http.StatusNoContent)` directly rather than
+/// going through `writeJSON`, so a 204 carries **no `Content-Type` header** and
+/// no body — not an empty JSON document, and not a zero-length body under a
+/// JSON content type. `None` reproduces that; `Some(vec![])` would not.
+#[derive(Debug)]
 pub struct Answer {
-    pub body: Vec<u8>,
+    pub status: StatusCode,
+    /// `None` sends no body and no `Content-Type`.
+    pub body: Option<Vec<u8>>,
+    /// A request to fire at the sidecar afterwards, to keep the corpus fresh.
     pub probe: Option<&'static str>,
+}
+
+impl Answer {
+    /// `200 OK` with a JSON body — what every ported read answers.
+    pub fn json(body: Vec<u8>) -> Self {
+        Self {
+            status: StatusCode::OK,
+            body: Some(body),
+            probe: None,
+        }
+    }
+
+    /// A JSON body under a status the handler chooses.
+    pub fn json_status(status: StatusCode, body: Vec<u8>) -> Self {
+        Self {
+            status,
+            body: Some(body),
+            probe: None,
+        }
+    }
+
+    /// `204 No Content`: no body, no `Content-Type`.
+    pub fn no_content() -> Self {
+        Self {
+            status: StatusCode::NO_CONTENT,
+            body: None,
+            probe: None,
+        }
+    }
+
+    /// Attach a freshness probe to fire at the sidecar after answering.
+    pub fn with_probe(mut self, probe: &'static str) -> Self {
+        self.probe = Some(probe);
+        self
+    }
 }
 
 /// What every handler needs to reach the data the Go server owns.
@@ -143,6 +201,31 @@ pub fn claims(method: &Method, path: &str) -> bool {
     ENDPOINTS.iter().any(|e| (e.claims)(method, path))
 }
 
+/// Whether a request may be *executed* natively in the seam's current mode.
+///
+/// This exists for exactly one reason, and it is the sharpest hazard #274
+/// introduced. `Mode::Diff` runs **both** implementations and compares them:
+/// Go answers, Rust computes alongside. For a read that is the whole point.
+/// For a write it means the mutation is applied twice — two agents created, a
+/// row deleted and then deleted again, a counter advanced by two. There is no
+/// diff worth that, and the failure would look like a user double-clicking.
+///
+/// So in `Diff` mode a non-`GET` is not run natively at all; it simply
+/// forwards, and Go remains the only writer. Ported writes are verified the
+/// ordinary way — unit tests over a temp database, and a live parity run
+/// against a scratch instance — not by shadowing production traffic.
+///
+/// The rule is blanket rather than per-endpoint on purpose: a flag on
+/// [`Endpoint`] saying "this one mutates" is a flag someone forgets on the one
+/// that does.
+pub fn may_serve(mode: Mode, method: &Method) -> bool {
+    match mode {
+        Mode::Off => false,
+        Mode::On => true,
+        Mode::Diff => method == Method::GET,
+    }
+}
+
 /// Answer a claimed request. `Err` means "fall back to the Go sidecar".
 pub fn serve(req: &Request) -> Result<Answer, String> {
     let ctx = Ctx {
@@ -159,16 +242,22 @@ pub fn serve(req: &Request) -> Result<Answer, String> {
     ))
 }
 
-/// Wrap a native body in the response `writeJSON` would have produced.
+/// Wrap a native answer in the response Go would have produced.
 ///
 /// The header set is Go's, exactly: `Content-Type: application/json` with no
 /// charset. The frontend does not care, but a diff of the whole exchange would.
-pub fn response(body: Vec<u8>) -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
+///
+/// A `None` body sends neither header nor payload, because that is what a bare
+/// `w.WriteHeader(204)` does — see [`Answer`].
+pub fn response(answer: Answer) -> Response<Body> {
+    let builder = Response::builder().status(answer.status);
+    let built = match answer.body {
+        Some(body) => builder
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body)),
+        None => builder.body(Body::empty()),
+    };
+    built.unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
 #[cfg(test)]
@@ -207,24 +296,28 @@ mod tests {
         // The per-session insight record is a different route and stays with Go.
         assert!(!claims(&Method::GET, "/api/claude-sessions/abc/insights"));
 
-        // Agents: the two reads, and nothing that writes or nests.
+        // Agents: the two reads and, since #274, the three writes. `duplicate`
+        // is a different route and still forwards.
         assert!(claims(&Method::GET, "/api/agents"));
         assert!(claims(&Method::GET, "/api/agents/my-agent"));
-        assert!(!claims(&Method::POST, "/api/agents"));
-        assert!(!claims(&Method::PUT, "/api/agents/my-agent"));
-        assert!(!claims(&Method::DELETE, "/api/agents/my-agent"));
+        assert!(claims(&Method::POST, "/api/agents"));
+        assert!(claims(&Method::PUT, "/api/agents/my-agent"));
+        assert!(claims(&Method::DELETE, "/api/agents/my-agent"));
+        assert!(!claims(&Method::POST, "/api/agents/my-agent/duplicate"));
         assert!(!claims(&Method::GET, "/api/agents/my-agent/duplicate"));
         assert!(!claims(&Method::GET, "/api/agents/"));
 
-        // Chats: the two reads. Every write stays with Go, and so does the
-        // streaming turn — `/messages` is a POST-based SSE response, which is
-        // the one thing the proxy must never buffer.
+        // Chats: the two reads and, since #274, the CRUD. The streaming turn
+        // stays with Go — `/messages` is a POST-based SSE response, which is the
+        // one thing the proxy must never buffer, and #276 owns it.
         assert!(claims(&Method::GET, "/api/chats"));
         assert!(claims(&Method::GET, "/api/chats/abc-123"));
-        assert!(!claims(&Method::POST, "/api/chats"));
-        assert!(!claims(&Method::DELETE, "/api/chats"));
-        assert!(!claims(&Method::PATCH, "/api/chats/abc-123"));
-        assert!(!claims(&Method::DELETE, "/api/chats/abc-123"));
+        assert!(claims(&Method::POST, "/api/chats"));
+        assert!(claims(&Method::DELETE, "/api/chats"));
+        assert!(claims(&Method::PATCH, "/api/chats/abc-123"));
+        assert!(claims(&Method::DELETE, "/api/chats/abc-123"));
+        assert!(!claims(&Method::POST, "/api/chats/abc-123/messages"));
+        assert!(!claims(&Method::POST, "/api/chats/abc-123/stop"));
         assert!(!claims(&Method::GET, "/api/chats/abc-123/messages"));
         assert!(!claims(&Method::GET, "/api/chats/abc-123/stop"));
         assert!(!claims(&Method::GET, "/api/chats/"));
@@ -236,11 +329,15 @@ mod tests {
         assert!(claims(&Method::GET, "/api/tasks/abc-123/job-history"));
         assert!(claims(&Method::GET, "/api/job-history"));
         assert!(claims(&Method::GET, "/api/job-history/abc-123"));
+        // Task writes all touch the scheduler, so they are #275's; the two
+        // job-history deletes are pure row removals and moved in #274.
         assert!(!claims(&Method::POST, "/api/tasks"));
         assert!(!claims(&Method::PUT, "/api/tasks/abc-123"));
         assert!(!claims(&Method::POST, "/api/tasks/abc-123/pause"));
         assert!(!claims(&Method::POST, "/api/tasks/abc-123/resume"));
-        assert!(!claims(&Method::DELETE, "/api/job-history"));
+        assert!(!claims(&Method::DELETE, "/api/tasks/abc-123"));
+        assert!(claims(&Method::DELETE, "/api/job-history"));
+        assert!(claims(&Method::DELETE, "/api/job-history/abc-123"));
         assert!(!claims(&Method::GET, "/api/tasks/"));
         assert!(!claims(&Method::GET, "/api/job-history/"));
 
@@ -303,8 +400,59 @@ mod tests {
             method: &Method::GET,
             path: "/api/nothing-here",
             query: "",
+            body: &[],
         })
         .is_err());
+    }
+
+    /// The single most dangerous thing #274 could get wrong.
+    ///
+    /// `Diff` mode runs Go *and* Rust and compares them. For a read that is the
+    /// whole point; for a write it applies the mutation twice. If this test
+    /// ever goes green with `Diff` allowing a POST, turning on shadow mode
+    /// silently doubles every create the user makes.
+    #[test]
+    fn shadow_mode_never_executes_a_write() {
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert!(
+                !may_serve(Mode::Diff, &method),
+                "{method} must not run natively in diff mode — it would apply twice"
+            );
+            // …but it is perfectly fine in the normal mode, which is the whole
+            // point of the port.
+            assert!(may_serve(Mode::On, &method));
+            assert!(!may_serve(Mode::Off, &method));
+        }
+
+        // Reads are unaffected in every mode but Off.
+        assert!(may_serve(Mode::Diff, &Method::GET));
+        assert!(may_serve(Mode::On, &Method::GET));
+        assert!(!may_serve(Mode::Off, &Method::GET));
+    }
+
+    /// Go's deletes call `w.WriteHeader(204)` directly rather than going
+    /// through `writeJSON`, so there is no `Content-Type` and no body. An empty
+    /// JSON body under a JSON content type is a different response.
+    #[test]
+    fn a_no_content_answer_carries_neither_body_nor_content_type() {
+        let resp = response(Answer::no_content());
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert!(resp.headers().get(header::CONTENT_TYPE).is_none());
+
+        let created = response(Answer::json_status(StatusCode::CREATED, b"{}".to_vec()));
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(
+            created.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
+
+        // The read path is unchanged: 200 plus the JSON header.
+        let read = response(Answer::json(b"[]".to_vec()));
+        assert_eq!(read.status(), StatusCode::OK);
+        assert_eq!(
+            read.headers().get(header::CONTENT_TYPE).unwrap(),
+            "application/json"
+        );
     }
 
     /// Two modules claiming one path is a merge accident, not a feature: the
