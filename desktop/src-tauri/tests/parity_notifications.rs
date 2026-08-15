@@ -34,6 +34,23 @@
 //!   ('task.failed','smtp','Agento: failed','error','dial tcp: refused','2026-08-02 11:30:00 +0000 UTC');"
 //! ```
 //!
+//! **A stored `null` cannot be seeded through the API**, because `PUT` marshals
+//! a Go struct and never writes one — and editing the scratch database after
+//! `start` does not help either, since the settings row is read once into
+//! `SettingsManager` at startup while a native read re-reads it per request. To
+//! diff that case, prepare the column *before* the server boots:
+//!
+//! ```sh
+//! mkdir -p /tmp/stage && cp ~/.agento/agento.db /tmp/stage/
+//! sqlite3 /tmp/stage/agento.db \
+//!   "UPDATE user_settings SET notification_settings='{\"enabled\":true,\"provider\":null}' WHERE id=1"
+//! AGENTO_SOURCE_DATA_DIR=/tmp/stage AGENTO_PARITY_DIR=/tmp/parity-null \
+//!   ./scripts/parity-instance.sh start
+//! ```
+//!
+//! Go answers 200 with `enabled: true` and a zero-valued provider; that is what
+//! `null_is_zero_value` exists to reproduce.
+//!
 //! **Read-only.** These issue GETs and nothing else.
 
 mod parity_common;

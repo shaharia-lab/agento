@@ -33,12 +33,29 @@
 use std::path::Path;
 
 use axum::http::Method;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::db;
 use super::gotime::GoTime;
 
 // ─── GET /api/notifications/settings ──────────────────────────────────────────
+
+/// Decode a field the way Go does: a stored JSON `null` is the **zero value**,
+/// not a type error.
+///
+/// `json.Unmarshal` treats `null` as a no-op for every type here, so
+/// `{"provider":null}` leaves `SMTPConfig{}` and returns a 200. `serde` rejects
+/// it, and the seam would turn that into a silent fallback — the route stops
+/// being native with nothing to signal it. Genuinely unparsable text still
+/// fails, which is also what Go does. Same rule `scheduled_tasks.schedule_config`
+/// needed in PR #285; the column is hand-editable, so it is reachable.
+fn null_is_zero_value<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 /// SMTP connection parameters. Mirrors `notification.SMTPConfig`.
 ///
@@ -46,20 +63,20 @@ use super::gotime::GoTime;
 /// unconfigured install — including `"port": 0`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmtpConfig {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub host: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub port: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub username: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub password: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub from_address: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub to_addresses: String,
     /// "none", "starttls" or "ssl_tls".
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub encryption: String,
 }
 
@@ -81,7 +98,7 @@ pub struct ScheduledTasksPreferences {
 /// Mirrors `notification.NotificationPreferences`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationPreferences {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub scheduled_tasks: ScheduledTasksPreferences,
 }
 
@@ -89,11 +106,11 @@ pub struct NotificationPreferences {
 /// `user_settings.notification_settings`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationSettings {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub enabled: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub provider: SmtpConfig,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_is_zero_value")]
     pub preferences: NotificationPreferences,
 }
 
@@ -199,15 +216,20 @@ pub fn list_log(db_path: &Path, limit: i64) -> Result<Option<Vec<NotificationLog
 /// unreachable from HTTP for that reason; it exists for other callers.
 pub fn log_limit(query: &str) -> i64 {
     const DEFAULT_LIMIT: i64 = 50;
-    for pair in query.split('&') {
-        if let Some(value) = pair.strip_prefix("limit=") {
-            return match value.parse::<i64>() {
-                Ok(n) if n > 0 => n,
-                _ => DEFAULT_LIMIT,
-            };
-        }
+
+    // `form_urlencoded`, not a `strip_prefix` scan: it is what `tasks.rs` uses
+    // and what reproduces `r.URL.Query().Get` — percent-decoded, and the *first*
+    // value for a repeated key. `tasks::parse_query_int` itself is not reusable
+    // here because it clamps to `MAX_QUERY_LIMIT`, which this handler does not.
+    let raw = form_urlencoded::parse(query.as_bytes())
+        .find(|(k, _)| k == "limit")
+        .map(|(_, v)| v.into_owned())
+        .unwrap_or_default();
+
+    match raw.parse::<i64>() {
+        Ok(n) if n > 0 => n,
+        _ => DEFAULT_LIMIT,
     }
-    DEFAULT_LIMIT
 }
 
 // ─── The seam ─────────────────────────────────────────────────────────────────
@@ -346,6 +368,34 @@ mod tests {
         assert!(get_settings(file.path()).is_err());
     }
 
+    /// The other half of the pair, which behaves oppositely and looks the same:
+    /// `json.Unmarshal` treats `null` as a no-op for every type here, so Go
+    /// answers 200 with the zero value. Rejecting it would fall back silently.
+    #[test]
+    fn a_stored_null_is_the_zero_value_not_a_parse_failure() {
+        for raw in [
+            r#"{"enabled":null,"provider":null,"preferences":null}"#,
+            r#"{"enabled":true,"provider":null}"#,
+            r#"{"provider":{"host":null,"port":null},"preferences":{"scheduled_tasks":null}}"#,
+        ] {
+            let file = fixture(raw, "");
+            let settings = get_settings(file.path())
+                .unwrap_or_else(|e| panic!("{raw} should decode, got {e}"));
+            assert_eq!(settings.provider.host, "", "{raw}");
+            assert_eq!(settings.provider.port, 0, "{raw}");
+            assert_eq!(
+                settings.preferences,
+                NotificationPreferences::default(),
+                "{raw}"
+            );
+        }
+
+        // …and `enabled: true` beside a null sibling still survives, so the
+        // decoder is tolerant rather than blanket-defaulting.
+        let file = fixture(r#"{"enabled":true,"provider":null}"#, "");
+        assert!(get_settings(file.path()).expect("settings").enabled);
+    }
+
     /// `omitempty` on a `*bool` omits nil and keeps a pointer to `false`. The
     /// difference is the whole meaning of the field: absent is "use the
     /// default", which is enabled.
@@ -444,6 +494,12 @@ mod tests {
         assert_eq!(log_limit("limit=abc"), 50);
         assert_eq!(log_limit("limit=7"), 7);
         assert_eq!(log_limit("other=1&limit=7"), 7);
+        // `r.URL.Query().Get` answers with the *first* value for a repeated key.
+        assert_eq!(log_limit("limit=7&limit=9"), 7);
+        // …and it percent-decodes, which a `strip_prefix` scan would not: this
+        // is `limit=5` to Go, so it must be 5 here.
+        assert_eq!(log_limit("%6cimit=5"), 5);
+        assert_eq!(log_limit("limit=%35"), 5);
     }
 
     #[test]
