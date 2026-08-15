@@ -410,7 +410,7 @@ fn split_url(raw: &str) -> Result<(String, String), WriteError> {
 
     // Everything below is a rule `parseHost` has that this port does not
     // reimplement — userinfo validation, IPv6 bracket matching, percent-escapes
-    // (a host may not carry one at all) and port syntax. **Forwarding is the
+    // (Go accepts some and rejects others) and port syntax. **Forwarding is the
     // only safe answer**, because the failure mode of guessing is not a wrong
     // message but a wrong *acceptance*: Rust would create an integration whose
     // `site_url` Go's own parser can never read, and being native the request
@@ -637,13 +637,19 @@ mod tests {
     fn every_url_shape_this_port_is_unsure_of_forwards_rather_than_accepting() {
         // Each of these is an error from `url.Parse`, not a validation failure.
         for url in [
-            "https://x.net:abc",     // invalid port
-            "https://x.net:80:90",   // two ports
-            "https://ex%41mple.net", // a host may not carry an escape
-            "https://[::1",          // unmatched bracket
-            "https://a\\\\b@x.net",  // invalid userinfo
-            "https://a[b@x.net",     // invalid userinfo
-            "://x.net",              // `missing protocol scheme`
+            "https://x.net:abc",   // invalid port
+            "https://x.net:80:90", // two ports
+            // Go rejects an escape whose first hex digit is below 8; it
+            // *accepts* `%25` (host `x%net`) and valid multi-byte sequences
+            // such as `%C3%A9` (host `xénet`). This port forwards all of them
+            // rather than encoding that rule — deliberately, but do not
+            // "correct" the guard toward "a host may never carry an escape",
+            // which is not Go's rule.
+            "https://ex%41mple.net",
+            "https://[::1",         // unmatched bracket
+            "https://a\\\\b@x.net", // invalid userinfo
+            "https://a[b@x.net",    // invalid userinfo
+            "://x.net",             // `missing protocol scheme`
         ] {
             let creds = format!(r#"{{"site_url":"{url}","email":"e","api_token":"t"}}"#);
             for kind in ["confluence", "jira"] {
