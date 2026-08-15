@@ -221,7 +221,11 @@ pub fn default_claude_config_dir() -> String {
 /// The single dir a run targets: `CLAUDE_CONFIG_DIR` first, then the stored
 /// global setting, then the default. The environment comes first because it is
 /// what the surrounding environment has already chosen for every subprocess.
-fn run_config_dir(stored: &str) -> String {
+///
+/// `pub(crate)` since #276: the chat runner needs the same answer, because an
+/// agent's per-run override resolves *against* this and a second copy of the
+/// precedence would be a second thing to keep in step.
+pub(crate) fn run_config_dir(stored: &str) -> String {
     if let Ok(env) = std::env::var("CLAUDE_CONFIG_DIR") {
         if let Some(dir) = absolute_dir(&normalize(&env)) {
             return dir;
@@ -239,7 +243,7 @@ fn run_config_dir(stored: &str) -> String {
 /// This is not tidiness: the dirs are deduplicated by string comparison and
 /// recorded on cached rows, so `~/.claude`, `$HOME/.claude` and `$HOME/.claude/`
 /// must collapse to one value or the same corpus is attributed to two dirs.
-fn normalize(p: &str) -> String {
+pub(crate) fn normalize(p: &str) -> String {
     let p = p.trim();
     if p.is_empty() {
         return String::new();
@@ -276,7 +280,7 @@ fn clean(p: &str) -> String {
 /// Absolute paths only. A relative config dir means two different things at
 /// once — Agento resolves it against the server's working directory, Claude
 /// Code against the subprocess's — so Go drops it and so does this.
-fn absolute_dir(p: &str) -> Option<String> {
+pub(crate) fn absolute_dir(p: &str) -> Option<String> {
     if p.is_empty() || !Path::new(p).is_absolute() {
         return None;
     }

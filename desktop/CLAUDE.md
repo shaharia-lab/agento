@@ -135,6 +135,12 @@ src-tauri/src/
     db.rs        the SQLite handles: read-only for reads, read-write for writes
     migrate.rs   the 27 migrations, embedded from parity/ — verified, not applied
     writes.rs    what a write may answer, and what it hands back to Go
+    chat/        the SSE turn and the three routes that steer it (#276)
+      live.rs    the process-local live-session registry — why the four move together
+      runner.rs  an agent's config as SDK options; refuses what it cannot supply
+      turn.rs    spawn, stream, and the AskUserQuestion continuation
+      persist.rs what a finished turn writes, and what an interrupted one does not
+      sse.rs     the frame bytes: raw pass-through vs the two synthetic events
     settings.rs  GET /api/settings; also the preferences + config dirs a read is scoped to
     monitoring.rs GET /api/monitoring — monitoring.json and the OTEL_* locks, no exporters
     version.rs   GET /api/version and /version/update-check (dev builds only)
@@ -410,7 +416,7 @@ of the `Err` arms the cut-over has to turn into a real response.
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
 | 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. Scheduler is #275. |
 | 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram. WhatsApp is **not** among them — see below. |
-| 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. **The SDK underneath it is ported** (`src/claude/`, below); what remains is the runner, the chat service and the SSE handler on top of it. |
+| 5 ← | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
 
 ### The session scanner (`src-tauri/src/native/scanner/`)
 
@@ -674,6 +680,54 @@ asserted against the slice by `internal/storage/migrations_vector_test.go`, and
 embedded by `native/migrate.rs` with `include_str!`. Adding migration 28 without
 regenerating fails Go's own suite — and the file is what records the schema once
 the Go server is deleted.
+
+### Phase 5: the chat turn (#276)
+
+**The seam grew a second registry.** `Answer` is a buffered `Vec<u8>` and
+`Endpoint::serve` is a sync `fn` on `spawn_blocking` — right for thirteen areas
+that hand back a finished document, wrong for a turn that lasts as long as the
+model talks. `StreamEndpoint` is async and returns a `Response<Body>` built from
+`Body::from_stream`. `native::claims` is the union of both, because the proxy
+asks one question; `route_is_native` excludes the streaming ones so the buffered
+path cannot try to answer a chat turn with a `Vec<u8>`.
+
+**The four routes share a process-local registry, so they moved together** —
+`/messages` puts a session in, the others look one up. But not every chat *can*
+run natively: an agent whose tools come from an integration or the local MCP
+server needs #277/#282, and `runner::build_options` refuses those before any
+subprocess exists. That would strand `/stop` for a chat still running on Go, so
+the three steering routes answer natively **only when Rust holds a live session
+for that chat** and forward otherwise. Go then answers — correctly, because it
+is the side that has the session.
+
+Five rules that are silent when broken, all pinned by `tests/chat_turn.rs`:
+
+- **`result` is not terminal.** With an `AskUserQuestion` pending the same
+  subprocess carries on, so one HTTP request spans several turns and several
+  `result` frames. The turn ends on stream close, on an error result, or on a
+  final result with nothing pending.
+- **A mid-stream failure is a `result` with `is_error: true`**, never an `error`
+  event — the 200 was committed before the first frame.
+- **An event with no raw line emits nothing.** The SDK synthesizes process
+  failures that way, so a crashed subprocess tells the client nothing and the
+  stream just ends. Reproduced, not "fixed".
+- **`AskUserQuestion` is answered by *denying* the tool** with the user's text as
+  the message. That is how the answer reaches the model without the tool running.
+- **A turn with no final text persists no messages** — not even the user's — but
+  the session row is still written: `updated_at`, the token totals, and on a
+  first message a title derived from a message that was never stored.
+
+**The `tool_use` input must never round-trip through a `serde_json::Value`.**
+The first version of `append_assistant_blocks` did, and turned `{"z":1.50,"a":1}`
+into `{"a":1,"z":1.5}` — sorted and respelled, with nothing to signal it.
+`tests/chat_turn.rs` caught it, which is also why that test's fake CLI emits
+literal bytes rather than `json.dumps`: Python normalises `1.50` to `1.5` and
+adds spaces, so a byte-exactness test cannot go through it.
+
+**`AGENTO_CLAUDE_EXECUTABLE`** overrides which binary is spawned, falling back to
+`find_claude_cli()` and then the bare name. The fallback matters — a GUI process
+inherits a minimal `PATH`, which is why that helper already existed for the
+startup banner — and the override is how the turn tests point at a fake CLI.
 
 ### Do not port
 

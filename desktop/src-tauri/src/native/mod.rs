@@ -14,6 +14,7 @@
 pub mod active_time;
 pub mod agents;
 pub mod analytics;
+pub mod chat;
 pub mod chats;
 pub mod db;
 pub mod diff;
@@ -166,6 +167,64 @@ pub struct Endpoint {
     pub serve: fn(&Ctx, &Request) -> Result<Answer, String>,
 }
 
+/// A request whose answer is a *stream*, not a buffered body.
+///
+/// # Why this is a second registry rather than a wider `Answer`
+///
+/// [`Answer`] is a `Vec<u8>` and [`Endpoint::serve`] is a **sync** `fn` the
+/// proxy runs on `spawn_blocking` — the right shape for thirteen areas that
+/// read SQLite and hand back a finished document. A chat turn is neither: it is
+/// async, it lasts as long as the model talks, and buffering it would defeat
+/// the point of SSE.
+///
+/// Widening `Answer` to express both would make every buffered handler carry a
+/// streaming case it never uses, and would put an async runtime in front of a
+/// blocking read. So streaming gets its own registry, and the two share only
+/// `claims`-style routing. `native::claims` is the union, because the proxy asks
+/// one question: is this route ours?
+pub struct StreamEndpoint {
+    pub name: &'static str,
+    pub claims: fn(&Method, &str) -> bool,
+    /// Owned rather than borrowed, so the returned future is `'static` and can
+    /// outlive the call — which it must, since the response body is produced
+    /// long after `serve` returns.
+    pub serve: fn(StreamRequest) -> BoxFuture<'static, Result<Response<Body>, String>>,
+}
+
+/// Everything a streaming handler needs, owned.
+pub struct StreamRequest {
+    pub method: Method,
+    pub path: String,
+    pub body: Vec<u8>,
+    pub db_path: std::path::PathBuf,
+}
+
+pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
+
+/// Areas whose answer streams. Only chat execution, and likely only ever.
+const STREAM_ENDPOINTS: &[StreamEndpoint] = &[chat::ENDPOINT];
+
+/// Whether this request is answered by a *streaming* native handler.
+pub fn claims_stream(method: &Method, path: &str) -> bool {
+    STREAM_ENDPOINTS.iter().any(|e| (e.claims)(method, path))
+}
+
+/// Answer a claimed streaming request. `Err` forwards, exactly as for a
+/// buffered one — and the same rule applies: a handler must fail *before* it
+/// has any effect, because the forward re-runs it. For a chat turn that means
+/// every check happens before the subprocess is spawned.
+pub async fn serve_stream(req: StreamRequest) -> Result<Response<Body>, String> {
+    for endpoint in STREAM_ENDPOINTS {
+        if (endpoint.claims)(&req.method, &req.path) {
+            return (endpoint.serve)(req).await;
+        }
+    }
+    Err(format!(
+        "{} {} is claimed but has no handler",
+        req.method, req.path
+    ))
+}
+
 /// Every ported area, in match order.
 ///
 /// **Adding an endpoint is one appended line here plus its own module.** That
@@ -198,7 +257,7 @@ const ENDPOINTS: &[Endpoint] = &[
 /// trailing slash, which chi treats as a different route — falls through to Go
 /// and keeps whatever answer Go gives it.
 pub fn claims(method: &Method, path: &str) -> bool {
-    ENDPOINTS.iter().any(|e| (e.claims)(method, path))
+    ENDPOINTS.iter().any(|e| (e.claims)(method, path)) || claims_stream(method, path)
 }
 
 /// Whether a request may be *executed* natively in the seam's current mode.
@@ -316,8 +375,18 @@ mod tests {
         assert!(claims(&Method::DELETE, "/api/chats"));
         assert!(claims(&Method::PATCH, "/api/chats/abc-123"));
         assert!(claims(&Method::DELETE, "/api/chats/abc-123"));
-        assert!(!claims(&Method::POST, "/api/chats/abc-123/messages"));
-        assert!(!claims(&Method::POST, "/api/chats/abc-123/stop"));
+        // Since #276 the four streaming actions are ours too — but through the
+        // *streaming* registry, which is why `claims` (the union) says yes.
+        assert!(claims(&Method::POST, "/api/chats/abc-123/messages"));
+        assert!(claims(&Method::POST, "/api/chats/abc-123/stop"));
+        assert!(claims(&Method::POST, "/api/chats/abc-123/input"));
+        assert!(claims(&Method::POST, "/api/chats/abc-123/permission"));
+        assert!(claims_stream(&Method::POST, "/api/chats/abc-123/messages"));
+        // …and only the streaming one: the buffered registry must not also
+        // claim them, or a chat turn would be answered with a `Vec<u8>`.
+        assert!(!ENDPOINTS
+            .iter()
+            .any(|e| (e.claims)(&Method::POST, "/api/chats/abc-123/messages")));
         assert!(!claims(&Method::GET, "/api/chats/abc-123/messages"));
         assert!(!claims(&Method::GET, "/api/chats/abc-123/stop"));
         assert!(!claims(&Method::GET, "/api/chats/"));
