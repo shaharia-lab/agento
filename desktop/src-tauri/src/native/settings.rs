@@ -13,10 +13,21 @@
 //! Getting this wrong does not fail loudly. A hidden project that is not
 //! filtered out simply appears — in a list the user has told us to leave it out
 //! of, and in totals the Go server computes without it.
+//!
+//! Since #266 this module also answers `GET /api/settings`, which is the whole
+//! row rather than the four columns a session read cares about. **One reader,
+//! not two**: [`load_stored`] is the single `SELECT`, [`load`] narrows it to
+//! [`DataSettings`] and [`resolve`] applies the defaults and env overrides the
+//! way `config.SettingsManager` does. A second reader would drift, and the drift
+//! would show as the settings page disagreeing with the sessions list about
+//! which projects are hidden.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use axum::http::Method;
 use rusqlite::{Connection, OptionalExtension};
+use serde::Serialize;
 
 use crate::paths;
 
@@ -63,19 +74,76 @@ impl DataSettings {
     }
 }
 
-/// Read the settings row. A missing row, a missing column, or malformed JSON
-/// all degrade to defaults rather than failing the request — exactly as Go's
-/// snapshot starts at its defaults before `ApplyDataSettings` runs.
-pub fn load(conn: &Connection) -> DataSettings {
-    let row: Option<(String, String, String, i64)> = conn
+/// The persisted settings row, exactly as `storage.SQLiteSettingsStore.Load`
+/// returns it — before `SettingsManager` fills defaults or the environment
+/// overrides anything. Field order is `config.UserSettings`'s declaration
+/// order, which is what decides the key order on the wire.
+///
+/// The two string-list columns are `Option` rather than `Vec` because Go's
+/// `decodeStringList` returns a **nil** slice for a blank or unparseable column
+/// and a non-nil empty one for a stored `[]` — and a nil slice marshals as
+/// `null` while an empty one marshals as `[]`. The distinction is stored, so it
+/// travels.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UserSettings {
+    pub default_working_dir: String,
+    pub default_model: String,
+    pub onboarding_complete: bool,
+    pub appearance_dark_mode: bool,
+    pub appearance_font_size: i64,
+    pub appearance_font_family: String,
+    pub notification_settings: String,
+    pub event_bus_worker_pool_size: i64,
+    pub public_url: String,
+    pub hidden_projects: Option<Vec<String>>,
+    pub idle_gap_threshold_minutes: i64,
+    pub claude_config_dir: String,
+    pub claude_config_dirs: Option<Vec<String>>,
+}
+
+/// Read the settings row as stored. A missing row, a read error, or malformed
+/// JSON all degrade to the zero value rather than failing — exactly as Go's
+/// store returns zero-value settings for `sql.ErrNoRows` and its snapshot
+/// starts at its defaults before `ApplyDataSettings` runs.
+pub fn load_stored(conn: &Connection) -> UserSettings {
+    let row: Option<UserSettings> = conn
         .query_row(
-            "SELECT COALESCE(hidden_projects, ''),
+            "SELECT COALESCE(default_working_dir, ''),
+                    COALESCE(default_model, ''),
+                    COALESCE(onboarding_complete, 0),
+                    COALESCE(appearance_dark_mode, 0),
+                    COALESCE(appearance_font_size, 0),
+                    COALESCE(appearance_font_family, ''),
+                    COALESCE(notification_settings, ''),
+                    COALESCE(event_bus_worker_pool_size, 0),
+                    COALESCE(public_url, ''),
+                    COALESCE(hidden_projects, ''),
+                    COALESCE(idle_gap_threshold_minutes, 0),
                     COALESCE(claude_config_dir, ''),
-                    COALESCE(claude_config_dirs, ''),
-                    COALESCE(idle_gap_threshold_minutes, 0)
+                    COALESCE(claude_config_dirs, '')
              FROM user_settings WHERE id = 1",
             [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| {
+                let onboarding: i64 = r.get(2)?;
+                let dark_mode: i64 = r.get(3)?;
+                let hidden_raw: String = r.get(9)?;
+                let extra_raw: String = r.get(12)?;
+                Ok(UserSettings {
+                    default_working_dir: r.get(0)?,
+                    default_model: r.get(1)?,
+                    onboarding_complete: onboarding != 0,
+                    appearance_dark_mode: dark_mode != 0,
+                    appearance_font_size: r.get(4)?,
+                    appearance_font_family: r.get(5)?,
+                    notification_settings: r.get(6)?,
+                    event_bus_worker_pool_size: r.get(7)?,
+                    public_url: r.get(8)?,
+                    hidden_projects: decode_string_list(&hidden_raw),
+                    idle_gap_threshold_minutes: r.get(10)?,
+                    claude_config_dir: r.get(11)?,
+                    claude_config_dirs: decode_string_list(&extra_raw),
+                })
+            },
         )
         .optional()
         .unwrap_or_else(|e| {
@@ -83,29 +151,46 @@ pub fn load(conn: &Connection) -> DataSettings {
             None
         });
 
-    let (hidden_raw, run_override, extra_raw, idle_minutes) = row.unwrap_or_default();
+    row.unwrap_or_default()
+}
+
+/// Narrow the stored row to the preferences a session read depends on.
+pub fn load(conn: &Connection) -> DataSettings {
+    from_stored(&load_stored(conn))
+}
+
+/// The [`DataSettings`] view of a stored row.
+fn from_stored(stored: &UserSettings) -> DataSettings {
     DataSettings {
-        hidden_projects: decode_string_array(&hidden_raw),
-        indexed_config_dirs: claude_config_dirs(&run_override, &decode_string_array(&extra_raw)),
+        hidden_projects: stored.hidden_projects.clone().unwrap_or_default(),
+        indexed_config_dirs: claude_config_dirs(
+            &stored.claude_config_dir,
+            stored.claude_config_dirs.as_deref().unwrap_or_default(),
+        ),
         // Zero is "unset", not "no idle time at all": the column defaults to 0
         // and the setting is bounded to 1–240 minutes when the user does set it.
-        idle_gap_ms: if idle_minutes > 0 {
-            idle_minutes * 60 * 1000
+        idle_gap_ms: if stored.idle_gap_threshold_minutes > 0 {
+            stored.idle_gap_threshold_minutes * 60 * 1000
         } else {
             DEFAULT_IDLE_GAP_MS
         },
     }
 }
 
-/// Decode a JSON string array column, treating anything unusable as empty.
-fn decode_string_array(raw: &str) -> Vec<String> {
+/// Decode a JSON string array column the way `storage.decodeStringList` does:
+/// blank or unparseable is **nil** (`null` on the wire), a stored `[]` is an
+/// empty slice (`[]` on the wire).
+fn decode_string_list(raw: &str) -> Option<Vec<String>> {
     if raw.trim().is_empty() {
-        return Vec::new();
+        return None;
     }
-    serde_json::from_str::<Vec<String>>(raw).unwrap_or_else(|e| {
-        log::warn!("native settings: malformed string array {raw:?}: {e}");
-        Vec::new()
-    })
+    match serde_json::from_str::<Vec<String>>(raw) {
+        Ok(values) => Some(values),
+        Err(e) => {
+            log::warn!("native settings: malformed string array {raw:?}: {e}");
+            None
+        }
+    }
 }
 
 /// Every config dir Agento indexes, mirroring `config.ClaudeConfigDirs`:
@@ -222,6 +307,156 @@ fn absolute_dir(p: &str) -> Option<String> {
     Some(p.to_string())
 }
 
+// ─── GET /api/settings ────────────────────────────────────────────────────────
+
+/// What `GET /api/settings` answers with. Mirrors `api.settingsResponse`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsResponse {
+    pub settings: UserSettings,
+    /// Field name → the environment variable pinning it. Never nil on the Go
+    /// side (`make`d unconditionally), so an unlocked install ships `{}` rather
+    /// than `null` — and a `BTreeMap` because Go marshals map keys sorted.
+    pub locked: BTreeMap<String, String>,
+    pub model_from_env: bool,
+}
+
+/// `config.defaultModel`.
+const DEFAULT_MODEL: &str = "sonnet";
+
+/// Resolve the row into the answer `SettingsManager` gives, in its order:
+/// load the store, fill the two defaults, then apply the environment.
+///
+/// The manager does this once during startup wiring and holds it in memory; a
+/// ported read has no startup to hook into, so it redoes the resolution per
+/// request. That is not just equivalent, it is slightly fresher — a value saved
+/// through the Go server is visible to the very next native read.
+pub fn resolve(stored: UserSettings) -> SettingsResponse {
+    let mut settings = stored;
+    let locked = locked_fields();
+
+    // `SettingsManager.load` records whether the model was explicitly stored
+    // *before* filling the default, and `applyEnvOverrides` reads that flag.
+    let model_in_file = !settings.default_model.is_empty();
+    if settings.default_working_dir.is_empty() {
+        settings.default_working_dir = default_working_dir();
+    }
+    if settings.default_model.is_empty() {
+        settings.default_model = DEFAULT_MODEL.to_string();
+    }
+
+    // `applyEnvOverrides`. AGENTO_DEFAULT_MODEL locks the field;
+    // ANTHROPIC_DEFAULT_SONNET_MODEL is a soft default that only applies when
+    // the user has not chosen one, and neither locks nor is reported in
+    // `locked` — but both make the displayed model environment-derived.
+    let mut model_from_env = false;
+    if let Some(model) = env_value("AGENTO_DEFAULT_MODEL") {
+        settings.default_model = model;
+        model_from_env = true;
+    } else if let Some(sonnet) = env_value("ANTHROPIC_DEFAULT_SONNET_MODEL") {
+        if !model_in_file {
+            settings.default_model = sonnet;
+            model_from_env = true;
+        }
+    }
+    if let Some(dir) = env_value("AGENTO_WORKING_DIR") {
+        settings.default_working_dir = dir;
+    }
+    if let Some(url) = env_value("AGENTO_PUBLIC_URL") {
+        settings.public_url = url;
+    }
+    if let Some(dir) = claude_config_dir_from_env() {
+        settings.claude_config_dir = dir;
+    }
+
+    SettingsResponse {
+        settings,
+        locked,
+        model_from_env,
+    }
+}
+
+/// `SettingsManager.detectLockedFields`.
+///
+/// Go gates the first three on the matching `AppConfig` field also being
+/// non-empty, but each of those fields is populated from exactly this variable
+/// and nothing else, so the environment check alone is the same condition.
+/// `default_model` is the one to watch: its `AppConfig` field falls back to
+/// `ANTHROPIC_DEFAULT_SONNET_MODEL` and then to `"sonnet"`, so it is *always*
+/// non-empty — which is why the lock still turns only on `AGENTO_DEFAULT_MODEL`.
+fn locked_fields() -> BTreeMap<String, String> {
+    let mut locked = BTreeMap::new();
+    for (field, var) in [
+        ("default_model", "AGENTO_DEFAULT_MODEL"),
+        ("default_working_dir", "AGENTO_WORKING_DIR"),
+        ("public_url", "AGENTO_PUBLIC_URL"),
+    ] {
+        if env_value(var).is_some() {
+            locked.insert(field.to_string(), var.to_string());
+        }
+    }
+    // CLAUDE_CONFIG_DIR is Claude Code's own variable rather than one of ours,
+    // so its presence in the environment is the whole condition — and it is
+    // compared *normalized*, since a value of "   " is not a choice.
+    if claude_config_dir_from_env().is_some() {
+        locked.insert(
+            "claude_config_dir".to_string(),
+            "CLAUDE_CONFIG_DIR".to_string(),
+        );
+    }
+    locked
+}
+
+/// An environment variable, or `None` when unset **or empty** — Go's checks are
+/// all `os.Getenv(x) != ""`, so an exported-but-blank variable locks nothing.
+fn env_value(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
+}
+
+/// `config.ClaudeConfigDirFromEnv`: the normalized value, or `None` when blank.
+fn claude_config_dir_from_env() -> Option<String> {
+    let normalized = normalize(&std::env::var("CLAUDE_CONFIG_DIR").unwrap_or_default());
+    (!normalized.is_empty()).then_some(normalized)
+}
+
+/// `config.DefaultWorkingDir`: `<temp>/agento/work`. The temp dir is resolved
+/// rather than hardcoded because Go's `os.TempDir` honours `TMPDIR`, and the
+/// value is shown to the user in the settings form.
+fn default_working_dir() -> String {
+    std::env::temp_dir()
+        .join("agento")
+        .join("work")
+        .to_string_lossy()
+        .into_owned()
+}
+
+// ─── The seam ─────────────────────────────────────────────────────────────────
+
+/// This module's entry in `native::ENDPOINTS`.
+pub const ENDPOINT: super::Endpoint = super::Endpoint {
+    name: "settings",
+    claims,
+    serve,
+};
+
+/// The read only. `PUT /api/settings` writes the row and then re-applies the
+/// process-wide snapshots and kicks off a rescan, none of which Rust can do
+/// while the Go server owns the database — so it stays with Go, and so does
+/// `/api/settings/claude-config-dirs`, which is a filesystem probe rather than
+/// a read of this row.
+fn claims(method: &Method, path: &str) -> bool {
+    method == Method::GET && path == "/api/settings"
+}
+
+fn serve(ctx: &super::Ctx, _req: &super::Request) -> Result<super::Answer, String> {
+    let conn = super::db::open_read_only(&ctx.db_path)?;
+    let body = super::gojson::to_vec(&resolve(load_stored(&conn)))
+        .map_err(|e| format!("encoding settings: {e}"))?;
+    Ok(super::Answer { body, probe: None })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,10 +498,120 @@ mod tests {
         assert_eq!(dirs, vec![default, "/var/lib/claude-work".to_string()]);
     }
 
+    /// A nil list is `null` and an empty one is `[]`, and only the stored `[]`
+    /// produces the second. Collapsing the two would change the wire for every
+    /// install that has never hidden a project.
     #[test]
-    fn a_malformed_settings_column_degrades_to_empty() {
-        assert!(decode_string_array("not json").is_empty());
-        assert!(decode_string_array("").is_empty());
-        assert_eq!(decode_string_array(r#"["/a","/b"]"#), vec!["/a", "/b"]);
+    fn a_malformed_settings_column_degrades_to_nil_not_empty() {
+        assert_eq!(decode_string_list("not json"), None);
+        assert_eq!(decode_string_list(""), None);
+        assert_eq!(decode_string_list("  "), None);
+        assert_eq!(decode_string_list("[]"), Some(Vec::new()));
+        assert_eq!(
+            decode_string_list(r#"["/a","/b"]"#),
+            Some(vec!["/a".to_string(), "/b".to_string()])
+        );
+    }
+
+    /// The whole envelope, encoded the way the handler encodes it. Key order is
+    /// the Go struct's declaration order; `locked` is `{}` rather than `null`.
+    #[test]
+    fn the_response_shape_is_the_go_envelope() {
+        let stored = UserSettings {
+            default_working_dir: "/tmp/agento/work".into(),
+            default_model: "opus".into(),
+            onboarding_complete: true,
+            appearance_font_size: 13,
+            appearance_font_family: "Inter".into(),
+            notification_settings: "{}".into(),
+            event_bus_worker_pool_size: 3,
+            hidden_projects: Some(vec!["/home/u/secret".into()]),
+            claude_config_dirs: Some(Vec::new()),
+            ..Default::default()
+        };
+        let body = super::super::gojson::to_vec(&SettingsResponse {
+            settings: stored,
+            locked: BTreeMap::new(),
+            model_from_env: false,
+        })
+        .expect("encode");
+
+        assert_eq!(
+            String::from_utf8(body).expect("utf8"),
+            concat!(
+                r#"{"settings":{"default_working_dir":"/tmp/agento/work","default_model":"opus","#,
+                r#""onboarding_complete":true,"appearance_dark_mode":false,"#,
+                r#""appearance_font_size":13,"appearance_font_family":"Inter","#,
+                r#""notification_settings":"{}","event_bus_worker_pool_size":3,"#,
+                r#""public_url":"","hidden_projects":["/home/u/secret"],"#,
+                r#""idle_gap_threshold_minutes":0,"claude_config_dir":"","#,
+                r#""claude_config_dirs":[]},"locked":{},"model_from_env":false}"#,
+                "\n"
+            )
+        );
+    }
+
+    /// A nil list must reach the wire as `null`, which is what an install with
+    /// no settings row at all produces.
+    #[test]
+    fn absent_lists_are_null_not_empty_arrays() {
+        let body = super::super::gojson::to_vec(&UserSettings::default()).expect("encode");
+        let json = String::from_utf8(body).expect("utf8");
+        assert!(json.contains(r#""hidden_projects":null"#), "{json}");
+        assert!(json.contains(r#""claude_config_dirs":null"#), "{json}");
+    }
+
+    /// The two defaults `SettingsManager.load` fills, and the flag that is set
+    /// only when the *environment* chose the model.
+    /// The two defaults `SettingsManager.load` fills, and the flag that is set
+    /// only when the *environment* chose the model.
+    ///
+    /// Guarded on the variables rather than asserted flat: these run on a
+    /// developer's machine, and one that exports `AGENTO_DEFAULT_MODEL` would
+    /// otherwise fail a test about the built-in default.
+    #[test]
+    fn an_empty_row_resolves_to_the_built_in_defaults() {
+        let resolved = resolve(UserSettings::default());
+
+        match env_value("AGENTO_DEFAULT_MODEL")
+            .or_else(|| env_value("ANTHROPIC_DEFAULT_SONNET_MODEL"))
+        {
+            Some(from_env) => {
+                assert_eq!(resolved.settings.default_model, from_env);
+                assert!(resolved.model_from_env);
+            }
+            None => {
+                assert_eq!(resolved.settings.default_model, DEFAULT_MODEL);
+                assert!(!resolved.model_from_env);
+            }
+        }
+
+        if env_value("AGENTO_WORKING_DIR").is_none() {
+            assert_eq!(resolved.settings.default_working_dir, default_working_dir());
+        }
+    }
+
+    /// A stored model is not overwritten by the soft default, and that is
+    /// exactly the case `modelInFile` exists to protect.
+    #[test]
+    fn a_stored_model_survives_and_is_not_environment_derived() {
+        let stored = UserSettings {
+            default_model: "haiku".into(),
+            ..Default::default()
+        };
+        let resolved = resolve(stored);
+        if env_value("AGENTO_DEFAULT_MODEL").is_none() {
+            assert_eq!(resolved.settings.default_model, "haiku");
+            assert!(!resolved.model_from_env);
+        }
+    }
+
+    #[test]
+    fn only_the_settings_read_is_claimed() {
+        assert!(claims(&Method::GET, "/api/settings"));
+        assert!(!claims(&Method::PUT, "/api/settings"));
+        // A filesystem probe, not a read of this row — it stays with Go.
+        assert!(!claims(&Method::GET, "/api/settings/claude-config-dirs"));
+        assert!(!claims(&Method::GET, "/api/settings/"));
     }
 }

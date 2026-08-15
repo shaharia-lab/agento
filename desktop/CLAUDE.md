@@ -133,7 +133,9 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        read-only SQLite handle on the file the Go server owns
-    settings.rs  user preferences + Claude config dirs a read is scoped to
+    settings.rs  GET /api/settings; also the preferences + config dirs a read is scoped to
+    monitoring.rs GET /api/monitoring — monitoring.json and the OTEL_* locks, no exporters
+    version.rs   GET /api/version and /version/update-check (dev builds only)
     pricing.rs   GET /api/pricing/catalog, plus the rate Resolver
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
@@ -326,6 +328,27 @@ fast path was not.)
 body). Nothing read from SQLite can be either — SQLite stores NaN as NULL — but
 a *computed* average or ratio can be, so guard the division at the source
 rather than expecting the encoder to notice.
+
+### The build stamp, and the half of `/version` that is not ported
+
+`internal/build`'s three variables are set by `-ldflags`, and **only the
+Makefile does that**. `scripts/build-sidecar.sh` builds with `-ldflags "-s -w"`
+and `scripts/parity-instance.sh` with none at all, so the sidecar the app ships
+and the server every parity test diffs against both serve the package defaults —
+`dev` / `unknown` / `unknown`. `native/version.rs` declares the same defaults,
+behind `option_env!("AGENTO_BUILD_VERSION")` and friends, so stamping the desktop
+bundle later is a build-script change rather than a code change. Do not stamp
+Rust while the Go sidecar is still unstamped: that is a parity failure by
+construction.
+
+`/api/version/update-check` is deliberately **half** ported. Go's answer for a
+build that names no published release needs no network — it short-circuits to
+`update_available: false`, and that is every build the desktop app ships. Its
+other branch asks GitHub for the latest release and compares, which *is* the
+self-updater, the one subsystem the handover excludes because Tauri's updater
+replaces it. So the short-circuit is native and anything else returns `Err` and
+forwards. That is the seam working as designed, not an omission — but it is one
+of the `Err` arms the cut-over has to turn into a real response.
 
 ### Phase order (easiest → hardest)
 

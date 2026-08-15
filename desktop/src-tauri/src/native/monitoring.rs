@@ -1,0 +1,409 @@
+//! `GET /api/monitoring` — the OpenTelemetry configuration the settings page
+//! renders, and which of its fields the environment has pinned.
+//!
+//! Mirrors `getMonitoring` (`internal/api/monitoring.go`) over
+//! `telemetry.MonitoringManager` (`internal/telemetry/manager.go`).
+//!
+//! **This ports the read, not the telemetry.** The desktop app does not run OTel
+//! providers and is not going to — the handover records that OTel/Prometheus is
+//! replaced rather than reimplemented. What it does have is a settings page that
+//! shows the stored configuration, so the endpoint behind that page has to
+//! answer. Everything here is `monitoring.json` plus `OTEL_*`; nothing here
+//! exports anything.
+//!
+//! `PUT /api/monitoring` and `POST /api/monitoring/test` stay with Go: one
+//! writes the file *and* hot-reloads the providers, the other dials the OTLP
+//! endpoint over gRPC. Neither is a read.
+//!
+//! The two env-override mechanisms in Agento are not the same shape and this is
+//! the one that returns 409: monitoring answers a conflicting write with an
+//! `EnvLockedError`, while `UserSettings` carries a `locked` map and answers
+//! with a 400. Both surfaces expose a `locked` map, which is why they look
+//! alike from here — but only this one also carries `env_locked`.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use axum::http::Method;
+use serde::{Deserialize, Serialize};
+
+/// The config as it travels. Mirrors `api.MonitoringConfigDTO`, whose field
+/// order is the key order on the wire.
+///
+/// The interval is milliseconds rather than a `time.Duration` on purpose: Go's
+/// duration marshals as a nanosecond count, which is not a number any UI wants
+/// to render.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MonitoringConfigDto {
+    pub enabled: bool,
+    pub metrics_exporter: String,
+    pub logs_exporter: String,
+    pub otlp_endpoint: String,
+    /// `omitempty`, so an install with no headers omits the key entirely rather
+    /// than sending `{}`. A `BTreeMap` because Go marshals map keys sorted.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub otlp_headers: BTreeMap<String, String>,
+    pub otlp_insecure: bool,
+    pub metric_export_interval_ms: i64,
+}
+
+/// The envelope. Mirrors `api.MonitoringResponse`.
+#[derive(Debug, Clone, Serialize)]
+pub struct MonitoringResponse {
+    pub settings: MonitoringConfigDto,
+    /// Field name → the `OTEL_*` variable pinning it. Never nil on the Go side,
+    /// so an unpinned install ships `{}`.
+    pub locked: BTreeMap<String, String>,
+    pub env_locked: bool,
+}
+
+/// `telemetry.DefaultMonitoringConfig`: disabled, no exporters, one minute.
+fn default_config() -> MonitoringConfigDto {
+    MonitoringConfigDto {
+        enabled: false,
+        metrics_exporter: "none".to_string(),
+        logs_exporter: "none".to_string(),
+        otlp_endpoint: String::new(),
+        otlp_headers: BTreeMap::new(),
+        otlp_insecure: false,
+        metric_export_interval_ms: 60_000,
+    }
+}
+
+/// `telemetry.envVarChecks`, in the map's key order — which is also the order
+/// the `locked` map ships in, since Go sorts map keys on marshal.
+const ENV_VAR_CHECKS: &[(&str, &str)] = &[
+    ("enabled", "OTEL_SDK_DISABLED"),
+    ("logs_exporter", "OTEL_LOGS_EXPORTER"),
+    ("metric_export_interval", "OTEL_METRIC_EXPORT_INTERVAL"),
+    ("metrics_exporter", "OTEL_METRICS_EXPORTER"),
+    ("otlp_endpoint", "OTEL_EXPORTER_OTLP_ENDPOINT"),
+    ("otlp_headers", "OTEL_EXPORTER_OTLP_HEADERS"),
+    ("otlp_insecure", "OTEL_EXPORTER_OTLP_INSECURE"),
+];
+
+/// The persisted file. Mirrors `telemetry.monitoringConfigStore`.
+///
+/// Every field is an `Option` so a stored `null` decodes to the zero value
+/// instead of failing, which is what Go's decoder does. A *type* mismatch still
+/// fails the decode — also Go's behaviour, and the whole file then degrades to
+/// the default, because `MonitoringManager.Load` returns the error and
+/// `initMonitoringManager` logs it and leaves `current` at the env config.
+#[derive(Debug, Default, Deserialize)]
+struct StoredMonitoring {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    metrics_exporter: Option<String>,
+    #[serde(default)]
+    logs_exporter: Option<String>,
+    #[serde(default)]
+    otlp_endpoint: Option<String>,
+    #[serde(default)]
+    otlp_headers: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    otlp_insecure: Option<bool>,
+    #[serde(default)]
+    metric_export_interval_ms: Option<i64>,
+}
+
+impl StoredMonitoring {
+    /// `telemetry.storeToConfig`.
+    ///
+    /// The two exporter names are passed through **unvalidated**: the file is
+    /// only validated on the way in (`validateMonitoringDTO` on `PUT`), so a
+    /// hand-edited `"metrics_exporter": "bogus"` is what `GET` returns. Parsing
+    /// it here would answer with something the Go server does not.
+    fn into_dto(self) -> MonitoringConfigDto {
+        let default = default_config();
+        MonitoringConfigDto {
+            enabled: self.enabled.unwrap_or(false),
+            metrics_exporter: self.metrics_exporter.unwrap_or_default(),
+            logs_exporter: self.logs_exporter.unwrap_or_default(),
+            otlp_endpoint: self.otlp_endpoint.unwrap_or_default(),
+            otlp_headers: self.otlp_headers.unwrap_or_default(),
+            otlp_insecure: self.otlp_insecure.unwrap_or(false),
+            // A non-positive interval is "unset", not "export continuously".
+            metric_export_interval_ms: match self.metric_export_interval_ms.unwrap_or(0) {
+                ms if ms > 0 => ms,
+                _ => default.metric_export_interval_ms,
+            },
+        }
+    }
+}
+
+/// `telemetry.ConfigFromEnv`.
+///
+/// Note what it does *not* do: an `OTEL_*` variable that is set but names
+/// nothing meaningful — `OTEL_SDK_DISABLED=false` alone, say — still locks every
+/// field, but leaves the config at its default. The lock and the value are two
+/// different questions.
+fn config_from_env() -> MonitoringConfigDto {
+    let cfg = default_config();
+
+    let sdk_disabled = env_raw("OTEL_SDK_DISABLED");
+    if sdk_disabled == "true" || sdk_disabled == "1" {
+        return cfg;
+    }
+
+    let metrics = env_raw("OTEL_METRICS_EXPORTER").trim().to_ascii_lowercase();
+    let logs = env_raw("OTEL_LOGS_EXPORTER").trim().to_ascii_lowercase();
+    let endpoint = env_raw("OTEL_EXPORTER_OTLP_ENDPOINT").trim().to_string();
+
+    if metrics.is_empty() && logs.is_empty() && endpoint.is_empty() {
+        return cfg;
+    }
+
+    let insecure = env_raw("OTEL_EXPORTER_OTLP_INSECURE");
+    MonitoringConfigDto {
+        enabled: true,
+        metrics_exporter: match metrics.as_str() {
+            "otlp" => "otlp",
+            "prometheus" => "prometheus",
+            _ => "none",
+        }
+        .to_string(),
+        logs_exporter: if logs == "otlp" { "otlp" } else { "none" }.to_string(),
+        otlp_endpoint: endpoint,
+        otlp_headers: parse_otlp_headers(&env_raw("OTEL_EXPORTER_OTLP_HEADERS")),
+        otlp_insecure: insecure == "true" || insecure == "1",
+        metric_export_interval_ms: match env_raw("OTEL_METRIC_EXPORT_INTERVAL").parse::<i64>() {
+            Ok(ms) if ms > 0 => ms,
+            _ => cfg.metric_export_interval_ms,
+        },
+    }
+}
+
+/// `telemetry.parseOTLPHeaders`: `key=value,key2=value2`. A pair with no `=`,
+/// or one whose `=` opens it, is dropped rather than stored under an empty key.
+fn parse_otlp_headers(raw: &str) -> BTreeMap<String, String> {
+    let mut headers = BTreeMap::new();
+    if raw.is_empty() {
+        return headers;
+    }
+    for pair in raw.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        match pair.find('=') {
+            Some(idx) if idx > 0 => {
+                headers.insert(
+                    pair[..idx].trim().to_string(),
+                    pair[idx + 1..].trim().to_string(),
+                );
+            }
+            _ => continue,
+        }
+    }
+    headers
+}
+
+fn env_raw(name: &str) -> String {
+    std::env::var(name).unwrap_or_default()
+}
+
+/// The answer `GET /api/monitoring` gives, resolved the way the manager does.
+///
+/// **The environment wins outright.** `MonitoringManager.Load` returns before
+/// touching the file when any `OTEL_*` variable is set, so a stored config is
+/// not merged with the environment — it is ignored. Reproducing that matters
+/// more than it looks: the two configurations routinely disagree, and merging
+/// would show the user a page that describes neither.
+pub fn response(data_dir: &Path) -> MonitoringResponse {
+    let locked: BTreeMap<String, String> = ENV_VAR_CHECKS
+        .iter()
+        .filter(|(_, var)| !env_raw(var).is_empty())
+        .map(|(field, var)| (field.to_string(), var.to_string()))
+        .collect();
+    let env_locked = !locked.is_empty();
+
+    let settings = if env_locked {
+        config_from_env()
+    } else {
+        load_file(&data_dir.join("monitoring.json"))
+    };
+
+    MonitoringResponse {
+        settings,
+        locked,
+        env_locked,
+    }
+}
+
+/// Read `monitoring.json`. A missing file, an unreadable one and a malformed
+/// one all resolve to the default, because that is where `current` is left in
+/// each case — the manager seeds it from the env config (which, with no
+/// variables set, *is* the default) and only replaces it on a clean load.
+fn load_file(path: &Path) -> MonitoringConfigDto {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!("native monitoring: reading {}: {e}", path.display());
+            }
+            return default_config();
+        }
+    };
+    match serde_json::from_slice::<StoredMonitoring>(&raw) {
+        Ok(stored) => stored.into_dto(),
+        Err(e) => {
+            log::warn!("native monitoring: parsing {}: {e}", path.display());
+            default_config()
+        }
+    }
+}
+
+// ─── The seam ─────────────────────────────────────────────────────────────────
+
+/// This module's entry in `native::ENDPOINTS`.
+pub const ENDPOINT: super::Endpoint = super::Endpoint {
+    name: "monitoring",
+    claims,
+    serve,
+};
+
+fn claims(method: &Method, path: &str) -> bool {
+    method == Method::GET && path == "/api/monitoring"
+}
+
+fn serve(ctx: &super::Ctx, _req: &super::Request) -> Result<super::Answer, String> {
+    // The data dir is the database's parent by construction (`paths::data_dir`
+    // joins `agento.db` onto it), which is also what makes the parity instance
+    // work: it points both at its scratch copy.
+    let data_dir = ctx
+        .db_path
+        .parent()
+        .ok_or("no data directory beside the database")?;
+    let body = super::gojson::to_vec(&response(data_dir))
+        .map_err(|e| format!("encoding monitoring config: {e}"))?;
+    Ok(super::Answer { body, probe: None })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write(dir: &Path, body: &str) {
+        std::fs::create_dir_all(dir).expect("temp dir");
+        std::fs::write(dir.join("monitoring.json"), body).expect("write");
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("agento-monitoring-test-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn an_absent_file_is_the_default_config() {
+        let dto = load_file(&scratch("absent").join("monitoring.json"));
+        assert_eq!(dto, default_config());
+    }
+
+    /// The failure the manager swallows: it logs and leaves `current` where the
+    /// env config put it, so a corrupt file reads as "not configured" rather
+    /// than taking the endpoint down.
+    #[test]
+    fn a_malformed_file_degrades_to_the_default() {
+        let dir = scratch("malformed");
+        write(&dir, "{not json");
+        assert_eq!(load_file(&dir.join("monitoring.json")), default_config());
+    }
+
+    /// A stored `null` is not a malformed file — Go decodes it into the zero
+    /// value without complaint, and so must this.
+    #[test]
+    fn stored_nulls_decode_to_zero_values() {
+        let dir = scratch("nulls");
+        write(
+            &dir,
+            r#"{"enabled":null,"metrics_exporter":null,"metric_export_interval_ms":null}"#,
+        );
+        let dto = load_file(&dir.join("monitoring.json"));
+        assert!(!dto.enabled);
+        assert_eq!(dto.metrics_exporter, "");
+        assert_eq!(dto.metric_export_interval_ms, 60_000);
+    }
+
+    /// A non-positive interval means "unset". Zero is what a file written
+    /// before the field existed carries.
+    #[test]
+    fn a_non_positive_interval_falls_back_to_a_minute() {
+        let dir = scratch("interval");
+        write(&dir, r#"{"enabled":true,"metric_export_interval_ms":0}"#);
+        assert_eq!(
+            load_file(&dir.join("monitoring.json")).metric_export_interval_ms,
+            60_000
+        );
+        write(&dir, r#"{"enabled":true,"metric_export_interval_ms":-5}"#);
+        assert_eq!(
+            load_file(&dir.join("monitoring.json")).metric_export_interval_ms,
+            60_000
+        );
+    }
+
+    /// An exporter name the UI would never write is passed through, because
+    /// validation happens on `PUT` and `GET` reports what is stored.
+    #[test]
+    fn an_unknown_exporter_name_is_not_corrected() {
+        let dir = scratch("exporter");
+        write(
+            &dir,
+            r#"{"metrics_exporter":"bogus","logs_exporter":"otlp"}"#,
+        );
+        let dto = load_file(&dir.join("monitoring.json"));
+        assert_eq!(dto.metrics_exporter, "bogus");
+        assert_eq!(dto.logs_exporter, "otlp");
+    }
+
+    #[test]
+    fn headers_parse_the_way_the_env_var_is_written() {
+        assert!(parse_otlp_headers("").is_empty());
+        let headers = parse_otlp_headers("x-api-key=secret, x-tenant = acme ,,broken,=novalue");
+        assert_eq!(headers.get("x-api-key").map(String::as_str), Some("secret"));
+        assert_eq!(headers.get("x-tenant").map(String::as_str), Some("acme"));
+        assert_eq!(headers.len(), 2, "{headers:?}");
+    }
+
+    /// Empty headers are omitted, not sent as `{}` — the field carries
+    /// `omitempty` and that is one of the four ways a port drifts.
+    #[test]
+    fn the_response_shape_is_the_go_envelope() {
+        let body = super::super::gojson::to_vec(&MonitoringResponse {
+            settings: default_config(),
+            locked: BTreeMap::new(),
+            env_locked: false,
+        })
+        .expect("encode");
+
+        assert_eq!(
+            String::from_utf8(body).expect("utf8"),
+            concat!(
+                r#"{"settings":{"enabled":false,"metrics_exporter":"none","#,
+                r#""logs_exporter":"none","otlp_endpoint":"","otlp_insecure":false,"#,
+                r#""metric_export_interval_ms":60000},"locked":{},"env_locked":false}"#,
+                "\n"
+            )
+        );
+    }
+
+    #[test]
+    fn populated_headers_are_sent_with_sorted_keys() {
+        let mut settings = default_config();
+        settings.otlp_headers = parse_otlp_headers("z-last=2,a-first=1");
+        let body = super::super::gojson::to_vec(&settings).expect("encode");
+        assert!(String::from_utf8(body)
+            .expect("utf8")
+            .contains(r#""otlp_headers":{"a-first":"1","z-last":"2"}"#));
+    }
+
+    #[test]
+    fn only_the_monitoring_read_is_claimed() {
+        assert!(claims(&Method::GET, "/api/monitoring"));
+        assert!(!claims(&Method::PUT, "/api/monitoring"));
+        assert!(!claims(&Method::POST, "/api/monitoring/test"));
+        assert!(!claims(&Method::GET, "/api/monitoring/test"));
+        assert!(!claims(&Method::GET, "/api/monitoring/"));
+    }
+}
