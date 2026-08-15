@@ -315,6 +315,21 @@ mod tests {
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let path = file.path().to_path_buf();
 
+        // WAL is set **once, up front** — not per thread.
+        //
+        // It is persistent in the file, so both connections inherit it. Setting
+        // it inside each thread is what made this flake in CI: switching journal
+        // mode needs a lock SQLite refuses to *wait* for, so it returns
+        // `SQLITE_BUSY` immediately rather than honouring a busy timeout, and
+        // the test failed on its own setup instead of on the property it
+        // measures. The app never hits this because the mode is already set by
+        // the time anything opens the database.
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.pragma_update(None, "journal_mode", "WAL")
+                .expect("wal");
+        }
+
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let handles: Vec<_> = (0..2)
             .map(|_| {
@@ -322,10 +337,6 @@ mod tests {
                 let barrier = std::sync::Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     let mut conn = Connection::open(&path).expect("open");
-                    // WAL so the two do not serialize on the whole file, which
-                    // is the configuration the app actually runs.
-                    conn.pragma_update(None, "journal_mode", "WAL")
-                        .expect("wal");
                     barrier.wait();
                     apply(&mut conn)
                 })

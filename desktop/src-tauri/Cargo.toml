@@ -37,6 +37,9 @@ log = "0.4"
 # Local reverse proxy in front of the Go sidecar. No TLS backend: every hop is
 # loopback, and pulling in rustls here would cost build time for nothing.
 axum = "0.8"
+# The SSE body is a channel of frames; `ReceiverStream` is what turns that into
+# the `Stream` `Body::from_stream` wants. Added with #276.
+tokio-stream = "0.1"
 # `process` and `io-util` are for the Claude Agent SDK port (`src/claude/`),
 # which spawns the `claude` CLI and reads its stdout line by line. The sidecar
 # goes through tauri-plugin-shell instead, but that only launches binaries
@@ -96,3 +99,5 @@ strip = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# Collecting a streamed SSE body in the turn tests.
+http-body-util = "0.1"

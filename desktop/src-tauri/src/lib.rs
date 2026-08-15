@@ -92,7 +92,7 @@ fn install_kind() -> &'static str {
 /// agents by spawning the Claude Code CLI as a subprocess, and that CLI is a
 /// separate ~280 MB install we do not redistribute. Detecting it up front turns
 /// "every chat fails with exec: not found" into one honest message.
-fn find_claude_cli() -> Option<String> {
+pub(crate) fn find_claude_cli() -> Option<String> {
     let name = if cfg!(windows) {
         "claude.exe"
     } else {
