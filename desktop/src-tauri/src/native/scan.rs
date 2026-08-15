@@ -69,6 +69,34 @@ struct ScanState {
     in_progress: bool,
     files_done: usize,
     files_total: usize,
+    /// Rows the last scan actually wrote.
+    ///
+    /// Exposed because `files_done` is **not** evidence of work: `apply` counts
+    /// a file as done even when its batch fails to commit, so a scan that read
+    /// everything and wrote nothing reaches `files_done == files_total`. That is
+    /// precisely the failure the live test exists to catch, and it needs a
+    /// number that only a successful write moves.
+    rows_written: usize,
+}
+
+/// Rows the last completed scan wrote.
+///
+/// Not on [`Status`] — that is a wire shape Go defines and this is not one of
+/// its fields. It exists so a test can tell a scan that did the work from one
+/// that walked every file and committed nothing, which `files_done` cannot: a
+/// file whose batch fails to commit is still counted done.
+pub fn last_rows_written() -> usize {
+    // `outcome.notifications` is deliberately dropped. Go publishes them on its
+    // event bus and the insight worker reacts at once; Rust has no bus, so the
+    // desktop app relies on that worker's own 5-minute `rescanOutdated` loop
+    // instead. The effect is bounded latency, not lost work — the rows are
+    // written and carry their versions, so the loop finds them. An event path is
+    // worth building when there is a second consumer; until then a bus with one
+    // subscriber behind a 5-minute fallback is machinery for its own sake.
+    state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .rows_written
 }
 
 fn state() -> &'static Mutex<ScanState> {
@@ -140,7 +168,10 @@ fn refresh(db_path: &Path) -> Result<super::Answer, WriteError> {
     invalidate(&conn).map_err(WriteError::Fallback)?;
     drop(conn);
 
-    ensure_scan(db_path.to_path_buf());
+    // `force`: the user asked. The TTL check would fire anyway — `invalidate`
+    // just zeroed the marker — but saying so here means a later change to the
+    // gate cannot quietly turn Refresh into a no-op.
+    force_scan(db_path.to_path_buf());
     Ok(super::Answer::status_only(StatusCode::ACCEPTED))
 }
 
@@ -199,12 +230,57 @@ fn live_pricing_rev(db_path: &Path) -> i64 {
         .unwrap_or(staleness::PRICING_REV_UNKNOWN)
 }
 
-/// `Cache.EnsureScan`: admit exactly one scan, and return immediately.
+/// Clears `in_progress` however the scan thread ends.
 ///
-/// The critical section covers only the flag, never the scan — holding the lock
-/// for the scan's duration would make `/status` block on the very thing it
-/// exists to report.
+/// A plain reset at the end of the closure is **not** enough: `thread::spawn`
+/// does not run the tail on an unwind, so a panicking scan would leave the flag
+/// set for the life of the process — `ensure_scan` would then return at its
+/// first check forever and `/status` would report a scan that is not running.
+/// The panic path is reachable: `apply.rs` shares a `Mutex` across its reader
+/// pool and `expect`s the lock, so one panicking reader cascades. Go is safe
+/// here because its equivalent uses `defer`.
+struct ScanGuard;
+
+impl Drop for ScanGuard {
+    fn drop(&mut self) {
+        state()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .in_progress = false;
+    }
+}
+
+/// `Cache.ensureFresh`: scan only when something says the cache is out of date.
+///
+/// **`ensureFresh`, not `EnsureScan`.** Go's read paths do not start a scan on
+/// every request — they ask three questions first, and only then admit one.
+/// Porting the admission without the questions makes every list, facet change,
+/// dashboard and insights open kick off a full corpus walk, which at the size
+/// this file is written for is minutes of work per page view, with the progress
+/// counters resetting under the user each time.
+///
+/// The three questions are Go's, in `cache.go`:
+///
+/// 1. the last scan is older than [`CACHE_TTL`],
+/// 2. the pricing catalog moved, or
+/// 3. the idle-gap threshold moved.
+///
+/// `detect_staleness` already answers the last two; the TTL is the third.
+/// `force` is how `/refresh` bypasses all of it — though in practice it has
+/// already invalidated `last_scanned_at`, so the TTL check would fire anyway.
 pub fn ensure_scan(db_path: PathBuf) {
+    ensure_scan_inner(db_path, false)
+}
+
+/// `/refresh`: scan whatever the markers say.
+pub fn force_scan(db_path: PathBuf) {
+    ensure_scan_inner(db_path, true)
+}
+
+fn ensure_scan_inner(db_path: PathBuf, force: bool) {
+    if !force && !needs_scan(&db_path) {
+        return;
+    }
     {
         let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
         if s.in_progress {
@@ -213,14 +289,50 @@ pub fn ensure_scan(db_path: PathBuf) {
         s.in_progress = true;
         s.files_done = 0;
         s.files_total = 0;
+        s.rows_written = 0;
     }
     std::thread::spawn(move || {
+        // Created first, so it clears the flag on an unwind as well as a return.
+        let _guard = ScanGuard;
         if let Err(e) = run_scan(&db_path) {
             log::warn!("claude session scan failed: {e}");
         }
-        let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
-        s.in_progress = false;
     });
+}
+
+/// Go's `CacheTTL`.
+const CACHE_TTL: chrono::TimeDelta = chrono::TimeDelta::hours(1);
+
+/// The `!isFresh() || pricingChanged() || idleThresholdChanged()` decision.
+///
+/// Unreadable means "scan": a database this cannot open is one whose freshness
+/// it cannot vouch for, and Go's `isFresh` returns false on a failed read for
+/// the same reason.
+fn needs_scan(db_path: &Path) -> bool {
+    let Ok(conn) = super::db::open_read_only(db_path) else {
+        return true;
+    };
+    let idle_ms = super::settings::load(&conn).idle_gap_ms;
+    let stale = staleness::detect_staleness(&conn, live_pricing_rev(db_path), idle_ms);
+    if stale.pricing || stale.idle {
+        return true;
+    }
+    !is_fresh(&conn)
+}
+
+/// `Cache.isFresh`: scanned within [`CACHE_TTL`]. A missing or unparseable
+/// marker is stale, which is what `Invalidate` relies on.
+fn is_fresh(conn: &rusqlite::Connection) -> bool {
+    let stored = last_scanned_at(conn);
+    if stored.is_empty() {
+        return false;
+    }
+    match chrono::DateTime::parse_from_rfc3339(&stored) {
+        Ok(t) => {
+            chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc)) < CACHE_TTL
+        }
+        Err(_) => false,
+    }
 }
 
 /// One full pass: walk, diff, re-read what changed, record the markers.
@@ -229,11 +341,27 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
     super::migrate::verify(&conn)?;
 
     let live_pricing = live_pricing_rev(db_path);
-    let idle_ms = super::settings::load(&conn).idle_gap_ms;
+    let settings = super::settings::load(&conn);
+    let idle_ms = settings.idle_gap_ms;
     let stale = staleness::detect_staleness(&conn, live_pricing, idle_ms);
 
-    let dirs = super::settings::load(&conn).indexed_config_dirs;
-    let walked = walk::walk_all_disk_files(&dirs);
+    let walked = walk::walk_all_disk_files(&settings.indexed_config_dirs);
+
+    // Not one configured dir could be listed. Go stamps `last_scanned_at` and
+    // returns **without recording the staleness markers**, which is the part
+    // that matters: recording them would claim a re-read that never happened,
+    // so a pending version bump or rate edit would be dropped for good after a
+    // single transient unreadable `~/.claude` — an unplugged drive looks exactly
+    // like a deleted one from here.
+    if walked.walked.is_empty() {
+        log::warn!(
+            "claude sessions: no readable claude config dir, keeping cached rows: {:?}",
+            settings.indexed_config_dirs
+        );
+        record_last_scanned(&conn);
+        return Ok(());
+    }
+
     let mut cached: Vec<diff::CachedEntry> =
         store::load_cached_entries(&conn)?.into_values().collect();
 
@@ -243,6 +371,26 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
     // the rows stay, so a re-read is an update rather than a rediscovery.
     if stale.any() {
         staleness::invalidate_cached_mtimes(&mut cached);
+        // A threshold change is the one kind of staleness that also invalidates
+        // the *insights*, and it has to: `turn_count` and every rhythm metric
+        // derived from it are computed under the threshold. Without this the
+        // insight worker never picks these rows up — its rescan selects on
+        // `processor_version < CurrentProcessorVersion` alone — so the insights
+        // would sit on the old threshold indefinitely while the sessions list
+        // beside them showed the new one.
+        if stale.idle {
+            match conn.execute("UPDATE session_insights SET processor_version = 0", []) {
+                Ok(rows) if rows > 0 => {
+                    log::info!("claude sessions: {rows} insights queued for reprocessing")
+                }
+                Ok(_) => {}
+                // Logged and continued, as Go does: losing this costs stale
+                // insights, where failing the scan costs the corpus.
+                Err(e) => log::warn!(
+                    "claude sessions: failed to invalidate insights after idle-threshold change: {e}"
+                ),
+            }
+        }
     }
     let cached_by_path: std::collections::HashMap<PathBuf, diff::CachedEntry> = cached
         .into_iter()
@@ -285,7 +433,11 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
         },
     );
 
-    record_markers(&conn, live_pricing, idle_ms);
+    state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .rows_written = outcome.rows_written;
+    record_markers(&conn, &stale);
     log::info!(
         "claude session scan complete: {} written, {} deleted, {} skipped",
         outcome.rows_written,
@@ -295,38 +447,50 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The three staleness markers plus the scan time.
+/// The staleness markers, plus the scan time.
 ///
 /// Written **after** the changes apply, never before: a failed scan must leave
 /// the drift recorded so the next one retries it, which is the property that
 /// makes a rate edit eventually reach the figures.
-fn record_markers(conn: &rusqlite::Connection, pricing_rev: i64, idle_ms: i64) {
+///
+/// Each marker is written **only if that marker was stale**, mirroring Go's
+/// `cacheStaleness.record`. Stamping all three unconditionally would be wrong in
+/// one specific way: `pricing_rev` would be overwritten with
+/// `PRICING_REV_UNKNOWN` whenever the catalog failed to load, discarding a
+/// perfectly good revision and guaranteeing a re-read next time.
+fn record_markers(conn: &rusqlite::Connection, stale: &staleness::CacheStaleness) {
+    record_last_scanned(conn);
+    if stale.reader {
+        record_marker(conn, "scanner_version", CURRENT_SCANNER_VERSION);
+    }
+    if stale.pricing {
+        record_marker(conn, "pricing_rev", stale.pricing_rev);
+    }
+    if stale.idle {
+        record_marker(conn, "idle_threshold_ms", stale.idle_ms);
+    }
+}
+
+/// `updateLastScanned`. Stamped even on the path where nothing was read, which
+/// is what stops an unreadable corpus re-walking on every request.
+fn record_last_scanned(conn: &rusqlite::Connection) {
     let now = super::gotime::now_go_text();
-    let statements: [(&str, rusqlite::types::Value); 4] = [
-        (
-            "INSERT INTO claude_cache_metadata (id, last_scanned_at) VALUES (1, ?1)
-             ON CONFLICT(id) DO UPDATE SET last_scanned_at = excluded.last_scanned_at",
-            now.into(),
-        ),
-        (
-            "UPDATE claude_cache_metadata SET scanner_version = ?1 WHERE id = 1",
-            CURRENT_SCANNER_VERSION.into(),
-        ),
-        (
-            "UPDATE claude_cache_metadata SET pricing_rev = ?1 WHERE id = 1",
-            pricing_rev.into(),
-        ),
-        (
-            "UPDATE claude_cache_metadata SET idle_threshold_ms = ?1 WHERE id = 1",
-            idle_ms.into(),
-        ),
-    ];
-    for (sql, value) in statements {
-        if let Err(e) = conn.execute(sql, [value]) {
-            // Go logs and continues for each of these too: a lost marker costs
-            // one redundant re-read, where failing the scan costs the corpus.
-            log::warn!("recording scan marker failed: {e}");
-        }
+    if let Err(e) = conn.execute(
+        "INSERT INTO claude_cache_metadata (id, last_scanned_at) VALUES (1, ?1)
+         ON CONFLICT(id) DO UPDATE SET last_scanned_at = excluded.last_scanned_at",
+        [&now],
+    ) {
+        log::warn!("failed to update last_scanned_at: {e}");
+    }
+}
+
+fn record_marker(conn: &rusqlite::Connection, column: &str, value: i64) {
+    // The column name is one of three literals above, never user input.
+    let sql = format!("UPDATE claude_cache_metadata SET {column} = ?1 WHERE id = 1");
+    if let Err(e) = conn.execute(&sql, [value]) {
+        // Go logs and continues for each of these too: a lost marker costs one
+        // redundant re-read, where failing the scan costs the corpus.
+        log::warn!("claude sessions: failed to record {column}: {e}");
     }
 }
 

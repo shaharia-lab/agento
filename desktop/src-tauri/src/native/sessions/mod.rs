@@ -15,13 +15,15 @@
 //! so: transcripts would stop being re-read, a rate edit would never reach
 //! stored costs, and the list would serve indefinitely stale figures.
 //!
-//! Rather than reimplement that decision — four pieces of metadata, a TTL, a
-//! pricing fingerprint and a user-set threshold, each of which could drift out
-//! of step with the Go original — this delegates it. `freshness_probe` names a
-//! cheap request against the sidecar that goes through `ensureFresh` itself, so
-//! the *rules* stay in the code that owns them. It is fire-and-forget: the page
-//! never waits for it, exactly as `ListPage` never waits for the rescan it
-//! starts.
+//! That decision used to be **delegated** to the sidecar through a cheap probe
+//! request, so the rules stayed in the code that owned them. Since #289 the
+//! shell owns the scan, so there is no such code to delegate to and the rules
+//! are reimplemented in `native::scan::ensure_scan` — the TTL, the pricing
+//! fingerprint and the idle threshold, the same three `ensureFresh` asks.
+//!
+//! `triggers_scan` below is the other half: *which* routes ask the question at
+//! all. It is fire-and-forget either way — the page never waits, exactly as
+//! `ListPage` never waits for the rescan it starts.
 
 pub mod corpus;
 pub mod detail;

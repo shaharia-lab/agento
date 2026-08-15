@@ -205,8 +205,6 @@ func (c *Cache) notify(sessionID, filePath string, isNew bool) {
 	})
 }
 
-// StartBackgroundScan runs an incremental scan in a background goroutine so
-// the server starts immediately while the cache is being populated.
 // scannerDisabled reports whether this process has been told not to scan.
 //
 // Read once: it is a deployment fact, not a setting, and re-reading it per call

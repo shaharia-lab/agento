@@ -284,6 +284,23 @@ pub fn may_serve(mode: Mode, method: &Method) -> bool {
     }
 }
 
+/// Routes whose diff is **expected** to differ, and why.
+///
+/// Diff mode compares Rust's answer against Go's. That only means anything when
+/// both are answering the same question, and since #289 one route is not:
+/// `/api/claude-sessions/status` reports the state of a scan, the sidecar is
+/// started with `AGENTO_SCANNER=off`, and so Go always says `false`/`0`/`0`
+/// while Rust says whatever is actually happening. Comparing them would report a
+/// permanent false difference and train the reader to ignore the diff output —
+/// which is worse than not comparing, because it hides the real ones.
+///
+/// This is deliberately a **short, named list** rather than a flag on the
+/// endpoint: an entry here is a claim that the two implementations cannot agree
+/// by construction, which should stay rare enough to enumerate.
+pub fn diff_exempt(path: &str) -> bool {
+    path == "/api/claude-sessions/status"
+}
+
 /// Answer a claimed request. `Err` means "fall back to the Go sidecar".
 pub fn serve(req: &Request) -> Result<Answer, String> {
     let ctx = Ctx {

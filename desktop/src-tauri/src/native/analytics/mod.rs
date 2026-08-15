@@ -26,9 +26,8 @@
 //! `Cache.Analytics` calls `ensureFresh` before it answers, so opening a
 //! dashboard after a rate edit starts the re-cost rather than waiting for
 //! someone to open the sessions list. Serving this route from Rust removes that
-//! trigger, so the handler fires the same probe the sessions list does — see
-//! `sessions::PROBE_PATH`, which delegates the decision to the Go code that
-//! owns the rules rather than reimplementing four pieces of metadata here.
+//! trigger, so the handler calls `native::scan::ensure_scan` — which asks the
+//! same three questions `ensureFresh` asks before it starts anything (#289).
 
 pub mod buckets;
 pub mod cards;

@@ -28,6 +28,10 @@ fn real_db() -> Option<PathBuf> {
     db.is_file().then_some(db)
 }
 
+fn status_files_done(db: &std::path::Path) -> usize {
+    agento_lib::native::scan::status(db).files_done
+}
+
 fn count(conn: &rusqlite::Connection, table: &str) -> i64 {
     conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
         .unwrap_or(-1)
@@ -79,7 +83,7 @@ fn a_full_scan_reproduces_the_corpus_go_wrote() {
     }
 
     let started = std::time::Instant::now();
-    agento_lib::native::scan::ensure_scan(db.clone());
+    agento_lib::native::scan::force_scan(db.clone());
 
     // Poll rather than sleep: a full re-read of a real corpus is minutes.
     let mut settled = false;
@@ -100,6 +104,20 @@ fn a_full_scan_reproduces_the_corpus_go_wrote() {
         count(&conn, "claude_subagent_cache"),
     );
     eprintln!("after:  {} sessions, {} sub-agents", after.0, after.1);
+
+    // **The assertion that actually catches a broken scan.** `files_done`
+    // reaching `files_total` proves nothing: `apply` counts a file as done even
+    // when its batch fails to commit, so a scan that read all ~1,400 transcripts
+    // and wrote none reaches the end looking healthy, leaves the row counts
+    // unchanged (satisfying `after >= before`) and stamps the markers anyway.
+    // Only a number that a successful write moves can tell the two apart.
+    let written = agento_lib::native::scan::last_rows_written();
+    eprintln!("rows written: {written}");
+    assert!(
+        written > 0,
+        "the scan read {} files and wrote no rows — it reported success without doing the work",
+        status_files_done(&db)
+    );
 
     // The scan must not *lose* rows. A forced re-read updates in place; the
     // count can only grow, by whatever landed on disk since Go last looked.

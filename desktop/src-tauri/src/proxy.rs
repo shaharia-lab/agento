@@ -225,6 +225,13 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
                     }
                 };
                 match native {
+                    // A route the two sides cannot agree on by construction is
+                    // skipped rather than reported — see `native::diff_exempt`.
+                    // A permanent false difference is worse than no comparison,
+                    // because it teaches the reader to ignore the output.
+                    Ok(_) if native::diff_exempt(&path) => {
+                        log::debug!("native diff {path}: exempt, not compared")
+                    }
                     Ok(answer) => native::diff::report(
                         &path,
                         &native::diff::compare(&go_body, answer.body.as_deref().unwrap_or(&[])),
