@@ -148,8 +148,17 @@ pub async fn run(
     // subprocess exists, so forwarding is safe.
     let options = runner::build_options(&spec, handler)?;
 
-    // The subprocess starts here. Past this point a failure can no longer
-    // forward, because Go would spawn a second one.
+    // The subprocess starts here, and these are the last two `Err`s. Both are
+    // still safe to forward, but for different reasons and neither is obvious:
+    //
+    // - A failed spawn produced no process at all.
+    // - A failed `send` produced one, but `close` terminates it and the user
+    //   message never reached the CLI — so nothing was transmitted, nothing was
+    //   written to its transcript, and Go starting a fresh subprocess is the
+    //   right answer rather than a duplicate.
+    //
+    // Everything after this point streams, and a failure there ends the stream
+    // rather than forwarding: the 200 is already committed.
     let mut session = Session::new(options)
         .await
         .map_err(|e| format!("starting agent session: {e}"))?;

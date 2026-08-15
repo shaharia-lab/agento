@@ -392,6 +392,18 @@ async fn run_turn_answering(
     run_turn_inner(cli, chat_id, content, Some(answer.to_string())).await
 }
 
+/// Serialises the turn tests.
+///
+/// `AGENTO_CLAUDE_EXECUTABLE` is **process-global**, and cargo runs these in
+/// parallel in one process — so without this each test would overwrite the
+/// others' fake CLI path and they would spawn each other's scripts. The lock is
+/// held for the whole turn, not just the `set_var`, because the variable is read
+/// when the subprocess spawns rather than when it is set.
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 async fn run_turn_inner(
     cli: &Path,
     chat_id: &str,
@@ -400,6 +412,7 @@ async fn run_turn_inner(
 ) -> (String, bool) {
     use http_body_util::BodyExt;
 
+    let _env = env_lock().lock().await;
     let file = migrated_with_chat(chat_id);
     // The SDK resolves the executable from this variable, so the fake stands in
     // for a real `claude` without any code path knowing.
