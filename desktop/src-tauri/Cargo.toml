@@ -94,7 +94,20 @@ libc = "0.2"
 codegen-units = 1
 lto = true
 opt-level = "s"
-panic = "abort"
+# Unwind, not abort, and this is load-bearing rather than a default.
+#
+# The seam's whole safety story is that a native failure falls back to the Go
+# sidecar — "a ported route can only be as broken as an unported one". Two
+# mechanisms implement it and **both need unwinding**: `proxy.rs` turns a
+# panicking native handler into an `Err` that forwards, and `native/scan.rs`
+# clears its in-progress flag from a `Drop` guard. Under `panic = "abort"`
+# neither runs, so in the build users actually install, a panic anywhere in the
+# ported code takes the whole desktop app down instead of degrading — with no
+# window, no message, and a sidecar right there that could have answered.
+#
+# The cost is a slightly larger binary. That is the right trade for a shell
+# whose entire design premise is that the Rust half may be wrong.
+panic = "unwind"
 strip = true
 
 [dev-dependencies]

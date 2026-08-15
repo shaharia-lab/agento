@@ -74,12 +74,30 @@ func TestEnsureScanRespectsTheScannerSwitch(t *testing.T) {
 		}
 	}
 
-	// The guard must not be swallowing everything: with the switch off, an
-	// admission is observable. The scan may fail immediately against this
-	// database, so this asserts the channel is a *fresh* one rather than the
-	// pre-closed constant the guard returns.
+	// The positive control, and it has to be the exact inverse of the above.
+	//
+	// An earlier version asserted only that the returned channel was non-nil,
+	// which both paths satisfy — so a guard that disabled scanning
+	// unconditionally passed. That is the **off-by-mistake** direction this
+	// test's header calls dangerous: nothing would scan and nothing would say
+	// so. The observable difference is the same one as before, inverted: with
+	// the switch on, EnsureScan returns a channel that is *not* already closed,
+	// because a real scan has to run first.
 	withScannerOff(t, false)
-	if cache.EnsureScan() == nil {
-		t.Error("EnsureScan must always return a channel")
+	admitted := false
+	for range 100 {
+		select {
+		case <-cache.EnsureScan():
+			// Closed already — either the guard fired, or a previous scan
+			// finished between iterations. Keep looking.
+		default:
+			admitted = true
+		}
+		if admitted {
+			break
+		}
+	}
+	if !admitted {
+		t.Error("with the scanner on, EnsureScan must return a channel that is not already closed")
 	}
 }

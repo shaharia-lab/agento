@@ -86,13 +86,6 @@ struct ScanState {
 /// that walked every file and committed nothing, which `files_done` cannot: a
 /// file whose batch fails to commit is still counted done.
 pub fn last_rows_written() -> usize {
-    // `outcome.notifications` is deliberately dropped. Go publishes them on its
-    // event bus and the insight worker reacts at once; Rust has no bus, so the
-    // desktop app relies on that worker's own 5-minute `rescanOutdated` loop
-    // instead. The effect is bounded latency, not lost work — the rows are
-    // written and carry their versions, so the loop finds them. An event path is
-    // worth building when there is a second consumer; until then a bus with one
-    // subscriber behind a 5-minute fallback is machinery for its own sake.
     state()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -191,23 +184,12 @@ fn invalidate(conn: &rusqlite::Connection) -> Result<(), String> {
 }
 
 fn last_scanned_at(conn: &rusqlite::Connection) -> String {
-    let stored: String = conn
-        .query_row(
-            "SELECT last_scanned_at FROM claude_cache_metadata WHERE id = 1",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or_default();
-    if stored.is_empty() || stored.starts_with("0001-01-01") {
-        return String::new();
-    }
-    // Go reads the column into a `time.Time` and formats it RFC 3339 in UTC.
-    match super::gotime::GoTime::parse_any(&stored) {
-        Ok(t) => t
-            .instant()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        // Unparseable is `time.Time{}` to Go's driver, and so "never".
-        Err(_) => String::new(),
+    match stored_scan_time(conn) {
+        // Go reads the column into a `time.Time` and formats it RFC 3339 in UTC.
+        Some(t) => t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        // Never scanned, unreadable, or the zero time — all of which Go reports
+        // as an empty string rather than a year-1 date.
+        None => String::new(),
     }
 }
 
@@ -225,9 +207,7 @@ fn costs_stale(conn: &rusqlite::Connection, db_path: &Path) -> bool {
 /// treats it as "do not decide", which stops an unpriced process re-reading the
 /// whole corpus on every scan.
 fn live_pricing_rev(db_path: &Path) -> i64 {
-    super::pricing::catalog(db_path)
-        .map(|c| c.revision)
-        .unwrap_or(staleness::PRICING_REV_UNKNOWN)
+    super::pricing::revision_of(db_path).unwrap_or(staleness::PRICING_REV_UNKNOWN)
 }
 
 /// Clears `in_progress` however the scan thread ends.
@@ -239,6 +219,11 @@ fn live_pricing_rev(db_path: &Path) -> i64 {
 /// The panic path is reachable: `apply.rs` shares a `Mutex` across its reader
 /// pool and `expect`s the lock, so one panicking reader cascades. Go is safe
 /// here because its equivalent uses `defer`.
+///
+/// This works only because **every profile unwinds** — `panic = "abort"` runs no
+/// destructors, so under it the guard would be a debug-only net and a scan panic
+/// would kill the app outright. `Cargo.toml` sets `panic = "unwind"` for release
+/// for this reason and for `proxy.rs`'s panic-to-forward, and says so there.
 struct ScanGuard;
 
 impl Drop for ScanGuard {
@@ -314,7 +299,18 @@ fn needs_scan(db_path: &Path) -> bool {
     };
     let idle_ms = super::settings::load(&conn).idle_gap_ms;
     let stale = staleness::detect_staleness(&conn, live_pricing_rev(db_path), idle_ms);
-    if stale.pricing || stale.idle {
+    // `ensureFresh` asks only about pricing and the threshold, because a *read*
+    // should not pay for a scanner upgrade. But Go's boot scan does not go
+    // through `ensureFresh` at all — `StartBackgroundScan` calls `EnsureScan`
+    // directly, precisely so an upgraded binary re-reads what its new scanner
+    // can extract. Gating the boot scan the same way as a read would have meant
+    // a version bump silently waiting up to an hour for the TTL.
+    //
+    // Including `reader` here answers both: one decision instead of two, and a
+    // version bump reaches the figures on whichever surface the user opens
+    // first. It cannot loop — `record_markers` writes `scanner_version` under
+    // exactly this flag, so it is true for one scan only.
+    if stale.reader || stale.pricing || stale.idle {
         return true;
     }
     !is_fresh(&conn)
@@ -323,16 +319,32 @@ fn needs_scan(db_path: &Path) -> bool {
 /// `Cache.isFresh`: scanned within [`CACHE_TTL`]. A missing or unparseable
 /// marker is stale, which is what `Invalidate` relies on.
 fn is_fresh(conn: &rusqlite::Connection) -> bool {
-    let stored = last_scanned_at(conn);
-    if stored.is_empty() {
+    // The **stored** column, not `last_scanned_at`'s output. That function
+    // formats for the wire; routing the freshness decision through it would
+    // couple the gate to a display format, so a change there would silently
+    // move when scans happen.
+    let Some(t) = stored_scan_time(conn) else {
         return false;
+    };
+    chrono::Utc::now().signed_duration_since(t) < CACHE_TTL
+}
+
+/// The stored scan time as an instant, or `None` for never/unreadable — which
+/// includes the zero time `Invalidate` writes.
+fn stored_scan_time(conn: &rusqlite::Connection) -> Option<chrono::DateTime<chrono::Utc>> {
+    let stored: String = conn
+        .query_row(
+            "SELECT last_scanned_at FROM claude_cache_metadata WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    if stored.is_empty() || stored.starts_with("0001-01-01") {
+        return None;
     }
-    match chrono::DateTime::parse_from_rfc3339(&stored) {
-        Ok(t) => {
-            chrono::Utc::now().signed_duration_since(t.with_timezone(&chrono::Utc)) < CACHE_TTL
-        }
-        Err(_) => false,
-    }
+    super::gotime::GoTime::parse_any(&stored)
+        .ok()
+        .map(|t| t.instant())
 }
 
 /// One full pass: walk, diff, re-read what changed, record the markers.
@@ -433,6 +445,13 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
         },
     );
 
+    // `outcome.notifications` is deliberately dropped. Go publishes them on its
+    // event bus and the insight worker reacts at once; Rust has no bus, so the
+    // desktop app relies on that worker's own 5-minute `rescanOutdated` loop
+    // instead. The effect is bounded latency, not lost work — the rows are
+    // written and carry their versions, so the loop finds them. An event path is
+    // worth building when there is a second consumer; until then a bus with one
+    // subscriber behind a 5-minute fallback is machinery for its own sake.
     state()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -564,6 +583,119 @@ mod tests {
         assert_eq!(
             String::from_utf8(body).expect("utf-8").trim_end(),
             r#"{"costs_stale":true,"scan_in_progress":true,"files_done":4,"files_total":9,"last_scanned_at":"2026-03-01T10:00:00Z"}"#
+        );
+    }
+
+    fn seed_scanned_at_for(db: &std::path::Path, conn: &rusqlite::Connection, text: &str) {
+        conn.execute(
+            "INSERT INTO claude_cache_metadata (id, last_scanned_at, scanner_version,
+                                                pricing_rev, idle_threshold_ms)
+             VALUES (1, ?1, ?2, ?3, 600000)
+             ON CONFLICT(id) DO UPDATE SET
+                last_scanned_at = excluded.last_scanned_at,
+                scanner_version = excluded.scanner_version,
+                pricing_rev = excluded.pricing_rev",
+            rusqlite::params![text, CURRENT_SCANNER_VERSION, live_pricing_rev(db)],
+        )
+        .expect("seed");
+    }
+
+    /// A cache scanned inside the TTL, with every marker current, needs nothing.
+    ///
+    /// This is the half that stops the app doing a corpus walk per request —
+    /// and the half whose absence review caught, so it is pinned rather than
+    /// assumed.
+    #[test]
+    fn a_fresh_cache_with_current_markers_does_not_need_a_scan() {
+        let file = migrated();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let now = super::super::gotime::now_go_text();
+        seed_scanned_at_for(file.path(), &conn, &now);
+        drop(conn);
+        assert!(
+            !needs_scan(file.path()),
+            "a cache scanned just now, at the current markers, must not rescan"
+        );
+    }
+
+    /// …and each of the four reasons, on its own, is enough.
+    #[test]
+    fn every_reason_to_rescan_is_enough_on_its_own() {
+        // 1. The TTL expired.
+        let file = migrated();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        seed_scanned_at_for(file.path(), &conn, "2020-01-01 00:00:00 +0000 UTC");
+        drop(conn);
+        assert!(needs_scan(file.path()), "an expired TTL must rescan");
+
+        // 2. Never scanned at all — the state `Invalidate` leaves behind.
+        let file = migrated();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let now = super::super::gotime::now_go_text();
+        seed_scanned_at_for(file.path(), &conn, &now);
+        invalidate(&conn).expect("invalidate");
+        drop(conn);
+        assert!(
+            needs_scan(file.path()),
+            "an invalidated cache must rescan, or Refresh would do nothing"
+        );
+
+        // 3. The scanner version moved. `ensureFresh` does *not* ask this, but
+        // Go's boot scan re-reads unconditionally, so the gate has to — else a
+        // version bump waits up to an hour behind the TTL.
+        let file = migrated();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let now = super::super::gotime::now_go_text();
+        seed_scanned_at_for(file.path(), &conn, &now);
+        conn.execute(
+            "UPDATE claude_cache_metadata SET scanner_version = ?1 WHERE id = 1",
+            [CURRENT_SCANNER_VERSION - 1],
+        )
+        .expect("age the version");
+        drop(conn);
+        assert!(
+            needs_scan(file.path()),
+            "an older scanner version must rescan on any surface, not just at boot"
+        );
+
+        // 4. The idle threshold moved.
+        let file = migrated();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let now = super::super::gotime::now_go_text();
+        seed_scanned_at_for(file.path(), &conn, &now);
+        conn.execute(
+            "UPDATE claude_cache_metadata SET idle_threshold_ms = 999 WHERE id = 1",
+            [],
+        )
+        .expect("move the threshold");
+        drop(conn);
+        assert!(
+            needs_scan(file.path()),
+            "a moved idle threshold must rescan"
+        );
+    }
+
+    /// A database this cannot open is one whose freshness it cannot vouch for.
+    #[test]
+    fn an_unreadable_database_needs_a_scan() {
+        assert!(needs_scan(std::path::Path::new("/nonexistent/agento.db")));
+    }
+
+    /// The guard clears the flag however the thread ends — including a panic,
+    /// which `thread::spawn` would otherwise leave set for the process lifetime,
+    /// wedging every future scan and making `/status` report one forever.
+    #[test]
+    fn the_scan_guard_clears_the_flag_on_a_panic() {
+        state().lock().expect("lock").in_progress = true;
+        let handle = std::thread::spawn(|| {
+            let _guard = ScanGuard;
+            panic!("a scan blew up");
+        });
+        assert!(handle.join().is_err(), "the thread should have panicked");
+        assert!(
+            !state().lock().expect("lock").in_progress,
+            "a panicking scan must not leave the chat wedged — this needs \
+             panic=unwind in every profile, see Cargo.toml"
         );
     }
 
