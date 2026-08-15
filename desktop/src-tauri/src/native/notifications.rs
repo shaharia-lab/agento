@@ -234,7 +234,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         }
         other => return Err(format!("{other} is not a notification read")),
     };
-    Ok(super::Answer { body, probe: None })
+    Ok(super::Answer::json(body))
 }
 
 #[cfg(test)]

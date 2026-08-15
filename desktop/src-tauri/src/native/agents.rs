@@ -1,28 +1,44 @@
-//! `GET /api/agents` and `GET /api/agents/{slug}`.
+//! The agent CRUD: `GET`, `POST`, `PUT` and `DELETE` on `/api/agents`.
 //!
-//! Mirrors `SQLiteAgentStore.List`/`Get` (`internal/storage/sqlite_agent_store.go`),
-//! `agentService.List`/`Get` and the two handlers in `internal/api/agents.go`.
-//! The service layer only wraps the store in a span, so the shape the handler
-//! writes is the store's row.
-//!
-//! Reads only. Create, update and delete stay with Go until the storage layer
-//! moves, which is the right split for now: this is the same database file, and
-//! a second writer would race the migrations and seeding the Go server performs
-//! on every startup.
+//! Mirrors `SQLiteAgentStore` (`internal/storage/sqlite_agent_store.go`),
+//! `agentService` and the handlers in `internal/api/agents.go`. The service
+//! layer only wraps the store in a span, so the shape the handler writes is the
+//! store's row.
 //!
 //! Two Go-isms decide the bytes here and neither is visible in the struct:
 //! **field order is declaration order**, and **a nil slice marshals as `null`**,
 //! not `[]`. `capabilities.built_in` is exactly that case — an agent with no
 //! built-in tools sends `null`, and a `Vec` defaulting to empty would send `[]`.
+//!
+//! ## The writes (#274)
+//!
+//! Three things about them are easy to get subtly wrong, and all three are
+//! observable:
+//!
+//! - **The validation order is not the same on create and update.** Create
+//!   checks the name first and looks the agent up last; update looks it up
+//!   *first*, so a `PUT` to a missing agent with an empty name is a 404, not a
+//!   422. Reordering for tidiness changes which error the user sees.
+//! - **`permission_mode` can never be set through this API.** `AgentRequest`
+//!   (`internal/api/types.go`) has no such field, so it is always `""` — which
+//!   the service's switch accepts and the store then writes, *overwriting a
+//!   value that got there another way*. That is an upstream bug, recorded in
+//!   `desktop/CLAUDE.md`; reproducing it is the parity bar, and "fixing" it here
+//!   would make the two implementations disagree.
+//! - **Deleting a missing agent is a 500, not a 404.** The store returns a plain
+//!   `fmt.Errorf` rather than a `NotFoundError`, so `httpErr` falls through to
+//!   its default arm. This port does not reproduce 500s: it detects the case,
+//!   writes nothing, and forwards, so Go produces its own answer.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use axum::http::Method;
+use axum::http::{Method, StatusCode};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use super::db;
+use super::writes::{decode_body, finish, WriteError};
 
 /// One agent. Mirrors `config.AgentConfig`.
 #[derive(Debug, Clone, Serialize)]
@@ -130,7 +146,15 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
 };
 
 fn claims(method: &Method, path: &str) -> bool {
-    method == Method::GET && (path == "/api/agents" || slug_of(path).is_some())
+    match *method {
+        // The collection: listed and created.
+        Method::GET => path == "/api/agents" || slug_of(path).is_some(),
+        Method::POST => path == "/api/agents",
+        // One agent: replaced or removed. `/api/agents/{slug}/duplicate` is a
+        // different route and `slug_of` rejects it, so it still forwards.
+        Method::PUT | Method::DELETE => slug_of(path).is_some(),
+        _ => false,
+    }
 }
 
 /// The slug in `/api/agents/{slug}`, or `None` for anything else.
@@ -147,6 +171,22 @@ fn slug_of(path: &str) -> Option<&str> {
 }
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
+    match *req.method {
+        Method::GET => serve_read(ctx, req),
+        Method::POST => finish(create(&ctx.db_path, req.body)),
+        Method::PUT => match slug_of(req.path) {
+            Some(slug) => finish(update(&ctx.db_path, slug, req.body)),
+            None => Err("PUT /api/agents has no slug".to_string()),
+        },
+        Method::DELETE => match slug_of(req.path) {
+            Some(slug) => finish(delete(&ctx.db_path, slug)),
+            None => Err("DELETE /api/agents has no slug".to_string()),
+        },
+        _ => Err(format!("{} /api/agents is not ported", req.method)),
+    }
+}
+
+fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
     let body = match slug_of(req.path) {
         None => super::gojson::to_vec(&list(&ctx.db_path)?)
             .map_err(|e| format!("encoding agents: {e}"))?,
@@ -159,7 +199,359 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
             None => return Err(format!("agent {slug:?} not found")),
         },
     };
-    Ok(super::Answer { body, probe: None })
+    Ok(super::Answer::json(body))
+}
+
+// ─── Writes ───────────────────────────────────────────────────────────────────
+
+/// `AgentRequest` (`internal/api/types.go`).
+///
+/// Every field defaults, because Go's decoder leaves a missing key at its zero
+/// value rather than failing — and because a stored JSON `null` for a scalar is
+/// a zero value to Go and a type error to serde.
+///
+/// **There is deliberately no `permission_mode`.** Adding one here would accept
+/// a field the Go API silently drops, so the two would diverge on exactly the
+/// request a user would send to work around the upstream bug.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct AgentRequest {
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    name: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    slug: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    description: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    model: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    thinking: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    system_prompt: String,
+    capabilities: Option<Capabilities>,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    claude_config_dir: String,
+}
+
+impl AgentRequest {
+    /// The `config.AgentConfig` the handler builds, before the service applies
+    /// its defaults. `permission_mode` is `""` because the request cannot carry
+    /// one — see the module header.
+    fn into_agent(self) -> Agent {
+        Agent {
+            name: self.name,
+            slug: self.slug,
+            description: self.description,
+            model: self.model,
+            thinking: self.thinking,
+            permission_mode: String::new(),
+            system_prompt: self.system_prompt,
+            capabilities: self.capabilities.unwrap_or_default(),
+            claude_config_dir: self.claude_config_dir,
+        }
+    }
+}
+
+/// `agentService.Create`, in its order.
+fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let mut agent = decode_body::<AgentRequest>(body)?.into_agent();
+
+    if agent.name.is_empty() {
+        return Err(WriteError::validation("name", "name is required"));
+    }
+    if agent.slug.is_empty() {
+        agent.slug = to_slug(&agent.name);
+    }
+    if !is_valid_slug(&agent.slug) {
+        return Err(WriteError::validation(
+            "slug",
+            format!(
+                "invalid slug {:?}: use lowercase letters, digits and hyphens",
+                agent.slug
+            ),
+        ));
+    }
+    apply_defaults(&mut agent);
+    normalize_config_dir(&mut agent)?;
+
+    let mut conn = open_for_write(db_path)?;
+
+    // The uniqueness check and the insert have to be one transaction, or two
+    // concurrent creates both see "no such slug" and the second overwrites the
+    // first through the upsert. Go is not exposed to that only because it holds
+    // a single serialized connection; a separate process is.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin agent create: {e}")))?;
+
+    let exists: bool = tx
+        .query_row(
+            "SELECT 1 FROM agents WHERE slug = ?1",
+            [&agent.slug],
+            |_| Ok(true),
+        )
+        .optional()
+        .map_err(|e| WriteError::Fallback(format!("checking slug uniqueness: {e}")))?
+        .unwrap_or(false);
+    if exists {
+        return Err(WriteError::Conflict {
+            resource: "agent".to_string(),
+            id: agent.slug.clone(),
+        });
+    }
+
+    save(&tx, &agent)?;
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit agent create: {e}")))?;
+
+    encode(StatusCode::CREATED, &agent)
+}
+
+/// `agentService.Update`. Note it looks the agent up **before** validating the
+/// name, which is the opposite of create.
+fn update(db_path: &Path, slug: &str, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let mut agent = decode_body::<AgentRequest>(body)?.into_agent();
+    let mut conn = open_for_write(db_path)?;
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin agent update: {e}")))?;
+
+    let exists: bool = tx
+        .query_row("SELECT 1 FROM agents WHERE slug = ?1", [slug], |_| Ok(true))
+        .optional()
+        .map_err(|e| WriteError::Fallback(format!("looking up agent: {e}")))?
+        .unwrap_or(false);
+    if !exists {
+        return Err(WriteError::NotFound {
+            resource: "agent".to_string(),
+            id: slug.to_string(),
+        });
+    }
+
+    if agent.name.is_empty() {
+        return Err(WriteError::validation("name", "name is required"));
+    }
+    // The slug is the stable identifier; a body that carries a different one is
+    // ignored rather than rejected.
+    agent.slug = slug.to_string();
+    apply_defaults(&mut agent);
+    normalize_config_dir(&mut agent)?;
+
+    save(&tx, &agent)?;
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit agent update: {e}")))?;
+
+    encode(StatusCode::OK, &agent)
+}
+
+/// `agentService.Delete`. A missing agent is a 500 in Go, so it forwards.
+fn delete(db_path: &Path, slug: &str) -> Result<super::Answer, WriteError> {
+    let conn = open_for_write(db_path)?;
+    let affected = conn
+        .execute("DELETE FROM agents WHERE slug = ?1", [slug])
+        .map_err(|e| WriteError::Fallback(format!("deleting agent {slug:?}: {e}")))?;
+    if affected == 0 {
+        // Nothing was written, so forwarding cannot double-apply. Go answers
+        // its own 500, which is the behaviour the app has today.
+        return Err(WriteError::Fallback(format!("agent {slug:?} not found")));
+    }
+    Ok(super::Answer::no_content())
+}
+
+/// The defaults the service fills in. Shared by create and update because they
+/// apply the same three — but note update does *not* re-derive the slug.
+fn apply_defaults(agent: &mut Agent) {
+    if agent.model.is_empty() {
+        agent.model = "claude-sonnet-4-6".to_string();
+    }
+    if agent.thinking.is_empty() {
+        agent.thinking = "adaptive".to_string();
+    }
+    // `permission_mode` is always "" here, so the service's switch — which
+    // accepts "", "bypass" and "default" — can never reject it. Modelled as a
+    // fact rather than a branch, so it reads as deliberate.
+}
+
+/// `config.ValidateClaudeConfigDir` then `NormalizeClaudeConfigDir`.
+///
+/// Go validates the *normalized* path and then stores the normalized form, so
+/// the order matters: `~/x` is expanded before the absolute-path check, or
+/// every tilde path would be rejected.
+fn normalize_config_dir(agent: &mut Agent) -> Result<(), WriteError> {
+    if agent.claude_config_dir.is_empty() {
+        return Ok(());
+    }
+    let normalized = normalize_claude_config_dir(&agent.claude_config_dir);
+    if normalized.is_empty() {
+        agent.claude_config_dir = normalized;
+        return Ok(());
+    }
+
+    let path = PathBuf::from(&normalized);
+    if !path.is_absolute() {
+        return Err(WriteError::validation(
+            "claude_config_dir",
+            format!("claude config dir must be an absolute path, got {normalized:?}"),
+        ));
+    }
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(WriteError::validation(
+                "claude_config_dir",
+                format!("claude config dir {normalized:?} is not a directory"),
+            ))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(WriteError::validation(
+                "claude_config_dir",
+                format!("claude config dir {normalized:?} does not exist"),
+            ))
+        }
+        // Go wraps the underlying error here, and its text is the Go runtime's.
+        // Reproducing it is not possible, so this forwards instead of inventing
+        // a message the user would see.
+        Err(e) => {
+            return Err(WriteError::Fallback(format!(
+                "claude config dir {normalized:?} is not readable: {e}"
+            )))
+        }
+    }
+
+    agent.claude_config_dir = normalized;
+    Ok(())
+}
+
+/// `config.NormalizeClaudeConfigDir`: trim, expand a leading `~`, then
+/// `filepath.Clean`.
+fn normalize_claude_config_dir(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let expanded = if trimmed == "~" || trimmed.starts_with("~/") {
+        match crate::paths::home() {
+            Some(home) => super::gopath::join(&[
+                &home.to_string_lossy(),
+                trimmed.strip_prefix('~').unwrap_or(""),
+            ]),
+            // Go leaves the value alone when the home dir cannot be resolved,
+            // and the absolute-path check then rejects it.
+            None => trimmed.to_string(),
+        }
+    } else {
+        trimmed.to_string()
+    };
+    super::gopath::clean(&expanded)
+}
+
+/// `SQLiteAgentStore.Save` — one upsert, `created_at` untouched on conflict.
+fn save(tx: &rusqlite::Transaction, agent: &Agent) -> Result<(), WriteError> {
+    // `validateAgentForSave` rejects an unknown thinking value with a plain
+    // error, which is a 500. Detect it before writing and forward.
+    if !matches!(
+        agent.thinking.as_str(),
+        "" | "adaptive" | "disabled" | "enabled"
+    ) {
+        return Err(WriteError::Fallback(format!(
+            "invalid thinking value {:?}: must be adaptive, disabled, or enabled",
+            agent.thinking
+        )));
+    }
+
+    let capabilities = super::gojson::to_vec_marshal(&agent.capabilities)
+        .map_err(|e| WriteError::Fallback(format!("encoding capabilities: {e}")))?;
+    let capabilities = String::from_utf8(capabilities)
+        .map_err(|e| WriteError::Fallback(format!("capabilities are not UTF-8: {e}")))?;
+    let now = super::gotime::now_go_text();
+
+    tx.execute(
+        "INSERT INTO agents (slug, name, description, model, thinking, permission_mode,
+                             system_prompt, capabilities, claude_config_dir,
+                             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(slug) DO UPDATE SET
+             name = excluded.name,
+             description = excluded.description,
+             model = excluded.model,
+             thinking = excluded.thinking,
+             permission_mode = excluded.permission_mode,
+             system_prompt = excluded.system_prompt,
+             capabilities = excluded.capabilities,
+             claude_config_dir = excluded.claude_config_dir,
+             updated_at = excluded.updated_at",
+        rusqlite::params![
+            agent.slug,
+            agent.name,
+            agent.description,
+            agent.model,
+            agent.thinking,
+            agent.permission_mode,
+            agent.system_prompt,
+            capabilities,
+            agent.claude_config_dir,
+            now,
+            now,
+        ],
+    )
+    .map_err(|e| WriteError::Fallback(format!("saving agent {:?}: {e}", agent.slug)))?;
+    Ok(())
+}
+
+/// `toSlug` (`internal/service/agent_service.go`), byte for byte.
+///
+/// Lowercases, keeps `[a-z0-9]`, collapses every other run into a single
+/// hyphen, never leads with one, and trims trailing ones. It walks **bytes**,
+/// not chars, so a multi-byte character becomes one hyphen rather than one per
+/// byte — the `len(result) > 0` guard and the `prevHyphen` flag together are
+/// what produce that, and a `chars()` port would differ on any non-ASCII name.
+fn to_slug(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let mut result: Vec<u8> = Vec::new();
+    let mut prev_hyphen = false;
+    for &c in lower.as_bytes() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            result.push(c);
+            prev_hyphen = false;
+        } else if !prev_hyphen && !result.is_empty() {
+            result.push(b'-');
+            prev_hyphen = true;
+        }
+    }
+    while result.last() == Some(&b'-') {
+        result.pop();
+    }
+    String::from_utf8(result).unwrap_or_default()
+}
+
+/// `slugRE`: `^[a-z0-9]+(?:-[a-z0-9]+)*$`.
+///
+/// Written out rather than pulled in as a regex dependency: it is one
+/// alternation, and the crate is not otherwise needed.
+fn is_valid_slug(slug: &str) -> bool {
+    if slug.is_empty() {
+        return false;
+    }
+    let mut segments = slug.split('-');
+    segments.all(|segment| {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    })
+}
+
+fn open_for_write(db_path: &Path) -> Result<rusqlite::Connection, WriteError> {
+    let conn = db::open_read_write(db_path).map_err(WriteError::Fallback)?;
+    super::migrate::verify(&conn).map_err(WriteError::Fallback)?;
+    Ok(conn)
+}
+
+fn encode(status: StatusCode, agent: &Agent) -> Result<super::Answer, WriteError> {
+    let body = super::gojson::to_vec(agent)
+        .map_err(|e| WriteError::Fallback(format!("encoding agent: {e}")))?;
+    Ok(super::Answer::json_status(status, body))
 }
 
 #[cfg(test)]
@@ -272,5 +664,226 @@ mod tests {
         .expect("insert");
 
         assert!(list(file.path()).is_err());
+    }
+
+    // ─── Writes ───────────────────────────────────────────────────────────────
+
+    /// A database built by the **real** migrations rather than the hand-written
+    /// `SCHEMA` above, because the write path checks the recorded schema version
+    /// and because a fixture table is exactly where a column default drifts away
+    /// from the one production has.
+    fn migrated() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        super::super::migrate::apply(&mut conn).expect("migrate");
+        file
+    }
+
+    fn stored(file: &tempfile::NamedTempFile, slug: &str) -> Option<Agent> {
+        get(file.path(), slug).expect("get")
+    }
+
+    #[test]
+    fn creating_an_agent_answers_201_and_stores_it() {
+        let file = migrated();
+        let answer = create(
+            file.path(),
+            br#"{"name":"My Agent","description":"d","system_prompt":"p"}"#,
+        )
+        .expect("create");
+
+        assert_eq!(answer.status, StatusCode::CREATED);
+        let agent = stored(&file, "my-agent").expect("stored");
+        assert_eq!(agent.name, "My Agent");
+        // The service's defaults, not the column's.
+        assert_eq!(agent.model, "claude-sonnet-4-6");
+        assert_eq!(agent.thinking, "adaptive");
+        // The one the API cannot set. The column default is 'bypass', but the
+        // insert supplies "" explicitly, so "" is what lands.
+        assert_eq!(agent.permission_mode, "");
+
+        // The response body is the agent, not an envelope.
+        let body = String::from_utf8(answer.body.expect("body")).unwrap();
+        assert!(
+            body.starts_with(r#"{"name":"My Agent","slug":"my-agent""#),
+            "{body}"
+        );
+    }
+
+    /// The upstream bug this port must not "fix": a `permission_mode` in the
+    /// request is dropped, because `AgentRequest` has no such field.
+    #[test]
+    fn a_permission_mode_in_the_request_is_ignored_as_go_ignores_it() {
+        let file = migrated();
+        create(file.path(), br#"{"name":"Pm","permission_mode":"plan"}"#).expect("create");
+        assert_eq!(stored(&file, "pm").expect("stored").permission_mode, "");
+    }
+
+    #[test]
+    fn a_missing_name_is_422_and_writes_nothing() {
+        let file = migrated();
+        let err = create(file.path(), br#"{"description":"no name"}"#).unwrap_err();
+        assert_eq!(err, WriteError::validation("name", "name is required"));
+        assert_eq!(list(file.path()).expect("list").len(), 0);
+    }
+
+    #[test]
+    fn a_bad_slug_is_422_with_gos_message() {
+        let file = migrated();
+        let err = create(file.path(), br#"{"name":"X","slug":"Not A Slug"}"#).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "validation error for \"slug\": invalid slug \"Not A Slug\": use lowercase letters, digits and hyphens"
+        );
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn a_duplicate_slug_is_409_and_leaves_the_original_alone() {
+        let file = migrated();
+        create(file.path(), br#"{"name":"First","slug":"dup"}"#).expect("first");
+        let err = create(file.path(), br#"{"name":"Second","slug":"dup"}"#).unwrap_err();
+
+        assert_eq!(err.status(), StatusCode::CONFLICT);
+        assert_eq!(err.message(), "agent with id \"dup\" already exists");
+        // The upsert must not have run: a conflict that overwrote would be
+        // silent data loss reported as an error.
+        assert_eq!(stored(&file, "dup").expect("stored").name, "First");
+    }
+
+    #[test]
+    fn updating_replaces_the_agent_and_answers_200() {
+        let file = migrated();
+        create(file.path(), br#"{"name":"Before","slug":"a1"}"#).expect("create");
+        let answer = update(
+            file.path(),
+            "a1",
+            br#"{"name":"After","description":"changed","thinking":"disabled"}"#,
+        )
+        .expect("update");
+
+        assert_eq!(answer.status, StatusCode::OK);
+        let agent = stored(&file, "a1").expect("stored");
+        assert_eq!(agent.name, "After");
+        assert_eq!(agent.description, "changed");
+        assert_eq!(agent.thinking, "disabled");
+    }
+
+    /// The slug is the identifier: a body carrying a different one is ignored,
+    /// not honoured and not rejected. Getting this wrong would silently create
+    /// a second agent and orphan the first.
+    #[test]
+    fn updating_ignores_a_slug_in_the_body() {
+        let file = migrated();
+        create(file.path(), br#"{"name":"Orig","slug":"keep"}"#).expect("create");
+        update(file.path(), "keep", br#"{"name":"Renamed","slug":"other"}"#).expect("update");
+
+        assert!(stored(&file, "other").is_none(), "must not have moved");
+        assert_eq!(stored(&file, "keep").expect("stored").name, "Renamed");
+        assert_eq!(list(file.path()).expect("list").len(), 1);
+    }
+
+    /// Update looks the agent up **before** validating the name, so this is a
+    /// 404 rather than the 422 create would give. The orders genuinely differ
+    /// in Go and the difference is visible.
+    #[test]
+    fn updating_a_missing_agent_is_404_even_with_an_invalid_body() {
+        let file = migrated();
+        let err = update(file.path(), "ghost", br#"{"name":""}"#).unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), "agent \"ghost\" not found");
+    }
+
+    #[test]
+    fn deleting_answers_204_with_no_body() {
+        let file = migrated();
+        create(file.path(), br#"{"name":"Bye","slug":"bye"}"#).expect("create");
+
+        let answer = delete(file.path(), "bye").expect("delete");
+        assert_eq!(answer.status, StatusCode::NO_CONTENT);
+        assert!(answer.body.is_none(), "204 carries no body");
+        assert!(stored(&file, "bye").is_none());
+    }
+
+    /// Go answers 500 here, and this port does not reproduce 500s — it forwards
+    /// so Go answers for itself. The important half is that nothing was written
+    /// first, or the forward would delete something else.
+    #[test]
+    fn deleting_a_missing_agent_forwards_rather_than_inventing_a_404() {
+        let file = migrated();
+        create(file.path(), br#"{"name":"Keep","slug":"keep"}"#).expect("create");
+
+        let err = delete(file.path(), "ghost").unwrap_err();
+        assert!(matches!(err, WriteError::Fallback(_)), "{err:?}");
+        assert!(stored(&file, "keep").is_some(), "unrelated rows untouched");
+    }
+
+    /// A body that is not JSON is a 400 with Go's fixed message — not the
+    /// decoder's error, and not a 422.
+    #[test]
+    fn a_malformed_body_is_400() {
+        let file = migrated();
+        for body in [&b""[..], b"{not json", b"[]"] {
+            let err = create(file.path(), body).unwrap_err();
+            assert_eq!(err, WriteError::InvalidBody, "body {body:?}");
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    /// The write path refuses a database whose schema it does not recognise,
+    /// rather than writing through a shape it guessed at.
+    #[test]
+    fn a_write_against_an_unmigrated_database_forwards() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute_batch(SCHEMA).expect("schema");
+        drop(conn);
+
+        let err = create(file.path(), br#"{"name":"X"}"#).unwrap_err();
+        assert!(matches!(err, WriteError::Fallback(_)), "{err:?}");
+    }
+
+    /// `toSlug` walks bytes, so one multi-byte character collapses to a single
+    /// hyphen. A `chars()` port agrees on ASCII and differs here.
+    #[test]
+    fn to_slug_matches_gos_byte_walk() {
+        assert_eq!(to_slug("My Agent"), "my-agent");
+        assert_eq!(to_slug("  leading"), "leading");
+        assert_eq!(to_slug("trailing  "), "trailing");
+        assert_eq!(to_slug("Multiple   Spaces"), "multiple-spaces");
+        // "ünïcode" as bytes: `ü` is two non-alphanumeric bytes with nothing
+        // accumulated yet, so both are dropped rather than becoming a leading
+        // hyphen; `ï` is two more, and the pair collapses to a single hyphen
+        // because `prevHyphen` suppresses the second. A `chars()` port produces
+        // "-n-code" here and agrees with this one on every ASCII name.
+        assert_eq!(to_slug("Ünïcode"), "n-code");
+        assert_eq!(to_slug("---"), "");
+        assert_eq!(to_slug(""), "");
+        assert_eq!(to_slug("a1-b2"), "a1-b2");
+    }
+
+    #[test]
+    fn the_slug_pattern_is_gos_regex() {
+        for good in ["a", "a1", "my-agent", "a-b-c", "9-9"] {
+            assert!(is_valid_slug(good), "{good} should be valid");
+        }
+        for bad in ["", "-a", "a-", "a--b", "A", "a_b", "a b", "-", "ä"] {
+            assert!(!is_valid_slug(bad), "{bad} should be invalid");
+        }
+    }
+
+    #[test]
+    fn the_write_routes_are_claimed_and_the_nested_ones_are_not() {
+        assert!(claims(&Method::POST, "/api/agents"));
+        assert!(claims(&Method::PUT, "/api/agents/my-agent"));
+        assert!(claims(&Method::DELETE, "/api/agents/my-agent"));
+
+        // Creating is on the collection, not on one agent.
+        assert!(!claims(&Method::POST, "/api/agents/my-agent"));
+        // Still unported, and still a different route.
+        assert!(!claims(&Method::POST, "/api/agents/my-agent/duplicate"));
+        assert!(!claims(&Method::PUT, "/api/agents"));
+        assert!(!claims(&Method::DELETE, "/api/agents"));
+        assert!(!claims(&Method::PATCH, "/api/agents/my-agent"));
     }
 }

@@ -38,6 +38,7 @@ use serde::{Deserialize, Serialize};
 
 use super::db;
 use super::gotime::GoTime;
+use super::writes::{decode_body, finish, WriteError};
 
 /// How a task repeats. Mirrors `storage.ScheduleConfig`.
 ///
@@ -376,7 +377,18 @@ enum Route<'a> {
 }
 
 fn claims(method: &Method, path: &str) -> bool {
-    method == Method::GET && route_of(path).is_some()
+    match *method {
+        Method::GET => route_of(path).is_some(),
+        // The two job-history deletes (#274). Task writes stay with Go: every
+        // one of them also registers or unregisters a cron entry in the
+        // scheduler, which is #275's to move — a task created here would be
+        // stored and then never fire.
+        Method::DELETE => matches!(
+            route_of(path),
+            Some(Route::JobHistoryList) | Some(Route::JobHistory(_))
+        ),
+        _ => false,
+    }
 }
 
 /// Match the five read paths and nothing else.
@@ -411,6 +423,17 @@ fn segment(value: &str) -> Option<&str> {
 }
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
+    if *req.method == Method::DELETE {
+        return match route_of(req.path) {
+            Some(Route::JobHistory(id)) => finish(delete_job_history(&ctx.db_path, id)),
+            Some(Route::JobHistoryList) => finish(bulk_delete_job_history(&ctx.db_path, req.body)),
+            _ => Err(format!("DELETE {} is not ported", req.path)),
+        };
+    }
+    serve_read(ctx, req)
+}
+
+fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
     let db = &ctx.db_path;
     let body = match route_of(req.path) {
         Some(Route::TaskList) => {
@@ -447,13 +470,87 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
 
         None => return Err(format!("{} is not a task read", req.path)),
     };
-    Ok(super::Answer { body, probe: None })
+    Ok(super::Answer::json(body))
+}
+
+// ─── Writes ───────────────────────────────────────────────────────────────────
+
+/// `BulkDeleteRequest` (`internal/api/types.go`).
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct BulkDeleteRequest {
+    ids: Option<Vec<String>>,
+}
+
+/// Go's `maxQueryLimit`, reused as the bulk-delete cap.
+const MAX_BULK_IDS: usize = 500;
+
+/// `taskService.DeleteJobHistory`.
+///
+/// Unlike the chat and agent deletes, this one is a genuine **404**: the service
+/// reads the row first and returns a `NotFoundError`, which `httpErr` maps. The
+/// store's own zero-rows error is unreachable behind that check.
+fn delete_job_history(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
+    let mut conn = open_for_write(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin job history delete: {e}")))?;
+
+    let exists: bool = tx
+        .query_row("SELECT 1 FROM job_history WHERE id = ?1", [id], |_| {
+            Ok(true)
+        })
+        .optional()
+        .map_err(|e| WriteError::Fallback(format!("looking up job history: {e}")))?
+        .unwrap_or(false);
+    if !exists {
+        return Err(WriteError::NotFound {
+            resource: "job_history".to_string(),
+            id: id.to_string(),
+        });
+    }
+
+    tx.execute("DELETE FROM job_history WHERE id = ?1", [id])
+        .map_err(|e| WriteError::Fallback(format!("deleting job history {id:?}: {e}")))?;
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit job history delete: {e}")))?;
+
+    Ok(super::Answer::no_content())
+}
+
+/// `handleBulkDeleteJobHistory`. Ids that do not exist are not an error.
+fn bulk_delete_job_history(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<BulkDeleteRequest>(body)?;
+    let ids = req.ids.unwrap_or_default();
+    if ids.is_empty() {
+        return Err(WriteError::BadRequest("ids must not be empty".to_string()));
+    }
+    if ids.len() > MAX_BULK_IDS {
+        return Err(WriteError::BadRequest("too many ids (max 500)".to_string()));
+    }
+
+    let conn = open_for_write(db_path)?;
+    // `vec!` rather than `iter::repeat_n`, which needs Rust 1.82 and this
+    // crate's MSRV is 1.77.
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!("DELETE FROM job_history WHERE id IN ({placeholders})");
+    conn.execute(&sql, rusqlite::params_from_iter(ids.iter()))
+        .map_err(|e| WriteError::Fallback(format!("bulk deleting job history: {e}")))?;
+
+    Ok(super::Answer::no_content())
+}
+
+fn open_for_write(db_path: &Path) -> Result<rusqlite::Connection, WriteError> {
+    let conn = db::open_read_write(db_path).map_err(WriteError::Fallback)?;
+    super::migrate::verify(&conn).map_err(WriteError::Fallback)?;
+    Ok(conn)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::native::gojson;
+    use axum::http::StatusCode;
 
     const SCHEMA: &str = "
         CREATE TABLE scheduled_tasks (
@@ -734,10 +831,103 @@ mod tests {
         assert!(!claimed("/api/task"));
         assert!(!claimed("/api/job-historyx"));
 
-        // Only GET, so every write on these paths still forwards.
+        // Task writes still forward — see `only_the_job_history_deletes_are_claimed`.
         assert!(!claims(&Method::POST, "/api/tasks"));
         assert!(!claims(&Method::PUT, "/api/tasks/abc-123"));
-        assert!(!claims(&Method::DELETE, "/api/job-history"));
         assert!(claims(&Method::GET, "/api/tasks"));
+    }
+
+    // ─── Writes ───────────────────────────────────────────────────────────────
+
+    fn migrated_with_history() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute_batch(
+            "INSERT INTO scheduled_tasks (id, name, prompt) VALUES ('t1', 'T', 'p');
+             INSERT INTO job_history (id, task_id, task_name, started_at)
+             VALUES ('j1', 't1', 'T', '2026-01-01 00:00:00 +0000 UTC'),
+                    ('j2', 't1', 'T', '2026-01-02 00:00:00 +0000 UTC'),
+                    ('j3', 't1', 'T', '2026-01-03 00:00:00 +0000 UTC');",
+        )
+        .expect("seed");
+        file
+    }
+
+    fn history_ids(file: &tempfile::NamedTempFile) -> Vec<String> {
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let mut stmt = conn
+            .prepare("SELECT id FROM job_history ORDER BY id")
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query");
+        rows.map(|r| r.expect("row")).collect()
+    }
+
+    #[test]
+    fn deleting_one_job_history_entry_answers_204() {
+        let file = migrated_with_history();
+        let answer = delete_job_history(file.path(), "j2").expect("delete");
+        assert_eq!(answer.status, StatusCode::NO_CONTENT);
+        assert!(answer.body.is_none());
+        assert_eq!(history_ids(&file), vec!["j1", "j3"]);
+    }
+
+    /// This one really is a 404 — the service checks the row exists and returns
+    /// a `NotFoundError`, unlike the agent and chat deletes which are 500s.
+    #[test]
+    fn deleting_a_missing_job_history_entry_is_404() {
+        let file = migrated_with_history();
+        let err = delete_job_history(file.path(), "ghost").unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), "job_history \"ghost\" not found");
+        assert_eq!(history_ids(&file).len(), 3, "nothing deleted");
+    }
+
+    #[test]
+    fn bulk_deleting_job_history_ignores_unknown_ids() {
+        let file = migrated_with_history();
+        let answer =
+            bulk_delete_job_history(file.path(), br#"{"ids":["j1","j3","nope"]}"#).expect("bulk");
+        assert_eq!(answer.status, StatusCode::NO_CONTENT);
+        assert_eq!(history_ids(&file), vec!["j2"]);
+    }
+
+    #[test]
+    fn bulk_job_history_bounds_are_400() {
+        let file = migrated_with_history();
+        for (body, want) in [
+            (r#"{}"#.to_string(), "ids must not be empty"),
+            (r#"{"ids":[]}"#.to_string(), "ids must not be empty"),
+            (
+                format!(r#"{{"ids":[{}]}}"#, vec!["\"x\""; 501].join(",")),
+                "too many ids (max 500)",
+            ),
+        ] {
+            let err = bulk_delete_job_history(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(err.message(), want);
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        }
+        assert_eq!(
+            history_ids(&file).len(),
+            3,
+            "a rejected bulk deletes nothing"
+        );
+    }
+
+    /// Task writes are #275's: every one of them also touches the scheduler, so
+    /// a task created here would be stored and then never run.
+    #[test]
+    fn only_the_job_history_deletes_are_claimed() {
+        assert!(claims(&Method::DELETE, "/api/job-history"));
+        assert!(claims(&Method::DELETE, "/api/job-history/j1"));
+
+        assert!(!claims(&Method::POST, "/api/tasks"));
+        assert!(!claims(&Method::PUT, "/api/tasks/t1"));
+        assert!(!claims(&Method::DELETE, "/api/tasks/t1"));
+        assert!(!claims(&Method::POST, "/api/tasks/t1/pause"));
+        assert!(!claims(&Method::POST, "/api/tasks/t1/resume"));
+        assert!(!claims(&Method::DELETE, "/api/tasks/t1/job-history"));
     }
 }

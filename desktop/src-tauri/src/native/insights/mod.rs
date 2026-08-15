@@ -53,9 +53,9 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
     let conn = db::open_read_only(&ctx.db_path)?;
     let data_settings = settings::load(&conn);
     let summary = summary::summary(&conn, &data_settings, req.query)?;
-    Ok(Answer {
-        body: gojson::to_vec(&summary).map_err(|e| format!("encoding insights summary: {e}"))?,
-        // It reads the corpus through Cache.List, which runs ensureFresh.
-        probe: Some(sessions::PROBE_PATH),
-    })
+    // It reads the corpus through Cache.List, which runs ensureFresh.
+    Ok(Answer::json(
+        gojson::to_vec(&summary).map_err(|e| format!("encoding insights summary: {e}"))?,
+    )
+    .with_probe(sessions::PROBE_PATH))
 }

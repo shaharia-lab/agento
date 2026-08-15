@@ -158,7 +158,7 @@ fn serve(_ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, Strin
     }
     let listing = list(&path_param(req.query))?;
     let body = super::gojson::to_vec(&listing).map_err(|e| format!("encoding fs listing: {e}"))?;
-    Ok(super::Answer { body, probe: None })
+    Ok(super::Answer::json(body))
 }
 
 #[cfg(test)]

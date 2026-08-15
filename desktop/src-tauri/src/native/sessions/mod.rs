@@ -97,20 +97,17 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
             // Falling back lets Go answer its own 404 rather than this having
             // to reproduce the body and the status.
             None => Err(format!("claude session {id:?} not found")),
-            Some(d) => Ok(Answer {
-                body: gojson::to_vec(&d).map_err(|e| format!("encoding session detail: {e}"))?,
-                probe: None,
-            }),
+            Some(d) => Ok(Answer::json(
+                gojson::to_vec(&d).map_err(|e| format!("encoding session detail: {e}"))?,
+            )),
         };
     }
 
     if req.path == "/api/claude-sessions/projects" {
         let projects = projects::list(&ctx.db_path, projects::include_hidden(req.query))?;
-        return Ok(Answer {
-            body: gojson::to_vec(&projects)
-                .map_err(|e| format!("encoding claude projects: {e}"))?,
-            probe: None,
-        });
+        return Ok(Answer::json(
+            gojson::to_vec(&projects).map_err(|e| format!("encoding claude projects: {e}"))?,
+        ));
     }
 
     let q = query::SessionQuery::parse(req.query)?;
@@ -124,9 +121,10 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
         let facets = page::facets(&conn, &data_settings, &q)?;
         gojson::to_vec(&facets).map_err(|e| format!("encoding session facets: {e}"))?
     };
-    Ok(Answer {
-        body,
-        probe: freshness_probe(req.path, &q),
+    let answer = Answer::json(body);
+    Ok(match freshness_probe(req.path, &q) {
+        Some(probe) => answer.with_probe(probe),
+        None => answer,
     })
 }
 

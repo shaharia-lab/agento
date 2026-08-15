@@ -28,13 +28,14 @@
 
 use std::path::Path;
 
-use axum::http::Method;
+use axum::http::{Method, StatusCode};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 use super::db;
 use super::gotime::GoTime;
+use super::writes::{decode_body, finish, WriteError};
 
 /// One chat session's metadata. Mirrors `storage.ChatSession`.
 ///
@@ -289,7 +290,14 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
 };
 
 fn claims(method: &Method, path: &str) -> bool {
-    method == Method::GET && (path == "/api/chats" || id_of(path).is_some())
+    match *method {
+        Method::GET => path == "/api/chats" || id_of(path).is_some(),
+        // Creating a chat, and the bulk delete — both on the collection.
+        Method::POST | Method::DELETE if path == "/api/chats" => true,
+        // Renaming/favouriting, and deleting one chat.
+        Method::PATCH | Method::DELETE => id_of(path).is_some(),
+        _ => false,
+    }
 }
 
 /// The id in `/api/chats/{id}`, or `None` for anything else.
@@ -307,6 +315,22 @@ fn id_of(path: &str) -> Option<&str> {
 }
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
+    match *req.method {
+        Method::GET => serve_read(ctx, req),
+        Method::POST => finish(create(&ctx.db_path, req.body)),
+        Method::PATCH => match id_of(req.path) {
+            Some(id) => finish(patch(&ctx.db_path, id, req.body)),
+            None => Err("PATCH /api/chats has no id".to_string()),
+        },
+        Method::DELETE => match id_of(req.path) {
+            Some(id) => finish(delete_one(&ctx.db_path, id)),
+            None => finish(bulk_delete(&ctx.db_path, req.body)),
+        },
+        _ => Err(format!("{} /api/chats is not ported", req.method)),
+    }
+}
+
+fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
     let body = match id_of(req.path) {
         None => super::gojson::to_vec(&list(&ctx.db_path)?)
             .map_err(|e| format!("encoding chats: {e}"))?,
@@ -319,7 +343,283 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
             None => return Err(format!("chat {id:?} not found")),
         },
     };
-    Ok(super::Answer { body, probe: None })
+    Ok(super::Answer::json(body))
+}
+
+// ─── Writes ───────────────────────────────────────────────────────────────────
+
+/// `createChatRequest` (`internal/api/chats.go`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CreateChatRequest {
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    agent_slug: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    working_directory: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    model: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    settings_profile_id: String,
+}
+
+/// The PATCH body. Both fields are genuinely optional — `null` and absent mean
+/// the same thing (leave it alone), and "neither present" is its own 400. So
+/// these are `Option`, not zero-value fields: a `title` of `""` is a *different*
+/// request from no title at all, and Go rejects the first and ignores the
+/// second.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct PatchChatRequest {
+    title: Option<String>,
+    is_favorite: Option<bool>,
+}
+
+/// `BulkDeleteRequest` (`internal/api/types.go`).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct BulkDeleteRequest {
+    ids: Option<Vec<String>>,
+}
+
+/// Go's `maxQueryLimit`, reused as the bulk-delete cap.
+const MAX_BULK_IDS: usize = 500;
+
+/// `chatService.CreateSession`.
+///
+/// The agent slug is validated only when non-empty — a chat with no agent is
+/// legal — and the row is created with a fixed title and zeroed counters.
+fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<CreateChatRequest>(body)?;
+    let mut conn = open_for_write(db_path)?;
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin chat create: {e}")))?;
+
+    if !req.agent_slug.is_empty() {
+        let exists: bool = tx
+            .query_row(
+                "SELECT 1 FROM agents WHERE slug = ?1",
+                [&req.agent_slug],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(|e| WriteError::Fallback(format!("looking up agent: {e}")))?
+            .unwrap_or(false);
+        if !exists {
+            return Err(WriteError::NotFound {
+                resource: "agent".to_string(),
+                id: req.agent_slug.clone(),
+            });
+        }
+    }
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = super::gotime::now_go_text();
+    // `sdk_session_id` and the four token totals are literals in the Go INSERT
+    // rather than bound parameters, so they are literals here too.
+    tx.execute(
+        "INSERT INTO chat_sessions
+            (id, title, agent_slug, sdk_session_id, working_directory, model,
+             settings_profile_id, total_input_tokens, total_output_tokens,
+             total_cache_creation_tokens, total_cache_read_tokens, created_at, updated_at)
+         VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, 0, 0, 0, 0, ?7, ?8)",
+        rusqlite::params![
+            id,
+            "New Chat",
+            req.agent_slug,
+            req.working_directory,
+            req.model,
+            req.settings_profile_id,
+            now,
+            now,
+        ],
+    )
+    .map_err(|e| WriteError::Fallback(format!("creating session: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit chat create: {e}")))?;
+
+    // The handler answers with the session the store built, not a re-read — so
+    // the timestamps are the ones just written, parsed back from the same text
+    // rather than re-taken from the clock.
+    let stamp = super::gotime::from_sql_text(&now, 0)
+        .map_err(|e| WriteError::Fallback(format!("re-reading the write timestamp: {e}")))?;
+    let session = ChatSession {
+        id,
+        title: "New Chat".to_string(),
+        agent_slug: req.agent_slug,
+        sdk_session_id: String::new(),
+        working_directory: req.working_directory,
+        model: req.model,
+        settings_profile_id: req.settings_profile_id,
+        created_at: stamp,
+        updated_at: stamp,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_creation_tokens: 0,
+        total_cache_read_tokens: 0,
+        is_favorite: false,
+    };
+    let body = super::gojson::to_vec(&session)
+        .map_err(|e| WriteError::Fallback(format!("encoding chat: {e}")))?;
+    Ok(super::Answer::json_status(StatusCode::CREATED, body))
+}
+
+/// `handleUpdateChat`: rename and/or favourite.
+///
+/// Every failure here is a **400**, not a 422 — the checks are in the handler
+/// rather than the service, and the chats handlers never call `httpErr`. A
+/// missing chat is a 404 with the fixed string `chat not found`, not the
+/// service's `NotFoundError` wording.
+fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<PatchChatRequest>(body)?;
+    if req.title.is_none() && req.is_favorite.is_none() {
+        return Err(WriteError::BadRequest("no fields to update".to_string()));
+    }
+    let title = match req.title {
+        Some(raw) => {
+            let trimmed = raw.trim().to_string();
+            if trimmed.is_empty() {
+                return Err(WriteError::BadRequest("title cannot be empty".to_string()));
+            }
+            Some(trimmed)
+        }
+        None => None,
+    };
+
+    let mut conn = open_for_write(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin chat patch: {e}")))?;
+
+    // The handler reads the session, mutates the struct and writes the whole
+    // row back, so a concurrent change to any other column would be clobbered.
+    // Doing it in one transaction is what stops that being observable here.
+    let mut session = match get_session_tx(&tx, id)? {
+        Some(session) => session,
+        // `err != nil || session == nil` collapses both to the same 404 with a
+        // fixed message.
+        None => return Err(WriteError::BadRequest("chat not found".to_string())),
+    };
+
+    if let Some(title) = title {
+        session.title = title;
+    }
+    if let Some(favorite) = req.is_favorite {
+        session.is_favorite = favorite;
+    }
+    let now = super::gotime::now_go_text();
+
+    tx.execute(
+        "UPDATE chat_sessions SET
+            title = ?1, agent_slug = ?2, sdk_session_id = ?3, working_directory = ?4,
+            model = ?5, settings_profile_id = ?6,
+            total_input_tokens = ?7, total_output_tokens = ?8,
+            total_cache_creation_tokens = ?9, total_cache_read_tokens = ?10,
+            is_favorite = ?11,
+            updated_at = ?12
+         WHERE id = ?13",
+        rusqlite::params![
+            session.title,
+            session.agent_slug,
+            session.sdk_session_id,
+            session.working_directory,
+            session.model,
+            session.settings_profile_id,
+            session.total_input_tokens,
+            session.total_output_tokens,
+            session.total_cache_creation_tokens,
+            session.total_cache_read_tokens,
+            session.is_favorite,
+            now,
+            id,
+        ],
+    )
+    .map_err(|e| WriteError::Fallback(format!("updating session {id:?}: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit chat patch: {e}")))?;
+
+    // The response is the in-memory session, whose `updated_at` the handler
+    // never refreshes — so it carries the value read from the row, not `now`.
+    let body = super::gojson::to_vec(&session)
+        .map_err(|e| WriteError::Fallback(format!("encoding chat: {e}")))?;
+    Ok(super::Answer::json(body))
+}
+
+/// `handleDeleteChat`. A missing chat is a 500 in Go — the store returns a
+/// plain error, so the `NotFoundError` branch never fires — so it forwards.
+fn delete_one(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
+    let conn = open_for_write(db_path)?;
+    let affected = conn
+        .execute("DELETE FROM chat_sessions WHERE id = ?1", [id])
+        .map_err(|e| WriteError::Fallback(format!("deleting session {id:?}: {e}")))?;
+    if affected == 0 {
+        return Err(WriteError::Fallback(format!("session {id:?} not found")));
+    }
+    Ok(super::Answer::no_content())
+}
+
+/// `handleBulkDeleteChats`. Unlike the single delete, ids that do not exist are
+/// not an error — the statement simply matches nothing.
+fn bulk_delete(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<BulkDeleteRequest>(body)?;
+    let ids = req.ids.unwrap_or_default();
+    if ids.is_empty() {
+        return Err(WriteError::BadRequest("ids must not be empty".to_string()));
+    }
+    if ids.len() > MAX_BULK_IDS {
+        return Err(WriteError::BadRequest("too many ids (max 500)".to_string()));
+    }
+
+    let conn = open_for_write(db_path)?;
+    // `vec!` rather than `iter::repeat_n`, which needs Rust 1.82 and this
+    // crate's MSRV is 1.77.
+    let placeholders = vec!["?"; ids.len()].join(",");
+    let sql = format!("DELETE FROM chat_sessions WHERE id IN ({placeholders})");
+    conn.execute(&sql, rusqlite::params_from_iter(ids.iter()))
+        .map_err(|e| WriteError::Fallback(format!("bulk deleting sessions: {e}")))?;
+
+    Ok(super::Answer::no_content())
+}
+
+/// The session row, read inside the caller's transaction.
+fn get_session_tx(tx: &rusqlite::Transaction, id: &str) -> Result<Option<ChatSession>, WriteError> {
+    tx.query_row(
+        "SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
+                settings_profile_id, total_input_tokens, total_output_tokens,
+                total_cache_creation_tokens, total_cache_read_tokens, is_favorite,
+                created_at, updated_at
+         FROM chat_sessions WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(ChatSession {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                agent_slug: row.get(2)?,
+                sdk_session_id: row.get(3)?,
+                working_directory: row.get(4)?,
+                model: row.get(5)?,
+                settings_profile_id: row.get(6)?,
+                total_input_tokens: row.get(7)?,
+                total_output_tokens: row.get(8)?,
+                total_cache_creation_tokens: row.get(9)?,
+                total_cache_read_tokens: row.get(10)?,
+                is_favorite: row.get(11)?,
+                created_at: super::gotime::from_sql_text(&row.get::<_, String>(12)?, 12)?,
+                updated_at: super::gotime::from_sql_text(&row.get::<_, String>(13)?, 13)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| WriteError::Fallback(format!("looking up session {id:?}: {e}")))
+}
+
+fn open_for_write(db_path: &Path) -> Result<rusqlite::Connection, WriteError> {
+    let conn = db::open_read_write(db_path).map_err(WriteError::Fallback)?;
+    super::migrate::verify(&conn).map_err(WriteError::Fallback)?;
+    Ok(conn)
 }
 
 #[cfg(test)]
@@ -598,5 +898,198 @@ mod tests {
             encoded(&decode_blocks(&separators)).trim_end(),
             r#"[{"type":"text","text":"para1\u2028para2"},{"type":"tool_use","id":"t9","name":"N","input":{"sep":"a\u2028b\u2029c","emoji":"😀 ünïcödé"}}]"#
         );
+    }
+
+    // ─── Writes ───────────────────────────────────────────────────────────────
+
+    /// Built by the real migrations, both because the write path checks the
+    /// recorded schema version and because `ON DELETE CASCADE` on
+    /// `chat_messages` only exists in the real schema.
+    fn migrated() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        file
+    }
+
+    fn created_id(answer: &super::super::Answer) -> String {
+        let body: serde_json::Value =
+            serde_json::from_slice(answer.body.as_deref().expect("body")).expect("json");
+        body["id"].as_str().expect("id").to_string()
+    }
+
+    #[test]
+    fn creating_a_chat_answers_201_with_the_new_session() {
+        let file = migrated();
+        let answer =
+            create(file.path(), br#"{"working_directory":"/tmp","model":"m"}"#).expect("create");
+
+        assert_eq!(answer.status, StatusCode::CREATED);
+        let body: serde_json::Value =
+            serde_json::from_slice(answer.body.as_deref().expect("body")).expect("json");
+        assert_eq!(body["title"], "New Chat");
+        assert_eq!(body["working_directory"], "/tmp");
+        assert_eq!(body["model"], "m");
+        // omitempty: zero counters and a false favourite are absent, and so is
+        // the empty settings profile.
+        assert!(body.get("total_input_tokens").is_none());
+        assert!(body.get("is_favorite").is_none());
+        assert!(body.get("settings_profile_id").is_none());
+        // The id is a v4 UUID, as `newSQLiteUUID` produces.
+        assert!(uuid::Uuid::parse_str(body["id"].as_str().unwrap()).is_ok());
+
+        assert_eq!(list(file.path()).expect("list").len(), 1);
+    }
+
+    /// A chat with no agent is legal, so the slug is only checked when present.
+    #[test]
+    fn an_empty_agent_slug_is_not_validated() {
+        let file = migrated();
+        create(file.path(), br#"{"agent_slug":""}"#).expect("create");
+        assert_eq!(list(file.path()).expect("list").len(), 1);
+    }
+
+    #[test]
+    fn an_unknown_agent_slug_is_404_and_creates_nothing() {
+        let file = migrated();
+        let err = create(file.path(), br#"{"agent_slug":"ghost"}"#).unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), "agent \"ghost\" not found");
+        assert_eq!(list(file.path()).expect("list").len(), 0);
+    }
+
+    #[test]
+    fn patching_renames_and_favourites() {
+        let file = migrated();
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+
+        let answer = patch(file.path(), &id, br#"{"title":"  Renamed  "}"#).expect("patch");
+        assert_eq!(answer.status, StatusCode::OK);
+        // The title is stored trimmed.
+        assert_eq!(
+            get(file.path(), &id).expect("get").unwrap().session.title,
+            "Renamed"
+        );
+
+        patch(file.path(), &id, br#"{"is_favorite":true}"#).expect("patch");
+        let session = get(file.path(), &id).expect("get").unwrap().session;
+        assert!(session.is_favorite);
+        // The rename survived the second patch — the handler writes the whole
+        // row back, so a lost read would silently revert it.
+        assert_eq!(session.title, "Renamed");
+    }
+
+    /// Every one of these is a 400, not a 422: the checks live in the handler,
+    /// and the chats handlers never reach `httpErr`.
+    #[test]
+    fn the_patch_rejections_are_400() {
+        let file = migrated();
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+
+        let err = patch(file.path(), &id, b"{}").unwrap_err();
+        assert_eq!(err, WriteError::BadRequest("no fields to update".into()));
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+
+        let err = patch(file.path(), &id, br#"{"title":"   "}"#).unwrap_err();
+        assert_eq!(err, WriteError::BadRequest("title cannot be empty".into()));
+
+        // A null title is "leave it alone", not "set it to empty" — so with no
+        // other field it is the no-fields case rather than the empty-title one.
+        let err = patch(file.path(), &id, br#"{"title":null}"#).unwrap_err();
+        assert_eq!(err, WriteError::BadRequest("no fields to update".into()));
+    }
+
+    #[test]
+    fn patching_a_missing_chat_says_chat_not_found() {
+        let file = migrated();
+        let err = patch(file.path(), "ghost", br#"{"title":"x"}"#).unwrap_err();
+        assert_eq!(err.message(), "chat not found");
+    }
+
+    #[test]
+    fn deleting_a_chat_removes_its_messages_too() {
+        let file = migrated();
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+        {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            conn.execute(
+                "INSERT INTO chat_messages (session_id, role, content, blocks, timestamp)
+                 VALUES (?1, 'user', 'hi', '[]', '2026-01-01 00:00:00 +0000 UTC')",
+                [&id],
+            )
+            .expect("message");
+        }
+
+        let answer = delete_one(file.path(), &id).expect("delete");
+        assert_eq!(answer.status, StatusCode::NO_CONTENT);
+        assert!(answer.body.is_none());
+
+        // The cascade only fires because the write handle sets foreign_keys=ON.
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let orphans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chat_messages", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(orphans, 0, "messages must cascade with their session");
+    }
+
+    #[test]
+    fn deleting_a_missing_chat_forwards() {
+        let file = migrated();
+        let err = delete_one(file.path(), "ghost").unwrap_err();
+        assert!(matches!(err, WriteError::Fallback(_)), "{err:?}");
+    }
+
+    #[test]
+    fn bulk_delete_removes_the_named_chats_only() {
+        let file = migrated();
+        let a = created_id(&create(file.path(), b"{}").expect("a"));
+        let b = created_id(&create(file.path(), b"{}").expect("b"));
+        let keep = created_id(&create(file.path(), b"{}").expect("keep"));
+
+        let payload = format!(r#"{{"ids":["{a}","{b}","never-existed"]}}"#);
+        let answer = bulk_delete(file.path(), payload.as_bytes()).expect("bulk");
+        assert_eq!(answer.status, StatusCode::NO_CONTENT);
+
+        // An id that does not exist is not an error here, unlike the single
+        // delete — the statement simply matches nothing.
+        let remaining = list(file.path()).expect("list");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, keep);
+    }
+
+    #[test]
+    fn bulk_delete_bounds_are_400() {
+        let file = migrated();
+        for (body, want) in [
+            (r#"{}"#.to_string(), "ids must not be empty"),
+            (r#"{"ids":[]}"#.to_string(), "ids must not be empty"),
+            (r#"{"ids":null}"#.to_string(), "ids must not be empty"),
+            (
+                format!(r#"{{"ids":[{}]}}"#, vec!["\"x\""; 501].join(",")),
+                "too many ids (max 500)",
+            ),
+        ] {
+            let err = bulk_delete(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(err.message(), want);
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        }
+        // Exactly 500 is allowed — the check is `>`, not `>=`.
+        let at_limit = format!(r#"{{"ids":[{}]}}"#, vec!["\"x\""; 500].join(","));
+        assert!(bulk_delete(file.path(), at_limit.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn the_chat_write_routes_are_claimed_and_the_streaming_ones_are_not() {
+        assert!(claims(&Method::POST, "/api/chats"));
+        assert!(claims(&Method::DELETE, "/api/chats"));
+        assert!(claims(&Method::PATCH, "/api/chats/abc"));
+        assert!(claims(&Method::DELETE, "/api/chats/abc"));
+
+        // #276 owns these: a subprocess, in-memory channels and an SSE body.
+        assert!(!claims(&Method::POST, "/api/chats/abc/messages"));
+        assert!(!claims(&Method::POST, "/api/chats/abc/input"));
+        assert!(!claims(&Method::POST, "/api/chats/abc/permission"));
+        assert!(!claims(&Method::POST, "/api/chats/abc/stop"));
+        assert!(!claims(&Method::PATCH, "/api/chats"));
     }
 }
