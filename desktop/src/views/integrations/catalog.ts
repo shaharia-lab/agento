@@ -400,6 +400,48 @@ export function providerFor(type: string): Provider | undefined {
   return PROVIDERS.find((p) => p.type === type);
 }
 
+/* --- Explaining a type with no catalog entry ------------------------------
+   Two different situations reach the same screen and telling them apart is the
+   whole point: a type from a newer Agento is something to upgrade into, while
+   WhatsApp is one this app will never gain — `whatsmeow` has no Rust equivalent
+   and is not being ported (#273). Saying "newer version" to someone who paired a
+   phone under the Go server sends them looking for an update that will never
+   ship.
+
+   Either way the row is listed and readable. It cannot be removed, renamed or
+   disabled from this app: those controls live in `IntegrationDetail`, which only
+   renders for a known provider. That dead end is deliberate for now — see #273's
+   scope note — so do not describe the row as deletable.
+
+   A `Map`, not an object literal: `type` is server-controlled and free-form
+   (Go's create path accepts any non-empty string), and a stored type of
+   `constructor` or `toString` would hit `Object.prototype` and render a title
+   built from `undefined`.
+   ------------------------------------------------------------------------ */
+
+const RETIRED_TYPES = new Map<string, { label: string; reason: string }>([
+  [
+    "whatsapp",
+    {
+      label: "WhatsApp",
+      reason:
+        "WhatsApp is not available in the desktop app, so this connection cannot be paired or edited here. It is left untouched — its tools keep working wherever the Agento server runs, and nothing about it has been deleted.",
+    },
+  ],
+]);
+
+/** Title and body for an integration whose type `providerFor` does not know. */
+export function unavailableCopy(type: string): { title: string; text: string } {
+  const retired = RETIRED_TYPES.get(type);
+  if (retired) {
+    return { title: `${retired.label} is not available here`, text: retired.reason };
+  }
+  return {
+    title: `Unknown provider “${type}”`,
+    text: "This integration was created by a newer version of Agento than this app knows about.",
+  };
+}
+
 /** The mode a stored integration is using, best-effort from its type alone. */
 export function defaultMode(provider: Provider): AuthMode {
   return provider.modes[0];

@@ -633,13 +633,21 @@ What that means in the code, and the part that is easy to get wrong:
   server has an `integrations` row of that type. `type` is a free-form `String`
   everywhere — no enum, no match — so it lists, opens and reads normally;
   `providerFor` returning `undefined` is a supported answer, and
-  `RETIRED_TYPES` in `IntegrationsView.tsx` is what turns it into an honest
-  "not available here" rather than the "newer version of Agento" line, which
-  would send that user hunting for an upgrade that does not exist.
+  `unavailableCopy` beside it turns that into an honest "not available here"
+  rather than the "newer version of Agento" line, which would send that user
+  hunting for an upgrade that will never ship. Both live in `catalog.ts`: what
+  types this app knows, and what to say about the ones it does not, are one
+  question. The row cannot be removed or edited from the desktop app — those
+  controls only render for a known provider — so do not describe it as
+  deletable.
 - **Do not filter it out of `available-tools`.** Go's handler never looks at
   `type`, so suppressing the row is a byte-level divergence on an endpoint
   whose bar is byte-identical JSON. Agents whose allowlists name WhatsApp tools
-  keep those entries; the tools simply never resolve.
+  keep those entries, and — while the sidecar is still bundled — those tools
+  still **resolve and work**: agent execution is phase 5, and `cmd/web.go`
+  registers the `whatsapp` starter in the binary the app ships. They stop
+  resolving when the sidecar is deleted at the cut-over. That is the accepted
+  trade, and it is a removal that happens *then*, not one this issue skipped.
 - `GET /api/integrations/{id}/whatsapp/*` stays unclaimed and forwards. Nothing
   calls it any more, so it dies with the sidecar rather than needing removal.
 

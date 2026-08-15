@@ -3,7 +3,7 @@
 
    Everything here layers on top of controls.css / views.css rather than
    restating it: a native select that borrows .select's box, a save bar, the
-   directory browser, the inline confirm, and the QR block.
+   directory browser and the inline confirm.
    ========================================================================== */
 
 /* --- Pane tabs ----------------------------------------------------------- */

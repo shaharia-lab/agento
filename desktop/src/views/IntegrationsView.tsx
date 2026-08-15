@@ -25,6 +25,7 @@ import type {
 import {
   PROVIDERS,
   providerFor,
+  unavailableCopy,
   type AuthMode,
   type Provider,
 } from "./integrations/catalog";
@@ -91,37 +92,6 @@ function countTools(services: Services | null | undefined): number {
   return Object.values(services).reduce(
     (n, s) => n + (s.enabled ? (s.tools?.length ?? 0) : 0),
     0
-  );
-}
-
-/* --- Types this app has no catalog entry for ------------------------------
-   Two different situations reach the same screen, and telling them apart is
-   the whole point: a type from a newer Agento is something to upgrade into,
-   while WhatsApp is one this app will never gain — `whatsmeow` has no Rust
-   equivalent and is not being ported (issue #273). Saying "newer version" to
-   someone who paired a phone under the Go server sends them looking for an
-   update that does not exist. The row is still listed and still deletable
-   either way; only the explanation differs.
-   ------------------------------------------------------------------------ */
-
-/** Types the Go server supports that the desktop app deliberately does not. */
-const RETIRED_TYPES: Record<string, { label: string; reason: string }> = {
-  whatsapp: {
-    label: "WhatsApp",
-    reason:
-      "WhatsApp is not available in the desktop app, so this connection cannot be paired or edited here. It is left untouched — its tools keep working wherever the Agento server runs, and nothing about it has been deleted.",
-  },
-};
-
-function unavailableTitle(type: string): string {
-  const retired = RETIRED_TYPES[type];
-  return retired ? `${retired.label} is not available here` : `Unknown provider “${type}”`;
-}
-
-function unavailableText(type: string): string {
-  return (
-    RETIRED_TYPES[type]?.reason ??
-    "This integration was created by a newer version of Agento than this app knows about."
   );
 }
 
@@ -264,11 +234,7 @@ export function IntegrationsView({ inspectorOpen }: { inspectorOpen: boolean }) 
             }}
           />
         ) : selected ? (
-          <Empty
-            icon="plug"
-            title={unavailableTitle(selected.type)}
-            text={unavailableText(selected.type)}
-          />
+          <Empty icon="plug" {...unavailableCopy(selected.type)} />
         ) : (
           <Empty icon="plug" title="Integrations" text="Choose an integration or a provider." />
         )}

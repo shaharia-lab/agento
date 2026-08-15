@@ -52,8 +52,10 @@
 //! - Filtering it out of `available-tools` would also be a **parity
 //!   regression**. Go's handler is type-agnostic, so a suppressed row is a
 //!   byte-level divergence on an endpoint whose bar is byte-identical JSON.
-//!   Agents whose allowlists name WhatsApp tools keep those entries; the tools
-//!   simply never resolve, which is the accepted trade.
+//!   Agents whose allowlists name WhatsApp tools keep those entries, and while
+//!   the sidecar is bundled those tools still resolve — agent execution is
+//!   phase 5 and `cmd/web.go` registers the `whatsapp` starter in the binary
+//!   the app ships. They stop resolving when the sidecar goes.
 //!
 //! ## Go's own response is not order-stable here
 //!
@@ -607,12 +609,16 @@ mod tests {
 
     /// A row of a type the desktop app has dropped is still ordinary data.
     ///
-    /// #273 removed WhatsApp from the UI, and the tempting next step is to
-    /// filter it out here too. Both halves of that would be wrong: the list
-    /// would lose a row the user really has, and `available-tools` would stop
-    /// matching Go — whose handler never looks at `type` — on an endpoint whose
-    /// bar is byte-identical JSON. Its own fixture, so the shared one's byte
-    /// assertions stay put.
+    /// **A guard, not a proof of #273.** It passes unchanged on the commit
+    /// before it: #273 removed WhatsApp from the *UI*, and the readers here
+    /// never looked at `type` to begin with. It exists because the tempting
+    /// follow-up is to "finish the job" by filtering the type out at this
+    /// layer, and both halves of that would be wrong — the list would lose a
+    /// row the user really has, and `available-tools` would stop matching Go,
+    /// whose handler never looks at `type` either, on an endpoint whose bar is
+    /// byte-identical JSON.
+    ///
+    /// Its own fixture, so the shared one's byte assertions stay put.
     #[test]
     fn a_dropped_integration_type_is_listed_like_any_other() {
         let file = tempfile::NamedTempFile::new().expect("temp file");
