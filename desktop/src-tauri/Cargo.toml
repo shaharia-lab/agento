@@ -24,7 +24,14 @@ serde = { version = "1", features = ["derive"] }
 # with Go on any endpoint that reads one (per-model costs today, analytics
 # next). Rust's own `str::parse` was always correct; only serde_json's fast
 # path was not.
-serde_json = { version = "1", features = ["float_roundtrip"] }
+#
+# `raw_value` is likewise load-bearing. A chat message's `tool_use` block stores
+# its arguments as a Go `json.RawMessage`, which Go re-emits through `compact` —
+# preserving the stored key order and number spelling. Decoding that into a
+# `serde_json::Value` and re-encoding would sort the keys and respell the
+# numbers (`{"z":1.50,"a":1}` → `{"a":1,"z":1.5}`), so the value is carried as a
+# `RawValue` and written back as a raw fragment.
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
 log = "0.4"
 
 # Local reverse proxy in front of the Go sidecar. No TLS backend: every hop is

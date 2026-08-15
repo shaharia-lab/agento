@@ -487,7 +487,17 @@ the tools — and an `rmcp` adapter is one impl away.
   `/version/update-check` answer `{settings, locked, …}`. `locked` maps a field
   name to the *environment variable* that pinned it; a PUT changing a locked
   field is rejected.
-- **`GET /chats/{id}` returns `{session, messages}`**, not a flattened session.
+- **`GET /chats/{id}` returns an envelope, not a flattened session — and the
+  wire order is `{messages, session}`.** The handler writes a `map[string]any`,
+  and `encoding/json` sorts map keys, so the order it is spelled in is not the
+  order it ships in. This file said `{session, messages}` until the port
+  measured it (#264).
+- **A `json.RawMessage` re-encodes through Go's `compact`**, which strips
+  whitespace outside strings and HTML-escapes, but **preserves the stored key
+  order and number spelling**. A tool_use `input` of `{"z":1.50,"a":1}` ships
+  exactly that; decoding it into a `serde_json::Value` and re-encoding would
+  ship `{"a":1,"z":1.5}` — reordered and respelled, with nothing to signal it.
+  `native/chats.rs::compact` is the byte pass that avoids it.
 - **The project filter differs between endpoints.** `/claude-analytics` matches
   `decoded_path`; `/claude-sessions` matches `project_path` literally, which is
   the dash-encoded name for some sessions and a real path for others. Sending

@@ -14,6 +14,7 @@
 pub mod active_time;
 pub mod agents;
 pub mod analytics;
+pub mod chats;
 pub mod db;
 pub mod diff;
 pub mod gojson;
@@ -115,6 +116,7 @@ const ENDPOINTS: &[Endpoint] = &[
     sessions::ENDPOINT,
     analytics::ENDPOINT,
     insights::ENDPOINT,
+    chats::ENDPOINT,
 ];
 
 /// Whether this request is answered by ported Rust code.
@@ -189,6 +191,19 @@ mod tests {
         assert!(!claims(&Method::DELETE, "/api/agents/my-agent"));
         assert!(!claims(&Method::GET, "/api/agents/my-agent/duplicate"));
         assert!(!claims(&Method::GET, "/api/agents/"));
+
+        // Chats: the two reads. Every write stays with Go, and so does the
+        // streaming turn — `/messages` is a POST-based SSE response, which is
+        // the one thing the proxy must never buffer.
+        assert!(claims(&Method::GET, "/api/chats"));
+        assert!(claims(&Method::GET, "/api/chats/abc-123"));
+        assert!(!claims(&Method::POST, "/api/chats"));
+        assert!(!claims(&Method::DELETE, "/api/chats"));
+        assert!(!claims(&Method::PATCH, "/api/chats/abc-123"));
+        assert!(!claims(&Method::DELETE, "/api/chats/abc-123"));
+        assert!(!claims(&Method::GET, "/api/chats/abc-123/messages"));
+        assert!(!claims(&Method::GET, "/api/chats/abc-123/stop"));
+        assert!(!claims(&Method::GET, "/api/chats/"));
     }
 
     #[test]
@@ -214,6 +229,8 @@ mod tests {
             "/api/claude-sessions/insights/summary",
             "/api/agents",
             "/api/agents/my-agent",
+            "/api/chats",
+            "/api/chats/abc-123",
         ];
         for path in paths {
             let owners: Vec<&str> = ENDPOINTS
@@ -237,6 +254,8 @@ mod tests {
             "/api/claude-sessions/insights/summary",
             "/api/agents",
             "/api/agents/my-agent",
+            "/api/chats",
+            "/api/chats/abc-123",
         ];
         for endpoint in ENDPOINTS {
             assert!(
