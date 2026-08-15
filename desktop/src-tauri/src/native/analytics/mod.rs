@@ -63,12 +63,12 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
     let conn = db::open_read_only(&ctx.db_path)?;
     let data_settings = settings::load(&conn);
     let report = analytics(&conn, &data_settings, req.query)?;
-    Ok(Answer {
-        body: gojson::to_vec(&report).map_err(|e| format!("encoding claude analytics: {e}"))?,
-        // Cache.Analytics runs ensureFresh before it answers, so a dashboard
-        // opened after a rate edit starts the re-cost.
-        probe: Some(sessions::PROBE_PATH),
-    })
+    // Cache.Analytics runs ensureFresh before it answers, so a dashboard
+    // opened after a rate edit starts the re-cost.
+    Ok(Answer::json(
+        gojson::to_vec(&report).map_err(|e| format!("encoding claude analytics: {e}"))?,
+    )
+    .with_probe(sessions::PROBE_PATH))
 }
 
 /// Build the report for one request's query string.

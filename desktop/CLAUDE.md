@@ -132,7 +132,9 @@ src-tauri/src/
     mod.rs       endpoint registry, mode switch, response shaping
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
-    db.rs        read-only SQLite handle on the file the Go server owns
+    db.rs        the SQLite handles: read-only for reads, read-write for writes
+    migrate.rs   the 27 migrations, embedded from parity/ — verified, not applied
+    writes.rs    what a write may answer, and what it hands back to Go
     settings.rs  GET /api/settings; also the preferences + config dirs a read is scoped to
     monitoring.rs GET /api/monitoring — monitoring.json and the OTEL_* locks, no exporters
     version.rs   GET /api/version and /version/update-check (dev builds only)
@@ -284,7 +286,13 @@ only a byte comparison catches all four.
      ```
      One suite per area (`tests/parity_<area>.rs`, sharing `tests/parity_common/`),
      so a port runs its own diff and two ports do not edit one file. Drop the
-     `--test` flag to run them all.
+     `--test` flag to run them all — but note that `parity_writes` **mutates**,
+     unlike every other suite. It creates, renames and deletes rows, so it
+     refuses to run unless `AGENTO_LIVE_URL` is set rather than falling back to
+     the `:8990` default the read suites use. Start the scratch instance first.
+     It also compares differently: a write cannot be asked of both
+     implementations at once, so it pins Go's answers — status *and* bytes — as
+     literals, and the unit tests assert the same literals against Rust;
    - optionally `AGENTO_DESKTOP_NATIVE=diff npm run app`, which compares every
      real request the UI makes.
 5. Only then leave it claimed.
@@ -400,7 +408,7 @@ of the `Err` arms the cut-over has to turn into a real response.
 |---|---|---|---|
 | 1 ✅ | Sidecar + proxy | — | done |
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
-| 3 | Storage + tasks | `internal/storage`, `internal/scheduler` | 27 SQLite migrations; reuse the same DB file and schema. Scheduler is cron/interval. |
+| 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. Scheduler is #275. |
 | 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram. WhatsApp is **not** among them — see below. |
 | 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. **The SDK underneath it is ported** (`src/claude/`, below); what remains is the runner, the chat service and the SSE handler on top of it. |
 
@@ -608,6 +616,64 @@ the tools — and an `rmcp` adapter is one impl away.
 `.card` sets `overflow: hidden`, so as a flex child of a scrolling column its
 min-content height collapses to zero and everything below the fold becomes a
 sliver. Dashboard containers need `> * { flex: 0 0 auto; }`.
+
+### Phase 3: the write path (#274)
+
+**A route moves only when Rust can reproduce *every* effect it has.** That is
+the whole rule, and it is what decides the split — not how hard the SQL is.
+Most of the ~50 write routes do something besides writing a row, and that
+something belongs to another issue: task writes register cron entries (#275),
+chat turns spawn a subprocess and hold in-memory channels (#276), integration
+writes reload MCP servers and call Telegram (#277), `/refresh` drives the
+scanner (#289). Porting `POST /api/tasks` without the scheduler would store a
+task that never fires — worse than not porting it.
+
+So the writes that moved are the ones that are only rows: the agent CRUD, the
+chat CRUD (**not** `/messages`, `/input`, `/permission`, `/stop`), and the two
+job-history deletes. Everything else still forwards, and the `claims` tests in
+each module say which and why.
+
+Four things the write path establishes:
+
+- **`db.rs::open_read_write` sets its pragmas per connection.** WAL is
+  persistent in the file, but `busy_timeout`, `foreign_keys` and `synchronous`
+  are not. Go gets away with setting them once because `SetMaxOpenConns(1)`
+  means it has exactly one connection; a second process does not inherit them.
+  Missing `foreign_keys=ON` is the quiet one — `ON DELETE CASCADE` stops firing
+  and a deleted chat leaves its messages behind.
+- **Rust verifies the schema version; it does not apply migrations.** Go's
+  `applyMigrations` reads the current version *outside* the transaction that
+  applies the next one, so two processes migrating together both try the same
+  version and the loser's DDL fails, taking its startup with it. While the
+  sidecar is bundled, exactly one process may migrate and it is Go.
+  `migrate::apply` is written and tested and turns on with #278.
+- **`Mode::Diff` never runs a write.** Shadow mode runs both implementations and
+  compares them; for a mutation that applies it twice. `native::may_serve` makes
+  it a blanket rule over the method rather than a per-endpoint flag someone
+  forgets. Writes are verified by unit tests and a scratch instance instead.
+- **A write must fail before it mutates.** `Err` still means "forward to Go", so
+  a handler that half-applied something and then errored would have it applied
+  twice. Every handler validates, checks the schema, and does the whole mutation
+  in one transaction.
+
+Two Go behaviours the port reproduces rather than improves:
+
+- **Deleting a missing agent or chat is a 500, not a 404** — the store returns a
+  plain error, so `httpErr`'s `NotFoundError` arm never fires. This port does
+  not reproduce 500s: it detects the case, writes nothing, and forwards.
+  Job-history's delete *is* a real 404, because its service checks first.
+- **`serde` deserializes a struct from a JSON array**, positionally. Go does
+  not. Without the object check in `writes::decode_body`, `POST /api/agents`
+  with a body of `["My Agent"]` would create an agent on a request Go answers
+  with a 400. A `null` body, conversely, is a *no-op* to Go — zero value, no
+  error — so it reaches the handler and fails validation with a 422.
+
+The migrations are **not transcribed**: `desktop/parity/migrations_vectors.json`
+is generated from Go (`go test ./internal/storage/ -update-migration-vectors`),
+asserted against the slice by `internal/storage/migrations_vector_test.go`, and
+embedded by `native/migrate.rs` with `include_str!`. Adding migration 28 without
+regenerating fails Go's own suite — and the file is what records the schema once
+the Go server is deleted.
 
 ### Do not port
 

@@ -99,6 +99,18 @@ pub fn to_go_string_utc(t: GoTime) -> String {
     format_go_string(&t.instant())
 }
 
+/// `time.Now().UTC()` in the rendering a DATETIME column stores.
+///
+/// Every Go write path stamps `created_at`/`updated_at` this way, and the
+/// columns are compared **as text** — the sessions list orders and pages on
+/// them. A row written in any other shape (RFC 3339, a fixed-width fraction)
+/// sorts into a different place than the rows around it, which is a silently
+/// wrong list rather than an error, so the writes go through here rather than
+/// formatting at each call site.
+pub fn now_go_text() -> String {
+    format_go_string(&Utc::now())
+}
+
 /// The same rendering for an epoch-milliseconds value, which is how the
 /// analytics drill-down encodes its windows.
 pub fn go_string_from_millis(ms: i64) -> String {

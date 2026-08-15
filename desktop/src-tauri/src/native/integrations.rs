@@ -360,7 +360,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
 
         None => return Err(format!("{} is not an integration read", req.path)),
     };
-    Ok(super::Answer { body, probe: None })
+    Ok(super::Answer::json(body))
 }
 
 #[cfg(test)]
