@@ -78,12 +78,34 @@ fn serve(req: StreamRequest) -> BoxFuture<'static, Result<Response<Body>, String
                 };
                 turn::run(req.db_path.clone(), id.to_string(), content).await
             }
-            Some(Route::Input(id)) => Ok(provide_input(id, &req.body)),
-            Some(Route::Permission(id)) => Ok(permission_response(id, &req.body)),
-            Some(Route::Stop(id)) => stop(id).await,
+            // `Forward` becomes the seam's `Err`, which is what makes Go answer.
+            // The reason travels with it so the log says which chat and why.
+            Some(Route::Input(id)) => steer(provide_input(id, &req.body), id),
+            Some(Route::Permission(id)) => steer(permission_response(id, &req.body), id),
+            Some(Route::Stop(id)) => steer(stop(id).await, id),
             None => Err(format!("{} is not a chat action", req.path)),
         }
     })
+}
+
+/// What one of the three steering routes decided.
+///
+/// A distinct type rather than a sentinel status: "forward" and "answered with
+/// a status" are different kinds of outcome, and encoding the first as a
+/// reserved status code would mean a real upstream response could impersonate
+/// it. There is no number here to collide with.
+enum Steer {
+    Answered(Response<Body>),
+    Forward,
+}
+
+fn steer(outcome: Steer, id: &str) -> Result<Response<Body>, String> {
+    match outcome {
+        Steer::Answered(response) => Ok(response),
+        Steer::Forward => Err(format!(
+            "chat {id:?} has no live session here; the sidecar may have one"
+        )),
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -130,75 +152,58 @@ fn decode_content(body: &[u8]) -> Result<String, Box<Response<Body>>> {
 
 /// `handleProvideInput`. The answer reaches whichever half of the turn is
 /// waiting — the permission handler or the post-result continuation.
-fn provide_input(id: &str, body: &[u8]) -> Response<Body> {
+fn provide_input(id: &str, body: &[u8]) -> Steer {
     let req: ProvideInputRequest = match crate::native::writes::decode_body(body) {
         Ok(req) => req,
-        Err(_) => return error_json(StatusCode::BAD_REQUEST, "invalid JSON body"),
+        Err(_) => return Steer::Answered(error_json(StatusCode::BAD_REQUEST, "invalid JSON body")),
     };
     if req.answer.is_empty() {
-        return error_json(StatusCode::BAD_REQUEST, "answer is required");
+        return Steer::Answered(error_json(StatusCode::BAD_REQUEST, "answer is required"));
     }
     let Some((_, input_tx, _)) = live::registry().get(id) else {
         // Not ours: Go may still have this session, and its 409 is the right
-        // answer if neither does. Signalled by the sentinel below.
-        return forward_sentinel();
+        // answer if neither does.
+        return Steer::Forward;
     };
     // Capacity 1, so a successful send is the approximation of "awaiting
     // input" — the same one Go makes.
     match input_tx.try_send(req.answer) {
-        Ok(()) => no_content(),
-        Err(_) => error_json(
+        Ok(()) => Steer::Answered(no_content()),
+        Err(_) => Steer::Answered(error_json(
             StatusCode::CONFLICT,
             "session is not currently awaiting input",
-        ),
+        )),
     }
 }
 
 /// `handlePermissionResponse`.
-fn permission_response(id: &str, body: &[u8]) -> Response<Body> {
+fn permission_response(id: &str, body: &[u8]) -> Steer {
     let req: PermissionRequestBody = match crate::native::writes::decode_body(body) {
         Ok(req) => req,
-        Err(_) => return error_json(StatusCode::BAD_REQUEST, "invalid JSON body"),
+        Err(_) => return Steer::Answered(error_json(StatusCode::BAD_REQUEST, "invalid JSON body")),
     };
     let Some((_, _, perm_tx)) = live::registry().get(id) else {
-        return forward_sentinel();
+        return Steer::Forward;
     };
     match perm_tx.try_send(req.allow) {
-        Ok(()) => no_content(),
-        Err(_) => error_json(
+        Ok(()) => Steer::Answered(no_content()),
+        Err(_) => Steer::Answered(error_json(
             StatusCode::CONFLICT,
             "session is not currently awaiting a permission response",
-        ),
+        )),
     }
 }
 
 /// `handleStopSession`. Returns **204 even when the interrupt fails** — Go only
 /// logs it — and never closes the session; the stream's own teardown owns that.
-async fn stop(id: &str) -> Result<Response<Body>, String> {
+async fn stop(id: &str) -> Steer {
     let Some((control, _, _)) = live::registry().get(id) else {
-        return Err(format!("chat {id:?} has no live session here"));
+        return Steer::Forward;
     };
     if let Err(e) = control.interrupt().await {
         log::warn!("interrupt session failed for chat {id}: {e}");
     }
-    Ok(no_content())
-}
-
-/// A response that means "let Go answer this".
-///
-/// The three steering routes cannot simply return `Err` from a non-async
-/// context, so they build this and the caller converts it. Kept as a distinct
-/// status no handler produces, so it cannot be confused with a real answer.
-fn forward_sentinel() -> Response<Body> {
-    Response::builder()
-        .status(StatusCode::from_u16(599).unwrap_or(StatusCode::BAD_GATEWAY))
-        .body(Body::empty())
-        .unwrap_or_else(|_| Response::new(Body::empty()))
-}
-
-/// Whether a response is the forward sentinel rather than an answer.
-pub fn is_forward(response: &Response<Body>) -> bool {
-    response.status().as_u16() == 599
+    Steer::Answered(no_content())
 }
 
 fn no_content() -> Response<Body> {
@@ -249,11 +254,14 @@ mod tests {
     /// working.
     #[test]
     fn a_chat_with_no_live_session_here_forwards_rather_than_409ing() {
-        let response = provide_input("no-such-chat", br#"{"answer":"yes"}"#);
-        assert!(is_forward(&response));
-
-        let response = permission_response("no-such-chat", br#"{"allow":true}"#);
-        assert!(is_forward(&response));
+        assert!(matches!(
+            provide_input("no-such-chat", br#"{"answer":"yes"}"#),
+            Steer::Forward
+        ));
+        assert!(matches!(
+            permission_response("no-such-chat", br#"{"allow":true}"#),
+            Steer::Forward
+        ));
     }
 
     /// Body validation happens *before* the registry lookup, so a malformed
@@ -261,11 +269,14 @@ mod tests {
     /// identically.
     #[test]
     fn the_body_is_validated_before_the_session_is_looked_up() {
-        let response = provide_input("any", b"{}");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-
-        let response = provide_input("any", b"not json");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        for body in [&b"{}"[..], b"not json"] {
+            match provide_input("any", body) {
+                Steer::Answered(response) => {
+                    assert_eq!(response.status(), StatusCode::BAD_REQUEST)
+                }
+                Steer::Forward => panic!("a malformed body must be rejected, not forwarded"),
+            }
+        }
     }
 
     /// `allow` defaults to false rather than failing, matching Go's decoder:
@@ -273,8 +284,10 @@ mod tests {
     /// is a deny.
     #[test]
     fn an_absent_allow_is_a_deny_not_an_error() {
-        let response = permission_response("no-such-chat", b"{}");
-        // Reaches the registry lookup, so the body parsed.
-        assert!(is_forward(&response));
+        // Reaching the registry lookup at all proves the body parsed.
+        assert!(matches!(
+            permission_response("no-such-chat", b"{}"),
+            Steer::Forward
+        ));
     }
 }

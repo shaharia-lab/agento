@@ -182,10 +182,16 @@ pub async fn run(
     tokio::spawn(async move {
         let state = stream_events(&mut session, notify_rx, &body_tx, &answers).await;
 
-        // Go's defer order: forget the live session (which also releases the
-        // busy lock), then close the subprocess.
+        // Go's defer order: forget the live session — which also releases the
+        // busy lock — then close the subprocess.
+        //
+        // `drop` explicitly rather than letting the guard fall out of scope,
+        // and that is the whole point: the guard is *moved into this task*, so
+        // its natural drop would be at the end of the block, **after** the
+        // commit. Go releases before committing, which is what makes a second
+        // send possible while the first is still writing. Dropping here rather
+        // than there is the difference.
         drop(guard);
-        registry().release(&chat_id);
         session.close();
 
         // The commit is detached from the request on purpose, so a client that

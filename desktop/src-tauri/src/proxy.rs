@@ -158,17 +158,15 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
         };
 
         match native::serve_stream(stream_req).await {
-            // `/input`, `/permission` and `/stop` answer this when Rust holds no
-            // live session for the chat — Go may, and its answer is the right
-            // one. See `native::chat`'s header.
-            Ok(response) if native::chat::is_forward(&response) => {
-                return forward_or_bad_gateway(&state, req, &path).await;
-            }
             Ok(response) => return response,
             // Same rule as the buffered path, and the same obligation: a
             // streaming handler must fail *before* it has any effect, or the
             // forward spawns a second subprocess. Every check in `turn::run`
             // happens before the CLI is started.
+            //
+            // This is also how `/input`, `/permission` and `/stop` hand a chat
+            // back when Rust holds no live session for it — Go may, and its
+            // answer is then the right one. See `native::chat`'s header.
             Err(e) => {
                 log::warn!("native stream for {path} failed, forwarding to Go: {e}");
                 return forward_or_bad_gateway(&state, req, &path).await;
