@@ -1,11 +1,53 @@
-//! The integration reads: `GET /api/integrations`, `GET /api/integrations/{id}`,
-//! `GET /api/integrations/available-tools` and
-//! `GET /api/integrations/{id}/triggers`.
+//! The integration reads, plus the writes that have no effect outside the
+//! database: `GET /api/integrations`, `GET /api/integrations/{id}`,
+//! `GET /api/integrations/available-tools`,
+//! `GET|POST /api/integrations/{id}/triggers`,
+//! `PUT|DELETE /api/integrations/{id}/triggers/{rid}` and
+//! `POST /api/integrations`.
 //!
 //! Mirrors `handleListIntegrations`, `handleGetIntegration`,
-//! `handleAvailableTools` (`internal/api/integrations.go`) and
-//! `handleListTriggerRules` (`internal/api/trigger_rules.go`) over
-//! `SQLiteIntegrationStore` and `SQLiteTriggerStore`.
+//! `handleAvailableTools`, `handleCreateIntegration`
+//! (`internal/api/integrations.go`) and the trigger-rule handlers
+//! (`internal/api/trigger_rules.go`) over `SQLiteIntegrationStore` and
+//! `SQLiteTriggerStore`.
+//!
+//! ## Which writes moved, and the rule that decided it (#277)
+//!
+//! A route moves only when Rust reproduces **every** effect it has, and the
+//! integration writes split cleanly on that test:
+//!
+//! - `PUT /api/integrations/{id}` calls `registry.Reload(id)` and `DELETE`
+//!   calls `registry.Stop(id)` — they restart the **live in-process MCP
+//!   server**. Rust has none to restart until #282, so both stay with Go. A
+//!   native write there would persist the row and leave the running integration
+//!   on stale config: an integration still using a token the user just revoked,
+//!   with a 200 saying it worked.
+//! - `POST /api/integrations` touches no registry at all. That was verified
+//!   against the whole of `integrationService.Create` rather than inferred from
+//!   its siblings, which is the point — `Create` and `Update` look alike and
+//!   differ exactly here.
+//! - The trigger-rule writes are safe for a different reason: the dispatcher
+//!   calls `ListRules` **per inbound message**
+//!   (`internal/trigger/dispatcher.go`), so there is no cached rule set for a
+//!   native write to leave stale.
+//!
+//! ## A create is the one native path that handles a secret
+//!
+//! Everything below the "Secrets" note is about never *reading* credentials.
+//! That cannot hold for a create, because the caller supplies them in the
+//! request body and they have to reach the column. So `create` carries them as
+//! a borrowed `RawValue` from decode to `INSERT`, and the response is still
+//! built from [`ScrubbedIntegration`], which has no field to leak them through.
+//!
+//! **That guarantee is not local to this module.** It also depends on
+//! `writes::decode_body` deserializing from the request's *original bytes*
+//! rather than from the `serde_json::Value` it shape-checks with — going
+//! through the `Value` sorts keys and respells numbers, so the captured
+//! `RawValue` would be a re-serialization and Go's verbatim column would
+//! differ on every blob with more than one key. `decode_body` has its own test
+//! for this; the one here asserts the stored bytes end to end. Both use a
+//! multi-key blob deliberately: a single-key one is a fixed point of the broken
+//! round trip and proves nothing.
 //!
 //! ## Secrets
 //!
@@ -71,8 +113,10 @@ use std::path::Path;
 use axum::http::Method;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use super::gotime::GoTime;
+use super::writes::{decode_body, finish, WriteError};
 
 /// One integration as `scrubIntegration` renders it.
 ///
@@ -263,31 +307,54 @@ pub fn list_trigger_rules(
         )
         .map_err(|e| format!("preparing trigger rule list: {e}"))?;
     let rows = stmt
-        .query_map([integration_id], |row| {
-            let enabled: i64 = row.get(4)?;
-            let keywords: String = row.get(6)?;
-            let chat_ids: String = row.get(7)?;
-            let created_at: String = row.get(8)?;
-            let updated_at: String = row.get(9)?;
-            Ok(TriggerRule {
-                id: row.get(0)?,
-                integration_id: row.get(1)?,
-                name: row.get(2)?,
-                agent_slug: row.get(3)?,
-                enabled: enabled != 0,
-                filter_prefix: row.get(5)?,
-                filter_keywords: super::gojson::decode_string_list(&keywords),
-                filter_chat_ids: super::gojson::decode_string_list(&chat_ids),
-                created_at: super::gotime::from_sql_text(&created_at, 8)?,
-                updated_at: super::gotime::from_sql_text(&updated_at, 9)?,
-            })
-        })
+        .query_map([integration_id], scan_trigger_rule)
         .map_err(|e| format!("listing trigger rules: {e}"))?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row.map_err(|e| format!("scanning trigger rule: {e}"))?);
     }
     Ok(out)
+}
+
+/// The projection both rule reads share, so the by-id lookup the write path
+/// needs cannot drift from the list.
+const TRIGGER_RULE_COLUMNS: &str = "SELECT id, integration_id, name, agent_slug, enabled,
+                    filter_prefix, filter_keywords, filter_chat_ids,
+                    created_at, updated_at
+             FROM trigger_rules";
+
+fn scan_trigger_rule(row: &rusqlite::Row<'_>) -> rusqlite::Result<TriggerRule> {
+    let enabled: i64 = row.get(4)?;
+    let keywords: String = row.get(6)?;
+    let chat_ids: String = row.get(7)?;
+    let created_at: String = row.get(8)?;
+    let updated_at: String = row.get(9)?;
+    Ok(TriggerRule {
+        id: row.get(0)?,
+        integration_id: row.get(1)?,
+        name: row.get(2)?,
+        agent_slug: row.get(3)?,
+        enabled: enabled != 0,
+        filter_prefix: row.get(5)?,
+        filter_keywords: super::gojson::decode_string_list(&keywords),
+        filter_chat_ids: super::gojson::decode_string_list(&chat_ids),
+        created_at: super::gotime::from_sql_text(&created_at, 8)?,
+        updated_at: super::gotime::from_sql_text(&updated_at, 9)?,
+    })
+}
+
+/// One rule by its own id, regardless of which integration owns it — the
+/// ownership comparison is the caller's, because Go's is what produces the 403.
+fn trigger_rule_by_id(
+    conn: &rusqlite::Connection,
+    rule_id: &str,
+) -> rusqlite::Result<Option<TriggerRule>> {
+    conn.query_row(
+        &format!("{TRIGGER_RULE_COLUMNS} WHERE id = ?1"),
+        [rule_id],
+        scan_trigger_rule,
+    )
+    .optional()
 }
 
 // ─── The seam ─────────────────────────────────────────────────────────────────
@@ -304,9 +371,11 @@ enum Route<'a> {
     AvailableTools,
     Get(&'a str),
     Triggers(&'a str),
+    /// `{id}/triggers/{rid}` — the rule routes that take a rule id.
+    Trigger(&'a str, &'a str),
 }
 
-/// Match the four reads and nothing else.
+/// Match the reads, plus the write routes that share their paths.
 ///
 /// `available-tools` is checked before the `{id}` arm because it is a single
 /// segment in the same position, exactly as chi's own route table orders them.
@@ -323,6 +392,12 @@ fn route_of(path: &str) -> Option<Route<'_>> {
     if let Some(id) = rest.strip_suffix("/triggers") {
         return segment(id).map(Route::Triggers);
     }
+    if let Some((id, tail)) = rest.split_once("/triggers/") {
+        return match (segment(id), segment(tail)) {
+            (Some(id), Some(rid)) => Some(Route::Trigger(id, rid)),
+            _ => None,
+        };
+    }
     segment(rest).map(Route::Get)
 }
 
@@ -333,12 +408,48 @@ fn segment(value: &str) -> Option<&str> {
     Some(value)
 }
 
+/// Which of this module's routes are native, by method.
+///
+/// **The integration `{id}` writes are deliberately absent.** `PUT` calls
+/// `registry.Reload(id)` and `DELETE` calls `registry.Stop(id)`
+/// (`internal/service/integration_service.go`), which start and stop the *live
+/// in-process MCP server* for that integration. Rust has no MCP server to
+/// reload until #282, so a native write would persist the row and leave the
+/// running integration on stale config — the failure would show up as an
+/// integration that keeps using a revoked token, with nothing in the response
+/// to suggest it. `POST /api/integrations` is safe because `Create` is a pure
+/// row write: it never touches the registry, which was verified against the
+/// whole function rather than assumed from its siblings.
+///
+/// The trigger-rule writes are safe for a different reason: the dispatcher
+/// calls `ListRules` **per inbound message** (`internal/trigger/dispatcher.go`),
+/// so there is no cached rule set for a native write to leave stale.
 fn claims(method: &Method, path: &str) -> bool {
-    method == Method::GET && route_of(path).is_some()
+    match route_of(path) {
+        Some(Route::List) => method == Method::GET || method == Method::POST,
+        Some(Route::AvailableTools) | Some(Route::Get(_)) => method == Method::GET,
+        Some(Route::Triggers(_)) => method == Method::GET || method == Method::POST,
+        Some(Route::Trigger(..)) => method == Method::PUT || method == Method::DELETE,
+        None => false,
+    }
 }
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
     let db = &ctx.db_path;
+    if req.method != Method::GET {
+        return match route_of(req.path) {
+            Some(Route::List) => finish(create(db, req.body)),
+            Some(Route::Triggers(id)) => finish(create_trigger_rule(db, id, req.body)),
+            Some(Route::Trigger(id, rid)) if req.method == Method::PUT => {
+                finish(update_trigger_rule(db, id, rid, req.body))
+            }
+            Some(Route::Trigger(id, rid)) => finish(delete_trigger_rule(db, id, rid)),
+            _ => Err(format!(
+                "{} {} is not an integration write",
+                req.method, req.path
+            )),
+        };
+    }
     let body = match route_of(req.path) {
         Some(Route::List) => {
             super::gojson::to_vec(&list(db)?).map_err(|e| format!("encoding integrations: {e}"))?
@@ -358,9 +469,335 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         Some(Route::Triggers(id)) => super::gojson::to_vec(&list_trigger_rules(db, id)?)
             .map_err(|e| format!("encoding trigger rules: {e}"))?,
 
-        None => return Err(format!("{} is not an integration read", req.path)),
+        // `claims` never admits a GET here — chi has no such route, so Go 405s
+        // and forwarding is what reproduces that.
+        Some(Route::Trigger(..)) | None => {
+            return Err(format!("{} is not an integration read", req.path))
+        }
     };
     Ok(super::Answer::json(body))
+}
+
+// ─── Writes ───────────────────────────────────────────────────────────────────
+
+/// `CreateIntegrationRequest`.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct CreateIntegrationRequest {
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    name: String,
+    #[serde(
+        rename = "type",
+        deserialize_with = "super::gojson::null_is_zero_value"
+    )]
+    integration_type: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    enabled: bool,
+    /// `json.RawMessage`, so a literal `null` is four bytes rather than absent —
+    /// which changes which validation error the caller gets. `captured_raw` is
+    /// what keeps the two distinguishable.
+    #[serde(deserialize_with = "super::gojson::captured_raw")]
+    credentials: Option<Box<RawValue>>,
+    services: Option<BTreeMap<String, ServiceConfig>>,
+}
+
+/// `handleCreateIntegration` → `integrationService.Create`.
+///
+/// Order is load-bearing and is Go's: name, then type, then credentials. A
+/// request missing all three reports `name`.
+fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<CreateIntegrationRequest>(body)?;
+
+    if req.name.is_empty() {
+        return Err(WriteError::validation("name", "name is required"));
+    }
+    if req.integration_type.is_empty() {
+        return Err(WriteError::validation("type", "type is required"));
+    }
+
+    let credentials = match super::integration_credentials::validate(
+        &req.integration_type,
+        req.credentials.as_deref(),
+    )? {
+        // Jira rewrites what it stores; everyone else stores the caller's bytes.
+        Some(normalized) => normalized,
+        None => req
+            .credentials
+            .as_ref()
+            .map(|c| c.get().to_string())
+            .unwrap_or_default(),
+    };
+
+    let id = uuid::Uuid::new_v4().to_string();
+    // One timestamp for both columns, as Go takes one `now`.
+    let now = super::gotime::now_go_text();
+    // `if cfg.Services == nil { cfg.Services = make(...) }` — so an absent
+    // `services` is stored and echoed as `{}`, never as `null`.
+    let services = req.services.unwrap_or_default();
+    let services_json = super::gojson::to_vec_marshal(&services)
+        .map_err(|e| WriteError::Fallback(format!("marshaling services: {e}")))?;
+    let services_json = String::from_utf8(services_json)
+        .map_err(|e| WriteError::Fallback(format!("services json is not utf-8: {e}")))?;
+
+    let conn = open_for_write(db_path)?;
+    conn.execute(
+        "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+         ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name, type = excluded.type, enabled = excluded.enabled,
+            credentials = excluded.credentials, auth = excluded.auth,
+            services = excluded.services, updated_at = excluded.updated_at",
+        rusqlite::params![
+            &id,
+            &req.name,
+            &req.integration_type,
+            i64::from(req.enabled),
+            &credentials,
+            // `authJSON` stays nil on create: nothing is authenticated yet.
+            None::<String>,
+            &services_json,
+            &now,
+            &now,
+        ],
+    )
+    .map_err(|e| WriteError::Fallback(format!("saving integration: {e}")))?;
+
+    let created = ScrubbedIntegration {
+        authenticated: false,
+        created_at: parse_written(&now)?,
+        enabled: req.enabled,
+        id,
+        name: req.name,
+        services: Some(services),
+        integration_type: req.integration_type,
+        updated_at: parse_written(&now)?,
+    };
+    encode_created(&created)
+}
+
+/// `CreateTriggerRuleRequest` / `UpdateTriggerRuleRequest` — identical shapes.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct TriggerRuleRequest {
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    name: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    agent_slug: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    enabled: bool,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    filter_prefix: String,
+    filter_keywords: Option<Vec<String>>,
+    filter_chat_ids: Option<Vec<String>>,
+}
+
+/// `handleCreateTriggerRule` → `triggerService.CreateRule`.
+fn create_trigger_rule(
+    db_path: &Path,
+    integration_id: &str,
+    body: &[u8],
+) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<TriggerRuleRequest>(body)?;
+
+    // `validateTriggerRule` checks agent_slug first, and integration_id second —
+    // the latter can only be empty if the path had an empty segment, which
+    // `route_of` already refuses, but the order is kept so the reasoning is
+    // visible rather than assumed.
+    if req.agent_slug.is_empty() {
+        return Err(WriteError::validation(
+            "agent_slug",
+            "agent_slug is required",
+        ));
+    }
+
+    let conn = open_for_write(db_path)?;
+    if !integration_exists(&conn, integration_id)? {
+        return Err(WriteError::NotFound {
+            resource: "integration".to_string(),
+            id: integration_id.to_string(),
+        });
+    }
+
+    // One `now` for both columns and for the response: Go takes a single
+    // `time.Now()` and writes it to both, so two calls here could store a rule
+    // whose `created_at` and `updated_at` differ by a nanosecond.
+    let now = super::gotime::now_go_text();
+    let stamp = parse_written(&now)?;
+    let rule = TriggerRule {
+        id: uuid::Uuid::new_v4().to_string(),
+        integration_id: integration_id.to_string(),
+        name: req.name,
+        agent_slug: req.agent_slug,
+        enabled: req.enabled,
+        filter_prefix: req.filter_prefix,
+        filter_keywords: req.filter_keywords,
+        filter_chat_ids: req.filter_chat_ids,
+        created_at: stamp,
+        updated_at: stamp,
+    };
+    insert_rule(&conn, &rule, &now)?;
+    encode_created(&rule)
+}
+
+/// `handleUpdateTriggerRule`.
+///
+/// The ownership check comes **before** the body is decoded, so a malformed
+/// payload aimed at another integration's rule is a 403 rather than a 400.
+fn update_trigger_rule(
+    db_path: &Path,
+    integration_id: &str,
+    rule_id: &str,
+    body: &[u8],
+) -> Result<super::Answer, WriteError> {
+    let conn = open_for_write(db_path)?;
+    let existing = load_rule(&conn, rule_id)?;
+    if existing.integration_id != integration_id {
+        return Err(WriteError::Forbidden(
+            "rule does not belong to this integration".to_string(),
+        ));
+    }
+
+    let req = decode_body::<TriggerRuleRequest>(body)?;
+    if req.agent_slug.is_empty() {
+        return Err(WriteError::validation(
+            "agent_slug",
+            "agent_slug is required",
+        ));
+    }
+
+    // `UpdateRule` keeps the stored id, integration and creation time and
+    // replaces everything else — a field the caller omitted is cleared, not kept.
+    let now = super::gotime::now_go_text();
+    let rule = TriggerRule {
+        id: existing.id,
+        integration_id: existing.integration_id,
+        name: req.name,
+        agent_slug: req.agent_slug,
+        enabled: req.enabled,
+        filter_prefix: req.filter_prefix,
+        filter_keywords: req.filter_keywords,
+        filter_chat_ids: req.filter_chat_ids,
+        created_at: existing.created_at,
+        updated_at: parse_written(&now)?,
+    };
+
+    conn.execute(
+        "UPDATE trigger_rules SET
+            name = ?1, agent_slug = ?2, enabled = ?3,
+            filter_prefix = ?4, filter_keywords = ?5, filter_chat_ids = ?6,
+            updated_at = ?7
+         WHERE id = ?8",
+        rusqlite::params![
+            &rule.name,
+            &rule.agent_slug,
+            i64::from(rule.enabled),
+            &rule.filter_prefix,
+            &marshal_list(&rule.filter_keywords)?,
+            &marshal_list(&rule.filter_chat_ids)?,
+            &now,
+            &rule.id,
+        ],
+    )
+    .map_err(|e| WriteError::Fallback(format!("updating trigger rule: {e}")))?;
+
+    let body = super::gojson::to_vec(&rule)
+        .map_err(|e| WriteError::Fallback(format!("encoding trigger rule: {e}")))?;
+    Ok(super::Answer::json(body))
+}
+
+/// `handleDeleteTriggerRule`. 204, and the same ownership check.
+fn delete_trigger_rule(
+    db_path: &Path,
+    integration_id: &str,
+    rule_id: &str,
+) -> Result<super::Answer, WriteError> {
+    let conn = open_for_write(db_path)?;
+    let existing = load_rule(&conn, rule_id)?;
+    if existing.integration_id != integration_id {
+        return Err(WriteError::Forbidden(
+            "rule does not belong to this integration".to_string(),
+        ));
+    }
+    conn.execute("DELETE FROM trigger_rules WHERE id = ?1", [rule_id])
+        .map_err(|e| WriteError::Fallback(format!("deleting trigger rule: {e}")))?;
+    Ok(super::Answer::no_content())
+}
+
+fn insert_rule(
+    conn: &rusqlite::Connection,
+    rule: &TriggerRule,
+    now: &str,
+) -> Result<(), WriteError> {
+    conn.execute(
+        "INSERT INTO trigger_rules
+            (id, integration_id, name, agent_slug, enabled,
+             filter_prefix, filter_keywords, filter_chat_ids, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        rusqlite::params![
+            &rule.id,
+            &rule.integration_id,
+            &rule.name,
+            &rule.agent_slug,
+            i64::from(rule.enabled),
+            &rule.filter_prefix,
+            &marshal_list(&rule.filter_keywords)?,
+            &marshal_list(&rule.filter_chat_ids)?,
+            now,
+            now,
+        ],
+    )
+    .map_err(|e| WriteError::Fallback(format!("creating trigger rule: {e}")))?;
+    Ok(())
+}
+
+/// `json.Marshal` of a `[]string`: `null` when nil, `[]` when empty.
+fn marshal_list(value: &Option<Vec<String>>) -> Result<String, WriteError> {
+    let bytes = super::gojson::to_vec_marshal(value)
+        .map_err(|e| WriteError::Fallback(format!("marshaling filter list: {e}")))?;
+    String::from_utf8(bytes)
+        .map_err(|e| WriteError::Fallback(format!("filter list is not utf-8: {e}")))
+}
+
+fn load_rule(conn: &rusqlite::Connection, rule_id: &str) -> Result<TriggerRule, WriteError> {
+    trigger_rule_by_id(conn, rule_id)
+        .map_err(|e| WriteError::Fallback(format!("looking up trigger rule: {e}")))?
+        .ok_or_else(|| WriteError::NotFound {
+            resource: "trigger_rule".to_string(),
+            id: rule_id.to_string(),
+        })
+}
+
+fn integration_exists(conn: &rusqlite::Connection, id: &str) -> Result<bool, WriteError> {
+    conn.query_row("SELECT 1 FROM integrations WHERE id = ?1", [id], |_| {
+        Ok(true)
+    })
+    .optional()
+    .map_err(|e| WriteError::Fallback(format!("looking up integration: {e}")))
+    .map(|found| found.unwrap_or(false))
+}
+
+/// Re-read a timestamp this process just formatted.
+///
+/// The stored text is the source of truth for both the column and the response,
+/// so parsing it back is what keeps them identical rather than merely equal.
+fn parse_written(text: &str) -> Result<GoTime, WriteError> {
+    GoTime::parse_go_string(text)
+        .map_err(|e| WriteError::Fallback(format!("re-reading written timestamp: {e}")))
+}
+
+fn open_for_write(db_path: &Path) -> Result<rusqlite::Connection, WriteError> {
+    let conn = super::db::open_read_write(db_path).map_err(WriteError::Fallback)?;
+    super::migrate::verify(&conn).map_err(WriteError::Fallback)?;
+    Ok(conn)
+}
+
+fn encode_created<T: Serialize>(value: &T) -> Result<super::Answer, WriteError> {
+    let body = super::gojson::to_vec(value)
+        .map_err(|e| WriteError::Fallback(format!("encoding created row: {e}")))?;
+    Ok(super::Answer::json_status(
+        axum::http::StatusCode::CREATED,
+        body,
+    ))
 }
 
 #[cfg(test)]
@@ -654,17 +1091,29 @@ mod tests {
     }
 
     #[test]
-    fn only_the_four_reads_are_claimed() {
+    fn the_reads_and_the_portable_writes_are_claimed_and_nothing_else_is() {
         assert!(claims(&Method::GET, "/api/integrations"));
         assert!(claims(&Method::GET, "/api/integrations/available-tools"));
         assert!(claims(&Method::GET, "/api/integrations/abc"));
         assert!(claims(&Method::GET, "/api/integrations/abc/triggers"));
 
-        // Writes.
-        assert!(!claims(&Method::POST, "/api/integrations"));
+        // The writes that moved (#277).
+        assert!(claims(&Method::POST, "/api/integrations"));
+        assert!(claims(&Method::POST, "/api/integrations/abc/triggers"));
+        assert!(claims(&Method::PUT, "/api/integrations/abc/triggers/r1"));
+        assert!(claims(&Method::DELETE, "/api/integrations/abc/triggers/r1"));
+
+        // The integration `{id}` writes did NOT move: `PUT` reloads and
+        // `DELETE` stops the live in-process MCP server, which Rust has no way
+        // to do until #282. Claiming either would persist the row and leave the
+        // running integration on stale config.
         assert!(!claims(&Method::PUT, "/api/integrations/abc"));
         assert!(!claims(&Method::DELETE, "/api/integrations/abc"));
-        assert!(!claims(&Method::POST, "/api/integrations/abc/triggers"));
+
+        // A rule id is one segment, and the collection has no PUT/DELETE.
+        assert!(!claims(&Method::PUT, "/api/integrations/abc/triggers"));
+        assert!(!claims(&Method::POST, "/api/integrations/abc/triggers/r1"));
+        assert!(!claims(&Method::PUT, "/api/integrations/abc/triggers/r1/x"));
 
         // Reads that stay with Go, each for its own reason — see the header.
         assert!(!claims(&Method::GET, "/api/integrations/abc/auth/status"));
@@ -679,5 +1128,230 @@ mod tests {
         ));
         assert!(!claims(&Method::GET, "/api/integrations/abc/triggers/rid"));
         assert!(!claims(&Method::GET, "/api/integrations/"));
+    }
+
+    // ─── Writes ───────────────────────────────────────────────────────────────
+
+    /// A database with the real schema, so the write path runs against the
+    /// same tables and the same `schema_migrations` row the app has.
+    fn migrated() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        super::super::migrate::apply(&mut conn).expect("migrate");
+        file
+    }
+
+    fn body_of(answer: &super::super::Answer) -> String {
+        String::from_utf8(answer.body.clone().expect("a body")).expect("utf-8")
+    }
+
+    fn stored(file: &tempfile::NamedTempFile, sql: &str) -> String {
+        Connection::open(file.path())
+            .expect("open")
+            .query_row(sql, [], |row| row.get::<_, String>(0))
+            .expect("query")
+    }
+
+    #[test]
+    fn creating_an_integration_answers_201_and_stores_the_row() {
+        let file = migrated();
+        // A **multi-key** blob, out of alphabetical order, with a trailing-zero
+        // decimal and interior whitespace. A single-key blob is a fixed point of
+        // a `serde_json::Value` round trip, so it would pass even if the bytes
+        // were being rebuilt — which is exactly the hole review found here.
+        let answer = create(
+            file.path(),
+            br#"{"name":"Work","type":"telegram","enabled":true,
+                 "credentials":{"zebra":"z", "bot_token":"t","rate":1.50}}"#,
+        )
+        .expect("create should succeed");
+
+        assert_eq!(answer.status, axum::http::StatusCode::CREATED);
+        let body = body_of(&answer);
+        // Alphabetical, because Go builds the response as a map.
+        assert!(
+            body.starts_with(r#"{"authenticated":false,"created_at":"#),
+            "{body}"
+        );
+        assert!(body.contains(r#""name":"Work""#), "{body}");
+        assert!(body.contains(r#""type":"telegram""#), "{body}");
+        // The secret is never echoed.
+        assert!(
+            !body.contains("bot_token"),
+            "credentials must not be in the response: {body}"
+        );
+        // …but it is stored, verbatim: a create is the one native path that
+        // necessarily handles a secret, because the caller supplies it.
+        assert_eq!(
+            stored(&file, "SELECT credentials FROM integrations"),
+            r#"{"zebra":"z", "bot_token":"t","rate":1.50}"#,
+            "Go stores the RawMessage verbatim: key order, `1.50` and the space \
+             after the first comma all survive"
+        );
+    }
+
+    /// `if cfg.Services == nil { cfg.Services = make(...) }`, so an omitted
+    /// `services` is `{}` in both the column and the response — never `null`.
+    #[test]
+    fn an_omitted_services_map_becomes_an_empty_object_not_null() {
+        let file = migrated();
+        let answer = create(
+            file.path(),
+            br#"{"name":"W","type":"telegram","credentials":{"bot_token":"t"}}"#,
+        )
+        .expect("create");
+        assert!(
+            body_of(&answer).contains(r#""services":{}"#),
+            "{}",
+            body_of(&answer)
+        );
+        assert_eq!(stored(&file, "SELECT services FROM integrations"), "{}");
+    }
+
+    /// Jira is the only type that rewrites what it stores.
+    #[test]
+    fn creating_a_jira_integration_stores_the_renormalised_credentials() {
+        let file = migrated();
+        create(
+            file.path(),
+            br#"{"name":"J","type":"jira","credentials":
+                 {"email":"e","extra":"dropped","site_url":"https://x.net//","api_token":"t"}}"#,
+        )
+        .expect("create");
+        assert_eq!(
+            stored(&file, "SELECT credentials FROM integrations"),
+            r#"{"site_url":"https://x.net","email":"e","api_token":"t"}"#,
+            "jira trims the trailing slashes, re-marshals in declaration order and drops unknown keys"
+        );
+    }
+
+    #[test]
+    fn name_is_checked_before_type_and_type_before_credentials() {
+        let file = migrated();
+        let err = create(file.path(), br#"{}"#).expect_err("empty body");
+        assert!(
+            err.message().contains("name is required"),
+            "{}",
+            err.message()
+        );
+        let err = create(file.path(), br#"{"name":"W"}"#).expect_err("no type");
+        assert!(
+            err.message().contains("type is required"),
+            "{}",
+            err.message()
+        );
+        let err =
+            create(file.path(), br#"{"name":"W","type":"telegram"}"#).expect_err("no credentials");
+        assert!(
+            err.message().contains("credentials are empty"),
+            "{}",
+            err.message()
+        );
+    }
+
+    fn seed_integration(file: &tempfile::NamedTempFile, id: &str) {
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO integrations (id, name, type, enabled, credentials, services,
+                                           created_at, updated_at)
+                 VALUES (?1, 'n', 'telegram', 1, '{}', '{}', '2026-01-01 00:00:00 +0000 UTC',
+                         '2026-01-01 00:00:00 +0000 UTC')",
+                [id],
+            )
+            .expect("seed");
+    }
+
+    #[test]
+    fn a_trigger_rule_round_trips_through_create_update_and_delete() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+
+        let created = create_trigger_rule(
+            file.path(),
+            "int-1",
+            br#"{"name":"R","agent_slug":"a","enabled":true,"filter_keywords":["x"]}"#,
+        )
+        .expect("create rule");
+        assert_eq!(created.status, axum::http::StatusCode::CREATED);
+        let body = body_of(&created);
+        assert!(body.contains(r#""agent_slug":"a""#), "{body}");
+        assert!(body.contains(r#""filter_keywords":["x"]"#), "{body}");
+        // A `TriggerRule` is a struct in Go, so this order is declaration order.
+        assert!(body.starts_with(r#"{"id":"#), "{body}");
+
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+
+        // An omitted field is cleared, not preserved — `UpdateRule` replaces.
+        let updated = update_trigger_rule(file.path(), "int-1", &id, br#"{"agent_slug":"b"}"#)
+            .expect("update rule");
+        assert_eq!(updated.status, axum::http::StatusCode::OK);
+        let body = body_of(&updated);
+        assert!(body.contains(r#""agent_slug":"b""#), "{body}");
+        assert!(
+            body.contains(r#""name":"""#),
+            "an omitted name is cleared: {body}"
+        );
+        // A nil Go slice is `null`; an omitted keyword list is nil, not `[]`.
+        assert!(body.contains(r#""filter_keywords":null"#), "{body}");
+
+        let deleted = delete_trigger_rule(file.path(), "int-1", &id).expect("delete rule");
+        assert_eq!(deleted.status, axum::http::StatusCode::NO_CONTENT);
+        assert!(deleted.body.is_none(), "a 204 carries no body at all");
+    }
+
+    /// The ownership check runs before the body is decoded, so a malformed
+    /// payload aimed at another integration's rule is 403 and not 400.
+    #[test]
+    fn a_rule_owned_by_another_integration_is_403_before_the_body_is_read() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+        seed_integration(&file, "int-2");
+        let created =
+            create_trigger_rule(file.path(), "int-1", br#"{"agent_slug":"a"}"#).expect("create");
+        assert_eq!(created.status, axum::http::StatusCode::CREATED);
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+
+        for body in [&br#"{"agent_slug":"b"}"#[..], b"not json at all"] {
+            let err = update_trigger_rule(file.path(), "int-2", &id, body)
+                .expect_err("wrong integration");
+            assert_eq!(
+                err.status(),
+                axum::http::StatusCode::FORBIDDEN,
+                "body: {body:?}"
+            );
+            assert_eq!(err.message(), "rule does not belong to this integration");
+        }
+
+        let err = delete_trigger_rule(file.path(), "int-2", &id).expect_err("wrong integration");
+        assert_eq!(err.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn a_missing_rule_is_404_and_a_missing_integration_is_too() {
+        let file = migrated();
+        let err = update_trigger_rule(file.path(), "int-1", "nope", br#"{"agent_slug":"a"}"#)
+            .expect_err("missing rule");
+        assert_eq!(err.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), r#"trigger_rule "nope" not found"#);
+
+        let err = create_trigger_rule(file.path(), "ghost", br#"{"agent_slug":"a"}"#)
+            .expect_err("missing integration");
+        assert_eq!(err.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), r#"integration "ghost" not found"#);
+    }
+
+    #[test]
+    fn a_rule_without_an_agent_slug_is_422() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+        let err = create_trigger_rule(file.path(), "int-1", br#"{"name":"R"}"#)
+            .expect_err("no agent_slug");
+        assert_eq!(err.status(), axum::http::StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            err.message().contains("agent_slug is required"),
+            "{}",
+            err.message()
+        );
     }
 }

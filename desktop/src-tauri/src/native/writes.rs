@@ -50,6 +50,12 @@ pub enum WriteError {
     /// [`WriteError::NotFound`] — which would render `chat "abc" not found` —
     /// is the wrong shape, and `BadRequest` is the wrong *status*.
     NotFoundMessage(String),
+    /// A 403 with a fixed message, written by the handler rather than raised by
+    /// the service. The trigger-rule routes use it for a rule that exists but
+    /// belongs to a different integration — note they check that *before*
+    /// decoding the body, so a malformed payload on someone else's rule is this
+    /// and not a 400.
+    Forbidden(String),
     /// Not reproducible here: let the sidecar answer.
     Fallback(String),
 }
@@ -70,6 +76,7 @@ impl WriteError {
             Self::Validation { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::NotFound { .. } | Self::NotFoundMessage(_) => StatusCode::NOT_FOUND,
+            Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::Fallback(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -97,6 +104,7 @@ impl WriteError {
             // `service.NotFoundError.Error()`.
             Self::NotFound { resource, id } => format!("{resource} {:?} not found", id),
             Self::NotFoundMessage(m) => m.clone(),
+            Self::Forbidden(m) => m.clone(),
             Self::Fallback(m) => m.clone(),
         }
     }
@@ -167,9 +175,41 @@ pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Wri
     let value: serde_json::Value =
         serde_json::from_slice(body).map_err(|_| WriteError::InvalidBody)?;
     match value {
-        serde_json::Value::Object(_) => {
-            serde_json::from_value(value).map_err(|_| WriteError::InvalidBody)
-        }
+        // Deserialize from the **original bytes**, not from the `Value` just
+        // parsed. The `Value` is only a shape check.
+        //
+        // This is load-bearing for any field that captures raw JSON: serde_json
+        // is built without `preserve_order`, so a `Value::Object` is a
+        // `BTreeMap` — going through it sorts keys, respells numbers (`1.50` →
+        // `1.5`, `1e3` → `1000.0`) and strips interior whitespace. A
+        // `Box<RawValue>` field would then capture the *re-serialized* value
+        // rather than what the client sent, and
+        // `integrations.credentials` is stored verbatim by Go, so the two
+        // databases would diverge on every blob with more than one key.
+        serde_json::Value::Object(_) => serde_json::from_slice(body).map_err(|_| {
+            // The strict path refuses one shape Go accepts — **duplicate keys**.
+            // serde's derived impl errors with `duplicate field`;
+            // `encoding/json` takes the last occurrence.
+            //
+            // The tempting repair is to decode the already-collapsed `Value`,
+            // but that is a *superset* of Go rather than a match: Go validates
+            // **every** occurrence, while the `Value` retained only the last. So
+            // `{"count":"notanumber","count":1}` is a 400 to Go and would decode
+            // cleanly here — an over-accept, which on `POST /api/integrations`
+            // means creating a row Go would have refused. It would also lose
+            // byte-verbatim raw capture, since the value came from the `Value`.
+            //
+            // Forwarding is exact in both directions and costs nothing: Go
+            // answers the well-typed duplicates and 400s the ill-typed ones. Safe
+            // because `decode_body` runs before any mutation in every caller.
+            if serde_json::from_value::<T>(value).is_ok() {
+                WriteError::Fallback(
+                    "duplicate keys: Go validates every occurrence, so only it can answer".into(),
+                )
+            } else {
+                WriteError::InvalidBody
+            }
+        }),
         // Go's no-op: the zero value, and the handler validates it.
         serde_json::Value::Null => {
             serde_json::from_value(serde_json::Value::Object(serde_json::Map::new()))
@@ -182,6 +222,95 @@ pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Wri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A field that captures raw JSON must capture what the **client sent**,
+    /// not a re-serialization of it.
+    ///
+    /// `decode_body` shape-checks through a `serde_json::Value`, and serde_json
+    /// here has no `preserve_order` — so deserializing *from that `Value`*
+    /// silently sorted keys, respelled `1.50` as `1.5` and dropped interior
+    /// whitespace. `integrations.credentials` is stored verbatim by Go, so that
+    /// was a byte divergence on every blob with more than one key. Deserializing
+    /// from the original bytes is what fixes it, and this pins it at the level
+    /// the bug lived at rather than only at the one call site that noticed.
+    #[test]
+    fn a_captured_raw_field_keeps_the_bytes_the_client_sent() {
+        #[derive(serde::Deserialize)]
+        struct Body {
+            #[serde(default, deserialize_with = "super::super::gojson::captured_raw")]
+            blob: Option<Box<serde_json::value::RawValue>>,
+        }
+        let body = br#"{"blob":{"zebra":"z", "alpha":"a","rate":1.50,"n":1e3}}"#;
+        let decoded: Body = decode_body(body).expect("decodes");
+        assert_eq!(
+            decoded.blob.expect("present").get(),
+            r#"{"zebra":"z", "alpha":"a","rate":1.50,"n":1e3}"#,
+            "key order, number spelling and interior whitespace must all survive"
+        );
+    }
+
+    /// Duplicate keys forward, because only Go can answer them.
+    ///
+    /// `encoding/json` keeps the **last** occurrence but type-checks **every**
+    /// one, so `{"n":"x","n":1}` is a 400 to Go even though the surviving value
+    /// is fine. serde's derived impl refuses duplicates outright, and the
+    /// collapsed `Value` has already thrown away the occurrences Go would have
+    /// judged — so neither local path can reproduce the answer. Handing it over
+    /// is exact in both directions.
+    #[test]
+    fn duplicate_keys_forward_rather_than_being_guessed_at() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Body {
+            #[serde(default)]
+            #[allow(dead_code)]
+            s: String,
+            #[serde(default)]
+            #[allow(dead_code)]
+            n: u8,
+        }
+        // Go would accept this one…
+        assert!(matches!(
+            decode_body::<Body>(br#"{"s":"first","s":"last-wins"}"#).unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+        // …and 400 this one, because the *first* occurrence does not fit `u8`.
+        // Both forward, so Go makes that distinction rather than this helper.
+        assert!(matches!(
+            decode_body::<Body>(br#"{"n":999,"n":7}"#).unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+    }
+
+    /// Ordinary bodies must not touch the duplicate path — verbatim capture
+    /// still has to come from the strict decode.
+    #[test]
+    fn a_body_without_duplicates_never_takes_the_forward_path() {
+        #[derive(serde::Deserialize)]
+        struct Body {
+            #[serde(default, deserialize_with = "super::super::gojson::captured_raw")]
+            blob: Option<Box<serde_json::value::RawValue>>,
+        }
+        let decoded: Body = decode_body(br#"{"blob":{"z":"z", "a":"a","r":1.50}}"#).expect("ok");
+        assert_eq!(
+            decoded.blob.expect("present").get(),
+            r#"{"z":"z", "a":"a","r":1.50}"#
+        );
+    }
+
+    /// The fallback must not widen what is accepted beyond it.
+    #[test]
+    fn a_body_both_paths_reject_is_still_malformed() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Body {
+            #[serde(default)]
+            #[allow(dead_code)] // Only the decode outcome is under test.
+            n: u8,
+        }
+        assert_eq!(
+            decode_body::<Body>(br#"{"n":"not a number"}"#).unwrap_err(),
+            WriteError::InvalidBody
+        );
+    }
 
     /// These strings ship. `service.ValidationError.Error()` uses `%q`, which
     /// is Go's quoted form — so the field name arrives in quotes, and a port
