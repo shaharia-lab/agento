@@ -25,6 +25,7 @@ pub mod insights;
 pub mod monitoring;
 pub mod notifications;
 pub mod pricing;
+pub mod query;
 pub mod scanner;
 pub mod sessions;
 pub mod settings;

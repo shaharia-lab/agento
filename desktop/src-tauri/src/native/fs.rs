@@ -19,6 +19,14 @@
 //! 3. **No traversal guard beyond `Clean`.** Go applies none, and adding one
 //!    here would refuse paths the sidecar serves.
 //!
+//! **One accepted divergence: a filename that is not valid UTF-8.** Both
+//! languages mangle it — Go's JSON encoder substitutes U+FFFD and so does
+//! `to_string_lossy` — but they count differently: Go emits one replacement per
+//! invalid *byte*, while Rust emits one per maximal invalid *subsequence*, so
+//! `\xe0\xa0` is two characters to Go and one here. Neither answer is a usable
+//! path, and reproducing Go's policy would mean hand-rolling the conversion for
+//! a case the picker cannot act on, so this is documented rather than fixed.
+//!
 //! **Answered on Unix only.** The endpoint is `filepath.Clean`/`Dir`/`Join`
 //! wrapped in a response, and Windows `filepath` strips a volume name before
 //! cleaning and accepts both separators — a different algorithm, with no Windows
@@ -120,13 +128,10 @@ pub fn list(raw_path: &str) -> Result<FsListResponse, String> {
     })
 }
 
-/// The `path` query parameter, read the way `r.URL.Query().Get` reads it:
-/// percent-decoded, and the first value when the key repeats.
+/// The `path` query parameter. No rule of its own on top of the decoding —
+/// `""` already means the home directory, which is what an absent key gives.
 pub fn path_param(query: &str) -> String {
-    form_urlencoded::parse(query.as_bytes())
-        .find(|(k, _)| k == "path")
-        .map(|(_, v)| v.into_owned())
-        .unwrap_or_default()
+    super::query::value(query, "path")
 }
 
 // ─── The seam ─────────────────────────────────────────────────────────────────

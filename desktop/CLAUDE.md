@@ -139,6 +139,7 @@ src-tauri/src/
     notifications.rs GET /api/notifications/settings (password masked) and /log
     fs.rs        GET /api/fs — the working-dir picker's listing (Unix; forwards on Windows)
     gopath.rs    Go's filepath.Clean/Dir/Join, pinned to vectors generated from Go
+    query.rs     one query parameter, read the way r.URL.Query().Get reads it
     pricing.rs   GET /api/pricing/catalog, plus the rate Resolver
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
