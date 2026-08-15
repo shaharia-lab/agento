@@ -208,7 +208,8 @@ The Go backend is ~80k lines across ~90 REST endpoints. The agreed strategy is
 **sidecar first, then port subsystem by subsystem**, because two Go
 dependencies have no mature Rust equivalent — the Claude Agent SDK for Go and
 `whatsmeow` for WhatsApp — and a big-bang rewrite would leave nothing runnable
-for months.
+for months. The SDK was ported (`src/claude/`); **WhatsApp was dropped instead**
+(see below).
 
 ### The seam
 
@@ -400,7 +401,7 @@ of the `Err` arms the cut-over has to turn into a real response.
 | 1 ✅ | Sidecar + proxy | — | done |
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
 | 3 | Storage + tasks | `internal/storage`, `internal/scheduler` | 27 SQLite migrations; reuse the same DB file and schema. Scheduler is cron/interval. |
-| 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. WhatsApp (`whatsmeow`) is the blocker — port it last or keep it in Go. |
+| 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram. WhatsApp is **not** among them — see below. |
 | 5 | Agent execution | `internal/agent`, `internal/service` | Spawns the `claude` CLI over stream-json stdin/stdout. **The SDK underneath it is ported** (`src/claude/`, below); what remains is the runner, the chat service and the SSE handler on top of it. |
 
 ### The session scanner (`src-tauri/src/native/scanner/`)
@@ -612,6 +613,35 @@ sliver. Dashboard containers need `> * { flex: 0 0 auto; }`.
 
 Telemetry/OTel, Prometheus metrics, and the self-updater are server concerns.
 The desktop app should use Tauri's own updater instead.
+
+### WhatsApp is dropped, not deferred (#273)
+
+`whatsmeow` has no Rust equivalent and will not be reimplemented. This is a
+decision, not a backlog item: do not port `internal/integrations/whatsapp`, and
+do not keep a Go sidecar, subprocess or shim for it — that would defeat the
+point of the port, which is to stop maintaining two implementations. A session
+that finds itself scoping WhatsApp work has misread this section. `main` keeps
+WhatsApp indefinitely; the desktop app is what loses it, and that is the
+accepted trade.
+
+What that means in the code, and the part that is easy to get wrong:
+
+- The UI offers no WhatsApp entry, pairing flow or QR screen. The picker is
+  `PROVIDERS` in `src/views/integrations/catalog.ts` — a hardcoded list, so
+  **that list is what decides it**, not anything the API returns.
+- **An existing row is data and must survive.** Someone who paired under the Go
+  server has an `integrations` row of that type. `type` is a free-form `String`
+  everywhere — no enum, no match — so it lists, opens and reads normally;
+  `providerFor` returning `undefined` is a supported answer, and
+  `RETIRED_TYPES` in `IntegrationsView.tsx` is what turns it into an honest
+  "not available here" rather than the "newer version of Agento" line, which
+  would send that user hunting for an upgrade that does not exist.
+- **Do not filter it out of `available-tools`.** Go's handler never looks at
+  `type`, so suppressing the row is a byte-level divergence on an endpoint
+  whose bar is byte-identical JSON. Agents whose allowlists name WhatsApp tools
+  keep those entries; the tools simply never resolve.
+- `GET /api/integrations/{id}/whatsapp/*` stays unclaimed and forwards. Nothing
+  calls it any more, so it dies with the sidecar rather than needing removal.
 
 ---
 
@@ -828,8 +858,8 @@ firing one cheap request at the sidecar, so the *rules* stay in the code that
 owns them rather than being reimplemented and left to drift.
 
 Verified but not exercised against real data: task/job writes, integration
-OAuth and WhatsApp pairing, and agent CRUD — the reference instance has none of
-those configured. Use the isolated dev instance for write testing.
+OAuth and agent CRUD — the reference instance has none of those configured.
+Use the isolated dev instance for write testing.
 
 **Known gaps**
 - Cross-view navigation: "Continue in chat" on a session can only report the

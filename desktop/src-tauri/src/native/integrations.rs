@@ -33,7 +33,27 @@
 //!   bot token.
 //! - **`GET /{id}/whatsapp/*`** is not ported at all: WhatsApp is dropped from
 //!   the desktop app by decision (`whatsmeow` has no Rust equivalent), so these
-//!   routes must keep answering exactly as the sidecar answers them.
+//!   routes must keep answering exactly as the sidecar answers them. As of
+//!   #273 the desktop UI no longer calls them, so they are unreachable rather
+//!   than merely unported — but they stay unclaimed, because forwarding is what
+//!   makes them the sidecar's problem to answer and then to delete.
+//!
+//! ## A `whatsapp` row is data, not a type this code knows
+//!
+//! Dropping the integration does **not** mean filtering it out here. Nothing in
+//! this module models an integration type: `type` is a `String` read verbatim,
+//! and `available_tools` selects on `enabled`/`authenticated` alone. That is
+//! deliberate on both counts.
+//!
+//! - A user who paired WhatsApp under the Go server has a row. Skipping it
+//!   would delete history from the list, which is not what "unavailable" means;
+//!   the UI renders it from the stored fields and explains itself instead
+//!   (`RETIRED_TYPES` in `IntegrationsView.tsx`).
+//! - Filtering it out of `available-tools` would also be a **parity
+//!   regression**. Go's handler is type-agnostic, so a suppressed row is a
+//!   byte-level divergence on an endpoint whose bar is byte-identical JSON.
+//!   Agents whose allowlists name WhatsApp tools keep those entries; the tools
+//!   simply never resolve, which is the accepted trade.
 //!
 //! ## Go's own response is not order-stable here
 //!
@@ -583,6 +603,48 @@ mod tests {
     fn a_missing_integration_is_none_not_an_error() {
         let file = fixture();
         assert!(get(file.path(), "nope").expect("get").is_none());
+    }
+
+    /// A row of a type the desktop app has dropped is still ordinary data.
+    ///
+    /// #273 removed WhatsApp from the UI, and the tempting next step is to
+    /// filter it out here too. Both halves of that would be wrong: the list
+    /// would lose a row the user really has, and `available-tools` would stop
+    /// matching Go — whose handler never looks at `type` — on an endpoint whose
+    /// bar is byte-identical JSON. Its own fixture, so the shared one's byte
+    /// assertions stay put.
+    #[test]
+    fn a_dropped_integration_type_is_listed_like_any_other() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let conn = Connection::open(file.path()).expect("open");
+        conn.execute_batch(SCHEMA).expect("schema");
+        conn.execute_batch(
+            r#"
+            INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                      created_at, updated_at)
+            VALUES
+              ('wa-int', 'Paired phone', 'whatsapp', 1,
+               '{}', '{"device_id":"abc"}',
+               '{"messaging":{"enabled":true,"tools":["send_message","send_media"]}}',
+               '2026-08-01 10:00:00 +0000 UTC', '2026-08-02 11:00:00 +0000 UTC');
+            "#,
+        )
+        .expect("seed");
+        drop(conn);
+
+        let listed = list(file.path()).expect("list");
+        assert_eq!(listed.len(), 1, "a whatsapp row must not be filtered out");
+        assert_eq!(listed[0].integration_type, "whatsapp");
+        assert!(listed[0].authenticated);
+
+        assert!(get(file.path(), "wa-int").expect("get").is_some());
+
+        // Its tools still reach the allowlist picker, exactly as Go reports
+        // them. They will never resolve at run time, and that is the accepted
+        // trade — not something this reader is allowed to paper over.
+        let tools = available_tools(file.path()).expect("tools");
+        let names: Vec<&str> = tools.iter().map(|t| t.tool_name.as_str()).collect();
+        assert_eq!(names, ["send_message", "send_media"]);
     }
 
     #[test]

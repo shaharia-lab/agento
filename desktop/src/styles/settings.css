@@ -358,35 +358,6 @@
   opacity: 0.55;
 }
 
-/* --- QR ------------------------------------------------------------------ */
-
-.qr {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--sp-5);
-  padding: var(--sp-7);
-  border-radius: var(--r-lg);
-  background: var(--bg-list);
-  box-shadow: inset 0 0 0 0.5px var(--line);
-}
-/* Always rendered on white with a real quiet zone — a themed background or a
-   missing margin is the usual reason a phone will not lock onto the code. */
-.qr__code {
-  background: #fff;
-  padding: 12px;
-  border-radius: var(--r-md);
-  box-shadow: var(--shadow-sm);
-  image-rendering: pixelated;
-}
-.qr__hint {
-  font-size: var(--text-sm);
-  color: var(--fg-tertiary);
-  text-align: center;
-  line-height: var(--leading-normal);
-  max-width: 340px;
-}
-
 .codebox {
   font-family: var(--font-mono);
   font-size: var(--text-xs);
