@@ -137,7 +137,7 @@ pub async fn run(
     let answers = Arc::new(Answers {
         input: tokio::sync::Mutex::new(input_rx),
         permission: tokio::sync::Mutex::new(perm_rx),
-        disconnect: body_tx.clone(),
+        disconnect: body_tx.downgrade(),
     });
     let handler = build_permission_handler(notify_tx.clone(), Arc::clone(&answers));
 
@@ -218,9 +218,8 @@ struct LockGuard {
 
 impl Drop for LockGuard {
     fn drop(&mut self) {
-        // The stream task calls `release` itself after dropping this, so a
-        // double release is possible and harmless — both are idempotent
-        // removals from a set.
+        // The only release: the stream task used to call `release` itself as
+        // well, and no longer does.
         registry().release(&self.id);
     }
 }
@@ -234,7 +233,7 @@ impl Drop for LockGuard {
 struct Answers {
     input: tokio::sync::Mutex<mpsc::Receiver<String>>,
     permission: tokio::sync::Mutex<mpsc::Receiver<bool>>,
-    /// A clone of the body sender, used only for [`mpsc::Sender::closed`].
+    /// A **weak** handle on the body sender, used only to notice a disconnect.
     ///
     /// This is how a waiting handler learns the client went away, and it is
     /// **not** optional: the permission callback is awaited inline on the SDK's
@@ -244,9 +243,36 @@ struct Answers {
     /// subprocess alive, the busy lock held and the chat unusable for the life
     /// of the process.
     ///
+    /// Weak rather than a plain clone, and that is load-bearing. This struct is
+    /// reachable from the permission-handler `Arc`, which the SDK's reader task
+    /// owns for as long as it runs — and that task ends only at stdout EOF. A
+    /// strong clone here would therefore keep the body's sender set non-empty
+    /// past the end of the turn, so `ReceiverStream` would not terminate and the
+    /// SSE response would stay open until the subprocess's stdout closed: ~5s
+    /// when the CLI ignores SIGTERM, and unbounded when it leaves a grandchild
+    /// holding stdout — the hazard `claude/process.rs` documents, which any
+    /// backgrounding `Bash` call produces. The frontend only clears its
+    /// streaming state in `onDone`, so that is a chat stuck mid-stream with the
+    /// composer blocked, long after the commit ran. Go's handler returns as soon
+    /// as `consumeAgentEvents` does.
+    ///
     /// Go reaches the same place through `r.Context().Done()`, which every one
     /// of its waits selects on.
-    disconnect: mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+    disconnect: mpsc::WeakSender<Result<Vec<u8>, std::io::Error>>,
+}
+
+/// Resolves once the client is gone.
+///
+/// Two ways that happens, and both mean "stop waiting": the body receiver was
+/// dropped (the tab closed), or every strong sender is already gone, which means
+/// the stream task itself has finished. Upgrading is transient — the strong
+/// sender it produces lives only while this future is parked, which is precisely
+/// the window in which the turn is still running and the CLI is blocked on an
+/// answer, so it cannot extend the stream past the turn.
+async fn client_gone(weak: &mpsc::WeakSender<Result<Vec<u8>, std::io::Error>>) {
+    if let Some(tx) = weak.upgrade() {
+        tx.closed().await;
+    }
 }
 
 /// `buildPermissionHandler`: `AskUserQuestion` is answered by *denying* the tool
@@ -286,7 +312,7 @@ fn build_permission_handler(
                         // alive and the chat's busy lock held for the life of
                         // the process. Go reaches the same place through
                         // `r.Context().Done()`, and answers with this string.
-                        _ = answers.disconnect.closed() => {
+                        _ = client_gone(&answers.disconnect) => {
                             PermissionResult::deny("request canceled")
                         }
                     };
@@ -302,7 +328,7 @@ fn build_permission_handler(
                     },
                     // Same reason as above — this is the more likely one to be
                     // hit, since a permission prompt is the common case.
-                    _ = answers.disconnect.closed() => {
+                    _ = client_gone(&answers.disconnect) => {
                         PermissionResult::deny("request canceled")
                     }
                 }

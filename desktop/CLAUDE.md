@@ -730,11 +730,32 @@ adds spaces, so a byte-exactness test cannot go through it.
 **A disconnect has to be raced explicitly, not inferred.** The permission
 handler is awaited *inline on the SDK's reader task*, so while it is parked no
 events arrive and the stream loop has nothing to send — a closed tab is
-invisible to every code path that would otherwise notice. All three unbounded
-waits (the loop, the post-result continuation, the permission round trip) race
-`Sender::closed` on the body channel, which is what Go gets from
-`r.Context().Done()`. Without it, closing a tab on an open prompt held the busy
-lock and leaked a `claude` subprocess for the life of the process.
+invisible to every code path that would otherwise notice. All four unbounded
+waits (the loop, the post-result continuation, and both permission arms) race
+the body channel's closure, which is what Go gets from `r.Context().Done()`.
+Without it, closing a tab on an open prompt held the busy lock and leaked a
+`claude` subprocess for the life of the process.
+
+The obvious way to write that is a **bug**, and the fix for it is the reason
+`Answers.disconnect` is an `mpsc::WeakSender`. A plain `Sender` clone works for
+detecting the disconnect, but this struct is reachable from the permission
+handler, which the SDK's reader task owns until *stdout* hits EOF — so a strong
+clone keeps the body's sender set non-empty past the end of the turn and the SSE
+response stays open. That is ~5s when the CLI ignores `SIGTERM` and **unbounded**
+when it leaves a grandchild holding stdout, which any backgrounding `Bash` call
+produces. `useChatStream.ts` clears its streaming state only in `onDone`, so the
+symptom is a chat stuck mid-stream with the composer blocked long after the
+commit ran — and Go's handler returns as soon as `consumeAgentEvents` does, so
+it is a parity break too. **Nothing that outlives the turn may hold a strong body
+sender.**
+
+Each of these is pinned by a test that fails when the fix is reverted —
+`a_disconnect_while_a_prompt_is_pending_releases_the_chat` (reads frames until
+the prompt arrives *before* disconnecting, or it would only exercise the
+pre-existing failed-send path), its `..._silent_cli_...` sibling for the loop
+arm, and `the_body_ends_with_the_turn_even_when_a_grandchild_holds_stdout_open`
+for the sender strength. Assert the revert fails; a disconnect test that passes
+either way is the easy mistake here.
 
 **`AGENTO_CLAUDE_EXECUTABLE`** overrides which binary is spawned, falling back to
 `find_claude_cli()` and then the bare name. The fallback matters — a GUI process

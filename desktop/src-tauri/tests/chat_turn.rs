@@ -420,17 +420,150 @@ async fn a_disconnect_while_a_prompt_is_pending_releases_the_chat() {
     .await
     .expect("the turn should stream");
 
-    // Drop the body without reading it to the end — a closed tab.
+    // Read until the prompt frame arrives, *then* disconnect.
+    //
+    // Dropping the response immediately would not test this: the first
+    // `out.send` would fail and tear the turn down through the pre-existing
+    // error path, which passes with the whole disconnect fix reverted. Waiting
+    // for `user_input_required` parks the turn in the post-result continuation,
+    // where nothing is being sent and only the disconnect race can free it.
+    read_until(response, "user_input_required").await;
+
+    assert_released(&id, "the post-result continuation").await;
+}
+
+/// The other half of the same rule, for the event loop's own arm.
+///
+/// The CLI here says **nothing** after initialize, so the turn parks in
+/// `stream_events` with no frame ever written — meaning no failing send can
+/// notice the disconnect and `out.closed()` is the only thing that can.
+#[tokio::test]
+async fn a_disconnect_while_the_loop_waits_on_a_silent_cli_releases_the_chat() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+"#,
+    );
+
+    let id = unique_id("disconnect-loop");
+    let file = migrated_with_chat(&id);
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    let response = agento_lib::native::chat::turn::run(
+        file.path().to_path_buf(),
+        id.clone(),
+        "hello".to_string(),
+    )
+    .await
+    .expect("the turn should stream");
+
+    // No frame will ever arrive, so dropping now is a tab closed on a turn that
+    // is waiting on a tool call — the case with no send to fail.
     drop(response);
 
-    // The turn must notice and release. Poll rather than sleep a fixed amount:
-    // the teardown is asynchronous, and a fixed wait is either flaky or slow.
+    assert_released(&id, "the event loop's disconnect arm").await;
+}
+
+/// The SSE body must end when the **turn** ends, not when the subprocess's
+/// stdout closes.
+///
+/// Nothing may hold a strong clone of the body sender past the turn. The
+/// permission handler is the tempting place to put one — it needs to notice a
+/// disconnect — but the SDK's reader task owns that handler until stdout hits
+/// EOF, which a grandchild can defer indefinitely. Here the CLI backgrounds a
+/// `sleep` that inherits stdout and then exits, which is what any `Bash` call
+/// starting a dev server or watcher does. The frontend clears its streaming
+/// state only when the body ends, so a body that outlives the turn is a chat
+/// stuck mid-stream with the composer blocked.
+#[tokio::test]
+async fn the_body_ends_with_the_turn_even_when_a_grandchild_holds_stdout_open() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        import subprocess
+        # Inherits stdout and outlives us: stdout never reaches EOF.
+        subprocess.Popen(["sleep", "30"])
+        raw('{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}')
+        raw('{"type":"result","subtype":"success","is_error":false,"result":"hi","session_id":"sdk-1","usage":{}}')
+        sys.exit(0)
+"#,
+    );
+
+    let id = unique_id("grandchild");
+    let file = migrated_with_chat(&id);
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    let response = agento_lib::native::chat::turn::run(
+        file.path().to_path_buf(),
+        id.clone(),
+        "hello".to_string(),
+    )
+    .await
+    .expect("the turn should stream");
+
+    // 10s is far below the grandchild's 30s and far above a healthy teardown,
+    // which is milliseconds — so this cannot be flaky in either direction.
+    let started = std::time::Instant::now();
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        use http_body_util::BodyExt;
+        response.into_body().collect().await.map(|c| c.to_bytes())
+    })
+    .await;
+
+    let body = drained
+        .expect("the body outlived the turn — something still holds a strong body sender")
+        .expect("body error");
+    assert!(
+        String::from_utf8_lossy(&body).contains("\"hi\""),
+        "the turn should still have streamed its reply"
+    );
+    eprintln!("body ended in {:?}", started.elapsed());
+}
+
+/// Consume frames until one contains `marker`, then disconnect by dropping the
+/// body. Returns once the turn is parked and the client is gone.
+async fn read_until(response: axum::http::Response<axum::body::Body>, marker: &str) {
+    use http_body_util::BodyExt;
+
+    let mut body = response.into_body();
+    let mut seen = String::new();
+    while !seen.contains(marker) {
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(20), body.frame())
+            .await
+            .unwrap_or_else(|_| panic!("timed out waiting for a frame containing {marker:?}"))
+            .unwrap_or_else(|| panic!("stream ended before {marker:?}; saw: {seen}"))
+            .expect("frame error");
+        if let Some(chunk) = frame.data_ref() {
+            seen.push_str(&String::from_utf8_lossy(chunk));
+        }
+    }
+    drop(body);
+}
+
+/// Poll rather than sleep a fixed amount: teardown is asynchronous, and a fixed
+/// wait is either flaky or slow.
+async fn assert_released(id: &str, which: &str) {
     let mut released = false;
     for _ in 0..200 {
-        if agento_lib::native::chat::live::registry()
-            .get(&id)
-            .is_none()
-            && agento_lib::native::chat::live::registry().try_lock(&id)
+        if agento_lib::native::chat::live::registry().get(id).is_none()
+            && agento_lib::native::chat::live::registry().try_lock(id)
         {
             released = true;
             break;
@@ -439,7 +572,7 @@ async fn a_disconnect_while_a_prompt_is_pending_releases_the_chat() {
     }
     assert!(
         released,
-        "a disconnected turn must release the busy lock, or the chat is wedged"
+        "a disconnected turn must release the busy lock via {which}, or the chat is wedged"
     );
 }
 
