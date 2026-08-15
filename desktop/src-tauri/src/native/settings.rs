@@ -220,7 +220,7 @@ fn claude_config_dirs(run_override: &str, extra: &[String]) -> Vec<String> {
 
 /// `~/.claude`, or `/root/.claude` when there is no home — the fallback Go's
 /// `DefaultClaudeConfigDir` uses.
-fn default_claude_config_dir() -> String {
+pub fn default_claude_config_dir() -> String {
     paths::home()
         .unwrap_or_else(|| PathBuf::from("/root"))
         .join(".claude")

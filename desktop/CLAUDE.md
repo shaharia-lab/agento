@@ -144,7 +144,10 @@ src-tauri/src/
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
-    sessions/    GET /api/claude-sessions and /facets; corpus.rs loads the lot
+    sessions/    GET /api/claude-sessions, /facets, /projects and /{id}
+      detail.rs  one session re-read from its transcript, patched from the cache
+      projects.rs the project picker's list, derived from the same walk a scan is
+      corpus.rs  loads the lot
     analytics/   GET /api/claude-analytics
       buckets.rs Go's time.Date/AddDate and the bucket walks, in the request's tz
       params.rs  from/to/project/tz, and the granularity the window picks
@@ -336,6 +339,25 @@ fast path was not.)
 body). Nothing read from SQLite can be either — SQLite stores NaN as NULL — but
 a *computed* average or ratio can be, so guard the division at the source
 rather than expecting the encoder to notice.
+
+### A JSON `null` is a zero value, not a type error
+
+Go's `json.Unmarshal` treats `null` as a no-op for every type in this codebase,
+so `{"parentUuid":null}` leaves `""` and returns **no error**. `serde` rejects
+it, and the consequences are wildly out of proportion to the cause: a rejected
+field fails its struct, a failed struct drops its whole event, and a dropped
+event is simply absent from a transcript with nothing to signal it.
+
+`gojson::null_is_zero_value` is the one answer, and every `#[serde(default)]`
+scalar in `native/insights/transcript.rs` and `native/notifications.rs` goes
+through it. This is not defensive padding — #271 added `uuid`/`parentUuid` to
+the transcript decoder and silently lost the **first user message of every
+conversation**, because `parentUuid` is `null` on exactly the event that starts
+one. The live diff caught it; no unit test would have, since the fixtures were
+all written by hand with the field present.
+
+Genuinely unparseable input still fails, which is also what Go does — so the
+null case and the malformed case need separate tests.
 
 ### The build stamp, and the half of `/version` that is not ported
 

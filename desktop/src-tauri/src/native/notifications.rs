@@ -33,29 +33,12 @@
 use std::path::Path;
 
 use axum::http::Method;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 use super::db;
 use super::gotime::GoTime;
 
 // ─── GET /api/notifications/settings ──────────────────────────────────────────
-
-/// Decode a field the way Go does: a stored JSON `null` is the **zero value**,
-/// not a type error.
-///
-/// `json.Unmarshal` treats `null` as a no-op for every type here, so
-/// `{"provider":null}` leaves `SMTPConfig{}` and returns a 200. `serde` rejects
-/// it, and the seam would turn that into a silent fallback — the route stops
-/// being native with nothing to signal it. Genuinely unparsable text still
-/// fails, which is also what Go does. Same rule `scheduled_tasks.schedule_config`
-/// needed in PR #285; the column is hand-editable, so it is reachable.
-fn null_is_zero_value<'de, D, T>(deserializer: D) -> Result<T, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de> + Default,
-{
-    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
-}
 
 /// SMTP connection parameters. Mirrors `notification.SMTPConfig`.
 ///
@@ -63,20 +46,20 @@ where
 /// unconfigured install — including `"port": 0`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SmtpConfig {
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub host: String,
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub port: i64,
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub username: String,
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub password: String,
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub from_address: String,
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub to_addresses: String,
     /// "none", "starttls" or "ssl_tls".
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub encryption: String,
 }
 
@@ -98,7 +81,7 @@ pub struct ScheduledTasksPreferences {
 /// Mirrors `notification.NotificationPreferences`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationPreferences {
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub scheduled_tasks: ScheduledTasksPreferences,
 }
 
@@ -106,11 +89,11 @@ pub struct NotificationPreferences {
 /// `user_settings.notification_settings`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationSettings {
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub enabled: bool,
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub provider: SmtpConfig,
-    #[serde(default, deserialize_with = "null_is_zero_value")]
+    #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub preferences: NotificationPreferences,
 }
 

@@ -368,7 +368,7 @@ fn parse_time(text: &str, column: usize) -> rusqlite::Result<GoTime> {
 
 /// The label the UI renders. Agento's own rename wins, then Claude Code's
 /// native title, then its AI-generated one, then the first prompt.
-fn resolve_display_title(s: &SessionSummary) -> String {
+pub fn resolve_display_title(s: &SessionSummary) -> String {
     for candidate in [&s.custom_title, &s.native_title, &s.ai_title, &s.preview] {
         if !candidate.is_empty() {
             return candidate.clone();

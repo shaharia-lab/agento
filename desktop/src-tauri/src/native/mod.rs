@@ -183,12 +183,21 @@ mod tests {
         // Writes stay with Go until phase 3 moves the storage layer.
         assert!(!claims(&Method::POST, "/api/pricing/rates"));
         assert!(!claims(&Method::POST, "/api/claude-sessions/refresh"));
-        // Scan lifecycle stays with Go while the scanner does.
+        // Scan lifecycle stays with Go while the scanner does — and `status`
+        // and `refresh` are single segments, so the detail route has to exclude
+        // them by name rather than by shape.
         assert!(!claims(&Method::GET, "/api/claude-sessions/status"));
-        // Not a prefix match: an unported endpoint under the same namespace
-        // must not be swallowed. A session ID is a path segment, not a suffix.
-        assert!(!claims(&Method::GET, "/api/claude-sessions/abc-123"));
+        assert!(!claims(&Method::GET, "/api/claude-sessions/refresh"));
+        // The detail read is claimed, but only as a single segment — a nested
+        // path under the same namespace must not be swallowed.
+        assert!(claims(&Method::GET, "/api/claude-sessions/abc-123"));
+        assert!(claims(&Method::GET, "/api/claude-sessions/projects"));
         assert!(!claims(&Method::GET, "/api/claude-sessions/"));
+        assert!(!claims(&Method::PATCH, "/api/claude-sessions/abc-123"));
+        assert!(!claims(
+            &Method::GET,
+            "/api/claude-sessions/abc-123/journey"
+        ));
         assert!(claims(
             &Method::GET,
             "/api/claude-sessions/insights/summary"

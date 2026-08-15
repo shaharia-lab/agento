@@ -225,7 +225,7 @@ impl TimeRange {
 }
 
 /// Sets cwd and git branch from the first event that has them.
-fn update_metadata_from_event(summary: &mut SessionSummary, ev: &Event) {
+pub(crate) fn update_metadata_from_event(summary: &mut SessionSummary, ev: &Event) {
     if summary.cwd.is_empty() && !ev.cwd.is_empty() {
         summary.cwd = ev.cwd.clone();
     }
@@ -274,7 +274,7 @@ fn process_summary_event(
 /// Claude Code re-appends every one of them on each resume, so unconditional
 /// assignment during a sequential read gives last-wins for free — which is the
 /// correct rule, since the final value is the current one.
-fn apply_session_metadata(summary: &mut SessionSummary, ev: &Event) {
+pub(crate) fn apply_session_metadata(summary: &mut SessionSummary, ev: &Event) {
     match ev.event_type.as_str() {
         "custom-title" => summary.native_title = ev.custom_title.clone(),
         "ai-title" => summary.ai_title = ev.ai_title.clone(),
@@ -297,7 +297,7 @@ fn apply_session_metadata(summary: &mut SessionSummary, ev: &Event) {
 ///
 /// Claude Code re-emits the event on every resume, so the same PR appears many
 /// times in one file; the earliest sighting keeps its timestamp.
-fn add_summary_pr_link(summary: &mut SessionSummary, ev: &Event) {
+pub(crate) fn add_summary_pr_link(summary: &mut SessionSummary, ev: &Event) {
     if ev.pr_url.is_empty() {
         return;
     }
@@ -319,7 +319,7 @@ fn add_summary_pr_link(summary: &mut SessionSummary, ev: &Event) {
 ///
 /// Only the `compact_boundary` subtype carries compaction metadata; every other
 /// system subtype is ignored here.
-fn add_summary_compaction(summary: &mut SessionSummary, ev: &Event) {
+pub(crate) fn add_summary_compaction(summary: &mut SessionSummary, ev: &Event) {
     if ev.subtype != "compact_boundary" {
         return;
     }
@@ -466,7 +466,7 @@ fn skill_name_from_path(path: &str) -> String {
 
 /// Truncates to `max` characters, appending an ellipsis — Go's
 /// `truncateRunes`, which counts runes rather than bytes.
-fn truncate_chars(s: &str, max: usize) -> String {
+pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_string();
     }

@@ -39,39 +39,91 @@ use serde::Deserialize;
 /// One decoded line of a session JSONL file.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Event {
-    #[serde(default, rename = "type")]
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub event_type: String,
-    #[serde(default)]
+    /// Identity of the event itself, and of the one it answers. Only the
+    /// session-detail view renders them — the counters and the journey work
+    /// from order — but they are decoded here because this is the one decoder
+    /// for the format.
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
+    pub uuid: String,
+    #[serde(
+        default,
+        rename = "parentUuid",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
+    pub parent_uuid: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub timestamp: Option<DateTime<Utc>>,
     /// Set on every event of a sub-agent transcript, and on delegated events
     /// inside a parent transcript. **The check is deliberately left to each
     /// caller**: the flag means "delegated work, skip" in a parent transcript
     /// but carries no such meaning in a sub-agent's own.
-    #[serde(default, rename = "isSidechain")]
+    #[serde(
+        default,
+        rename = "isSidechain",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub is_sidechain: bool,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub message: Option<Message>,
 
     /// Stamped by Claude Code at the *top level* of assistant events — never
     /// inside `message`, and never on user events. It names which skill's
     /// instructions were in context when the turn ran, so on a `Skill` tool
     /// call it names the **caller**, not the skill being invoked.
-    #[serde(default, rename = "attributionSkill")]
+    #[serde(
+        default,
+        rename = "attributionSkill",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub attribution_skill: String,
-    #[serde(default, rename = "attributionPlugin")]
+    #[serde(
+        default,
+        rename = "attributionPlugin",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub attribution_plugin: String,
-    #[serde(default, rename = "attributionAgent")]
+    #[serde(
+        default,
+        rename = "attributionAgent",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub attribution_agent: String,
     /// Decoded but deliberately **not counted**: these hold the last MCP tool
     /// touched and persist onto later, unrelated turns. MCP attribution comes
     /// from the `mcp__<server>__<tool>` block name instead, which is
     /// authoritative.
-    #[serde(default, rename = "attributionMcpServer")]
+    #[serde(
+        default,
+        rename = "attributionMcpServer",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub attribution_mcp_server: String,
-    #[serde(default, rename = "attributionMcpTool")]
+    #[serde(
+        default,
+        rename = "attributionMcpTool",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub attribution_mcp_tool: String,
     /// The reasoning-effort tier the turn ran at.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub effort: String,
 
     // ── Fields the scanner reads (issue #270) ───────────────────────────────
@@ -80,47 +132,100 @@ pub struct Event {
     // the one decoder for this file format, and a second struct over the same
     // lines is how two readers of one format drift apart.
     /// First non-empty value wins — the session's working directory.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub cwd: String,
-    #[serde(default, rename = "gitBranch")]
+    #[serde(
+        default,
+        rename = "gitBranch",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub git_branch: String,
 
     /// Title events carry no timestamp and no message — only these fields.
     /// Claude Code re-appends them on every resume, so last-in-file wins.
-    #[serde(default, rename = "customTitle")]
+    #[serde(
+        default,
+        rename = "customTitle",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub custom_title: String,
     /// Claude Code's own auto-title, distinct from a user rename.
-    #[serde(default, rename = "aiTitle")]
+    #[serde(
+        default,
+        rename = "aiTitle",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub ai_title: String,
 
     /// `pr-link`: the pull request a session produced. Unlike the other
     /// metadata events this one carries a **real** timestamp, which is why
     /// `bounds_session_time_range` has to exclude it explicitly.
-    #[serde(default, rename = "prNumber")]
+    #[serde(
+        default,
+        rename = "prNumber",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub pr_number: i64,
-    #[serde(default, rename = "prUrl")]
+    #[serde(
+        default,
+        rename = "prUrl",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub pr_url: String,
-    #[serde(default, rename = "prRepository")]
+    #[serde(
+        default,
+        rename = "prRepository",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub pr_repository: String,
 
     /// Session metadata events. Like the title events these carry no timestamp
     /// and are re-appended on every resume, so the last one in the file wins.
-    #[serde(default, rename = "agentName")]
+    #[serde(
+        default,
+        rename = "agentName",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub agent_name: String,
-    #[serde(default, rename = "permissionMode")]
+    #[serde(
+        default,
+        rename = "permissionMode",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub permission_mode: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub mode: String,
-    #[serde(default, rename = "relocatedCwd")]
+    #[serde(
+        default,
+        rename = "relocatedCwd",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub relocated_cwd: String,
-    #[serde(default, rename = "worktreeSession")]
+    #[serde(
+        default,
+        rename = "worktreeSession",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub worktree_session: Option<WorktreeSession>,
 
     /// `system` events: the subtype selects the payload, and only
     /// `compact_boundary` carries compaction metadata.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub subtype: String,
-    #[serde(default, rename = "compactMetadata")]
+    #[serde(
+        default,
+        rename = "compactMetadata",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub compact_metadata: Option<CompactMetadata>,
 }
 
@@ -128,15 +233,35 @@ pub struct Event {
 /// ran in, plus where it came from.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WorktreeSession {
-    #[serde(default, rename = "worktreeName")]
+    #[serde(
+        default,
+        rename = "worktreeName",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub worktree_name: String,
-    #[serde(default, rename = "worktreeBranch")]
+    #[serde(
+        default,
+        rename = "worktreeBranch",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub worktree_branch: String,
-    #[serde(default, rename = "originalBranch")]
+    #[serde(
+        default,
+        rename = "originalBranch",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub original_branch: String,
-    #[serde(default, rename = "originalCwd")]
+    #[serde(
+        default,
+        rename = "originalCwd",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub original_cwd: String,
-    #[serde(default, rename = "originalHeadCommit")]
+    #[serde(
+        default,
+        rename = "originalHeadCommit",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub original_head_commit: String,
 }
 
@@ -147,47 +272,136 @@ pub struct WorktreeSession {
 /// multiply-count it.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CompactMetadata {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub trigger: String,
-    #[serde(default, rename = "preTokens")]
+    #[serde(
+        default,
+        rename = "preTokens",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub pre_tokens: i64,
-    #[serde(default, rename = "postTokens")]
+    #[serde(
+        default,
+        rename = "postTokens",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub post_tokens: i64,
-    #[serde(default, rename = "cumulativeDroppedTokens")]
+    #[serde(
+        default,
+        rename = "cumulativeDroppedTokens",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub cumulative_dropped_tokens: i64,
-    #[serde(default, rename = "durationMs")]
+    #[serde(
+        default,
+        rename = "durationMs",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub duration_ms: i64,
 }
 
 /// The message payload of a user or assistant event.
-#[derive(Debug, Clone, Default, Deserialize)]
+///
+/// `content` is carried **twice**, and both are load-bearing:
+///
+/// - as a `Value`, because it is a bare JSON string on some events and an array
+///   of blocks on others, and telling those apart is what the turn predicates
+///   do — every one of them wants a decoded tree;
+/// - as the original bytes, because a `tool_use` block's `input` reaches the
+///   wire verbatim in `GET /api/claude-sessions/{id}` (Go carries it as a
+///   `json.RawMessage`). A `Value` round trip sorts its keys and respells its
+///   numbers, so `{"z":1.50,"a":1}` would ship as `{"a":1,"z":1.5}` with
+///   nothing to signal it.
+///
+/// One decode produces both — the `Value` is parsed *from* the raw — so they
+/// cannot describe different content.
+#[derive(Debug, Clone, Default)]
 pub struct Message {
-    #[serde(default)]
     pub role: String,
-    #[serde(default)]
     pub model: String,
-    /// Left raw: it is a bare JSON string on some events and an array of
-    /// content blocks on others, and telling those apart is what the turn
-    /// predicates are about.
-    #[serde(default)]
     pub content: serde_json::Value,
-    #[serde(default)]
+    /// The same content, unparsed. `None` only when the key was absent.
+    pub content_raw: Option<Box<serde_json::value::RawValue>>,
     pub usage: Option<Usage>,
+}
+
+/// The wire shape `Message` is built from.
+#[derive(Deserialize)]
+struct MessageWire {
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
+    role: String,
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
+    model: String,
+    #[serde(default, deserialize_with = "crate::native::gojson::captured_raw")]
+    content: Option<Box<serde_json::value::RawValue>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
+    usage: Option<Usage>,
+}
+
+impl<'de> Deserialize<'de> for Message {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = MessageWire::deserialize(deserializer)?;
+        // An unparseable content is `Null` rather than an error, matching a Go
+        // `json.RawMessage` that is held but never successfully decoded: the
+        // event still exists and its counters still run.
+        let content = wire
+            .content
+            .as_ref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok())
+            .unwrap_or(serde_json::Value::Null);
+        Ok(Message {
+            role: wire.role,
+            model: wire.model,
+            content,
+            content_raw: wire.content,
+            usage: wire.usage,
+        })
+    }
 }
 
 /// Token counters attached to an assistant message.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Usage {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub input_tokens: i64,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub output_tokens: i64,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub cache_creation_input_tokens: i64,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub cache_read_input_tokens: i64,
     /// Absent on transcripts written before Claude Code emitted the split.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub cache_creation: Option<CacheCreation>,
 }
 
@@ -196,9 +410,15 @@ pub struct Usage {
 /// which is the only reason the split is carried at all.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CacheCreation {
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub ephemeral_5m_input_tokens: i64,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub ephemeral_1h_input_tokens: i64,
 }
 
@@ -226,22 +446,66 @@ pub fn split_cache_tiers(total: i64, nested_1h: i64) -> (i64, i64) {
 /// One block within a message's content array.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ContentBlock {
-    #[serde(default, rename = "type")]
+    #[serde(
+        default,
+        rename = "type",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub block_type: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub text: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub thinking: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub id: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub name: String,
-    #[serde(default)]
-    pub input: serde_json::Value,
-    #[serde(default)]
+    /// Carried **raw**, never as a `serde_json::Value`. Go's `NormalizedBlock`
+    /// holds a `json.RawMessage`, so the stored key order and number spelling
+    /// reach the wire unchanged; decoding and re-encoding would sort the keys
+    /// and respell the numbers, with nothing to signal it.
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::captured_raw",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub input: Option<Box<serde_json::value::RawValue>>,
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub tool_use_id: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
     pub is_error: bool,
+}
+
+/// Decode array content into blocks **from the original bytes**, so a
+/// `tool_use` block's `input` keeps the key order and number spelling it was
+/// written with.
+///
+/// The `Value`-based sibling below cannot: its input has already been through a
+/// `serde_json::Value`, which sorts object keys and respells numbers. Both go
+/// through the same [`ContentBlock`], so this is one decoder with two entry
+/// points rather than two decoders — only the *source* differs, and only the
+/// consumer that puts `input` back on the wire needs this one.
+pub fn parse_content_blocks_raw(raw: &serde_json::value::RawValue) -> Vec<ContentBlock> {
+    // Go decodes the whole array or nothing.
+    serde_json::from_str::<Vec<ContentBlock>>(raw.get()).unwrap_or_default()
 }
 
 /// Decode array content into blocks. String content and anything undecodable
