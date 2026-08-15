@@ -328,6 +328,17 @@ offset and surrounding context.
 
 Before assuming a diff is your bug, **ask Go the same question twice**.
 
+**Retrying only works when the orderings come up evenly.** `GET /api/integrations/available-tools`
+ranges `cfg.Services`, a Go map, and measured over 25 requests against a
+two-service integration it emitted 22 of one order and 3 of the other — so
+twelve attempts miss about one run in five. `tests/parity_integrations.rs`
+compares that one endpoint as a **multiset of byte-exact elements** instead:
+each element is captured as a `RawValue` so a reordered key or a respelled
+number *inside* one still fails, and only the order *between* elements is
+exempt. Prefer this shape over raising the retry count when a diff is unstable
+for a reason Go cannot promise away — a test that flakes is worse than no test,
+and a byte diff of the whole body is not a property either side can have.
+
 ### Known encoder divergence
 
 `serde_json`'s float **parser** is not bit-exact by default — `0.36238800000000004`

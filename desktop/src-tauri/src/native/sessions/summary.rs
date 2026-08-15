@@ -296,8 +296,8 @@ pub fn scan(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         native_title: row.get(18)?,
         ai_title: row.get(19)?,
         display_title: String::new(),
-        start_time: parse_time(&start_time, 5)?,
-        last_activity: parse_time(&last_activity, 6)?,
+        start_time: crate::native::gotime::from_sql_text(&start_time, 5)?,
+        last_activity: crate::native::gotime::from_sql_text(&last_activity, 6)?,
         active_duration_ms: row.get(37)?,
         subagent_active_duration_ms: row.get(53)?,
         message_count: row.get(7)?,
@@ -354,16 +354,6 @@ pub fn scan(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
     };
     s.display_title = resolve_display_title(&s);
     Ok(s)
-}
-
-fn parse_time(text: &str, column: usize) -> rusqlite::Result<GoTime> {
-    GoTime::parse_any(text).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            column,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other(e)),
-        )
-    })
 }
 
 /// The label the UI renders. Agento's own rename wins, then Claude Code's

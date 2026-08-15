@@ -551,8 +551,8 @@ fn list_subagents(conn: &Connection, session_id: &str) -> Vec<Subagent> {
             agent_type: row.get(1)?,
             description: row.get(2)?,
             tool_use_id: row.get(3)?,
-            start_time: parse_time(&start, 4)?,
-            last_activity: parse_time(&last, 5)?,
+            start_time: crate::native::gotime::from_sql_text(&start, 4)?,
+            last_activity: crate::native::gotime::from_sql_text(&last, 5)?,
             message_count: row.get(6)?,
             event_count: row.get(7)?,
             usage: TokenUsage {
@@ -573,16 +573,6 @@ fn list_subagents(conn: &Connection, session_id: &str) -> Vec<Subagent> {
             Vec::new()
         }
     }
-}
-
-fn parse_time(text: &str, index: usize) -> rusqlite::Result<crate::native::gotime::GoTime> {
-    crate::native::gotime::GoTime::parse_any(text).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            index,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other(e)),
-        )
-    })
 }
 
 /// A transcript timestamp as it travels, or the zero `time.Time` when absent.

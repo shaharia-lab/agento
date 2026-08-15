@@ -133,13 +133,13 @@ fn scan_integration(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScrubbedIntegra
     let updated_at: String = row.get(7)?;
     Ok(ScrubbedIntegration {
         authenticated: authenticated != 0,
-        created_at: parse_time(&created_at, 6)?,
+        created_at: super::gotime::from_sql_text(&created_at, 6)?,
         enabled: enabled != 0,
         id: row.get(0)?,
         name: row.get(1)?,
         services: decode_services(&services),
         integration_type: row.get(2)?,
-        updated_at: parse_time(&updated_at, 7)?,
+        updated_at: super::gotime::from_sql_text(&updated_at, 7)?,
     })
 }
 
@@ -254,10 +254,10 @@ pub fn list_trigger_rules(
                 agent_slug: row.get(3)?,
                 enabled: enabled != 0,
                 filter_prefix: row.get(5)?,
-                filter_keywords: decode_string_list(&keywords),
-                filter_chat_ids: decode_string_list(&chat_ids),
-                created_at: parse_time(&created_at, 8)?,
-                updated_at: parse_time(&updated_at, 9)?,
+                filter_keywords: super::gojson::decode_string_list(&keywords),
+                filter_chat_ids: super::gojson::decode_string_list(&chat_ids),
+                created_at: super::gotime::from_sql_text(&created_at, 8)?,
+                updated_at: super::gotime::from_sql_text(&updated_at, 9)?,
             })
         })
         .map_err(|e| format!("listing trigger rules: {e}"))?;
@@ -266,25 +266,6 @@ pub fn list_trigger_rules(
         out.push(row.map_err(|e| format!("scanning trigger rule: {e}"))?);
     }
     Ok(out)
-}
-
-/// A stored JSON string array: blank or unparseable is nil (`null` on the
-/// wire), a stored `[]` is an empty slice (`[]`).
-fn decode_string_list(raw: &str) -> Option<Vec<String>> {
-    if raw.trim().is_empty() {
-        return None;
-    }
-    serde_json::from_str::<Option<Vec<String>>>(raw).unwrap_or_default()
-}
-
-fn parse_time(text: &str, index: usize) -> rusqlite::Result<GoTime> {
-    GoTime::parse_any(text).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(
-            index,
-            rusqlite::types::Type::Text,
-            Box::new(std::io::Error::other(e)),
-        )
-    })
 }
 
 // ─── The seam ─────────────────────────────────────────────────────────────────

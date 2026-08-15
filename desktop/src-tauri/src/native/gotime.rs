@@ -166,6 +166,22 @@ fn format_go_rfc3339(t: &DateTime<FixedOffset>) -> String {
     out
 }
 
+/// Read a DATETIME column as the `time.Time` the Go driver round-trips.
+///
+/// One definition rather than one per module: it decides that an unparseable
+/// timestamp **fails the row** rather than defaulting, which is what Go's
+/// driver does, and four copies of that decision would drift the first time one
+/// of them was softened. `index` is the column, so the error names it.
+pub fn from_sql_text(text: &str, index: usize) -> rusqlite::Result<GoTime> {
+    GoTime::parse_any(text).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::other(e)),
+        )
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
