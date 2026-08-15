@@ -24,6 +24,7 @@ pub mod pricing;
 pub mod scanner;
 pub mod sessions;
 pub mod settings;
+pub mod tasks;
 
 use axum::body::Body;
 use axum::http::{header, Method, Response, StatusCode};
@@ -117,6 +118,7 @@ const ENDPOINTS: &[Endpoint] = &[
     analytics::ENDPOINT,
     insights::ENDPOINT,
     chats::ENDPOINT,
+    tasks::ENDPOINT,
 ];
 
 /// Whether this request is answered by ported Rust code.
@@ -204,6 +206,21 @@ mod tests {
         assert!(!claims(&Method::GET, "/api/chats/abc-123/messages"));
         assert!(!claims(&Method::GET, "/api/chats/abc-123/stop"));
         assert!(!claims(&Method::GET, "/api/chats/"));
+
+        // Tasks and job history: the five reads. The two POST actions share the
+        // `/api/tasks/{id}` prefix and must not be swallowed by it.
+        assert!(claims(&Method::GET, "/api/tasks"));
+        assert!(claims(&Method::GET, "/api/tasks/abc-123"));
+        assert!(claims(&Method::GET, "/api/tasks/abc-123/job-history"));
+        assert!(claims(&Method::GET, "/api/job-history"));
+        assert!(claims(&Method::GET, "/api/job-history/abc-123"));
+        assert!(!claims(&Method::POST, "/api/tasks"));
+        assert!(!claims(&Method::PUT, "/api/tasks/abc-123"));
+        assert!(!claims(&Method::POST, "/api/tasks/abc-123/pause"));
+        assert!(!claims(&Method::POST, "/api/tasks/abc-123/resume"));
+        assert!(!claims(&Method::DELETE, "/api/job-history"));
+        assert!(!claims(&Method::GET, "/api/tasks/"));
+        assert!(!claims(&Method::GET, "/api/job-history/"));
     }
 
     #[test]
@@ -231,6 +248,11 @@ mod tests {
             "/api/agents/my-agent",
             "/api/chats",
             "/api/chats/abc-123",
+            "/api/tasks",
+            "/api/tasks/abc-123",
+            "/api/tasks/abc-123/job-history",
+            "/api/job-history",
+            "/api/job-history/abc-123",
         ];
         for path in paths {
             let owners: Vec<&str> = ENDPOINTS
@@ -256,6 +278,11 @@ mod tests {
             "/api/agents/my-agent",
             "/api/chats",
             "/api/chats/abc-123",
+            "/api/tasks",
+            "/api/tasks/abc-123",
+            "/api/tasks/abc-123/job-history",
+            "/api/job-history",
+            "/api/job-history/abc-123",
         ];
         for endpoint in ENDPOINTS {
             assert!(
