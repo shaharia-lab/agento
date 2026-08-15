@@ -1,0 +1,403 @@
+{
+  "_comment": [
+    "Cross-language parity vectors for Go's path/filepath, Unix rules.",
+    "Generated from Go, then frozen. Read by desktop/parity/gopath_parity_test.go",
+    "(Go) and by desktop/src-tauri/src/native/gopath.rs (Rust). 'want' is exactly",
+    "what Go produces, so a divergence fails one language against the other's",
+    "real output rather than against a belief about it.",
+    "Regenerate with: go test ./desktop/parity/ -run TestGoPathVectors -update-gopath-vectors"
+  ],
+  "clean": [
+    {
+      "value": "",
+      "want": "."
+    },
+    {
+      "value": ".",
+      "want": "."
+    },
+    {
+      "value": "..",
+      "want": ".."
+    },
+    {
+      "value": "...",
+      "want": "..."
+    },
+    {
+      "value": "/",
+      "want": "/"
+    },
+    {
+      "value": "//",
+      "want": "/"
+    },
+    {
+      "value": "///",
+      "want": "/"
+    },
+    {
+      "value": "/.",
+      "want": "/"
+    },
+    {
+      "value": "/..",
+      "want": "/"
+    },
+    {
+      "value": "/../..",
+      "want": "/"
+    },
+    {
+      "value": "a",
+      "want": "a"
+    },
+    {
+      "value": "a/",
+      "want": "a"
+    },
+    {
+      "value": "a//b",
+      "want": "a/b"
+    },
+    {
+      "value": "a/./b",
+      "want": "a/b"
+    },
+    {
+      "value": "a/../b",
+      "want": "b"
+    },
+    {
+      "value": "a/..",
+      "want": "."
+    },
+    {
+      "value": "a/../..",
+      "want": ".."
+    },
+    {
+      "value": "./a",
+      "want": "a"
+    },
+    {
+      "value": "../a",
+      "want": "../a"
+    },
+    {
+      "value": "../../a",
+      "want": "../../a"
+    },
+    {
+      "value": "/a/../..",
+      "want": "/"
+    },
+    {
+      "value": "/a/b/../c/",
+      "want": "/a/c"
+    },
+    {
+      "value": "/../a",
+      "want": "/a"
+    },
+    {
+      "value": "/home/u/.claude/",
+      "want": "/home/u/.claude"
+    },
+    {
+      "value": "/home//u/./.claude",
+      "want": "/home/u/.claude"
+    },
+    {
+      "value": "/home/u/x/../.claude",
+      "want": "/home/u/.claude"
+    },
+    {
+      "value": "~",
+      "want": "~"
+    },
+    {
+      "value": "~/foo",
+      "want": "~/foo"
+    },
+    {
+      "value": "/a/b/c/../../d",
+      "want": "/a/d"
+    },
+    {
+      "value": "foo/bar/..",
+      "want": "foo"
+    },
+    {
+      "value": "/a//b//c",
+      "want": "/a/b/c"
+    },
+    {
+      "value": "a/b/./../c",
+      "want": "a/c"
+    },
+    {
+      "value": ".hidden",
+      "want": ".hidden"
+    },
+    {
+      "value": "/.hidden/",
+      "want": "/.hidden"
+    },
+    {
+      "value": "/a/b/..",
+      "want": "/a"
+    },
+    {
+      "value": "/a/b/../..",
+      "want": "/"
+    },
+    {
+      "value": "/a/b/../../..",
+      "want": "/"
+    }
+  ],
+  "dir": [
+    {
+      "value": "",
+      "want": "."
+    },
+    {
+      "value": ".",
+      "want": "."
+    },
+    {
+      "value": "..",
+      "want": "."
+    },
+    {
+      "value": "...",
+      "want": "."
+    },
+    {
+      "value": "/",
+      "want": "/"
+    },
+    {
+      "value": "//",
+      "want": "/"
+    },
+    {
+      "value": "///",
+      "want": "/"
+    },
+    {
+      "value": "/.",
+      "want": "/"
+    },
+    {
+      "value": "/..",
+      "want": "/"
+    },
+    {
+      "value": "/../..",
+      "want": "/"
+    },
+    {
+      "value": "a",
+      "want": "."
+    },
+    {
+      "value": "a/",
+      "want": "a"
+    },
+    {
+      "value": "a//b",
+      "want": "a"
+    },
+    {
+      "value": "a/./b",
+      "want": "a"
+    },
+    {
+      "value": "a/../b",
+      "want": "."
+    },
+    {
+      "value": "a/..",
+      "want": "a"
+    },
+    {
+      "value": "a/../..",
+      "want": "."
+    },
+    {
+      "value": "./a",
+      "want": "."
+    },
+    {
+      "value": "../a",
+      "want": ".."
+    },
+    {
+      "value": "../../a",
+      "want": "../.."
+    },
+    {
+      "value": "/a/../..",
+      "want": "/"
+    },
+    {
+      "value": "/a/b/../c/",
+      "want": "/a/c"
+    },
+    {
+      "value": "/../a",
+      "want": "/"
+    },
+    {
+      "value": "/home/u/.claude/",
+      "want": "/home/u/.claude"
+    },
+    {
+      "value": "/home//u/./.claude",
+      "want": "/home/u"
+    },
+    {
+      "value": "/home/u/x/../.claude",
+      "want": "/home/u"
+    },
+    {
+      "value": "~",
+      "want": "."
+    },
+    {
+      "value": "~/foo",
+      "want": "~"
+    },
+    {
+      "value": "/a/b/c/../../d",
+      "want": "/a"
+    },
+    {
+      "value": "foo/bar/..",
+      "want": "foo/bar"
+    },
+    {
+      "value": "/a//b//c",
+      "want": "/a/b"
+    },
+    {
+      "value": "a/b/./../c",
+      "want": "a"
+    },
+    {
+      "value": ".hidden",
+      "want": "."
+    },
+    {
+      "value": "/.hidden/",
+      "want": "/.hidden"
+    },
+    {
+      "value": "/a/b/..",
+      "want": "/a/b"
+    },
+    {
+      "value": "/a/b/../..",
+      "want": "/a"
+    },
+    {
+      "value": "/a/b/../../..",
+      "want": "/"
+    }
+  ],
+  "join": [
+    {
+      "elems": [
+        "/a",
+        "b"
+      ],
+      "want": "/a/b"
+    },
+    {
+      "elems": [
+        "/",
+        "b"
+      ],
+      "want": "/b"
+    },
+    {
+      "elems": [
+        "",
+        "b"
+      ],
+      "want": "b"
+    },
+    {
+      "elems": [
+        "a",
+        ""
+      ],
+      "want": "a"
+    },
+    {
+      "elems": [
+        "/a/",
+        "b"
+      ],
+      "want": "/a/b"
+    },
+    {
+      "elems": [
+        "a",
+        "../b"
+      ],
+      "want": "b"
+    },
+    {
+      "elems": [
+        "/a",
+        ".."
+      ],
+      "want": "/"
+    },
+    {
+      "elems": [
+        "/a/b",
+        "../.."
+      ],
+      "want": "/"
+    },
+    {
+      "elems": [
+        "/",
+        ".."
+      ],
+      "want": "/"
+    },
+    {
+      "elems": [
+        "/home/u",
+        ".claude"
+      ],
+      "want": "/home/u/.claude"
+    },
+    {
+      "elems": [
+        "/a",
+        "b/c"
+      ],
+      "want": "/a/b/c"
+    },
+    {
+      "elems": [
+        ".",
+        "a"
+      ],
+      "want": "a"
+    },
+    {
+      "elems": [
+        "..",
+        "a"
+      ],
+      "want": "../a"
+    }
+  ]
+}
