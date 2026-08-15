@@ -6,6 +6,13 @@
    turned on, so it cannot drive a connect form for something not yet created.
    The shapes therefore live here, mirroring internal/config/integration.go for
    the credentials and each provider's MCP server for the tool names.
+
+   WhatsApp is deliberately absent, and this is the list that decides it. The
+   Go server still carries the integration and `type` is a free-form string on
+   the wire, so nothing upstream stops one appearing; leaving the entry here is
+   what would offer a pairing flow the desktop app cannot complete, because
+   `whatsmeow` has no Rust equivalent and is not being ported (issue #273).
+   A row paired under the Go server is still listed — see providerFor.
    ========================================================================== */
 
 import type { IconName } from "../../lib/icons";
@@ -21,7 +28,7 @@ export interface CredField {
 }
 
 /** How an integration proves who it is once it has been created. */
-export type AuthKind = "oauth" | "token" | "qr";
+export type AuthKind = "oauth" | "token";
 
 export interface AuthMode {
   /** The `auth_mode` credential value, or "" when the provider has no such field. */
@@ -380,36 +387,59 @@ export const PROVIDERS: Provider[] = [
       },
     ],
   },
-  {
-    type: "whatsapp",
-    label: "WhatsApp",
-    blurb: "Pair a phone by QR code and send messages from it",
-    icon: "chat",
-    tone: "green",
-    hasAuthModeField: false,
-    modes: [{ value: "", label: "QR pairing", kind: "qr", fields: [] }],
-    services: [
-      {
-        key: "messaging",
-        label: "Messaging",
-        description:
-          "Send messages and media. Contacts come from the paired device's own store.",
-        tools: [
-          { name: "send_message", description: "Send a text message to a number or group" },
-          { name: "send_media", description: "Send an image or document by URL" },
-          {
-            name: "get_contacts",
-            description:
-              "List contacts from the local device store — empty until messages flow",
-          },
-        ],
-      },
-    ],
-  },
 ];
 
+/**
+ * The catalog entry for a stored integration's type, if this app has one.
+ *
+ * `undefined` is a normal answer, not a failure: the `type` column is free-form
+ * and the Go server knows types this app deliberately does not — WhatsApp above
+ * all. Callers render the row from the stored fields instead of dropping it.
+ */
 export function providerFor(type: string): Provider | undefined {
   return PROVIDERS.find((p) => p.type === type);
+}
+
+/* --- Explaining a type with no catalog entry ------------------------------
+   Two different situations reach the same screen and telling them apart is the
+   whole point: a type from a newer Agento is something to upgrade into, while
+   WhatsApp is one this app will never gain — `whatsmeow` has no Rust equivalent
+   and is not being ported (#273). Saying "newer version" to someone who paired a
+   phone under the Go server sends them looking for an update that will never
+   ship.
+
+   Either way the row is listed and readable. It cannot be removed, renamed or
+   disabled from this app: those controls live in `IntegrationDetail`, which only
+   renders for a known provider. That dead end is deliberate for now — see #273's
+   scope note — so do not describe the row as deletable.
+
+   A `Map`, not an object literal: `type` is server-controlled and free-form
+   (Go's create path accepts any non-empty string), and a stored type of
+   `constructor` or `toString` would hit `Object.prototype` and render a title
+   built from `undefined`.
+   ------------------------------------------------------------------------ */
+
+const RETIRED_TYPES = new Map<string, { label: string; reason: string }>([
+  [
+    "whatsapp",
+    {
+      label: "WhatsApp",
+      reason:
+        "WhatsApp is not available in the desktop app, so this connection cannot be paired or edited here. It is left untouched — its tools keep working wherever the Agento server runs, and nothing about it has been deleted.",
+    },
+  ],
+]);
+
+/** Title and body for an integration whose type `providerFor` does not know. */
+export function unavailableCopy(type: string): { title: string; text: string } {
+  const retired = RETIRED_TYPES.get(type);
+  if (retired) {
+    return { title: `${retired.label} is not available here`, text: retired.reason };
+  }
+  return {
+    title: `Unknown provider “${type}”`,
+    text: "This integration was created by a newer version of Agento than this app knows about.",
+  };
 }
 
 /** The mode a stored integration is using, best-effort from its type alone. */
