@@ -498,6 +498,109 @@ mod tests {
         assert_eq!(dirs, vec![default, "/var/lib/claude-work".to_string()]);
     }
 
+    /// `internal/storage/sqlite.go`'s `user_settings`, with the columns the
+    /// later migrations appended. Only the ones the read touches.
+    const SCHEMA: &str = "
+        CREATE TABLE user_settings (
+            id                         INTEGER PRIMARY KEY CHECK (id = 1),
+            default_working_dir        TEXT    NOT NULL DEFAULT '',
+            default_model              TEXT    NOT NULL DEFAULT '',
+            onboarding_complete        INTEGER NOT NULL DEFAULT 0,
+            appearance_dark_mode       INTEGER NOT NULL DEFAULT 0,
+            appearance_font_size       INTEGER NOT NULL DEFAULT 0,
+            appearance_font_family     TEXT    NOT NULL DEFAULT '',
+            notification_settings      TEXT    NOT NULL DEFAULT '{}',
+            event_bus_worker_pool_size INTEGER NOT NULL DEFAULT 3,
+            public_url                 TEXT    NOT NULL DEFAULT '',
+            hidden_projects            TEXT    NOT NULL DEFAULT '[]',
+            idle_gap_threshold_minutes INTEGER NOT NULL DEFAULT 0,
+            claude_config_dir          TEXT    NOT NULL DEFAULT '',
+            claude_config_dirs         TEXT    NOT NULL DEFAULT '[]'
+        );";
+
+    fn fixture(row: Option<&str>) -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory database");
+        conn.execute_batch(SCHEMA).expect("schema");
+        if let Some(insert) = row {
+            conn.execute_batch(insert).expect("row");
+        }
+        conn
+    }
+
+    /// The read is positional, and the struct is not filled in the `SELECT`'s
+    /// order — the two bools and the two JSON columns are pulled out first. So
+    /// every value gets a **distinct** marker here: two adjacent `TEXT` columns
+    /// swapped would compile, pass every other test in this file, and only
+    /// surface in the live parity run, which CI does not run.
+    #[test]
+    fn every_column_lands_on_its_own_field() {
+        let conn = fixture(Some(
+            r#"INSERT INTO user_settings
+                 (id, default_working_dir, default_model, onboarding_complete,
+                  appearance_dark_mode, appearance_font_size, appearance_font_family,
+                  notification_settings, event_bus_worker_pool_size, public_url,
+                  hidden_projects, idle_gap_threshold_minutes,
+                  claude_config_dir, claude_config_dirs)
+               VALUES (1, 'working-dir', 'the-model', 1,
+                       1, 13, 'the-font',
+                       'the-notifications', 7, 'the-url',
+                       '["/hidden/one"]', 25,
+                       '/run/dir', '["/extra/dir"]')"#,
+        ));
+
+        let stored = load_stored(&conn);
+        assert_eq!(stored.default_working_dir, "working-dir");
+        assert_eq!(stored.default_model, "the-model");
+        assert!(stored.onboarding_complete);
+        assert!(stored.appearance_dark_mode);
+        assert_eq!(stored.appearance_font_size, 13);
+        assert_eq!(stored.appearance_font_family, "the-font");
+        assert_eq!(stored.notification_settings, "the-notifications");
+        assert_eq!(stored.event_bus_worker_pool_size, 7);
+        assert_eq!(stored.public_url, "the-url");
+        assert_eq!(
+            stored.hidden_projects,
+            Some(vec!["/hidden/one".to_string()])
+        );
+        assert_eq!(stored.idle_gap_threshold_minutes, 25);
+        assert_eq!(stored.claude_config_dir, "/run/dir");
+        assert_eq!(
+            stored.claude_config_dirs,
+            Some(vec!["/extra/dir".to_string()])
+        );
+
+        // The narrowed view must agree with the row it was derived from — one
+        // reader is the point.
+        let data = from_stored(&stored);
+        assert_eq!(data.hidden_projects, vec!["/hidden/one".to_string()]);
+        assert_eq!(data.idle_gap_ms, 25 * 60 * 1000);
+        assert!(data.indexed_config_dirs.contains(&"/extra/dir".to_string()));
+    }
+
+    /// No row at all is Go's `sql.ErrNoRows`, which its store answers with
+    /// zero-value settings rather than an error — and the zero value is where
+    /// the two lists are nil, so they ship as `null`.
+    #[test]
+    fn an_install_with_no_row_reads_as_the_zero_value() {
+        let stored = load_stored(&fixture(None));
+        assert_eq!(stored.default_model, "");
+        assert_eq!(stored.hidden_projects, None);
+        assert_eq!(stored.claude_config_dirs, None);
+        // And the derived view still resolves the threshold to the default.
+        assert_eq!(from_stored(&stored).idle_gap_ms, DEFAULT_IDLE_GAP_MS);
+    }
+
+    /// A read failure is not a 500: the table can be missing entirely on a
+    /// database the Go server has not migrated yet, and the endpoint answers
+    /// with defaults exactly as the snapshot does before `ApplyDataSettings`.
+    #[test]
+    fn a_missing_table_degrades_rather_than_failing() {
+        let conn = Connection::open_in_memory().expect("in-memory database");
+        let stored = load_stored(&conn);
+        assert_eq!(stored.hidden_projects, None);
+        assert_eq!(from_stored(&stored).idle_gap_ms, DEFAULT_IDLE_GAP_MS);
+    }
+
     /// A nil list is `null` and an empty one is `[]`, and only the stored `[]`
     /// produces the second. Collapsing the two would change the wire for every
     /// install that has never hidden a project.

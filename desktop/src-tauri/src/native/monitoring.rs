@@ -268,9 +268,11 @@ fn claims(method: &Method, path: &str) -> bool {
 }
 
 fn serve(ctx: &super::Ctx, _req: &super::Request) -> Result<super::Answer, String> {
-    // The data dir is the database's parent by construction (`paths::data_dir`
-    // joins `agento.db` onto it), which is also what makes the parity instance
-    // work: it points both at its scratch copy.
+    // The data dir is the database's parent by construction — `paths::data_dir`
+    // joins `agento.db` onto it, and `paths::tests::database_sits_beside_the_data_dir`
+    // pins that. It is also what makes the parity instance work: the same
+    // derivation points both the database read and this file read at its
+    // scratch copy.
     let data_dir = ctx
         .db_path
         .parent()
@@ -284,21 +286,27 @@ fn serve(ctx: &super::Ctx, _req: &super::Request) -> Result<super::Answer, Strin
 mod tests {
     use super::*;
 
-    fn write(dir: &Path, body: &str) {
-        std::fs::create_dir_all(dir).expect("temp dir");
-        std::fs::write(dir.join("monitoring.json"), body).expect("write");
+    /// A private directory per test. Not a fixed path under the system temp
+    /// dir: two agents running `cargo test` in separate worktrees is a
+    /// supported arrangement here, and a shared path would have each run
+    /// deleting the other's fixture mid-test.
+    fn scratch() -> tempfile::TempDir {
+        tempfile::tempdir().expect("temp dir")
     }
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("agento-monitoring-test-{name}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+    fn write(dir: &tempfile::TempDir, body: &str) -> std::path::PathBuf {
+        let path = dir.path().join("monitoring.json");
+        std::fs::write(&path, body).expect("write");
+        path
     }
 
     #[test]
     fn an_absent_file_is_the_default_config() {
-        let dto = load_file(&scratch("absent").join("monitoring.json"));
-        assert_eq!(dto, default_config());
+        let dir = scratch();
+        assert_eq!(
+            load_file(&dir.path().join("monitoring.json")),
+            default_config()
+        );
     }
 
     /// The failure the manager swallows: it logs and leaves `current` where the
@@ -306,21 +314,20 @@ mod tests {
     /// than taking the endpoint down.
     #[test]
     fn a_malformed_file_degrades_to_the_default() {
-        let dir = scratch("malformed");
-        write(&dir, "{not json");
-        assert_eq!(load_file(&dir.join("monitoring.json")), default_config());
+        let dir = scratch();
+        assert_eq!(load_file(&write(&dir, "{not json")), default_config());
     }
 
     /// A stored `null` is not a malformed file — Go decodes it into the zero
     /// value without complaint, and so must this.
     #[test]
     fn stored_nulls_decode_to_zero_values() {
-        let dir = scratch("nulls");
-        write(
+        let dir = scratch();
+        let path = write(
             &dir,
             r#"{"enabled":null,"metrics_exporter":null,"metric_export_interval_ms":null}"#,
         );
-        let dto = load_file(&dir.join("monitoring.json"));
+        let dto = load_file(&path);
         assert!(!dto.enabled);
         assert_eq!(dto.metrics_exporter, "");
         assert_eq!(dto.metric_export_interval_ms, 60_000);
@@ -330,31 +337,85 @@ mod tests {
     /// before the field existed carries.
     #[test]
     fn a_non_positive_interval_falls_back_to_a_minute() {
-        let dir = scratch("interval");
-        write(&dir, r#"{"enabled":true,"metric_export_interval_ms":0}"#);
-        assert_eq!(
-            load_file(&dir.join("monitoring.json")).metric_export_interval_ms,
-            60_000
-        );
-        write(&dir, r#"{"enabled":true,"metric_export_interval_ms":-5}"#);
-        assert_eq!(
-            load_file(&dir.join("monitoring.json")).metric_export_interval_ms,
-            60_000
-        );
+        let dir = scratch();
+        let zero = write(&dir, r#"{"enabled":true,"metric_export_interval_ms":0}"#);
+        assert_eq!(load_file(&zero).metric_export_interval_ms, 60_000);
+        let negative = write(&dir, r#"{"enabled":true,"metric_export_interval_ms":-5}"#);
+        assert_eq!(load_file(&negative).metric_export_interval_ms, 60_000);
     }
 
     /// An exporter name the UI would never write is passed through, because
     /// validation happens on `PUT` and `GET` reports what is stored.
     #[test]
     fn an_unknown_exporter_name_is_not_corrected() {
-        let dir = scratch("exporter");
-        write(
+        let dir = scratch();
+        let path = write(
             &dir,
             r#"{"metrics_exporter":"bogus","logs_exporter":"otlp"}"#,
         );
-        let dto = load_file(&dir.join("monitoring.json"));
+        let dto = load_file(&path);
         assert_eq!(dto.metrics_exporter, "bogus");
         assert_eq!(dto.logs_exporter, "otlp");
+    }
+
+    /// The resolution rule, not just the file read: with nothing pinned, the
+    /// stored config *is* the answer, `locked` is empty and `env_locked` is
+    /// false. The precedence in the other direction — any `OTEL_*` set means the
+    /// file is ignored rather than merged — cannot be asserted here without
+    /// mutating process-global state that every other test shares, so it is
+    /// covered by `tests/parity_settings.rs`, which diffs an env-locked instance
+    /// against Go.
+    #[test]
+    fn an_unpinned_install_answers_with_the_stored_config() {
+        if ENV_VAR_CHECKS
+            .iter()
+            .any(|(_, var)| !env_raw(var).is_empty())
+        {
+            // This shell exports an OTEL_* variable, so the not-env-locked path
+            // is unreachable. Skipping beats asserting the wrong branch.
+            return;
+        }
+
+        let dir = scratch();
+        write(
+            &dir,
+            r#"{"enabled":true,"metrics_exporter":"prometheus","logs_exporter":"none",
+                "otlp_endpoint":"collector:4317","otlp_headers":{"x-key":"v"},
+                "otlp_insecure":true,"metric_export_interval_ms":15000}"#,
+        );
+
+        let answer = response(dir.path());
+        assert!(!answer.env_locked);
+        assert!(answer.locked.is_empty());
+        assert!(answer.settings.enabled);
+        assert_eq!(answer.settings.metrics_exporter, "prometheus");
+        assert_eq!(answer.settings.otlp_endpoint, "collector:4317");
+        assert_eq!(answer.settings.metric_export_interval_ms, 15_000);
+        assert_eq!(
+            answer
+                .settings
+                .otlp_headers
+                .get("x-key")
+                .map(String::as_str),
+            Some("v")
+        );
+    }
+
+    /// An install that has never opened the monitoring page has no file at all,
+    /// and that is the shape the endpoint answers with most often.
+    #[test]
+    fn an_install_with_no_file_answers_with_the_default() {
+        if ENV_VAR_CHECKS
+            .iter()
+            .any(|(_, var)| !env_raw(var).is_empty())
+        {
+            return;
+        }
+        let dir = scratch();
+        let answer = response(dir.path());
+        assert_eq!(answer.settings, default_config());
+        assert!(!answer.env_locked);
+        assert!(answer.locked.is_empty());
     }
 
     #[test]
