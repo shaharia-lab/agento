@@ -136,6 +136,8 @@ src-tauri/src/
     settings.rs  user preferences + Claude config dirs a read is scoped to
     pricing.rs   GET /api/pricing/catalog, plus the rate Resolver
     agents.rs    GET /api/agents and /api/agents/{slug}
+    chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
+    tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
     sessions/    GET /api/claude-sessions and /facets; corpus.rs loads the lot
     analytics/   GET /api/claude-analytics
       buckets.rs Go's time.Date/AddDate and the bucket walks, in the request's tz
@@ -726,6 +728,27 @@ still Go, and nothing in `native/` routes to it. It is here first because phases
 4 and 5 both need it — every integration is one of its MCP servers — and because
 its correctness is testable in isolation, against a scripted CLI, in a way it
 would not be once a route depends on it.
+
+The **chat reads** followed (`native/chats.rs`, #264) and then the **scheduled-task
+and job-history reads** (`native/tasks.rs`, #265) — the first two areas whose data
+is ordinary SQLite rather than the Claude corpus, and the first whose parity had to
+be *seeded* rather than found: both areas were completely empty on the reference
+machine, so every list diffed `[]` against `[]` until rows existed. Each suite now
+fails rather than passes in that state.
+
+Three rules they added to the ones above, each of which makes a wrong port look
+right:
+
+- **A handler that writes a Go map ships alphabetical keys.** `handleGetChat`
+  spells `{session, messages}` and sends `{messages, session}`. Check
+  struct-versus-map before modelling any envelope.
+- **`limit=0` means fifty.** `parseQueryInt` only rejects negative and unparsable
+  values, and the service *then* maps `limit <= 0` to the default — so a literal
+  zero asks for nothing and receives a full page. `maxQueryLimit` (500) clamps
+  `offset` too, since both share the parser.
+- **An unknown task's job history is `200 []`, not a 404.** Go never checks the
+  task exists before listing its runs, so this must be *answered* rather than
+  forwarded; only `/api/tasks/{id}` and `/api/job-history/{id}` 404.
 
 Nothing else is ported. Every endpoint not listed above — every write path, the
 per-session reads and every other read — still forwards to Go.
