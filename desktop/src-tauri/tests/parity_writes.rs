@@ -312,3 +312,171 @@ async fn the_job_history_delete_answers_match_go() {
         );
     }
 }
+
+// ─── Integrations and trigger rules (#277) ────────────────────────────────────
+
+/// Pin Go's answers for the integration writes that moved, and for the two that
+/// deliberately did not.
+///
+/// The per-type credential validators are where this port's parity risk
+/// concentrates — seven types, each with its own required fields and its own
+/// exact 422 wording — so the messages are asserted verbatim rather than by
+/// status alone.
+#[tokio::test]
+#[ignore = "requires a scratch Go instance; mutates it"]
+async fn the_integration_write_answers_match_go() {
+    require_scratch_instance();
+
+    // A missing name is a 422 from the service, and it is checked before type.
+    let no_name = go_answer(
+        Method::POST,
+        "/api/integrations",
+        Some(r#"{"type":"telegram"}"#),
+    )
+    .await;
+    assert_eq!(no_name.0, 422);
+    assert_eq!(
+        String::from_utf8_lossy(&no_name.1).trim_end(),
+        r#"{"error":"validation error for \"name\": name is required"}"#
+    );
+
+    let no_type = go_answer(Method::POST, "/api/integrations", Some(r#"{"name":"n"}"#)).await;
+    assert_eq!(no_type.0, 422);
+    assert_eq!(
+        String::from_utf8_lossy(&no_type.1).trim_end(),
+        r#"{"error":"validation error for \"type\": type is required"}"#
+    );
+
+    // An **absent** credentials blob is "credentials are empty"…
+    let absent = go_answer(
+        Method::POST,
+        "/api/integrations",
+        Some(r#"{"name":"n","type":"telegram"}"#),
+    )
+    .await;
+    assert_eq!(absent.0, 422);
+    assert_eq!(
+        String::from_utf8_lossy(&absent.1).trim_end(),
+        r#"{"error":"validation error for \"credentials\": invalid telegram credentials: credentials are empty"}"#
+    );
+
+    // …but a literal `null` is four bytes, so it decodes to the zero value and
+    // reports the missing *field* instead. This pair is the whole reason the
+    // port captures the raw blob rather than letting serde fold null into None.
+    let null_creds = go_answer(
+        Method::POST,
+        "/api/integrations",
+        Some(r#"{"name":"n","type":"telegram","credentials":null}"#),
+    )
+    .await;
+    assert_eq!(null_creds.0, 422);
+    assert_eq!(
+        String::from_utf8_lossy(&null_creds.1).trim_end(),
+        r#"{"error":"validation error for \"credentials.bot_token\": bot_token is required"}"#
+    );
+
+    let created = go_answer(
+        Method::POST,
+        "/api/integrations",
+        // Multi-key, out of order, with a trailing-zero decimal and interior
+        // whitespace: a single-key blob is a fixed point of a `Value` round
+        // trip and would prove nothing about verbatim storage.
+        Some(
+            r#"{"name":"Parity Writes","type":"telegram",
+                 "credentials":{"zebra":"z", "bot_token":"tok","rate":1.50}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(created.0, 201, "create must be 201, got {}", created.0);
+    println!("create: {}", String::from_utf8_lossy(&created.1));
+    let body: serde_json::Value = serde_json::from_slice(&created.1).expect("json");
+    let id = body["id"].as_str().expect("an id").to_string();
+    // An omitted services map is `{}`, never null, and no secret is echoed.
+    assert_eq!(body["services"], serde_json::json!({}));
+    assert_eq!(body["authenticated"], false);
+    assert!(
+        body.get("credentials").is_none(),
+        "credentials must be scrubbed"
+    );
+
+    // ── Trigger rules ──
+    let rule = go_answer(
+        Method::POST,
+        &format!("/api/integrations/{id}/triggers"),
+        Some(r#"{"name":"R","agent_slug":"a","enabled":true}"#),
+    )
+    .await;
+    assert_eq!(rule.0, 201, "rule create must be 201");
+    let rule_body: serde_json::Value = serde_json::from_slice(&rule.1).expect("json");
+    let rid = rule_body["id"].as_str().expect("a rule id").to_string();
+
+    // An omitted field is cleared by an update, not preserved.
+    let updated = go_answer(
+        Method::PUT,
+        &format!("/api/integrations/{id}/triggers/{rid}"),
+        Some(r#"{"agent_slug":"b"}"#),
+    )
+    .await;
+    assert_eq!(updated.0, 200);
+    let updated_body: serde_json::Value = serde_json::from_slice(&updated.1).expect("json");
+    assert_eq!(updated_body["agent_slug"], "b");
+    assert_eq!(updated_body["name"], "", "an omitted name is cleared");
+
+    // A rule id that exists but belongs elsewhere is 403 — and the check runs
+    // before the body is decoded, so garbage still gets 403 rather than 400.
+    let other = go_answer(
+        Method::POST,
+        "/api/integrations",
+        Some(r#"{"name":"Other","type":"telegram","credentials":{"bot_token":"t2"}}"#),
+    )
+    .await;
+    let other_id = serde_json::from_slice::<serde_json::Value>(&other.1).expect("json")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    for body in [r#"{"agent_slug":"c"}"#, "not json at all"] {
+        let forbidden = go_answer(
+            Method::PUT,
+            &format!("/api/integrations/{other_id}/triggers/{rid}"),
+            Some(body),
+        )
+        .await;
+        assert_eq!(forbidden.0, 403, "body {body:?} must still be 403");
+        assert_eq!(
+            String::from_utf8_lossy(&forbidden.1).trim_end(),
+            r#"{"error":"rule does not belong to this integration"}"#
+        );
+    }
+
+    let missing = go_answer(
+        Method::PUT,
+        &format!("/api/integrations/{id}/triggers/no-such-rule"),
+        Some(r#"{"agent_slug":"c"}"#),
+    )
+    .await;
+    assert_eq!(missing.0, 404);
+    assert_eq!(
+        String::from_utf8_lossy(&missing.1).trim_end(),
+        r#"{"error":"trigger_rule \"no-such-rule\" not found"}"#
+    );
+
+    let deleted = go_answer(
+        Method::DELETE,
+        &format!("/api/integrations/{id}/triggers/{rid}"),
+        None,
+    )
+    .await;
+    assert_eq!(deleted.0, 204);
+    assert!(deleted.1.is_empty(), "204 carries no body");
+
+    // Clean up through Go, which is also the side that owns these deletes.
+    for cleanup in [&id, &other_id] {
+        let gone = go_answer(
+            Method::DELETE,
+            &format!("/api/integrations/{cleanup}"),
+            None,
+        )
+        .await;
+        assert_eq!(gone.0, 204, "integration delete must be 204");
+    }
+}

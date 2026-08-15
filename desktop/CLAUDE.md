@@ -146,7 +146,11 @@ src-tauri/src/
     version.rs   GET /api/version and /version/update-check (dev builds only)
     notifications.rs GET /api/notifications/settings (password masked) and /log
     integrations.rs GET /api/integrations, /{id}, /available-tools, /{id}/triggers —
-                 credentials are never selected and auth is a bool made in SQL
+                 credentials are never selected and auth is a bool made in SQL;
+                 plus POST /api/integrations and the trigger-rule writes (#277).
+                 PUT/DELETE /{id} stay with Go: they reload/stop the live MCP server
+    integration_credentials.rs the seven per-type validators, and the two failures
+                 whose Go error text is not reproducible (both forward)
     fs.rs        GET /api/fs — the working-dir picker's listing (Unix; forwards on Windows)
     gopath.rs    Go's filepath.Clean/Dir/Join, pinned to vectors generated from Go
     query.rs     one query parameter, read the way r.URL.Query().Get reads it
