@@ -17,6 +17,14 @@
 //! two take guards Go's own short statements against each other, which a second
 //! process handles with `busy_timeout` instead.
 //!
+//! The leg most likely to be re-derived wrongly: **Go's own writer does not
+//! invalidate the analytics memo either.** "There is no state to leave stale" is
+//! true here because none is *maintained*, not merely because none exists — so
+//! a native write leaves exactly the state a Go write would leave. Had
+//! `UpdateCustomTitle` invalidated anything, this port would have been wrong,
+//! and that is what to check before moving the next route through a `Cache`
+//! method.
+//!
 //! The other half of the argument is that the **scanner cannot fight it**:
 //! `custom_title` and `is_favorite` are in neither of the scanner's write lists
 //! — they are the only columns there the user typed — so the shell's own scan

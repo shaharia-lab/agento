@@ -50,9 +50,16 @@ var updateWriteRoutes = flag.Bool("update-write-routes", false,
 type writeRoute struct {
 	Method string `json:"method"`
 	Route  string `json:"route"`
-	// Whether the Rust shell answers this route. Asserted against the real
-	// `native::claims` by the Rust half.
-	Native bool `json:"native"`
+	// What this repo has decided: `native` (Rust answers it), `deferred`
+	// (Rust will answer it once the named issue lands) or `dropped` (Rust will
+	// never answer it).
+	//
+	// **`deferred` and `dropped` are not the same answer**, and a boolean
+	// cannot say so — the WhatsApp routes are waiting for nothing, while the
+	// task writes are waiting for #275. For a file whose point is to be
+	// queried, the distinction the reader cares about has to be a field rather
+	// than a phrase inside `reason`.
+	Status string `json:"status"`
 	// The issue that owns the decision — the one that ported it, or the one it
 	// waits on.
 	Owner string `json:"owner"`
@@ -69,102 +76,125 @@ type writeRoutes struct {
 // disposition is what this repo has decided about one write route, keyed by
 // "METHOD route".
 type disposition struct {
-	native bool
+	status string
 	owner  string
 	reason string
 }
+
+// The three values `disposition.status` may take.
+const (
+	statusNative   = "native"
+	statusDeferred = "deferred"
+	statusDropped  = "dropped"
+)
 
 // dispositions must cover the write surface exactly. Adding a route to the
 // router without adding it here fails this test, which is the whole point.
 var dispositions = map[string]disposition{
 	// ── Rows and nothing else (#274) ────────────────────────────────────────
-	"POST /api/agents":             {true, "#274", "agent CRUD is only rows"},
-	"PUT /api/agents/{slug}":       {true, "#274", "agent CRUD is only rows"},
-	"DELETE /api/agents/{slug}":    {true, "#274", "agent CRUD is only rows"},
-	"POST /api/chats":              {true, "#274", "chat CRUD is only rows"},
-	"DELETE /api/chats":            {true, "#274", "chat CRUD is only rows"},
-	"PATCH /api/chats/{id}":        {true, "#274", "chat CRUD is only rows"},
-	"DELETE /api/chats/{id}":       {true, "#274", "chat CRUD is only rows"},
-	"DELETE /api/job-history":      {true, "#274", "job history is only rows"},
-	"DELETE /api/job-history/{id}": {true, "#274", "job history is only rows"},
+	"POST /api/agents":             {statusNative, "#274", "agent CRUD is only rows"},
+	"PUT /api/agents/{slug}":       {statusNative, "#274", "agent CRUD is only rows"},
+	"DELETE /api/agents/{slug}":    {statusNative, "#274", "agent CRUD is only rows"},
+	"POST /api/chats":              {statusNative, "#274", "chat CRUD is only rows"},
+	"DELETE /api/chats":            {statusNative, "#274", "chat CRUD is only rows"},
+	"PATCH /api/chats/{id}":        {statusNative, "#274", "chat CRUD is only rows"},
+	"DELETE /api/chats/{id}":       {statusNative, "#274", "chat CRUD is only rows"},
+	"DELETE /api/job-history":      {statusNative, "#274", "job history is only rows"},
+	"DELETE /api/job-history/{id}": {statusNative, "#274", "job history is only rows"},
 
 	// ── The chat turn and the three routes that steer it (#276) ─────────────
-	"POST /api/chats/{id}/messages":   {true, "#276", "the SSE turn, on the ported SDK"},
-	"POST /api/chats/{id}/input":      {true, "#276", "steers a live session Rust holds; forwards when it does not"},
-	"POST /api/chats/{id}/permission": {true, "#276", "steers a live session Rust holds; forwards when it does not"},
-	"POST /api/chats/{id}/stop":       {true, "#276", "steers a live session Rust holds; forwards when it does not"},
+	"POST /api/chats/{id}/messages":   {statusNative, "#276", "the SSE turn, on the ported SDK"},
+	"POST /api/chats/{id}/input":      {statusNative, "#276", "steers a live session Rust holds; forwards when it does not"},
+	"POST /api/chats/{id}/permission": {statusNative, "#276", "steers a live session Rust holds; forwards when it does not"},
+	"POST /api/chats/{id}/stop":       {statusNative, "#276", "steers a live session Rust holds; forwards when it does not"},
 
 	// ── Integrations that own no live state (#277) ──────────────────────────
-	"POST /api/integrations":                       {true, "#277", "Create makes no registry call"},
-	"POST /api/integrations/{id}/triggers":         {true, "#277", "trigger rules are only rows"},
-	"PUT /api/integrations/{id}/triggers/{rid}":    {true, "#277", "trigger rules are only rows"},
-	"DELETE /api/integrations/{id}/triggers/{rid}": {true, "#277", "trigger rules are only rows"},
+	"POST /api/integrations":                       {statusNative, "#277", "Create makes no registry call"},
+	"POST /api/integrations/{id}/triggers":         {statusNative, "#277", "trigger rules are only rows"},
+	"PUT /api/integrations/{id}/triggers/{rid}":    {statusNative, "#277", "trigger rules are only rows"},
+	"DELETE /api/integrations/{id}/triggers/{rid}": {statusNative, "#277", "trigger rules are only rows"},
 
 	// ── The scan, which the shell now owns (#289) ───────────────────────────
-	"POST /api/claude-sessions/refresh": {true, "#289", "the shell owns the scan; the sidecar runs with AGENTO_SCANNER=off"},
+	"POST /api/claude-sessions/refresh": {statusNative, "#289", "the shell owns the scan; the sidecar runs with AGENTO_SCANNER=off"},
 
 	// ── Pricing (#306), uploads and continue (#308), notifications (#307) ───
-	"POST /api/pricing/rates":                 {true, "#306", "add and correct are two endpoints; the write invalidates stored costs"},
-	"PUT /api/pricing/rates":                  {true, "#306", "add and correct are two endpoints; the write invalidates stored costs"},
-	"DELETE /api/pricing/rates":               {true, "#306", "the write invalidates stored costs"},
-	"POST /api/uploads":                       {true, "#308", "the one multipart route; its effect is a file on disk"},
-	"POST /api/claude-sessions/{id}/continue": {true, "#308", "two chat writes in one transaction"},
-	"PUT /api/notifications/settings":         {true, "#307", "touches one column, deliberately unlike Go's read-modify-write"},
-	"POST /api/notifications/test":            {true, "#307", "sends the mail; a failed send forwards, only success is answered"},
+	"POST /api/pricing/rates":                 {statusNative, "#306", "add and correct are two endpoints; the write invalidates stored costs"},
+	"PUT /api/pricing/rates":                  {statusNative, "#306", "add and correct are two endpoints; the write invalidates stored costs"},
+	"DELETE /api/pricing/rates":               {statusNative, "#306", "the write invalidates stored costs"},
+	"POST /api/uploads":                       {statusNative, "#308", "the one multipart route; its effect is a file on disk"},
+	"POST /api/claude-sessions/{id}/continue": {statusNative, "#308", "two chat writes in one transaction"},
+	"PUT /api/notifications/settings":         {statusNative, "#307", "touches one column, deliberately unlike Go's read-modify-write"},
+	"POST /api/notifications/test":            {statusNative, "#307", "sends the mail; a failed send forwards, only success is answered"},
 
 	// ── Claude settings and profiles (#327) ─────────────────────────────────
-	"PUT /api/claude-settings":                          {true, "#327", "a file under the run config dir"},
-	"POST /api/claude-settings/profiles":                {true, "#327", "profile files plus their metadata index"},
-	"PUT /api/claude-settings/profiles/{id}":            {true, "#327", "profile files plus their metadata index"},
-	"DELETE /api/claude-settings/profiles/{id}":         {true, "#327", "profile files plus their metadata index"},
-	"POST /api/claude-settings/profiles/{id}/duplicate": {true, "#327", "profile files plus their metadata index"},
-	"PUT /api/claude-settings/profiles/{id}/default":    {true, "#327", "profile files plus their metadata index"},
+	"PUT /api/claude-settings":                          {statusNative, "#327", "a file under the run config dir"},
+	"POST /api/claude-settings/profiles":                {statusNative, "#327", "profile files plus their metadata index"},
+	"PUT /api/claude-settings/profiles/{id}":            {statusNative, "#327", "profile files plus their metadata index"},
+	"DELETE /api/claude-settings/profiles/{id}":         {statusNative, "#327", "profile files plus their metadata index"},
+	"POST /api/claude-settings/profiles/{id}/duplicate": {statusNative, "#327", "profile files plus their metadata index"},
+	"PUT /api/claude-settings/profiles/{id}/default":    {statusNative, "#327", "profile files plus their metadata index"},
 
 	// ── Declined outright (#309) ────────────────────────────────────────────
-	"PUT /api/monitoring":       {true, "#309", "answers 501: this build exports no telemetry, so a 200 would lie"},
-	"POST /api/monitoring/test": {true, "#309", "answers 501: this build exports no telemetry, so a 200 would lie"},
+	"PUT /api/monitoring":       {statusNative, "#309", "answers 501: this build exports no telemetry, so a 200 would lie"},
+	"POST /api/monitoring/test": {statusNative, "#309", "answers 501: this build exports no telemetry, so a 200 would lie"},
 
 	// ── The two #293 missed, ported by #296 ─────────────────────────────────
-	"POST /api/fs/mkdir":              {true, "#296", "one effect: a directory on disk"},
-	"PATCH /api/claude-sessions/{id}": {true, "#296", "two UPDATEs; Cache holds no session state and the scanner writes neither column"},
+	"POST /api/fs/mkdir":              {statusNative, "#296", "one effect: a directory on disk"},
+	"PATCH /api/claude-sessions/{id}": {statusNative, "#296", "two UPDATEs; Cache holds no session state and the scanner writes neither column"},
 
 	// ── Deferred: the scheduler (#275) ──────────────────────────────────────
-	"POST /api/tasks":             {false, "#275", "registers a cron entry; a stored task that never fires is worse than none"},
-	"PUT /api/tasks/{id}":         {false, "#275", "re-registers the cron entry"},
-	"DELETE /api/tasks/{id}":      {false, "#275", "unregisters the cron entry"},
-	"POST /api/tasks/{id}/pause":  {false, "#275", "unregisters the cron entry"},
-	"POST /api/tasks/{id}/resume": {false, "#275", "re-registers the cron entry"},
+	"POST /api/tasks":             {statusDeferred, "#275", "registers a cron entry; a stored task that never fires is worse than none"},
+	"PUT /api/tasks/{id}":         {statusDeferred, "#275", "re-registers the cron entry"},
+	"DELETE /api/tasks/{id}":      {statusDeferred, "#275", "unregisters the cron entry"},
+	"POST /api/tasks/{id}/pause":  {statusDeferred, "#275", "unregisters the cron entry"},
+	"POST /api/tasks/{id}/resume": {statusDeferred, "#275", "re-registers the cron entry"},
 
 	// ── Deferred: the live MCP server (#282) ────────────────────────────────
-	"PUT /api/integrations/{id}":    {false, "#282", "Reloads the live in-process MCP server"},
-	"DELETE /api/integrations/{id}": {false, "#282", "Stops the live in-process MCP server"},
+	"PUT /api/integrations/{id}":    {statusDeferred, "#282", "Reloads the live in-process MCP server"},
+	"DELETE /api/integrations/{id}": {statusDeferred, "#282", "Stops the live in-process MCP server"},
 
 	// ── Deferred: it talks to somebody else's server ────────────────────────
-	"POST /api/integrations/{id}/auth/start":                {false, "-", "mints an OAuth URL and holds the in-flight flow in memory"},
-	"POST /api/integrations/{id}/auth/validate":             {false, "-", "dials the remote service; the error text is not reproducible"},
-	"POST /api/integrations/{id}/webhook/register":          {false, "-", "registers the webhook with Telegram"},
-	"DELETE /api/integrations/{id}/webhook/register":        {false, "-", "deregisters the webhook with Telegram"},
-	"POST /api/integrations/{id}/webhook/regenerate-secret": {false, "-", "rotates the secret and re-registers with Telegram"},
+	"POST /api/integrations/{id}/auth/start":                {statusDeferred, "-", "mints an OAuth URL and holds the in-flight flow in memory"},
+	"POST /api/integrations/{id}/auth/validate":             {statusDeferred, "-", "dials the remote service; the error text is not reproducible"},
+	"POST /api/integrations/{id}/webhook/register":          {statusDeferred, "-", "registers the webhook with Telegram"},
+	"DELETE /api/integrations/{id}/webhook/register":        {statusDeferred, "-", "deregisters the webhook with Telegram"},
+	"POST /api/integrations/{id}/webhook/regenerate-secret": {statusDeferred, "-", "rotates the secret and re-registers with Telegram"},
 
 	// ── Deferred: the sidecar's boot-time snapshot (#305) ───────────────────
-	"PUT /api/settings": {false, "#305", "the sidecar holds a snapshot these preferences resolve through; no AGENTO_SCANNER=off equivalent exists"},
+	"PUT /api/settings": {statusDeferred, "#305", "the sidecar holds a snapshot these preferences resolve through; no AGENTO_SCANNER=off equivalent exists"},
+
+	// ── Deferred: it arrives from outside and dispatches an agent run ───────
+	//
+	// The one write outside `/api`. It is authenticated by its own secret token
+	// rather than by the two `/api` guards — it arrives from Telegram's servers
+	// with a foreign `Host` — and its effect is a trigger-rule match plus an
+	// agent run through the dispatcher, which is the scheduler's executor by
+	// another name.
+	"POST /webhooks/telegram/{id}": {statusDeferred, "#275", "dispatches an agent run; the executor is still Go's"},
 
 	// ── Not deferred: dropped (#273) ────────────────────────────────────────
-	"POST /api/integrations/{id}/whatsapp/pair":      {false, "#273", "WhatsApp is dropped, not deferred; dies with the sidecar"},
-	"POST /api/integrations/{id}/whatsapp/reconnect": {false, "#273", "WhatsApp is dropped, not deferred; dies with the sidecar"},
+	"POST /api/integrations/{id}/whatsapp/pair":      {statusDropped, "#273", "WhatsApp is dropped, not deferred; dies with the sidecar"},
+	"POST /api/integrations/{id}/whatsapp/reconnect": {statusDropped, "#273", "WhatsApp is dropped, not deferred; dies with the sidecar"},
 }
 
 // walkWrites returns every non-GET route the real router registers.
 //
 // `&api.Server{}` is enough: `Mount` only takes method values, it never
 // dereferences the receiver, so no service has to be constructed to ask the
-// router what it has.
+// router what it has. The same is true of the webhook handler.
+//
+// **Both mounts, not just `/api`.** `internal/server/server.go` mounts the API
+// under `/api` and the Telegram webhook handler at the **root**, and the second
+// one registers a write. Walking only `/api` would leave it unclassified — and
+// a write route escaping the enumeration is the exact failure this file exists
+// to prevent, so it would have been a table that looked exhaustive and was not.
 func walkWrites(t *testing.T) []string {
 	t.Helper()
 
 	r := chi.NewRouter()
 	server := &api.Server{}
 	r.Route("/api", func(r chi.Router) { server.Mount(r) })
+	(&api.TelegramWebhookHandler{}).Mount(r)
 
 	var routes []string
 	err := chi.Walk(r, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
@@ -200,10 +230,16 @@ func TestWriteRoutes(t *testing.T) {
 			continue
 		}
 		method, route, _ := strings.Cut(key, " ")
+		switch d.status {
+		case statusNative, statusDeferred, statusDropped:
+		default:
+			t.Errorf("write route %q has status %q; want one of native/deferred/dropped", key, d.status)
+			continue
+		}
 		out = append(out, writeRoute{
 			Method: method,
 			Route:  route,
-			Native: d.native,
+			Status: d.status,
 			Owner:  d.owner,
 			Reason: d.reason,
 		})
@@ -224,7 +260,7 @@ func TestWriteRoutes(t *testing.T) {
 			"Generated from a chi.Walk over the real router by desktop/parity/write_routes_parity_test.go,",
 			"which also fails when a route is unclassified or a classification is stale.",
 			"Read by desktop/src-tauri/src/native/mod.rs, which asserts each route's real",
-			"native::claims() matches the 'native' column here.",
+			"native::claims() matches the 'status' column here.",
 			"Regenerate with: go test ./desktop/parity/ -run TestWriteRoutes -update-write-routes",
 		},
 		Routes: out,

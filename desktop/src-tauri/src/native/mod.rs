@@ -651,7 +651,9 @@ mod tests {
         struct Row {
             method: String,
             route: String,
-            native: bool,
+            /// `native`, `deferred` or `dropped`. The last two are both "not
+            /// ours" to `claims`, and are a different answer to everyone else.
+            status: String,
             owner: String,
             reason: String,
         }
@@ -666,33 +668,45 @@ mod tests {
             .unwrap_or_else(|e| panic!("reading {path}: {e} — regenerate it from Go"));
         let table: Table = serde_json::from_str(&raw).expect("parsing write routes");
 
-        assert!(
-            table.routes.len() >= 45,
-            "the write surface is ~50 routes; {} looks truncated",
-            table.routes.len()
-        );
+        // Completeness is the Go half's job — it walks the router and fails on
+        // an unclassified route — so this only guards against reading an empty
+        // or truncated file, and deliberately carries no count that would drift.
+        assert!(!table.routes.is_empty(), "no write routes in {path}");
 
         for row in table.routes {
             let method = Method::from_bytes(row.method.as_bytes())
                 .unwrap_or_else(|_| panic!("bad method {:?}", row.method));
             // The table carries chi's patterns; `claims` matches concrete
-            // paths, so the parameters get a sample segment each.
+            // paths, so every parameter segment gets a sample value.
+            //
+            // Generic rather than a list of the three names in use today: an
+            // unsubstituted `{taskID}` would leave literal braces, `claims`
+            // would answer `false`, and a **deferred** route would then pass
+            // having asserted nothing — silently, and on the larger half of the
+            // table.
             let concrete = row
                 .route
-                .replace("{slug}", "sample")
-                .replace("{rid}", "rule")
-                .replace("{id}", "sample");
+                .split('/')
+                .map(|segment| {
+                    if segment.starts_with('{') && segment.ends_with('}') {
+                        "sample"
+                    } else {
+                        segment
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
 
             assert_eq!(
                 claims(&method, &concrete),
-                row.native,
-                "{} {} — the table says native={} ({}, {}). Either the claim moved \
+                row.status == "native",
+                "{} {} — the table says status={:?} ({}, {}). Either the claim moved \
                  and the table is stale, or a route was claimed without deciding \
                  about it. Regenerate with: go test ./desktop/parity/ -run \
                  TestWriteRoutes -update-write-routes",
                 row.method,
                 row.route,
-                row.native,
+                row.status,
                 row.owner,
                 row.reason,
             );

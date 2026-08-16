@@ -498,11 +498,13 @@ mod tests {
     /// `0750` on **every** directory created, where `std::fs::create_dir_all`
     /// would have used `0777 & !umask`. The difference has a security
     /// direction, so it is asserted rather than assumed.
+    #[cfg(unix)]
     #[test]
     fn every_created_directory_gets_gos_mode() {
         use std::os::unix::fs::PermissionsExt;
 
         let root = tempfile::tempdir().expect("temp dir");
+        let umask = current_umask(root.path());
         let root = root.path().to_str().expect("utf8");
         mkdir(mkdir_body(&format!("{root}/outer/inner")).as_bytes()).expect("mkdir");
 
@@ -510,29 +512,32 @@ mod tests {
             let mode = std::fs::metadata(&dir).expect("stat").permissions().mode();
             // The umask applies to both implementations alike; 0750 under the
             // usual 022 is 0750.
-            assert_eq!(mode & 0o777, 0o750 & !current_umask(), "{dir}");
+            assert_eq!(mode & 0o777, 0o750 & !umask, "{dir}");
         }
     }
 
-    /// Read the process umask without changing it for the other tests, which
-    /// run in the same process: `umask` has no getter, so it is set and put
-    /// straight back.
-    fn current_umask() -> u32 {
-        // SAFETY: `umask` is not thread-safe, but every value is restored
-        // immediately and no test in this file depends on it being stable
-        // across the two calls beyond what it reads back.
-        unsafe {
-            let previous = libc_umask(0o777);
-            libc_umask(previous);
-            previous
-        }
-    }
+    /// Read the effective umask **without touching it**: a directory created
+    /// with the default mode is `0o777 & !umask`, so the mask falls out of the
+    /// mode.
+    ///
+    /// `umask(2)` has no getter, and the set-and-restore trick that stands in
+    /// for one is process-global — these 600-odd tests share one binary and run
+    /// on many threads, several of them creating temp files whose mode is
+    /// derived from the umask at that instant. A two-syscall window where it
+    /// reads `0o777` is a `tempfile` created mode `0000` in another test, and a
+    /// failure nobody could attribute.
+    #[cfg(unix)]
+    fn current_umask(root: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
 
-    unsafe fn libc_umask(mask: u32) -> u32 {
-        extern "C" {
-            fn umask(mask: u32) -> u32;
-        }
-        umask(mask)
+        let probe = root.join(".umask-probe");
+        std::fs::create_dir(&probe).expect("probe dir");
+        let mode = std::fs::metadata(&probe)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        0o777 & !mode
     }
 
     #[test]

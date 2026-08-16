@@ -105,15 +105,11 @@ fn claims(method: &Method, path: &str) -> bool {
 /// Answer one of the four reads, or one of the two writes.
 ///
 /// **`/status` and `/refresh` are not here, and that is a decision rather than
-/// an omission.** Both are about the *scan*: `/status` reports
-/// `scan_in_progress`, `files_done` and `files_total`, which are in-memory
-/// state of the scanner running inside the Go sidecar, and `/refresh`
-/// invalidates the cache and starts one. Rust deliberately does not own
-/// scanning — `native/db.rs` opens the database **read-only** precisely so two
-/// processes never write one SQLite file — so a native `/status` could only
-/// answer `false`/`0`, which would be actively wrong while a Go scan runs and
-/// would blank the "Scanning ~/.claude… 412 / 1,373" the list shows during a
-/// first run. They move when the scanner is wired in, which is phase 3.
+/// an omission.** Both are about the *scan*, which since #289 the shell owns —
+/// `/status` reports `scan_in_progress`, `files_done` and `files_total`, and
+/// `/refresh` invalidates the markers and starts one. All of that is
+/// `native/scan.rs`'s state, so both routes live there with it rather than
+/// here with the reads that merely ask it to stay fresh.
 fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
     if let Some(Route::Continue(id)) = route_of(req.path) {
         return crate::native::writes::finish(continue_chat::continue_session(&ctx.db_path, id));

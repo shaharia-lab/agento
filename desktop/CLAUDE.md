@@ -321,7 +321,10 @@ natively-served request never reaches `internal/server/guards.go`, so neither
 guards' coverage shrinks with every endpoint the port claims. It has been true
 since #274 and it belongs with the proxy rather than with any one area, so it is
 tracked separately — but it is worth knowing while porting, because the surfaces
-being claimed now include `~/.claude/settings.json` and its `hooks` key.
+being claimed now include `~/.claude/settings.json` and its `hooks` key, and
+since #296 `POST /api/fs/mkdir`, whose effect is a directory at an arbitrary
+absolute path. Both are bounded — mkdir creates an empty `0750` directory and
+nothing else — but they are the class of route that paragraph exists to flag.
 
 Because both implementations run at once, a ported route is verifiable:
 replay the same request against Rust and against Go and diff the JSON.
@@ -880,18 +883,21 @@ A prose table has the same problem one release later, so the table is
   router has and the map does not classify **fails the Go suite**; a
   classification naming a route the router no longer has fails it too.
 - `desktop/parity/write_routes.json` is what that produces: method, route,
-  `native`, the owning issue, and the one-line reason. For a deferral the reason
+  `status`, the owning issue, and the one-line reason. For a deferral the reason
   is the *effect Rust cannot reproduce*, because that is the only thing #274's
-  rule turns on.
+  rule turns on. `status` is `native` | `deferred` | `dropped` rather than a
+  boolean, because **`deferred` and `dropped` are not the same answer** — the
+  WhatsApp routes are waiting for nothing — and a file meant to be queried has
+  to say so in a field rather than inside a sentence.
 - `native::tests::every_write_route_matches_its_recorded_disposition` reads the
-  same file and asserts each route's real `claims()` matches its `native`
-  column, so a route cannot be claimed or unclaimed without the file moving.
+  same file and asserts each route's real `claims()` matches its `status`, so a
+  route cannot be claimed or unclaimed without the file moving.
 
 Regenerate with `go test ./desktop/parity/ -run TestWriteRoutes
 -update-write-routes`, *after* deciding about whatever changed. Read the file
 for the per-route detail; the standing summary is:
 
-**Native (35).** Agent and chat CRUD and the job-history deletes (#274); the
+**Native (35 of 51).** Agent and chat CRUD and the job-history deletes (#274); the
 chat turn and its three steering routes (#276); `POST /api/integrations` and the
 three trigger-rule writes (#277); `/claude-sessions/refresh` (#289); the three
 pricing rate writes (#306); the two notification writes (#307); `POST /uploads`
@@ -900,16 +906,26 @@ and `/claude-sessions/{id}/continue` (#308); `PUT /monitoring` and
 the five profile writes (#327); and `POST /fs/mkdir` plus
 `PATCH /claude-sessions/{id}` (#296).
 
-**Deferred (13), each by the effect Rust does not own.** The five task writes
+**Deferred (14), each by the effect Rust does not own.** The five task writes
 register or unregister a cron entry (#275). `PUT`/`DELETE /integrations/{id}`
 reload and stop the live in-process MCP server (#282). `PUT /settings` resolves
 through a snapshot the sidecar still holds, with no `AGENTO_SCANNER=off`
 equivalent to switch the Go half off (#305). Five more talk to somebody else's
-server — the two `auth/*` routes and the three Telegram `webhook/*` ones.
+server — the two `auth/*` routes and the three Telegram `webhook/*` ones. The
+fourteenth is `POST /webhooks/telegram/{id}`, the one write outside `/api`:
+inbound from Telegram, authenticated by its own secret token rather than by the
+two guards, and its effect is an agent run through the dispatcher — which is
+#275's executor by another name.
 
 **Dropped (2), which is not the same as deferred.** The two WhatsApp routes are
 `false` in the table for a reason that will never be resolved: `whatsmeow` is not
 being ported, and they die with the sidecar rather than moving (#273).
+
+The walk covers **both** mounts, not just `/api`: `internal/server/server.go`
+also mounts the Telegram webhook handler at the root, and
+`POST /webhooks/telegram/{id}` is a write with a large effect — it matches a
+trigger rule and dispatches an agent run. Walking `/api` alone would have left it
+unclassified, which is the same shape of miss this section exists to end.
 
 GET routes are deliberately out of the table. A read that misses is a fallback,
 not a double-apply, so it carries none of the hazard the rule exists for.
