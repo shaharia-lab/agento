@@ -1,0 +1,141 @@
+{
+  "_comment": [
+    "Cross-language parity vectors for config.ClaudeConfigDirs and",
+    "config.DiscoverCandidateClaudeDirs, Unix rules. Generated from Go, then",
+    "frozen. Read by desktop/parity/claude_dirs_parity_test.go (Go) and by",
+    "desktop/src-tauri/src/native/settings.rs (Rust). 'layout' is the home",
+    "directory both languages build; 'indexed' and 'candidates' are exactly what",
+    "Go answered over it, so a divergence fails one language against the other's",
+    "real output rather than against a belief about it.",
+    "$HOME stands for the temp home each side builds the layout in.",
+    "Regenerate with: go test ./desktop/parity/ -run TestClaudeDirsVectors -update-golden"
+  ],
+  "layout": {
+    "dirs": [
+      ".claude/projects",
+      ".claude-work/projects",
+      ".claude.bak/projects",
+      ".clauded/projects",
+      ".claude-alpha/projects",
+      ".claude-zeta/projects",
+      ".claude-backup",
+      "notclaude/projects",
+      ".claude-projfile"
+    ],
+    "files": [
+      ".claude-projfile/projects",
+      ".claude-file"
+    ],
+    "symlinks": [
+      {
+        "link": ".claude-link",
+        "target": ".claude-work"
+      }
+    ]
+  },
+  "cases": [
+    {
+      "name": "nothing configured: the default dir alone is indexed",
+      "claude_config_dir_env": "",
+      "run_dir": "",
+      "extra": [],
+      "indexed": [
+        "$HOME/.claude"
+      ],
+      "candidates": [
+        "$HOME/.claude-alpha",
+        "$HOME/.claude-work",
+        "$HOME/.claude-zeta",
+        "$HOME/.claude.bak",
+        "$HOME/.clauded"
+      ]
+    },
+    {
+      "name": "a configured run dir is indexed and so is not suggested",
+      "claude_config_dir_env": "",
+      "run_dir": "$HOME/.claude-zeta",
+      "extra": [],
+      "indexed": [
+        "$HOME/.claude",
+        "$HOME/.claude-zeta"
+      ],
+      "candidates": [
+        "$HOME/.claude-alpha",
+        "$HOME/.claude-work",
+        "$HOME/.claude.bak",
+        "$HOME/.clauded"
+      ]
+    },
+    {
+      "name": "extras follow the run dir, in the order they were given",
+      "claude_config_dir_env": "",
+      "run_dir": "",
+      "extra": [
+        "$HOME/.claude-work",
+        "$HOME/.claude-alpha"
+      ],
+      "indexed": [
+        "$HOME/.claude",
+        "$HOME/.claude-work",
+        "$HOME/.claude-alpha"
+      ],
+      "candidates": [
+        "$HOME/.claude-zeta",
+        "$HOME/.claude.bak",
+        "$HOME/.clauded"
+      ]
+    },
+    {
+      "name": "a duplicate, a trailing slash and a relative extra all collapse",
+      "claude_config_dir_env": "",
+      "run_dir": "",
+      "extra": [
+        "$HOME/.claude-work/",
+        "$HOME/.claude-work",
+        "relative/dir"
+      ],
+      "indexed": [
+        "$HOME/.claude",
+        "$HOME/.claude-work"
+      ],
+      "candidates": [
+        "$HOME/.claude-alpha",
+        "$HOME/.claude-zeta",
+        "$HOME/.claude.bak",
+        "$HOME/.clauded"
+      ]
+    },
+    {
+      "name": "CLAUDE_CONFIG_DIR beats the run dir it is given",
+      "claude_config_dir_env": "$HOME/.claude-alpha",
+      "run_dir": "$HOME/.claude-zeta",
+      "extra": [],
+      "indexed": [
+        "$HOME/.claude",
+        "$HOME/.claude-alpha"
+      ],
+      "candidates": [
+        "$HOME/.claude-work",
+        "$HOME/.claude-zeta",
+        "$HOME/.claude.bak",
+        "$HOME/.clauded"
+      ]
+    },
+    {
+      "name": "a relative CLAUDE_CONFIG_DIR is dropped, not resolved",
+      "claude_config_dir_env": "relative/dir",
+      "run_dir": "$HOME/.claude-zeta",
+      "extra": [],
+      "indexed": [
+        "$HOME/.claude",
+        "$HOME/.claude-zeta"
+      ],
+      "candidates": [
+        "$HOME/.claude-alpha",
+        "$HOME/.claude-work",
+        "$HOME/.claude.bak",
+        "$HOME/.clauded"
+      ]
+    }
+  ]
+}
