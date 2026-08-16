@@ -11,9 +11,47 @@
 //! answer. Everything here is `monitoring.json` plus `OTEL_*`; nothing here
 //! exports anything.
 //!
-//! `PUT /api/monitoring` and `POST /api/monitoring/test` stay with Go: one
-//! writes the file *and* hot-reloads the providers, the other dials the OTLP
-//! endpoint over gRPC. Neither is a read.
+//! # The two writes answer 501, and that is the decision (#309)
+//!
+//! `PUT /api/monitoring` and `POST /api/monitoring/test` used to forward. After
+//! the cut-over there is nothing to forward *to*, so "out of scope" would have
+//! become "the settings page 404s", and the issue asked for one of three
+//! answers: port the config surface, port the exporters too, or decline the
+//! feature. This declines it.
+//!
+//! The reason is that the other two are worse, not that this one is cheap:
+//!
+//! - **Persisting the config without exporters is a save that changes nothing.**
+//!   `Manager.Update` writes `monitoring.json` *and* rebuilds the providers, and
+//!   the providers are the half this build does not have. A 200 on that PUT
+//!   would tell the user telemetry is on while nothing is emitted — and a
+//!   ported PUT would go stale a second way before the cut-over even arrives,
+//!   since the sidecar's providers are built once at `Update` and a native write
+//!   cannot reach them. There is no `AGENTO_SCANNER=off` equivalent to switch
+//!   the Go half off, which is the same wall #305 hit on `PUT /api/settings`.
+//! - **Porting the exporters** is the largest option in the plan and reverses a
+//!   decision the handover already records: OTel and Prometheus are server
+//!   concerns, and this app is not the server.
+//!
+//! So the honest answer is the one that does not claim a reload happened. `501`
+//! rather than `404`, because the route exists and this build declines it —
+//! a 404 would read as a version mismatch and send someone looking for an
+//! upgrade that will never ship, exactly as `unavailableCopy` avoids for
+//! WhatsApp.
+//!
+//! **`GET /api/monitoring` stays.** It reports what `monitoring.json` holds and
+//! which `OTEL_*` variables are pinning fields, both of which are still true and
+//! still useful to someone running `agento web` against the same data dir. The
+//! settings page renders it read-only and says why.
+//!
+//! One thing worth recording before it is lost with the sidecar: Go's
+//! `POST /test` is close to a no-op. It calls `grpc.Dial` (lazy, so it almost
+//! never errors), `Connect()`, then `WaitForStateChange(ctx, Idle)` — which
+//! returns as soon as the state leaves `Idle`, i.e. immediately, at `Connecting`
+//! — and `Connecting` counts as success. So it answers `ok: true` for an
+//! endpoint nothing is listening on, unless the failure happens to land inside
+//! the microseconds before the state is read. Reproducing that would have meant
+//! reproducing a race.
 //!
 //! The two env-override mechanisms in Agento are not the same shape and this is
 //! the one that returns 409: monitoring answers a conflicting write with an
@@ -263,11 +301,29 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
     serve,
 };
 
+/// What both declined routes say. One sentence, and it names the alternative
+/// rather than only the refusal — a message that says "not supported" and stops
+/// leaves the reader with nowhere to go.
+const DECLINED: &str = "the desktop build exports no telemetry; \
+run the agento server if you need OpenTelemetry or Prometheus";
+
 fn claims(method: &Method, path: &str) -> bool {
-    method == Method::GET && path == "/api/monitoring"
+    match path {
+        "/api/monitoring" => method == Method::GET || method == Method::PUT,
+        "/api/monitoring/test" => method == Method::POST,
+        _ => false,
+    }
 }
 
-fn serve(ctx: &super::Ctx, _req: &super::Request) -> Result<super::Answer, String> {
+fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
+    if req.method != Method::GET {
+        // Claimed so it is answered here rather than by a sidecar that is going
+        // away. `finish` renders it as `{"error": …}`, the shape every other
+        // failure in the API uses, so the settings page needs no special case.
+        return super::writes::finish(Err(super::writes::WriteError::NotImplemented(
+            DECLINED.to_string(),
+        )));
+    }
     // The data dir is the database's parent by construction — `paths::data_dir`
     // joins `agento.db` onto it, and `paths::tests::database_sits_beside_the_data_dir`
     // pins that. It is also what makes the parity instance work: the same
@@ -460,11 +516,71 @@ mod tests {
     }
 
     #[test]
-    fn only_the_monitoring_read_is_claimed() {
+    fn the_read_and_both_declined_writes_are_claimed() {
         assert!(claims(&Method::GET, "/api/monitoring"));
-        assert!(!claims(&Method::PUT, "/api/monitoring"));
-        assert!(!claims(&Method::POST, "/api/monitoring/test"));
+        // Claimed so this build answers them rather than a sidecar that is
+        // going away — see the module header.
+        assert!(claims(&Method::PUT, "/api/monitoring"));
+        assert!(claims(&Method::POST, "/api/monitoring/test"));
+
         assert!(!claims(&Method::GET, "/api/monitoring/test"));
+        assert!(!claims(&Method::DELETE, "/api/monitoring"));
         assert!(!claims(&Method::GET, "/api/monitoring/"));
+        assert!(!claims(&Method::PUT, "/api/monitoring/test"));
+    }
+
+    /// A declined route must be **answered**, not forwarded: forwarding would
+    /// reach the sidecar, which would happily save the config and reload its
+    /// own providers — the outcome this decision exists to stop.
+    #[test]
+    fn the_writes_answer_501_rather_than_forwarding() {
+        let ctx = super::super::Ctx {
+            db_path: std::path::PathBuf::from("/nonexistent/agento.db"),
+        };
+        for (method, path) in [
+            (Method::PUT, "/api/monitoring"),
+            (Method::POST, "/api/monitoring/test"),
+        ] {
+            let answer = serve(
+                &ctx,
+                &super::super::Request {
+                    method: &method,
+                    path,
+                    query: "",
+                    content_type: "application/json",
+                    body: br#"{"enabled":true,"otlp_endpoint":"localhost:4317"}"#,
+                },
+            )
+            .expect("answered here, not forwarded");
+            assert_eq!(answer.status, axum::http::StatusCode::NOT_IMPLEMENTED);
+            let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+            assert_eq!(
+                body,
+                format!("{{\"error\":\"{DECLINED}\"}}\n"),
+                "the shape is the API's ordinary error envelope"
+            );
+        }
+    }
+
+    /// The database path is nonsense in the test above on purpose: a declined
+    /// route must not need one. The read still does.
+    #[test]
+    fn the_read_is_untouched_by_the_decision() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let ctx = super::super::Ctx {
+            db_path: dir.path().join("agento.db"),
+        };
+        let answer = serve(
+            &ctx,
+            &super::super::Request {
+                method: &Method::GET,
+                path: "/api/monitoring",
+                query: "",
+                content_type: "",
+                body: &[],
+            },
+        )
+        .expect("the read still answers");
+        assert_eq!(answer.status, axum::http::StatusCode::OK);
     }
 }

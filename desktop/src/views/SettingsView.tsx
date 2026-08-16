@@ -7,7 +7,7 @@ import {
   type SetStateAction,
 } from "react";
 import { api, ApiError, qs } from "../lib/api";
-import { describeError, useResource } from "../lib/hooks";
+import { describeError, useResource, type Resource } from "../lib/hooks";
 import { dateTime, relativeTime, tildePath, usd } from "../lib/format";
 import { Icon, type IconName } from "../lib/icons";
 import { Checkbox, Empty, FormRow, Switch } from "../components/ui";
@@ -207,7 +207,11 @@ export function SettingsView({
     (signal) => api.get<SettingsEnvelope>("/settings", signal),
     []
   );
-  const monitoring = useEditable<MonitoringEnvelope>(
+  // Read-only since #309: this build exports no telemetry, so there is nothing
+  // for a save here to take effect on. The stored config is still worth showing
+  // — an `agento web` on the same data dir uses it, and `locked` says which
+  // OTEL_* variables have pinned a field.
+  const monitoring = useResource<MonitoringEnvelope>(
     (signal) => api.get<MonitoringEnvelope>("/monitoring", signal),
     []
   );
@@ -231,8 +235,7 @@ export function SettingsView({
       ? `Must be 0 (use the default) or between ${IDLE_GAP_MIN} and ${IDLE_GAP_MAX}.`
       : undefined;
 
-  const dirty =
-    settings.dirty || monitoring.dirty || notifications.dirty || passwordEdit !== null;
+  const dirty = settings.dirty || notifications.dirty || passwordEdit !== null;
 
   const patchUser = useCallback(
     (patch: Partial<UserSettings>) =>
@@ -240,14 +243,6 @@ export function SettingsView({
         prev ? { ...prev, settings: { ...prev.settings, ...patch } } : prev
       ),
     [settings]
-  );
-
-  const patchMonitoring = useCallback(
-    (patch: Partial<MonitoringConfig>) =>
-      monitoring.setDraft((prev) =>
-        prev ? { ...prev, settings: { ...prev.settings, ...patch } } : prev
-      ),
-    [monitoring]
   );
 
   async function save() {
@@ -263,13 +258,6 @@ export function SettingsView({
           settings.draft.settings
         );
         settings.setServer(next);
-      }
-      if (monitoring.dirty && monitoring.draft) {
-        const next = await api.put<MonitoringEnvelope>(
-          "/monitoring",
-          monitoring.draft.settings
-        );
-        monitoring.setServer(next);
       }
       if ((notifications.dirty || passwordEdit !== null) && notifications.draft) {
         const body: NotificationSettings = {
@@ -296,7 +284,6 @@ export function SettingsView({
 
   function revertAll() {
     settings.revert();
-    monitoring.revert();
     notifications.revert();
     setPasswordEdit(null);
     setError(undefined);
@@ -379,12 +366,7 @@ export function SettingsView({
               {pane === "pricing" && <PricingPane />}
 
               {pane === "advanced" && user && (
-                <AdvancedPane
-                  user={user}
-                  onPatch={patchUser}
-                  monitoring={monitoring}
-                  onPatchMonitoring={patchMonitoring}
-                />
+                <AdvancedPane user={user} onPatch={patchUser} monitoring={monitoring} />
               )}
 
               {error && (
@@ -1701,38 +1683,13 @@ function AdvancedPane({
   user,
   onPatch,
   monitoring,
-  onPatchMonitoring,
 }: {
   user: UserSettings;
   onPatch(patch: Partial<UserSettings>): void;
-  monitoring: Editable<MonitoringEnvelope>;
-  onPatchMonitoring(patch: Partial<MonitoringConfig>): void;
+  monitoring: Resource<MonitoringEnvelope>;
 }) {
-  const mon = monitoring.draft?.settings;
-  const envLocked = monitoring.server?.env_locked ?? false;
-
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; text: string }>();
-
-  async function testMonitoring() {
-    if (!mon) return;
-    setTesting(true);
-    setTestResult(undefined);
-    try {
-      const res = await api.post<{ ok: boolean; error?: string }>(
-        "/monitoring/test",
-        mon
-      );
-      setTestResult({
-        ok: res.ok,
-        text: res.ok ? "Reached the OTLP endpoint." : (res.error ?? "Could not connect."),
-      });
-    } catch (err) {
-      setTestResult({ ok: false, text: describeError(err) });
-    } finally {
-      setTesting(false);
-    }
-  }
+  const mon = monitoring.data?.settings;
+  const locked = monitoring.data?.locked ?? {};
 
   return (
     <>
@@ -1758,132 +1715,95 @@ function AdvancedPane({
 
       <div className="divider" />
 
-      <div className="formsec">
-        <div className="formsec__title">Monitoring</div>
-        {monitoring.error && !mon && (
-          <div className="msgline msgline--error">{monitoring.error}</div>
-        )}
-        {envLocked && (
-          <div className="msgline msgline--warn">
-            <span className="msgline__icon">
-              <Icon name="shield" size={13} />
-            </span>
-            <span>
-              Telemetry is configured through the environment on this instance, so
-              these controls are read-only.
-            </span>
-          </div>
-        )}
-        {mon && (
-          <>
-            <div className="grouplist">
-              <div className="grouplist__row">
-                <span style={{ flex: 1 }}>Export telemetry</span>
-                <Switch
-                  on={mon.enabled}
-                  onChange={(v) => !envLocked && onPatchMonitoring({ enabled: v })}
-                />
-              </div>
-            </div>
-
-            <FormRow label="Metrics exporter">
-              <select
-                className="nselect"
-                style={{ maxWidth: 180 }}
-                value={mon.metrics_exporter || "none"}
-                onChange={(e) => onPatchMonitoring({ metrics_exporter: e.target.value })}
-                disabled={envLocked}
-              >
-                <option value="none">None</option>
-                <option value="otlp">OTLP</option>
-                <option value="prometheus">Prometheus</option>
-              </select>
-            </FormRow>
-
-            <FormRow label="Logs exporter">
-              <select
-                className="nselect"
-                style={{ maxWidth: 180 }}
-                value={mon.logs_exporter || "none"}
-                onChange={(e) => onPatchMonitoring({ logs_exporter: e.target.value })}
-                disabled={envLocked}
-              >
-                <option value="none">None</option>
-                <option value="otlp">OTLP</option>
-              </select>
-            </FormRow>
-
-            <FormRow label="OTLP endpoint" help="host:port of the collector's gRPC listener.">
-              <label className={`field ${envLocked ? "field--locked" : ""}`}>
-                <input
-                  value={mon.otlp_endpoint}
-                  onChange={(e) => onPatchMonitoring({ otlp_endpoint: e.target.value })}
-                  placeholder="localhost:4317"
-                  className="mono"
-                  disabled={envLocked}
-                  spellCheck={false}
-                />
-              </label>
-            </FormRow>
-
-            <FormRow label="Insecure">
-              <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
-                <Checkbox
-                  on={mon.otlp_insecure}
-                  onChange={(v) => !envLocked && onPatchMonitoring({ otlp_insecure: v })}
-                />
-                <span style={{ fontSize: "var(--text-sm)", color: "var(--fg-secondary)" }}>
-                  Connect without TLS
-                </span>
-              </div>
-            </FormRow>
-
-            <FormRow label="Export interval">
-              <div className="row" style={{ gap: "var(--sp-3)", alignItems: "center" }}>
-                <label className={`field ${envLocked ? "field--locked" : ""}`} style={{ width: 120 }}>
-                  <input
-                    type="number"
-                    className="tnum"
-                    min={0}
-                    value={String(mon.metric_export_interval_ms)}
-                    onChange={(e) =>
-                      onPatchMonitoring({
-                        metric_export_interval_ms: Number(e.target.value) || 0,
-                      })
-                    }
-                    disabled={envLocked}
-                  />
-                </label>
-                <span style={{ color: "var(--fg-tertiary)", fontSize: "var(--text-sm)" }}>
-                  ms
-                </span>
-              </div>
-            </FormRow>
-
-            <FormRow label="Connection">
-              <button
-                className="btn btn--lg"
-                style={{ alignSelf: "flex-start" }}
-                onClick={testMonitoring}
-                disabled={testing || !mon.otlp_endpoint}
-              >
-                <Icon name="activity" size={14} />
-                {testing ? "Testing…" : "Test endpoint"}
-              </button>
-              {testResult && (
-                <div className={`msgline ${testResult.ok ? "msgline--ok" : "msgline--error"}`}>
-                  {testResult.text}
-                </div>
-              )}
-            </FormRow>
-          </>
-        )}
-      </div>
+      <MonitoringSection mon={mon} locked={locked} error={monitoring.error} />
 
       <div className="divider" />
 
       <VersionSection />
     </>
+  );
+}
+
+/**
+ * Telemetry, read-only.
+ *
+ * The desktop app exports no OpenTelemetry and no Prometheus — that is a
+ * decision the port records rather than a gap it is working through, and
+ * `PUT /api/monitoring` answers 501 to match. Editable controls here would be a
+ * save that changes nothing, which is worse than no controls at all.
+ *
+ * The stored configuration is still shown, for two reasons: an `agento web`
+ * sharing this data dir reads the same `monitoring.json`, and `locked` reports
+ * which `OTEL_*` variables have pinned a field — which is the kind of thing
+ * someone debugging a missing trace comes here to find out.
+ */
+function MonitoringSection({
+  mon,
+  locked,
+  error,
+}: {
+  mon?: MonitoringConfig;
+  locked: Record<string, string>;
+  error?: string;
+}) {
+  const lockedFields = Object.entries(locked);
+
+  return (
+    <div className="formsec">
+      <div className="formsec__title">Monitoring</div>
+
+      <div className="msgline">
+        <span className="msgline__icon">
+          <Icon name="info" size={13} />
+        </span>
+        <span>
+          This app exports no telemetry. The settings below are what{" "}
+          <span className="mono">monitoring.json</span> holds — run the Agento
+          server if you need OpenTelemetry or Prometheus.
+        </span>
+      </div>
+
+      {error && !mon && <div className="msgline msgline--error">{error}</div>}
+
+      {mon && (
+        <>
+          <FormRow label="Export telemetry">
+            <span className="mono selectable">{mon.enabled ? "on" : "off"}</span>
+          </FormRow>
+          <FormRow label="Metrics exporter">
+            <span className="mono selectable">{mon.metrics_exporter || "none"}</span>
+          </FormRow>
+          <FormRow label="Logs exporter">
+            <span className="mono selectable">{mon.logs_exporter || "none"}</span>
+          </FormRow>
+          <FormRow label="OTLP endpoint">
+            <span className="mono selectable">{mon.otlp_endpoint || "—"}</span>
+          </FormRow>
+          <FormRow label="Insecure">
+            <span className="mono selectable">{mon.otlp_insecure ? "yes" : "no"}</span>
+          </FormRow>
+          <FormRow label="Export interval">
+            <span className="mono selectable tnum">
+              {mon.metric_export_interval_ms} ms
+            </span>
+          </FormRow>
+          {lockedFields.length > 0 && (
+            <FormRow
+              label="Pinned by the environment"
+              help="These fields come from environment variables, which override the stored file."
+            >
+              <div className="col" style={{ gap: "var(--sp-1)" }}>
+                {lockedFields.map(([field, envVar]) => (
+                  <span key={field} className="mono selectable">
+                    {field} = ${envVar}
+                  </span>
+                ))}
+              </div>
+            </FormRow>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

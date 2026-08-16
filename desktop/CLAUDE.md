@@ -989,6 +989,43 @@ real machine. `.claude.bak` and `.clauded` *are* candidates when they have a
 Telemetry/OTel, Prometheus metrics, and the self-updater are server concerns.
 The desktop app should use Tauri's own updater instead.
 
+**#309 turned that from an omission into an answer.** "Out of scope" was fine
+while the two config routes forwarded to a sidecar that *did* export; after the
+cut-over it would have meant the settings page 404s. So `PUT /api/monitoring`
+and `POST /api/monitoring/test` are claimed and answer **501** with a message
+naming the alternative, and the Monitoring section is **read-only**.
+
+The two options not taken, and why:
+
+- **Persisting the config without exporters is a save that changes nothing.**
+  `Manager.Update` writes `monitoring.json` *and* rebuilds the providers; this
+  build has no providers. A 200 there tells the user telemetry is on while
+  nothing is emitted. It would also be stale a second way before the cut-over,
+  since the sidecar builds its providers once at `Update` and a native write
+  cannot reach them — the same wall #305 hit on `PUT /api/settings`, with no
+  `AGENTO_SCANNER=off` equivalent to switch the Go half off.
+- **Porting the exporters** is the largest option in the plan and reverses the
+  decision above.
+
+`501` rather than `404` because the route exists and this build declines it; a
+404 reads as a version mismatch and sends someone hunting an upgrade that will
+never ship — the same reasoning `unavailableCopy` encodes for WhatsApp. The
+routes are **claimed rather than forwarded** on purpose: a forward would reach
+the sidecar, which would save the config and reload its own providers, which is
+the outcome the decision exists to stop.
+
+`GET /api/monitoring` stays native and the section still renders it, because
+what it reports is still true: `monitoring.json` is shared with an `agento web`
+on the same data dir, and `locked` names the `OTEL_*` variables pinning a field
+— which is what someone debugging a missing trace comes here to read.
+
+One thing worth recording before it disappears with the sidecar: Go's
+`POST /api/monitoring/test` is close to a no-op. `grpc.Dial` is lazy and almost
+never errors, `WaitForStateChange(ctx, Idle)` returns as soon as the state
+leaves `Idle` — immediately, at `Connecting` — and `Connecting` counts as
+success. It answers `ok: true` for an endpoint nothing is listening on, unless
+the failure lands inside the microseconds before the state is read.
+
 ### WhatsApp is dropped, not deferred (#273)
 
 `whatsmeow` has no Rust equivalent and will not be reimplemented. This is a
