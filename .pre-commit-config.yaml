@@ -3,8 +3,16 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # The email skeleton is generated: it is what `html/template` *renders*
+      # from internal/notification/template.go, and the notification port is
+      # asserted against a golden Go wrote. Its trailing whitespace is Go's —
+      # the spaces either side of the six HTML comments html/template elides —
+      # so stripping it silently makes the desktop app send different mail from
+      # the server. Byte-exact is the point of the file.
       - id: trailing-whitespace
+        exclude: ^desktop/src-tauri/src/native/notifications/email\.html$
       - id: end-of-file-fixer
+        exclude: ^desktop/src-tauri/src/native/notifications/email\.html$
       - id: check-yaml
       - id: check-json
       - id: check-merge-conflict

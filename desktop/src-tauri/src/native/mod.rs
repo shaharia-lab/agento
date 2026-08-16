@@ -458,12 +458,18 @@ mod tests {
         assert!(claims(&Method::GET, "/api/version/update-check"));
         assert!(!claims(&Method::GET, "/api/version/"));
 
-        // Notifications: the settings and log reads. The write and the test
-        // send stay with Go — the test opens an SMTP connection.
+        // Notifications: the two reads, and since #307 the settings write and
+        // the test send — the one route in the port that dials a server we do
+        // not run.
         assert!(claims(&Method::GET, "/api/notifications/settings"));
         assert!(claims(&Method::GET, "/api/notifications/log"));
-        assert!(!claims(&Method::PUT, "/api/notifications/settings"));
-        assert!(!claims(&Method::POST, "/api/notifications/test"));
+        assert!(claims(&Method::PUT, "/api/notifications/settings"));
+        assert!(claims(&Method::POST, "/api/notifications/test"));
+        // Each route is claimed for its own methods and no others.
+        assert!(!claims(&Method::GET, "/api/notifications/test"));
+        assert!(!claims(&Method::POST, "/api/notifications/settings"));
+        assert!(!claims(&Method::DELETE, "/api/notifications/settings"));
+        assert!(!claims(&Method::PUT, "/api/notifications/log"));
         assert!(!claims(&Method::GET, "/api/notifications"));
 
         // The filesystem listing, on the platforms `gopath` speaks. Creating a

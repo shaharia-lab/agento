@@ -6,10 +6,26 @@
 //! (`internal/service/notification_service.go`) and `SQLiteNotificationStore`
 //! (`internal/storage/sqlite_notification_store.go`).
 //!
-//! `PUT /api/notifications/settings` and `POST /api/notifications/test` stay
-//! with Go: one writes the settings row, the other opens an SMTP connection and
-//! sends mail. SMTP delivery as a whole is a write-side concern and is not
-//! ported here — nothing in this module talks to a mail server.
+//! Since #307 it also answers `PUT /api/notifications/settings` and
+//! `POST /api/notifications/test`, and carries the sender they sit on:
+//! [`template`] is `internal/notification/template.go` and [`smtp`] is
+//! `internal/notification/smtp.go`.
+//!
+//! **The subscriber is not wired, and cannot be yet.** `NotificationHandler` is
+//! useful because the event bus calls it when a scheduled task finishes, and the
+//! task executor is #275's — it still runs in the sidecar, so the events exist
+//! in a process this code is not in. What is ported is everything downstream of
+//! that call: settings → message → send. Wiring it is a subscription, once
+//! there is a Rust publisher to subscribe to.
+//!
+//! One consequence of porting the write while the subscriber is Go's, and the
+//! reason `cmd/web.go` changed with this: the sidecar's `SettingsManager` holds
+//! an in-memory snapshot of `user_settings` taken at boot, and its notification
+//! `SettingsLoader` read from it. A native write would then have left every
+//! scheduled-task email on the previous SMTP credentials until the app
+//! restarted, with nothing to say so. The loader now reads the row, which is
+//! what its own doc comment already promised ("so that configuration changes
+//! take effect without a server restart") and what a second writer makes true.
 //!
 //! Three things decide the bytes, none of them visible in the Go structs:
 //!
@@ -30,6 +46,9 @@
 //!    that has never sent a notification gets `null` — which is most machines.
 //!    See [`list_log`].
 
+pub mod smtp;
+pub mod template;
+
 use std::path::Path;
 
 use axum::http::Method;
@@ -37,6 +56,7 @@ use serde::{Deserialize, Serialize};
 
 use super::db;
 use super::gotime::GoTime;
+use super::writes::{decode_body, finish, WriteError};
 
 // ─── GET /api/notifications/settings ──────────────────────────────────────────
 
@@ -209,6 +229,109 @@ pub fn log_limit(query: &str) -> i64 {
     }
 }
 
+// ─── PUT /api/notifications/settings ──────────────────────────────────────────
+
+/// `handleUpdateNotificationSettings` over `UpdateSettings`.
+///
+/// # The one column, and why that is the fix rather than a shortcut
+///
+/// Go's `UpdateSettings` is a read-modify-write of the **whole** `user_settings`
+/// row: it takes `settingsMgr.Get()` — the sidecar's in-memory snapshot, loaded
+/// at boot — sets one field on it, and saves all fourteen columns back. #305
+/// reproduced what that costs once a second process writes the same row: one
+/// unrelated save here reverted a natively-written hidden-project list and idle
+/// threshold to the sidecar's boot values, silently.
+///
+/// This writes `notification_settings` and nothing else, so the hazard is not
+/// reproduced — it is removed. That is a deliberate divergence from Go's
+/// *mechanism*; the observable result of a save is the same, and the only way
+/// to make it observably identical would be to reproduce a data-loss bug.
+///
+/// # The masked password
+///
+/// `"***"` in the incoming password means "keep what is stored" — the same
+/// sentinel `get_settings` writes on the way out, so the UI can round-trip the
+/// form without ever holding the real value. Storing the sentinel verbatim
+/// would replace the user's password with three asterisks, and the next send
+/// would fail authentication with nothing pointing at the save that did it.
+fn update_settings(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let mut incoming = decode_body::<NotificationSettings>(body)?;
+
+    let conn = db::open_read_write(db_path).map_err(WriteError::Fallback)?;
+    super::migrate::verify(&conn).map_err(WriteError::Fallback)?;
+
+    if incoming.provider.password == MASKED_FIELD_SENTINEL {
+        let stored = decode_settings(&super::settings::load_stored(&conn).notification_settings)
+            .map_err(|e| WriteError::Fallback(format!("loading existing settings: {e}")))?;
+        incoming.provider.password = stored.provider.password;
+    }
+
+    // `json.Marshal`, not the response encoder: this string is stored and read
+    // back by Go, so it must be the bytes Go would have written — HTML escaping
+    // included, since `encoding/json` escapes and the column round-trips.
+    let raw = super::gojson::to_vec_marshal(&incoming)
+        .map_err(|e| WriteError::Fallback(format!("encoding notification settings: {e}")))?;
+    let raw = String::from_utf8(raw)
+        .map_err(|e| WriteError::Fallback(format!("notification settings are not UTF-8: {e}")))?;
+
+    let updated = conn
+        .execute(
+            "UPDATE user_settings SET notification_settings = ?1 WHERE id = 1",
+            [&raw],
+        )
+        .map_err(|e| WriteError::Fallback(format!("saving notification settings: {e}")))?;
+    if updated == 0 {
+        // No settings row at all — a machine whose server has never saved one.
+        // Go's `Save` inserts the whole row from its snapshot, defaults filled
+        // in; reproducing that here would mean owning every column. Nothing was
+        // written, so forwarding is exact.
+        return Err(WriteError::Fallback(
+            "no user_settings row to update; let Go create it".to_string(),
+        ));
+    }
+
+    // Go answers with a re-read rather than the request, which is how the
+    // password comes back masked instead of echoed.
+    let saved = get_settings(db_path).map_err(WriteError::Fallback)?;
+    let body = super::gojson::to_vec(&saved)
+        .map_err(|e| WriteError::Fallback(format!("encoding notification settings: {e}")))?;
+    Ok(super::Answer::json(body))
+}
+
+// ─── POST /api/notifications/test ─────────────────────────────────────────────
+
+/// `handleTestNotification` over `TestNotification`.
+///
+/// Sends with the stored settings **regardless of `enabled`**, which is the
+/// point of the button: it lets someone verify credentials before committing to
+/// turning notifications on.
+///
+/// Only the success path is answered here. Every failure forwards, because Go's
+/// 400 carries `err.Error()` and those strings come from go-mail and the Go
+/// runtime — see `smtp.rs`. Forwarding costs a second dial and is safe for
+/// exactly one reason: the send reports success only after the server has
+/// accepted the message, so an error means nothing was delivered.
+fn test_notification(db_path: &Path) -> Result<super::Answer, WriteError> {
+    let conn = db::open_read_only(db_path).map_err(WriteError::Fallback)?;
+    let settings = decode_settings(&super::settings::load_stored(&conn).notification_settings)
+        .map_err(WriteError::Fallback)?;
+    drop(conn);
+
+    // Encoded before the send. Nothing fallible may run after the message is
+    // accepted, or an `Err` would forward and Go would send a second email.
+    let answer = super::gojson::to_vec(&TestResponse { status: "ok" })
+        .map_err(|e| WriteError::Fallback(format!("encoding test response: {e}")))?;
+
+    smtp::send(&settings.provider, &smtp::test_mail()).map_err(WriteError::Fallback)?;
+    Ok(super::Answer::json(answer))
+}
+
+/// `map[string]string{"status": "ok"}` — one key, so nothing to sort.
+#[derive(Serialize)]
+struct TestResponse {
+    status: &'static str,
+}
+
 // ─── The seam ─────────────────────────────────────────────────────────────────
 
 /// This module's entry in `native::ENDPOINTS`.
@@ -219,22 +342,36 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
 };
 
 fn claims(method: &Method, path: &str) -> bool {
-    method == Method::GET
-        && (path == "/api/notifications/settings" || path == "/api/notifications/log")
+    match path {
+        "/api/notifications/settings" => method == Method::GET || method == Method::PUT,
+        "/api/notifications/log" => method == Method::GET,
+        "/api/notifications/test" => method == Method::POST,
+        _ => false,
+    }
 }
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
-    let body = match req.path {
-        "/api/notifications/settings" => super::gojson::to_vec(&get_settings(&ctx.db_path)?)
-            .map_err(|e| format!("encoding notification settings: {e}"))?,
-        "/api/notifications/log" => {
-            let entries = list_log(&ctx.db_path, log_limit(req.query))?;
-            super::gojson::to_vec(&entries)
-                .map_err(|e| format!("encoding notification log: {e}"))?
+    match (req.method, req.path) {
+        (&Method::GET, "/api/notifications/settings") => {
+            let body = super::gojson::to_vec(&get_settings(&ctx.db_path)?)
+                .map_err(|e| format!("encoding notification settings: {e}"))?;
+            Ok(super::Answer::json(body))
         }
-        other => return Err(format!("{other} is not a notification read")),
-    };
-    Ok(super::Answer::json(body))
+        (&Method::GET, "/api/notifications/log") => {
+            let entries = list_log(&ctx.db_path, log_limit(req.query))?;
+            let body = super::gojson::to_vec(&entries)
+                .map_err(|e| format!("encoding notification log: {e}"))?;
+            Ok(super::Answer::json(body))
+        }
+        (&Method::PUT, "/api/notifications/settings") => {
+            finish(update_settings(&ctx.db_path, req.body))
+        }
+        (&Method::POST, "/api/notifications/test") => finish(test_notification(&ctx.db_path)),
+        _ => Err(format!(
+            "{} {} is not a notification route",
+            req.method, req.path
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -480,13 +617,186 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_notification_reads_are_claimed() {
+    fn each_notification_route_is_claimed_for_its_own_methods() {
         assert!(claims(&Method::GET, "/api/notifications/settings"));
         assert!(claims(&Method::GET, "/api/notifications/log"));
-        assert!(!claims(&Method::PUT, "/api/notifications/settings"));
-        assert!(!claims(&Method::POST, "/api/notifications/test"));
+        assert!(claims(&Method::PUT, "/api/notifications/settings"));
+        assert!(claims(&Method::POST, "/api/notifications/test"));
+
+        // The path match must not carry a method chi routes nowhere.
         assert!(!claims(&Method::GET, "/api/notifications/test"));
+        assert!(!claims(&Method::POST, "/api/notifications/settings"));
+        assert!(!claims(&Method::DELETE, "/api/notifications/settings"));
+        assert!(!claims(&Method::PUT, "/api/notifications/log"));
         assert!(!claims(&Method::GET, "/api/notifications"));
         assert!(!claims(&Method::GET, "/api/notifications/log/"));
+    }
+
+    // ─── PUT /api/notifications/settings ──────────────────────────────────────
+
+    /// A database built by the **real** migrations: the write path checks the
+    /// recorded schema version, which the hand-written `SCHEMA` above has none
+    /// of.
+    fn migrated() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        super::super::migrate::apply(&mut conn).expect("migrate");
+        conn.execute("INSERT INTO user_settings (id) VALUES (1)", [])
+            .expect("settings row");
+        file
+    }
+
+    fn stored_json(file: &tempfile::NamedTempFile) -> String {
+        let conn = Connection::open(file.path()).expect("open");
+        conn.query_row(
+            "SELECT notification_settings FROM user_settings WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("column")
+    }
+
+    #[test]
+    fn saving_settings_answers_with_the_reread_row_and_masks_the_password() {
+        let file = migrated();
+        let answer = update_settings(
+            file.path(),
+            br#"{"enabled":true,"provider":{"host":"smtp.example.com","port":587,
+                 "username":"mailer","password":"hunter2","from_address":"a@example.com",
+                 "to_addresses":"b@example.com","encryption":"starttls"},
+                 "preferences":{"scheduled_tasks":{"on_failed":false}}}"#,
+        )
+        .expect("save");
+
+        assert_eq!(answer.status, axum::http::StatusCode::OK);
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+        assert!(
+            body.contains(r#""password":"***""#),
+            "the answer is a re-read, so the password comes back masked: {body}"
+        );
+        assert!(body.contains(r#""host":"smtp.example.com""#), "{body}");
+        // A deliberate opt-out is a `false`, not an omission.
+        assert!(body.contains(r#""on_failed":false"#), "{body}");
+
+        // …while the column holds the real one.
+        assert!(stored_json(&file).contains(r#""password":"hunter2""#));
+    }
+
+    /// The sentinel round-trip. The UI never holds the real password, so a save
+    /// from a form that only changed the host sends `"***"` back — storing it
+    /// verbatim would replace the password with three asterisks and every
+    /// later send would fail authentication with nothing pointing here.
+    #[test]
+    fn the_masked_sentinel_keeps_the_stored_password() {
+        let file = migrated();
+        update_settings(
+            file.path(),
+            br#"{"provider":{"host":"old.example.com","password":"hunter2",
+                 "from_address":"a@b.c","to_addresses":"d@e.f"}}"#,
+        )
+        .expect("first save");
+
+        update_settings(
+            file.path(),
+            br#"{"provider":{"host":"new.example.com","password":"***",
+                 "from_address":"a@b.c","to_addresses":"d@e.f"}}"#,
+        )
+        .expect("second save");
+
+        let stored = stored_json(&file);
+        assert!(stored.contains(r#""password":"hunter2""#), "{stored}");
+        assert!(stored.contains(r#""host":"new.example.com""#), "{stored}");
+    }
+
+    /// An empty password is not masked on the way out, so it must not be read
+    /// as the sentinel on the way in either — clearing a password has to work.
+    #[test]
+    fn an_empty_password_clears_rather_than_preserving() {
+        let file = migrated();
+        update_settings(
+            file.path(),
+            br#"{"provider":{"password":"hunter2","from_address":"a@b.c"}}"#,
+        )
+        .expect("first save");
+        update_settings(
+            file.path(),
+            br#"{"provider":{"password":"","from_address":"a@b.c"}}"#,
+        )
+        .expect("second save");
+        assert!(stored_json(&file).contains(r#""password":"""#));
+    }
+
+    /// The divergence from Go's mechanism that is the point of the port.
+    ///
+    /// `UpdateSettings` saves all fourteen columns from the sidecar's boot-time
+    /// snapshot, which #305 reproduced reverting a natively-written
+    /// hidden-project list and idle threshold. This touches one column, so a
+    /// notification save cannot revert anything else.
+    #[test]
+    fn saving_settings_touches_no_other_column() {
+        let file = migrated();
+        {
+            let conn = Connection::open(file.path()).expect("open");
+            conn.execute(
+                "UPDATE user_settings SET hidden_projects = ?1,
+                     idle_gap_threshold_minutes = 45, default_model = 'claude-opus-5'
+                 WHERE id = 1",
+                ["[\"/home/u/secret\"]"],
+            )
+            .expect("seed neighbours");
+        }
+
+        update_settings(
+            file.path(),
+            br#"{"enabled":true,"provider":{"host":"h","from_address":"a@b.c"}}"#,
+        )
+        .expect("save");
+
+        let conn = Connection::open(file.path()).expect("open");
+        let (hidden, idle, model): (String, i64, String) = conn
+            .query_row(
+                "SELECT hidden_projects, idle_gap_threshold_minutes, default_model
+                 FROM user_settings WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("row");
+        assert_eq!(hidden, "[\"/home/u/secret\"]");
+        assert_eq!(idle, 45);
+        assert_eq!(model, "claude-opus-5");
+    }
+
+    /// No settings row at all means the server has never saved one, and Go's
+    /// insert fills every column from its snapshot. Owning that would mean
+    /// owning all fourteen, so it forwards — having written nothing.
+    #[test]
+    fn a_missing_settings_row_forwards_rather_than_inventing_one() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        super::super::migrate::apply(&mut conn).expect("migrate");
+        drop(conn);
+
+        let err = update_settings(file.path(), br#"{"enabled":true}"#).unwrap_err();
+        assert!(matches!(err, WriteError::Fallback(_)));
+    }
+
+    #[test]
+    fn a_malformed_body_is_400_and_a_null_body_is_the_zero_value() {
+        let file = migrated();
+        assert_eq!(
+            update_settings(file.path(), b"[]").unwrap_err(),
+            WriteError::InvalidBody
+        );
+        assert_eq!(
+            update_settings(file.path(), b"").unwrap_err(),
+            WriteError::InvalidBody
+        );
+        // Go's `json.Unmarshal(null, &v)` is a no-op, so this saves the zero
+        // value rather than failing — which is a real way to turn everything off.
+        update_settings(file.path(), b"null").expect("null is the zero value");
+        assert_eq!(
+            stored_json(&file),
+            r#"{"enabled":false,"provider":{"host":"","port":0,"username":"","password":"","from_address":"","to_addresses":"","encryption":""},"preferences":{"scheduled_tasks":{}}}"#
+        );
     }
 }

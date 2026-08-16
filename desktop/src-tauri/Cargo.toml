@@ -84,6 +84,33 @@ chrono = { version = "0.4.45", default-features = false, features = ["std", "clo
 chrono-tz = "0.10"
 form_urlencoded = "1.2.2"
 
+# SMTP, for the notification sender (#307). `POST /api/notifications/test` and
+# the task-completion emails behind it are the one thing in this shell that
+# talks to a server we do not run, so this is the one place a TLS stack is
+# unavoidable — the note on `reqwest` above is about *loopback* hops, not about
+# TLS being unwelcome.
+#
+# **rustls, not native-tls.** `native-tls` links the platform's OpenSSL/Schannel,
+# and the release workflow builds five target triples; the whole reason
+# `rusqlite` is `bundled` is that there is no C toolchain to arrange. rustls is
+# pure Rust and cross-compiles the same way everything else here does.
+#
+# `hostname` is on because it is what lettre greets the server with. Go's
+# go-mail sends `os.Hostname()`; without this feature lettre says `localhost`,
+# which some relays reject outright.
+#
+# `pool` is off deliberately: a transport is built per send, exactly as
+# `NewSMTPProvider` is constructed per event on the Go side, so a connection
+# pool would hold sockets open against a server for a message every few hours.
+lettre = { version = "0.11.19", default-features = false, features = [
+    "smtp-transport",
+    "builder",
+    "rustls-tls",
+    "ring",
+    "webpki-roots",
+    "hostname",
+] }
+
 # Graceful shutdown of the `claude` subprocess is close stdin → SIGTERM →
 # SIGKILL after 5s, mirroring the TypeScript SDK's close(). Tokio's own
 # `Child::kill` is SIGKILL only, so the SIGTERM step needs raw kill(2).

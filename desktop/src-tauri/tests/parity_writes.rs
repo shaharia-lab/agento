@@ -650,3 +650,100 @@ async fn the_pricing_rate_write_answers_match_go() {
         format!(r#"{{"error":"rate \"{key}\" not found"}}"#)
     );
 }
+
+// ─── Notification settings (#307) ─────────────────────────────────────────────
+
+/// Pin Go's answers for the notification settings write.
+///
+/// The masked-password round trip is what this exists for. The UI never holds
+/// the real password — `GET` answers `"***"` — so an ordinary save posts the
+/// sentinel back, and a port that stored it verbatim would replace the user's
+/// password with three asterisks. Nothing would report it: the save succeeds,
+/// the form redisplays `"***"`, and the next send fails authentication.
+///
+/// `POST /api/notifications/test` is deliberately **not** driven here. It dials
+/// a real SMTP server, so on a scratch instance it can only fail — and its
+/// failure body is go-mail's and the Go runtime's wording, which is exactly why
+/// the native handler forwards a failure rather than answering it. What is
+/// asserted is that shape: a 400 whose text is environment-dependent.
+#[tokio::test]
+#[ignore = "requires a scratch Go instance; mutates it"]
+async fn the_notification_settings_write_answers_match_go() {
+    require_scratch_instance();
+
+    let original = go_answer(Method::GET, "/api/notifications/settings", None).await;
+    assert_eq!(original.0, 200);
+    let original_body = String::from_utf8_lossy(&original.1).into_owned();
+
+    let saved = go_answer(
+        Method::PUT,
+        "/api/notifications/settings",
+        Some(
+            r#"{"enabled":true,"provider":{"host":"smtp.parity.example","port":587,
+                "username":"mailer","password":"parity-secret",
+                "from_address":"agento@parity.example","to_addresses":"you@parity.example",
+                "encryption":"starttls"},
+                "preferences":{"scheduled_tasks":{"on_failed":false}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(saved.0, 200, "a settings save is 200, not 201 or 204");
+    let body: serde_json::Value = serde_json::from_slice(&saved.1).expect("json");
+    assert_eq!(
+        body["provider"]["password"], "***",
+        "the answer is a re-read, so the password is masked rather than echoed"
+    );
+    assert_eq!(body["provider"]["host"], "smtp.parity.example");
+    // `*bool` with omitempty: a deliberate false ships, an unset one is absent.
+    assert_eq!(body["preferences"]["scheduled_tasks"]["on_failed"], false);
+    assert!(body["preferences"]["scheduled_tasks"]
+        .get("on_finished")
+        .is_none());
+
+    // The sentinel means "keep it": saving again with `"***"` must not store
+    // three asterisks as the password.
+    let kept = go_answer(
+        Method::PUT,
+        "/api/notifications/settings",
+        Some(
+            r#"{"enabled":true,"provider":{"host":"smtp.changed.example","port":587,
+                "username":"mailer","password":"***",
+                "from_address":"agento@parity.example","to_addresses":"you@parity.example",
+                "encryption":"starttls"}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(kept.0, 200);
+    let kept_body: serde_json::Value = serde_json::from_slice(&kept.1).expect("json");
+    assert_eq!(kept_body["provider"]["host"], "smtp.changed.example");
+    assert_eq!(
+        kept_body["provider"]["password"], "***",
+        "still masked — and still a real password underneath, which the next \
+         GET's mask is the only visible evidence of"
+    );
+
+    let malformed = go_answer(Method::PUT, "/api/notifications/settings", Some("[]")).await;
+    assert_eq!(malformed.0, 400, "a malformed body is 400");
+    assert_eq!(
+        String::from_utf8_lossy(&malformed.1).trim_end(),
+        r#"{"error":"invalid JSON body"}"#
+    );
+
+    // The test send against a host that does not exist: a 400 whose body is
+    // whichever sentence the resolver and go-mail produced.
+    let failed = go_answer(Method::POST, "/api/notifications/test", None).await;
+    assert_eq!(failed.0, 400, "an unreachable relay is a 400");
+    assert!(
+        String::from_utf8_lossy(&failed.1).starts_with(r#"{"error":"#),
+        "the body is an error envelope; its text is not reproducible from Rust"
+    );
+
+    // Put the instance back the way it was found.
+    let restored = go_answer(
+        Method::PUT,
+        "/api/notifications/settings",
+        Some(&original_body),
+    )
+    .await;
+    assert_eq!(restored.0, 200);
+}
