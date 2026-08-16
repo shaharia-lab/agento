@@ -16,6 +16,7 @@ pub mod agents;
 pub mod analytics;
 pub mod chat;
 pub mod chats;
+pub mod claude_settings;
 pub mod db;
 pub mod diff;
 pub mod fs;
@@ -250,6 +251,7 @@ const ENDPOINTS: &[Endpoint] = &[
     chats::ENDPOINT,
     tasks::ENDPOINT,
     settings::ENDPOINT,
+    claude_settings::ENDPOINT,
     monitoring::ENDPOINT,
     version::ENDPOINT,
     notifications::ENDPOINT,
@@ -452,8 +454,30 @@ mod tests {
         assert!(claims(&Method::GET, "/api/settings"));
         assert!(claims(&Method::GET, "/api/settings/claude-config-dirs"));
         assert!(!claims(&Method::PUT, "/api/settings"));
-        // A different tree entirely: Claude Code's own settings.json.
-        assert!(!claims(&Method::GET, "/api/claude-settings"));
+        // Claude Code's own settings.json and the profiles beside it: a
+        // different tree entirely, and since #304 all nine routes are ours —
+        // reads included, because `GET .../profiles` seeds the index and so is
+        // itself a write.
+        assert!(claims(&Method::GET, "/api/claude-settings"));
+        assert!(claims(&Method::PUT, "/api/claude-settings"));
+        assert!(claims(&Method::GET, "/api/claude-settings/profiles"));
+        assert!(claims(&Method::POST, "/api/claude-settings/profiles"));
+        assert!(claims(&Method::GET, "/api/claude-settings/profiles/work"));
+        assert!(claims(&Method::PUT, "/api/claude-settings/profiles/work"));
+        assert!(claims(
+            &Method::DELETE,
+            "/api/claude-settings/profiles/work"
+        ));
+        assert!(claims(
+            &Method::POST,
+            "/api/claude-settings/profiles/work/duplicate"
+        ));
+        assert!(claims(
+            &Method::PUT,
+            "/api/claude-settings/profiles/work/default"
+        ));
+        assert!(!claims(&Method::POST, "/api/claude-settings"));
+        assert!(!claims(&Method::GET, "/api/claude-settings/profiles/"));
 
         // Monitoring: the read, plus the two writes this build **declines**
         // (#309). They are claimed rather than forwarded on purpose — a forward
@@ -617,6 +641,9 @@ mod tests {
             "/api/job-history/abc-123",
             "/api/settings",
             "/api/settings/claude-config-dirs",
+            "/api/claude-settings",
+            "/api/claude-settings/profiles",
+            "/api/claude-settings/profiles/work",
             "/api/monitoring",
             "/api/version",
             "/api/version/update-check",
@@ -660,6 +687,9 @@ mod tests {
             "/api/job-history/abc-123",
             "/api/settings",
             "/api/settings/claude-config-dirs",
+            "/api/claude-settings",
+            "/api/claude-settings/profiles",
+            "/api/claude-settings/profiles/work",
             "/api/monitoring",
             "/api/version",
             "/api/version/update-check",
