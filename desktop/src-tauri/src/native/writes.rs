@@ -10,6 +10,13 @@
 //! cannot pick one convention; each route answers what its own Go handler
 //! answers, and this type is only the vocabulary for saying so.
 //!
+//! # One variant is not a reproduction
+//!
+//! [`WriteError::NotImplemented`] is the exception to everything above: it is
+//! **501**, and Go answers 501 nowhere. It exists because a desktop build can
+//! decline a server feature outright — see `native/monitoring.rs` — and because
+//! the alternative for a declined route is an answer that looks like success.
+//!
 //! # `Fallback` is the important variant
 //!
 //! Anything Go answers with a 500 — and anything this port is not certain it
@@ -56,6 +63,13 @@ pub enum WriteError {
     /// decoding the body, so a malformed payload on someone else's rule is this
     /// and not a 400.
     Forbidden(String),
+    /// A route this build deliberately does not implement. **501**, and unlike
+    /// every other variant it does not correspond to anything Go answers — it
+    /// is the desktop app declining a server feature rather than reproducing
+    /// one. `PUT /api/monitoring` and `POST /api/monitoring/test` are the only
+    /// users (#309): the desktop build exports no telemetry, so a save that
+    /// appeared to succeed would be the worst answer available.
+    NotImplemented(String),
     /// Not reproducible here: let the sidecar answer.
     Fallback(String),
 }
@@ -77,6 +91,7 @@ impl WriteError {
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::NotFound { .. } | Self::NotFoundMessage(_) => StatusCode::NOT_FOUND,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
             Self::Fallback(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -105,6 +120,7 @@ impl WriteError {
             Self::NotFound { resource, id } => format!("{resource} {:?} not found", id),
             Self::NotFoundMessage(m) => m.clone(),
             Self::Forbidden(m) => m.clone(),
+            Self::NotImplemented(m) => m.clone(),
             Self::Fallback(m) => m.clone(),
         }
     }

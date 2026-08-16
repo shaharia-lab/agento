@@ -455,11 +455,15 @@ mod tests {
         // A different tree entirely: Claude Code's own settings.json.
         assert!(!claims(&Method::GET, "/api/claude-settings"));
 
-        // Monitoring: the read. The write hot-reloads the OTel providers and
-        // the test dials the collector over gRPC.
+        // Monitoring: the read, plus the two writes this build **declines**
+        // (#309). They are claimed rather than forwarded on purpose — a forward
+        // would reach a sidecar that would save the config and reload its own
+        // providers, which is the outcome the decision exists to stop.
         assert!(claims(&Method::GET, "/api/monitoring"));
-        assert!(!claims(&Method::PUT, "/api/monitoring"));
-        assert!(!claims(&Method::POST, "/api/monitoring/test"));
+        assert!(claims(&Method::PUT, "/api/monitoring"));
+        assert!(claims(&Method::POST, "/api/monitoring/test"));
+        assert!(!claims(&Method::DELETE, "/api/monitoring"));
+        assert!(!claims(&Method::GET, "/api/monitoring/test"));
 
         // Version: both reads are claimed, but the update check falls back for
         // a stamped release — that branch is the self-updater, not a read.
