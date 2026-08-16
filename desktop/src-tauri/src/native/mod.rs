@@ -382,7 +382,13 @@ mod tests {
         assert!(claims(&Method::GET, "/api/claude-sessions/abc-123"));
         assert!(claims(&Method::GET, "/api/claude-sessions/projects"));
         assert!(!claims(&Method::GET, "/api/claude-sessions/"));
-        assert!(!claims(&Method::PATCH, "/api/claude-sessions/abc-123"));
+        // The rename/favourite write shares that path and is separated by
+        // method (#296). Every other method on it still forwards.
+        assert!(claims(&Method::PATCH, "/api/claude-sessions/abc-123"));
+        assert!(!claims(&Method::PUT, "/api/claude-sessions/abc-123"));
+        assert!(!claims(&Method::DELETE, "/api/claude-sessions/abc-123"));
+        assert!(!claims(&Method::PATCH, "/api/claude-sessions/"));
+        assert!(!claims(&Method::PATCH, "/api/claude-sessions/abc/journey"));
         assert!(!claims(
             &Method::GET,
             "/api/claude-sessions/abc-123/journey"
@@ -511,10 +517,12 @@ mod tests {
         assert!(!claims(&Method::PUT, "/api/notifications/log"));
         assert!(!claims(&Method::GET, "/api/notifications"));
 
-        // The filesystem listing, on the platforms `gopath` speaks. Creating a
-        // directory is still a write Go owns.
+        // The filesystem listing and the one directory create, on the platforms
+        // `gopath` speaks (#296).
         assert!(claims(&Method::GET, "/api/fs"));
-        assert!(!claims(&Method::POST, "/api/fs/mkdir"));
+        assert!(claims(&Method::POST, "/api/fs/mkdir"));
+        assert!(!claims(&Method::GET, "/api/fs/mkdir"));
+        assert!(!claims(&Method::POST, "/api/fs"));
 
         // Uploads (#308): the one multipart route, and the only claimed one
         // with no read at all.
@@ -620,6 +628,75 @@ mod tests {
         // rejects it, so Go answers 400 from inside `net/http` and the proxy
         // forwards rather than inventing one.
         assert!(gourl::route_path("/api/agents/a%2").is_none());
+    }
+
+    /// The write surface, asserted route by route against the table
+    /// `desktop/parity/write_routes.json` records (#296).
+    ///
+    /// #293 accounted for the deferred writes **by category** — scheduler, chat
+    /// execution, integrations, scan — which reads well and cannot be audited:
+    /// nothing said whether the categories covered every route, and two escaped
+    /// all of them. The Go half of this pair walks the real router and fails
+    /// when a write route has no recorded decision; this half fails when a
+    /// route's real disposition stops matching the decision.
+    ///
+    /// So a route cannot be claimed, unclaimed, added or removed without the
+    /// frozen file moving — which is what makes the next agent able to *audit*
+    /// the split rather than trust it.
+    #[test]
+    fn every_write_route_matches_its_recorded_disposition() {
+        use serde::Deserialize;
+
+        #[derive(Deserialize)]
+        struct Row {
+            method: String,
+            route: String,
+            native: bool,
+            owner: String,
+            reason: String,
+        }
+
+        #[derive(Deserialize)]
+        struct Table {
+            routes: Vec<Row>,
+        }
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../parity/write_routes.json");
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("reading {path}: {e} — regenerate it from Go"));
+        let table: Table = serde_json::from_str(&raw).expect("parsing write routes");
+
+        assert!(
+            table.routes.len() >= 45,
+            "the write surface is ~50 routes; {} looks truncated",
+            table.routes.len()
+        );
+
+        for row in table.routes {
+            let method = Method::from_bytes(row.method.as_bytes())
+                .unwrap_or_else(|_| panic!("bad method {:?}", row.method));
+            // The table carries chi's patterns; `claims` matches concrete
+            // paths, so the parameters get a sample segment each.
+            let concrete = row
+                .route
+                .replace("{slug}", "sample")
+                .replace("{rid}", "rule")
+                .replace("{id}", "sample");
+
+            assert_eq!(
+                claims(&method, &concrete),
+                row.native,
+                "{} {} — the table says native={} ({}, {}). Either the claim moved \
+                 and the table is stale, or a route was claimed without deciding \
+                 about it. Regenerate with: go test ./desktop/parity/ -run \
+                 TestWriteRoutes -update-write-routes",
+                row.method,
+                row.route,
+                row.native,
+                row.owner,
+                row.reason,
+            );
+        }
     }
 
     #[test]

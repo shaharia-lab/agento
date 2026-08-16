@@ -32,6 +32,7 @@ pub mod page;
 pub mod projects;
 pub mod query;
 pub mod summary;
+pub mod update;
 
 use axum::http::Method;
 
@@ -92,15 +93,16 @@ fn route_of(path: &str) -> Option<Route<'_>> {
 
 fn claims(method: &Method, path: &str) -> bool {
     match route_of(path) {
-        // The one write. Claimed for POST alone, so a GET of the same path
-        // still forwards and gets chi's own 405.
+        // The two writes, each claimed for its own method only, so the wrong
+        // pairing still forwards and gets chi's own 405.
         Some(Route::Continue(_)) => method == Method::POST,
+        Some(Route::Detail(_)) => method == Method::GET || method == Method::PATCH,
         Some(_) => method == Method::GET,
         None => false,
     }
 }
 
-/// Answer one of the four reads.
+/// Answer one of the four reads, or one of the two writes.
 ///
 /// **`/status` and `/refresh` are not here, and that is a decision rather than
 /// an omission.** Both are about the *scan*: `/status` reports
@@ -115,6 +117,17 @@ fn claims(method: &Method, path: &str) -> bool {
 fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
     if let Some(Route::Continue(id)) = route_of(req.path) {
         return crate::native::writes::finish(continue_chat::continue_session(&ctx.db_path, id));
+    }
+
+    // `PATCH /api/claude-sessions/{id}` (#296) shares its path with the detail
+    // read, so the method is what separates them.
+    if req.method == Method::PATCH {
+        return match route_of(req.path) {
+            Some(Route::Detail(id)) => {
+                crate::native::writes::finish(update::update(&ctx.db_path, id, req.body))
+            }
+            _ => Err(format!("PATCH {} is not ported", req.path)),
+        };
     }
 
     if let Some(Route::Detail(id)) = route_of(req.path) {

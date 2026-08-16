@@ -164,7 +164,8 @@ src-tauri/src/
                  whose Go error text is not reproducible (both forward)
     scan.rs      GET /api/claude-sessions/status, POST /refresh — and the scan
                  itself: the shell owns it now, the sidecar runs with AGENTO_SCANNER=off
-    fs.rs        GET /api/fs — the working-dir picker's listing (Unix; forwards on Windows)
+    fs.rs        GET /api/fs and POST /api/fs/mkdir — the working-dir picker's
+                 listing and its one create (Unix; forwards on Windows)
     uploads.rs   POST /api/uploads — the one multipart body, and the extension
                  allowlist that is the route's whole security boundary
     gopath.rs    Go's filepath.Clean/Dir/Join, pinned to vectors generated from Go
@@ -179,8 +180,10 @@ src-tauri/src/
       mod.rs     buildJobDefinition and gocron's four job types; claims no route
       cron.rs    robfig/cron's dialect, which is the one a cron task is written in
     sessions/    GET /api/claude-sessions, /facets, /projects and /{id}, plus
-                 POST /{id}/continue (#308)
+                 POST /{id}/continue (#308) and PATCH /{id} (#296)
       continue_chat.rs the two writes that resume a Claude session as a chat
+      update.rs  the rename and the favourite — the only two columns here the
+                 user typed, and the only ones the scanner never writes
       detail.rs  one session re-read from its transcript, patched from the cache
       projects.rs the project picker's list, derived from the same walk a scan is
       corpus.rs  loads the lot
@@ -861,6 +864,55 @@ So the writes that moved are the ones that are only rows: the agent CRUD, the
 chat CRUD (**not** `/messages`, `/input`, `/permission`, `/stop`), and the two
 job-history deletes. Everything else still forwards, and the `claims` tests in
 each module say which and why.
+
+### The write surface is enumerated, not described (#296)
+
+#293 accounted for the deferred writes **by category** — scheduler, chat
+execution, integrations, scan. That reads well and it cannot be audited: nothing
+said whether the categories covered every route, and two escaped all of them
+(`POST /api/fs/mkdir` and `PATCH /api/claude-sessions/{id}`, both since ported).
+A prose table has the same problem one release later, so the table is
+**generated and cross-checked** instead:
+
+- `desktop/parity/write_routes_parity_test.go` runs `chi.Walk` over the **real
+  router** — `&api.Server{}` is enough, since `Mount` only takes method values —
+  and classifies every non-GET route against a `dispositions` map. A route the
+  router has and the map does not classify **fails the Go suite**; a
+  classification naming a route the router no longer has fails it too.
+- `desktop/parity/write_routes.json` is what that produces: method, route,
+  `native`, the owning issue, and the one-line reason. For a deferral the reason
+  is the *effect Rust cannot reproduce*, because that is the only thing #274's
+  rule turns on.
+- `native::tests::every_write_route_matches_its_recorded_disposition` reads the
+  same file and asserts each route's real `claims()` matches its `native`
+  column, so a route cannot be claimed or unclaimed without the file moving.
+
+Regenerate with `go test ./desktop/parity/ -run TestWriteRoutes
+-update-write-routes`, *after* deciding about whatever changed. Read the file
+for the per-route detail; the standing summary is:
+
+**Native (35).** Agent and chat CRUD and the job-history deletes (#274); the
+chat turn and its three steering routes (#276); `POST /api/integrations` and the
+three trigger-rule writes (#277); `/claude-sessions/refresh` (#289); the three
+pricing rate writes (#306); the two notification writes (#307); `POST /uploads`
+and `/claude-sessions/{id}/continue` (#308); `PUT /monitoring` and
+`/monitoring/test`, which answer **501** (#309); the Claude settings file and
+the five profile writes (#327); and `POST /fs/mkdir` plus
+`PATCH /claude-sessions/{id}` (#296).
+
+**Deferred (13), each by the effect Rust does not own.** The five task writes
+register or unregister a cron entry (#275). `PUT`/`DELETE /integrations/{id}`
+reload and stop the live in-process MCP server (#282). `PUT /settings` resolves
+through a snapshot the sidecar still holds, with no `AGENTO_SCANNER=off`
+equivalent to switch the Go half off (#305). Five more talk to somebody else's
+server — the two `auth/*` routes and the three Telegram `webhook/*` ones.
+
+**Dropped (2), which is not the same as deferred.** The two WhatsApp routes are
+`false` in the table for a reason that will never be resolved: `whatsmeow` is not
+being ported, and they die with the sidecar rather than moving (#273).
+
+GET routes are deliberately out of the table. A read that misses is a fallback,
+not a double-apply, so it carries none of the hazard the rule exists for.
 
 **The pricing rate writes are the exception that proves the rule (#306).** They
 are only rows too — but a rate edit has an effect outside the table: #188's
