@@ -26,7 +26,6 @@ func (c *LocalMCPConfig) AllowedToolName(toolName string) string {
 }
 
 // AllowedToolNames returns the fully qualified names for a subset of local tools.
-// If names is empty, returns qualified names for all tools.
 func (c *LocalMCPConfig) AllowedToolNames(names []string) []string {
 	result := make([]string, 0, len(names))
 	for _, name := range names {
