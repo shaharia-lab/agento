@@ -23,6 +23,7 @@ pub mod fs;
 pub mod gojson;
 pub mod gopath;
 pub mod gotime;
+pub mod gourl;
 pub mod insights;
 pub mod integration_credentials;
 pub mod integrations;
@@ -556,6 +557,69 @@ mod tests {
             "/api/integrations/abc/webhook/status"
         ));
         assert!(!claims(&Method::GET, "/api/integrations/abc/whatsapp/qr"));
+    }
+
+    /// #294: what every `claims` function above matches on is the path **chi**
+    /// routes on, not the raw request target.
+    ///
+    /// `proxy.rs` runs `gourl::route_path` once before this registry is asked
+    /// anything, so the property worth pinning here is that both spellings a
+    /// percent-encoded id can arrive in reach `claims` the way Go's router would
+    /// deliver them — including the one where the right answer is *not* to
+    /// decode.
+    #[test]
+    fn a_claim_matches_on_the_path_chi_would_route_on() {
+        let route = |raw: &str| gourl::route_path(raw).expect("a routable target");
+
+        // Canonical escaping: Go decodes, so `agents::slug_of` extracts `a b`,
+        // and the row `agents::update` looks up is the one Go updates. Matching
+        // the raw target claimed `a%20b` and answered 404 for a live agent.
+        assert_eq!(route("/api/agents/a%20b"), "/api/agents/a b");
+        assert!(claims(&Method::PUT, &route("/api/agents/a%20b")));
+
+        // Non-canonical: `-` needs no escaping, so Go keeps the escaped form and
+        // so must this. The issue's own example, and the case already correct.
+        assert_eq!(route("/api/agents/a%2Db"), "/api/agents/a%2Db");
+        assert!(claims(&Method::PUT, &route("/api/agents/a%2Db")));
+
+        // An encoded separator stays encoded, which is what keeps a one-segment
+        // route one segment. A blanket decode — the obvious fix — would make
+        // this `/api/agents/a/b`, `slug_of` would reject it, and a PUT Go
+        // applies would forward instead of being claimed.
+        assert_eq!(route("/api/agents/a%2Fb"), "/api/agents/a%2Fb");
+        assert!(claims(&Method::PUT, &route("/api/agents/a%2Fb")));
+
+        // The same rule reaches every module's segment, not just agents'.
+        assert!(claims(&Method::GET, &route("/api/chats/a%20b")));
+        assert!(claims(&Method::GET, &route("/api/tasks/a%20b")));
+        assert!(claims(
+            &Method::PUT,
+            &route("/api/integrations/a%20b/triggers/r%201")
+        ));
+        assert!(claims(
+            &Method::POST,
+            &route("/api/claude-sessions/a%20b/continue")
+        ));
+
+        // Canonicality is a property of the **whole** path, not of a segment:
+        // one non-canonical escape anywhere leaves every segment raw, `r%201`
+        // included, even though on its own it would have decoded. This is the
+        // case a future `slug_of`/`route_of` change is most likely to get
+        // wrong, and it is why the rule is applied to the path rather than to
+        // each id.
+        assert_eq!(
+            route("/api/integrations/a%2Db/triggers/r%201"),
+            "/api/integrations/a%2Db/triggers/r%201"
+        );
+        assert!(claims(
+            &Method::PUT,
+            &route("/api/integrations/a%2Db/triggers/r%201")
+        ));
+
+        // A malformed target has no route path at all: `url.ParseRequestURI`
+        // rejects it, so Go answers 400 from inside `net/http` and the proxy
+        // forwards rather than inventing one.
+        assert!(gourl::route_path("/api/agents/a%2").is_none());
     }
 
     #[test]

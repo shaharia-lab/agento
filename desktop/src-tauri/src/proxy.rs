@@ -233,6 +233,14 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
     // It returns before the access log on purpose: handing out an embedded file
     // is static serving, not an application operation, and one page load is
     // dozens of them.
+    //
+    // `path` here is the **raw** request target, and stays raw for both halves
+    // of this `if` and for the access line below. The asset lookup is a file
+    // this binary embeds, so nothing about Go's router is involved in finding
+    // one; the API gate is raw because reaching a divergence would need a
+    // percent-escape inside the `/api` prefix itself (`/%61pi/agents`), which no
+    // client sends and which `dispatch` would answer identically anyway. The log
+    // is raw because it should record what arrived, not what matched.
     if !is_api_path(&path) {
         #[cfg(not(debug_assertions))]
         {
@@ -295,7 +303,48 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
 /// Split out of [`handle`] so the access line has exactly one call site. There
 /// are eight-odd ways out of here, and logging at each of them is the shape
 /// that drifts: the next port adds a ninth and quietly stops being recorded.
-async fn dispatch(state: ProxyState, req: Request<Body>, path: String) -> (Response<Body>, Served) {
+async fn dispatch(
+    state: ProxyState,
+    req: Request<Body>,
+    raw_path: String,
+) -> (Response<Body>, Served) {
+    // From here on, the path every claim function sees is the one **chi** would
+    // route on, not the raw request target (#294). They are not the same string:
+    // `net/http` decodes the target into `url.URL` before any handler runs, and
+    // chi routes on `RawPath` when the escaping is non-canonical and on the
+    // decoded `Path` when it is not — so `/api/agents/a%2Db` is `a%2Db` to Go
+    // and `/api/agents/a%20b` is `a b`. Matching on the raw target got the
+    // second class wrong, which was invisible while every claimed route was a
+    // read (a miss forwarded and Go answered) and is not now that #274 and #276
+    // claim writes: `agents::update` would *answer* 404 for a row Go updates.
+    //
+    // Doing it once here rather than in each module's `slug_of`/`id_of` is what
+    // stops the five of them drifting apart — and it is also the only place
+    // that can see the whole path, which is what the rule is about: one
+    // non-canonical escape anywhere leaves every segment raw.
+    let path = match native::gourl::route_path(&raw_path) {
+        Some(path) => path,
+        // No route path at all: either the escaping is malformed, in which case
+        // `url.ParseRequestURI` fails and Go answers 400 from inside
+        // `net/http`, or it is canonical and the decoded path is not UTF-8, so
+        // Rust cannot carry the string chi routes on. Forwarding is how both get
+        // the answer Go would have given — `Forwarded` rather than
+        // `NativeFailedForwarded` because no native handler was tried.
+        //
+        // Logged because every other fallback here says why it fell back, and
+        // these two conditions are the hardest of the lot to reproduce from a
+        // bug report.
+        None => {
+            log::debug!(
+                "no route path for {raw_path}: malformed escape or a non-UTF-8 decoded path, forwarding"
+            );
+            return (
+                forward_or_bad_gateway(&state, req, &raw_path).await,
+                Served::Forwarded,
+            );
+        }
+    };
+
     // The streaming half of the seam (#276). Checked before the buffered one
     // because a chat turn must never be collected into a `Vec<u8>`: it is the
     // one response whose whole point is arriving in pieces.
