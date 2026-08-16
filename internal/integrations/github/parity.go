@@ -18,6 +18,16 @@ package github
 // SetAPIBase points every outgoing GitHub request at base and returns a
 // function that restores the previous value.
 //
+// Do not call outside tests. What it is is a primitive for pointing every
+// GitHub request in the process — each one bearing a user's personal access
+// token — at an arbitrary host, so a caller anywhere in the running server
+// would be a credential-exfiltration seam rather than a misconfiguration. It is
+// exported only because `desktop/parity` is a different package and the vectors
+// have to come from the real server; the Rust port needs no equivalent
+// concession (both of its callers are in-crate) and gates the same seam behind
+// `#[cfg(test)]`, so it does not exist in a shipped desktop binary at all.
+// #313–#317 each add one of these: keep it as narrow as the language allows.
+//
 // The variable it writes is the same one this package's own tests redirect, and
 // it is a package global in Go for the same reason it is a `RwLock` static on
 // the Rust side: `client` is constructed per registration and the base is not

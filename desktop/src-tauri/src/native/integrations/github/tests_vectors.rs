@@ -14,10 +14,19 @@
 //! stubbed: a change to the client, to a path, to a body or to a sentence fails
 //! here.
 //!
-//! Two fields carry a *pinned divergence* rather than a match, each documented
-//! at its use below and in the Go generator: `rust_text` (Go's
-//! `encoding/json` syntax-error vocabulary) and `rust_target` (the Go MCP SDK
-//! rounds an integer argument above 2^53 before the handler sees it).
+//! Three fields carry a *pinned divergence* rather than a match, across four
+//! causes, each documented at its use below and in the Go generator:
+//!
+//! - `rust_text` — Go's `encoding/json` syntax-error vocabulary; the
+//!   dot-segment refusal; and `rmcp`'s wording for an argument it will not
+//!   decode.
+//! - `rust_target` — the Go MCP SDK rounds an integer argument above 2^53
+//!   before the handler sees it.
+//! - `rust_no_request` — Go reached the fake and this port did not: a path
+//!   holding a `.` or `..` segment, which [`super::client::absolute`] refuses
+//!   because `url` would resolve it into a different endpoint than Go calls,
+//!   and a zero-fraction float, which the Go SDK re-marshals into an integer
+//!   and `serde_json` refuses.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -96,6 +105,11 @@ struct CallVector {
     rust_text: String,
     #[serde(default)]
     rust_target: String,
+    /// Go made a request and this port deliberately makes none — a path
+    /// carrying a `.` or `..` segment, which `super::client::absolute` refuses
+    /// rather than let `url` resolve into a different endpoint.
+    #[serde(default)]
+    rust_no_request: bool,
 }
 
 #[derive(Deserialize)]
@@ -171,7 +185,13 @@ fn the_advertised_surface_matches_the_go_vectors() {
     assert_eq!(
         server.tool_names(),
         v.tools.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
-        "the hosted tool set — and its order, which is what tools/list carries"
+        // Both sides are already name-sorted — `tool_names` goes through
+        // `ToolRouter::list_all`, which sorts, and the Go SDK's `featureSet`
+        // lists by sorted key — so this is set equality in a stable order, not
+        // an order assertion. *Registration* order is pinned by
+        // `super::tests::an_empty_allowed_set_hosts_every_tool` against
+        // `GITHUB_TOOL_NAMES`; see `super::SERVICES`.
+        "the hosted tool set, as tools/list answers it"
     );
 
     for want in &v.tools {
@@ -347,7 +367,22 @@ async fn every_call_matches_the_go_vectors() {
         assert_eq!(result.is_error, case.is_error, "{}: is_error", case.case);
 
         let seen = state.0.lock().expect("fake lock").seen.take();
-        match (&case.request, seen) {
+        let want_request = if case.rust_no_request {
+            // The dot-segment refusal: Go reached the fake, this port never
+            // built the request. Asserted as "and nothing was sent" rather than
+            // skipped, because sending *something* — the resolved path — is the
+            // outcome `absolute` exists to prevent.
+            assert!(
+                seen.is_none(),
+                "{}: the refusal still reached the network: {:?}",
+                case.case,
+                seen.as_ref().map(|r| &r.target)
+            );
+            None
+        } else {
+            case.request.as_ref()
+        };
+        match (want_request, seen) {
             (None, seen) => assert!(
                 seen.is_none(),
                 "{}: Go made no request and this one did",
@@ -381,18 +416,92 @@ async fn every_call_matches_the_go_vectors() {
     set_api_base(None);
 }
 
+/// A malformed argument is a **tool** error, not a protocol error.
+///
+/// `desktop/CLAUDE.md` promises that a missing, extra or wrong-typed field
+/// yields a `CallToolResult` carrying `IsError` — text the model can read and
+/// retry against — exactly as the Go server does, and never a JSON-RPC `error`.
+/// Nothing in this port implements that: it rests entirely on `rmcp`'s
+/// `into_tool_argument_error`, which **prefix-matches a hardcoded string**
+/// (`"failed to deserialize parameters:"`) against its own extractor's message
+/// (`handler/server/router/tool.rs`). An upgrade that reworded either half
+/// would silently flip all 62 ported tools to protocol errors, which the CLI
+/// renders as "Tool result missing due to internal error" — nothing to retry
+/// against, on every integration at once.
+///
+/// [`every_call_matches_the_go_vectors`] cannot notice: [`call_tool`] asserts
+/// the absence of an `error` member, but no vector ever sends bad arguments, so
+/// the assertion never runs on the path it guards. This sends them.
+///
+/// The **kind** is pinned, not the text: the wording divergence (Go's
+/// `validating "arguments": …` against `rmcp`'s `failed to deserialize
+/// parameters: …`) is already accepted and documented, and pinning it here
+/// would fail on a harmless rmcp rewording while still missing the real one.
+#[tokio::test]
+async fn malformed_arguments_are_a_tool_error_rather_than_a_protocol_error() {
+    let v = vectors();
+    // Nothing should reach the network — the decode fails before a handler
+    // runs — so the base points at a port with nothing behind it. If that ever
+    // stops being true this fails loudly instead of calling api.github.com.
+    let _guard = api_base_lock().await;
+    set_api_base(Some("http://127.0.0.1:1".to_string()));
+
+    let server = start_github_mcp_server(&v.integration_id, &all_services(), &v.token)
+        .await
+        .expect("start the github server");
+
+    for (case, arguments) in [
+        // `repo` is required — every field of all twenty tools is, since no Go
+        // params struct in this integration carries `omitempty`.
+        (
+            "a missing required field",
+            serde_json::json!({"owner": "octocat"}),
+        ),
+        // `deny_unknown_fields`, which is what emits `additionalProperties:
+        // false` — the key Go's reflector sets and its server validates on.
+        (
+            "an unknown field",
+            serde_json::json!({"owner": "octocat", "repo": "hello-world", "nope": 1}),
+        ),
+    ] {
+        let body = rpc_call(&server, "get_repo", &arguments).await;
+        assert!(
+            body.get("error").is_none(),
+            "{case}: raised a JSON-RPC error rather than a tool error: {body}"
+        );
+        assert_eq!(
+            body["result"]["isError"].as_bool(),
+            Some(true),
+            "{case}: want a tool error: {body}"
+        );
+        let content = body["result"]["content"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{case}: no content array: {body}"));
+        assert_eq!(content.len(), 1, "{case}: want exactly one content block");
+        assert_eq!(content[0]["type"], "text");
+        assert!(
+            content[0]["text"].as_str().is_some_and(|t| !t.is_empty()),
+            "{case}: the model is handed an empty message: {body}"
+        );
+    }
+
+    set_api_base(None);
+}
+
 struct ToolAnswer {
     text: String,
     is_error: bool,
 }
 
 /// One `tools/call` over the server's own HTTP transport, sent the way the CLI
-/// sends it — including the bearer token the handle's config carries.
-async fn call_tool(
+/// sends it — including the bearer token the handle's config carries. Answers
+/// the raw JSON-RPC reply, so a caller can assert on the envelope as well as on
+/// the result.
+async fn rpc_call(
     server: &crate::claude::InProcessMcpServer,
     name: &str,
     arguments: &Value,
-) -> ToolAnswer {
+) -> Value {
     let payload = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -412,12 +521,22 @@ async fn call_tool(
         .send()
         .await
         .expect("send tools/call");
-    let body: Value =
-        serde_json::from_str(&response.text().await.expect("text")).expect("a JSON-RPC reply");
+    serde_json::from_str(&response.text().await.expect("text")).expect("a JSON-RPC reply")
+}
+
+/// [`rpc_call`]'s success shape: exactly one text block, and no protocol error.
+async fn call_tool(
+    server: &crate::claude::InProcessMcpServer,
+    name: &str,
+    arguments: &Value,
+) -> ToolAnswer {
+    let body = rpc_call(server, name, arguments).await;
 
     // A failing tool is never a protocol error — the convention `new_tool`
     // ports from `mcp.AddTool`, and the Go generator asserts the same thing by
-    // reading `result.Content` unconditionally.
+    // reading `result.Content` unconditionally. Malformed *arguments* are the
+    // path that assertion really guards, and no vector sends those; see
+    // [`malformed_arguments_are_a_tool_error_rather_than_a_protocol_error`].
     assert!(
         body.get("error").is_none(),
         "{name}: a tool must not raise a protocol error: {body}"

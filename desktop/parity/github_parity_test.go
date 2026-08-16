@@ -137,6 +137,22 @@ type githubCallVector struct {
 	// input struct, so Rust keeps the exact value. Unreachable with real
 	// GitHub run ids, which are eleven digits.
 	RustTarget string `json:"rust_target,omitempty"`
+	// Set where Go made a request and Rust deliberately makes none. Two causes,
+	// both documented at their cases below and both carrying `RustText` for the
+	// sentence the model reads instead:
+	//
+	//   - a path holding a `.` or `..` segment. Go's `net/http` sends the path
+	//     verbatim, while `url::Url::parse` — which `reqwest` builds every
+	//     request through — applies WHATWG dot-segment removal, so
+	//     `/repos/../../issues` would leave as `/issues`: the *authenticated
+	//     user's* issues across every repository, on a request already carrying
+	//     the PAT. Escaping does not help, `%2E%2E` is collapsed too, and
+	//     `reqwest` offers no unnormalized target, so the port refuses the call
+	//     rather than reaching a different endpoint than Go would.
+	//   - a zero-fraction float for an integer field, which this SDK's
+	//     validate-and-re-marshal turns into an integer and `serde_json`
+	//     refuses, so no handler runs.
+	RustNoRequest bool `json:"rust_no_request,omitempty"`
 }
 
 type githubHostingVector struct {
@@ -324,12 +340,13 @@ func jsonArgs(t *testing.T, args map[string]any) json.RawMessage {
 
 // callCase is a call vector before the live run fills in what happened.
 type callCase struct {
-	name       string
-	tool       string
-	args       map[string]any
-	script     githubResponseScript
-	rustText   string
-	rustTarget string
+	name          string
+	tool          string
+	args          map[string]any
+	script        githubResponseScript
+	rustText      string
+	rustTarget    string
+	rustNoRequest bool
 }
 
 func ok(body string) githubResponseScript {
@@ -780,6 +797,115 @@ func githubCallCases() []callCase {
 			},
 			script: ok(okBody),
 		},
+
+		// ─── a zero-fraction float, which models do emit ─────────────────────
+		{
+			// `{"per_page": 30.0}` is accepted by Go and refused here, and the
+			// mechanism is the 2^53 case's: `mcp/tool.go` unmarshals
+			// `arguments` into a `map[string]any`, **validates** against the
+			// reflected schema — where JSON Schema counts a zero-fraction float
+			// as an `integer` — and re-marshals, so `float64(30)` is written
+			// back as `30` and the typed decode into `int` succeeds. `rmcp`
+			// deserializes straight into the input struct and
+			// `serde_json::from_value::<i64>(Number(30.0))` fails outright.
+			// More reachable than the 2^53 one: six of the twenty tools take an
+			// integer, and a model emitting `30.0` for one is ordinary.
+			//
+			// `json.RawMessage` because Go's encoder writes `float64(30)` as
+			// `30` — the literal has to survive into the `arguments` bytes for
+			// the case to be about anything.
+			//
+			// Scripted as a 404 for one reason: it makes both languages report
+			// an error, so the divergence needs no `rust_is_error` field
+			// alongside `rustText`/`rustNoRequest`. The status is never reached
+			// on the Rust side — the decode fails before a handler runs.
+			name: "list_repos/a zero-fraction float is an integer to Go and not to serde",
+			tool: "list_repos",
+			args: map[string]any{
+				"visibility": "", "sort": "",
+				"per_page": json.RawMessage("30.0"), "page": 0,
+			},
+			script: githubResponseScript{Status: http.StatusNotFound, Body: `{"message":"Not Found"}`},
+			rustText: "failed to deserialize parameters: invalid type: floating point `30.0`, " +
+				"expected i64",
+			rustNoRequest: true,
+		},
+
+		// ─── dot segments ────────────────────────────────────────────────────
+		//
+		// `owner`, `repo` and `workflow_id` are model-supplied and tool results
+		// carry attacker-authored GitHub content, so a `..` reaching a segment
+		// is reachable under prompt injection. Go sends it verbatim — neither
+		// `url.PathEscape` (`.` is unreserved) nor `net/http` normalizes — so
+		// `list_issues(owner: "..", repo: "..")` asks GitHub for
+		// `/repos/../../issues` and gets a 404. A URL library that resolved the
+		// segments would instead ask for `/issues`, which on a PAT-bearing
+		// request is *the authenticated user's issues across every repository*:
+		// scope confusion, not a cosmetic difference.
+		//
+		// These pin the request Go builds so a port cannot quietly build
+		// another. One per call shape — `call`, `call` with a body, `callRaw`
+		// and `getRedirectURL` — because each constructs its own URL, plus a
+		// single-dot case, which resolves to a *different* wrong path than `..`
+		// does. Note that adding `..` to `gourl_parity_test.go`'s segment
+		// inputs would catch none of it: `PathEscape("..")` is `".."` in both
+		// languages and the normalization happens downstream, in whatever
+		// builds the request.
+		//
+		// The `rustText` values below are hand-written, like the syntax-error
+		// one above: they are what the port answers, so they move by editing
+		// these lines rather than by regenerating from Go.
+		{
+			name:          "get_repo/dot segments are sent literally, not resolved",
+			tool:          "get_repo",
+			args:          map[string]any{"owner": "..", "repo": ".."},
+			script:        githubResponseScript{Status: http.StatusNotFound, Body: `{"message":"Not Found"}`},
+			rustText:      "calling GitHub GET /repos/../..: request failed",
+			rustNoRequest: true,
+		},
+		{
+			name:          "get_repo/a single dot segment is sent literally too",
+			tool:          "get_repo",
+			args:          map[string]any{"owner": ".", "repo": "hello-world"},
+			script:        githubResponseScript{Status: http.StatusNotFound, Body: `{"message":"Not Found"}`},
+			rustText:      "calling GitHub GET /repos/./hello-world: request failed",
+			rustNoRequest: true,
+		},
+		{
+			// The write path: a POST whose body is built and sent before the
+			// status is looked at, so the request lands whatever the answer is.
+			// Scripted as a 404 so both languages report an error and the only
+			// difference is the sentence.
+			name: "create_issue/dot segments reach the write path too",
+			args: map[string]any{
+				"owner": "..", "repo": "..",
+				"title": "Bare", "body": "", "labels": "", "assignees": "",
+			},
+			tool:          "create_issue",
+			script:        githubResponseScript{Status: http.StatusNotFound, Body: `{"message":"Not Found"}`},
+			rustText:      "calling GitHub POST /repos/../../issues: request failed",
+			rustNoRequest: true,
+		},
+		{
+			name:          "get_pull_diff/callRaw builds its own URL, and it is not resolved either",
+			tool:          "get_pull_diff",
+			args:          map[string]any{"owner": "..", "repo": "..", "number": 42},
+			script:        githubResponseScript{Status: http.StatusNotFound, Body: `{"message":"Not Found"}`},
+			rustText:      "calling GitHub GET /repos/../../pulls/42: request failed",
+			rustNoRequest: true,
+		},
+		{
+			// `getRedirectURL` is the third URL builder and words its failure
+			// differently — no method placeholder, because the method is a
+			// literal there.
+			name:   "get_run_logs/getRedirectURL builds the third URL, and it is not resolved either",
+			tool:   "get_run_logs",
+			args:   map[string]any{"owner": "..", "repo": "..", "run_id": 42},
+			script: githubResponseScript{Status: http.StatusNotFound, Body: `{"message":"Not Found"}`},
+			rustText: "fetching logs URL for run 42: " +
+				"calling GitHub GET /repos/../../actions/runs/42/logs: request failed",
+			rustNoRequest: true,
+		},
 	}
 }
 
@@ -874,8 +1000,13 @@ func TestGitHubVectors(t *testing.T) {
 
 // hostedTools starts a server for services and asks it what it hosts.
 //
-// Sorted, because `tools/list` order is the registration order and the point
-// here is the *set*; the twenty-tool `tools` block above keeps the order.
+// The point here is the *set*, and the sort only makes explicit what both SDKs
+// already do: `tools/list` answers in **name** order, not registration order —
+// this SDK keeps its tools in a `featureSet` that lists by sorted key, and
+// `rmcp`'s `ToolRouter::list_all` ends in `sort_by(|a, b| a.name.cmp(&b.name))`
+// — which is why the `tools` block above starts at `create_issue` rather than
+// at `list_repos`. Registration order is pinned on the Rust side instead, by
+// `an_empty_allowed_set_hosts_every_tool` against `GITHUB_TOOL_NAMES`.
 func hostedTools(
 	t *testing.T, ctx context.Context, services map[string]config.ServiceConfig,
 ) []string {
@@ -922,14 +1053,15 @@ func runCallCase(
 	}
 
 	return githubCallVector{
-		Case:       c.name,
-		Tool:       c.tool,
-		Arguments:  args,
-		Response:   c.script,
-		Request:    fake.recorded(),
-		IsError:    result.IsError,
-		Text:       text.Text,
-		RustText:   c.rustText,
-		RustTarget: c.rustTarget,
+		Case:          c.name,
+		Tool:          c.tool,
+		Arguments:     args,
+		Response:      c.script,
+		Request:       fake.recorded(),
+		IsError:       result.IsError,
+		Text:          text.Text,
+		RustText:      c.rustText,
+		RustTarget:    c.rustTarget,
+		RustNoRequest: c.rustNoRequest,
 	}
 }

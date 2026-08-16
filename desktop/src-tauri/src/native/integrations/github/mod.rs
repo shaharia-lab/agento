@@ -72,12 +72,19 @@ use client::Client;
 
 /// The five service groups, in the order `buildMCPServer` gates them.
 ///
-/// Order is observable: it is `tools/list`'s order, and therefore the order the
-/// model reads the tool set in.
+/// Registration order is **not** what the model reads the tool set in: both
+/// SDKs sort `tools/list` by name — `rmcp`'s `ToolRouter::list_all` ends in
+/// `tools.sort_by(|a, b| a.name.cmp(&b.name))`, and the Go SDK holds its tools
+/// in a `featureSet` that lists by sorted key — which is why
+/// `github_vectors.json`'s `tools` array starts at `create_issue` rather than at
+/// `list_repos`. The order here is Go's registration order all the same, so the
+/// two `buildMCPServer`s can be read side by side, and it is pinned against
+/// [`GITHUB_TOOL_NAMES`] by `an_empty_allowed_set_hosts_every_tool`.
 pub const SERVICES: &[&str] = &["repos", "issues", "pull_requests", "actions", "releases"];
 
 /// Every tool this integration can host, in registration order — which is
-/// `SERVICES` order, then each `register*Tools` function's own order.
+/// `SERVICES` order, then each `register*Tools` function's own order. See
+/// [`SERVICES`] for why that is not the order `tools/list` answers in.
 ///
 /// The frontend carries its own copy for the allowlist picker, as the web UI
 /// does; this is the list the server actually registers.

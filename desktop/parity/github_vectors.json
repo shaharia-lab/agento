@@ -1964,6 +1964,158 @@
       },
       "is_error": false,
       "text": "Tags: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "list_repos/a zero-fraction float is an integer to Go and not to serde",
+      "tool": "list_repos",
+      "arguments": {
+        "page": 0,
+        "per_page": 30.0,
+        "sort": "",
+        "visibility": ""
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/user/repos?per_page=30",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "github API error: status 404: {\"message\":\"Not Found\"}",
+      "rust_text": "failed to deserialize parameters: invalid type: floating point `30.0`, expected i64",
+      "rust_no_request": true
+    },
+    {
+      "case": "get_repo/dot segments are sent literally, not resolved",
+      "tool": "get_repo",
+      "arguments": {
+        "owner": "..",
+        "repo": ".."
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/../..",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "github API error: status 404: {\"message\":\"Not Found\"}",
+      "rust_text": "calling GitHub GET /repos/../..: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "get_repo/a single dot segment is sent literally too",
+      "tool": "get_repo",
+      "arguments": {
+        "owner": ".",
+        "repo": "hello-world"
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/./hello-world",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "github API error: status 404: {\"message\":\"Not Found\"}",
+      "rust_text": "calling GitHub GET /repos/./hello-world: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "create_issue/dot segments reach the write path too",
+      "tool": "create_issue",
+      "arguments": {
+        "assignees": "",
+        "body": "",
+        "labels": "",
+        "owner": "..",
+        "repo": "..",
+        "title": "Bare"
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/../../issues",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"title\":\"Bare\"}"
+      },
+      "is_error": true,
+      "text": "github API error: status 404: {\"message\":\"Not Found\"}",
+      "rust_text": "calling GitHub POST /repos/../../issues: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "get_pull_diff/callRaw builds its own URL, and it is not resolved either",
+      "tool": "get_pull_diff",
+      "arguments": {
+        "number": 42,
+        "owner": "..",
+        "repo": ".."
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/../../pulls/42",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3.diff",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "github API error: status 404: {\"message\":\"Not Found\"}",
+      "rust_text": "calling GitHub GET /repos/../../pulls/42: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "get_run_logs/getRedirectURL builds the third URL, and it is not resolved either",
+      "tool": "get_run_logs",
+      "arguments": {
+        "owner": "..",
+        "repo": "..",
+        "run_id": 42
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/../../actions/runs/42/logs",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "fetching logs URL for run 42: github API error: status 404: {\"message\":\"Not Found\"}",
+      "rust_text": "fetching logs URL for run 42: calling GitHub GET /repos/../../actions/runs/42/logs: request failed",
+      "rust_no_request": true
     }
   ]
 }

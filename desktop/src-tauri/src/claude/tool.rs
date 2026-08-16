@@ -260,8 +260,26 @@ fn normalize_object(schema: &mut serde_json::Map<String, serde_json::Value>) -> 
     changed |= schema.remove("format").is_some();
     changed |= schema.remove("default").is_some();
 
-    // Positions holding a single subschema.
-    for key in ["items", "additionalProperties", "propertyNames", "not"] {
+    // Positions holding a single subschema. The last six are unreachable from
+    // the integrations as they stand — nothing there is conditional or uses
+    // `flatten` — but they are what a *future* one would hit, and the failure
+    // is silent: a nested `$schema`/`format`/`default` under an unwalked
+    // keyword survives into a schema the model reads and nothing says so.
+    // `unevaluatedProperties`/`unevaluatedItems` are what `schemars` 1.x emits
+    // for `#[serde(flatten)]` under `deny_unknown_fields`, which is on for every
+    // params struct in this port.
+    for key in [
+        "items",
+        "additionalProperties",
+        "propertyNames",
+        "not",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+        "if",
+        "then",
+        "else",
+        "contains",
+    ] {
         if let Some(serde_json::Value::Object(child)) = schema.get_mut(key) {
             changed |= normalize_object(child);
         }
@@ -269,7 +287,13 @@ fn normalize_object(schema: &mut serde_json::Map<String, serde_json::Value>) -> 
     // Positions holding a map of name → subschema. `properties` is why this
     // walk is structure-aware: a tool may legitimately have a field called
     // `format`, and a blind key sweep would delete it.
-    for key in ["properties", "patternProperties", "$defs", "definitions"] {
+    for key in [
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+    ] {
         if let Some(serde_json::Value::Object(children)) = schema.get_mut(key) {
             for child in children.values_mut() {
                 if let serde_json::Value::Object(child) = child {

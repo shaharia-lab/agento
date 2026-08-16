@@ -780,9 +780,15 @@ three by #310 and one by #312 — and all six inherit every one:
   `Arc`, not through it: `rmcp` memoizes one schema per input type and hands
   every route a clone, so an in-place edit would reach into a process-wide
   cache. The walk is structure-aware rather than a key sweep — all three are
-  legal property *names* too. `#[serde(deny_unknown_fields)]` is what produces
-  `additionalProperties: false`, which Go reflects onto every struct and its
-  server *validates* against.
+  legal property *names* too — and it follows every position `schemars` can put
+  a subschema in, including the ones nothing has reached yet
+  (`unevaluatedProperties`/`unevaluatedItems`, which 1.x emits for
+  `#[serde(flatten)]` under `deny_unknown_fields`, plus `if`/`then`/`else`,
+  `contains` and `dependentSchemas`): an unwalked keyword leaves a nested
+  `$schema`/`format`/`default` in a schema the model reads and nothing says so.
+  `#[serde(deny_unknown_fields)]` is what produces `additionalProperties:
+  false`, which Go reflects onto every struct and its server *validates*
+  against.
 - **The reflector divergence map is generated, and it is the file to read
   before porting an integration** (#312).
   `desktop/parity/jsonschema_reflect_vectors.json` reflects one reference struct
@@ -817,6 +823,18 @@ three by #310 and one by #312 — and all six inherit every one:
   differs: Go's `validating "arguments": …` against `rmcp`'s `failed to
   deserialize parameters: …`. It is a property of `new_tool`, so every ported
   tool has it; there is no missing conversion to add.
+
+  Nothing in this port implements it, though, and that is the part worth
+  knowing: `into_tool_argument_error` **prefix-matches a hardcoded string**
+  (`"failed to deserialize parameters:"`) against its own extractor's message,
+  so an `rmcp` upgrade rewording either half would flip all 62 ported tools to
+  protocol errors at once — which the CLI renders as "Tool result missing due
+  to internal error", nothing for the model to retry against.
+  `malformed_arguments_are_a_tool_error_rather_than_a_protocol_error`
+  (`native/integrations/github/tests_vectors.rs`) sends a missing field and an
+  unknown field and pins the **kind**, deliberately not the text. Every ported
+  integration inherits the property from `new_tool`, so one test covers all of
+  them; add another only if a port stops going through `new_tool`.
 - **A tool's name is not renameable.** `mcp__local-tools__current_time` is in
   agents' stored `capabilities.local` allowlists and in every `tool_use` block
   already written to `chat_messages`. `desktop/parity/local_tools_vectors.json`
@@ -906,12 +924,52 @@ Five things it brought that #313–#317 will want:
   `client.Do` fails, so `calling GitHub %s %s: request failed` is what the model
   reads there too — no divergence to invent. Every outbound call
   `tokio::select!`s on the token, because `rmcp` spawns handlers detached.
-- **`reqwest` gained `rustls-tls`.** Every hop this shell made was loopback
-  until now, so no TLS backend was configured and `https://api.github.com` would
-  have failed at runtime. rustls with bundled webpki roots, for the reasoning
-  already written on `lettre`: five release triples, no C toolchain.
+- **`reqwest` gained a TLS backend, and it reads the *platform* trust store.**
+  Every hop this shell made was loopback until now, so none was configured and
+  `https://api.github.com` would have failed at runtime. rustls rather than
+  `native-tls` for the reasoning already written on `lettre` (five release
+  triples, no C toolchain) — but `rustls-tls-native-roots`, **not** the
+  `rustls-tls` alias, which is a Mozilla snapshot compiled in. Go's `net/http`
+  reads the platform store, and the case bundled roots break is exactly the one
+  they are usually chosen for: a TLS-inspecting corporate proxy intercepts
+  `api.github.com` like anything else and its CA exists only in the system
+  store, so the web UI's integration would work and the desktop app's would
+  answer `request failed` with nothing to point at the cause. It costs no new
+  crate (`rustls-native-certs` was already in the tree through
+  `tauri-plugin-updater`'s `reqwest 0.13`) and still resolves to `ring`.
+  `lettre`'s webpki roots are #307's decision and are deliberately left alone.
+  One consequence to keep: `reqwest` loads the roots inside `build()` and
+  reports an unusable store as a **builder** error, where Go's `&http.Client{…}`
+  is a struct literal that cannot fail — so `client.rs` holds
+  `OnceLock<Option<Client>>` and answers `calling GitHub …: request failed`
+  rather than panicking inside a handler `rmcp` spawned detached.
+- **`reqwest` gained `gzip`.** Go's transport adds `Accept-Encoding: gzip` and
+  decompresses transparently, so every Go-side integration call is compressed
+  and every uncompressed one here was a silent divergence — most visibly
+  `get_pull_diff`, whose 10 MB cap is 10 MB of highly compressible text. The
+  fakes never compress, so no vector can see it. The cap semantics do not move:
+  reqwest decompresses in its service stack, so `bytes_stream()` yields
+  decompressed bytes and `read_capped` caps what Go's `io.LimitReader` over a
+  gunzipped `resp.Body` caps.
+- **The test seam is `#[cfg(test)]`, and should stay that way in #313–#317.**
+  `githubAPIBase` had to be *exported* on the Go side (`parity.go`) because
+  `desktop/parity` is a different package; both Rust callers are in-crate, so
+  `API_BASE`/`set_api_base` compile out of a shipped binary entirely. What they
+  are is a primitive for pointing every GitHub request — each bearing the
+  user's PAT — at an arbitrary host.
 
-Two divergences are pinned rather than reconciled, both in the vectors:
+One fact to have before the next port, because it is easy to assume the other
+way: **`tools/list` does not carry registration order.** Both SDKs sort by
+name — `rmcp`'s `ToolRouter::list_all` ends in
+`tools.sort_by(|a, b| a.name.cmp(&b.name))`, and `modelcontextprotocol/go-sdk`
+holds tools in a `featureSet` that lists by sorted key — which is why
+`github_vectors.json`'s `tools` array starts at `create_issue` rather than at
+`list_repos`. Registration order is still worth keeping in `SERVICES` order so
+the two `buildMCPServer`s read alike, and it is pinned by
+`an_empty_allowed_set_hosts_every_tool` against `GITHUB_TOOL_NAMES` — but a
+`tools/list` comparison is set equality, not an order assertion.
+
+Four divergences are pinned rather than reconciled, all in the vectors:
 
 - **`encoding/json`'s syntax-error vocabulary.** `trigger_workflow` parses a
   caller-supplied document, and Go's `invalid character 'o' in literal null
@@ -927,6 +985,35 @@ Two divergences are pinned rather than reconciled, both in the vectors:
   Carried by the vector's `rust_target` field. Unreachable with a real GitHub
   run id, and deliberately not reproduced — degrading Rust to match would be
   worse than the divergence.
+- **A zero-fraction float is an integer to Go and not to serde.** Same
+  mechanism, and far more reachable: that same `map[string]any` round trip
+  *validates* against the reflected schema, where JSON Schema counts `30.0` as
+  an `integer`, and re-marshals `float64(30)` back as `30`, so the typed decode
+  succeeds. `serde_json::from_value::<i64>(Number(30.0))` fails outright, and
+  `{"per_page": 30.0}` is something models emit — six of the twenty tools take
+  an integer. Accepting it would mean a newtype on 21 fields whose `JsonSchema`
+  has to be hand-written to stay inlined rather than lifted into `$defs`, which
+  is a schema risk taken for a wording difference, so it is pinned instead:
+  `rust_text` plus `rust_no_request`.
+- **A `.` or `..` path segment reaches a different endpoint.** `url::Url::parse`
+  — which `reqwest` builds every request through — applies WHATWG dot-segment
+  removal for http(s); Go's `net/http` does not normalize and `url.PathEscape`
+  leaves both alone, so `list_issues(owner: "..", repo: "..")` asks Go's GitHub
+  for `/repos/../../issues` (a 404) and would ask this one for `/issues` — *the
+  authenticated user's issues across every repository*, on a request carrying
+  the PAT. Escaping does not help; `%2E%2E` is collapsed too. `owner`, `repo`
+  and `workflow_id` are model-supplied and every tool result carries
+  attacker-authored GitHub content, so it is reachable under prompt injection,
+  and it applies to the write tools too. `reqwest` offers no unnormalized
+  target, so `client::absolute` compares the parsed path and query against the
+  ones the tool built and **refuses** rather than calling somewhere else —
+  answering the site's own `calling GitHub …: request failed`. Five vectors,
+  covering all three URL builders and both the read and the write path, carry
+  `rust_text` and `rust_no_request`. The comparison is exact rather than a `..`
+  scan, so anything else `url` normalizes is caught by construction; nothing
+  legitimate trips it, because `gourl`'s escaping already covers every byte in
+  `url`'s path and query encode sets. **#313–#317 each build URLs the same way
+  and need the same guard.**
 
 ### Things that will bite
 

@@ -33,7 +33,9 @@
 //! `rmcp` spawns handlers detached, so a handler that ignores it keeps its
 //! socket open after the caller is gone.)
 
-use std::sync::{OnceLock, RwLock};
+use std::sync::OnceLock;
+#[cfg(test)]
+use std::sync::RwLock;
 use std::time::Duration;
 
 use reqwest::Method;
@@ -47,36 +49,53 @@ pub const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// Go's `githubAPIBase`, a package variable "exposed as a variable so tests can
 /// redirect requests to a local server".
 ///
-/// A `RwLock` rather than a `OnceLock` for that same reason: the parity suite
-/// points it at a loopback fake and puts it back. Reads are on every request
-/// and contention is nil, since nothing writes outside a test.
+/// **Test-only, where Go's is not, and deliberately.** The seam is "point every
+/// GitHub request — bearing the user's personal access token — at an arbitrary
+/// host", so it should not exist in a shipped binary. Go had no choice:
+/// `desktop/parity` is a different package, so `internal/integrations/github/`
+/// had to export `SetAPIBase` to be redirectable at all. Both callers here are
+/// in-crate, so `#[cfg(test)]` costs nothing and compiles the whole thing out —
+/// which is what [`api_base_lock`] below already does, for the same reason.
+/// #313–#317 each add their own seam and should follow this.
+///
+/// A `RwLock` rather than a `OnceLock` because a test points it at a loopback
+/// fake and then puts it back.
+#[cfg(test)]
 static API_BASE: RwLock<Option<String>> = RwLock::new(None);
 
-/// Where requests go. [`DEFAULT_API_BASE`] unless [`set_api_base`] said
+/// Where requests go — [`DEFAULT_API_BASE`] unless [`set_api_base`] said
 /// otherwise.
-pub fn api_base() -> String {
-    match API_BASE.read() {
-        Ok(base) => base.clone().unwrap_or_else(|| DEFAULT_API_BASE.to_string()),
-        // A poisoned lock means a test panicked while holding it; answering the
-        // real API would then be the *worse* outcome, so fail loudly.
-        Err(poisoned) => poisoned
-            .into_inner()
-            .clone()
-            .unwrap_or_else(|| DEFAULT_API_BASE.to_string()),
-    }
+///
+/// A poisoned lock means a test panicked between taking the write guard and
+/// dropping it, three lines later. There is no recovery that is not a lie about
+/// which server the next request reaches, and the caller is a test either way,
+/// so this panics rather than guessing.
+#[cfg(test)]
+fn api_base() -> String {
+    API_BASE
+        .read()
+        .expect("the github API base lock is poisoned")
+        .clone()
+        .unwrap_or_else(|| DEFAULT_API_BASE.to_string())
+}
+
+/// Where requests go. There is one answer in a shipped binary, because nothing
+/// outside a test can move it — see [`API_BASE`].
+#[cfg(not(test))]
+fn api_base() -> String {
+    DEFAULT_API_BASE.to_string()
 }
 
 /// Points every subsequent request at `base`; `None` restores the default.
 ///
-/// Only the parity suite calls this. It is not per-integration configuration —
-/// GitHub Enterprise would need a per-row base, which the Go side does not have
-/// either.
-pub fn set_api_base(base: Option<String>) {
-    let mut guard = match API_BASE.write() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    };
-    *guard = base;
+/// Only tests call this, and only tests *can* — see [`API_BASE`]. It is not
+/// per-integration configuration: GitHub Enterprise would need a per-row base,
+/// which the Go side does not have either.
+#[cfg(test)]
+pub(super) fn set_api_base(base: Option<String>) {
+    *API_BASE
+        .write()
+        .expect("the github API base lock is poisoned") = base;
 }
 
 /// Serializes the tests that redirect [`API_BASE`].
@@ -96,14 +115,26 @@ pub(super) async fn api_base_lock() -> tokio::sync::MutexGuard<'static, ()> {
 }
 
 /// `ghHTTPClient` — 15 seconds, redirects followed.
-fn http_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .build()
-            .expect("a reqwest client with a TLS backend")
-    })
+///
+/// `Option`, because building one can fail here where Go's cannot.
+/// `&http.Client{Timeout: …}` is a struct literal and the trust store is not
+/// consulted until the handshake, so a machine with an unusable one fails
+/// *per request*; `reqwest` reads the platform roots inside `build()` (see
+/// `Cargo.toml` on `rustls-tls-native-roots`) and reports an empty store as a
+/// builder error. That has to reach the model as Go's own
+/// `calling GitHub …: request failed` — a handshake that cannot complete is a
+/// transport failure there too — rather than as a panic inside a handler
+/// `rmcp` spawned detached.
+fn http_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .build()
+                .ok()
+        })
+        .as_ref()
 }
 
 /// `ghNoRedirectClient` — the same, with `CheckRedirect` returning
@@ -111,15 +142,17 @@ fn http_client() -> &'static reqwest::Client {
 ///
 /// A second client rather than a per-request policy because `reqwest` has no
 /// per-request one; Go's is a second client too.
-fn no_redirect_client() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("a reqwest client with a TLS backend")
-    })
+fn no_redirect_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(15))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .ok()
+        })
+        .as_ref()
 }
 
 /// `call`'s cap: 2 MiB.
@@ -167,8 +200,10 @@ impl Client {
         body: Option<Vec<u8>>,
     ) -> Result<String, String> {
         let has_body = body.is_some();
+        let failed = request_failed(&method, path);
         let mut request = http_client()
-            .request(method.clone(), format!("{}{path}", api_base()))
+            .ok_or_else(|| failed.clone())?
+            .request(method, absolute(path, &failed)?)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github.v3+json");
         if has_body {
@@ -178,7 +213,7 @@ impl Client {
             request = request.body(body);
         }
 
-        let response = send(ct, request, &request_failed(&method, path)).await?;
+        let response = send(ct, request, &failed).await?;
         let status = response.status();
         let text = read_capped(ct, response, MAX_JSON_BYTES).await?;
         api_error_or(status, text)
@@ -193,12 +228,14 @@ impl Client {
         path: &str,
         accept: &str,
     ) -> Result<String, String> {
+        let failed = request_failed(&method, path);
         let request = http_client()
-            .request(method.clone(), format!("{}{path}", api_base()))
+            .ok_or_else(|| failed.clone())?
+            .request(method, absolute(path, &failed)?)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", accept);
 
-        let response = send(ct, request, &request_failed(&method, path)).await?;
+        let response = send(ct, request, &failed).await?;
         let status = response.status();
         let text = read_capped(ct, response, MAX_RAW_BYTES).await?;
         api_error_or(status, text)
@@ -215,17 +252,14 @@ impl Client {
         ct: &CancellationToken,
         path: &str,
     ) -> Result<String, String> {
+        let failed = format!("calling GitHub GET {path}: request failed");
         let request = no_redirect_client()
-            .get(format!("{}{path}", api_base()))
+            .ok_or_else(|| failed.clone())?
+            .get(absolute(path, &failed)?)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Accept", "application/vnd.github.v3+json");
 
-        let response = send(
-            ct,
-            request,
-            &format!("calling GitHub GET {path}: request failed"),
-        )
-        .await?;
+        let response = send(ct, request, &failed).await?;
 
         let status = response.status();
         if status == reqwest::StatusCode::FOUND || status == reqwest::StatusCode::MOVED_PERMANENTLY
@@ -233,12 +267,19 @@ impl Client {
             // `Header.Get` on an absent header is `""`, and a header whose
             // value is the empty string is the same thing to Go — so both
             // reach the same sentence.
+            //
+            // `from_utf8_lossy` over the raw bytes rather than `to_str()`,
+            // which refuses anything non-ASCII: Go's `Header.Get` hands back
+            // whatever bytes arrived, so a `Location` carrying a non-ASCII
+            // byte — a redirect to a signed URL through a host with a
+            // percent-decoding proxy in front of it, say — succeeds there and
+            // would have become `redirect response missing Location header`
+            // here, which is a sentence about a header that is present.
             let location = response
                 .headers()
                 .get(reqwest::header::LOCATION)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default()
-                .to_string();
+                .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+                .unwrap_or_default();
             if location.is_empty() {
                 return Err("redirect response missing Location header".to_string());
             }
@@ -258,6 +299,57 @@ impl Client {
 /// `fmt.Errorf("calling GitHub %s %s: request failed", method, path)`.
 fn request_failed(method: &Method, path: &str) -> String {
     format!("calling GitHub {method} {path}: request failed")
+}
+
+/// The URL a request to `path` goes to — or `failed`, if this port cannot build
+/// the request Go builds.
+///
+/// # Why this exists, and why it refuses instead of correcting
+///
+/// Go appends `path` to `githubAPIBase`, hands the string to
+/// `http.NewRequestWithContext`, and `net/http` writes `URL.RequestURI()` on
+/// the wire **verbatim**. Nothing normalizes: `url.PathEscape` leaves `.` and
+/// `..` alone (both are unreserved), and `net/url` does not remove dot
+/// segments. So `list_issues(owner: "..", repo: "..")` asks GitHub for
+/// `/repos/../../issues` and gets a 404.
+///
+/// `reqwest` builds every request through `url::Url::parse`, which applies
+/// WHATWG dot-segment removal for http(s). The same call would leave as
+/// `/issues` — on a request already carrying the user's PAT, that is *the
+/// authenticated user's issues across every repository* in place of one
+/// repository's. `owner`, `repo` and `workflow_id` are model-supplied and every
+/// tool result carries attacker-authored GitHub content, so it is reachable
+/// under prompt injection, and it applies to the write tools too. Escaping the
+/// dots is not a fix — `%2E%2E` is collapsed as well.
+///
+/// `reqwest` offers no way to send an unnormalized target, so the faithful
+/// option is to **refuse**: the model reads the sentence a transport failure
+/// produces rather than the answer to a question it did not ask. Pinned in
+/// `desktop/parity/github_vectors.json` as `rust_no_request` plus `rust_text`,
+/// alongside the 2^53 divergence — five cases, covering all three URL builders.
+///
+/// # Why the whole target is compared rather than `..` scanned for
+///
+/// An exact comparison catches anything else `url` normalizes, now or after an
+/// upgrade, instead of the one shape known today. Nothing legitimate trips it,
+/// and that is a property of `gourl`'s escaping rather than luck: Go's
+/// `encodePathSegment` escapes every byte in `url`'s path encode set (space,
+/// `"`, `#`, `<`, `>`, `?`, `` ` ``, `{`, `}`) and its `encodeQueryComponent`
+/// every byte in the query one, so there is nothing left for `url` to
+/// percent-encode; existing `%XX` escapes are passed through with their case
+/// intact, so Go's uppercase hex survives; and a path with no `?` compares
+/// `""` against `query()`'s `None`. Host, scheme and port are not compared at
+/// all, so `url`'s default-port and case normalization cannot reach this.
+/// Verified against all 50 call vectors, `+`-encoded spaces and multi-byte
+/// UTF-8 among them.
+fn absolute(path: &str, failed: &str) -> Result<reqwest::Url, String> {
+    let url =
+        reqwest::Url::parse(&format!("{}{path}", api_base())).map_err(|_| failed.to_string())?;
+    let (want_path, want_query) = path.split_once('?').unwrap_or((path, ""));
+    if url.path() != want_path || url.query().unwrap_or("") != want_query {
+        return Err(failed.to_string());
+    }
+    Ok(url)
 }
 
 /// `fmt.Errorf("github API error: status %d: %s", status, body)`.
@@ -415,6 +507,67 @@ mod tests {
                 Err(format!("github API error: status {code}: b"))
             );
         }
+    }
+
+    /// The dot-segment guard, at the unit rather than at the vector: what it
+    /// refuses, and — the half that would bite — everything it must not.
+    ///
+    /// `github_vectors.json` covers this end to end for all 50 calls; this
+    /// covers the shapes a *future* tool could build that no vector has yet,
+    /// which is where a guard like this normally goes wrong.
+    #[test]
+    fn dot_segments_are_refused_and_nothing_else_is() {
+        let ok = |path: &str| {
+            absolute(path, "no").unwrap_or_else(|_| panic!("{path} is a legitimate path"))
+        };
+
+        // `url` resolves every one of these into a different endpoint than Go
+        // calls, and escaping the dots does not help — `%2E%2E` is collapsed
+        // too, so there is nothing to encode our way out of.
+        for path in [
+            "/repos/../../issues",
+            "/repos/./x/issues",
+            "/repos/%2E%2E/%2E%2E/issues",
+            "/repos/o/r/..",
+        ] {
+            assert_eq!(
+                absolute(path, "refused"),
+                Err("refused".to_string()),
+                "{path}"
+            );
+        }
+
+        // Everything `gourl` can emit. `PathEscape` already escapes every byte
+        // in `url`'s path encode set and `QueryEscape` every byte in its query
+        // one, so there is nothing left for `url` to re-encode; percent-escapes
+        // keep Go's uppercase hex; a space is `+` in a query and `%20` in a
+        // segment; and a path with no `?` has no query on either side.
+        assert_eq!(ok("/user/repos?per_page=30").path(), "/user/repos");
+        assert_eq!(ok("/repos/o/r").query(), None);
+        assert_eq!(
+            ok("/search/code?q=repo%3Ao%2Fr+func+foo%2Bbar+~x%2Fy%26z%3D1+%2A&per_page=30").query(),
+            Some("q=repo%3Ao%2Fr+func+foo%2Bbar+~x%2Fy%26z%3D1+%2A&per_page=30")
+        );
+        assert_eq!(
+            ok("/repos/my%20org/a%2Fb").path(),
+            "/repos/my%20org/a%2Fb",
+            "uppercase hex survives, and so does an escaped slash"
+        );
+        assert_eq!(
+            ok("/repos/a$&+:=@b/caf%C3%A9%3B%E6%97%A5%E6%9C%AC%E8%AA%9E%2Cx%3Fy").path(),
+            "/repos/a$&+:=@b/caf%C3%A9%3B%E6%97%A5%E6%9C%AC%E8%AA%9E%2Cx%3Fy",
+            "the reserved bytes a segment keeps are not re-encoded"
+        );
+        // A dot *inside* a segment is not a dot segment, and neither is one
+        // inside a query value — only the path is resolved.
+        assert_eq!(
+            ok("/repos/o/r/actions/workflows/ci.yml").path(),
+            "/repos/o/r/actions/workflows/ci.yml"
+        );
+        assert_eq!(
+            ok("/repos/o/r/issues?labels=..%2F..&per_page=30").query(),
+            Some("labels=..%2F..&per_page=30")
+        );
     }
 
     /// The base is a variable so the parity suite can redirect it, and putting
