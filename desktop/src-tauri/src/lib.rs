@@ -11,6 +11,18 @@ pub mod paths;
 mod proxy;
 mod sidecar;
 
+// The seam's two fallbacks are destructors and caught panics: `proxy.rs` turns a
+// panicking native handler into an `Err` that forwards to the Go sidecar, and
+// `native/scan.rs` clears its in-progress flag from a `Drop` guard. `panic =
+// "abort"` runs neither, so setting it would silently delete both — and no test
+// could catch it, because the test profile always unwinds. Fail the build
+// instead. See `[profile.release]` in Cargo.toml.
+#[cfg(panic = "abort")]
+compile_error!(
+    "agento's desktop shell requires panic=\"unwind\": aborting disables the \
+     native-handler fallback in proxy.rs and the scan guard in native/scan.rs"
+);
+
 use serde::Serialize;
 use tauri::{Manager, WindowEvent};
 

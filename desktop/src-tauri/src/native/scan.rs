@@ -67,6 +67,18 @@ const GO_ZERO_TIME: &str = "0001-01-01 00:00:00 +0000 UTC";
 #[derive(Default)]
 struct ScanState {
     in_progress: bool,
+    /// When a scan last found **no readable config dir**.
+    ///
+    /// That path deliberately records no staleness markers — see `run_scan` —
+    /// so the gate that admitted it is still open when the next request
+    /// arrives, and every request would admit another. Go never notices because
+    /// its equivalent is reached from `List`, which is called far less often
+    /// than a gated request is here. A fresh install is exactly this state:
+    /// `scanner_version = 0` and no `~/.claude` yet.
+    ///
+    /// This is a rate limit, not a marker: the drift stays recorded and stays
+    /// retryable, which is the property the early return exists to preserve.
+    no_dirs_at: Option<std::time::Instant>,
     files_done: usize,
     files_total: usize,
     /// Rows the last scan actually wrote.
@@ -262,9 +274,20 @@ pub fn force_scan(db_path: PathBuf) {
     ensure_scan_inner(db_path, true)
 }
 
+/// How long to wait before re-admitting a scan that found no readable dir.
+const NO_DIRS_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn ensure_scan_inner(db_path: PathBuf, force: bool) {
     if !force && !needs_scan(&db_path) {
         return;
+    }
+    if !force {
+        let s = state().lock().unwrap_or_else(|e| e.into_inner());
+        if s.no_dirs_at
+            .is_some_and(|at| at.elapsed() < NO_DIRS_COOLDOWN)
+        {
+            return;
+        }
     }
     {
         let mut s = state().lock().unwrap_or_else(|e| e.into_inner());
@@ -371,8 +394,14 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
             settings.indexed_config_dirs
         );
         record_last_scanned(&conn);
+        // Deliberately no markers — see `record_markers`. That leaves the gate
+        // open, so remember this happened and stop re-admitting for a while.
+        state().lock().unwrap_or_else(|e| e.into_inner()).no_dirs_at =
+            Some(std::time::Instant::now());
         return Ok(());
     }
+
+    state().lock().unwrap_or_else(|e| e.into_inner()).no_dirs_at = None;
 
     let mut cached: Vec<diff::CachedEntry> =
         store::load_cached_entries(&conn)?.into_values().collect();
@@ -586,6 +615,21 @@ mod tests {
         );
     }
 
+    /// Serialises the two tests that touch the process-global [`state`].
+    ///
+    /// They flake against each other otherwise — one clears `in_progress` while
+    /// the other is asserting on it, in both directions. The full suite happens
+    /// not to hit it today, but `cargo test --lib scan` is the ordinary dev
+    /// loop and the odds move with thread count; a flaky test guarding the
+    /// port's panic-safety net is the worst place to leave one.
+    ///
+    /// `unwrap_or_else` rather than `unwrap`: one of these tests panics on
+    /// purpose, which poisons the lock.
+    fn scan_state_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn seed_scanned_at_for(db: &std::path::Path, conn: &rusqlite::Connection, text: &str) {
         conn.execute(
             "INSERT INTO claude_cache_metadata (id, last_scanned_at, scanner_version,
@@ -686,6 +730,7 @@ mod tests {
     /// wedging every future scan and making `/status` report one forever.
     #[test]
     fn the_scan_guard_clears_the_flag_on_a_panic() {
+        let _serialised = scan_state_lock();
         state().lock().expect("lock").in_progress = true;
         let handle = std::thread::spawn(|| {
             let _guard = ScanGuard;
@@ -694,7 +739,7 @@ mod tests {
         assert!(handle.join().is_err(), "the thread should have panicked");
         assert!(
             !state().lock().expect("lock").in_progress,
-            "a panicking scan must not leave the chat wedged — this needs \
+            "a panicking scan must not leave the scan wedged — this needs \
              panic=unwind in every profile, see Cargo.toml"
         );
     }
@@ -703,6 +748,7 @@ mod tests {
     /// full re-read on top of the first.
     #[test]
     fn a_second_ensure_scan_while_one_runs_is_a_no_op() {
+        let _serialised = scan_state_lock();
         {
             let mut s = state().lock().expect("lock");
             s.in_progress = true;
