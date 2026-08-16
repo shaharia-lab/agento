@@ -65,7 +65,51 @@ tokio = { version = "1", features = [
     "io-std",
     "sync",
 ] }
-reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+# `stream` is for the proxy's SSE pass-through and for the byte-capped reads the
+# ported integrations do — Go's `io.LimitReader(resp.Body, 2*1024*1024)` stops
+# *reading* at the cap, which a `bytes()` that buffers the whole body first
+# would not.
+#
+# **A TLS backend, added with #312.** Until the integrations landed, every hop
+# this client made was loopback (the Go sidecar, an in-process MCP server), so
+# none was configured at all and a `https://api.github.com` request would have
+# failed at runtime with "URL scheme is not allowed". The reasoning for *which*
+# stack is the one already written on `lettre` below and it has not changed:
+# `native-tls` links the platform's OpenSSL/Schannel, the release workflow
+# builds five target triples, and the whole reason `rusqlite` is `bundled` is
+# that there is no C toolchain to arrange.
+#
+# **The root store is `rustls-tls-native-roots`, and that is a parity decision
+# rather than a build-system one.** `rustls-tls` is an alias for
+# `rustls-tls-webpki-roots` — a Mozilla snapshot compiled into the binary — and
+# Go's `net/http` reads the **platform** trust store on every OS. The
+# difference is not theoretical: a TLS-inspecting corporate proxy intercepts
+# `api.github.com` like anything else, and its CA exists only in the system
+# store, so bundled roots would give a user whose web UI integration works a
+# desktop one that answers `request failed` with nothing to point at the cause.
+# #313–#317 would each inherit that. `rustls-tls-native-roots` is equally pure
+# Rust and equally toolchain-free — `rustls-native-certs` reads files on Linux,
+# Security.framework on macOS and CryptoAPI on Windows, all through crates that
+# cross-compile the way everything else here does — so the `native-tls`
+# reasoning below (five triples, no C toolchain) is untouched by it, and it
+# still resolves to `ring`, so no second crypto provider enters the tree.
+# `lettre`'s bundled roots below are #307's decision and are left alone; SMTP to
+# a configured relay is not the same exposure as an API call through whatever
+# the machine's network does to it.
+#
+# `gzip` because Go's transport adds `Accept-Encoding: gzip` and decompresses
+# transparently, so every Go-side integration call is compressed and every
+# uncompressed one here was a silent bandwidth divergence — most visibly
+# `get_pull_diff`, whose 10 MB cap is 10 MB of highly compressible text. The
+# fakes never compress, so the vectors cannot see this either way. Note the cap
+# semantics do **not** move: reqwest decompresses in its service stack, so
+# `bytes_stream()` yields decompressed bytes and `read_capped` caps the same
+# thing Go's `io.LimitReader` over a gunzipped `resp.Body` does.
+reqwest = { version = "0.12", default-features = false, features = [
+    "stream",
+    "gzip",
+    "rustls-tls-native-roots",
+] }
 
 # Control requests are correlated by a v4 UUID, and hook callbacks are
 # registered under one. Go generates them from crypto/rand by hand; the format

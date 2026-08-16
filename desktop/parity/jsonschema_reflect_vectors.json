@@ -1,0 +1,344 @@
+{
+  "_comment": [
+    "The reflector divergence map: google/jsonschema-go's output for every Go shape",
+    "a ported integration params struct can contain. Generated from Go, then frozen.",
+    "Read by desktop/parity/jsonschema_reflect_parity_test.go (Go) and by",
+    "desktop/src-tauri/src/claude/schema_vectors.rs (Rust), which declares the",
+    "corresponding Rust shapes and asserts per property either equality or the exact",
+    "divergence — with the guidance a port needs written at its site.",
+    "Two rules every port depends on: a jsonschema tag is the description verbatim",
+    "(the 'required,' prefix included, and it is not a directive), and a field is",
+    "optional only when it carries omitempty or omitzero.",
+    "Regenerate with: go test ./desktop/parity/ -run TestJSONSchemaReflectVectors -update-jsonschema-reflect-vectors"
+  ],
+  "schema": {
+    "type": "object",
+    "properties": {
+      "required_string": {
+        "type": "string",
+        "description": "required,A required string"
+      },
+      "optional_string": {
+        "type": "string",
+        "description": "An optional string"
+      },
+      "omitzero_string": {
+        "type": "string",
+        "description": "An omitzero string"
+      },
+      "untagged": {
+        "type": "string"
+      },
+      "int": {
+        "type": "integer",
+        "description": "A plain int"
+      },
+      "int64": {
+        "type": "integer",
+        "description": "An int64"
+      },
+      "int32": {
+        "type": "integer",
+        "description": "An int32",
+        "minimum": -2147483648,
+        "maximum": 2147483647
+      },
+      "uint": {
+        "type": "integer",
+        "description": "A uint",
+        "minimum": 0
+      },
+      "float": {
+        "type": "number",
+        "description": "A float64"
+      },
+      "bool": {
+        "type": "boolean",
+        "description": "A bool"
+      },
+      "strings": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "description": "A string slice"
+      },
+      "strings_omitempty": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "description": "An omitempty string slice"
+      },
+      "nested": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The nested name"
+          },
+          "count": {
+            "type": "integer",
+            "description": "The nested count"
+          }
+        },
+        "description": "A nested struct",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "nested_ptr": {
+        "type": [
+          "null",
+          "object"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The nested name"
+          },
+          "count": {
+            "type": "integer",
+            "description": "The nested count"
+          }
+        },
+        "description": "A pointer to a nested struct",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      },
+      "ptr_string": {
+        "type": [
+          "null",
+          "string"
+        ],
+        "description": "A pointer to a string"
+      },
+      "map": {
+        "type": "object",
+        "description": "A map of strings",
+        "additionalProperties": {
+          "type": "string"
+        }
+      }
+    },
+    "required": [
+      "required_string",
+      "untagged",
+      "int",
+      "int64",
+      "int32",
+      "uint",
+      "float",
+      "bool",
+      "strings",
+      "nested",
+      "ptr_string",
+      "map"
+    ],
+    "additionalProperties": false
+  },
+  "required": [
+    "required_string",
+    "untagged",
+    "int",
+    "int64",
+    "int32",
+    "uint",
+    "float",
+    "bool",
+    "strings",
+    "nested",
+    "ptr_string",
+    "map"
+  ],
+  "properties": [
+    {
+      "name": "required_string",
+      "required": true,
+      "schema": {
+        "type": "string",
+        "description": "required,A required string"
+      }
+    },
+    {
+      "name": "optional_string",
+      "required": false,
+      "schema": {
+        "type": "string",
+        "description": "An optional string"
+      }
+    },
+    {
+      "name": "omitzero_string",
+      "required": false,
+      "schema": {
+        "type": "string",
+        "description": "An omitzero string"
+      }
+    },
+    {
+      "name": "untagged",
+      "required": true,
+      "schema": {
+        "type": "string"
+      }
+    },
+    {
+      "name": "int",
+      "required": true,
+      "schema": {
+        "type": "integer",
+        "description": "A plain int"
+      }
+    },
+    {
+      "name": "int64",
+      "required": true,
+      "schema": {
+        "type": "integer",
+        "description": "An int64"
+      }
+    },
+    {
+      "name": "int32",
+      "required": true,
+      "schema": {
+        "type": "integer",
+        "description": "An int32",
+        "minimum": -2147483648,
+        "maximum": 2147483647
+      }
+    },
+    {
+      "name": "uint",
+      "required": true,
+      "schema": {
+        "type": "integer",
+        "description": "A uint",
+        "minimum": 0
+      }
+    },
+    {
+      "name": "float",
+      "required": true,
+      "schema": {
+        "type": "number",
+        "description": "A float64"
+      }
+    },
+    {
+      "name": "bool",
+      "required": true,
+      "schema": {
+        "type": "boolean",
+        "description": "A bool"
+      }
+    },
+    {
+      "name": "strings",
+      "required": true,
+      "schema": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "description": "A string slice"
+      }
+    },
+    {
+      "name": "strings_omitempty",
+      "required": false,
+      "schema": {
+        "type": [
+          "null",
+          "array"
+        ],
+        "items": {
+          "type": "string"
+        },
+        "description": "An omitempty string slice"
+      }
+    },
+    {
+      "name": "nested",
+      "required": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The nested name"
+          },
+          "count": {
+            "type": "integer",
+            "description": "The nested count"
+          }
+        },
+        "description": "A nested struct",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "nested_ptr",
+      "required": false,
+      "schema": {
+        "type": [
+          "null",
+          "object"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The nested name"
+          },
+          "count": {
+            "type": "integer",
+            "description": "The nested count"
+          }
+        },
+        "description": "A pointer to a nested struct",
+        "required": [
+          "name"
+        ],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ptr_string",
+      "required": true,
+      "schema": {
+        "type": [
+          "null",
+          "string"
+        ],
+        "description": "A pointer to a string"
+      }
+    },
+    {
+      "name": "map",
+      "required": true,
+      "schema": {
+        "type": "object",
+        "description": "A map of strings",
+        "additionalProperties": {
+          "type": "string"
+        }
+      }
+    }
+  ]
+}

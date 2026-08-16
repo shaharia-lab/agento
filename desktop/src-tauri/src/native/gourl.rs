@@ -49,13 +49,44 @@
 //! languages' tests, exactly as `gopath_vectors.json` is, so these functions are
 //! pinned to what Go does rather than to what this comment believes.
 
-/// Bytes Go's `escape(s, encodePath)` leaves alone.
+/// Which of `net/url`'s escaping modes a byte is being judged under.
 ///
-/// Transcribed from `shouldEscape` in `net/url/url.go`, `encodePath` arm:
-/// alphanumerics and the unreserved marks are never escaped; of the reserved
-/// set `$ & + , / : ; = ? @` a path may carry every one **except** `?`; and
-/// everything else — every byte over 0x7F included — is escaped.
-fn should_escape(c: u8) -> bool {
+/// Go's `shouldEscape` takes this as a parameter and the three arms genuinely
+/// differ — which is the whole reason this enum exists rather than one
+/// function. `escape_path` was the only mode until #312; the GitHub integration
+/// needs the other two, and reaching for the wrong one is invisible in a
+/// response.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Encoding {
+    /// `encodePath` — a whole path. What [`route_path`]'s canonical check runs
+    /// under.
+    Path,
+    /// `encodePathSegment` — what `url.PathEscape` uses, and what every
+    /// `url.PathEscape(p.Owner)` in `internal/integrations/` is.
+    PathSegment,
+    /// `encodeQueryComponent` — what `url.QueryEscape` uses, and therefore what
+    /// `url.Values.Encode` applies to every key and value.
+    QueryComponent,
+}
+
+/// Bytes Go's `escape(s, mode)` leaves alone.
+///
+/// Transcribed from `shouldEscape` in `net/url/url.go`: alphanumerics and the
+/// unreserved marks `-_.~` are never escaped in any mode, everything else —
+/// every byte over 0x7F included — always is, and the reserved set
+/// `$ & + , / : ; = ? @` is where the modes part company:
+///
+/// | mode | escapes, of the reserved set |
+/// |---|---|
+/// | `encodePath` | `?` |
+/// | `encodePathSegment` | `/ ; , ?` |
+/// | `encodeQueryComponent` | all of them |
+///
+/// The two that bite: a **query** escapes `~`'s neighbours but not `~` itself
+/// while escaping `*` (`form_urlencoded`, already in this tree, does the exact
+/// reverse), and a **path segment** escapes `/` where a whole path does not —
+/// which is what stops a repository named `a/b` from becoming two segments.
+fn should_escape(c: u8, mode: Encoding) -> bool {
     if c.is_ascii_alphanumeric() {
         return false;
     }
@@ -64,8 +95,12 @@ fn should_escape(c: u8) -> bool {
         // The RFC allows `: @ & = + $` in a path and reserves `/ ; ,` for
         // assigning meaning to individual segments; `net/url` manipulates the
         // path as a whole and so allows those three too. That leaves `?`.
-        b'$' | b'&' | b'+' | b',' | b'/' | b':' | b';' | b'=' | b'@' => false,
-        b'?' => true,
+        b'$' | b'&' | b'+' | b',' | b'/' | b':' | b';' | b'=' | b'?' | b'@' => match mode {
+            Encoding::Path => c == b'?',
+            Encoding::PathSegment => matches!(c, b'/' | b';' | b',' | b'?'),
+            // "The RFC reserves (so we must escape) everything."
+            Encoding::QueryComponent => true,
+        },
         _ => true,
     }
 }
@@ -76,7 +111,27 @@ fn should_escape(c: u8) -> bool {
 /// `encodeQueryComponent`, and using it here would make every path holding a
 /// space look non-canonical and flip [`route_path`] to the wrong branch.
 pub fn escape_path(s: &str) -> String {
-    escape_bytes(s.as_bytes())
+    escape_bytes(s.as_bytes(), Encoding::Path)
+}
+
+/// Go's `url.PathEscape` — `escape(s, encodePathSegment)`.
+///
+/// One segment, so `/` is escaped: this is what every
+/// `fmt.Sprintf("/repos/%s/%s", url.PathEscape(owner), url.PathEscape(repo))`
+/// in `internal/integrations/` relies on, and a repository literally named
+/// `a/b` is the case that shows it.
+pub fn path_escape(s: &str) -> String {
+    escape_bytes(s.as_bytes(), Encoding::PathSegment)
+}
+
+/// Go's `url.QueryEscape` — `escape(s, encodeQueryComponent)`, space included.
+///
+/// The space rule lives in `escape` rather than in `shouldEscape`: a space
+/// becomes `+`, not `%20`. That is the one byte where this and
+/// percent-encoding-by-the-RFC visibly disagree, and `url.Values.Encode` puts
+/// it in every search query a user types.
+pub fn query_escape(s: &str) -> String {
+    escape_bytes(s.as_bytes(), Encoding::QueryComponent)
 }
 
 /// The same function over bytes, which is what [`route_path`] needs.
@@ -85,11 +140,15 @@ pub fn escape_path(s: &str) -> String {
 /// canonical check has to run before anything demands UTF-8 — see
 /// [`route_path`]. The output is ASCII either way: every byte over 0x7F is
 /// escaped, so `char` is safe here for exactly the reason `should_escape` says.
-fn escape_bytes(bytes: &[u8]) -> String {
+fn escape_bytes(bytes: &[u8], mode: Encoding) -> String {
     const UPPERHEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(bytes.len());
     for &c in bytes {
-        if should_escape(c) {
+        // Go tests this *before* `shouldEscape`, and only in this mode: a space
+        // is `+` in a query component and `%20` everywhere else.
+        if c == b' ' && mode == Encoding::QueryComponent {
+            out.push('+');
+        } else if should_escape(c, mode) {
             out.push('%');
             out.push(UPPERHEX[(c >> 4) as usize] as char);
             out.push(UPPERHEX[(c & 15) as usize] as char);
@@ -98,6 +157,50 @@ fn escape_bytes(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// Go's `url.Values`, restricted to the one shape every caller here uses.
+///
+/// `url.Values` is a `map[string][]string`, but every construction in
+/// `internal/integrations/` is a sequence of `q.Set(k, v)` — which *replaces* —
+/// so one value per key models it exactly, and a `BTreeMap` gives
+/// [`Values::encode`] the sorted-key iteration `Encode` performs explicitly.
+///
+/// The sorting is not cosmetic. It is what makes a request reproducible, which
+/// is what lets `desktop/parity/github_vectors.json` pin the encoded target of
+/// every paged tool.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Values(std::collections::BTreeMap<String, String>);
+
+impl Values {
+    /// An empty set of parameters — `url.Values{}`.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `Values.Set`: replaces whatever was under `key`.
+    pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.0.insert(key.into(), value.into());
+    }
+
+    /// `Values.Encode`: `k=v` pairs joined by `&`, keys sorted, both halves
+    /// through [`query_escape`].
+    ///
+    /// An empty set encodes to `""` — which the callers rely on, since they all
+    /// append it after a literal `?` and Go produces a bare trailing `?` in
+    /// exactly the same case.
+    pub fn encode(&self) -> String {
+        let mut out = String::new();
+        for (key, value) in &self.0 {
+            if !out.is_empty() {
+                out.push('&');
+            }
+            out.push_str(&query_escape(key));
+            out.push('=');
+            out.push_str(&query_escape(value));
+        }
+        out
+    }
 }
 
 /// Go's `unescape(s, encodePath)`: `%XX` becomes one byte, everything else is
@@ -160,7 +263,7 @@ pub fn route_path(raw: &str) -> Option<String> {
     // `url.setPath`: the escaping is canonical exactly when re-encoding the
     // decoded path reproduces what arrived, and that is when `RawPath` stays
     // empty and chi falls through to the decoded `URL.Path`.
-    if escape_bytes(&decoded) == raw {
+    if escape_bytes(&decoded, Encoding::Path) == raw {
         String::from_utf8(decoded).ok()
     } else {
         // Non-canonical: chi routes on `RawPath`, which is the request target
@@ -195,6 +298,8 @@ mod tests {
     struct Vectors {
         route_path: Vec<RoutePathCase>,
         escape_path: Vec<EscapeCase>,
+        path_escape: Vec<EscapeCase>,
+        query_escape: Vec<EscapeCase>,
     }
 
     fn vectors() -> Vectors {
@@ -236,6 +341,65 @@ mod tests {
                 case.value
             );
         }
+    }
+
+    /// The two modes every ported integration builds a request with.
+    #[test]
+    fn path_and_query_escaping_match_the_go_vectors() {
+        let v = vectors();
+        assert!(v.path_escape.len() >= 20, "vectors look truncated");
+        for case in v.path_escape {
+            assert_eq!(
+                path_escape(&case.value),
+                case.want,
+                "url.PathEscape({:?})",
+                case.value
+            );
+        }
+        for case in v.query_escape {
+            assert_eq!(
+                query_escape(&case.value),
+                case.want,
+                "url.QueryEscape({:?})",
+                case.value
+            );
+        }
+    }
+
+    /// The three bytes a reader is most likely to assume, spelled out here so
+    /// the rule is legible without opening the vectors — and because each is a
+    /// place an off-the-shelf encoder disagrees with Go.
+    #[test]
+    fn the_two_modes_disagree_exactly_where_go_says_they_do() {
+        // A segment escapes `/`; a whole path does not. This is what keeps a
+        // repository named `a/b` one segment.
+        assert_eq!(path_escape("a/b"), "a%2Fb");
+        assert_eq!(escape_path("a/b"), "a/b");
+        // A space is `+` in a query and `%20` in a segment.
+        assert_eq!(query_escape("a b"), "a+b");
+        assert_eq!(path_escape("a b"), "a%20b");
+        // `~` survives and `*` does not — `form_urlencoded` does the reverse.
+        assert_eq!(query_escape("~a*b"), "~a%2Ab");
+    }
+
+    /// `Values.Encode` sorts by key and escapes both halves, which is what
+    /// makes every paged GitHub request reproducible.
+    #[test]
+    fn values_encode_sorts_keys_and_escapes_both_halves() {
+        let mut values = Values::new();
+        values.set("per_page", "30");
+        values.set("q", "repo:o/r func foo");
+        values.set("labels", "bug,help wanted");
+        assert_eq!(
+            values.encode(),
+            "labels=bug%2Chelp+wanted&per_page=30&q=repo%3Ao%2Fr+func+foo"
+        );
+
+        // `Set` replaces, and an empty set is the empty string — the callers
+        // append it after a literal `?` either way.
+        values.set("per_page", "100");
+        assert!(values.encode().contains("per_page=100"));
+        assert_eq!(Values::new().encode(), "");
     }
 
     /// The four rows of the module header's table, spelled out so a reader of
