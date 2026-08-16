@@ -32,6 +32,7 @@ pub mod page;
 pub mod projects;
 pub mod query;
 pub mod summary;
+pub mod update;
 
 use axum::http::Method;
 
@@ -92,29 +93,37 @@ fn route_of(path: &str) -> Option<Route<'_>> {
 
 fn claims(method: &Method, path: &str) -> bool {
     match route_of(path) {
-        // The one write. Claimed for POST alone, so a GET of the same path
-        // still forwards and gets chi's own 405.
+        // The two writes, each claimed for its own method only, so the wrong
+        // pairing still forwards and gets chi's own 405.
         Some(Route::Continue(_)) => method == Method::POST,
+        Some(Route::Detail(_)) => method == Method::GET || method == Method::PATCH,
         Some(_) => method == Method::GET,
         None => false,
     }
 }
 
-/// Answer one of the four reads.
+/// Answer one of the four reads, or one of the two writes.
 ///
 /// **`/status` and `/refresh` are not here, and that is a decision rather than
-/// an omission.** Both are about the *scan*: `/status` reports
-/// `scan_in_progress`, `files_done` and `files_total`, which are in-memory
-/// state of the scanner running inside the Go sidecar, and `/refresh`
-/// invalidates the cache and starts one. Rust deliberately does not own
-/// scanning — `native/db.rs` opens the database **read-only** precisely so two
-/// processes never write one SQLite file — so a native `/status` could only
-/// answer `false`/`0`, which would be actively wrong while a Go scan runs and
-/// would blank the "Scanning ~/.claude… 412 / 1,373" the list shows during a
-/// first run. They move when the scanner is wired in, which is phase 3.
+/// an omission.** Both are about the *scan*, which since #289 the shell owns —
+/// `/status` reports `scan_in_progress`, `files_done` and `files_total`, and
+/// `/refresh` invalidates the markers and starts one. All of that is
+/// `native/scan.rs`'s state, so both routes live there with it rather than
+/// here with the reads that merely ask it to stay fresh.
 fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
     if let Some(Route::Continue(id)) = route_of(req.path) {
         return crate::native::writes::finish(continue_chat::continue_session(&ctx.db_path, id));
+    }
+
+    // `PATCH /api/claude-sessions/{id}` (#296) shares its path with the detail
+    // read, so the method is what separates them.
+    if req.method == Method::PATCH {
+        return match route_of(req.path) {
+            Some(Route::Detail(id)) => {
+                crate::native::writes::finish(update::update(&ctx.db_path, id, req.body))
+            }
+            _ => Err(format!("PATCH {} is not ported", req.path)),
+        };
     }
 
     if let Some(Route::Detail(id)) = route_of(req.path) {
