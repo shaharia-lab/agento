@@ -378,7 +378,9 @@ struct PatchChatRequest {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct BulkDeleteRequest {
-    ids: Option<Vec<String>>,
+    /// A `null` element is `""` to Go, not an error (#295) — and an empty id
+    /// simply matches no row, exactly as Go's does.
+    ids: Option<super::gojson::GoList<String>>,
 }
 
 /// Go's `maxQueryLimit`, reused as the bulk-delete cap.
@@ -1128,6 +1130,24 @@ mod tests {
 
         // An id that does not exist is not an error here, unlike the single
         // delete — the statement simply matches nothing.
+        let remaining = list(file.path()).expect("list");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, keep);
+    }
+
+    /// A `null` element is `""` to Go — no error — and an empty id simply
+    /// matches no row, so the other two are still deleted. Reverting the
+    /// deserializer makes this a 400 for a request Go applies (#295).
+    #[test]
+    fn a_null_id_is_an_empty_string_rather_than_a_400() {
+        let file = migrated();
+        let a = created_id(&create(file.path(), b"{}").expect("a"));
+        let keep = created_id(&create(file.path(), b"{}").expect("keep"));
+
+        let payload = format!(r#"{{"ids":["{a}",null]}}"#);
+        let answer = bulk_delete(file.path(), payload.as_bytes()).expect("bulk");
+        assert_eq!(answer.status, StatusCode::NO_CONTENT);
+
         let remaining = list(file.path()).expect("list");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, keep);

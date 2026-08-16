@@ -155,7 +155,7 @@ pub fn build_options(
     Ok(opts)
 }
 
-fn capability_count(list: Option<&Vec<String>>) -> usize {
+fn capability_count(list: Option<&crate::native::gojson::GoList<String>>) -> usize {
     list.map(|l| l.len()).unwrap_or(0)
 }
 
@@ -167,7 +167,7 @@ fn allowed_tools(caps: Option<&Capabilities>) -> Vec<String> {
         return Vec::new();
     };
     if capability_count(caps.built_in.as_ref()) > 0 {
-        return caps.built_in.clone().unwrap_or_default();
+        return caps.built_in.as_deref().cloned().unwrap_or_default();
     }
     if capability_count(caps.local.as_ref()) == 0 && caps.mcp.as_ref().is_none_or(|m| m.is_empty())
     {
@@ -414,7 +414,7 @@ mod tests {
     #[test]
     fn an_explicit_built_in_list_wins() {
         let caps = Capabilities {
-            built_in: Some(vec!["Read".into(), "Bash".into()]),
+            built_in: Some(vec!["Read".into(), "Bash".into()].into()),
             local: None,
             mcp: None,
         };
@@ -436,13 +436,13 @@ mod tests {
         mcp.insert(
             "github".to_string(),
             crate::native::agents::McpCapability {
-                tools: Some(vec!["list_prs".into()]),
+                tools: Some(vec!["list_prs".into()].into()),
             },
         );
         let caps = Capabilities {
             built_in: None,
             local: None,
-            mcp: Some(mcp),
+            mcp: Some(mcp.into()),
         };
         assert!(allowed_tools(Some(&caps)).is_empty());
     }
@@ -465,7 +465,7 @@ mod tests {
             agent: Some(agent_with(Capabilities {
                 built_in: None,
                 local: None,
-                mcp: Some(mcp),
+                mcp: Some(mcp.into()),
             })),
             fallback_model: String::new(),
             working_dir: String::new(),
@@ -484,7 +484,7 @@ mod tests {
         let spec = RunSpec {
             agent: Some(agent_with(Capabilities {
                 built_in: None,
-                local: Some(vec!["now".into()]),
+                local: Some(vec!["now".into()].into()),
                 mcp: None,
             })),
             fallback_model: String::new(),
