@@ -1,0 +1,159 @@
+// Cross-language golden for the notification email template.
+//
+// Every other parity fixture in this directory pins a JSON *response*, because
+// that is what the shared frontend reads. This one pins something no API ever
+// returns: the subject line and the HTML body of an email a person opens. The
+// desktop shell has to send the same mail the Go server sends, and nothing
+// downstream would notice if it did not — there is no schema to fail, no field
+// name to mismatch, and the first report would be a user saying the email
+// "looks different".
+//
+// The escaping is the part that needs a golden rather than a reading of the
+// code. `{{.Body}}` goes through `html/template`'s htmlEscaper, whose
+// replacement table has **eight** entries: it escapes `+`, `=` and NUL on top
+// of the five characters every general-purpose HTML escaper handles. `=` shows
+// up in practically every real notification, because `NotificationHandler.Handle`
+// builds the body from `key: value` lines. A Rust port written against the
+// obvious five-character rule renders `x&#61;1` as `x=1` and looks perfectly
+// fine until someone diffs two emails.
+//
+// The template itself is the other half: `html/template` **elides HTML
+// comments**, and `emailTmpl` carries six. The rendered skeleton the Rust side
+// carries is Go's output, not Go's source, and this golden is what fails if
+// that copy goes stale.
+//
+// Regenerate (only from Go, and only when template.go changes):
+//
+//	go test ./desktop/parity/ -run TestNotificationTemplateGolden -update-notification-template-golden
+//
+// The other half lives in
+// desktop/src-tauri/src/native/notifications/template.rs.
+package parity
+
+import (
+	"encoding/json"
+	"flag"
+	"os"
+	"testing"
+
+	"github.com/shaharia-lab/agento/internal/notification"
+)
+
+const notificationTemplateGoldenFile = "notification_template_golden.json"
+
+var updateNotificationTemplateGolden = flag.Bool(
+	"update-notification-template-golden", false,
+	"rewrite notification_template_golden.json from this Go implementation")
+
+type notificationTemplateGolden struct {
+	Comment []string                   `json:"_comment"`
+	Cases   []notificationTemplateCase `json:"cases"`
+}
+
+type notificationTemplateCase struct {
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+	// Prefixed records whether WantSubject came from buildSubject. The last
+	// case deliberately did not, so the in-body title exercises TrimPrefix's
+	// no-match arm — and a port must not assert buildSubject over it.
+	Prefixed    bool   `json:"prefixed"`
+	WantSubject string `json:"want_subject"`
+	WantHTML    string `json:"want_html"`
+}
+
+// templateInputs covers each escaping class separately, so a failure names the
+// rule that broke rather than "the HTML differs":
+//
+//   - the two real subjects `humanSubject` produces, and the test send's;
+//   - a `key: value` body, which is the shape every scheduled-task email has;
+//   - the three characters a five-entry escaper misses, on their own;
+//   - the five it does not, so a port cannot pass by escaping nothing;
+//   - a subject that does **not** carry the prefix, because the in-body title
+//     is `TrimPrefix` rather than "drop 22 characters";
+//   - non-ASCII, which is not escaped at all and must survive as UTF-8.
+var templateInputs = []struct{ subject, body string }{
+	{"Scheduled Task Completed Successfully", "task: nightly-digest\nstatus: ok"},
+	{"Scheduled Task Execution Failed", "task: nightly-digest\nerror: exit status 1"},
+	{"Test Notification", "This is a test notification from Agento.\n\nYour SMTP configuration is working correctly."},
+	{"Equals And Plus", "a+b=c"},
+	{"Angles", "<script>alert('x')</script> & \"quotes\""},
+	{"Nul", "before\x00after"},
+	{"Unicode — em dash, ümlaut, 日本語", "path: /home/u/Projekte/agento — ok"},
+	{"", ""},
+}
+
+func TestNotificationTemplateGolden(t *testing.T) {
+	cases := make([]notificationTemplateCase, 0, len(templateInputs)+1)
+	for _, in := range templateInputs {
+		subject := notification.SubjectPrefix + in.subject
+		html, err := notification.BuildEmailHTML(subject, in.body)
+		if err != nil {
+			t.Fatalf("rendering %q: %v", in.subject, err)
+		}
+		cases = append(cases, notificationTemplateCase{
+			Subject:     in.subject,
+			Body:        in.body,
+			Prefixed:    true,
+			WantSubject: subject,
+			WantHTML:    html,
+		})
+	}
+
+	// A subject that never went through buildSubject, so the in-body title is
+	// the whole subject rather than a trimmed one.
+	bare := "Bare Subject With No Prefix"
+	bareHTML, err := notification.BuildEmailHTML(bare, "body")
+	if err != nil {
+		t.Fatalf("rendering the unprefixed subject: %v", err)
+	}
+	cases = append(cases, notificationTemplateCase{
+		Subject:     bare,
+		Body:        "body",
+		Prefixed:    false,
+		WantSubject: bare,
+		WantHTML:    bareHTML,
+	})
+
+	golden := notificationTemplateGolden{
+		Comment: []string{
+			"Generated by desktop/parity/notification_template_parity_test.go from the Go",
+			"implementation in internal/notification/template.go. Do not hand-edit.",
+			"Regenerate: go test ./desktop/parity/ -run TestNotificationTemplateGolden -update-notification-template-golden",
+			"Asserted by Go here and by desktop/src-tauri/src/native/notifications/template.rs.",
+		},
+		Cases: cases,
+	}
+
+	if *updateNotificationTemplateGolden {
+		out, err := json.MarshalIndent(golden, "", "  ")
+		if err != nil {
+			t.Fatalf("encoding golden: %v", err)
+		}
+		if err := os.WriteFile(notificationTemplateGoldenFile, append(out, '\n'), 0o600); err != nil {
+			t.Fatalf("writing golden: %v", err)
+		}
+		t.Logf("wrote %s with %d cases", notificationTemplateGoldenFile, len(cases))
+		return
+	}
+
+	raw, err := os.ReadFile(notificationTemplateGoldenFile)
+	if err != nil {
+		t.Fatalf("reading golden (regenerate with -update-notification-template-golden): %v", err)
+	}
+	var stored notificationTemplateGolden
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatalf("decoding golden: %v", err)
+	}
+	if len(stored.Cases) != len(cases) {
+		t.Fatalf("golden has %d cases, this run produced %d", len(stored.Cases), len(cases))
+	}
+	for i, want := range stored.Cases {
+		got := cases[i]
+		if got.WantSubject != want.WantSubject {
+			t.Errorf("case %d subject: got %q, golden %q", i, got.WantSubject, want.WantSubject)
+		}
+		if got.WantHTML != want.WantHTML {
+			t.Errorf("case %d html differs from the golden; regenerate if template.go changed on purpose", i)
+		}
+	}
+}

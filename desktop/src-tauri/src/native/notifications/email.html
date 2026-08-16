@@ -1,20 +1,4 @@
-package notification
-
-import (
-	"bytes"
-	"html/template"
-	"strings"
-)
-
-// SubjectPrefix is prepended to every outgoing notification subject.
-const SubjectPrefix = "Agento Notification - "
-
-// subjectPrefix is the unexported alias used within this package.
-const subjectPrefix = SubjectPrefix
-
-// emailTmpl is the HTML wrapper applied to every outgoing notification.
-// All fields are auto-escaped by html/template.
-var emailTmpl = template.Must(template.New("email").Parse(`<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -31,13 +15,13 @@ var emailTmpl = template.Must(template.New("email").Parse(`<!DOCTYPE html>
                style="max-width:600px;width:100%;border-radius:12px;
                       box-shadow:0 1px 3px rgba(0,0,0,.10);">
 
-          <!-- ── Header ────────────────────────────────────────── -->
+          
           <tr>
             <td style="background-color:#ffffff;padding:24px 32px;
                        border-radius:12px 12px 0 0;border-bottom:1px solid #e5e7eb;">
               <table width="100%" cellpadding="0" cellspacing="0" role="presentation">
                 <tr>
-                  <!-- Logo -->
+                  
                   <td style="vertical-align:middle;">
                     <table cellpadding="0" cellspacing="0" role="presentation">
                       <tr>
@@ -57,7 +41,7 @@ var emailTmpl = template.Must(template.New("email").Parse(`<!DOCTYPE html>
                       </tr>
                     </table>
                   </td>
-                  <!-- Badge -->
+                  
                   <td align="right" style="vertical-align:middle;">
                     <span style="font-size:10px;font-weight:600;letter-spacing:0.8px;
                                  color:#6b7280;background-color:#f3f4f6;
@@ -70,7 +54,7 @@ var emailTmpl = template.Must(template.New("email").Parse(`<!DOCTYPE html>
             </td>
           </tr>
 
-          <!-- ── Title ─────────────────────────────────────────── -->
+          
           <tr>
             <td style="background-color:#f9fafb;padding:20px 32px;
                        border-bottom:1px solid #e5e7eb;">
@@ -79,7 +63,7 @@ var emailTmpl = template.Must(template.New("email").Parse(`<!DOCTYPE html>
             </td>
           </tr>
 
-          <!-- ── Body ──────────────────────────────────────────── -->
+          
           <tr>
             <td style="background-color:#ffffff;padding:32px;">
               <div style="font-size:14px;line-height:1.75;color:#374151;
@@ -87,7 +71,7 @@ var emailTmpl = template.Must(template.New("email").Parse(`<!DOCTYPE html>
             </td>
           </tr>
 
-          <!-- ── Footer ────────────────────────────────────────── -->
+          
           <tr>
             <td style="background-color:#f9fafb;padding:18px 32px;
                        border-top:1px solid #e5e7eb;border-radius:0 0 12px 12px;">
@@ -107,30 +91,3 @@ var emailTmpl = template.Must(template.New("email").Parse(`<!DOCTYPE html>
   </table>
 </body>
 </html>
-`))
-
-// buildSubject prepends the standard prefix to a subject line.
-func buildSubject(subject string) string {
-	return subjectPrefix + subject
-}
-
-// BuildEmailHTML renders the HTML email template.
-// The in-body title strips the prefix so it reads cleanly inside the email.
-//
-// Exported for the same reason SubjectPrefix is: the desktop shell ports this
-// renderer, and desktop/parity pins what Go produces so the two cannot drift.
-// The mail is read by a person rather than parsed by anything, so a divergence
-// has nothing downstream to report it.
-func BuildEmailHTML(subject, body string) (string, error) {
-	title := strings.TrimPrefix(subject, SubjectPrefix)
-	var buf bytes.Buffer
-	err := emailTmpl.Execute(&buf, struct {
-		FullSubject string
-		Title       string
-		Body        string
-	}{subject, title, body})
-	if err != nil {
-		return "", err
-	}
-	return buf.String(), nil
-}

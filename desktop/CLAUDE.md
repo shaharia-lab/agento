@@ -144,7 +144,10 @@ src-tauri/src/
     settings.rs  GET /api/settings; also the preferences + config dirs a read is scoped to
     monitoring.rs GET /api/monitoring — monitoring.json and the OTEL_* locks, no exporters
     version.rs   GET /api/version and /version/update-check (dev builds only)
-    notifications.rs GET /api/notifications/settings (password masked) and /log
+    notifications/ the settings read (password masked), /log, the settings
+                 write and the test send (#307)
+      template.rs  html/template's escaper, and why the skeleton is Go's output
+      smtp.rs      go-mail's TLS policy — `ssl_tls` is *STARTTLS*, not SMTPS
     integrations.rs GET /api/integrations, /{id}, /available-tools, /{id}/triggers —
                  credentials are never selected and auth is a bool made in SQL;
                  plus POST /api/integrations and the trigger-rule writes (#277).
@@ -826,6 +829,49 @@ the row counts do not shrink and the markers are recorded. It is `#[ignore]`d
 ```bash
 cargo test --test scan_live -- --ignored --nocapture
 ```
+
+### The notification sender (#307)
+
+`PUT /api/notifications/settings` and `POST /api/notifications/test` are
+native, and with them `internal/notification/{template,smtp}.go` — the only
+code in this shell that talks to a server we do not run. Four things about it
+are load-bearing:
+
+- **`encryption` does not mean what it says.** `tlsPolicyFromEncryption` hands
+  go-mail a *TLSPolicy*, and every policy there is about **STARTTLS**. go-mail's
+  implicit-TLS switch is `WithSSL()`, which Agento never calls — so `ssl_tls`
+  means *mandatory STARTTLS*, not SMTPS on 465. Reproducing that is the parity
+  bar; "fixing" it moves a working configuration to a port nothing answers on.
+- **The parity bar is the rendered mail, not JSON.** Nothing downstream parses
+  it, so a divergence has nothing to report it — the first sign would be a user
+  saying the email looks different. `desktop/parity/notification_template_golden.json`
+  is rendered by Go and asserted by both languages. It earned its keep
+  immediately: `html/template`'s text escaper is **seven** entries (the usual
+  five plus `+` and NUL), and this port had also escaped `=`, which lives in the
+  *nospace* table and applies to unquoted attribute values rather than text.
+  The template skeleton is Go's **output**, not its source, because
+  `html/template` elides HTML comments and `emailTmpl` has six.
+- **A failed send forwards; only success is answered.** Go's 400 carries
+  go-mail's and the Go runtime's wording, none of it reproducible. Forwarding
+  costs a second dial and is safe for one reason only: `send` reports success
+  after the server has accepted the message, so an error means nothing was
+  delivered. Nothing fallible may run after that point — the response bytes are
+  encoded before the dial for exactly that reason.
+- **The settings write touches one column**, where Go's `UpdateSettings` saves
+  all fourteen from the sidecar's boot-time snapshot. That is a deliberate
+  divergence in *mechanism*: it is the bug #305 reproduced (one notification
+  save reverting a natively-written hidden-project list and idle threshold), and
+  the only way to be observably identical would be to reproduce it.
+
+**The subscriber is not wired**, and cannot be: the event bus fires when a
+scheduled task finishes and the executor is #275's, still in the sidecar. What
+is ported is everything downstream of that call — settings → message → send.
+
+`cmd/web.go` changed with this, and had to. The sidecar's notification
+`SettingsLoader` read `settingsMgr.Get()`, an in-memory snapshot taken at boot;
+with a second writer that meant a native save left every scheduled-task email on
+the previous SMTP credentials until restart, silently. It reads the row now,
+which is what its own doc comment already promised.
 
 ### Do not port
 
