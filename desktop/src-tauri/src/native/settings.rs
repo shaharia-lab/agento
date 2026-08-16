@@ -230,12 +230,19 @@ fn claude_config_dirs(run_override: &str, extra: &[String]) -> Vec<String> {
 
 /// `~/.claude`, or `/root/.claude` when there is no home — the fallback Go's
 /// `DefaultClaudeConfigDir` uses.
+///
+/// Joined through [`super::gopath::join`] rather than `PathBuf::join` because
+/// Go's is `filepath.Join`, which **cleans**: with `HOME=/home//u` Go answers
+/// `/home/u/.claude` and a `PathBuf::join` would answer `/home//u/.claude`.
+/// Every other caller runs the result through [`normalize`] and so never saw
+/// the difference; `GET /api/settings/claude-config-dirs` puts it on the wire
+/// raw as `default`, where it would disagree with its own `indexed[0]`.
 pub fn default_claude_config_dir() -> String {
-    paths::home()
+    let home = paths::home()
         .unwrap_or_else(|| PathBuf::from("/root"))
-        .join(".claude")
         .to_string_lossy()
-        .into_owned()
+        .into_owned();
+    super::gopath::join(&[&home, ".claude"])
 }
 
 /// The single dir a run targets: `CLAUDE_CONFIG_DIR` first, then the stored
@@ -458,8 +465,18 @@ pub struct ClaudeConfigDirsResponse {
 }
 
 /// `handleClaudeConfigDirs`.
+///
+/// The row is read **through [`resolve`]**, not raw. Go answers `indexed` from
+/// the `config.claudeDirs` snapshot, which `ApplyClaudeDirs` installs from the
+/// *env-resolved* settings — and `applyEnvOverrides` overwrites
+/// `ClaudeConfigDir` with `ClaudeConfigDirFromEnv()` whenever that is non-blank,
+/// **including when the env value is relative**. So with a relative
+/// `CLAUDE_CONFIG_DIR` exported and an absolute value in the column, Go drops
+/// both (the env wins, then `absoluteDir` discards it) and falls back to the
+/// default dir; reading the raw row would drop only the env value and add a dir
+/// Go does not index.
 pub fn claude_config_dirs_response(conn: &Connection) -> ClaudeConfigDirsResponse {
-    let stored = load_stored(conn);
+    let stored = resolve(load_stored(conn)).settings;
     let indexed = claude_config_dirs(
         &stored.claude_config_dir,
         stored.claude_config_dirs.as_deref().unwrap_or_default(),
@@ -481,9 +498,15 @@ pub fn claude_config_dirs_response(conn: &Connection) -> ClaudeConfigDirsRespons
 /// - a **sibling of the default dir** — anywhere else is added by hand, because
 ///   suggesting is not discovering;
 /// - whose name starts with `.claude`;
-/// - which contains a `projects` **directory**. That is what keeps
-///   `.claude-backup` and `.claude.bak` out; they are the common shapes of a
-///   directory that merely looks like a config dir.
+/// - which contains a `projects` **directory** — the only filter beyond the
+///   prefix, and so the only thing that keeps a directory which merely *looks*
+///   like a config dir (the `.claude-backup` shape) out.
+///
+/// Go's own comment says the `projects` check "is what keeps `.claude-backup`
+/// and `.claude.bak` out". That is wrong about the second: the prefix match is
+/// literal, so `.claude.bak` **is** suggested whenever it has a `projects`
+/// directory — as the vectors below pin. Nothing distinguishes a name; only the
+/// `projects` directory does.
 ///
 /// Two Go details that a natural Rust rewrite gets wrong: `os.ReadDir`'s
 /// `DirEntry.IsDir` does **not** follow symlinks (so a symlink to a directory is
@@ -543,6 +566,16 @@ const MAX_IDLE_GAP_MINUTES: i64 = 240;
 /// write, and it is not the 422 the service layer's `ValidationError` produces —
 /// `SettingsManager` returns plain `fmt.Errorf` values and the handler flattens
 /// them all to 400.
+///
+/// One exception, and it is not a status: a failure of the machinery rather
+/// than of the request — opening the database, verifying the migrations, the
+/// `INSERT`, or encoding the answer — is a [`WriteError::Fallback`] and
+/// **forwards to Go** rather than answering at all, because those wrap driver
+/// and `os` errors whose Go text is not reproducible. The first three forward
+/// with nothing written, which is what makes forwarding safe; the encode
+/// happens after the row is saved, and forwarding there re-applies a `PUT`
+/// that replaces the whole row with the same values, so it is idempotent
+/// rather than merely harmless.
 pub fn update(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     update_with(db_path, body, super::scan::force_scan)
 }
@@ -939,11 +972,33 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
 /// because it is a filesystem probe rather than a row read; the probe is the
 /// only new part, and the `indexed` half it shares with the row cannot disagree
 /// with Go's snapshot while Go still owns every write to it.
+///
+/// It is claimed on **every** platform but answered only on Unix: [`serve`]
+/// forwards the probe on Windows, because it is `filepath` arithmetic and
+/// `native/gopath.rs` implements the Unix rules. Claiming platform-independently
+/// and refusing in `serve` is what `native/fs.rs` does, and it keeps the
+/// platform decision in one readable place rather than making the route vanish
+/// from the registry. Windows x86_64 is a shipped target
+/// (`.github/workflows/desktop-release.yml`) while desktop CI is ubuntu-only, so
+/// nothing else would catch it.
 fn claims(method: &Method, path: &str) -> bool {
     method == Method::GET && matches!(path, "/api/settings" | "/api/settings/claude-config-dirs")
 }
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
+    // The config-dir probe is `filepath` arithmetic on the real filesystem, and
+    // this port implements the **Unix** `filepath` (see `native/gopath.rs`,
+    // whose vectors are Unix-shaped). On Windows `gopath::dir` finds no `/` in
+    // `C:\Users\u\.claude` and answers `"."`, so the probe would list the
+    // process working directory instead of `$HOME`, and `gopath::join` would
+    // build `C:\Users\u/.claude-work`, which no `configured` entry can match —
+    // silently empty suggestions at best, an outright wrong list at worst.
+    // Forwarding is the seam's own mechanism for "cannot answer", exactly as
+    // `native/fs.rs` does. `GET /api/settings` is a plain row read and is
+    // deliberately still answered.
+    if !cfg!(unix) && req.path == "/api/settings/claude-config-dirs" {
+        return Err("the config-dir probe is not ported for Windows path semantics".to_string());
+    }
     let conn = super::db::open_read_only(&ctx.db_path)?;
     let body = if req.path == "/api/settings/claude-config-dirs" {
         super::gojson::to_vec(&claude_config_dirs_response(&conn))
@@ -1213,88 +1268,122 @@ mod tests {
 
     // ─── GET /api/settings/claude-config-dirs ─────────────────────────────────
 
-    /// A home laid out to exercise every clause of the discovery rule at once,
-    /// including the three shapes that look like candidates and are not.
-    fn candidate_home() -> tempfile::TempDir {
-        let home = tempfile::tempdir().expect("tempdir");
-        let root = home.path();
-        for dir in [
-            ".claude",
-            ".claude-work",
-            ".claude.bak",
-            ".clauded",
-            ".claude-alpha",
-            ".claude-zeta",
-        ] {
-            std::fs::create_dir_all(root.join(dir).join("projects")).expect("candidate");
-        }
-        // A `.claude*` dir with no `projects` — the `.claude-backup` shape.
-        std::fs::create_dir_all(root.join(".claude-backup")).expect("backup");
-        // `projects` exists but is a file, not a directory.
-        std::fs::create_dir_all(root.join(".claude-projfile")).expect("projfile");
-        std::fs::write(root.join(".claude-projfile").join("projects"), "").expect("projects file");
-        // A plain file whose name has the prefix.
-        std::fs::write(root.join(".claude-file"), "").expect("file");
-        // The right shape under the wrong name.
-        std::fs::create_dir_all(root.join("notclaude").join("projects")).expect("notclaude");
-        // A *symlink* to a perfectly good candidate. `os.ReadDir`'s `IsDir` does
-        // not follow it, so Go does not suggest it — and neither may this.
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(root.join(".claude-work"), root.join(".claude-link"))
-            .expect("symlink");
-        home
+    use crate::paths::tests::EnvVar;
+
+    /// `desktop/parity/claude_dirs_vectors.json`, generated from Go by
+    /// `desktop/parity/claude_dirs_parity_test.go`.
+    ///
+    /// A shared *primitive* rather than a response, so it takes the vector form
+    /// `desktop/CLAUDE.md`'s checklist names — the same arrangement
+    /// `gopath_vectors.json` uses. It has to be the vector form here: the four
+    /// exclusion shapes (a `.claude*` symlink, a `.claude*` dir with no
+    /// `projects`, one whose `projects` is a *file*, a plain file with the
+    /// prefix) exist in no real `$HOME`, so the live parity diff structurally
+    /// cannot re-verify them, and a hand-transcribed literal would pin only what
+    /// its author believed Go does. Both languages now assert against what Go
+    /// actually answered, and a change to Go's rule fails Go's own suite.
+    #[derive(Deserialize)]
+    struct DirVectorSymlink {
+        link: String,
+        target: String,
     }
 
-    /// Pinned to what a Go server built from this checkout answered over
-    /// exactly this layout, with `HOME` pointed at it.
+    #[derive(Deserialize)]
+    struct DirVectorLayout {
+        dirs: Vec<String>,
+        files: Vec<String>,
+        symlinks: Vec<DirVectorSymlink>,
+    }
+
+    #[derive(Deserialize)]
+    struct DirVectorCase {
+        name: String,
+        claude_config_dir_env: String,
+        run_dir: String,
+        extra: Vec<String>,
+        indexed: Vec<String>,
+        candidates: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct DirVectors {
+        layout: DirVectorLayout,
+        cases: Vec<DirVectorCase>,
+    }
+
+    /// Baked in rather than read at run time: the file is a build input, and a
+    /// missing one should fail the compile rather than one test.
+    const DIR_VECTORS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../parity/claude_dirs_vectors.json"
+    ));
+
+    /// The `$HOME` token the vectors record, since the home directory is a
+    /// fresh temp dir on both sides.
+    fn expand(path: &str, home: &str) -> String {
+        path.replace("$HOME", home)
+    }
+
+    fn expand_all(paths: &[String], home: &str) -> Vec<String> {
+        paths.iter().map(|p| expand(p, home)).collect()
+    }
+
+    /// Build the vectors' layout — the same tree the Go test built.
+    #[cfg(unix)]
+    fn build_layout(layout: &DirVectorLayout, root: &Path) {
+        for dir in &layout.dirs {
+            std::fs::create_dir_all(root.join(dir)).expect("layout dir");
+        }
+        for file in &layout.files {
+            std::fs::write(root.join(file), "").expect("layout file");
+        }
+        for link in &layout.symlinks {
+            std::os::unix::fs::symlink(root.join(&link.target), root.join(&link.link))
+                .expect("layout symlink");
+        }
+    }
+
+    /// Both halves of the endpoint, against Go's own answers over a home
+    /// directory built from the vectors.
     ///
-    /// Every entry is a rule, and four of them are exclusions that a natural
-    /// rewrite gets wrong: the symlink (`IsDir` does not follow), the dir with
-    /// no `projects`, the one whose `projects` is a file, and the plain file.
-    /// `.claude.bak` and `.clauded` are *included* — the prefix is literal and
-    /// the `projects` check is the only filter, whatever the doc comment's
-    /// examples suggest.
+    /// `#[cfg(unix)]` for the same reason the vectors are Unix-shaped and
+    /// [`serve`] forwards the route on Windows: the layout needs a symlink, and
+    /// the rule is `filepath` arithmetic this port implements for Unix only.
     #[test]
+    #[cfg(unix)]
     fn the_candidate_probe_matches_gos_discovery_rule() {
         let _env = crate::paths::tests::env_lock();
-        let home = candidate_home();
-        let previous_home = std::env::var_os("HOME");
-        let previous_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::env::set_var("HOME", home.path());
-        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let vectors: DirVectors =
+            serde_json::from_str(DIR_VECTORS).expect("parsing claude dir vectors");
+        assert!(vectors.cases.len() >= 5, "vectors look truncated");
 
+        let home = tempfile::tempdir().expect("tempdir");
+        build_layout(&vectors.layout, home.path());
         let root = home.path().to_string_lossy().into_owned();
-        let indexed = claude_config_dirs("", &[]);
-        assert_eq!(indexed, vec![format!("{root}/.claude")]);
-        assert_eq!(
-            discover_candidate_claude_dirs(&indexed),
-            Some(vec![
-                format!("{root}/.claude-alpha"),
-                format!("{root}/.claude-work"),
-                format!("{root}/.claude-zeta"),
-                format!("{root}/.claude.bak"),
-                format!("{root}/.clauded"),
-            ]),
-            "`-` < `.` < `d` — sort.Strings is a byte-order sort"
-        );
+        let _home_var = EnvVar::set("HOME", home.path());
 
-        // A configured dir is not a candidate: it is already in the set.
-        let indexed = claude_config_dirs(&format!("{root}/.claude-zeta"), &[]);
-        assert_eq!(
-            indexed,
-            vec![format!("{root}/.claude"), format!("{root}/.claude-zeta")],
-            "default first, then the run dir"
-        );
-        let candidates = discover_candidate_claude_dirs(&indexed).expect("listable");
-        assert!(!candidates.contains(&format!("{root}/.claude-zeta")));
-        assert!(candidates.contains(&format!("{root}/.claude-work")));
+        for case in &vectors.cases {
+            let _dir_var = match case.claude_config_dir_env.as_str() {
+                "" => EnvVar::unset("CLAUDE_CONFIG_DIR"),
+                value => EnvVar::set("CLAUDE_CONFIG_DIR", expand(value, &root)),
+            };
 
-        match previous_home {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
-        if let Some(d) = previous_dir {
-            std::env::set_var("CLAUDE_CONFIG_DIR", d);
+            let indexed = claude_config_dirs(
+                &expand(&case.run_dir, &root),
+                &expand_all(&case.extra, &root),
+            );
+            assert_eq!(
+                indexed,
+                expand_all(&case.indexed, &root),
+                "indexed — {}",
+                case.name
+            );
+            assert_eq!(
+                discover_candidate_claude_dirs(&indexed),
+                Some(expand_all(&case.candidates, &root)),
+                "candidates — {}",
+                case.name
+            );
         }
     }
 
@@ -1303,21 +1392,68 @@ mod tests {
     #[test]
     fn an_unlistable_home_is_null_and_an_empty_one_is_an_empty_array() {
         let _env = crate::paths::tests::env_lock();
-        let previous_home = std::env::var_os("HOME");
 
         let empty = tempfile::tempdir().expect("tempdir");
-        std::env::set_var("HOME", empty.path());
+        let _home_var = EnvVar::set("HOME", empty.path());
         assert_eq!(discover_candidate_claude_dirs(&[]), Some(Vec::new()));
 
         // `~/.claude`'s parent is the home directory, so a home that does not
         // exist is the unlistable case.
-        std::env::set_var("HOME", empty.path().join("gone"));
+        let _gone = EnvVar::set("HOME", empty.path().join("gone"));
         assert_eq!(discover_candidate_claude_dirs(&[]), None);
+    }
 
-        match previous_home {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
+    /// `default` is `filepath.Join(home, ".claude")`, and `filepath.Join`
+    /// **cleans** — `PathBuf::join` does not. This is the one caller whose
+    /// output reaches the wire without passing through [`normalize`], so a
+    /// non-clean `HOME` would put a `default` on the wire that disagrees with
+    /// the `indexed[0]` beside it.
+    #[test]
+    fn the_default_dir_is_cleaned_like_filepath_join() {
+        let _env = crate::paths::tests::env_lock();
+        let _home_var = EnvVar::set("HOME", "/home//u/");
+        assert_eq!(default_claude_config_dir(), "/home/u/.claude");
+        assert_eq!(
+            claude_config_dirs("", &[]),
+            vec!["/home/u/.claude".to_string()],
+            "`default` and `indexed[0]` are the same dir and must be spelled alike"
+        );
+    }
+
+    /// `indexed` is resolved from the **env-resolved** settings, not the raw
+    /// row: `applyEnvOverrides` overwrites `claude_config_dir` with
+    /// `CLAUDE_CONFIG_DIR` whenever that is non-blank — *including when the env
+    /// value is relative* — and `ApplyClaudeDirs` installs what is left. So a
+    /// relative env value drops the stored dir with it, and reading the raw row
+    /// would index a dir Go does not.
+    #[test]
+    fn a_relative_env_dir_drops_the_stored_run_dir_too() {
+        let _env = crate::paths::tests::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(home.path().join(".claude").join("projects")).expect("default dir");
+        let stored = home.path().join(".claude-work");
+        std::fs::create_dir_all(stored.join("projects")).expect("stored dir");
+
+        let _home_var = EnvVar::set("HOME", home.path());
+        let _dir_var = EnvVar::set("CLAUDE_CONFIG_DIR", "relative/dir");
+
+        let conn = fixture(Some(&format!(
+            "INSERT INTO user_settings (id, claude_config_dir) VALUES (1, '{}')",
+            stored.display()
+        )));
+        let response = claude_config_dirs_response(&conn);
+        assert_eq!(
+            response.indexed,
+            vec![home.path().join(".claude").to_string_lossy().into_owned()],
+            "the relative env value replaces the stored one before either is resolved"
+        );
+        assert!(
+            response
+                .candidates
+                .expect("listable")
+                .contains(&stored.to_string_lossy().into_owned()),
+            "and the dropped dir is offered as a candidate, exactly as Go offers it"
+        );
     }
 
     /// The envelope, byte for byte — including `default`, which is a Rust
@@ -1651,10 +1787,12 @@ mod tests {
         std::fs::create_dir_all(&pinned).expect("dir");
         std::fs::create_dir_all(&other).expect("dir");
 
-        let previous_url = std::env::var_os("AGENTO_PUBLIC_URL");
-        let previous_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
-        std::env::set_var("AGENTO_PUBLIC_URL", "https://example.test");
-        std::env::set_var("CLAUDE_CONFIG_DIR", pinned.to_string_lossy().as_ref());
+        // RAII, not a trailing restore: a failed assertion below panics past
+        // any epilogue, and these two variables would then leak into the rest
+        // of the binary — where six other tests skip themselves when anything
+        // is locked, silently turning one failure into seven.
+        let _url_var = EnvVar::set("AGENTO_PUBLIC_URL", "https://example.test");
+        let _dir_var = EnvVar::set("CLAUDE_CONFIG_DIR", pinned.to_string_lossy().as_ref());
 
         let file = migrated_db();
         let (status, body) = put(
@@ -1713,15 +1851,6 @@ mod tests {
             body.contains(&format!(r#""claude_config_dir":"{}""#, pinned.display())),
             "{body}"
         );
-
-        match previous_url {
-            Some(v) => std::env::set_var("AGENTO_PUBLIC_URL", v),
-            None => std::env::remove_var("AGENTO_PUBLIC_URL"),
-        }
-        match previous_dir {
-            Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
-            None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
-        }
     }
 
     /// `applyDataSettings`'s three cases, which are not symmetrical.

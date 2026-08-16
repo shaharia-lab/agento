@@ -142,8 +142,9 @@ src-tauri/src/
       persist.rs what a finished turn writes, and what an interrupted one does not
       sse.rs     the frame bytes: raw pass-through vs the two synthetic events
     settings.rs  GET /api/settings and /settings/claude-config-dirs (a filesystem
-                 probe); the preferences + config dirs a read is scoped to; and
-                 `update`, the PUT — written and tested, deliberately unclaimed
+                 probe; Unix, forwards on Windows); the preferences + config dirs
+                 a read is scoped to; and `update`, the PUT — written and tested,
+                 deliberately unclaimed
     monitoring.rs GET /api/monitoring — monitoring.json and the OTEL_* locks, no exporters
     version.rs   GET /api/version and /version/update-check (dev builds only)
     notifications/ the settings read (password masked), /log, the settings
