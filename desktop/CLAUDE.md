@@ -141,7 +141,9 @@ src-tauri/src/
       turn.rs    spawn, stream, and the AskUserQuestion continuation
       persist.rs what a finished turn writes, and what an interrupted one does not
       sse.rs     the frame bytes: raw pass-through vs the two synthetic events
-    settings.rs  GET /api/settings; also the preferences + config dirs a read is scoped to
+    settings.rs  GET /api/settings and /settings/claude-config-dirs (a filesystem
+                 probe); the preferences + config dirs a read is scoped to; and
+                 `update`, the PUT — written and tested, deliberately unclaimed
     monitoring.rs GET /api/monitoring — monitoring.json and the OTEL_* locks, no exporters
     version.rs   GET /api/version and /version/update-check (dev builds only)
     notifications/ the settings read (password masked), /log, the settings
@@ -583,7 +585,8 @@ the tools — and an `rmcp` adapter is one impl away.
 - **Envelopes, not bare records.** `GET /settings`, `/monitoring` and
   `/version/update-check` answer `{settings, locked, …}`. `locked` maps a field
   name to the *environment variable* that pinned it; a PUT changing a locked
-  field is rejected.
+  field is rejected — with a **400**, not the 409 the monitoring path answers,
+  because `locked` is not `EnvLockedError`.
 - **`GET /chats/{id}` returns an envelope, not a flattened session — and the
   wire order is `{messages, session}`.** The handler writes a `map[string]any`,
   and `encoding/json` sorts map keys, so the order it is spelled in is not the
@@ -915,6 +918,68 @@ then updates it to carry the Claude session id; this does both in one
 transaction, which is a deliberate divergence with only one alternative: `Err`
 forwards, so a Rust failure *between* the two writes would leave Go's orphan
 chat **and** have Go create a second one.
+
+### The settings write is written, tested and not claimed (#305)
+
+`GET /api/settings/claude-config-dirs` is native. `PUT /api/settings` is
+implemented in full — validation, the locked-field 400s, the row write, the
+rescan rules — and left out of `claims`, the way `migrate::apply` was in #274.
+
+The reason is **not** the one this file used to give. Rust holds no snapshot of
+these preferences at all: `settings::load` reads the row per request, which is
+why `apply_data_settings` is three lines where Go's is thirty. The obstacle is
+the **sidecar**, which does hold one and is still serving routes that read it:
+
+- `notificationServiceImpl.UpdateSettings` is a read-modify-write over
+  `settingsMgr.Get()` that persists the **whole** `user_settings` row. So a
+  native settings save followed by any SMTP save through the unported
+  `PUT /api/notifications/settings` rewrites `hidden_projects`,
+  `idle_gap_threshold_minutes` and both config-dir columns from the sidecar's
+  boot-time copy. Reproduced against a Go server built from this checkout: a
+  row edited to `["…/native-wrote-this"]` / 42 read back
+  `["…/hidden-one"]` / 25 after one unrelated notification save, with no error
+  anywhere. That is silent, total reversion of the Data & Analytics tab.
+- `config.ResolveAgentClaudeDir` resolves each run's Claude account from
+  `claudeDirs.runOverride`, so scheduled tasks (#275) and Telegram triggers —
+  both still Go's — would keep authenticating as the previous account.
+- `config.profiles` resolves `/api/claude-settings*` against the same snapshot.
+
+#274's rule decides it: *a route moves only when Rust can reproduce every effect
+it has*, and "the sidecar now agrees" is one of this route's effects. #289's
+flip worked because `AGENTO_SCANNER=off` switched the Go half off; there is no
+equivalent here, and forward-after-write is just the forward. It turns on with
+the cut-over that deletes the sidecar.
+
+Three things the write itself pins, each captured from a live Go server:
+
+- **The `PUT` response is the stored row, not a resolution of it.** `Update`
+  assigns the incoming struct to `m.settings` wholesale and the handler answers
+  `Get()`, so nothing is re-defaulted: a body sending `"default_model":""` is
+  answered `""` where the very next `GET` answers `"sonnet"`. `claude_config_dirs`
+  comes back `null` for a request that sent `[]`, because
+  `normalizeClaudeConfigDirs` collapses an empty list to a nil slice while `Save`
+  still writes `[]` — so the column reads back non-nil.
+- **A locked field is a 400, not the 409 the monitoring path uses.**
+  `SettingsManager` returns plain errors and the handler flattens every one of
+  them, so the validation failures are 400s too — not the service layer's 422.
+  Field order is Go's slice order (`default_model`, `default_working_dir`,
+  `public_url`, `claude_config_dir`), so a body conflicting on two reports the
+  first of *those*, not the first in the JSON. A **blank** incoming value is
+  never a conflict — the form posts every tab back — it is pinned instead.
+- **The scan trigger is `force_scan`, not `ensure_scan`.** Go calls
+  `Cache.EnsureScan`, which admits a scan outright; `ensure_scan` is `ensureFresh`
+  and asks the staleness markers first. The threshold branch would pass that gate,
+  but the config-dir branch would not — no marker records which dirs were walked —
+  and a newly added account would sit unindexed until the TTL.
+
+`claude-config-dirs`'s own trap is that `candidates` distinguishes nil from
+empty: a home directory that cannot be listed is `null`, one with nothing to
+suggest is `[]`. Its rules are pinned against a crafted home rather than the
+developer's, because the four exclusions that matter — a symlink to a good
+candidate (`os.ReadDir`'s `IsDir` does not follow), a `.claude*` dir with no
+`projects`, one whose `projects` is a file, and a plain file — do not exist on a
+real machine. `.claude.bak` and `.clauded` *are* candidates when they have a
+`projects` dir: the prefix is literal and the `projects` check is the only filter.
 
 ### Do not port
 
