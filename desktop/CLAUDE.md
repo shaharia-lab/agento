@@ -767,9 +767,24 @@ integration. Three things it settled that all six inherit:
   not have. It is stripped by replacing the `Arc`, not through it: `rmcp`
   memoizes one schema per input type and hands every route a clone, so an
   in-place edit would reach into a process-wide cache. What is left matches Go
-  key for key — `additionalProperties`, `properties`, `required`, `type` — and
-  `#[serde(deny_unknown_fields)]` is what produces the first of those, which Go
-  reflects onto every struct and its server *validates* against.
+  key for key — `additionalProperties`, `properties`, `required`, `type` — **for
+  a flat struct of required scalars**, which is all #310 has and all the vectors
+  cover. `#[serde(deny_unknown_fields)]` is what produces the first of those,
+  which Go reflects onto every struct and its server *validates* against.
+  `$schema` is the first of a class, not the whole class: `schemars` and
+  `google/jsonschema-go` are known to diverge on `Option<T>`
+  (`"type":["string","null"]` vs an `omitempty` field that stays
+  `"type":"string"` and just leaves `required`), on nested structs (`$defs`/
+  `$ref` vs inlined) and on integer `"format"`. Get a nested/`Option` parity
+  vector in before the first integration port lands.
+- **Malformed arguments are the same *kind* of failure, with different
+  wording.** Both servers answer a missing field, an extra field, a wrong type
+  or an absent `arguments` with a `CallToolResult` carrying `IsError`, never a
+  JSON-RPC error — `rmcp`'s `into_tool_argument_error` converts its own
+  extractor's `INVALID_PARAMS` for exactly this. Only the text the model reads
+  differs: Go's `validating "arguments": …` against `rmcp`'s `failed to
+  deserialize parameters: …`. It is a property of `new_tool`, so every ported
+  tool has it; there is no missing conversion to add.
 - **A tool's name is not renameable.** `mcp__local-tools__current_time` is in
   agents' stored `capabilities.local` allowlists and in every `tool_use` block
   already written to `chat_messages`. `desktop/parity/local_tools_vectors.json`
@@ -783,8 +798,10 @@ integration. Three things it settled that all six inherit:
 - **The listener is per turn, not per process.** Go starts its one server in
   `cmd/web.go` and shares it; here the handle *is* the lifetime, so
   `build_options` starts one and hands it back, and `turn.rs` drops it **after**
-  `session.close()` — dropping it first would cancel a `tools/call` the
-  subprocess is still waiting on.
+  `session.close()`, since dropping the listener cancels every handler's token.
+  `close` does not wait for the subprocess — it flips a flag and fires a
+  oneshot — so the ordering is best-effort rather than a barrier; the stream has
+  already ended by then, so no `tools/call` should be outstanding either way.
 
 One Go rule that only becomes visible once local tools exist:
 `appendDisallowedTools` keys on the agent's **explicit built-in list**, not on

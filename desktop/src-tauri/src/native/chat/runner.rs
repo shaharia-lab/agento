@@ -756,6 +756,27 @@ mod tests {
         assert!(!opts.strict_mcp_config);
     }
 
+    /// `local: []` — **present but empty** — is the distinction `GoList` exists
+    /// to preserve, and it decides whether the agent gets twelve built-ins or
+    /// none. Go's `len(caps.Local) > 0` makes an empty list the same as an
+    /// absent one on both counts: no listener, and still "names no tools at
+    /// all", so all the built-ins.
+    #[tokio::test]
+    async fn a_present_but_empty_local_list_is_the_same_as_none() {
+        let spec = spec_for(Capabilities {
+            built_in: None,
+            local: Some(vec![].into()),
+            mcp: None,
+        });
+        let (opts, local) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+        assert!(local.is_none());
+        assert!(opts.mcp_servers.is_empty());
+        assert!(!opts.strict_mcp_config);
+        assert_eq!(opts.allowed_tools.len(), ALL_BUILT_IN_TOOLS.len());
+    }
+
     #[test]
     fn thinking_defaults_to_adaptive() {
         assert_eq!(thinking_mode(None), "adaptive");

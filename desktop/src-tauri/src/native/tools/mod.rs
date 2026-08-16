@@ -31,6 +31,26 @@
 //! `mcp.Implementation` says `1.0.0`, [`crate::claude::ToolServer`] reports the
 //! SDK's. Neither reaches the CLI's transcript, and there is deliberately no
 //! second way to build a server just to carry a different string.
+//!
+//! ## Malformed arguments: same kind, different wording
+//!
+//! This is a property of [`crate::claude::new_tool`], not of `current_time`, so
+//! every ported tool inherits it. For all four malformed-input classes — a
+//! missing field, an extra field (`deny_unknown_fields`), a wrong type, and an
+//! absent `arguments` object — the **kind** of failure already matches Go: the
+//! `modelcontextprotocol/go-sdk` server returns a `CallToolResult` with
+//! `IsError` rather than a JSON-RPC error, and `rmcp`'s
+//! `into_tool_argument_error` intercepts exactly the `INVALID_PARAMS` its own
+//! `Parameters` extractor raises and converts it to `CallToolResult::error`.
+//! Acceptance is therefore identical: the same inputs are refused on both
+//! sides, and the model gets something it can retry against either way.
+//!
+//! What differs is the **message text** the model reads: Go says
+//! `validating "arguments": …`, `rmcp` says `failed to deserialize parameters:
+//! …`, each followed by its own reflector's account of what was wrong. Neither
+//! is reachable from the vectors, which drive `format_current_time` directly,
+//! so it is written down here rather than pinned — and it is a wording
+//! difference, not a missing conversion to go and add.
 
 mod current_time;
 

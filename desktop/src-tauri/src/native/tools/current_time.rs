@@ -95,9 +95,25 @@ pub fn format_current_time(timezone: &str, now: DateTime<Utc>) -> Result<String,
 ///    database does not.
 /// 2. `"Local"` is the machine's zone. `chrono-tz` has no such name, so it is
 ///    resolved through `iana-time-zone` (already in the tree for the scheduler,
-///    which needs the same answer for `CRON_TZ=Local`). A machine whose zone
-///    cannot be named falls through to the unknown-zone error rather than to a
-///    silently different clock.
+///    which needs the same answer for `CRON_TZ=Local`). **This is the one
+///    deliberate divergence from Go**, and it is a divergence rather than a
+///    port: `time.LoadLocation("Local")` never fails — a machine whose zone Go
+///    cannot determine gets `time.Local` with the *name* `UTC` and a UTC
+///    offset, so Go answers with a clock rather than an error. Here the same
+///    machine gets `unknown timezone "Local": unknown time zone Local`.
+///
+///    Two failures reach that branch and only one of them is Go's: the zone
+///    genuinely cannot be named (where Go answers UTC), or `iana-time-zone`
+///    names a zone `chrono-tz` does not carry (where Go reads the system
+///    database and answers *correctly*). Falling back to UTC would match Go in
+///    the first case and, in the second, label a UTC clock `Current time in
+///    Local:` on a machine that is hours away from it — the failure mode with
+///    nothing to show for it. An explicit error is preferred over both, since
+///    every other timezone this tool takes is named outright and `Local` is the
+///    only input whose answer depends on the host.
+///
+///    No parity vector covers it, for the same reason: a vector for `Local`
+///    would record this machine rather than the contract.
 /// 3. A name containing `..`, or beginning with a separator, is rejected with a
 ///    **different message** — `time: invalid location name` — because Go treats
 ///    it as a path-traversal attempt rather than as a missing zone. Reproducing
@@ -174,11 +190,15 @@ mod tests {
     }
 
     /// `Local` resolves rather than erroring, which is `LoadLocation`'s second
-    /// short-circuit. The value is the machine's, so only the shape is asserted.
+    /// short-circuit. The value is the machine's, so only the shape is
+    /// asserted — but the *precondition* is what is gated on, not the result:
+    /// gating on `Ok` would let a `load_location("Local")` that always failed
+    /// pass this test silently, which is the one thing it exists to catch.
     #[test]
     fn local_is_a_zone_rather_than_a_typo() {
-        let answer = format_current_time("Local", at("2026-08-16T21:07:34Z"));
-        if let Ok(text) = answer {
+        if iana_time_zone::get_timezone().is_ok_and(|zone| zone.parse::<Tz>().is_ok()) {
+            let text = format_current_time("Local", at("2026-08-16T21:07:34Z"))
+                .expect("Local resolves where the machine can name a zone chrono-tz carries");
             assert!(text.starts_with("Current time in Local: "), "{text}");
         }
     }

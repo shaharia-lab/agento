@@ -194,6 +194,18 @@ where
 /// model that the same tool hosted by the Go server does not have, on the one
 /// surface (#310–#317) where the two are meant to be indistinguishable.
 ///
+/// `$schema` is the first of a class rather than the whole class. What is left
+/// is verified to match Go key for key **for a flat struct of required
+/// scalars**, which is what `current_time` is and all the parity vectors cover.
+/// `schemars` 1.2.2 and `google/jsonschema-go` are known to diverge on shapes
+/// the six integration ports will hit: an `Option<T>` renders as
+/// `"type": ["string","null"]` where a Go field with `omitempty` stays
+/// `"type":"string"` and merely drops out of `required`; a nested struct
+/// produces `$defs`/`$ref` where Go inlines; integers pick up a `"format"`.
+/// A parity vector for a nested/`Option` input is wanted before the first
+/// integration port lands, since this function's contract is "strip one key",
+/// not "reconcile two reflectors".
+///
 /// Replaces the `Arc` rather than mutating through it, and that is not
 /// fussiness: `rmcp` memoizes one generated schema per input type and hands
 /// every `ToolRoute` a clone of the same `Arc`, so `get_mut` would refuse and an

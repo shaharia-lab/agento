@@ -25,6 +25,11 @@
 // Regenerate (only from Go, and only when adding cases):
 //
 //	go test ./desktop/parity/ -run TestLocalToolsVectors -update-local-tools-vectors
+//
+// Regenerate on a case-sensitive filesystem: the `"utc"` case asserts that the
+// lookup is case-sensitive, and on a case-insensitive one (macOS's default) the
+// zoneinfo file for `UTC` is found under that name, so the case would record a
+// success where Linux and the Rust port record an error.
 package parity
 
 import (
@@ -34,6 +39,16 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	// Every case below is a time.LoadLocation call, and Windows declares no
+	// platformZoneSources at all — so without this, regenerating there (or in a
+	// minimal container) would write a vector file in which all 34 cases are
+	// errors, and the Rust suite plus Linux CI would fail against it. Same
+	// reasoning, and the same fallback-not-override property, as
+	// internal/scheduler/schedule_vectors_test.go: the system database still
+	// wins where it exists, so a genuine tzdata disagreement fails loudly here
+	// rather than being papered over.
+	_ "time/tzdata"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 

@@ -211,9 +211,12 @@ pub async fn run(
         drop(guard);
         session.close();
         // After `close`, and explicitly rather than at the end of the block:
-        // the CLI can be mid-`tools/call` when the stream ends, and dropping
-        // the listener cancels every handler's token. Ordering it before
-        // `close` would cancel a tool call the subprocess is still waiting on.
+        // dropping the listener cancels every handler's token, so the shutdown
+        // signal is already in flight before the listener goes. `close` only
+        // flips a flag and fires a oneshot — it does not wait for the
+        // subprocess — so this is ordering rather than a barrier; but the
+        // stream has ended by here, so no `tools/call` should be outstanding
+        // either way.
         drop(local_tools);
 
         // The commit is detached from the request on purpose, so a client that
