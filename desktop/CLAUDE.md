@@ -174,6 +174,9 @@ src-tauri/src/
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
+    schedule/    when a task fires — pinned to parity/scheduler_vectors.json (#275)
+      mod.rs     buildJobDefinition and gocron's four job types; claims no route
+      cron.rs    robfig/cron's dialect, which is the one a cron task is written in
     sessions/    GET /api/claude-sessions, /facets, /projects and /{id}, plus
                  POST /{id}/continue (#308)
       continue_chat.rs the two writes that resume a Claude session as a chat
@@ -444,7 +447,7 @@ of the `Err` arms the cut-over has to turn into a real response.
 |---|---|---|---|
 | 1 ✅ | Sidecar + proxy | — | done |
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
-| 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. Scheduler is #275. |
+| 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274, #275).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. The scheduler's *schedule computation* is ported and pinned (#275); its ownership is not, and is blocked — see below. |
 | 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. WhatsApp is **not** among them — see below. |
 | 5 ← | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
 
@@ -1278,6 +1281,103 @@ database and does nothing for the Claude config dir, and this suite overwrites
 `settings.json`. Exporting it before `start` is also what puts both
 implementations in one directory — a diff across two would mean nothing.
 
+### The scheduler: the computation moved, the ownership did not (#275)
+
+**Only one process may schedule**, and today that process is Go: `cmd/web.go`'s
+`initTaskScheduler` constructs and starts one on every boot. Two schedulers over
+one `scheduled_tasks` table means every task fires twice and the Telegram
+webhook is re-registered under whichever instance registered last, so taking the
+scheduler is a *flip* on the #289 model — sidecar off, shell on, one commit —
+not a route that can forward on doubt. **That flip is blocked; see below.**
+
+What is here is the half that is verifiable before the flip, and the half most
+likely to be subtly wrong: **when a task fires**. `native/schedule/` ports
+`buildJobDefinition` and the `next()` of each `gocron/v2` job type it can
+produce, pinned to `desktop/parity/scheduler_vectors.json` — 68 cases generated
+from a *real* `gocron.Scheduler` driven by a `clockwork` fake clock
+(`go test ./internal/scheduler/ -update-scheduler-vectors`), asserted against Go
+by `internal/scheduler/schedule_vectors_test.go` and against Rust by
+`include_str!`, exactly the shape `gopath_vectors.json` uses. A change to
+`buildJobDefinition`, to gocron or to `robfig/cron` fails **Go's** suite first.
+
+The semantics are gocron's, not the cron string's, and three of them are silent
+when reproduced wrong:
+
+- **`run_immediately` is a one-time job at `now + 2s`.** gocron discards
+  one-time start times that are not strictly in the future and then refuses the
+  job outright, so "now" would never run. The vector records the *offset*
+  rather than an instant, because Go reads `time.Now()` inside the builder.
+- **`every_days` + `at_time` is a `DailyJob`, not a 24-hour `DurationJob`.** A
+  daily job holds the wall clock across a DST transition; a duration job adds 24
+  absolute hours and walks off it. Both are in the vectors from the same
+  Europe/Berlin start: midnight stays midnight, 12:00 becomes 13:00.
+- **A malformed `at_time` falls back to that duration job with no error.**
+  `buildIntervalJob` discards `buildDailyAtTimeJob`'s error, so `9am`,
+  `09:00:00`, `25:00` and `09:60` all schedule *something else* and say nothing.
+  Note `7:5` is **not** a fallback — `Atoi` needs no zero padding.
+
+Two more the vectors pin, both invisible in UTC:
+
+- **`robfig/cron`'s dialect** (`cron.rs`), because `gocron.CronJob` delegates to
+  `ParseStandard` with `CRON_TZ=<location>` prepended. Descriptors *are*
+  accepted (`@daily`, `@every 1h30m` — Go's `ParseDuration`, floored at 1s);
+  six-field seconds specs are *not*; `N/step` means `N-max/step`; and `?` sets
+  the same star bit `*` does, which decides whether day-of-month and day-of-week
+  are ANDed or ORed. Its `Next` steps **absolute** hours, so a daily `0 2 * * *`
+  in Europe/Berlin skips 2026-03-29 entirely rather than shifting — while
+  gocron's own duplicate-wall-clock guard stops it running twice on the October
+  Sunday when 02:00 happens twice. `*/30 * * * *` does repeat through that hour,
+  because the guard only catches an identical wall clock.
+- **A one-off keeps `run_at`'s own offset**; every other job type renders in the
+  scheduler's location. That is why `Fire` carries an offset beside the instant.
+
+`cron.rs` reuses `analytics/buckets.rs`'s `go_date`/`add_date` rather than
+`chrono`'s calendar arithmetic — robfig resets the lower fields with
+`time.Date`, which *normalizes* a wall clock a DST gap removed instead of
+failing, and that normalization is the answer on the spring-forward day.
+
+**The executor is deliberately not ported.** It is fifteen functions needing the
+agent runner, job-history writes, the event bus, chat-session creation and OTel
+spans, and — unlike `migrate::apply`, which is small with a crisp contract — an
+unwired executor has no testable contract at all. It would be several hundred
+lines nothing could check until the flip. It follows the flip; it does not
+precede it.
+
+**The blocker, verified.** The flip needs Rust to *run* a task, and
+`chat/runner.rs::build_options` refuses any agent whose capabilities name the
+local in-process MCP server or an MCP server (#277/#282/#310–#317). For a chat
+that is safe — the three steering routes forward and Go answers, because Go
+holds the session. **For a scheduled task there is no second implementation
+behind it**: with the sidecar not scheduling, a task Rust cannot run does not
+fail, it *silently never runs*, and the job history has no row to show for it.
+That is the one property the whole port has relied on, absent.
+
+How much it strands: an agent is runnable natively only if its allowlist is
+built-ins only. Against 12 built-ins there are 61 integration tools across the
+six supported providers, plus `internal/tools`' local server, plus anything in
+`mcps.yaml` — none of which Rust can supply, and the scheduled task that fetches
+a calendar or triages issues is the archetype rather than the edge. One of the
+two agents Agento *ships* (`agents/hello-world.yaml`) names `local:
+current_time` and would be stranded. (Neither `~/.agento` nor
+`~/.agento-desktop-dev` has an agent, task or integration on this machine, so
+that is the structural count, not a measured one.)
+
+There is also no escape hatch that keeps Go executing: the API has no
+"run this task now" route, so a Rust-owned timer has nothing to call. Adding one
+would put the scheduling decision in two processes again, which is the hazard
+the flip exists to remove.
+
+So `cmd/web.go` is **untouched** — no `AGENTO_SCHEDULER` gate was added, because
+a gate whose only correct setting is "on" is a switch for turning tasks off. The
+flip is one commit when `build_options` can supply every tool source: gate
+`initTaskScheduler` on `AGENTO_SCHEDULER` the way `Cache.EnsureScan` is gated on
+`AGENTO_SCANNER` (unset = on, unrecognized = on, so a plain `agento web` is
+unchanged and a typo cannot disable it), set it from `sidecar.rs`, port the
+executor, and move `POST/PUT/DELETE /api/tasks` and the pause/resume actions —
+which #274 left with Go precisely because each also calls
+`ScheduleTask`/`UnscheduleTask`, and a row written without a registration is a
+task that never fires.
+
 ### Do not port
 
 Telemetry/OTel, Prometheus metrics, and the self-updater are server concerns.
@@ -1606,3 +1706,15 @@ Use the isolated dev instance for write testing.
   hand-edited index can therefore have an update write outside the settings dir.
   The port reproduces this deliberately (adding the check would refuse a write Go
   performs) and says so at both sites.
+- **A cron task can be saved that stops the server from starting.**
+  `validateScheduleConfig` checks only that `expression` is non-empty, and
+  `robfig/cron`'s `Parse` slices between `=` and the first space — so an
+  expression of exactly `CRON_TZ=UTC` panics with `slice bounds out of range
+  [:-1]`. `CreateTask` writes the row *before* calling `ScheduleTask`, and
+  `middleware.Recoverer` turns the request into a 500, so the row survives.
+  On the next boot `Scheduler.Start` reaches it with nothing recovering, and
+  `agento web` dies. Reproduced against gocron v2.22.0. The fix is to validate
+  the crontab at save time (`gocron.NewDefaultCron(false).IsValid`) rather than
+  discovering it at schedule time. `native/schedule/cron.rs` answers `Err`
+  there instead of panicking, deliberately, and has no vector for it: pinning a
+  panic is pinning a bug.

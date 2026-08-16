@@ -1,0 +1,1158 @@
+{
+  "_comment": [
+    "When an Agento scheduled task fires, as gocron/v2 actually computes it.",
+    "",
+    "Generated from Go (go test ./internal/scheduler/ -update-scheduler-vectors)",
+    "and asserted by both languages: internal/scheduler/schedule_vectors_test.go",
+    "regenerates and checks it against a real gocron.Scheduler on a fake clock,",
+    "and desktop/src-tauri/src/native/schedule/ embeds it with include_str! and",
+    "asserts the Rust port answers the same.",
+    "",
+    "'definition' is which of gocron's four job types buildJobDefinition chose —",
+    "the field the silent at_time fallback shows up in. 'error' is a stable",
+    "classification, not Go's message: 'build:*' is Agento's own builder",
+    "refusing, 'schedule:*' is gocron refusing the definition it was handed.",
+    "'next_runs[0]' is the scheduler's initial next run; the rest are successive",
+    "applications of the schedule's next(). A null is gocron's zero time, which",
+    "is how an exhausted one-time job answers — and the sequence then oscillates,",
+    "because next(zero) binary-searches straight back to the single run.",
+    "'one_time_offset_ms' replaces next_runs for run_immediately alone, whose",
+    "fire time is time.Now()+2s and so has no absolute instant to freeze.",
+    "",
+    "Location is explicit because production uses time.Local, which is not",
+    "reproducible across machines. Cases anchored on 2026-03-08, 2026-03-29,",
+    "2026-10-25 and 2026-11-01 sit on DST transitions on purpose."
+  ],
+  "cases": [
+    {
+      "name": "run_immediately/plain",
+      "why": "a one-time job at now+2s — not now, which gocron would refuse as already past",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "run_immediately",
+      "schedule_config": {},
+      "definition": "one_time",
+      "error": "",
+      "next_runs": [],
+      "one_time_offset_ms": 2000
+    },
+    {
+      "name": "run_immediately/config_is_ignored",
+      "why": "the branch is chosen on schedule_type alone; every config field is dead here",
+      "location": "Europe/Berlin",
+      "now": "2026-03-28T12:00:00+01:00",
+      "schedule_type": "run_immediately",
+      "schedule_config": {
+        "run_at": "2020-01-01T00:00:00Z",
+        "every_minutes": 5,
+        "expression": "0 0 * * *"
+      },
+      "definition": "one_time",
+      "error": "",
+      "next_runs": [],
+      "one_time_offset_ms": 2000
+    },
+    {
+      "name": "one_off/future",
+      "why": "the single run, then gocron's zero time — and note it OSCILLATES: next(zero) binary-searches back to the same run",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "one_off",
+      "schedule_config": {
+        "run_at": "2026-06-01T12:00:00Z"
+      },
+      "definition": "one_time",
+      "error": "",
+      "next_runs": [
+        "2026-06-01T12:00:00Z",
+        null,
+        "2026-06-01T12:00:00Z",
+        null
+      ]
+    },
+    {
+      "name": "one_off/future_with_offset",
+      "why": "run_at carries its own zone and keeps it; the scheduler's location does not convert it",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "one_off",
+      "schedule_config": {
+        "run_at": "2026-06-01T12:00:00+02:00"
+      },
+      "definition": "one_time",
+      "error": "",
+      "next_runs": [
+        "2026-06-01T12:00:00+02:00",
+        null,
+        "2026-06-01T12:00:00+02:00",
+        null
+      ]
+    },
+    {
+      "name": "one_off/past",
+      "why": "gocron drops past times at setup and then refuses the job outright",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "one_off",
+      "schedule_config": {
+        "run_at": "2020-01-01T00:00:00Z"
+      },
+      "definition": "one_time",
+      "error": "schedule:one_time_past",
+      "next_runs": []
+    },
+    {
+      "name": "one_off/exactly_now",
+      "why": "the past filter is a binary search that skips an exact hit, so now is already too late",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "one_off",
+      "schedule_config": {
+        "run_at": "2026-02-10T09:15:30Z"
+      },
+      "definition": "one_time",
+      "error": "schedule:one_time_past",
+      "next_runs": []
+    },
+    {
+      "name": "one_off/malformed",
+      "why": "run_at is parsed as RFC3339 and nothing else",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "one_off",
+      "schedule_config": {
+        "run_at": "tomorrow"
+      },
+      "definition": "",
+      "error": "build:run_at",
+      "next_runs": []
+    },
+    {
+      "name": "one_off/empty",
+      "why": "an absent run_at fails the parse rather than defaulting",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "one_off",
+      "schedule_config": {},
+      "definition": "",
+      "error": "build:run_at",
+      "next_runs": []
+    },
+    {
+      "name": "one_off/date_only",
+      "why": "RFC3339 needs the time; a bare date is not accepted",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "one_off",
+      "schedule_config": {
+        "run_at": "2026-06-01"
+      },
+      "definition": "",
+      "error": "build:run_at",
+      "next_runs": []
+    },
+    {
+      "name": "interval/every_minutes",
+      "why": "a plain duration job: absolute addition, no wall clock involved",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_minutes": 5
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T09:20:30Z",
+        "2026-02-10T09:25:30Z",
+        "2026-02-10T09:30:30Z",
+        "2026-02-10T09:35:30Z"
+      ]
+    },
+    {
+      "name": "interval/every_minutes_wins_over_hours_and_days",
+      "why": "the builder tests minutes, then hours, then days — the first positive one wins outright",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_minutes": 5,
+        "every_hours": 2,
+        "every_days": 3,
+        "at_time": "09:00"
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T09:20:30Z",
+        "2026-02-10T09:25:30Z",
+        "2026-02-10T09:30:30Z",
+        "2026-02-10T09:35:30Z"
+      ]
+    },
+    {
+      "name": "interval/every_hours",
+      "why": "hours reached only because minutes was zero",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_hours": 6
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T15:15:30Z",
+        "2026-02-10T21:15:30Z",
+        "2026-02-11T03:15:30Z",
+        "2026-02-11T09:15:30Z"
+      ]
+    },
+    {
+      "name": "interval/every_days_no_at_time",
+      "why": "without at_time this is 24 absolute hours, so it walks off the wall clock across a DST transition",
+      "location": "Europe/Berlin",
+      "now": "2026-03-28T12:00:00+01:00",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-03-29T13:00:00+02:00",
+        "2026-03-30T13:00:00+02:00",
+        "2026-03-31T13:00:00+02:00",
+        "2026-04-01T13:00:00+02:00"
+      ]
+    },
+    {
+      "name": "interval/every_days_two_no_at_time",
+      "why": "days multiply into 24h each",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 2
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-02-12T09:15:30Z",
+        "2026-02-14T09:15:30Z",
+        "2026-02-16T09:15:30Z",
+        "2026-02-18T09:15:30Z"
+      ]
+    },
+    {
+      "name": "interval/negative_minutes_falls_through",
+      "why": "the guards are `\u003e 0`, so a negative value is not rejected as such — it is simply never chosen, and the config then has no interval at all",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_minutes": -5
+      },
+      "definition": "",
+      "error": "build:invalid_interval",
+      "next_runs": []
+    },
+    {
+      "name": "interval/all_zero",
+      "why": "the one interval config that fails to build at all",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {},
+      "definition": "",
+      "error": "build:invalid_interval",
+      "next_runs": []
+    },
+    {
+      "name": "interval/at_time_without_days",
+      "why": "at_time is only read inside the every_days branch; alone it schedules nothing",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "at_time": "09:00"
+      },
+      "definition": "",
+      "error": "build:invalid_interval",
+      "next_runs": []
+    },
+    {
+      "name": "interval/daily_at_time_later_today",
+      "why": "first pass takes the same day when the at-time is still ahead",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "18:30"
+      },
+      "definition": "daily",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T18:30:00Z",
+        "2026-02-11T18:30:00Z",
+        "2026-02-12T18:30:00Z",
+        "2026-02-13T18:30:00Z"
+      ]
+    },
+    {
+      "name": "interval/daily_at_time_already_passed",
+      "why": "first pass finds nothing, so the second starts at midnight of day+interval",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "07:00"
+      },
+      "definition": "daily",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T07:00:00Z",
+        "2026-02-12T07:00:00Z",
+        "2026-02-13T07:00:00Z",
+        "2026-02-14T07:00:00Z"
+      ]
+    },
+    {
+      "name": "interval/daily_every_three_days",
+      "why": "interval \u003e 1 jumps whole intervals; it does not run tomorrow and then wait",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 3,
+        "at_time": "07:00"
+      },
+      "definition": "daily",
+      "error": "",
+      "next_runs": [
+        "2026-02-13T07:00:00Z",
+        "2026-02-16T07:00:00Z",
+        "2026-02-19T07:00:00Z",
+        "2026-02-22T07:00:00Z"
+      ]
+    },
+    {
+      "name": "interval/daily_midnight",
+      "why": "a daily job holds the wall clock across the spring-forward, unlike the 24h duration job above",
+      "location": "Europe/Berlin",
+      "now": "2026-03-28T12:00:00+01:00",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "00:00"
+      },
+      "definition": "daily",
+      "error": "",
+      "next_runs": [
+        "2026-03-29T00:00:00+01:00",
+        "2026-03-30T00:00:00+02:00",
+        "2026-03-31T00:00:00+02:00",
+        "2026-04-01T00:00:00+02:00"
+      ]
+    },
+    {
+      "name": "interval/daily_inside_the_spring_forward_gap",
+      "why": "02:30 does not exist on 2026-03-29; the default DST policy takes whatever time.Date normalizes to",
+      "location": "Europe/Berlin",
+      "now": "2026-03-28T12:00:00+01:00",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "02:30"
+      },
+      "definition": "daily",
+      "error": "",
+      "next_runs": [
+        "2026-03-29T03:30:00+02:00",
+        "2026-03-30T02:30:00+02:00",
+        "2026-03-31T02:30:00+02:00",
+        "2026-04-01T02:30:00+02:00"
+      ]
+    },
+    {
+      "name": "interval/daily_inside_the_fall_back_hour",
+      "why": "02:30 happens twice on 2026-10-25; time.Date picks one of them and the job does not repeat",
+      "location": "Europe/Berlin",
+      "now": "2026-10-25T01:30:00+02:00",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "02:30"
+      },
+      "definition": "daily",
+      "error": "",
+      "next_runs": [
+        "2026-10-25T02:30:00+01:00",
+        "2026-10-26T02:30:00+01:00",
+        "2026-10-27T02:30:00+01:00",
+        "2026-10-28T02:30:00+01:00"
+      ]
+    },
+    {
+      "name": "interval/daily_inside_the_us_spring_forward_gap",
+      "why": "the same gap a week earlier and five hours west — the offset arithmetic differs, the rule does not",
+      "location": "America/New_York",
+      "now": "2026-03-07T12:00:00-05:00",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "02:30"
+      },
+      "definition": "daily",
+      "error": "",
+      "next_runs": [
+        "2026-03-08T01:30:00-05:00",
+        "2026-03-09T02:30:00-04:00",
+        "2026-03-10T02:30:00-04:00",
+        "2026-03-11T02:30:00-04:00"
+      ]
+    },
+    {
+      "name": "interval/daily_inside_the_us_fall_back_hour",
+      "why": "01:30 happens twice on 2026-11-01; the daily job takes one of them and moves on",
+      "location": "America/New_York",
+      "now": "2026-11-01T00:30:00-04:00",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "01:30"
+      },
+      "definition": "daily",
+      "error": "",
+      "next_runs": [
+        "2026-11-01T01:30:00-04:00",
+        "2026-11-02T01:30:00-05:00",
+        "2026-11-03T01:30:00-05:00",
+        "2026-11-04T01:30:00-05:00"
+      ]
+    },
+    {
+      "name": "interval/daily_at_time_23_59",
+      "why": "the inclusive upper bound of the at_time range check",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "23:59"
+      },
+      "definition": "daily",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T23:59:00Z",
+        "2026-02-11T23:59:00Z",
+        "2026-02-12T23:59:00Z",
+        "2026-02-13T23:59:00Z"
+      ]
+    },
+    {
+      "name": "interval/at_time_hour_out_of_range",
+      "why": "THE SILENT FALLBACK: the daily job is rejected and a 72h duration job is scheduled with no error",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 3,
+        "at_time": "25:00"
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-02-13T09:15:30Z",
+        "2026-02-16T09:15:30Z",
+        "2026-02-19T09:15:30Z",
+        "2026-02-22T09:15:30Z"
+      ]
+    },
+    {
+      "name": "interval/at_time_minute_out_of_range",
+      "why": "same fallback, minute bound",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "09:60"
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T09:15:30Z",
+        "2026-02-12T09:15:30Z",
+        "2026-02-13T09:15:30Z",
+        "2026-02-14T09:15:30Z"
+      ]
+    },
+    {
+      "name": "interval/at_time_no_colon",
+      "why": "same fallback, split length",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "9"
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T09:15:30Z",
+        "2026-02-12T09:15:30Z",
+        "2026-02-13T09:15:30Z",
+        "2026-02-14T09:15:30Z"
+      ]
+    },
+    {
+      "name": "interval/at_time_three_parts",
+      "why": "same fallback: HH:MM:SS looks right and is not accepted",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "09:00:00"
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T09:15:30Z",
+        "2026-02-12T09:15:30Z",
+        "2026-02-13T09:15:30Z",
+        "2026-02-14T09:15:30Z"
+      ]
+    },
+    {
+      "name": "interval/at_time_non_numeric",
+      "why": "same fallback, Atoi",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "ab:cd"
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T09:15:30Z",
+        "2026-02-12T09:15:30Z",
+        "2026-02-13T09:15:30Z",
+        "2026-02-14T09:15:30Z"
+      ]
+    },
+    {
+      "name": "interval/at_time_negative_hour",
+      "why": "Atoi accepts the sign, so this is caught by the range check rather than the parse",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "-1:00"
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T09:15:30Z",
+        "2026-02-12T09:15:30Z",
+        "2026-02-13T09:15:30Z",
+        "2026-02-14T09:15:30Z"
+      ]
+    },
+    {
+      "name": "interval/at_time_padded_and_unpadded_agree",
+      "why": "Atoi does not require zero padding, so 7:5 is 07:05 and not a fallback",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 1,
+        "at_time": "7:5"
+      },
+      "definition": "daily",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T07:05:00Z",
+        "2026-02-12T07:05:00Z",
+        "2026-02-13T07:05:00Z",
+        "2026-02-14T07:05:00Z"
+      ]
+    },
+    {
+      "name": "cron/every_five_minutes",
+      "why": "the baseline five-field spec; note the first run truncates the seconds now carries",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "*/5 * * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T09:20:00Z",
+        "2026-02-10T09:25:00Z",
+        "2026-02-10T09:30:00Z",
+        "2026-02-10T09:35:00Z"
+      ]
+    },
+    {
+      "name": "cron/weekdays_at_nine",
+      "why": "a day-of-week range, and the weekend skip that comes with it",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 9 * * 1-5"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T09:00:00Z",
+        "2026-02-12T09:00:00Z",
+        "2026-02-13T09:00:00Z",
+        "2026-02-16T09:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/named_weekday",
+      "why": "robfig accepts three-letter day names, case-insensitively",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 0 * * SUN"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-15T00:00:00Z",
+        "2026-02-22T00:00:00Z",
+        "2026-03-01T00:00:00Z",
+        "2026-03-08T00:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/named_month",
+      "why": "and month names",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 0 1 jan *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2027-01-01T00:00:00Z",
+        "2028-01-01T00:00:00Z",
+        "2029-01-01T00:00:00Z",
+        "2030-01-01T00:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/question_mark",
+      "why": "'?' is a synonym for '*' and, like '*', sets the star bit that makes dom/dow an AND",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 0 ? * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T00:00:00Z",
+        "2026-02-12T00:00:00Z",
+        "2026-02-13T00:00:00Z",
+        "2026-02-14T00:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/dom_and_dow_both_restricted",
+      "why": "with neither field starred the two are ORed, so this is every 13th AND every Friday",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 0 13 * 5"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-13T00:00:00Z",
+        "2026-02-20T00:00:00Z",
+        "2026-02-27T00:00:00Z",
+        "2026-03-06T00:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/step_from_a_value",
+      "why": "'N/step' means 'N-max/step', which is robfig's own extension and not POSIX",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 9/4 * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T13:00:00Z",
+        "2026-02-10T17:00:00Z",
+        "2026-02-10T21:00:00Z",
+        "2026-02-11T09:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/list_of_values",
+      "why": "comma lists in two fields at once",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0,30 8,20 * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T20:00:00Z",
+        "2026-02-10T20:30:00Z",
+        "2026-02-11T08:00:00Z",
+        "2026-02-11T08:30:00Z"
+      ]
+    },
+    {
+      "name": "cron/monthly_first",
+      "why": "a month step, which walks the calendar rather than adding 30 days",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 0 1 * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-03-01T00:00:00Z",
+        "2026-04-01T00:00:00Z",
+        "2026-05-01T00:00:00Z",
+        "2026-06-01T00:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/descriptor_daily",
+      "why": "descriptors ARE accepted: gocron uses ParseStandard, which enables them",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "@daily"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T00:00:00Z",
+        "2026-02-12T00:00:00Z",
+        "2026-02-13T00:00:00Z",
+        "2026-02-14T00:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/descriptor_midnight",
+      "why": "an alias of @daily",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "@midnight"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T00:00:00Z",
+        "2026-02-12T00:00:00Z",
+        "2026-02-13T00:00:00Z",
+        "2026-02-14T00:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/descriptor_hourly",
+      "why": "hourly across the fall-back, where the same wall-clock hour occurs twice",
+      "location": "Europe/Berlin",
+      "now": "2026-10-25T01:30:00+02:00",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "@hourly"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-10-25T02:00:00+02:00",
+        "2026-10-25T03:00:00+01:00",
+        "2026-10-25T04:00:00+01:00",
+        "2026-10-25T05:00:00+01:00"
+      ]
+    },
+    {
+      "name": "cron/descriptor_weekly",
+      "why": "Sunday midnight",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "@weekly"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-15T00:00:00Z",
+        "2026-02-22T00:00:00Z",
+        "2026-03-01T00:00:00Z",
+        "2026-03-08T00:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/descriptor_monthly",
+      "why": "first of the month",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "@monthly"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-03-01T00:00:00Z",
+        "2026-04-01T00:00:00Z",
+        "2026-05-01T00:00:00Z",
+        "2026-06-01T00:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/descriptor_yearly",
+      "why": "@annually and @yearly are the same spec",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "@annually"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2027-01-01T00:00:00Z",
+        "2028-01-01T00:00:00Z",
+        "2029-01-01T00:00:00Z",
+        "2030-01-01T00:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/descriptor_every_duration",
+      "why": "'@every' is not a spec at all: it is Go's ParseDuration behind a constant-delay schedule",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "@every 1h30m"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T10:45:30Z",
+        "2026-02-10T12:15:30Z",
+        "2026-02-10T13:45:30Z",
+        "2026-02-10T15:15:30Z"
+      ]
+    },
+    {
+      "name": "cron/descriptor_every_sub_second",
+      "why": "Every() floors the delay at one second and drops the sub-second part of it",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "@every 100ms"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T09:15:31Z",
+        "2026-02-10T09:15:32Z",
+        "2026-02-10T09:15:33Z",
+        "2026-02-10T09:15:34Z"
+      ]
+    },
+    {
+      "name": "cron/descriptor_every_bad_duration",
+      "why": "a bad duration is a parse failure, not an unrecognized descriptor",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "@every soon"
+      },
+      "definition": "cron",
+      "error": "schedule:cron_parse",
+      "next_runs": []
+    },
+    {
+      "name": "cron/descriptor_unknown",
+      "why": "anything else beginning with '@' is rejected",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "@fortnightly"
+      },
+      "definition": "cron",
+      "error": "schedule:cron_parse",
+      "next_runs": []
+    },
+    {
+      "name": "cron/six_fields_rejected",
+      "why": "Agento passes withSeconds=false, so a seconds field is one field too many",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 * * * * *"
+      },
+      "definition": "cron",
+      "error": "schedule:cron_parse",
+      "next_runs": []
+    },
+    {
+      "name": "cron/four_fields_rejected",
+      "why": "and exactly five are required, not at least five",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 9 * *"
+      },
+      "definition": "cron",
+      "error": "schedule:cron_parse",
+      "next_runs": []
+    },
+    {
+      "name": "cron/garbage",
+      "why": "a plain parse failure",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "not a cron"
+      },
+      "definition": "cron",
+      "error": "schedule:cron_parse",
+      "next_runs": []
+    },
+    {
+      "name": "cron/empty",
+      "why": "an empty expression reaches the parser as an empty field list, not as a special case",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {},
+      "definition": "cron",
+      "error": "schedule:cron_parse",
+      "next_runs": []
+    },
+    {
+      "name": "cron/out_of_range_field",
+      "why": "bounds are checked per field at parse time",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 25 * * *"
+      },
+      "definition": "cron",
+      "error": "schedule:cron_parse",
+      "next_runs": []
+    },
+    {
+      "name": "cron/never_fires",
+      "why": "February 30th parses fine and matches nothing; gocron rejects it on the five-year search, not the parse",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 0 30 2 *"
+      },
+      "definition": "cron",
+      "error": "schedule:cron_invalid",
+      "next_runs": []
+    },
+    {
+      "name": "cron/embedded_timezone_wins",
+      "why": "a CRON_TZ prefix beats the scheduler's location, which is otherwise prepended as one",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "CRON_TZ=America/New_York 0 9 * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T14:00:00Z",
+        "2026-02-11T14:00:00Z",
+        "2026-02-12T14:00:00Z",
+        "2026-02-13T14:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/embedded_timezone_tz_form",
+      "why": "the older TZ= spelling is accepted too",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "TZ=Asia/Tokyo 30 3 * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-10T18:30:00Z",
+        "2026-02-11T18:30:00Z",
+        "2026-02-12T18:30:00Z",
+        "2026-02-13T18:30:00Z"
+      ]
+    },
+    {
+      "name": "cron/embedded_bad_timezone",
+      "why": "an unloadable zone is a parse failure",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "CRON_TZ=Mars/Olympus 0 9 * * *"
+      },
+      "definition": "cron",
+      "error": "schedule:cron_parse",
+      "next_runs": []
+    },
+    {
+      "name": "cron/across_the_spring_forward_gap",
+      "why": "02:00 does not exist on 2026-03-29, and the hour loop steps absolute hours — so the job SKIPS that day",
+      "location": "Europe/Berlin",
+      "now": "2026-03-28T12:00:00+01:00",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 2 * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-03-30T02:00:00+02:00",
+        "2026-03-31T02:00:00+02:00",
+        "2026-04-01T02:00:00+02:00",
+        "2026-04-02T02:00:00+02:00"
+      ]
+    },
+    {
+      "name": "cron/across_the_fall_back_hour",
+      "why": "02:00 happens twice on 2026-10-25; gocron's duplicate-wall-clock guard suppresses the second",
+      "location": "Europe/Berlin",
+      "now": "2026-10-25T01:30:00+02:00",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 2 * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-10-25T02:00:00+02:00",
+        "2026-10-26T02:00:00+01:00",
+        "2026-10-27T02:00:00+01:00",
+        "2026-10-28T02:00:00+01:00"
+      ]
+    },
+    {
+      "name": "cron/across_the_us_spring_forward_gap",
+      "why": "the same skip on the US transition",
+      "location": "America/New_York",
+      "now": "2026-03-07T12:00:00-05:00",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "30 2 * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-03-09T02:30:00-04:00",
+        "2026-03-10T02:30:00-04:00",
+        "2026-03-11T02:30:00-04:00",
+        "2026-03-12T02:30:00-04:00"
+      ]
+    },
+    {
+      "name": "cron/across_the_us_fall_back_hour",
+      "why": "the duplicate-wall-clock guard again, on the US transition",
+      "location": "America/New_York",
+      "now": "2026-11-01T00:30:00-04:00",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "30 1 * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-11-01T01:30:00-04:00",
+        "2026-11-02T01:30:00-05:00",
+        "2026-11-03T01:30:00-05:00",
+        "2026-11-04T01:30:00-05:00"
+      ]
+    },
+    {
+      "name": "cron/minute_zero_across_fall_back",
+      "why": "a sub-hourly spec does repeat through the fall-back hour; the guard only catches an identical wall clock",
+      "location": "Europe/Berlin",
+      "now": "2026-10-25T01:30:00+02:00",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "*/30 * * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-10-25T02:00:00+02:00",
+        "2026-10-25T02:30:00+02:00",
+        "2026-10-25T02:00:00+01:00",
+        "2026-10-25T02:30:00+01:00"
+      ]
+    },
+    {
+      "name": "unknown/weekly",
+      "why": "the default arm: an unrecognized schedule_type is refused rather than defaulted",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "weekly",
+      "schedule_config": {},
+      "definition": "",
+      "error": "build:unknown_type",
+      "next_runs": []
+    },
+    {
+      "name": "unknown/empty",
+      "why": "and so is an absent one",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "",
+      "schedule_config": {},
+      "definition": "",
+      "error": "build:unknown_type",
+      "next_runs": []
+    }
+  ]
+}
