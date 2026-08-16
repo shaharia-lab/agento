@@ -122,18 +122,7 @@ pub async fn run(
     };
     let (row, agent) = loaded;
 
-    // Deliberately *not* resolved here: `runner::build_options` calls this only
-    // for a chat with no agent, which is the only branch Go reads the user's
-    // default in. Resolving eagerly opened a second read-only connection and
-    // loaded the settings row on every turn of every agent chat, to throw the
-    // answer away.
-    let fallback_model: Box<dyn Fn() -> String + Send + Sync> = if row.model.is_empty() {
-        let db_path = db_path.clone();
-        Box::new(move || default_model(&db_path))
-    } else {
-        let model = row.model.clone();
-        Box::new(move || model.clone())
-    };
+    let no_agent_model = no_agent_model_for(&db_path, &row.model);
 
     let (notify_tx, notify_rx) = mpsc::channel::<Notify>(NOTIFY_CAPACITY);
     let (input_tx, input_rx) = mpsc::channel::<String>(1);
@@ -151,7 +140,7 @@ pub async fn run(
 
     let spec = RunSpec {
         agent,
-        fallback_model,
+        no_agent_model,
         working_dir: row.working_dir.clone(),
         settings_profile_id: row.settings_profile_id.clone(),
         resume_session_id: Some(row.sdk_session_id.clone()).filter(|s| !s.is_empty()),
@@ -578,16 +567,98 @@ fn sse_response(body: Body) -> Response<Body> {
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 
+/// The closure `RunSpec::no_agent_model` carries.
+///
+/// Deliberately *not* resolved here: `runner::build_options` calls it only for a
+/// chat with no agent, which is the only branch Go reads the user's default in
+/// (`resolveAgentConfig` returns the agent's config outright otherwise).
+/// Resolving eagerly opened a read-only connection and loaded the settings row
+/// on every turn of every agent chat, to throw the answer away.
+fn no_agent_model_for(
+    db_path: &std::path::Path,
+    session_model: &str,
+) -> Box<dyn Fn() -> String + Send + Sync> {
+    if session_model.is_empty() {
+        let db_path = db_path.to_path_buf();
+        Box::new(move || default_model(&db_path))
+    } else {
+        let model = session_model.to_string();
+        Box::new(move || model.clone())
+    }
+}
+
+/// `settingsMgr.Get().DefaultModel`.
+///
+/// **`resolve`, not `load_stored`.** Go reads the *resolved* settings, and
+/// `SettingsManager.load` fills `"sonnet"` when nothing is stored before
+/// `applyEnvOverrides` applies `AGENTO_DEFAULT_MODEL` /
+/// `ANTHROPIC_DEFAULT_SONNET_MODEL`. The raw `SELECT` has neither, so a user who
+/// had never saved settings ran on the SDK's own default instead of `sonnet`,
+/// and one who exported `AGENTO_DEFAULT_MODEL` had it silently ignored —
+/// `settings::resolve` is the documented mirror of `Get()` and every other
+/// caller in the port already goes through it.
 fn default_model(db_path: &std::path::Path) -> String {
     let Ok(conn) = crate::native::db::open_read_only(db_path) else {
         return String::new();
     };
-    crate::native::settings::load_stored(&conn).default_model
+    crate::native::settings::resolve(crate::native::settings::load_stored(&conn))
+        .settings
+        .default_model
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The branch the three `runner.rs` tests cannot reach: they stub the
+    /// closure, so nothing checked which one `turn::run` builds. Inverting this
+    /// condition would ship green and run every no-agent chat on the wrong
+    /// model.
+    #[test]
+    fn a_session_model_is_used_verbatim_and_never_touches_the_database() {
+        // A path that does not exist: if the row's model were ignored and the
+        // settings read anyway, opening it would fail and this would be `""`.
+        let nowhere = std::path::Path::new("/nonexistent/agento/definitely-not-a-db");
+        let resolve = no_agent_model_for(nowhere, "session-model");
+        assert_eq!(resolve(), "session-model");
+        // Idempotent — `build_options` calls it once, but nothing enforces that.
+        assert_eq!(resolve(), "session-model");
+    }
+
+    /// The other arm reads the settings, and does so through `resolve` — which
+    /// is what fills `"sonnet"` for a user who has never saved settings, exactly
+    /// as `SettingsManager.load` does before Go reads it.
+    #[test]
+    fn an_empty_session_model_resolves_the_users_default() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        drop(conn);
+
+        // Nothing stored: the raw column is empty and `resolve` fills Go's
+        // default, so reading the row directly would have answered `""`.
+        assert_eq!(
+            no_agent_model_for(file.path(), "")(),
+            crate::native::settings::DEFAULT_MODEL
+        );
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO user_settings (id, default_model) VALUES (1, 'stored-model')
+             ON CONFLICT(id) DO UPDATE SET default_model = 'stored-model'",
+            [],
+        )
+        .expect("store a model");
+        assert_eq!(no_agent_model_for(file.path(), "")(), "stored-model");
+    }
+
+    /// An unreadable database is `""`, which `build_options` reads as "no model
+    /// option" rather than as a failure — the turn still runs.
+    #[test]
+    fn an_unreadable_database_yields_no_model_rather_than_an_error() {
+        let nowhere = std::path::Path::new("/nonexistent/agento/definitely-not-a-db");
+        assert_eq!(no_agent_model_for(nowhere, "")(), "");
+    }
 
     #[test]
     fn an_ask_user_question_tool_use_is_found() {

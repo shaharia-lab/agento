@@ -328,7 +328,11 @@ pub struct SettingsResponse {
 }
 
 /// `config.defaultModel`.
-const DEFAULT_MODEL: &str = "sonnet";
+/// Go's `defaultModel` (`internal/config/settings.go`), which
+/// `SettingsManager.load` fills in when nothing is stored — before
+/// `applyEnvOverrides` runs. Public so a caller that resolves the model through
+/// [`resolve`] can assert against the same constant rather than a literal.
+pub const DEFAULT_MODEL: &str = "sonnet";
 
 /// Resolve the row into the answer `SettingsManager` gives, in its order:
 /// load the store, fill the two defaults, then apply the environment.

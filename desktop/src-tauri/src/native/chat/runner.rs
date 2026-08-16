@@ -50,13 +50,18 @@ pub struct RunSpec {
     /// The model a chat with **no agent** runs: `session.model`, or the user's
     /// default when the session has none.
     ///
+    /// Named for the branch rather than for the fallback, because
+    /// [`crate::claude::options::Options::fallback_model`] already means
+    /// something else in this very function — the CLI's `--fallback-model`, used
+    /// when the *primary* model is unavailable.
+    ///
     /// A closure, because computing it opens a second read-only SQLite
     /// connection and loads the settings row — and Go never does that for a
     /// chat that names an agent. `resolveAgentConfig` returns the agent's own
     /// config outright in that case and the default is only read in the
     /// no-agent branch, so an eager value is work whose result is thrown away.
     /// Called at most once, in the one arm below that needs it.
-    pub fallback_model: Box<dyn Fn() -> String + Send + Sync>,
+    pub no_agent_model: Box<dyn Fn() -> String + Send + Sync>,
     pub working_dir: String,
     pub settings_profile_id: String,
     /// `Some` resumes an existing CLI session; `None` pins a new one to the
@@ -129,7 +134,7 @@ pub fn build_options(
     // from the one Go picks.
     let model = match spec.agent.as_ref() {
         Some(agent) => agent.model.clone(),
-        None => (spec.fallback_model)(),
+        None => (spec.no_agent_model)(),
     };
     if !model.is_empty() {
         opts = opts.with_model(model);
@@ -440,7 +445,7 @@ mod tests {
         (
             RunSpec {
                 agent,
-                fallback_model: Box::new(move || {
+                no_agent_model: Box::new(move || {
                     counter.fetch_add(1, Ordering::SeqCst);
                     "fallback-model".to_string()
                 }),
@@ -568,7 +573,7 @@ mod tests {
                 local: None,
                 mcp: Some(mcp.into()),
             })),
-            fallback_model: Box::new(String::new),
+            no_agent_model: Box::new(String::new),
             working_dir: String::new(),
             settings_profile_id: String::new(),
             resume_session_id: None,
@@ -588,7 +593,7 @@ mod tests {
                 local: Some(vec!["now".into()].into()),
                 mcp: None,
             })),
-            fallback_model: Box::new(String::new),
+            no_agent_model: Box::new(String::new),
             working_dir: String::new(),
             settings_profile_id: String::new(),
             resume_session_id: None,
