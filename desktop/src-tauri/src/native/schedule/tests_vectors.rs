@@ -42,7 +42,7 @@ fn vectors() -> Vec<Case> {
 #[test]
 fn every_vector_matches_what_go_produced() {
     let cases = vectors();
-    assert!(cases.len() >= 60, "vectors look truncated");
+    assert!(cases.len() >= 75, "vectors look truncated");
 
     for case in cases {
         let loc: Tz = case
@@ -131,6 +131,60 @@ fn the_three_silent_behaviours_are_covered() {
     assert_eq!(
         daily.definition, "daily",
         "every_days with a valid at_time must be a DailyJob, not 24 hours"
+    );
+}
+
+/// Three more the file has to keep, for the same reason: each one is a case
+/// where the port used to panic or answer differently, and a vector is the only
+/// thing standing between that and a silent regression.
+#[test]
+fn the_reachable_edges_are_covered() {
+    let cases = vectors();
+    let named = |n: &str| {
+        cases
+            .iter()
+            .find(|c| c.name == n)
+            .unwrap_or_else(|| panic!("missing vector {n}"))
+    };
+
+    // Production's own location, which every other vector names explicitly.
+    let local = named("cron/scheduler_location_is_time_local");
+    assert!(
+        local.next_runs[0]
+            .as_deref()
+            .is_some_and(|t| t.ends_with("+11:00")),
+        "generated through time.Local under a pinned TZ, so the offset is the zone's own"
+    );
+
+    // An `every_*` that no validation bounds, which Go answers by wrapping.
+    assert_eq!(
+        named("interval/every_days_overflows_negative").error,
+        "schedule:duration_negative",
+        "MaxInt64 days wraps negative and gocron refuses it — it does not panic"
+    );
+    assert_eq!(
+        named("interval/every_hours_overflows_into_the_future").definition,
+        "duration",
+        "and 2^31 hours wraps to an interval gocron happily schedules"
+    );
+
+    // A step the field's width cannot hold.
+    assert_eq!(
+        named("cron/step_wider_than_the_field").error,
+        "",
+        "Go schedules it; the port must not error, and must not overflow computing the bits"
+    );
+
+    // Go's RFC 3339, in both directions.
+    assert_eq!(
+        named("one_off/lowercase_designators").error,
+        "build:run_at",
+        "legal per RFC 3339 §5.6 and refused by Go"
+    );
+    assert_eq!(
+        named("one_off/comma_fraction").error,
+        "",
+        "and a comma decimal, which chrono refuses and Go accepts"
     );
 }
 

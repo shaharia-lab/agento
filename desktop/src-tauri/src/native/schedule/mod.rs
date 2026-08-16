@@ -47,6 +47,24 @@
 //! the one after. That guard is why a daily `0 2 * * *` runs once on the
 //! October Sunday when 02:00 happens twice, while `*/30 * * * *` runs through
 //! the repeated hour exactly as it reads.
+//!
+//! # Known divergences, all of them past the far edge of a real schedule
+//!
+//! **Beyond ~2038 the offsets can differ by an hour.** `chrono_tz`'s transition
+//! table is finite and falls back to standard time once it runs out, while Go's
+//! zoneinfo carries a POSIX TZ footer and keeps applying the last rule
+//! indefinitely. Europe/Berlin on 23 May is CEST here for 2026, 2037 and 2038
+//! and CET for 2100, 2200 and 2318. The *instant* still agrees — a differential
+//! fuzz surfaced it as `@every 2562047h` rendering `+02:00` in Go and `+01:00`
+//! here — but a daily job's wall-clock arithmetic then walks an hour off. The
+//! vectors deliberately stop short of it, because pinning a date that far out
+//! would pin `chrono_tz`'s table rather than gocron's behaviour.
+//!
+//! **A daily job whose interval overflows the calendar answers "never".**
+//! `every_days` is unbounded (`validateScheduleConfig` imposes no ceiling), and
+//! `every_days = 2^31` with an `at_time` puts Go's next run in the year
+//! 5,881,636 — outside `chrono`'s ±262,143. [`next_daily`] returns the zero
+//! time rather than panicking. See its comment.
 
 pub mod cron;
 
@@ -159,26 +177,98 @@ pub fn build_job_definition(
 ) -> Result<JobDefinition, BuildError> {
     match schedule_type {
         "run_immediately" => Ok(JobDefinition::OneTime(now + Duration::seconds(2))),
-        "one_off" => DateTime::parse_from_rfc3339(&cfg.run_at)
+        "one_off" => parse_go_rfc3339(&cfg.run_at)
             .map(JobDefinition::OneTime)
-            .map_err(|_| BuildError::RunAt),
+            .ok_or(BuildError::RunAt),
         "interval" => build_interval_job(cfg),
         "cron" => Ok(JobDefinition::Cron(cfg.expression.clone())),
         _ => Err(BuildError::UnknownType),
     }
 }
 
+/// `time.Parse(time.RFC3339, s)`, which is not `chrono`'s RFC 3339.
+///
+/// They disagree in both directions, and `run_at` is free-form client input, so
+/// the disagreement is reachable from `POST /api/tasks`:
+///
+/// - **Lowercase designators.** RFC 3339 §5.6 permits `t` and `z`; Go does not.
+///   Its fast path tests `s[10] == 'T'` and its fallback matches the layout's
+///   literal `T` and `Z` exactly, so `2026-06-01t12:00:00z` is a parse error.
+///   `chrono` accepts it and would schedule a one-off Go refuses.
+/// - **A comma decimal separator.** Go's fast path wants `.`, fails, and falls
+///   back to the general parser — which treats `,` and `.` alike — so
+///   `2026-06-01T12:00:00,5Z` is 12:00:00.5. `chrono` rejects it.
+/// - **A leap second.** `chrono` accepts `:60` and encodes it as a nanosecond
+///   past one billion; Go bounds the field at 59 and errors. Left in `chrono`'s
+///   representation it is not even a fire time — the schedule builds and then
+///   produces nothing.
+///
+/// Everything else is left to `chrono`: a differential run of 636 shapes
+/// through a real `gocron.Scheduler` found no other disagreement, including on
+/// component widths, the `+hh:mm` offset form and trailing text.
+fn parse_go_rfc3339(s: &str) -> Option<DateTime<FixedOffset>> {
+    let bytes = s.as_bytes();
+    // Go's date/time separator is the layout's literal 'T'. Nothing else — not
+    // 't', not a space — matches it.
+    if bytes.get(10) != Some(&b'T') {
+        return None;
+    }
+    // ...and the zone is 'Z' or a numeric offset; a trailing 'z' is neither.
+    if bytes.last() == Some(&b'z') {
+        return None;
+    }
+    // `,` is a fractional-second separator for Go and not for chrono. It can
+    // only appear in that one position, since every other byte of an RFC 3339
+    // timestamp is fixed, so replacing all of them is replacing at most one.
+    let normalized;
+    let s = if s.contains(',') {
+        normalized = s.replace(',', ".");
+        normalized.as_str()
+    } else {
+        s
+    };
+    let parsed = DateTime::parse_from_rfc3339(s).ok()?;
+    // chrono's leap-second encoding: the extra second lives in `nanosecond`.
+    if parsed.nanosecond() >= 1_000_000_000 {
+        return None;
+    }
+    Some(parsed)
+}
+
+/// Go's `time.Duration` arithmetic: `int64` nanoseconds that **wrap** rather
+/// than trap or saturate.
+///
+/// `validateScheduleConfig` puts no ceiling on `every_minutes`/`every_hours`/
+/// `every_days`, so `POST /api/tasks` can store any `int64` and
+/// `buildIntervalJob` multiplies it out unchecked. Go answers *something* for
+/// every one of them — `every_hours = 2^31` wraps to a real 2081 fire time,
+/// `every_days = math.MaxInt64` wraps negative and gocron rejects it as
+/// `ErrDurationJobIntervalNegative`. `chrono::TimeDelta::minutes` and
+/// `::hours` panic out of bounds instead, and a panic is the one answer gocron
+/// never gives. `TimeDelta::nanoseconds` is total over `i64`, so routing
+/// through it reproduces the wrap exactly.
+fn go_duration(n: i64, unit_nanos: i64) -> Duration {
+    Duration::nanoseconds(n.wrapping_mul(unit_nanos))
+}
+
+const NANOS_PER_MINUTE: i64 = 60_000_000_000;
+const NANOS_PER_HOUR: i64 = 3_600_000_000_000;
+
 /// `buildIntervalJob`. The guards are `> 0`, in that order — so a negative
 /// `every_minutes` is not rejected, it is simply never chosen, and a config
 /// carrying only a negative value has no interval at all.
 fn build_interval_job(cfg: &ScheduleConfig) -> Result<JobDefinition, BuildError> {
     if cfg.every_minutes > 0 {
-        return Ok(JobDefinition::Duration(Duration::minutes(
+        return Ok(JobDefinition::Duration(go_duration(
             cfg.every_minutes,
+            NANOS_PER_MINUTE,
         )));
     }
     if cfg.every_hours > 0 {
-        return Ok(JobDefinition::Duration(Duration::hours(cfg.every_hours)));
+        return Ok(JobDefinition::Duration(go_duration(
+            cfg.every_hours,
+            NANOS_PER_HOUR,
+        )));
     }
     if cfg.every_days > 0 {
         if !cfg.at_time.is_empty() {
@@ -187,8 +277,11 @@ fn build_interval_job(cfg: &ScheduleConfig) -> Result<JobDefinition, BuildError>
             }
             // THE SILENT FALLBACK. Go discards the error here; so does this.
         }
-        return Ok(JobDefinition::Duration(Duration::hours(
-            cfg.every_days * 24,
+        // `time.Duration(cfg.EveryDays) * 24 * time.Hour`, left to right — so
+        // the `* 24` is its own wrapping int64 multiply, not part of one.
+        return Ok(JobDefinition::Duration(go_duration(
+            cfg.every_days.wrapping_mul(24),
+            NANOS_PER_HOUR,
         )));
     }
     Err(BuildError::InvalidInterval)
@@ -415,20 +508,41 @@ fn next_daily(interval: i64, at_times: &[(u32, u32, u32)], loc: Tz, last_run: Fi
         return Fire::zoned(next.with_timezone(&loc));
     }
     let l = last_run.instant.with_timezone(&loc);
-    let start_next_day = go_date(
-        loc,
-        l.year(),
-        l.month() as i32,
-        l.day() as i32 + interval as i32,
-        0,
-        0,
-        0,
-        0,
-    );
+    // `lastRun.Day() + int(d.interval)`, in Go's width and with Go's wrap.
+    // `interval` is `every_days`, which nothing bounds, so this is the only
+    // place a stored `int64` reaches the calendar unscaled.
+    let Some(day) = calendar_day(i64::from(l.day()).wrapping_add(interval)) else {
+        return Fire::zero();
+    };
+    let start_next_day = go_date(loc, l.year(), l.month() as i32, day, 0, 0, 0, 0);
     match next_day(at_times, loc, start_next_day, false) {
         Some(next) => Fire::zoned(next.with_timezone(&loc)),
         None => Fire::zero(),
     }
+}
+
+/// Days `go_date` can still turn into a date, as a day-of-month offset.
+///
+/// `time.Date` counts days from the first of the month and normalizes without
+/// bound; `chrono`'s calendar stops at ±262,143 years, and `NaiveDate + Duration`
+/// **panics** past it rather than saturating. ±9,000,000 days is roughly ±24,600
+/// years — beyond every fire time a person will ever configure and comfortably
+/// inside what `chrono` can hold.
+const MAX_CALENDAR_DAY: i64 = 9_000_000;
+
+/// A day-of-month `go_date` can be handed, or `None` where Go would answer a
+/// date `chrono` cannot represent.
+///
+/// The caller turns `None` into gocron's zero time — "no next run" — which is a
+/// divergence, and the deliberate one: `every_days = 2^31` with an `at_time`
+/// fires in the year 5,881,636 for Go. There is no `chrono` value for that, so
+/// the choice is between the wrong answer and a panic on a request the HTTP API
+/// accepts today. See the module comment.
+fn calendar_day(day: i64) -> Option<i32> {
+    if !(-MAX_CALENDAR_DAY..=MAX_CALENDAR_DAY).contains(&day) {
+        return None;
+    }
+    i32::try_from(day).ok()
 }
 
 /// `dailyJob.nextDay`.
@@ -585,3 +699,127 @@ pub fn fire_times(
 
 #[cfg(test)]
 mod tests_vectors;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s)
+            .expect("literal parses")
+            .with_timezone(&Utc)
+    }
+
+    /// The unbounded `every_*` values. `validateScheduleConfig` has no ceiling,
+    /// so every one of these is reachable from `POST /api/tasks`, and Go answers
+    /// all of them by wrapping its int64 nanoseconds. The vectors pin the
+    /// answers; this pins that *nothing panics*, which is the part a wrong
+    /// answer would not tell you apart from.
+    #[test]
+    fn an_unbounded_interval_answers_rather_than_panicking() {
+        let now = utc("2026-02-10T09:15:30Z");
+        for cfg in [
+            ScheduleConfig {
+                every_minutes: i64::MAX,
+                ..Default::default()
+            },
+            ScheduleConfig {
+                every_hours: i64::MAX,
+                ..Default::default()
+            },
+            ScheduleConfig {
+                every_days: i64::MAX,
+                ..Default::default()
+            },
+            ScheduleConfig {
+                every_hours: 1 << 31,
+                ..Default::default()
+            },
+            ScheduleConfig {
+                every_minutes: 1 << 40,
+                ..Default::default()
+            },
+            // The daily branch, whose interval reaches the calendar unscaled.
+            ScheduleConfig {
+                every_days: i64::MAX,
+                at_time: "09:00".into(),
+                ..Default::default()
+            },
+            ScheduleConfig {
+                every_days: 1 << 31,
+                at_time: "09:00".into(),
+                ..Default::default()
+            },
+        ] {
+            let out = fire_times("interval", &cfg, Tz::UTC, now, 4);
+            assert!(
+                out.definition.is_some(),
+                "{cfg:?} built nothing, but the builder's only failure is an absent interval"
+            );
+        }
+    }
+
+    /// Go's arithmetic, not a bounds check: `2^31` hours is 7.7e21 nanoseconds
+    /// and wraps to an ordinary positive interval, while `MaxInt64` days wraps
+    /// negative and gocron then refuses the job.
+    #[test]
+    fn go_durations_wrap_where_chrono_would_panic() {
+        assert_eq!(
+            go_duration(1 << 31, NANOS_PER_HOUR),
+            Duration::nanoseconds((1i64 << 31).wrapping_mul(NANOS_PER_HOUR))
+        );
+        assert!(go_duration(i64::MAX.wrapping_mul(24), NANOS_PER_HOUR) < Duration::zero());
+        assert_eq!(go_duration(5, NANOS_PER_MINUTE), Duration::minutes(5));
+    }
+
+    /// A daily interval Go answers past the end of `chrono`'s calendar. The
+    /// answer diverges — gocron's zero time rather than the year 5,881,636 —
+    /// and the point of the test is that it is an answer at all.
+    #[test]
+    fn a_daily_interval_past_the_calendar_is_the_zero_time() {
+        assert_eq!(calendar_day(10), Some(10));
+        assert_eq!(calendar_day(i64::from(u32::MAX)), None);
+        assert_eq!(calendar_day(i64::MIN), None);
+
+        let sched = JobSchedule::Daily {
+            interval: 1 << 31,
+            at_times: vec![(9, 0, 0)],
+            loc: Tz::UTC,
+        };
+        // 09:00 is behind 12:00, so the first pass finds nothing and the second
+        // one has to walk 2^31 days forward.
+        let fired = sched.next(Fire {
+            instant: utc("2026-02-10T12:00:00Z"),
+            offset: FixedOffset::east_opt(0).expect("UTC"),
+        });
+        assert!(fired.is_zero());
+    }
+
+    /// Go's RFC 3339, which is neither RFC 3339 nor chrono's reading of it.
+    /// `run_at` is free-form client input, so this is the most reachable
+    /// divergence in the module.
+    #[test]
+    fn run_at_is_parsed_the_way_go_parses_it() {
+        assert!(
+            parse_go_rfc3339("2026-06-01t12:00:00z").is_none(),
+            "lowercase designators are legal per §5.6 and rejected by Go"
+        );
+        assert!(parse_go_rfc3339("2026-06-01T12:00:00z").is_none());
+        assert!(parse_go_rfc3339("2026-06-01t12:00:00Z").is_none());
+        assert!(
+            parse_go_rfc3339("2026-06-01 12:00:00Z").is_none(),
+            "a space is not the layout's literal T either"
+        );
+
+        let comma = parse_go_rfc3339("2026-06-01T12:00:00,5Z").expect("Go accepts a comma");
+        assert_eq!(
+            comma,
+            parse_go_rfc3339("2026-06-01T12:00:00.5Z").expect("and a period")
+        );
+
+        assert!(parse_go_rfc3339("2026-06-01T12:00:00+02:00").is_some());
+        assert!(parse_go_rfc3339("2026-06-01").is_none());
+        assert!(parse_go_rfc3339("tomorrow").is_none());
+        assert!(parse_go_rfc3339("").is_none());
+    }
+}

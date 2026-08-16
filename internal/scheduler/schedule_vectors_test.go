@@ -5,6 +5,8 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,6 +61,49 @@ const scheduleVectorFile = "../../desktop/parity/scheduler_vectors.json"
 var updateScheduleVectors = flag.Bool("update-scheduler-vectors", false,
 	"rewrite "+scheduleVectorFile+" from this Go toolchain")
 
+// pinnedLocalZone is the zone this package's tests run in.
+//
+// It exists for one vector. `gocron.NewScheduler()` defaults its location to
+// `time.Local` and nothing in Agento calls `WithLocation`, so **production's
+// scheduler location is whatever `time.Local` resolves to** — and every other
+// vector names an explicit IANA zone, which would leave that resolution with no
+// coverage at all. Pinning TZ makes `time.Local` reproducible so one vector can
+// be generated through it.
+//
+// Note what `time.Local` is *called* changes with TZ, and gocron writes that
+// name into the `CRON_TZ=` prefix verbatim: with TZ set, `initLocal` adopts the
+// loaded zone's own name (so the prefix reads `CRON_TZ=Australia/Lord_Howe`);
+// with TZ unset it keeps the name "Local" and robfig resolves that through
+// `time.LoadLocation("Local")`. The Rust port handles both — see
+// `resolve_scheduler_location` and `location_from_name` in
+// desktop/src-tauri/src/native/schedule/cron.rs. Only the first is reproducible
+// as a vector, because the second's answer is the build machine's own zone.
+//
+// Lord Howe Island rather than a round zone because its offset is +10:30 and
+// its DST shift is 30 minutes, so an offset the port renders by assuming whole
+// hours fails here rather than passing by luck.
+const pinnedLocalZone = "Australia/Lord_Howe"
+
+func TestMain(m *testing.M) {
+	// Before any test body runs, and therefore before anything in this package
+	// can trigger time.Local's one-shot initialization.
+	if err := os.Setenv("TZ", pinnedLocalZone); err != nil {
+		panic("pinning TZ: " + err.Error())
+	}
+	os.Exit(m.Run())
+}
+
+// discardLogger is what a Scheduler under test logs to.
+//
+// Not a nil logger: `buildIntervalJob` happens to be silent today, and that
+// silence is the defect this file's vectors document. The natural fix — logging
+// the `buildDailyAtTimeJob` error it discards — would nil-dereference every
+// caller here, and the failure would read as a bug in the test rather than in
+// the code under test.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.DiscardHandler)
+}
+
 // nextRunCount is how many fire times each vector records. The first is the
 // scheduler's own initial `nextRun` (`j.next(now)` advanced past now); the rest
 // are successive `next` applications, which is what `Job.NextRuns` computes.
@@ -69,9 +114,12 @@ const nextRunCount = 4
 type scheduleVector struct {
 	Name string `json:"name"`
 	Why  string `json:"why"`
-	// IANA zone the gocron scheduler runs in. Production uses `time.Local`,
-	// which is not reproducible across machines; the port takes the location as
-	// a parameter and defaults it to the system zone, exactly as gocron does.
+	// IANA zone the gocron scheduler runs in.
+	//
+	// Production passes no location at all, so gocron uses `time.Local` — see
+	// `pinnedLocalZone` and the `cron/scheduler_location_is_time_local` vector,
+	// which is generated through it. Every other case names a zone outright,
+	// because a vector has to answer the same on every machine.
 	Location       string                 `json:"location"`
 	Now            string                 `json:"now"`
 	ScheduleType   string                 `json:"schedule_type"`
@@ -108,6 +156,10 @@ type scheduleVectorInput struct {
 	now [6]int
 	typ storage.ScheduleType
 	cfg storage.ScheduleConfig
+	// useTimeLocal takes the scheduler's location from `time.Local` rather than
+	// from `location` — what production actually does. `location` is then the
+	// zone TestMain pinned, asserted rather than assumed.
+	useTimeLocal bool
 }
 
 // The anchors every case is written against. 2026-03-29 and 2026-10-25 are the
@@ -118,6 +170,9 @@ var (
 	berlinFall = [6]int{2026, 10, 25, 1, 30, 0} // inside the fall-back morning
 	nycPre     = [6]int{2026, 3, 7, 12, 0, 0}   // day before the US spring-forward
 	nycFall    = [6]int{2026, 11, 1, 0, 30, 0}  // inside the US fall-back morning
+	// Two days before Lord Howe Island leaves DST, which it does by half an
+	// hour rather than a whole one: +11:00 becomes +10:30 on 2026-04-05.
+	lordHowePre = [6]int{2026, 4, 3, 12, 0, 0}
 )
 
 //nolint:funlen // a vector table: length is the point
@@ -178,6 +233,24 @@ func scheduleVectorInputs() []scheduleVectorInput {
 			cfg: storage.ScheduleConfig{RunAt: "2026-06-01"},
 			why: "RFC3339 needs the time; a bare date is not accepted",
 		},
+		{
+			name: "one_off/lowercase_designators", location: "UTC", now: utcNoon,
+			typ: storage.ScheduleOneOff,
+			cfg: storage.ScheduleConfig{RunAt: "2026-06-01t12:00:00z"},
+			why: "RFC 3339 §5.6 allows lowercase 't' and 'z'; Go's parser does not — it matches the layout's literal T and Z. A permissive parser would schedule a one-off Go refuses",
+		},
+		{
+			name: "one_off/comma_fraction", location: "UTC", now: utcNoon,
+			typ: storage.ScheduleOneOff,
+			cfg: storage.ScheduleConfig{RunAt: "2026-06-01T12:00:00,5Z"},
+			why: "and the disagreement runs the other way too: Go's fast path wants '.', falls back to the general parser, and that treats ',' as a fractional separator — so this is 12:00:00.5",
+		},
+		{
+			name: "one_off/leap_second", location: "UTC", now: utcNoon,
+			typ: storage.ScheduleOneOff,
+			cfg: storage.ScheduleConfig{RunAt: "2026-06-01T12:00:60Z"},
+			why: "Go bounds the seconds field at 59. A parser that models leap seconds accepts this and then has no instant to fire at, so the task builds and never runs",
+		},
 
 		// --- interval: duration ----------------------------------------------
 		{
@@ -226,6 +299,32 @@ func scheduleVectorInputs() []scheduleVectorInput {
 			typ: storage.ScheduleInterval,
 			cfg: storage.ScheduleConfig{AtTime: "09:00"},
 			why: "at_time is only read inside the every_days branch; alone it schedules nothing",
+		},
+
+		// --- interval: values validateScheduleConfig does not bound -----------
+		//
+		// There is no upper limit on every_minutes/every_hours/every_days, so
+		// POST /api/tasks can store any int64 and buildIntervalJob multiplies it
+		// into a time.Duration unchecked. Go's int64 nanoseconds WRAP, and it
+		// answers something for every one of these — which is what the port has
+		// to reproduce, since a panic is the one answer gocron never gives.
+		{
+			name: "interval/every_hours_overflows_into_the_future", location: "UTC", now: utcNoon,
+			typ: storage.ScheduleInterval,
+			cfg: storage.ScheduleConfig{EveryHours: 1 << 31},
+			why: "2^31 hours is 7.7e21 nanoseconds; wrapped into int64 it is a perfectly ordinary ~55-year interval, and gocron schedules it",
+		},
+		{
+			name: "interval/every_minutes_overflows_into_the_future", location: "UTC", now: utcNoon,
+			typ: storage.ScheduleInterval,
+			cfg: storage.ScheduleConfig{EveryMinutes: 1 << 40},
+			why: "the same wrap on the minutes branch, at a different scale — the sign the wrap lands on is not predictable from the magnitude",
+		},
+		{
+			name: "interval/every_days_overflows_negative", location: "UTC", now: utcNoon,
+			typ: storage.ScheduleInterval,
+			cfg: storage.ScheduleConfig{EveryDays: math.MaxInt64},
+			why: "and here the wrap lands negative, so gocron rejects the job outright — note every_days is multiplied by 24 first, which is its own wrapping multiply",
 		},
 
 		// --- interval: the DailyJob, and the silent fallback ------------------
@@ -495,6 +594,31 @@ func scheduleVectorInputs() []scheduleVectorInput {
 			why: "an unloadable zone is a parse failure",
 		},
 		{
+			name: "cron/embedded_empty_timezone", location: "UTC", now: utcNoon,
+			typ: storage.ScheduleCron,
+			cfg: storage.ScheduleConfig{Expression: "TZ= 0 9 * * *"},
+			why: "time.LoadLocation(\"\") is UTC, not an error — one of two names it resolves that an IANA-only lookup does not (the other is \"Local\")",
+		},
+		{
+			name: "cron/scheduler_location_is_time_local", location: pinnedLocalZone, now: lordHowePre,
+			typ:          storage.ScheduleCron,
+			cfg:          storage.ScheduleConfig{Expression: "0 9 * * *"},
+			useTimeLocal: true,
+			why:          "THE PRODUCTION PATH: gocron.NewScheduler() defaults to time.Local and Agento never calls WithLocation, so this is the only case whose location is resolved rather than named. TestMain pins TZ to make it reproducible, and the zone leaves DST by HALF an hour on 2026-04-05 — which both renders an offset no whole-hour assumption produces and skips 2026-04-05 outright, because the hour loop steps absolute hours onto 08:30 and never lands on 09:00",
+		},
+		{
+			name: "cron/step_wider_than_the_field", location: "UTC", now: utcNoon,
+			typ: storage.ScheduleCron,
+			cfg: storage.ScheduleConfig{Expression: "* * 1/4294967295 * *"},
+			why: "a step is never range-checked: getBits walks i += step from the field minimum, sets the one bit and stops. Go schedules it; a 32-bit index overflows adding it",
+		},
+		{
+			name: "cron/step_wider_than_int32", location: "UTC", now: utcNoon,
+			typ: storage.ScheduleCron,
+			cfg: storage.ScheduleConfig{Expression: "* * * * */9999999999"},
+			why: "mustParseInt is Atoi bounded below at zero, so anything up to MaxInt64 parses — the accepted range is Go's int, not the field's",
+		},
+		{
 			name: "cron/across_the_spring_forward_gap", location: "Europe/Berlin", now: berlinPre,
 			typ: storage.ScheduleCron,
 			cfg: storage.ScheduleConfig{Expression: "0 2 * * *"},
@@ -595,6 +719,13 @@ func buildErrorClass(typ storage.ScheduleType) string {
 // The offset is rounded to the second because `builtAt` was sampled just before
 // the call rather than inside it; the assertion below is what makes the
 // rounding safe rather than a way of hiding a wrong answer.
+//
+// The ±500 ms around 2s in that assertion is the flake budget, not a precision
+// claim: `builtAt` is read outside `buildJobDefinition`, which then reads its
+// own `time.Now()`, so the gap between them is however long a loaded CI runner
+// takes to get from one line to the next. Tightening it buys nothing — the
+// rounding to whole seconds is what actually pins the rule — and costs a
+// spurious failure on every stalled runner.
 func runImmediatelyOffsetMs(t *testing.T, name string, def gocron.JobDefinition, builtAt time.Time) *int64 {
 	t.Helper()
 
@@ -635,6 +766,17 @@ func answer(t *testing.T, in scheduleVectorInput) scheduleVector {
 	if err != nil {
 		t.Fatalf("%s: loading location %q: %v", in.name, in.location, err)
 	}
+	if in.useTimeLocal {
+		// The whole point of the case: take the location the way production
+		// does. Assert rather than trust that TestMain's TZ took effect, or a
+		// Go release that moved time.Local's initialization would quietly write
+		// a machine-dependent vector instead of failing.
+		if time.Local.String() != in.location {
+			t.Fatalf("%s: time.Local is %q, want the pinned %q — TestMain's TZ did not take effect",
+				in.name, time.Local.String(), in.location)
+		}
+		loc = time.Local
+	}
 	now := time.Date(in.now[0], time.Month(in.now[1]), in.now[2], in.now[3], in.now[4], in.now[5], 0, loc)
 
 	out := scheduleVector{
@@ -646,7 +788,7 @@ func answer(t *testing.T, in scheduleVectorInput) scheduleVector {
 
 	task := &storage.ScheduledTask{ID: in.name, ScheduleType: in.typ, ScheduleConfig: in.cfg}
 	builtAt := time.Now()
-	def, buildErr := (&Scheduler{}).buildJobDefinition(task)
+	def, buildErr := (&Scheduler{logger: discardLogger()}).buildJobDefinition(task)
 	if buildErr != nil {
 		out.Error = buildErrorClass(in.typ)
 		return out
@@ -727,8 +869,12 @@ func TestScheduleVectors(t *testing.T) {
 			"fire time is time.Now()+2s and so has no absolute instant to freeze.",
 			"",
 			"Location is explicit because production uses time.Local, which is not",
-			"reproducible across machines. Cases anchored on 2026-03-08, 2026-03-29,",
-			"2026-10-25 and 2026-11-01 sit on DST transitions on purpose.",
+			"reproducible across machines — with one exception:",
+			"cron/scheduler_location_is_time_local IS generated through time.Local,",
+			"under a TZ the generator pins, because production's own location",
+			"resolution would otherwise have no coverage at all. Cases anchored on",
+			"2026-03-08, 2026-03-29, 2026-10-25 and 2026-11-01 sit on DST",
+			"transitions on purpose.",
 		},
 		Cases: make([]scheduleVector, 0, len(inputs)),
 	}
@@ -767,9 +913,72 @@ func TestScheduleVectors(t *testing.T) {
 		t.Errorf("%s is stale — regenerate with:\n"+
 			"\tgo test ./internal/scheduler/ -run TestScheduleVectors -update-scheduler-vectors\n"+
 			"Something moved in buildJobDefinition, in gocron/v2, in robfig/cron or in this "+
-			"machine's tzdata. The Rust port in desktop/src-tauri/src/native/schedule/ "+
+			"machine's tzdata. If TestScheduleVectorZoneRules failed too it is tzdata, and "+
+			"that test names the rule. The Rust port in desktop/src-tauri/src/native/schedule/ "+
 			"embeds this file and will fail against it, so check what changed before "+
 			"accepting the new bytes.", scheduleVectorFile)
+	}
+}
+
+// TestScheduleVectorZoneRules pins the zone rules the vector table is built on.
+//
+// The vectors are a byte comparison against a file whose contents depend on the
+// machine's tzdata, which is a real exposure: the EU has live legislation to
+// abolish seasonal clock changes, and if that ever lands in a tzdata release
+// then `make test` breaks tree-wide on a change nobody made.
+//
+// Putting the whole thing behind a build tag (the `bench-scale` arrangement)
+// was considered and rejected. The DST behavior *is* the content — a duration
+// job walking off the wall clock, a cron job skipping a spring-forward day — so
+// tagging it out would mean the parity check runs only when someone remembers.
+// Worse, it would only silence the Go half: the Rust port embeds the same file
+// with `include_str!` and asserts against it on every `cargo test`, so the
+// vectors would still fail, just in the language that cannot regenerate them.
+// And a tzdata change that moves these numbers is not noise — `chrono-tz` ships
+// its own copy and moves independently, so the disagreement is exactly what
+// this file exists to surface.
+//
+// What was missing is a *diagnosis*. This test converts "78-case JSON byte
+// diff" into "Europe/Berlin's spring-forward moved", so the next person spends
+// a minute rather than an afternoon. It is not a guard against the change; it
+// is a guard against misreading it.
+func TestScheduleVectorZoneRules(t *testing.T) {
+	// Each row: the instant just before a transition, and the UTC offsets in
+	// seconds either side of it. These are what every DST vector turns on.
+	rules := []struct {
+		zone          string
+		at            time.Time
+		before, after int
+		what          string
+	}{
+		{"Europe/Berlin", time.Date(2026, 3, 29, 1, 0, 0, 0, time.UTC), 3600, 7200,
+			"the EU spring-forward the cron and daily vectors are anchored on"},
+		{"Europe/Berlin", time.Date(2026, 10, 25, 1, 0, 0, 0, time.UTC), 7200, 3600,
+			"the EU fall-back, where gocron's duplicate-wall-clock guard is exercised"},
+		{"America/New_York", time.Date(2026, 3, 8, 7, 0, 0, 0, time.UTC), -18000, -14400,
+			"the US spring-forward"},
+		{"America/New_York", time.Date(2026, 11, 1, 6, 0, 0, 0, time.UTC), -14400, -18000,
+			"the US fall-back"},
+		{pinnedLocalZone, time.Date(2026, 4, 4, 15, 0, 0, 0, time.UTC), 39600, 37800,
+			"Lord Howe's HALF-hour shift, which is why the time.Local vector uses this zone"},
+	}
+
+	for _, r := range rules {
+		loc, err := time.LoadLocation(r.zone)
+		if err != nil {
+			t.Fatalf("loading %s: %v", r.zone, err)
+		}
+		_, before := r.at.Add(-time.Second).In(loc).Zone()
+		_, after := r.at.Add(time.Second).In(loc).Zone()
+		if before != r.before || after != r.after {
+			t.Errorf("%s at %s: offsets are %d→%d, want %d→%d.\n"+
+				"This machine's tzdata disagrees with the one the vectors were generated "+
+				"from about %s. Every DST vector in %s is now wrong, and regenerating "+
+				"would bake this machine's rules in — decide whether the rule really "+
+				"changed before doing that.",
+				r.zone, r.at.Format(time.RFC3339), before, after, r.before, r.after,
+				r.what, scheduleVectorFile)
+		}
 	}
 }
 
@@ -777,7 +986,7 @@ func TestScheduleVectors(t *testing.T) {
 // table — so a regression fails with the name of the behavior that broke
 // rather than as one line of a diff between two large JSON files.
 func TestTheThreeSilentSchedulingBehaviors(t *testing.T) {
-	s := &Scheduler{}
+	s := &Scheduler{logger: discardLogger()}
 
 	t.Run("run_immediately is a one-time job two seconds out", func(t *testing.T) {
 		before := time.Now()

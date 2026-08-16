@@ -87,7 +87,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		if task.Status != storage.TaskStatusActive {
 			continue
 		}
-		if err := s.ScheduleTask(task); err != nil {
+		if err := s.scheduleTaskOnStartup(task); err != nil {
 			s.logger.Warn("failed to schedule task on startup",
 				"task_id", task.ID, "task_name", task.Name, "error", err)
 		}
@@ -96,6 +96,34 @@ func (s *Scheduler) Start(ctx context.Context) error {
 	s.cron.Start()
 	s.logger.Info("task scheduler started", "active_tasks", len(s.jobs))
 	return nil
+}
+
+// scheduleTaskOnStartup is ScheduleTask with a stored row's crontab treated as
+// untrusted input, because on this path it is.
+//
+// A saved cron task can panic the parser rather than returning an error: an
+// expression of exactly `CRON_TZ=UTC` (a zone prefix with nothing after it)
+// makes robfig's `strings.Index(spec, " ")` return -1 and the slice that
+// follows go out of range. `validateScheduleConfig` does not catch it — it
+// checks only that the expression is non-empty — and `CreateTask` writes the
+// row before scheduling it, so the row outlives the failed request.
+//
+// Start runs on a goroutine off `initTaskScheduler` with nothing above it
+// recovering, so without this one such row stops `agento web` from starting at
+// all, on every boot, recoverable only by editing SQLite by hand. Confining the
+// blast radius to the task that caused it is worth a recover here even though
+// the parser should not be panicking; validating at save time is issue #330.
+//
+// Deliberately only on the startup path. A panic reaching an API handler is
+// caught by `middleware.Recoverer` and reported, which is what should happen to
+// a request; it is the unattended boot loop that needs to survive.
+func (s *Scheduler) scheduleTaskOnStartup(task *storage.ScheduledTask) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic scheduling task %q (see issue #330): %v", task.ID, r)
+		}
+	}()
+	return s.ScheduleTask(task)
 }
 
 // Stop shuts down the gocron scheduler.

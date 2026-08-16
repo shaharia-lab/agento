@@ -20,8 +20,12 @@
     "fire time is time.Now()+2s and so has no absolute instant to freeze.",
     "",
     "Location is explicit because production uses time.Local, which is not",
-    "reproducible across machines. Cases anchored on 2026-03-08, 2026-03-29,",
-    "2026-10-25 and 2026-11-01 sit on DST transitions on purpose."
+    "reproducible across machines — with one exception:",
+    "cron/scheduler_location_is_time_local IS generated through time.Local,",
+    "under a TZ the generator pins, because production's own location",
+    "resolution would otherwise have no coverage at all. Cases anchored on",
+    "2026-03-08, 2026-03-29, 2026-10-25 and 2026-11-01 sit on DST",
+    "transitions on purpose."
   ],
   "cases": [
     {
@@ -146,6 +150,50 @@
       "schedule_type": "one_off",
       "schedule_config": {
         "run_at": "2026-06-01"
+      },
+      "definition": "",
+      "error": "build:run_at",
+      "next_runs": []
+    },
+    {
+      "name": "one_off/lowercase_designators",
+      "why": "RFC 3339 §5.6 allows lowercase 't' and 'z'; Go's parser does not — it matches the layout's literal T and Z. A permissive parser would schedule a one-off Go refuses",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "one_off",
+      "schedule_config": {
+        "run_at": "2026-06-01t12:00:00z"
+      },
+      "definition": "",
+      "error": "build:run_at",
+      "next_runs": []
+    },
+    {
+      "name": "one_off/comma_fraction",
+      "why": "and the disagreement runs the other way too: Go's fast path wants '.', falls back to the general parser, and that treats ',' as a fractional separator — so this is 12:00:00.5",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "one_off",
+      "schedule_config": {
+        "run_at": "2026-06-01T12:00:00,5Z"
+      },
+      "definition": "one_time",
+      "error": "",
+      "next_runs": [
+        "2026-06-01T12:00:00.5Z",
+        null,
+        "2026-06-01T12:00:00.5Z",
+        null
+      ]
+    },
+    {
+      "name": "one_off/leap_second",
+      "why": "Go bounds the seconds field at 59. A parser that models leap seconds accepts this and then has no instant to fire at, so the task builds and never runs",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "one_off",
+      "schedule_config": {
+        "run_at": "2026-06-01T12:00:60Z"
       },
       "definition": "",
       "error": "build:run_at",
@@ -279,6 +327,55 @@
       },
       "definition": "",
       "error": "build:invalid_interval",
+      "next_runs": []
+    },
+    {
+      "name": "interval/every_hours_overflows_into_the_future",
+      "why": "2^31 hours is 7.7e21 nanoseconds; wrapped into int64 it is a perfectly ordinary ~55-year interval, and gocron schedules it",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_hours": 2147483648
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2081-09-26T02:54:05.697872896Z",
+        "2137-05-12T20:32:41.395745792Z",
+        "2192-12-26T14:11:17.093618688Z",
+        "2248-08-12T07:49:52.791491584Z"
+      ]
+    },
+    {
+      "name": "interval/every_minutes_overflows_into_the_future",
+      "why": "the same wrap on the minutes branch, at a different scale — the sign the wrap lands on is not predictable from the magnitude",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_minutes": 1099511627776
+      },
+      "definition": "duration",
+      "error": "",
+      "next_runs": [
+        "2189-01-07T01:38:24.643421184Z",
+        "2351-12-05T18:01:19.286842368Z",
+        "2514-11-01T10:24:13.930263552Z",
+        "2677-09-28T02:47:08.573684736Z"
+      ]
+    },
+    {
+      "name": "interval/every_days_overflows_negative",
+      "why": "and here the wrap lands negative, so gocron rejects the job outright — note every_days is multiplied by 24 first, which is its own wrapping multiply",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "interval",
+      "schedule_config": {
+        "every_days": 9223372036854775807
+      },
+      "definition": "duration",
+      "error": "schedule:duration_negative",
       "next_runs": []
     },
     {
@@ -1041,6 +1138,78 @@
       "definition": "cron",
       "error": "schedule:cron_parse",
       "next_runs": []
+    },
+    {
+      "name": "cron/embedded_empty_timezone",
+      "why": "time.LoadLocation(\"\") is UTC, not an error — one of two names it resolves that an IANA-only lookup does not (the other is \"Local\")",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "TZ= 0 9 * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-11T09:00:00Z",
+        "2026-02-12T09:00:00Z",
+        "2026-02-13T09:00:00Z",
+        "2026-02-14T09:00:00Z"
+      ]
+    },
+    {
+      "name": "cron/scheduler_location_is_time_local",
+      "why": "THE PRODUCTION PATH: gocron.NewScheduler() defaults to time.Local and Agento never calls WithLocation, so this is the only case whose location is resolved rather than named. TestMain pins TZ to make it reproducible, and the zone leaves DST by HALF an hour on 2026-04-05 — which both renders an offset no whole-hour assumption produces and skips 2026-04-05 outright, because the hour loop steps absolute hours onto 08:30 and never lands on 09:00",
+      "location": "Australia/Lord_Howe",
+      "now": "2026-04-03T12:00:00+11:00",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "0 9 * * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-04-04T09:00:00+11:00",
+        "2026-04-06T09:00:00+10:30",
+        "2026-04-07T09:00:00+10:30",
+        "2026-04-08T09:00:00+10:30"
+      ]
+    },
+    {
+      "name": "cron/step_wider_than_the_field",
+      "why": "a step is never range-checked: getBits walks i += step from the field minimum, sets the one bit and stops. Go schedules it; a 32-bit index overflows adding it",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "* * 1/4294967295 * *"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-03-01T00:00:00Z",
+        "2026-03-01T00:01:00Z",
+        "2026-03-01T00:02:00Z",
+        "2026-03-01T00:03:00Z"
+      ]
+    },
+    {
+      "name": "cron/step_wider_than_int32",
+      "why": "mustParseInt is Atoi bounded below at zero, so anything up to MaxInt64 parses — the accepted range is Go's int, not the field's",
+      "location": "UTC",
+      "now": "2026-02-10T09:15:30Z",
+      "schedule_type": "cron",
+      "schedule_config": {
+        "expression": "* * * * */9999999999"
+      },
+      "definition": "cron",
+      "error": "",
+      "next_runs": [
+        "2026-02-15T00:00:00Z",
+        "2026-02-15T00:01:00Z",
+        "2026-02-15T00:02:00Z",
+        "2026-02-15T00:03:00Z"
+      ]
     },
     {
       "name": "cron/across_the_spring_forward_gap",

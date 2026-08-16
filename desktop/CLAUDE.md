@@ -1707,14 +1707,20 @@ Use the isolated dev instance for write testing.
   The port reproduces this deliberately (adding the check would refuse a write Go
   performs) and says so at both sites.
 - **A cron task can be saved that stops the server from starting.**
+  Filed as [#330](https://github.com/shaharia-lab/agento/issues/330), because
+  this list is not somewhere a server engineer looks. `Scheduler.Start` now
+  recovers per task so one bad row cannot brick a boot (#324); the validation
+  half is still open.
   `validateScheduleConfig` checks only that `expression` is non-empty, and
   `robfig/cron`'s `Parse` slices between `=` and the first space — so an
   expression of exactly `CRON_TZ=UTC` panics with `slice bounds out of range
   [:-1]`. `CreateTask` writes the row *before* calling `ScheduleTask`, and
   `middleware.Recoverer` turns the request into a 500, so the row survives.
-  On the next boot `Scheduler.Start` reaches it with nothing recovering, and
-  `agento web` dies. Reproduced against gocron v2.22.0. The fix is to validate
-  the crontab at save time (`gocron.NewDefaultCron(false).IsValid`) rather than
-  discovering it at schedule time. `native/schedule/cron.rs` answers `Err`
+  On the next boot `Scheduler.Start` reached it with nothing recovering, and
+  `agento web` died. Reproduced against gocron v2.22.0. The fix is to validate
+  the crontab at save time — but note the obvious implementation does not work:
+  `gocron.NewDefaultCron(false).IsValid` panics on this input too, since it is
+  the same `ParseStandard` underneath, so validation needs its own `recover()`
+  or a prefix pre-check. `native/schedule/cron.rs` answers `Err`
   there instead of panicking, deliberately, and has no vector for it: pinning a
   panic is pinning a bug.

@@ -92,6 +92,11 @@ chrono = { version = "0.4.45", default-features = false, features = ["std", "clo
 # IANA name has to resolve to real offsets and real DST transitions. Go reaches
 # its own embedded tzdata through `time.LoadLocation`; this is the equivalent.
 chrono-tz = "0.10"
+# Which IANA zone Go's `time.Local` is, for the scheduler port: a default
+# `gocron.Scheduler` runs in `time.Local` and prepends `CRON_TZ=Local`, so the
+# port has to resolve that name the way Go's `initLocal` does. Already in the
+# tree as a chrono `clock` dependency; named here because the code calls it.
+iana-time-zone = "0.1"
 form_urlencoded = "1.2.2"
 
 # SMTP, for the notification sender (#307). `POST /api/notifications/test` and

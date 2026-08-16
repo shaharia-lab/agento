@@ -30,7 +30,30 @@
 //! (which supplies the space) unless the string already carries a `TZ=` prefix,
 //! so reaching it needs an expression that is *only* a prefix. This returns a
 //! parse error there; there is no vector for it, because pinning a panic is
-//! pinning a bug.
+//! pinning a bug. It is not unreachable from the *server*, though — see
+//! [issue #330](https://github.com/shaharia-lab/agento/issues/330).
+//!
+//! # Widths are Go's, not the ones the values need
+//!
+//! Every parsed number is a `u64`, because robfig's `mustParseInt` returns a
+//! `uint` — `strconv.Atoi` bounded below at zero, so anything up to
+//! `math.MaxInt64`. Narrowing to `u32` would be sound for every value that can
+//! *match* a field (the widest is 59) but not for a **step**, which is never
+//! range-checked: `getBits` walks `i += step` from the field minimum, so
+//! `* * 1/4294967295 * *` sets one bit and stops. Go schedules it. A `u32`
+//! `i += step` overflows there, which panics in a debug build and wraps to a
+//! spurious bit in a release one.
+//!
+//! # Which location strings resolve
+//!
+//! A `TZ=`/`CRON_TZ=` prefix is handed to Go's `time.LoadLocation`, which
+//! accepts three things `chrono_tz::Tz::from_str` does not: `""` (meaning UTC),
+//! `"Local"`, and a path relative to `ZONEINFO`. The first two are reproduced
+//! by [`location_from_name`]; the third is not, because nothing writes it.
+//! `"Local"` is the one that matters in production — see
+//! [`resolve_scheduler_location`].
+
+use std::str::FromStr;
 
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
@@ -71,10 +94,13 @@ pub struct SpecSchedule {
 }
 
 /// Field bounds, with the name table where robfig has one.
+///
+/// `u64` rather than a width the values need, because these share arithmetic
+/// with a step — see the module comment on widths.
 struct Bounds {
-    min: u32,
-    max: u32,
-    names: &'static [(&'static str, u32)],
+    min: u64,
+    max: u64,
+    names: &'static [(&'static str, u64)],
 }
 
 const SECONDS: Bounds = Bounds {
@@ -130,13 +156,17 @@ const DOW: Bounds = Bounds {
 };
 
 /// Go's `<<` on a `uint64`, which yields 0 for a shift of 64 or more where
-/// Rust's would panic. Reachable only through `getBits`' `max + 1`.
-fn shl(v: u64, n: u32) -> u64 {
-    v.checked_shl(n).unwrap_or(0)
+/// Rust's would panic. Reachable through `getBits`' `max + 1` and, now that the
+/// index is Go's width, through any out-of-range value a step walked to.
+fn shl(v: u64, n: u64) -> u64 {
+    u32::try_from(n)
+        .ok()
+        .and_then(|n| v.checked_shl(n))
+        .unwrap_or(0)
 }
 
 /// `getBits(min, max, step)`.
-fn get_bits(min: u32, max: u32, step: u32) -> u64 {
+fn get_bits(min: u64, max: u64, step: u64) -> u64 {
     if step == 1 {
         return !shl(u64::MAX, max + 1) & shl(u64::MAX, min);
     }
@@ -144,7 +174,11 @@ fn get_bits(min: u32, max: u32, step: u32) -> u64 {
     let mut i = min;
     while i <= max {
         bits |= shl(1, i);
-        i += step;
+        // Go's `uint` addition, which wraps rather than panicking. It cannot
+        // actually wrap here — `must_parse_int` caps a step at `i64::MAX` and
+        // `min` is at most 59 — but the arithmetic is Go's either way, and it
+        // is what a `u32` index got wrong.
+        i = i.wrapping_add(step);
     }
     bits
 }
@@ -154,18 +188,24 @@ fn all(r: &Bounds) -> u64 {
 }
 
 /// `mustParseInt`: Go's `strconv.Atoi` plus a non-negative check.
-fn must_parse_int(expr: &str) -> Result<u32, ParseError> {
+///
+/// The result is a `uint`, so the accepted range is `[0, math.MaxInt64]` — what
+/// `Atoi` can hold, not what any field can use. `* * * * */9999999999` is a
+/// legal (and useless) spec because of it.
+fn must_parse_int(expr: &str) -> Result<u64, ParseError> {
     let n: i64 = expr
         .parse()
         .map_err(|_| ParseError("failed to parse int from field"))?;
     if n < 0 {
         return Err(ParseError("negative number not allowed"));
     }
-    u32::try_from(n).map_err(|_| ParseError("number out of range"))
+    // Infallible after the check above; spelled as a conversion rather than a
+    // cast so the sign check stays the only place negativity is decided.
+    u64::try_from(n).map_err(|_| ParseError("negative number not allowed"))
 }
 
 /// `parseIntOrName`: the name table wins, case-insensitively.
-fn parse_int_or_name(expr: &str, r: &Bounds) -> Result<u32, ParseError> {
+fn parse_int_or_name(expr: &str, r: &Bounds) -> Result<u64, ParseError> {
     let lower = expr.to_ascii_lowercase();
     for (name, value) in r.names {
         if *name == lower {
@@ -386,11 +426,77 @@ fn parse_descriptor(descriptor: &str, loc: Tz) -> Result<Schedule, ParseError> {
     }
 }
 
+/// Go's `time.Local`, which is the location a `gocron.Scheduler` runs in when
+/// nobody calls `WithLocation` — and nothing in Agento does.
+///
+/// This is not a detail of the vectors. `gocron.NewScheduler()` defaults
+/// `location` to `time.Local` and `defaultCron.IsValid` prepends
+/// `CRON_TZ=<location.String()>`, so **production literally schedules against
+/// the string `"Local"`**. Getting the zone wrong here moves every daily and
+/// cron task by the offset between the two, silently.
+///
+/// The resolution order is Go's `initLocal`: `TZ` first, then the system zone.
+/// Three cases resolve differently from Go and are UTC here:
+///
+/// - **Windows.** Go reads the registry and maps it; `iana_time_zone` returns
+///   an IANA name on Windows too, so this normally agrees — but where it cannot
+///   report one there is nothing to fall back to but UTC.
+/// - **An `/etc/localtime` that matches no zoneinfo file.** Go still uses the
+///   file's rules under the name "Local"; there is no `chrono_tz::Tz` for a
+///   zone that is not in the database, so UTC.
+/// - **A POSIX `TZ` string** such as `TZ=UTC+5` or `TZ=EST5EDT,M3.2.0,M11.1.0`.
+///   Go implements the POSIX grammar; `chrono_tz` holds named zones only. Note
+///   robfig rejects the same string inside a `CRON_TZ=` prefix, so only the
+///   *scheduler's* location can carry one.
+///
+/// Each of those is a wrong offset rather than a crash, which is why the
+/// mapping is written down here rather than left implicit at the call site.
+pub fn resolve_scheduler_location() -> Tz {
+    let from_env = std::env::var("TZ").ok();
+    local_tz(from_env.as_deref(), iana_time_zone::get_timezone().ok())
+}
+
+/// The decision [`resolve_scheduler_location`] makes, with the two lookups
+/// lifted out so the fallbacks are testable without touching process state.
+fn local_tz(tz_env: Option<&str>, system: Option<String>) -> Tz {
+    // Go treats an empty TZ as UTC and an unset one as "ask the system".
+    if let Some(name) = tz_env {
+        if name.is_empty() {
+            return Tz::UTC;
+        }
+        // Go accepts a leading ':' (`TZ=:Europe/Berlin`) and strips it.
+        let name = name.strip_prefix(':').unwrap_or(name);
+        if let Ok(tz) = Tz::from_str(name) {
+            return tz;
+        }
+        // An unresolvable TZ is UTC in Go as well — `initLocal` falls through
+        // to `localLoc.name = "UTC"`.
+        return Tz::UTC;
+    }
+    system
+        .and_then(|name| Tz::from_str(&name).ok())
+        .unwrap_or(Tz::UTC)
+}
+
+/// `time.LoadLocation`, restricted to what a crontab prefix can carry.
+///
+/// `""` and `"Local"` are the two names Go resolves and `Tz::from_str` does
+/// not, and both reach here: gocron writes `location.String()` into the prefix
+/// verbatim, and that is `"Local"` for the default scheduler.
+fn location_from_name(name: &str) -> Option<Tz> {
+    match name {
+        "" => Some(Tz::UTC),
+        "Local" => Some(resolve_scheduler_location()),
+        _ => Tz::from_str(name).ok(),
+    }
+}
+
 /// `defaultCron.IsValid` plus `cron.ParseStandard`, as gocron chains them.
 ///
 /// `loc` is the scheduler's location, prepended as `CRON_TZ=` unless the
 /// expression already names one — which is what makes a `TZ=`/`CRON_TZ=` prefix
-/// win over the scheduler.
+/// win over the scheduler. Callers standing in for the default
+/// `gocron.NewScheduler()` pass [`resolve_scheduler_location`].
 pub fn parse(crontab: &str, loc: Tz) -> Result<Schedule, ParseError> {
     let with_location = if crontab.starts_with("TZ=") || crontab.starts_with("CRON_TZ=") {
         crontab.to_string()
@@ -413,9 +519,7 @@ fn parse_standard(spec: &str) -> Result<Schedule, ParseError> {
         let (Some(i), Some(eq)) = (spec.find(' '), spec.find('=')) else {
             return Err(ParseError("timezone prefix with no expression after it"));
         };
-        loc = spec[eq + 1..i]
-            .parse()
-            .map_err(|_| ParseError("provided bad location"))?;
+        loc = location_from_name(&spec[eq + 1..i]).ok_or(ParseError("provided bad location"))?;
         spec = spec[i..].trim();
     }
 
@@ -479,7 +583,7 @@ impl SpecSchedule {
             }
 
             // Month.
-            while shl(1, local(t, loc).month()) & self.month == 0 {
+            while shl(1, u64::from(local(t, loc).month())) & self.month == 0 {
                 if !added {
                     added = true;
                     let l = local(t, loc);
@@ -515,7 +619,7 @@ impl SpecSchedule {
 
             // Hour. `t.Add(1h)` is absolute, which is what makes a spring-
             // forward gap skip the day rather than shift the run.
-            while shl(1, local(t, loc).hour()) & self.hour == 0 {
+            while shl(1, u64::from(local(t, loc).hour())) & self.hour == 0 {
                 if !added {
                     added = true;
                     let l = local(t, loc);
@@ -537,7 +641,7 @@ impl SpecSchedule {
             }
 
             // Minute.
-            while shl(1, local(t, loc).minute()) & self.minute == 0 {
+            while shl(1, u64::from(local(t, loc).minute())) & self.minute == 0 {
                 if !added {
                     added = true;
                     t = truncate(t, 60);
@@ -549,7 +653,7 @@ impl SpecSchedule {
             }
 
             // Second.
-            while shl(1, local(t, loc).second()) & self.second == 0 {
+            while shl(1, u64::from(local(t, loc).second())) & self.second == 0 {
                 if !added {
                     added = true;
                     t = truncate(t, 1);
@@ -567,8 +671,8 @@ impl SpecSchedule {
     /// `dayMatches`: AND when either field was starred, OR when neither was.
     fn day_matches(&self, t: DateTime<Utc>, loc: Tz) -> bool {
         let l = local(t, loc);
-        let dom_match = shl(1, l.day()) & self.dom > 0;
-        let dow_match = shl(1, l.weekday().num_days_from_sunday()) & self.dow > 0;
+        let dom_match = shl(1, u64::from(l.day())) & self.dom > 0;
+        let dow_match = shl(1, u64::from(l.weekday().num_days_from_sunday())) & self.dow > 0;
         if self.dom & STAR_BIT > 0 || self.dow & STAR_BIT > 0 {
             return dom_match && dow_match;
         }
@@ -621,6 +725,95 @@ mod tests {
             panic!("expected a spec");
         };
         assert!(spec.dom & STAR_BIT > 0);
+    }
+
+    /// A step is never range-checked, so `getBits` can be asked to walk past
+    /// the end of a `u32` — and did, until the indices became Go's width.
+    /// `cron/step_wider_than_the_field` is the vector; this is the unit that
+    /// says *what* the bits are, and that a debug build no longer panics
+    /// computing them.
+    #[test]
+    fn a_step_wider_than_the_field_sets_one_bit_and_stops() {
+        let Schedule::Spec(spec) = parse("* * 1/4294967295 * *", Tz::UTC).expect("parses") else {
+            panic!("expected a spec");
+        };
+        assert_eq!(spec.dom, 1 << 1, "only day 1, and no star bit");
+
+        let Schedule::Spec(star) = parse("* * */4294967295 * *", Tz::UTC).expect("parses") else {
+            panic!("expected a spec");
+        };
+        assert_eq!(
+            star.dom,
+            1 << 1,
+            "'*' with a step > 1 drops the star bit too, which changes dom/dow from AND to OR"
+        );
+    }
+
+    /// `mustParseInt` is `Atoi` bounded below at zero, so the ceiling is Go's
+    /// `int` rather than the field's maximum. Narrowing it rejected specs Go
+    /// schedules.
+    #[test]
+    fn a_step_may_be_any_value_atoi_accepts() {
+        assert!(parse("* * * * */9999999999", Tz::UTC).is_ok());
+        assert_eq!(
+            must_parse_int("9223372036854775807"),
+            Ok(9_223_372_036_854_775_807u64)
+        );
+        // One past MaxInt64 is where Atoi itself gives up.
+        assert!(must_parse_int("9223372036854775808").is_err());
+        assert!(must_parse_int("-1").is_err());
+    }
+
+    /// The two names `time.LoadLocation` resolves that an IANA lookup does not.
+    /// `"Local"` is not hypothetical: it is what a default `gocron.Scheduler`
+    /// writes into every `CRON_TZ=` prefix when `TZ` is unset.
+    #[test]
+    fn empty_and_local_are_locations() {
+        assert_eq!(location_from_name(""), Some(Tz::UTC));
+        assert_eq!(
+            location_from_name("Local"),
+            Some(resolve_scheduler_location())
+        );
+        assert_eq!(
+            location_from_name("America/New_York"),
+            Some(Tz::America__New_York)
+        );
+        assert_eq!(location_from_name("Mars/Olympus"), None);
+        // robfig hands the prefix to LoadLocation, so both spellings reach it.
+        assert!(parse_standard("TZ= 0 9 * * *").is_ok());
+        assert!(parse_standard("CRON_TZ=Local 0 9 * * *").is_ok());
+    }
+
+    /// `initLocal`'s order, with the two lookups supplied rather than read, so
+    /// the fallbacks are covered without writing to the process environment.
+    #[test]
+    fn time_local_resolves_the_way_go_resolves_it() {
+        assert_eq!(
+            local_tz(Some("Europe/Berlin"), Some("America/New_York".into())),
+            Tz::Europe__Berlin,
+            "TZ wins over the system zone"
+        );
+        assert_eq!(
+            local_tz(Some(":Europe/Berlin"), None),
+            Tz::Europe__Berlin,
+            "Go strips a leading colon"
+        );
+        assert_eq!(
+            local_tz(Some(""), Some("Europe/Berlin".into())),
+            Tz::UTC,
+            "an empty TZ is UTC in Go, not 'ask the system' — only an *unset* one asks"
+        );
+        assert_eq!(
+            local_tz(Some("UTC+5"), None),
+            Tz::UTC,
+            "a POSIX TZ string has no chrono_tz zone; documented as a divergence"
+        );
+        assert_eq!(
+            local_tz(None, Some("Asia/Tokyo".into())),
+            Tz::Asia__Tokyo,
+            "unset TZ reads the system zone"
+        );
+        assert_eq!(local_tz(None, None), Tz::UTC, "and UTC when there is none");
     }
 
     /// robfig's own extension, and the one a POSIX reading gets wrong.
