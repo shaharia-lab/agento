@@ -482,9 +482,27 @@ func setupNotifications(
 
 	bus := eventbus.New(workerPoolSize, logger)
 	notifStore := storage.NewSQLiteNotificationStore(db)
+	// Read the row, not settingsMgr's snapshot.
+	//
+	// The snapshot is loaded at boot and refreshed only by a save this process
+	// handled, which was fine while this process was the only writer. The
+	// desktop shell now answers PUT /api/notifications/settings itself
+	// (agento#307), so a snapshot read would leave every scheduled-task email
+	// on the previous SMTP credentials until the server restarted — a silent
+	// failure, since the send would fail authentication with nothing pointing
+	// at the save that caused it.
+	//
+	// This is what the SettingsLoader doc comment already promises: settings
+	// changes take effect without a restart. One extra SELECT per notification
+	// event is not a cost worth reasoning about — events are task completions,
+	// not requests.
+	settingsStore := storage.NewSQLiteSettingsStore(db)
 	notifHandler := notification.NewNotificationHandler(
 		func() (*notification.NotificationSettings, error) {
-			us := settingsMgr.Get()
+			us, err := settingsStore.Load()
+			if err != nil {
+				return nil, fmt.Errorf("loading settings for notification: %w", err)
+			}
 			return loadNotificationSettingsFromJSON(us.NotificationSettings)
 		},
 		notifStore,
