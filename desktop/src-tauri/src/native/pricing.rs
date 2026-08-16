@@ -1,9 +1,12 @@
-//! `GET /api/pricing/catalog`, ported from Go.
+//! `GET /api/pricing/catalog` and the three rate writes, ported from Go.
 //!
 //! Go sources this mirrors, and which are the spec if the two ever disagree:
 //!
-//! - `internal/pricing/store.go`   — `Snapshot`, `attachTiers`, `Revision`
-//! - `internal/service/pricing_service.go` — `Catalog`, `groupByModel`
+//! - `internal/pricing/store.go`   — `Snapshot`, `attachTiers`, `Revision`,
+//!   `UpsertRate`, `DeleteRate`
+//! - `internal/service/pricing_service.go` — `Catalog`, `groupByModel`,
+//!   `AddRate`, `CorrectRate`, `DeleteRate`, `validatePricingRate`
+//! - `internal/api/pricing.go`             — the handlers and `afterRateChange`
 //! - `internal/claudesessions/cache.go`    — `UnpricedModels`
 //!
 //! Three things here are load-bearing and easy to "clean up" into a regression:
@@ -20,17 +23,43 @@
 //! 3. **`current` is resolved inside the model's own rows**, never through the
 //!    resolver, which answers for a model *ID* and would happily return a
 //!    different, more specific pattern's rate.
+//!
+//! ## The writes (#306)
+//!
+//! Four things decide whether this port is right, and each is silent when it is
+//! not:
+//!
+//! - **Add and correct are deliberately not one upsert.** Appending leaves
+//!   history priced at what it was charged; correcting rewrites already-reported
+//!   costs. So `AddRate` refuses to overwrite — and answers the collision with
+//!   the *colliding row* in the body, not a bare 409, because the UI offers
+//!   "correct it instead?" and needs the row to do that — while `CorrectRate`
+//!   refuses to create.
+//! - **`effective_from` is normalized to second precision**, because RFC 3339 is
+//!   what the column round-trips. Skip it and the read-back after a save finds
+//!   nothing, so a written row is unreachable by the value that wrote it.
+//! - **`UpsertRate` clears the rate's bands.** [`Rate::price`] picks a band
+//!   *before* applying any price, so a correction that left the seeded bands in
+//!   place would save and then change nothing at any request size. The
+//!   correct-rate form says so; this keeps it true. Tier *editing* is
+//!   deliberately not offered anywhere, and is not added here.
+//! - **Every mutation has to move `pricing_rev`**, or #188's stored per-session
+//!   costs keep the pre-edit figure with nothing to signal it. Go's
+//!   `afterRateChange` invalidates its cache and lets the next read's freshness
+//!   gate re-scan; since #289 that scan is *ours*, so the re-read is ours to
+//!   trigger — see [`super::scan::after_pricing_change`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use axum::http::Method;
-use chrono::{DateTime, Utc};
+use axum::http::{Method, StatusCode};
+use chrono::{DateTime, NaiveDate, SecondsFormat, TimeZone, Timelike, Utc};
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::db;
 use super::gotime::GoTime;
+use super::writes::{decode_body, finish, WriteError};
 
 /// One effective-dated price row. Mirrors `pricing.Rate`.
 #[derive(Debug, Clone, Serialize)]
@@ -486,14 +515,535 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
 };
 
 fn claims(method: &Method, path: &str) -> bool {
-    method == Method::GET && path == "/api/pricing/catalog"
+    match path {
+        "/api/pricing/catalog" => method == Method::GET,
+        // One path, three methods — chi routes them to three handlers, and the
+        // key is a query pair rather than a path segment because a model
+        // pattern is not path-safe (`mixedbread-ai/` carries a slash,
+        // `<synthetic>` angle brackets).
+        "/api/pricing/rates" => {
+            method == Method::POST || method == Method::PUT || method == Method::DELETE
+        }
+        _ => false,
+    }
 }
 
-fn serve(ctx: &super::Ctx, _req: &super::Request) -> Result<super::Answer, String> {
-    let catalog = catalog(&ctx.db_path)?;
-    Ok(super::Answer::json(
-        super::gojson::to_vec(&catalog).map_err(|e| format!("encoding pricing catalog: {e}"))?,
+fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
+    match (req.method, req.path) {
+        (&Method::GET, "/api/pricing/catalog") => {
+            let catalog = catalog(&ctx.db_path)?;
+            Ok(super::Answer::json(
+                super::gojson::to_vec(&catalog)
+                    .map_err(|e| format!("encoding pricing catalog: {e}"))?,
+            ))
+        }
+        (&Method::POST, "/api/pricing/rates") => finish(after_rate_change(
+            &ctx.db_path,
+            add_rate(&ctx.db_path, req.body),
+        )),
+        (&Method::PUT, "/api/pricing/rates") => finish(after_rate_change(
+            &ctx.db_path,
+            correct_rate(&ctx.db_path, req.body),
+        )),
+        (&Method::DELETE, "/api/pricing/rates") => finish(after_rate_change(
+            &ctx.db_path,
+            delete_rate(&ctx.db_path, req.query),
+        )),
+        _ => Err(format!(
+            "{} {} is not a pricing route",
+            req.method, req.path
+        )),
+    }
+}
+
+/// `Server.afterRateChange`, fired where Go fires it: in the **handler**, after
+/// the service call came back, and never on a path that changed nothing.
+///
+/// It sits here rather than inside the three write functions for the same
+/// reason it sits in `internal/api/pricing.go` rather than in the service — and
+/// because a post-commit side effect wired into the mutation would run in every
+/// unit test, kicking a background walk of the developer's real `~/.claude`
+/// corpus into a temporary database.
+///
+/// **The success test is the status, not `is_ok`.** A rate collision is an
+/// `Ok(409)` carrying the colliding row, and Go returns from that arm *before*
+/// reaching `afterRateChange` — nothing was written, so nothing needs
+/// re-pricing. Every arm that did write answers 200, 201 or 204.
+fn after_rate_change(
+    db_path: &Path,
+    result: Result<super::Answer, WriteError>,
+) -> Result<super::Answer, WriteError> {
+    if result.as_ref().is_ok_and(|a| a.status.is_success()) {
+        super::scan::after_pricing_change(db_path);
+    }
+    result
+}
+
+// ─── Writes ───────────────────────────────────────────────────────────────────
+
+/// `api.PricingRateRequest`.
+///
+/// Every field defaults, because Go's decoder leaves a missing key at its zero
+/// value — and a stored `null` for a scalar is a zero value to Go and a type
+/// error to serde.
+///
+/// `billable` is the one field that is **not** a plain zero value: Go declares
+/// it `*bool` and reads a nil pointer as `true`, because the zero value of a Go
+/// bool would silently mark every priced model free. `Option<bool>` reproduces
+/// that, and an explicit `null` lands on `None` exactly as a nil pointer does.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RateRequest {
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    provider: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    model_pattern: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    match_type: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    display_name: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    input_per_mtok: f64,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    output_per_mtok: f64,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    cache_write_5m_per_mtok: f64,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    cache_write_1h_per_mtok: f64,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    cache_read_per_mtok: f64,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    effective_from: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    source: String,
+    billable: Option<bool>,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    estimated: bool,
+}
+
+/// The columns one write puts in the row. Not [`Rate`]: that carries the `id`
+/// and the bands, neither of which a request can express.
+#[derive(Debug, Clone)]
+struct RateInput {
+    provider: String,
+    model_pattern: String,
+    match_type: String,
+    display_name: String,
+    input_per_mtok: f64,
+    output_per_mtok: f64,
+    cache_write_5m_per_mtok: f64,
+    cache_write_1h_per_mtok: f64,
+    cache_read_per_mtok: f64,
+    effective_from: DateTime<Utc>,
+    source: String,
+    /// Preserved from the row being corrected; always false on a create, since
+    /// the request cannot carry one.
+    is_builtin: bool,
+    billable: bool,
+    estimated: bool,
+}
+
+impl RateRequest {
+    /// `PricingRateRequest.toRate`.
+    fn into_input(self) -> Result<RateInput, WriteError> {
+        let effective_from = parse_effective_from(&self.effective_from)?;
+        Ok(RateInput {
+            provider: self.provider,
+            model_pattern: self.model_pattern,
+            match_type: self.match_type,
+            display_name: self.display_name,
+            input_per_mtok: self.input_per_mtok,
+            output_per_mtok: self.output_per_mtok,
+            cache_write_5m_per_mtok: self.cache_write_5m_per_mtok,
+            cache_write_1h_per_mtok: self.cache_write_1h_per_mtok,
+            cache_read_per_mtok: self.cache_read_per_mtok,
+            effective_from,
+            source: self.source,
+            is_builtin: false,
+            billable: self.billable.unwrap_or(true),
+            estimated: self.estimated,
+        })
+    }
+}
+
+/// Go's zero `time.Time`, which is what `IsZero` tests and what an
+/// `0001-01-01T00:00:00Z` in the request parses to.
+fn go_zero_time() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(1, 1, 1, 0, 0, 0)
+        .single()
+        .unwrap_or_else(Utc::now)
+}
+
+/// `parseEffectiveFrom`: RFC 3339 first, then a bare `YYYY-MM-DD` meaning
+/// midnight UTC — what an `<input type="date">` produces.
+///
+/// Both messages are handler-level `writeError(422, err.Error())` calls rather
+/// than `service.ValidationError`s, so they ship **without** the
+/// `validation error for "field":` prefix. That is why the field is empty here.
+///
+/// The two shape guards are not decoration. `time.Parse` matches its layout
+/// exactly, while chrono is looser at both ends: `parse_from_rfc3339` accepts a
+/// space where Go demands `T`/`t`, and `%Y` accepts year lengths other than
+/// four. Without them a body Go answers 422 to would be accepted here.
+fn parse_effective_from(s: &str) -> Result<DateTime<Utc>, WriteError> {
+    if s.is_empty() {
+        return Err(WriteError::validation("", "effective_from is required"));
+    }
+    let separator_is_t = s
+        .as_bytes()
+        .get(10)
+        .is_some_and(|c| *c == b'T' || *c == b't');
+    if separator_is_t {
+        if let Ok(t) = DateTime::parse_from_rfc3339(s) {
+            return Ok(t.with_timezone(&Utc));
+        }
+    }
+    let dash_positions = s.len() == 10 && s.as_bytes()[4] == b'-' && s.as_bytes()[7] == b'-';
+    if dash_positions {
+        if let Some(day) = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .ok()
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+        {
+            return Ok(Utc.from_utc_datetime(&day));
+        }
+    }
+    Err(WriteError::validation(
+        "",
+        "effective_from must be YYYY-MM-DD or RFC3339",
     ))
+}
+
+/// `normalizePattern`: trim, then lowercase.
+fn normalize_pattern(p: &str) -> String {
+    p.trim().to_lowercase()
+}
+
+/// `normalizeEffectiveFrom`: `t.UTC().Truncate(time.Second)`.
+///
+/// `Truncate` rounds toward the zero time, which for any date this catalog can
+/// hold is simply dropping the sub-second part.
+fn normalize_effective_from(t: DateTime<Utc>) -> DateTime<Utc> {
+    t.with_nanosecond(0).unwrap_or(t)
+}
+
+/// `rateKey`: what a conflict or a 404 names the row by.
+fn rate_key(model_pattern: &str, effective_from: DateTime<Utc>) -> String {
+    format!(
+        "{}@{}",
+        normalize_pattern(model_pattern),
+        normalize_effective_from(effective_from).to_rfc3339_opts(SecondsFormat::Secs, true)
+    )
+}
+
+/// The text form the column holds: `EffectiveFrom.UTC().Format(time.RFC3339)`.
+fn stored_effective_from(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// `validatePricingRate`, in its order — which is observable, because the first
+/// failure is the one the user sees.
+fn validate(input: &mut RateInput) -> Result<(), WriteError> {
+    input.model_pattern = normalize_pattern(&input.model_pattern);
+    if input.model_pattern.is_empty() {
+        return Err(WriteError::validation(
+            "model_pattern",
+            "model_pattern is required",
+        ));
+    }
+    if input.effective_from == go_zero_time() {
+        return Err(WriteError::validation(
+            "effective_from",
+            "effective_from is required",
+        ));
+    }
+    input.effective_from = normalize_effective_from(input.effective_from);
+    if input.match_type.is_empty() {
+        input.match_type = "exact".to_string();
+    }
+    if input.match_type != "exact" && input.match_type != "prefix" {
+        return Err(WriteError::validation(
+            "match_type",
+            r#"match_type must be "exact" or "prefix""#,
+        ));
+    }
+    validate_amounts(input)
+}
+
+/// `validateRateAmounts`.
+///
+/// The billable rule is what makes a `$0.00` row mean something: a billable
+/// model prices every category, a non-billable one prices none. Without it a
+/// zeroed-out row reads as free rather than as unfilled.
+fn validate_amounts(input: &RateInput) -> Result<(), WriteError> {
+    let amounts = [
+        ("input_per_mtok", input.input_per_mtok),
+        ("output_per_mtok", input.output_per_mtok),
+        ("cache_write_5m_per_mtok", input.cache_write_5m_per_mtok),
+        ("cache_write_1h_per_mtok", input.cache_write_1h_per_mtok),
+        ("cache_read_per_mtok", input.cache_read_per_mtok),
+    ];
+    let mut non_zero = false;
+    for (name, value) in amounts {
+        if value < 0.0 {
+            return Err(WriteError::validation(name, "rate must not be negative"));
+        }
+        if value != 0.0 {
+            non_zero = true;
+        }
+    }
+    if input.billable && (input.input_per_mtok <= 0.0 || input.output_per_mtok <= 0.0) {
+        return Err(WriteError::validation(
+            "input_per_mtok",
+            "a billable model needs a positive input and output rate",
+        ));
+    }
+    if !input.billable && non_zero {
+        return Err(WriteError::validation(
+            "billable",
+            "a non-billable model must have every rate set to zero",
+        ));
+    }
+    Ok(())
+}
+
+/// The conflict body: **not** a bare `{"error": …}`.
+///
+/// `handleAddPricingRate` writes a two-key map, so the UI can offer to correct
+/// the row it collided with instead of making the user guess what they hit.
+/// `encoding/json` sorts map keys and `error` precedes `existing`, so the
+/// declaration order here is already the wire order.
+#[derive(Serialize)]
+struct RateConflict<'a> {
+    error: &'a str,
+    existing: &'a Rate,
+}
+
+fn open_for_write(db_path: &Path) -> Result<Connection, WriteError> {
+    let conn = db::open_read_write(db_path).map_err(WriteError::Fallback)?;
+    super::migrate::verify(&conn).map_err(WriteError::Fallback)?;
+    Ok(conn)
+}
+
+/// `findRate`: scan the snapshot the resolver already loads. The store exposes
+/// no read-by-key, and the catalog is tens of rows.
+fn find_rate(conn: &Connection, model_pattern: &str, at: DateTime<Utc>) -> Option<Rate> {
+    let want_pattern = normalize_pattern(model_pattern);
+    let want_from = normalize_effective_from(at);
+    snapshot(conn)
+        .ok()?
+        .into_iter()
+        .find(|r| r.model_pattern == want_pattern && r.effective_from.instant() == want_from)
+}
+
+/// `pricingService.AddRate` then `handleAddPricingRate`.
+fn add_rate(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let mut input = decode_body::<RateRequest>(body)?.into_input()?;
+    validate(&mut input)?;
+
+    let mut conn = open_for_write(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin add rate: {e}")))?;
+
+    // The existence check and the write are one transaction, or two concurrent
+    // adds both see "no such rate" and the second silently overwrites the first
+    // through the upsert. Go is not exposed to that only because it holds a
+    // single serialized connection; a second process is.
+    if let Some(existing) = find_rate(&tx, &input.model_pattern, input.effective_from) {
+        let message = WriteError::Conflict {
+            resource: "rate".to_string(),
+            id: rate_key(&input.model_pattern, input.effective_from),
+        }
+        .message();
+        let body = super::gojson::to_vec(&RateConflict {
+            error: &message,
+            existing: &existing,
+        })
+        .map_err(|e| WriteError::Fallback(format!("encoding rate conflict: {e}")))?;
+        // Nothing was written, so dropping the transaction rolls back nothing.
+        return Ok(super::Answer::json_status(StatusCode::CONFLICT, body));
+    }
+
+    let answer = save(&tx, &input, StatusCode::CREATED)?;
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit add rate: {e}")))?;
+    Ok(answer)
+}
+
+/// `pricingService.CorrectRate` then `handleCorrectPricingRate`.
+fn correct_rate(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let mut input = decode_body::<RateRequest>(body)?.into_input()?;
+    validate(&mut input)?;
+
+    let mut conn = open_for_write(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin correct rate: {e}")))?;
+
+    let Some(existing) = find_rate(&tx, &input.model_pattern, input.effective_from) else {
+        return Err(WriteError::NotFound {
+            resource: "rate".to_string(),
+            id: rate_key(&input.model_pattern, input.effective_from),
+        });
+    };
+    // A correction never turns a seeded row into a user-authored one. It does
+    // mark it `user_modified`, which is what stops the next startup re-seed
+    // restoring the published value over the correction.
+    input.is_builtin = existing.is_builtin;
+
+    let answer = save(&tx, &input, StatusCode::OK)?;
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit correct rate: {e}")))?;
+    Ok(answer)
+}
+
+/// `pricingService.save`: write, then read the row back so the caller answers
+/// with exactly what was persisted — the normalization and the `user_modified`
+/// flag the store applies on the way in included.
+///
+/// The answer is encoded **before** the commit. Everything after a commit must
+/// be infallible, because an `Err` forwards to Go and Go would apply the write
+/// a second time.
+fn save(
+    tx: &rusqlite::Transaction,
+    input: &RateInput,
+    status: StatusCode,
+) -> Result<super::Answer, WriteError> {
+    upsert_rate(tx, input)?;
+    let Some(saved) = find_rate(tx, &input.model_pattern, input.effective_from) else {
+        // Go's "vanished after write" — a 500. Nothing is committed yet, so
+        // rolling back and forwarding is safe.
+        return Err(WriteError::Fallback(format!(
+            "saving rate: {} vanished after write",
+            rate_key(&input.model_pattern, input.effective_from)
+        )));
+    };
+    let body = super::gojson::to_vec(&saved)
+        .map_err(|e| WriteError::Fallback(format!("encoding rate: {e}")))?;
+    Ok(super::Answer::json_status(status, body))
+}
+
+/// `Store.UpsertRate`, including the band clear.
+///
+/// The `DELETE` is not housekeeping. [`Rate::price`] selects a band before
+/// applying any price, so leaving the seeded bands would make a hand-entered
+/// rate unreachable at every request size — the edit would appear to save and
+/// then change nothing. The settings form cannot express bands, so entering a
+/// price here asserts that this is *the* price, which is the same
+/// user-intent-wins rule `user_modified` encodes everywhere else.
+fn upsert_rate(tx: &rusqlite::Transaction, input: &RateInput) -> Result<(), WriteError> {
+    let effective_from = stored_effective_from(input.effective_from);
+    let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+
+    tx.execute(
+        "INSERT INTO model_pricing (
+             provider, model_pattern, match_type, display_name,
+             input_per_mtok, output_per_mtok,
+             cache_write_5m_per_mtok, cache_write_1h_per_mtok, cache_read_per_mtok,
+             effective_from, source, is_builtin, user_modified, billable, estimated,
+             created_at, updated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14, ?15, ?16)
+         ON CONFLICT(model_pattern, effective_from) DO UPDATE SET
+             provider = excluded.provider,
+             match_type = excluded.match_type,
+             display_name = excluded.display_name,
+             input_per_mtok = excluded.input_per_mtok,
+             output_per_mtok = excluded.output_per_mtok,
+             cache_write_5m_per_mtok = excluded.cache_write_5m_per_mtok,
+             cache_write_1h_per_mtok = excluded.cache_write_1h_per_mtok,
+             cache_read_per_mtok = excluded.cache_read_per_mtok,
+             source = excluded.source,
+             is_builtin = excluded.is_builtin,
+             user_modified = 1,
+             billable = excluded.billable,
+             estimated = excluded.estimated,
+             updated_at = excluded.updated_at",
+        rusqlite::params![
+            input.provider,
+            input.model_pattern,
+            input.match_type,
+            input.display_name,
+            input.input_per_mtok,
+            input.output_per_mtok,
+            input.cache_write_5m_per_mtok,
+            input.cache_write_1h_per_mtok,
+            input.cache_read_per_mtok,
+            effective_from,
+            input.source,
+            input.is_builtin,
+            input.billable,
+            input.estimated,
+            now,
+            now,
+        ],
+    )
+    .map_err(|e| WriteError::Fallback(format!("saving rate {:?}: {e}", input.model_pattern)))?;
+
+    tx.execute(
+        "DELETE FROM model_pricing_tier
+         WHERE rate_id = (SELECT id FROM model_pricing
+                          WHERE model_pattern = ?1 AND effective_from = ?2)",
+        rusqlite::params![input.model_pattern, effective_from],
+    )
+    .map_err(|e| WriteError::Fallback(format!("clearing rate bands: {e}")))?;
+    Ok(())
+}
+
+/// `pricingService.DeleteRate` then `handleDeletePricingRate`.
+///
+/// The key arrives as a query pair. `parseEffectiveFrom` runs in the handler, so
+/// a malformed date is the handler's fieldless 422; the emptiness checks run in
+/// the service and carry their field.
+fn delete_rate(db_path: &Path, query: &str) -> Result<super::Answer, WriteError> {
+    let pattern = super::query::value(query, "model_pattern");
+    let from = parse_effective_from(&super::query::value(query, "effective_from"))?;
+
+    if pattern.trim().is_empty() {
+        return Err(WriteError::validation(
+            "model_pattern",
+            "model_pattern is required",
+        ));
+    }
+    if from == go_zero_time() {
+        return Err(WriteError::validation(
+            "effective_from",
+            "effective_from is required",
+        ));
+    }
+    let from = normalize_effective_from(from);
+
+    let mut conn = open_for_write(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin delete rate: {e}")))?;
+
+    if find_rate(&tx, &pattern, from).is_none() {
+        return Err(WriteError::NotFound {
+            resource: "rate".to_string(),
+            id: rate_key(&pattern, from),
+        });
+    }
+    // `ON DELETE CASCADE` takes the bands with it — which is why the write
+    // handle sets `foreign_keys=ON` per connection.
+    let affected = tx
+        .execute(
+            "DELETE FROM model_pricing WHERE model_pattern = ?1 AND effective_from = ?2",
+            rusqlite::params![normalize_pattern(&pattern), stored_effective_from(from)],
+        )
+        .map_err(|e| WriteError::Fallback(format!("deleting rate: {e}")))?;
+    if affected == 0 {
+        // `Store.DeleteRate`'s own "no rate for …" error, which is a 500. The
+        // transaction has not committed, so forwarding cannot double-apply.
+        return Err(WriteError::Fallback(format!(
+            "pricing: no rate for {:?} at {}",
+            pattern,
+            stored_effective_from(from)
+        )));
+    }
+
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit delete rate: {e}")))?;
+    Ok(super::Answer::no_content())
 }
 
 // ─── Resolver ─────────────────────────────────────────────────────────────────
@@ -824,5 +1374,468 @@ mod tests {
         let got =
             String::from_utf8(gojson::to_vec(&fixture_catalog()).expect("encode")).expect("utf-8");
         assert_eq!(got, want);
+    }
+
+    // ─── Writes ───────────────────────────────────────────────────────────────
+
+    /// Built by the **real** migrations rather than the hand-written `SCHEMA`
+    /// above: the write path checks the recorded schema version, and a fixture
+    /// table is exactly where a column default drifts away from production's.
+    fn migrated() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        super::super::migrate::apply(&mut conn).expect("migrate");
+        file
+    }
+
+    fn at(text: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(text)
+            .expect("timestamp")
+            .with_timezone(&Utc)
+    }
+
+    fn stored_rate(file: &tempfile::NamedTempFile, pattern: &str, from: &str) -> Option<Rate> {
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        find_rate(&conn, pattern, at(from))
+    }
+
+    fn body_of(answer: super::super::Answer) -> String {
+        String::from_utf8(answer.body.expect("body")).expect("utf-8")
+    }
+
+    const OPUS: &str = r#"{"provider":"anthropic","model_pattern":"claude-opus-5",
+        "match_type":"prefix","display_name":"Claude Opus 5","input_per_mtok":5,
+        "output_per_mtok":25,"cache_write_5m_per_mtok":6.25,"cache_write_1h_per_mtok":10,
+        "cache_read_per_mtok":0.5,"effective_from":"2026-01-01","source":"pricing page"}"#;
+
+    #[test]
+    fn adding_a_rate_answers_201_and_stores_it_user_modified() {
+        let file = migrated();
+        let answer = add_rate(file.path(), OPUS.as_bytes()).expect("add");
+        assert_eq!(answer.status, StatusCode::CREATED);
+
+        let body = body_of(answer);
+        // The response is the row that was read back, so it carries the id and
+        // the flags the store applied — not an echo of the request.
+        assert!(
+            body.starts_with(r#"{"id":1,"provider":"anthropic""#),
+            "{body}"
+        );
+        assert!(body.contains(r#""user_modified":true"#), "{body}");
+        assert!(body.contains(r#""is_builtin":false"#), "{body}");
+        // A bare date means midnight UTC on that day.
+        assert!(
+            body.contains(r#""effective_from":"2026-01-01T00:00:00Z""#),
+            "{body}"
+        );
+        // `billable` defaults to true: Go reads a nil `*bool` that way, because
+        // a Go bool's zero value would mark every priced model free.
+        assert!(body.contains(r#""billable":true"#), "{body}");
+
+        let saved = stored_rate(&file, "claude-opus-5", "2026-01-01T00:00:00Z").expect("stored");
+        assert_eq!(saved.output_per_mtok, 25.0);
+        assert_eq!(saved.match_type, "prefix");
+    }
+
+    /// A collision is **not** a bare 409: the colliding row ships in the body so
+    /// the UI can offer to correct it. And nothing may be written — an add that
+    /// overwrote would be silent data loss reported as an error.
+    #[test]
+    fn adding_over_an_existing_rate_is_409_carrying_the_colliding_row() {
+        let file = migrated();
+        add_rate(file.path(), OPUS.as_bytes()).expect("add");
+
+        let cheaper = OPUS.replace(r#""input_per_mtok":5"#, r#""input_per_mtok":1"#);
+        let answer = add_rate(file.path(), cheaper.as_bytes()).expect("answered, not forwarded");
+        assert_eq!(answer.status, StatusCode::CONFLICT);
+
+        let body = body_of(answer);
+        assert!(
+            body.starts_with(
+                r#"{"error":"rate with id \"claude-opus-5@2026-01-01T00:00:00Z\" already exists","existing":{"id":1"#
+            ),
+            "{body}"
+        );
+        assert_eq!(
+            stored_rate(&file, "claude-opus-5", "2026-01-01T00:00:00Z")
+                .expect("stored")
+                .input_per_mtok,
+            5.0,
+            "the add must not have overwritten the existing rate"
+        );
+    }
+
+    #[test]
+    fn correcting_a_missing_rate_is_404_and_writes_nothing() {
+        let file = migrated();
+        let err = correct_rate(file.path(), OPUS.as_bytes()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            err.message(),
+            "rate \"claude-opus-5@2026-01-01T00:00:00Z\" not found"
+        );
+        assert!(stored_rate(&file, "claude-opus-5", "2026-01-01T00:00:00Z").is_none());
+    }
+
+    #[test]
+    fn correcting_a_rate_rewrites_it_in_place_and_answers_200() {
+        let file = migrated();
+        add_rate(file.path(), OPUS.as_bytes()).expect("add");
+
+        let fixed = OPUS.replace(r#""output_per_mtok":25"#, r#""output_per_mtok":30"#);
+        let answer = correct_rate(file.path(), fixed.as_bytes()).expect("correct");
+        assert_eq!(answer.status, StatusCode::OK);
+        assert!(body_of(answer).contains(r#""output_per_mtok":30"#));
+
+        let saved = stored_rate(&file, "claude-opus-5", "2026-01-01T00:00:00Z").expect("stored");
+        assert_eq!(saved.output_per_mtok, 30.0);
+        assert_eq!(
+            saved.id, 1,
+            "a correction edits the row, it does not append"
+        );
+    }
+
+    /// A correction of a seeded row stays seeded but becomes user-modified —
+    /// which is what stops the next startup re-seed restoring the published
+    /// value over the correction.
+    #[test]
+    fn a_correction_keeps_is_builtin_and_sets_user_modified() {
+        let file = migrated();
+        {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            conn.execute(
+                "INSERT INTO model_pricing (provider, model_pattern, match_type, display_name,
+                     input_per_mtok, output_per_mtok, cache_write_5m_per_mtok,
+                     cache_write_1h_per_mtok, cache_read_per_mtok, effective_from, source,
+                     is_builtin, user_modified, billable, estimated, created_at, updated_at)
+                 VALUES ('anthropic', 'claude-opus-5', 'prefix', 'Claude Opus 5',
+                     5, 25, 6.25, 10, 0.5, '2026-01-01T00:00:00Z', 'pricing page',
+                     1, 0, 1, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                [],
+            )
+            .expect("seed row");
+        }
+
+        correct_rate(file.path(), OPUS.as_bytes()).expect("correct");
+        let saved = stored_rate(&file, "claude-opus-5", "2026-01-01T00:00:00Z").expect("stored");
+        assert!(saved.is_builtin, "a correction does not un-seed a row");
+        assert!(saved.user_modified);
+    }
+
+    /// The trap the correct-rate form warns about: `Rate::price` picks a band
+    /// *before* applying any price, so a correction that left the seeded bands
+    /// in place would save and then change nothing at any request size.
+    #[test]
+    fn a_correction_clears_the_rates_bands() {
+        let file = migrated();
+        add_rate(
+            file.path(),
+            br#"{"provider":"alibaba","model_pattern":"qwen3-max","match_type":"prefix",
+                 "display_name":"Qwen3 Max","input_per_mtok":1.2,"output_per_mtok":6,
+                 "cache_write_5m_per_mtok":1.5,"cache_write_1h_per_mtok":2.4,
+                 "cache_read_per_mtok":0.24,"effective_from":"2026-01-01"}"#,
+        )
+        .expect("add");
+        {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            conn.execute(
+                "INSERT INTO model_pricing_tier (rate_id, max_input_tokens, input_per_mtok,
+                     output_per_mtok, cache_write_5m_per_mtok, cache_write_1h_per_mtok,
+                     cache_read_per_mtok)
+                 VALUES (1, 32000, 1.2, 6, 1.5, 2.4, 0.24), (1, 128000, 2.4, 12, 3, 4.8, 0.48)",
+                [],
+            )
+            .expect("bands");
+        }
+        assert_eq!(
+            stored_rate(&file, "qwen3-max", "2026-01-01T00:00:00Z")
+                .expect("stored")
+                .tiers
+                .len(),
+            2
+        );
+
+        correct_rate(
+            file.path(),
+            br#"{"provider":"alibaba","model_pattern":"qwen3-max","match_type":"prefix",
+                 "display_name":"Qwen3 Max","input_per_mtok":2,"output_per_mtok":8,
+                 "effective_from":"2026-01-01"}"#,
+        )
+        .expect("correct");
+
+        let saved = stored_rate(&file, "qwen3-max", "2026-01-01T00:00:00Z").expect("stored");
+        assert!(
+            saved.tiers.is_empty(),
+            "a hand-entered rate is flat, or its new figures are unreachable"
+        );
+        // …and now the flat price is the one that applies at every size.
+        assert_eq!(
+            saved
+                .price(PricedUsage {
+                    input_tokens: 1_000_000,
+                    ..Default::default()
+                })
+                .input_cost_usd,
+            2.0
+        );
+    }
+
+    /// The written row has to be findable by the value that wrote it. RFC 3339
+    /// storage carries seconds, so a sub-second `effective_from` that was not
+    /// truncated would be saved and then never read back.
+    #[test]
+    fn a_sub_second_effective_from_is_truncated_so_the_read_back_finds_it() {
+        let file = migrated();
+        let precise = OPUS.replace(
+            r#""effective_from":"2026-01-01""#,
+            r#""effective_from":"2026-01-01T00:00:00.987654321Z""#,
+        );
+        let answer = add_rate(file.path(), precise.as_bytes()).expect("add");
+        assert_eq!(answer.status, StatusCode::CREATED);
+        assert!(body_of(answer).contains(r#""effective_from":"2026-01-01T00:00:00Z""#));
+    }
+
+    /// A non-UTC offset is converted rather than stored as given, so two clients
+    /// naming the same instant collide on the uniqueness key as they should.
+    #[test]
+    fn an_offset_timestamp_is_normalized_to_utc() {
+        let file = migrated();
+        let offset = OPUS.replace(
+            r#""effective_from":"2026-01-01""#,
+            r#""effective_from":"2026-01-01T05:30:00+05:30""#,
+        );
+        add_rate(file.path(), offset.as_bytes()).expect("add");
+        assert!(stored_rate(&file, "claude-opus-5", "2026-01-01T00:00:00Z").is_some());
+    }
+
+    /// `parseEffectiveFrom` fails in the **handler**, so its messages ship
+    /// without the `validation error for "field":` prefix a service error
+    /// carries. Getting that wrong changes the text on every bad date.
+    #[test]
+    fn a_malformed_effective_from_is_a_fieldless_422() {
+        let file = migrated();
+        for bad in ["", "01/02/2026", "2026-1-1", "2026-01-01 00:00:00Z"] {
+            let body = OPUS.replace(
+                r#""effective_from":"2026-01-01""#,
+                &format!(r#""effective_from":"{bad}""#),
+            );
+            let err = add_rate(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad:?}");
+            assert!(
+                err.message() == "effective_from is required"
+                    || err.message() == "effective_from must be YYYY-MM-DD or RFC3339",
+                "{bad:?} gave {:?}",
+                err.message()
+            );
+        }
+    }
+
+    /// The rule that makes a `$0.00` row mean something. Each of these is a
+    /// service `ValidationError`, so each *does* carry its field.
+    #[test]
+    fn the_billable_coherence_rules_are_422s_with_their_fields() {
+        let file = migrated();
+        let cases = [
+            (
+                r#""billable":false,"input_per_mtok":5,"output_per_mtok":25"#,
+                "validation error for \"billable\": a non-billable model must have every rate set to zero",
+            ),
+            (
+                r#""input_per_mtok":5,"output_per_mtok":0"#,
+                "validation error for \"input_per_mtok\": a billable model needs a positive input and output rate",
+            ),
+            (
+                r#""input_per_mtok":5,"output_per_mtok":25,"cache_read_per_mtok":-1"#,
+                "validation error for \"cache_read_per_mtok\": rate must not be negative",
+            ),
+        ];
+        for (fields, want) in cases {
+            let body = format!(r#"{{"model_pattern":"m","effective_from":"2026-01-01",{fields}}}"#);
+            let err = add_rate(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(err.message(), want);
+        }
+        // A non-billable model with everything zeroed is the *supported* way to
+        // record a deliberate $0.00, so it must be accepted.
+        add_rate(
+            file.path(),
+            br#"{"model_pattern":"<synthetic>","effective_from":"2026-01-01","billable":false}"#,
+        )
+        .expect("a zeroed non-billable rate is valid");
+    }
+
+    #[test]
+    fn an_unknown_match_type_is_422_and_an_empty_one_defaults_to_exact() {
+        let file = migrated();
+        let err = add_rate(
+            file.path(),
+            OPUS.replace(r#""match_type":"prefix""#, r#""match_type":"glob""#)
+                .as_bytes(),
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message(),
+            "validation error for \"match_type\": match_type must be \"exact\" or \"prefix\""
+        );
+
+        add_rate(
+            file.path(),
+            br#"{"model_pattern":"m","effective_from":"2026-01-01",
+                 "input_per_mtok":1,"output_per_mtok":2}"#,
+        )
+        .expect("add");
+        assert_eq!(
+            stored_rate(&file, "m", "2026-01-01T00:00:00Z")
+                .expect("stored")
+                .match_type,
+            "exact"
+        );
+    }
+
+    /// The pattern is the uniqueness key, so it is normalized on the way in —
+    /// otherwise `Claude-Opus-5` and `claude-opus-5` would be two rows and the
+    /// resolver, which lowercases, would find only one of them.
+    #[test]
+    fn the_model_pattern_is_trimmed_and_lowercased() {
+        let file = migrated();
+        add_rate(
+            file.path(),
+            OPUS.replace(r#""claude-opus-5""#, r#""  Claude-OPUS-5 ""#)
+                .as_bytes(),
+        )
+        .expect("add");
+        assert!(stored_rate(&file, "claude-opus-5", "2026-01-01T00:00:00Z").is_some());
+
+        let err = add_rate(
+            file.path(),
+            br#"{"model_pattern":"   ","effective_from":"2026-01-01"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.message(),
+            "validation error for \"model_pattern\": model_pattern is required"
+        );
+    }
+
+    #[test]
+    fn deleting_a_rate_answers_204_with_no_body_and_takes_its_bands() {
+        let file = migrated();
+        add_rate(file.path(), OPUS.as_bytes()).expect("add");
+        {
+            let conn = super::db::open_read_write(file.path()).expect("open rw");
+            conn.execute(
+                "INSERT INTO model_pricing_tier (rate_id, max_input_tokens, input_per_mtok,
+                     output_per_mtok, cache_write_5m_per_mtok, cache_write_1h_per_mtok,
+                     cache_read_per_mtok) VALUES (1, 32000, 5, 25, 6.25, 10, 0.5)",
+                [],
+            )
+            .expect("band");
+        }
+
+        let answer = delete_rate(
+            file.path(),
+            "model_pattern=claude-opus-5&effective_from=2026-01-01",
+        )
+        .expect("delete");
+        assert_eq!(answer.status, StatusCode::NO_CONTENT);
+        assert!(answer.body.is_none(), "204 carries no body and no header");
+        assert!(stored_rate(&file, "claude-opus-5", "2026-01-01T00:00:00Z").is_none());
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let bands: i64 = conn
+            .query_row("SELECT COUNT(*) FROM model_pricing_tier", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(bands, 0, "ON DELETE CASCADE did not fire");
+    }
+
+    /// The key is percent-encoded in the query because a model pattern is not
+    /// path-safe — which is the whole reason it is a query pair.
+    #[test]
+    fn a_percent_encoded_pattern_round_trips_through_the_query() {
+        let file = migrated();
+        add_rate(
+            file.path(),
+            br#"{"model_pattern":"<synthetic>","effective_from":"2026-01-01","billable":false}"#,
+        )
+        .expect("add");
+        delete_rate(
+            file.path(),
+            "model_pattern=%3Csynthetic%3E&effective_from=2026-01-01T00%3A00%3A00Z",
+        )
+        .expect("delete");
+        assert!(stored_rate(&file, "<synthetic>", "2026-01-01T00:00:00Z").is_none());
+    }
+
+    #[test]
+    fn deleting_a_missing_rate_is_404_and_a_missing_key_is_422() {
+        let file = migrated();
+        let err =
+            delete_rate(file.path(), "model_pattern=nope&effective_from=2026-01-01").unwrap_err();
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            err.message(),
+            "rate \"nope@2026-01-01T00:00:00Z\" not found"
+        );
+
+        // No `effective_from` at all is the handler's fieldless 422…
+        let err = delete_rate(file.path(), "model_pattern=nope").unwrap_err();
+        assert_eq!(err.message(), "effective_from is required");
+        // …and an empty pattern is the service's, which carries its field.
+        let err = delete_rate(file.path(), "effective_from=2026-01-01").unwrap_err();
+        assert_eq!(
+            err.message(),
+            "validation error for \"model_pattern\": model_pattern is required"
+        );
+    }
+
+    /// The reason any of this has to invalidate: a write that left the
+    /// fingerprint alone would leave every stored per-session cost at its
+    /// pre-edit figure with nothing anywhere to signal it.
+    #[test]
+    fn every_mutation_moves_the_catalog_revision() {
+        let file = migrated();
+        let revision_now = || revision_of(file.path()).expect("revision");
+
+        let empty = revision_now();
+        add_rate(file.path(), OPUS.as_bytes()).expect("add");
+        let added = revision_now();
+        assert_ne!(added, empty, "an insert must move the fingerprint");
+
+        correct_rate(
+            file.path(),
+            &OPUS
+                .replace(r#""output_per_mtok":25"#, r#""output_per_mtok":30"#)
+                .into_bytes(),
+        )
+        .expect("correct");
+        let corrected = revision_now();
+        assert_ne!(corrected, added, "a correction must move it too");
+
+        delete_rate(
+            file.path(),
+            "model_pattern=claude-opus-5&effective_from=2026-01-01",
+        )
+        .expect("delete");
+        assert_eq!(revision_now(), empty, "a delete restores the empty catalog");
+    }
+
+    /// A body Go answers 400 to must not become a 422 here, and a `null` body
+    /// must reach the handler's own validation rather than failing the decode.
+    #[test]
+    fn a_malformed_body_is_400_and_a_null_body_is_422() {
+        let file = migrated();
+        assert_eq!(
+            add_rate(file.path(), b"[]").unwrap_err(),
+            WriteError::InvalidBody
+        );
+        assert_eq!(
+            add_rate(file.path(), b"").unwrap_err(),
+            WriteError::InvalidBody
+        );
+        // `json.Unmarshal(null, &v)` is a documented no-op in Go: zero value, no
+        // error — so this fails `parseEffectiveFrom`, not the decoder.
+        let err = add_rate(file.path(), b"null").unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(err.message(), "effective_from is required");
     }
 }
