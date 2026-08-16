@@ -65,16 +65,29 @@ pub struct Agent {
 /// an empty one (`[]`) on the wire and the stored JSON carries whichever the
 /// writer produced. Round-tripping the distinction is the only way the bytes
 /// match.
+///
+/// The three lists and the map additionally decode a `null` **inside** them as
+/// the zero value (#295). `Option` alone covers `"built_in": null`; it does
+/// nothing for `"built_in": [null]`, which Go reads as `[""]` with no error and
+/// `serde` rejects outright — a 400 for a request Go applies. `#[serde(default)]`
+/// on the struct restores the missing-field behaviour that `deserialize_with`
+/// would otherwise take away.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Capabilities {
+    #[serde(deserialize_with = "super::gojson::null_elements_are_zero_values")]
     pub built_in: Option<Vec<String>>,
+    #[serde(deserialize_with = "super::gojson::null_elements_are_zero_values")]
     pub local: Option<Vec<String>>,
+    #[serde(deserialize_with = "super::gojson::null_map_values_are_zero_values")]
     pub mcp: Option<BTreeMap<String, McpCapability>>,
 }
 
 /// Which tools from one MCP server an agent may use.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct McpCapability {
+    #[serde(deserialize_with = "super::gojson::null_elements_are_zero_values")]
     pub tools: Option<Vec<String>>,
 }
 
@@ -642,6 +655,39 @@ mod tests {
             zeta.contains(r#""mcp":{"github":{"tools":["list_prs"]}}"#),
             "{zeta}"
         );
+    }
+
+    /// A `null` **inside** a capability list or the MCP map is the zero value,
+    /// not a type error (#295). Go answers `[""]` and `{"tools":null}` with no
+    /// error at all, so rejecting these was a 422 for an agent Go creates.
+    ///
+    /// Asserted through `AgentRequest`, which is the only way these bodies
+    /// arrive, and on the *stored* JSON, since that is what a later read serves.
+    #[test]
+    fn a_null_inside_capabilities_is_a_zero_value_rather_than_a_422() {
+        let body = br#"{"name":"N","slug":"n","capabilities":{
+            "built_in":[null,"Read"],
+            "local":[null],
+            "mcp":{"quiet":null,"github":{"tools":[null]}}
+        }}"#;
+        let req: AgentRequest = serde_json::from_slice(body).expect("a body Go accepts");
+        let caps = req.capabilities.expect("capabilities");
+
+        assert_eq!(caps.built_in, Some(vec![String::new(), "Read".into()]));
+        assert_eq!(caps.local, Some(vec![String::new()]));
+        let mcp = caps.mcp.expect("mcp");
+        // A null map value is the zero struct — every field at its own zero.
+        assert_eq!(mcp["quiet"].tools, None);
+        assert_eq!(mcp["github"].tools, Some(vec![String::new()]));
+
+        // And the nil-versus-empty distinction is untouched by any of it.
+        let bare: AgentRequest =
+            serde_json::from_slice(br#"{"capabilities":{"built_in":null,"local":[]}}"#)
+                .expect("nil and empty");
+        let caps = bare.capabilities.expect("capabilities");
+        assert_eq!(caps.built_in, None);
+        assert_eq!(caps.local, Some(Vec::new()));
+        assert!(caps.mcp.is_none());
     }
 
     #[test]

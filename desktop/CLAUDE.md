@@ -451,6 +451,26 @@ conversation**, because `parentUuid` is `null` on exactly the event that starts
 one. The live diff caught it; no unit test would have, since the fixtures were
 all written by hand with the field present.
 
+**`serde` only consults the rule where it is attached, so a container needs its
+own** (#295). `null_is_zero_value` covers the *field*: `{"ids":null}` was
+already `None` while `{"ids":[null]}` stayed a type error, and Go answers `[""]`
+to the second with no error at all. `null_elements_are_zero_values` is that one
+level down, `null_map_values_are_zero_values` is the same for a `null` object
+*value* (`{"mcp":{"s":null}}` is the zero struct to Go), and both keep the outer
+`Option` so the nil-versus-empty distinction is untouched. They are on
+`BulkDeleteRequest.ids` in `chats.rs` and `tasks.rs` and on all three of
+`Capabilities`' lists plus its MCP map. On a *read* this class of bug degrades
+to a fallback; on the writes #274 claimed it is a **400 or 422 for a request Go
+applies**.
+
+One thing those helpers deliberately do **not** fix, pinned in
+`gojson.rs::a_nested_struct_from_an_array_is_a_known_over_accept`: serde builds
+a struct from a JSON *array*, positionally, so `{"mcp":{"s":[]}}` is a zero
+`McpCapability` here and a 400 to Go. `writes::decode_body` guards that shape at
+the body level (#274) and nothing checks it for a value *inside* the body. It is
+an over-accept — the direction that creates rows Go refuses — and it predates
+#295.
+
 Genuinely unparseable input still fails, which is also what Go does — so the
 null case and the malformed case need separate tests.
 

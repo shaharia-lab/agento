@@ -225,6 +225,57 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// The same rule one level down: a `null` **element** of an array is the
+/// element type's zero value (#295).
+///
+/// [`null_is_zero_value`] covers the field itself and stops there, because
+/// `serde` only consults it where it is attached — so `{"ids":null}` was
+/// already `None` while `{"ids":[null]}` was a type error, and Go answers
+/// `[""]` to the second with no error at all. On a *write* route that
+/// difference is a 400 for a request Go applies.
+///
+/// The outer `Option` is kept, because it is the nil-versus-empty distinction
+/// Go puts on the wire: `null` stays `None` and `[]` stays `Some(vec![])`.
+///
+/// Reachable only by a hand-crafted body — no client sends one — which is why
+/// this is fidelity rather than a live bug. Genuinely unparseable elements
+/// (`{"ids":[1]}`) still fail, which is also what Go does.
+pub fn null_elements_are_zero_values<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de> + Default,
+{
+    use serde::Deserialize;
+    Ok(Option::<Vec<Option<T>>>::deserialize(deserializer)?
+        .map(|items| items.into_iter().map(Option::unwrap_or_default).collect()))
+}
+
+/// And the same rule for a `null` **value** of an object (#295).
+///
+/// `{"mcp":{"s":null}}` is `{"s":{"tools":null}}` to Go — the zero struct, no
+/// error — and a type error to `serde`. Exactly [`null_elements_are_zero_values`]
+/// with a map in place of the array, and it sits beside it because a struct
+/// carrying both shapes is only faithful when both are covered.
+pub fn null_map_values_are_zero_values<'de, D, V>(
+    deserializer: D,
+) -> Result<Option<std::collections::BTreeMap<String, V>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: serde::Deserialize<'de> + Default,
+{
+    use serde::Deserialize;
+    Ok(
+        Option::<std::collections::BTreeMap<String, Option<V>>>::deserialize(deserializer)?.map(
+            |entries| {
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k, v.unwrap_or_default()))
+                    .collect()
+            },
+        ),
+    )
+}
+
 /// Deserialize a value as-is, including an explicit `null`.
 ///
 /// `Option<Box<RawValue>>`'s own impl turns `null` into `None`, which would drop
@@ -595,5 +646,101 @@ mod tests {
             compact(r#"{ "k" : "ünïcödé 😀" }"#),
             r#"{"k":"ünïcödé 😀"}"#
         );
+    }
+
+    // ─── #295: a `null` inside a container ───────────────────────────────────
+
+    #[derive(Debug, Default, serde::Deserialize)]
+    #[serde(default)]
+    struct Listy {
+        #[serde(deserialize_with = "null_elements_are_zero_values")]
+        ids: Option<Vec<String>>,
+    }
+
+    #[derive(Debug, Default, serde::Deserialize)]
+    #[serde(default)]
+    struct Mappy {
+        #[serde(deserialize_with = "null_map_values_are_zero_values")]
+        mcp: Option<std::collections::BTreeMap<String, Listy>>,
+    }
+
+    /// Every answer here was measured against `encoding/json` rather than
+    /// reasoned about — the nil-versus-empty rows in particular, which is the
+    /// distinction the outer `Option` exists to keep.
+    #[test]
+    fn a_null_array_element_is_the_elements_zero_value() {
+        let ids = |body: &str| {
+            serde_json::from_str::<Listy>(body)
+                .unwrap_or_else(|e| panic!("{body}: {e}"))
+                .ids
+        };
+
+        // The case #295 is about: Go answers [""] with no error.
+        assert_eq!(ids(r#"{"ids":[null]}"#), Some(vec![String::new()]));
+        assert_eq!(
+            ids(r#"{"ids":["a",null,"b"]}"#),
+            Some(vec!["a".into(), String::new(), "b".into()])
+        );
+
+        // The nil-versus-empty distinction the outer `Option` carries, unmoved.
+        assert_eq!(ids(r#"{"ids":null}"#), None);
+        assert_eq!(ids(r#"{}"#), None);
+        assert_eq!(ids(r#"{"ids":[]}"#), Some(Vec::new()));
+        assert_eq!(ids(r#"{"ids":["a"]}"#), Some(vec!["a".into()]));
+    }
+
+    /// A `null` map value is the value type's zero, which for a struct is every
+    /// field at *its* zero — so the nesting has to survive.
+    #[test]
+    fn a_null_map_value_is_the_values_zero_value() {
+        let parsed: Mappy = serde_json::from_str(r#"{"mcp":{"s":null}}"#).expect("null value");
+        let mcp = parsed.mcp.expect("a map");
+        assert_eq!(mcp.len(), 1);
+        assert_eq!(mcp["s"].ids, None);
+
+        // And the two rules compose: a null element inside a null-able map
+        // value.
+        let parsed: Mappy =
+            serde_json::from_str(r#"{"mcp":{"s":{"ids":[null]}}}"#).expect("nested null");
+        assert_eq!(
+            parsed.mcp.expect("a map")["s"].ids,
+            Some(vec![String::new()])
+        );
+
+        assert!(serde_json::from_str::<Mappy>(r#"{"mcp":null}"#)
+            .expect("null map")
+            .mcp
+            .is_none());
+    }
+
+    /// The half that must *not* change: `null` is a zero value, but a wrong
+    /// **type** is still an error — to Go as much as to serde. Without this the
+    /// helpers would read as "accept anything".
+    #[test]
+    fn a_wrongly_typed_element_still_fails() {
+        assert!(serde_json::from_str::<Listy>(r#"{"ids":[1]}"#).is_err());
+        assert!(serde_json::from_str::<Listy>(r#"{"ids":[{}]}"#).is_err());
+        assert!(serde_json::from_str::<Listy>(r#"{"ids":"a"}"#).is_err());
+        assert!(serde_json::from_str::<Mappy>(r#"{"mcp":[]}"#).is_err());
+        assert!(serde_json::from_str::<Mappy>(r#"{"mcp":{"s":1}}"#).is_err());
+    }
+
+    /// A **nested** struct still deserializes from a JSON array, positionally,
+    /// and Go does not — `{"mcp":{"s":[]}}` is a 400 to `encoding/json` and a
+    /// zero-valued `McpCapability` here.
+    ///
+    /// Pinned rather than fixed, and deliberately: this is the quirk
+    /// `writes::decode_body` guards at the **body** level (#274, where
+    /// `POST /api/agents` with `["My Agent"]` would have created an agent), and
+    /// nothing checks it for a value *inside* the body. It predates #295 — the
+    /// helpers above change nothing about it — and it is an over-accept, the
+    /// direction that creates rows Go refuses, so it is its own issue rather
+    /// than a line snuck in here. The assertion exists so the next reader finds
+    /// it recorded rather than rediscovering it.
+    #[test]
+    fn a_nested_struct_from_an_array_is_a_known_over_accept() {
+        let parsed: Mappy = serde_json::from_str(r#"{"mcp":{"s":[]}}"#)
+            .expect("serde builds a struct from a sequence positionally");
+        assert_eq!(parsed.mcp.expect("a map")["s"].ids, None);
     }
 }
