@@ -117,7 +117,8 @@ src-tauri/src/
     options.rs   every option, and which of the two channels it travels on
     messages.rs  the wire types and parse_line
     permissions.rs / hooks.rs   the two callback round trips
-    mcp.rs       loopback HTTP host for in-process MCP servers
+    mcp.rs       loopback HTTP host for in-process MCP servers (rmcp, stateless)
+    tool.rs      a tool is a function: derived schemas, runtime registration
     lenient.rs   Go's partial-decode semantics, which serde does not have
   native/        ported endpoints (phase 2+)
     active_time.rs the capped-gap rule, shared by the scanner and the pipeline
@@ -429,7 +430,7 @@ of the `Err` arms the cut-over has to turn into a real response.
 | 1 ✅ | Sidecar + proxy | — | done |
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
 | 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. Scheduler is #275. |
-| 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram. WhatsApp is **not** among them — see below. |
+| 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. WhatsApp is **not** among them — see below. |
 | 5 ← | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
 
 ### The session scanner (`src-tauri/src/native/scanner/`)
@@ -532,12 +533,70 @@ its site: Go's partial-decode semantics (`lenient.rs`), the `Stream` /
 (Go blocks a goroutine inline; blocking a runtime worker is a bug), and handle
 lifetimes standing in for `context.Context`.
 
-One deliberate scope call: `start_in_process_mcp_server` takes an `McpService`
-trait rather than an `rmcp` server. Go hands its MCP SDK's `*mcp.Server` to its
-own streamable-HTTP handler; the equivalent here would pin `rmcp`'s API to
-satisfy no caller, since nothing has an MCP server to host until phase 4. The
-seam sits exactly where Go's does — the SDK owns the listener, the caller owns
-the tools — and an `rmcp` adapter is one impl away.
+### Hosting a tool — there is exactly one way (#282)
+
+**Decision: `rmcp`, the official Rust MCP SDK, and the hand-rolled `McpService`
+trait is gone.** `start_in_process_mcp_server(name, service)` takes an
+`rmcp::ServerHandler`; `claude::new_tool` / `claude::ToolServer` /
+`Options::with_tools` (`claude/tool.rs`) are the typed-tool layer over it, ported
+from `claude/tool.go`. Every phase-4 integration and the local-tools server build
+a `ToolServer` and hand it to `start_in_process_mcp_server`. **Do not add a
+second path** — that is the whole point of settling this before #310–#317 start.
+
+#281 deferred the choice on purpose, because nothing had a server to host and
+binding to `rmcp`'s API would have satisfied no caller. Phase 4 is what forces
+it, and the evidence came down one way:
+
+- **The 62 tools all want a derived schema.** Every Go integration is
+  `mcp.AddTool(server, &mcp.Tool{…}, handler)` over a params struct with
+  `jsonschema:` tags — the schema is reflected off the type. Keeping the trait
+  meant hand-writing 62 JSON Schemas beside 62 Rust structs and keeping them in
+  step by hand, plus hand-rolling initialize, capability and protocol-version
+  negotiation, `tools/list`, `tools/call`, the error codes and the content
+  encoding. `schemars` (which `rmcp` already pulls) is that whole job.
+- **It costs almost nothing.** `rmcp` 3.1.2 with `server` +
+  `transport-streamable-http-server` + `transport-io` adds **14 crates** — 371 →
+  388 packages — and no measurable build time against a Tauri/GTK tree. Its
+  async and HTTP halves are already here: `tokio`, `http`, `http-body(-util)`,
+  `tokio-stream`, `tokio-util`, `chrono`, `uuid`, `serde_json`, `thiserror`,
+  `tracing`, and `schemars` 1.2.2 was **already in the lock** (three schemars
+  majors arrive via Tauri). Genuinely new: `futures`, `rand`, `sse-stream`,
+  `pastey`, `base64`.
+- **It mirrors Go rather than diverging from it.** Go delegates the protocol to
+  `modelcontextprotocol/go-sdk` and keeps only the listener. This does the same
+  with the same project's Rust SDK, so the seam stays where Go's is.
+
+Three consequences, each load-bearing:
+
+- **The crate's MSRV moved 1.77 → 1.88**, because `rmcp` 3.x declares 1.88 and
+  cargo otherwise silently resolves `rmcp` 2.x, a superseded major. Both CI
+  workflows install `stable`, so nothing was holding the floor at 1.77 — it was
+  the Tauri template's value. It is not free: clippy's MSRV-gated lints wake up,
+  which is why three `map_or(true, …)` sites became `is_none_or` in the same
+  change. Expect that whenever the floor moves.
+- **The `macros` feature is off.** `#[tool_router]` / `#[tool]` fix a tool set at
+  compile time, and all eight of Agento's in-process servers choose their tools
+  at **runtime** from the integration's `services[].tools` allowlist, over
+  credentials read from the database. `ToolServer::add_tool` is that loop.
+  Leaving the macros enabled would give the tree two ways to declare a tool for
+  no caller's benefit.
+- **The transport is stateless** (`json_response: true`,
+  `legacy_session_mode: false`), against `rmcp`'s session-based default and
+  against Go's stateful handler. An in-process tool server has no
+  server-to-client traffic — no sampling, no elicitation, no progress — so a
+  session buys nothing and costs per-session state in eight servers. It also
+  keeps the module's contract literally what #281 wrote down: one POST, one JSON
+  reply, `202` for a notification. **This is verified against the real client,
+  not assumed** — `tests/claude_mcp_live.rs` (`--ignored`) has the Claude Code
+  CLI dial one and reports `✔ Connected`, which it reaches only by completing
+  the handshake over a server that issues no `Mcp-Session-Id` and answers `405`
+  to the stream `GET`. Re-run it if `server_config()` ever changes.
+
+`NewTool[In, Out]`'s `Out` has no counterpart: it is Go's *structured* result,
+no Agento tool passes anything but `nil`, and `rmcp` puts the same thing in
+`CallToolResult::structured_content`. `WithTools` returns the server handle
+alongside the options, because a listener's life is a handle's here — an
+`Options` that owned it would tie the port to a `Clone` value.
 
 ### Things that will bite
 
