@@ -13,12 +13,17 @@
 //! `AGENTO_DESKTOP_NATIVE` steers that: `on` (the default), `off` to forward
 //! everything, and `diff` to let Go answer while the Rust result is computed
 //! alongside and compared byte for byte. See `native/`.
+//!
+//! Being that seam is also why the request log lives here (#301): one place
+//! sees every `/api` request whichever side answers it, so the record cannot go
+//! selectively sparse as routes move. See [`Served`].
 
 use std::net::SocketAddr;
+use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, HeaderValue, Request, Response, StatusCode};
+use axum::http::{header, HeaderValue, Method, Request, Response, StatusCode, Uri};
 use axum::routing::any;
 use axum::Router;
 
@@ -133,12 +138,101 @@ fn max_body_for(path: &str) -> usize {
     }
 }
 
+/// Which implementation answered a request — the part of the access line that
+/// makes it honest about who did the work.
+///
+/// The port's whole hazard is that the same user action is served by different
+/// code depending on whether its route has moved yet (#301). A log line that
+/// did not say which would be worse than none, because it reads as coverage.
+///
+/// Each variant names **which half of the seam the request was routed to**, not
+/// which function produced the bytes. The seam can reject a request before
+/// either handler runs — an over-cap body is answered 400 right here — and such
+/// a line still belongs to the half that claimed the route, because that is
+/// what the reader is trying to establish. The adjacent `warn!` says where it
+/// actually failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Served {
+    /// The buffered native half took it: a handler answered in full, or the
+    /// seam rejected the request before one ran.
+    Native,
+    /// The streaming native half took it: a handler answered with a stream
+    /// still arriving, or the seam rejected the request before one ran.
+    NativeStream,
+    /// The Go sidecar answered; Rust does not claim this route.
+    Forwarded,
+    /// A native handler was tried, failed, and the request fell through to Go —
+    /// the seam's fallback rule. Worth distinguishing from a plain forward,
+    /// because it means a ported route is broken while the app looks healthy.
+    NativeFailedForwarded,
+    /// Shadow-diff mode: Go answered and Rust was computed alongside it.
+    Diff,
+}
+
+impl Served {
+    fn label(self) -> &'static str {
+        match self {
+            Served::Native => "native",
+            Served::NativeStream => "native-stream",
+            Served::Forwarded => "forwarded",
+            Served::NativeFailedForwarded => "native-failed-forwarded",
+            Served::Diff => "diff",
+        }
+    }
+}
+
+/// What the access line is logged at.
+///
+/// `tauri_plugin_log` is built at `LevelFilter::Info` in `lib.rs`, so this split
+/// is what the log actually contains by default: every state-changing request,
+/// every request that failed, and none of the successful reads. It is the same
+/// record Go's `requestLogger` (`internal/server/server.go`) writes, promoted
+/// out of debug for the half worth keeping — not Go's service-layer `Info`
+/// lines, which the seam cannot see. See `desktop/CLAUDE.md`.
+///
+/// Three arms rather than two, and the status arm is why:
+///
+/// - The argument for putting reads at debug is **volume**. The UI polls
+///   `GET /api/claude-sessions/status` on a timer for the whole length of a
+///   scan, and an info line per poll buries everything else, which is how a log
+///   stops being read.
+/// - A read that *failed* is not that volume. It is the one read anybody wants
+///   in the file, so a 4xx or 5xx outranks the method entirely. Without this
+///   arm the first native `GET` handler that answers 404 as `Ok(Answer)` — the
+///   natural shape once a read stops wanting the Go fallback — would be
+///   invisible, as would a Go 5xx forwarded through on a `GET`.
+/// - `HEAD` and `OPTIONS` reach here because the router is `any(handle)`, and
+///   neither changes anything. The split is reads against writes, not `GET`
+///   against everything else.
+fn access_level(method: &Method, status: StatusCode) -> log::Level {
+    if status.is_client_error() || status.is_server_error() {
+        log::Level::Warn
+    } else if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        log::Level::Debug
+    } else {
+        log::Level::Info
+    }
+}
+
+/// The path to log, which is deliberately **not** the URI.
+///
+/// The query string carries search terms, project paths and date ranges — the
+/// user's own data. It is dropped here rather than at the call site so there is
+/// one place to check that it always is.
+fn log_path(uri: &Uri) -> String {
+    uri.path().to_string()
+}
+
 async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response<Body> {
-    let path = req.uri().path().to_string();
+    let path = log_path(req.uri());
 
     // Anything that isn't the API is a frontend route. In release the assets
     // are embedded here; in debug the webview loads Vite directly and only
     // ever reaches the proxy for /api, so this arm is release-only.
+    //
+    // It returns before the access log on purpose: handing out an embedded file
+    // is static serving, not an application operation, and one page load is
+    // dozens of them.
     if !is_api_path(&path) {
         #[cfg(not(debug_assertions))]
         {
@@ -153,6 +247,55 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
         }
     }
 
+    let method = req.method().clone();
+    let started = Instant::now();
+    let (response, served) = dispatch(state, req, path.clone()).await;
+
+    // The one record the desktop build emits for a request (#301). No OTel span
+    // accompanies it and none will — see "Do not port" in `desktop/CLAUDE.md`.
+    //
+    // **Method, path, status, duration and who answered. Never a body, never a
+    // header, never the query string.** This is a desktop app: the bodies
+    // passing through here are chat prompts, agent system prompts and
+    // integration credentials, and this file is written to disk unencrypted in
+    // the app's log directory. Anyone tempted to add "just the request body for
+    // debugging" is proposing to write the user's API tokens to it.
+    //
+    // The one exception is the path itself, and it is an accepted one rather
+    // than an oversight: two route families put user-authored text in a path
+    // segment — the agent slug (`routeAgentBySlug`, derived from the name the
+    // user typed) and the settings-profile id (`routeProfileByID`). A name is
+    // not a body, and dropping the segment would leave the line unable to say
+    // which agent was written, which is most of what it is for. Nothing else in
+    // the route table carries user data in a path segment; a route that wanted
+    // to would need to be argued here first.
+    //
+    // The elapsed figure is time-to-headers whenever the body is still
+    // arriving, which is more lines than it looks: `native-stream` always, and
+    // any `forwarded` / `native-failed-forwarded` line for an SSE route, since
+    // `forward` builds its body with `Body::from_stream` too — under
+    // `AGENTO_DESKTOP_NATIVE=off` a three-minute chat turn logs `200 9ms
+    // forwarded`. Only `native` and `diff` buffer the whole response before
+    // this runs, and only they report a duration the request actually took.
+    log::log!(
+        access_level(&method, response.status()),
+        "{} {} {} {}ms {}",
+        method,
+        path,
+        response.status().as_u16(),
+        started.elapsed().as_millis(),
+        served.label(),
+    );
+
+    response
+}
+
+/// Answer one `/api` request, reporting which implementation did it.
+///
+/// Split out of [`handle`] so the access line has exactly one call site. There
+/// are eight-odd ways out of here, and logging at each of them is the shape
+/// that drifts: the next port adds a ninth and quietly stops being recorded.
+async fn dispatch(state: ProxyState, req: Request<Body>, path: String) -> (Response<Body>, Served) {
     // The streaming half of the seam (#276). Checked before the buffered one
     // because a chat turn must never be collected into a `Vec<u8>`: it is the
     // one response whose whole point is arriving in pieces.
@@ -163,7 +306,10 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
             Ok(bytes) => bytes,
             Err(e) => {
                 log::warn!("native stream for {path}: reading body failed: {e}");
-                return error_response(StatusCode::BAD_REQUEST, "could not read request body");
+                return (
+                    error_response(StatusCode::BAD_REQUEST, "could not read request body"),
+                    Served::NativeStream,
+                );
             }
         };
         let req = Request::from_parts(parts, Body::from(body_bytes.clone()));
@@ -176,13 +322,16 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
                 Some(path) => path,
                 None => {
                     log::warn!("native stream for {path}: no data dir, forwarding");
-                    return forward_or_bad_gateway(&state, req, &path).await;
+                    return (
+                        forward_or_bad_gateway(&state, req, &path).await,
+                        Served::NativeFailedForwarded,
+                    );
                 }
             },
         };
 
         match native::serve_stream(stream_req).await {
-            Ok(response) => return response,
+            Ok(response) => return (response, Served::NativeStream),
             // Same rule as the buffered path, and the same obligation: a
             // streaming handler must fail *before* it has any effect, or the
             // forward spawns a second subprocess. Every check in `turn::run`
@@ -193,7 +342,10 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
             // answer is then the right one. See `native::chat`'s header.
             Err(e) => {
                 log::warn!("native stream for {path} failed, forwarding to Go: {e}");
-                return forward_or_bad_gateway(&state, req, &path).await;
+                return (
+                    forward_or_bad_gateway(&state, req, &path).await,
+                    Served::NativeFailedForwarded,
+                );
             }
         }
     }
@@ -209,7 +361,10 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
             // Not forwarded: the body is gone. See `MAX_NATIVE_BODY`.
             Err(e) => {
                 log::warn!("native handler for {path}: reading body failed: {e}");
-                return error_response(StatusCode::BAD_REQUEST, "could not read request body");
+                return (
+                    error_response(StatusCode::BAD_REQUEST, "could not read request body"),
+                    Served::Native,
+                );
             }
         };
         // `req` keeps a complete copy of the body, so both forwards below can
@@ -255,7 +410,7 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
                     Ok(buffered) => buffered,
                     Err(e) => {
                         log::error!("proxy error for {path}: {e}");
-                        return error_response(StatusCode::BAD_GATEWAY, &e);
+                        return (error_response(StatusCode::BAD_GATEWAY, &e), Served::Diff);
                     }
                 };
                 match native {
@@ -272,9 +427,9 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
                     ),
                     Err(e) => log::error!("native diff {path}: native handler failed: {e}"),
                 }
-                return go_response;
+                return (go_response, Served::Diff);
             }
-            (_, Ok(answer)) => return native::response(answer),
+            (_, Ok(answer)) => return (native::response(answer), Served::Native),
             // A native failure is never surfaced to the UI: the request falls
             // through to the Go sidecar, which is still running and still
             // correct. A ported route can only be as broken as an unported one.
@@ -287,24 +442,30 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
             // safety, and it lives in the handlers because only they know it.
             (_, Err(e)) => {
                 log::warn!("native handler for {path} failed, forwarding to Go: {e}");
-                return match forward(&state, req).await {
-                    Ok(resp) => resp,
-                    Err(e) => {
-                        log::error!("proxy error for {path}: {e}");
-                        error_response(StatusCode::BAD_GATEWAY, &e)
-                    }
-                };
+                return (
+                    match forward(&state, req).await {
+                        Ok(resp) => resp,
+                        Err(e) => {
+                            log::error!("proxy error for {path}: {e}");
+                            error_response(StatusCode::BAD_GATEWAY, &e)
+                        }
+                    },
+                    Served::NativeFailedForwarded,
+                );
             }
         }
     }
 
-    match forward(&state, req).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            log::error!("proxy error for {path}: {e}");
-            error_response(StatusCode::BAD_GATEWAY, &e)
-        }
-    }
+    (
+        match forward(&state, req).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                log::error!("proxy error for {path}: {e}");
+                error_response(StatusCode::BAD_GATEWAY, &e)
+            }
+        },
+        Served::Forwarded,
+    )
 }
 
 /// Forward a request upstream, streaming both directions.
@@ -458,4 +619,130 @@ pub fn is_api_path(path: &str) -> bool {
         || path.starts_with("/webhooks")
         || path == "/health"
         || path == "/metrics"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The labels are the whole point of the line — they are what says which
+    /// implementation answered while both are running (#301). Pinned because a
+    /// rename would silently reword every historical log's meaning.
+    #[test]
+    fn served_labels_name_each_implementation() {
+        assert_eq!(Served::Native.label(), "native");
+        assert_eq!(Served::NativeStream.label(), "native-stream");
+        assert_eq!(Served::Forwarded.label(), "forwarded");
+        assert_eq!(
+            Served::NativeFailedForwarded.label(),
+            "native-failed-forwarded"
+        );
+        assert_eq!(Served::Diff.label(), "diff");
+    }
+
+    #[test]
+    fn writes_and_failures_log_at_info_or_above_and_successful_reads_at_debug() {
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert_eq!(
+                access_level(&method, StatusCode::OK),
+                log::Level::Info,
+                "{method} should be logged at info"
+            );
+        }
+        // Reads. `HEAD` and `OPTIONS` reach the seam because the router is
+        // `any(handle)`, and neither changes anything, so they belong with
+        // `GET` rather than with the writes.
+        for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            assert_eq!(
+                access_level(&method, StatusCode::OK),
+                log::Level::Debug,
+                "{method} should be logged at debug"
+            );
+        }
+        // A failed read is not polling volume, and is the one read a reader
+        // wants in the default-level file.
+        assert_eq!(
+            access_level(&Method::GET, StatusCode::NOT_FOUND),
+            log::Level::Warn
+        );
+        assert_eq!(
+            access_level(&Method::GET, StatusCode::BAD_GATEWAY),
+            log::Level::Warn
+        );
+        assert_eq!(
+            access_level(&Method::POST, StatusCode::CONFLICT),
+            log::Level::Warn
+        );
+    }
+
+    /// The label→path mapping, which is the half that rots as ports land: a
+    /// wrong label is not a crash, it is a log that quietly misattributes the
+    /// work. Only one `dispatch` arm can be reached without a live sidecar —
+    /// a claimed route whose body is over [`max_body_for`] is answered 400 by
+    /// the seam itself, before any forward — so that is the arm pinned here,
+    /// and it is also the one where a wrong label is least visible, since the
+    /// UI renders the 400 as an ordinary error.
+    ///
+    /// `native::mode()` reads the environment once per process, so this asserts
+    /// the shipped default rather than forcing it. Under
+    /// `AGENTO_DESKTOP_NATIVE=off` nothing is claimed and the arm does not
+    /// exist; skipping is honest, where forcing the env would make the test
+    /// claim to have exercised a path it did not.
+    #[tokio::test]
+    async fn oversized_body_on_a_claimed_route_is_answered_natively() {
+        if native::mode() != native::Mode::On {
+            return;
+        }
+
+        let state = ProxyState {
+            // Never dialled: the arm under test returns before any forward. If
+            // this ever is dialled the test fails on the status rather than
+            // hanging, because nothing is listening on port 1.
+            upstream: "http://127.0.0.1:1".to_string(),
+            client: reqwest::Client::new(),
+        };
+        let path = "/api/agents".to_string();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(&path)
+            .body(Body::from(vec![0u8; MAX_NATIVE_BODY + 1]))
+            .expect("request");
+
+        let (response, served) = dispatch(state, req, path).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(served, Served::Native);
+    }
+
+    /// A logged path must never carry the query string: it holds search terms,
+    /// project paths and date ranges.
+    #[test]
+    fn logged_path_drops_the_query_string() {
+        let uri: Uri = "/api/claude-sessions?search=my+secret+project&project=%2Fhome%2Fme%2Fwork"
+            .parse()
+            .expect("uri");
+        assert_eq!(log_path(&uri), "/api/claude-sessions");
+
+        let uri: Uri = "/api/agents".parse().expect("uri");
+        assert_eq!(log_path(&uri), "/api/agents");
+    }
+
+    /// `handle` returns before the access line for anything that is not an API
+    /// path, so this predicate is what decides whether a request is logged at
+    /// all. Serving an embedded asset is not an application operation, and one
+    /// page load is dozens of them.
+    #[test]
+    fn frontend_assets_are_not_logged() {
+        for path in [
+            "/",
+            "/index.html",
+            "/assets/index-abc123.js",
+            "/favicon.ico",
+        ] {
+            assert!(!is_api_path(path), "{path} should not be logged");
+        }
+        for path in ["/api/agents", "/webhooks/telegram/1", "/health", "/metrics"] {
+            assert!(is_api_path(path), "{path} should be logged");
+        }
+    }
 }
