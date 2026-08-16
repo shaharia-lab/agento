@@ -132,6 +132,33 @@ pub async fn send(method: reqwest::Method, path: &str, body: Option<&str>) -> (u
     (status, bytes)
 }
 
+/// A request with a caller-chosen `Content-Type` and a raw body.
+///
+/// [`send`] hard-codes `application/json`, which is right for every other
+/// write: `requireJSONContentType` rejects a state-changing request without it
+/// with a 415 before any handler runs. `POST /api/uploads` is the **one**
+/// exception the guard admits (`r.URL.Path == uploadPath`), and it is
+/// multipart — so it needs a way past that helper.
+pub async fn send_raw(
+    method: reqwest::Method,
+    path: &str,
+    content_type: &str,
+    body: Vec<u8>,
+) -> (u16, Vec<u8>) {
+    let url = format!("{}{path}", live_url());
+    let resp = reqwest::Client::new()
+        .request(method.clone(), &url)
+        .header("Content-Type", content_type)
+        .body(body)
+        .send()
+        .await
+        .unwrap_or_else(|e| panic!("{method} {url} failed — is Agento running? ({e})"));
+
+    let status = resp.status().as_u16();
+    let bytes = resp.bytes().await.expect("reading body").to_vec();
+    (status, bytes)
+}
+
 /// Compare a write's whole answer — status first, then bytes.
 ///
 /// Status before body on purpose: a 500 and a 201 both have bodies, and being

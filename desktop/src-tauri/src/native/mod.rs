@@ -35,6 +35,7 @@ pub mod scanner;
 pub mod sessions;
 pub mod settings;
 pub mod tasks;
+pub mod uploads;
 pub mod version;
 pub mod writes;
 
@@ -82,6 +83,13 @@ pub struct Request<'a> {
     pub path: &'a str,
     /// The raw query string without its leading `?`.
     pub query: &'a str,
+    /// The `Content-Type` header, or `""` when absent.
+    ///
+    /// Carried for exactly one route. `POST /api/uploads` is multipart, and a
+    /// multipart body cannot be parsed at all without the boundary parameter,
+    /// which lives only in this header — every other claimed route decodes JSON
+    /// and ignores it.
+    pub content_type: &'a str,
     /// The request body, already buffered. Empty for a GET, and empty for the
     /// several writes Go accepts with no payload at all.
     pub body: &'a [u8],
@@ -248,6 +256,7 @@ const ENDPOINTS: &[Endpoint] = &[
     fs::ENDPOINT,
     integrations::ENDPOINT,
     scan::ENDPOINT,
+    uploads::ENDPOINT,
 ];
 
 /// Whether this request is answered by ported Rust code.
@@ -473,11 +482,32 @@ mod tests {
         assert!(!claims(&Method::GET, "/api/notifications"));
 
         // The filesystem listing, on the platforms `gopath` speaks. Creating a
-        // directory is a write, and uploads has no read at all.
+        // directory is still a write Go owns.
         assert!(claims(&Method::GET, "/api/fs"));
         assert!(!claims(&Method::POST, "/api/fs/mkdir"));
-        assert!(!claims(&Method::POST, "/api/uploads"));
+
+        // Uploads (#308): the one multipart route, and the only claimed one
+        // with no read at all.
+        assert!(claims(&Method::POST, "/api/uploads"));
         assert!(!claims(&Method::GET, "/api/uploads"));
+        assert!(!claims(&Method::POST, "/api/uploads/"));
+
+        // Continuing a Claude session (#308) is a POST under the sessions
+        // prefix, and must not be reachable by any other method or shape.
+        assert!(claims(
+            &Method::POST,
+            "/api/claude-sessions/abc-123/continue"
+        ));
+        assert!(!claims(
+            &Method::GET,
+            "/api/claude-sessions/abc-123/continue"
+        ));
+        assert!(!claims(&Method::POST, "/api/claude-sessions//continue"));
+        assert!(!claims(&Method::POST, "/api/claude-sessions/continue"));
+        assert!(!claims(
+            &Method::POST,
+            "/api/claude-sessions/abc/journey/continue"
+        ));
 
         // Integrations: the four reads, plus the writes with no live-server
         // effect. Anything that reloads an MCP server, dials a remote service,
@@ -505,6 +535,7 @@ mod tests {
             method: &Method::GET,
             path: "/api/nothing-here",
             query: "",
+            content_type: "",
             body: &[],
         })
         .is_err());
@@ -634,9 +665,18 @@ mod tests {
             "/api/integrations/abc",
             "/api/integrations/abc/triggers",
         ];
+        // Paired with a method, because not every area has a read: `uploads`
+        // claims a POST and nothing else, and a GET-only probe list would
+        // report it as dead code.
+        let writes = [
+            (Method::POST, "/api/uploads"),
+            (Method::POST, "/api/claude-sessions/abc/continue"),
+        ];
         for endpoint in ENDPOINTS {
+            let reachable = probes.iter().any(|p| (endpoint.claims)(&Method::GET, p))
+                || writes.iter().any(|(m, p)| (endpoint.claims)(m, p));
             assert!(
-                probes.iter().any(|p| (endpoint.claims)(&Method::GET, p)),
+                reachable,
                 "{} claims none of the probe paths; add one when you add a route",
                 endpoint.name
             );

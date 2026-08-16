@@ -414,6 +414,44 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
         }
     }
 
+    let session = insert_session(
+        &tx,
+        &req.agent_slug,
+        &req.working_directory,
+        &req.model,
+        &req.settings_profile_id,
+    )?;
+
+    // Everything fallible happens before the commit. After it, an `Err` would
+    // forward to Go, which would mint a fresh UUID and insert a *second* chat.
+    // A failing `commit` is the one safe exception: it rolls back, so
+    // forwarding is exactly right.
+    let body = super::gojson::to_vec(&session)
+        .map_err(|e| WriteError::Fallback(format!("encoding chat: {e}")))?;
+
+    // Nothing below this line may return `Fallback`.
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit chat create: {e}")))?;
+    Ok(super::Answer::json_status(StatusCode::CREATED, body))
+}
+
+/// `chatService.CreateSession`'s row, without the handler around it.
+///
+/// Shared with `POST /api/claude-sessions/{id}/continue` (#308), which creates
+/// exactly this row and then links it to a Claude session. Two copies of the
+/// INSERT would be two places for the literals below to drift — and one of them
+/// would be the copy nobody looks at.
+///
+/// The handler answers with the session the store built rather than a re-read,
+/// so the timestamps are the ones just written, parsed back from the same text
+/// rather than re-taken from the clock.
+pub(super) fn insert_session(
+    tx: &rusqlite::Transaction,
+    agent_slug: &str,
+    working_directory: &str,
+    model: &str,
+    settings_profile_id: &str,
+) -> Result<ChatSession, WriteError> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = super::gotime::now_go_text();
     // `sdk_session_id` and the four token totals are literals in the Go INSERT
@@ -427,34 +465,26 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
         rusqlite::params![
             id,
             "New Chat",
-            req.agent_slug,
-            req.working_directory,
-            req.model,
-            req.settings_profile_id,
+            agent_slug,
+            working_directory,
+            model,
+            settings_profile_id,
             now,
             now,
         ],
     )
     .map_err(|e| WriteError::Fallback(format!("creating session: {e}")))?;
 
-    // Everything fallible happens before the commit. After it, an `Err` would
-    // forward to Go, which would mint a fresh UUID and insert a *second* chat.
-    // A failing `commit` is the one safe exception: it rolls back, so
-    // forwarding is exactly right.
-    //
-    // The handler answers with the session the store built, not a re-read — so
-    // the timestamps are the ones just written, parsed back from the same text
-    // rather than re-taken from the clock.
     let stamp = super::gotime::from_sql_text(&now, 0)
         .map_err(|e| WriteError::Fallback(format!("re-reading the write timestamp: {e}")))?;
-    let session = ChatSession {
+    Ok(ChatSession {
         id,
         title: "New Chat".to_string(),
-        agent_slug: req.agent_slug,
+        agent_slug: agent_slug.to_string(),
         sdk_session_id: String::new(),
-        working_directory: req.working_directory,
-        model: req.model,
-        settings_profile_id: req.settings_profile_id,
+        working_directory: working_directory.to_string(),
+        model: model.to_string(),
+        settings_profile_id: settings_profile_id.to_string(),
         created_at: stamp,
         updated_at: stamp,
         total_input_tokens: 0,
@@ -462,14 +492,7 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
         total_cache_creation_tokens: 0,
         total_cache_read_tokens: 0,
         is_favorite: false,
-    };
-    let body = super::gojson::to_vec(&session)
-        .map_err(|e| WriteError::Fallback(format!("encoding chat: {e}")))?;
-
-    // Nothing below this line may return `Fallback`.
-    tx.commit()
-        .map_err(|e| WriteError::Fallback(format!("commit chat create: {e}")))?;
-    Ok(super::Answer::json_status(StatusCode::CREATED, body))
+    })
 }
 
 /// `handleUpdateChat`: rename and/or favourite.
@@ -631,7 +654,7 @@ fn get_session_tx(tx: &rusqlite::Transaction, id: &str) -> Result<Option<ChatSes
     .map_err(|e| WriteError::Fallback(format!("looking up session {id:?}: {e}")))
 }
 
-fn open_for_write(db_path: &Path) -> Result<rusqlite::Connection, WriteError> {
+pub(super) fn open_for_write(db_path: &Path) -> Result<rusqlite::Connection, WriteError> {
     let conn = db::open_read_write(db_path).map_err(WriteError::Fallback)?;
     super::migrate::verify(&conn).map_err(WriteError::Fallback)?;
     Ok(conn)
