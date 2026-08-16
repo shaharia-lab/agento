@@ -105,9 +105,33 @@ async fn forward_or_bad_gateway(
 /// limit is hit. That is the one place the seam's "a native failure just falls
 /// back" rule does not hold, so the cap is set well above anything a claimed
 /// route legitimately carries: the biggest is an agent's `system_prompt`, and
-/// 8 MiB of it would be about a million words. Uploads are the only genuinely
-/// large body in the API and they are not claimed.
+/// 8 MiB of it would be about a million words.
 const MAX_NATIVE_BODY: usize = 8 << 20;
+
+/// What `POST /api/uploads` is allowed to carry, since #308 claimed it.
+///
+/// Go caps the request at `maxUploadSize` (100 MiB) with a `MaxBytesReader` and
+/// answers 400 over it. This has to be **at least** that, or the shell would
+/// refuse a file the server accepts — and it has to be more, because the cap
+/// here applies to the whole multipart envelope while Go's applies to the same
+/// bytes but the *file* inside it is what the 100 MiB is about. The slack is
+/// the part headers and the boundaries.
+///
+/// It is a second constant rather than a raised `MAX_NATIVE_BODY` because the
+/// cost is real: this is a buffer held in memory for the length of the request,
+/// where Go's `ParseMultipartForm` keeps 10 MiB and spills the rest to temp
+/// files. Paying that on an upload is a deliberate trade; paying it on every
+/// claimed route would be a memory regression on a route that never needs it.
+const MAX_UPLOAD_BODY: usize = (100 << 20) + (1 << 20);
+
+/// The body cap for one route.
+fn max_body_for(path: &str) -> usize {
+    if path == native::uploads::PATH {
+        MAX_UPLOAD_BODY
+    } else {
+        MAX_NATIVE_BODY
+    }
+}
 
 async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response<Body> {
     let path = req.uri().path().to_string();
@@ -180,7 +204,7 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
         // put back before any forward below. Claimed routes are never the SSE
         // ones, so nothing streaming is buffered by this.
         let (parts, body) = req.into_parts();
-        let body_bytes = match axum::body::to_bytes(body, MAX_NATIVE_BODY).await {
+        let body_bytes = match axum::body::to_bytes(body, max_body_for(&path)).await {
             Ok(bytes) => bytes,
             // Not forwarded: the body is gone. See `MAX_NATIVE_BODY`.
             Err(e) => {
@@ -196,6 +220,15 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
         // one slow read cannot stall an SSE stream sharing the runtime.
         let method = req.method().clone();
         let query = req.uri().query().unwrap_or_default().to_string();
+        // Carried because one claimed route needs it: a multipart body is
+        // unparseable without the boundary, and the boundary is only in the
+        // header. Everything else ignores it.
+        let content_type = req
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
         let native_answer = {
             let path = path.clone();
             tokio::task::spawn_blocking(move || {
@@ -203,6 +236,7 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
                     method: &method,
                     path: &path,
                     query: &query,
+                    content_type: &content_type,
                     body: &body_bytes,
                 })
             })
