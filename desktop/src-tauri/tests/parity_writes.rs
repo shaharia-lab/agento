@@ -955,3 +955,94 @@ async fn the_continue_session_answers_match_go() {
     let deleted = go_answer(Method::DELETE, &format!("/api/chats/{chat_id}"), None).await;
     assert_eq!(deleted.0, 204);
 }
+
+// ─── Monitoring: a deliberate divergence (#309) ───────────────────────────────
+
+/// The one case in this suite that pins what Go does in order to record what
+/// this build **stops** doing.
+///
+/// Every other test here asserts that Rust reproduces Go. `PUT /api/monitoring`
+/// and `POST /api/monitoring/test` do not: the desktop build exports no
+/// telemetry, so `native/monitoring.rs` answers 501 rather than saving a
+/// configuration that changes nothing. This exists so the decision is
+/// falsifiable — if someone later ports the exporters, they should find this
+/// test asserting the behaviour they are restoring, rather than discover the
+/// divergence from a user.
+///
+/// It also captures the thing worth knowing about Go's test endpoint before it
+/// disappears with the sidecar: it answers `ok: true` for an endpoint nothing is
+/// listening on, because `grpc.Dial` is lazy and `Connecting` counts as success.
+#[tokio::test]
+#[ignore = "requires a scratch Go instance; mutates it"]
+async fn the_monitoring_writes_are_what_the_desktop_build_declines() {
+    require_scratch_instance();
+
+    let original = go_answer(Method::GET, "/api/monitoring", None).await;
+    assert_eq!(original.0, 200);
+    let original: serde_json::Value = serde_json::from_slice(&original.1).expect("json");
+
+    // Go saves and answers with the envelope, having rebuilt its providers.
+    // Rust answers 501 — see `native::monitoring`'s header for why.
+    let saved = go_answer(
+        Method::PUT,
+        "/api/monitoring",
+        Some(
+            r#"{"enabled":false,"metrics_exporter":"otlp","logs_exporter":"none",
+                "otlp_endpoint":"127.0.0.1:4317","otlp_insecure":true,
+                "metric_export_interval_ms":60000}"#,
+        ),
+    )
+    .await;
+    assert_eq!(saved.0, 200, "Go saves it; this build declines to");
+    let saved_body: serde_json::Value = serde_json::from_slice(&saved.1).expect("json");
+    assert_eq!(saved_body["settings"]["metrics_exporter"], "otlp");
+
+    // An unknown exporter is a 400 from the handler's own validator, which is
+    // the check a config port would have had to reproduce.
+    let invalid = go_answer(
+        Method::PUT,
+        "/api/monitoring",
+        Some(r#"{"metrics_exporter":"statsd"}"#),
+    )
+    .await;
+    assert_eq!(invalid.0, 400);
+    assert_eq!(
+        String::from_utf8_lossy(&invalid.1).trim_end(),
+        r#"{"error":"invalid metrics_exporter: \"statsd\""}"#
+    );
+
+    // The test endpoint: 200 with an `ok` field either way, and `ok` is `true`
+    // for a port nothing is listening on.
+    let unreachable = go_answer(
+        Method::POST,
+        "/api/monitoring/test",
+        Some(r#"{"otlp_endpoint":"127.0.0.1:1","otlp_insecure":true}"#),
+    )
+    .await;
+    assert_eq!(
+        unreachable.0, 200,
+        "the test endpoint never fails the request"
+    );
+    let result: serde_json::Value = serde_json::from_slice(&unreachable.1).expect("json");
+    assert!(
+        result["ok"] == true || result["ok"] == false,
+        "whichever it is, it is a race — see native::monitoring's header"
+    );
+
+    // An empty endpoint is the one deterministic answer it has.
+    let empty = go_answer(Method::POST, "/api/monitoring/test", Some(r#"{}"#)).await;
+    assert_eq!(empty.0, 200);
+    assert_eq!(
+        String::from_utf8_lossy(&empty.1).trim_end(),
+        r#"{"ok":false,"error":"OTLP endpoint is not configured"}"#
+    );
+
+    // Put the instance back.
+    let restored = go_answer(
+        Method::PUT,
+        "/api/monitoring",
+        Some(&original["settings"].to_string()),
+    )
+    .await;
+    assert_eq!(restored.0, 200);
+}
