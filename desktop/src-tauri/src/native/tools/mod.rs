@@ -66,12 +66,6 @@ use crate::claude::{tool_server, InProcessMcpServer, Result, ToolDef};
 /// and in every stored `tool_use` block.
 pub const LOCAL_MCP_SERVER_NAME: &str = "local-tools";
 
-/// Every tool this server registers, in registration order — `ToolNames`.
-///
-/// The frontend carries its own copy (`desktop/src/views/AgentsView.tsx`), as
-/// the web UI does; this is the list the server actually hosts.
-pub const LOCAL_TOOL_NAMES: &[&str] = &["current_time"];
-
 /// The fully qualified name the CLI knows a local tool by, and the string an
 /// agent's allowlist has to contain — `LocalMCPConfig.AllowedToolName`.
 pub fn allowed_tool_name(tool_name: &str) -> String {
@@ -97,6 +91,14 @@ where
 }
 
 /// Every local tool, as `StartLocalMCPServer` registers them.
+///
+/// This *is* the list — there is deliberately no second `&[&str]` of names
+/// beside it. Go's `LocalMCPConfig.ToolNames` is such a list, hand-copied from
+/// the `mcp.AddTool` calls above it and, as of #310, read by nothing; a Rust
+/// copy would be a third statement of the same truth, free to drift from the
+/// registration it claims to describe. What a caller actually wants —
+/// "what is hosted?" — is answered by [`crate::claude::ToolServer::tool_names`],
+/// which is derived from the registered set and so cannot disagree with it.
 pub fn local_tools() -> Vec<ToolDef> {
     vec![current_time::tool()]
 }
@@ -141,8 +143,26 @@ mod tests {
         assert!(allowed_tool_names(Vec::<String>::new()).is_empty());
     }
 
+    /// The hosted set, spelled out — for the reason
+    /// `the_qualified_name_is_the_one_already_on_disk` spells its string out: a
+    /// list rebuilt from the registration agrees with it by construction and so
+    /// could never notice a tool being renamed or dropped. It stays a fixture
+    /// local to this test rather than a constant of the module, because nothing
+    /// in the crate should be reading a hand-written copy of what
+    /// [`local_tools`] already is.
+    ///
+    /// It is not folded into the vector test below either, because that one
+    /// needs `desktop/parity/local_tools_vectors.json` on disk and answers a
+    /// different question — "does Rust host what Go hosts?" rather than "is
+    /// this still the set we think we wrote?".
+    ///
+    /// Both UIs carry their own copy of this list —
+    /// `desktop/src/views/AgentsView.tsx` and `frontend/src/types.ts` — so
+    /// adding a tool means editing them too; neither can be reached from here.
     #[test]
     fn the_server_hosts_exactly_the_named_tools() {
+        const LOCAL_TOOL_NAMES: &[&str] = &["current_time"];
+
         let server =
             crate::claude::ToolServer::new(LOCAL_MCP_SERVER_NAME).with_tools(local_tools());
         assert_eq!(server.tool_names(), LOCAL_TOOL_NAMES);

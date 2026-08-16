@@ -11,12 +11,16 @@
 //! button would silently do nothing.
 //!
 //! But not every chat *can* run here: an agent whose tools come from an
-//! integration or the local MCP server needs machinery this port does not have
-//! (#277, #282), and those chats keep running on the sidecar. So the three
-//! steering routes are answered natively **only when Rust holds a live session
-//! for that chat**, and forward otherwise. Go then answers — correctly, because
-//! it is the side that has the session — and a chat with no live session
-//! anywhere gets Go's own 409 rather than a second copy of it.
+//! **integration** needs one MCP server per provider, which this port does not
+//! have (#311–#317), so `runner::build_options` refuses those and they keep
+//! running on the sidecar. The **local** in-process server was the other half of
+//! that refusal and is gone — `build_options` starts it itself and hands back
+//! the handle (#310) — but that only shrinks the set of chats Go still holds; it
+//! does not empty it, and the argument here turns on the set being non-empty.
+//! So the three steering routes are answered natively **only when Rust holds a
+//! live session for that chat**, and forward otherwise. Go then answers —
+//! correctly, because it is the side that has the session — and a chat with no
+//! live session anywhere gets Go's own 409 rather than a second copy of it.
 //!
 //! That is what lets the four move together without requiring *every* chat to
 //! move at once.
