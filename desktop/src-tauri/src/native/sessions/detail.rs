@@ -591,10 +591,10 @@ struct TimeRange {
 impl TimeRange {
     fn update(&mut self, at: Option<chrono::DateTime<chrono::Utc>>) {
         let Some(at) = at else { return };
-        if self.start.map_or(true, |s| at < s) {
+        if self.start.is_none_or(|s| at < s) {
             self.start = Some(at);
         }
-        if self.last.map_or(true, |l| at > l) {
+        if self.last.is_none_or(|l| at > l) {
             self.last = Some(at);
         }
     }
