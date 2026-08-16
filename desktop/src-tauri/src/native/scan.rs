@@ -768,6 +768,9 @@ mod tests {
     #[test]
     fn a_scan_with_no_readable_dir_arms_a_cooldown_without_recording_markers() {
         let _serialised = scan_state_lock();
+        // `HOME` is a second global, and `paths::tests` read it — without this
+        // they fail on a value this test swapped underneath them.
+        let _env = crate::paths::tests::env_lock();
 
         // A home with no `.claude`, so the walk finds nothing to list.
         let home = tempfile::tempdir().expect("tempdir");
