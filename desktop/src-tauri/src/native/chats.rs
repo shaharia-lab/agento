@@ -380,8 +380,7 @@ struct PatchChatRequest {
 struct BulkDeleteRequest {
     /// A `null` element is `""` to Go, not an error (#295) — and an empty id
     /// simply matches no row, exactly as Go's does.
-    #[serde(deserialize_with = "super::gojson::null_elements_are_zero_values")]
-    ids: Option<Vec<String>>,
+    ids: Option<super::gojson::GoList<String>>,
 }
 
 /// Go's `maxQueryLimit`, reused as the bulk-delete cap.

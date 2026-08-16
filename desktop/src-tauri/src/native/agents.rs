@@ -30,7 +30,6 @@
 //!   its default arm. This port does not reproduce 500s: it detects the case,
 //!   writes nothing, and forwards, so Go produces its own answer.
 
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use axum::http::{Method, StatusCode};
@@ -38,6 +37,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use super::db;
+use super::gojson::{GoList, GoMap};
 use super::writes::{decode_body, finish, WriteError};
 
 /// One agent. Mirrors `config.AgentConfig`.
@@ -66,29 +66,24 @@ pub struct Agent {
 /// writer produced. Round-tripping the distinction is the only way the bytes
 /// match.
 ///
-/// The three lists and the map additionally decode a `null` **inside** them as
-/// the zero value (#295). `Option` alone covers `"built_in": null`; it does
-/// nothing for `"built_in": [null]`, which Go reads as `[""]` with no error and
-/// `serde` rejects outright — a 400 for a request Go applies. `#[serde(default)]`
-/// on the struct restores the missing-field behaviour that `deserialize_with`
-/// would otherwise take away.
+/// [`GoList`] and [`GoMap`] carry one further rule: a `null` **inside** a list
+/// or the map is the zero value (#295). `Option` alone covers
+/// `"built_in": null`; it does nothing for `"built_in": [null]`, which Go reads
+/// as `[""]` with no error and plain `Vec<String>` rejects — a 400 for a
+/// request Go applies. They are types rather than `deserialize_with` functions
+/// precisely so this struct needs no `#[serde(default)]`, which would also make
+/// it accept `{"capabilities":[]}` — see [`GoList`]'s header.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
 pub struct Capabilities {
-    #[serde(deserialize_with = "super::gojson::null_elements_are_zero_values")]
-    pub built_in: Option<Vec<String>>,
-    #[serde(deserialize_with = "super::gojson::null_elements_are_zero_values")]
-    pub local: Option<Vec<String>>,
-    #[serde(deserialize_with = "super::gojson::null_map_values_are_zero_values")]
-    pub mcp: Option<BTreeMap<String, McpCapability>>,
+    pub built_in: Option<GoList<String>>,
+    pub local: Option<GoList<String>>,
+    pub mcp: Option<GoMap<McpCapability>>,
 }
 
 /// Which tools from one MCP server an agent may use.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
 pub struct McpCapability {
-    #[serde(deserialize_with = "super::gojson::null_elements_are_zero_values")]
-    pub tools: Option<Vec<String>>,
+    pub tools: Option<GoList<String>>,
 }
 
 const COLUMNS: &str = "SELECT slug, name, description, model, thinking, permission_mode,
@@ -657,39 +652,6 @@ mod tests {
         );
     }
 
-    /// A `null` **inside** a capability list or the MCP map is the zero value,
-    /// not a type error (#295). Go answers `[""]` and `{"tools":null}` with no
-    /// error at all, so rejecting these was a 422 for an agent Go creates.
-    ///
-    /// Asserted through `AgentRequest`, which is the only way these bodies
-    /// arrive, and on the *stored* JSON, since that is what a later read serves.
-    #[test]
-    fn a_null_inside_capabilities_is_a_zero_value_rather_than_a_422() {
-        let body = br#"{"name":"N","slug":"n","capabilities":{
-            "built_in":[null,"Read"],
-            "local":[null],
-            "mcp":{"quiet":null,"github":{"tools":[null]}}
-        }}"#;
-        let req: AgentRequest = serde_json::from_slice(body).expect("a body Go accepts");
-        let caps = req.capabilities.expect("capabilities");
-
-        assert_eq!(caps.built_in, Some(vec![String::new(), "Read".into()]));
-        assert_eq!(caps.local, Some(vec![String::new()]));
-        let mcp = caps.mcp.expect("mcp");
-        // A null map value is the zero struct — every field at its own zero.
-        assert_eq!(mcp["quiet"].tools, None);
-        assert_eq!(mcp["github"].tools, Some(vec![String::new()]));
-
-        // And the nil-versus-empty distinction is untouched by any of it.
-        let bare: AgentRequest =
-            serde_json::from_slice(br#"{"capabilities":{"built_in":null,"local":[]}}"#)
-                .expect("nil and empty");
-        let caps = bare.capabilities.expect("capabilities");
-        assert_eq!(caps.built_in, None);
-        assert_eq!(caps.local, Some(Vec::new()));
-        assert!(caps.mcp.is_none());
-    }
-
     #[test]
     fn the_field_order_is_gos_declaration_order() {
         let file = fixture();
@@ -717,6 +679,39 @@ mod tests {
         .expect("insert");
 
         assert!(list(file.path()).is_err());
+
+        // A stored `[]` is refused too, and that is not incidental: it is the
+        // shape a `#[serde(default)]` on `Capabilities` would have turned into
+        // an *empty* allowlist — an agent whose tools are unknown served as an
+        // agent with none. Neither implementation can write such a column
+        // today, which is exactly why the guard has to be a test rather than an
+        // observation.
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute_batch(SCHEMA).expect("schema");
+        conn.execute(
+            "INSERT INTO agents (slug, name, capabilities) VALUES ('arr', 'Arr', '[]')",
+            [],
+        )
+        .expect("insert");
+        assert!(
+            list(file.path()).is_err(),
+            "a stored [] must not read as an empty allowlist"
+        );
+
+        // A *full-length* positional array is still accepted, by serde's
+        // `visit_seq`. That one predates #295 and is deferred to #337; it is
+        // asserted here so the boundary between the two is recorded rather than
+        // rediscovered.
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute_batch(SCHEMA).expect("schema");
+        conn.execute(
+            r#"INSERT INTO agents (slug, name, capabilities) VALUES ('arr', 'Arr', '[["Read"],null,null]')"#,
+            [],
+        )
+        .expect("insert");
+        assert!(list(file.path()).is_ok(), "known over-accept, see #337");
     }
 
     // ─── Writes ───────────────────────────────────────────────────────────────
@@ -734,6 +729,65 @@ mod tests {
 
     fn stored(file: &tempfile::NamedTempFile, slug: &str) -> Option<Agent> {
         get(file.path(), slug).expect("get")
+    }
+
+    /// A `null` **inside** a capability list or the MCP map is the zero value,
+    /// not a type error (#295). Go answers `[""]` and the zero `MCPCapability`
+    /// with no error at all, so rejecting these was a **400** — `decode_body`'s
+    /// `InvalidBody`, since the typed decode is what failed — for an agent Go
+    /// creates.
+    ///
+    /// Driven through `create` and read back from the row, because the stored
+    /// JSON is what a later read serves and because that is the path the
+    /// `Value` shape-check sits in front of.
+    #[test]
+    fn a_null_inside_capabilities_is_a_zero_value_rather_than_a_400() {
+        let file = migrated();
+        let body = br#"{"name":"N","slug":"n","capabilities":{
+            "built_in":[null,"Read"],
+            "local":[null],
+            "mcp":{"quiet":null,"github":{"tools":[null]}}
+        }}"#;
+        let answer = create(file.path(), body).expect("a body Go accepts");
+        assert_eq!(answer.status, StatusCode::CREATED);
+
+        let caps = stored(&file, "n").expect("stored").capabilities;
+        assert_eq!(
+            caps.built_in,
+            Some(vec![String::new(), "Read".into()].into())
+        );
+        assert_eq!(caps.local, Some(vec![String::new()].into()));
+        let mcp = caps.mcp.expect("mcp");
+        // A null map value is the zero struct — every field at its own zero.
+        assert!(mcp["quiet"].tools.is_none());
+        assert_eq!(mcp["github"].tools, Some(vec![String::new()].into()));
+    }
+
+    /// The nil-versus-empty distinction is untouched by any of it, and a
+    /// wrongly-typed element still fails — which is Go's answer too.
+    #[test]
+    fn nil_empty_and_wrongly_typed_capabilities_are_unmoved() {
+        let file = migrated();
+        create(
+            file.path(),
+            br#"{"name":"B","slug":"b","capabilities":{"built_in":null,"local":[]}}"#,
+        )
+        .expect("nil and empty");
+        let caps = stored(&file, "b").expect("stored").capabilities;
+        assert!(caps.built_in.is_none());
+        assert_eq!(caps.local, Some(Vec::new().into()));
+        assert!(caps.mcp.is_none());
+
+        // And the shapes Go refuses are still refused here — including the
+        // array a `#[serde(default)]` on `Capabilities` would have accepted.
+        for body in [
+            &br#"{"name":"C","slug":"c","capabilities":{"built_in":[1]}}"#[..],
+            &br#"{"name":"C","slug":"c","capabilities":[]}"#[..],
+            &br#"{"name":"C","slug":"c","capabilities":{"mcp":{"s":[]}}}"#[..],
+        ] {
+            let err = create(file.path(), body).unwrap_err();
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{:?}", err);
+        }
     }
 
     #[test]
