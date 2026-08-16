@@ -332,7 +332,7 @@ pub struct SettingsResponse {
 /// `SettingsManager.load` fills in when nothing is stored — before
 /// `applyEnvOverrides` runs. Public so a caller that resolves the model through
 /// [`resolve`] can assert against the same constant rather than a literal.
-pub const DEFAULT_MODEL: &str = "sonnet";
+pub(crate) const DEFAULT_MODEL: &str = "sonnet";
 
 /// Resolve the row into the answer `SettingsManager` gives, in its order:
 /// load the store, fill the two defaults, then apply the environment.
@@ -419,7 +419,7 @@ fn locked_fields() -> BTreeMap<String, String> {
 
 /// An environment variable, or `None` when unset **or empty** — Go's checks are
 /// all `os.Getenv(x) != ""`, so an exported-but-blank variable locks nothing.
-fn env_value(name: &str) -> Option<String> {
+pub(crate) fn env_value(name: &str) -> Option<String> {
     match std::env::var(name) {
         Ok(v) if !v.is_empty() => Some(v),
         _ => None,

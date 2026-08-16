@@ -430,7 +430,7 @@ mod tests {
         }
     }
 
-    /// A `RunSpec` whose fallback records whether it was ever asked for.
+    /// A `RunSpec` whose no-agent model records whether it was ever asked for.
     ///
     /// The count is the point: #299 is about *not* resolving it, and a test that
     /// only checked the resulting model would pass with the work still being
@@ -447,7 +447,7 @@ mod tests {
                 agent,
                 no_agent_model: Box::new(move || {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    "fallback-model".to_string()
+                    "no-agent-model".to_string()
                 }),
                 working_dir: String::new(),
                 settings_profile_id: String::new(),
@@ -465,12 +465,12 @@ mod tests {
     }
 
     /// The whole of #299: a chat that names an agent never asks for the
-    /// fallback, because Go's `resolveAgentConfig` returns the agent's config
+    /// no-agent model, because Go's `resolveAgentConfig` returns the agent's config
     /// outright and never reads the user's default. Resolving it eagerly opened
     /// a second read-only SQLite connection and loaded the settings row on every
     /// turn, to discard the answer.
     #[test]
-    fn an_agent_chat_never_resolves_the_fallback_model() {
+    fn an_agent_chat_never_resolves_the_no_agent_model() {
         let mut agent = agent_with(Capabilities::default());
         agent.model = "agent-model".into();
         let (spec, calls) = spec_with(Some(agent));
@@ -480,7 +480,7 @@ mod tests {
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
-            "the fallback was resolved for a chat that cannot use it"
+            "the no-agent model was resolved for a chat that cannot use it"
         );
     }
 
@@ -491,7 +491,7 @@ mod tests {
     /// model option at all** — the session's model and the user's default are
     /// never consulted for it.
     #[test]
-    fn an_agent_with_no_model_runs_with_none_rather_than_the_fallback() {
+    fn an_agent_with_no_model_runs_with_none_rather_than_the_no_agent_model() {
         let mut agent = agent_with(Capabilities::default());
         agent.model = String::new();
         let (spec, calls) = spec_with(Some(agent));
@@ -509,11 +509,11 @@ mod tests {
 
     /// The one branch that does need it — and it is asked exactly once.
     #[test]
-    fn a_chat_with_no_agent_resolves_the_fallback_once() {
+    fn a_chat_with_no_agent_resolves_its_model_once() {
         let (spec, calls) = spec_with(None);
         let opts = build_options(&spec, no_op_handler()).expect("options");
 
-        assert_eq!(opts.model, "fallback-model");
+        assert_eq!(opts.model, "no-agent-model");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 

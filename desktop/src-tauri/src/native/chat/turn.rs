@@ -635,11 +635,22 @@ mod tests {
         crate::native::migrate::apply(&mut conn).expect("migrate");
         drop(conn);
 
+        // Guarded on the variables rather than asserted flat, the way
+        // `settings.rs`'s own default test is: these run on a developer's
+        // machine, and `resolve` applies `AGENTO_DEFAULT_MODEL` /
+        // `ANTHROPIC_DEFAULT_SONNET_MODEL` — which is the very behaviour this
+        // function gained, so asserting flat would fail for exactly the users
+        // it was fixed for.
+        let from_env = crate::native::settings::env_value("AGENTO_DEFAULT_MODEL")
+            .or_else(|| crate::native::settings::env_value("ANTHROPIC_DEFAULT_SONNET_MODEL"));
+
         // Nothing stored: the raw column is empty and `resolve` fills Go's
         // default, so reading the row directly would have answered `""`.
         assert_eq!(
             no_agent_model_for(file.path(), "")(),
-            crate::native::settings::DEFAULT_MODEL
+            from_env
+                .clone()
+                .unwrap_or_else(|| crate::native::settings::DEFAULT_MODEL.to_string())
         );
 
         let conn = rusqlite::Connection::open(file.path()).expect("open");
@@ -649,7 +660,13 @@ mod tests {
             [],
         )
         .expect("store a model");
-        assert_eq!(no_agent_model_for(file.path(), "")(), "stored-model");
+        // A stored model survives the *soft* default but not a hard
+        // `AGENTO_DEFAULT_MODEL`, which is `modelInFile`'s whole point.
+        let hard_override = crate::native::settings::env_value("AGENTO_DEFAULT_MODEL");
+        assert_eq!(
+            no_agent_model_for(file.path(), "")(),
+            hard_override.unwrap_or_else(|| "stored-model".to_string())
+        );
     }
 
     /// An unreadable database is `""`, which `build_options` reads as "no model
