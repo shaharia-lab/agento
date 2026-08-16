@@ -150,7 +150,13 @@ pub struct ServiceConfig {
     pub enabled: bool,
     /// A nil slice is `null` and an empty one is `[]`; the stored value decides.
     /// A `null` **element** is `""`, which is Go's answer too (#295).
-    #[serde(default)]
+    ///
+    /// **No `#[serde(default)]`, deliberately.** It carried one until #295 made
+    /// it redundant — `Option<GoList<_>>` gets `None` from `missing_field`
+    /// without it — and its only remaining effect was the derive's `visit_seq`
+    /// arm, which admits an array with as many elements as the struct has
+    /// defaulted fields. That is what made `{"services":{"s":[]}}` a 201 where
+    /// Go answers 400. See [`super::gojson::GoList`].
     pub tools: Option<super::gojson::GoList<String>>,
 }
 
@@ -1246,13 +1252,22 @@ mod tests {
         .expect("null map");
         assert_eq!(stored(&file, "SELECT services FROM integrations"), "{}");
 
-        // And a wrongly-typed value still fails, which is Go's answer too.
-        let file = migrated();
-        assert!(create(
-            file.path(),
-            br#"{"name":"W","type":"telegram","credentials":{"bot_token":"t"},"services":{"s":1}}"#,
-        )
-        .is_err());
+        // And a wrongly-typed value still fails, which is Go's answer too —
+        // including the positional arrays that `#[serde(default)]` on `tools`
+        // used to admit. Dropping that attribute (redundant once `tools` is a
+        // `GoList`) is what closes them.
+        for services in [r#"{"s":1}"#, r#"{"s":[]}"#, r#"{"s":[true]}"#] {
+            let file = migrated();
+            let body = format!(
+                r#"{{"name":"W","type":"telegram","credentials":{{"bot_token":"t"}},"services":{services}}}"#
+            );
+            let err = create(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(
+                err.status(),
+                axum::http::StatusCode::BAD_REQUEST,
+                "{services}"
+            );
+        }
     }
 
     /// The trigger rule's two filter lists, same rule.
