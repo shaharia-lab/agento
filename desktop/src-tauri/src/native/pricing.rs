@@ -826,13 +826,24 @@ fn open_for_write(db_path: &Path) -> Result<Connection, WriteError> {
 
 /// `findRate`: scan the snapshot the resolver already loads. The store exposes
 /// no read-by-key, and the catalog is tens of rows.
-fn find_rate(conn: &Connection, model_pattern: &str, at: DateTime<Utc>) -> Option<Rate> {
+///
+/// **A read failure is not "no such rate".** Go returns the error and the
+/// handler answers 500; collapsing it into `None` here would make [`add_rate`]
+/// see no conflict and write straight over an existing row through the upsert —
+/// silent data loss on the one path whose whole job is to refuse it. So the
+/// failure is its own arm, and it forwards.
+fn find_rate(
+    conn: &Connection,
+    model_pattern: &str,
+    at: DateTime<Utc>,
+) -> Result<Option<Rate>, WriteError> {
     let want_pattern = normalize_pattern(model_pattern);
     let want_from = normalize_effective_from(at);
-    snapshot(conn)
-        .ok()?
+    let rates = snapshot(conn)
+        .map_err(|e| WriteError::Fallback(format!("loading pricing catalog: {e}")))?;
+    Ok(rates
         .into_iter()
-        .find(|r| r.model_pattern == want_pattern && r.effective_from.instant() == want_from)
+        .find(|r| r.model_pattern == want_pattern && r.effective_from.instant() == want_from))
 }
 
 /// `pricingService.AddRate` then `handleAddPricingRate`.
@@ -849,7 +860,7 @@ fn add_rate(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     // adds both see "no such rate" and the second silently overwrites the first
     // through the upsert. Go is not exposed to that only because it holds a
     // single serialized connection; a second process is.
-    if let Some(existing) = find_rate(&tx, &input.model_pattern, input.effective_from) {
+    if let Some(existing) = find_rate(&tx, &input.model_pattern, input.effective_from)? {
         let message = WriteError::Conflict {
             resource: "rate".to_string(),
             id: rate_key(&input.model_pattern, input.effective_from),
@@ -880,7 +891,7 @@ fn correct_rate(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| WriteError::Fallback(format!("begin correct rate: {e}")))?;
 
-    let Some(existing) = find_rate(&tx, &input.model_pattern, input.effective_from) else {
+    let Some(existing) = find_rate(&tx, &input.model_pattern, input.effective_from)? else {
         return Err(WriteError::NotFound {
             resource: "rate".to_string(),
             id: rate_key(&input.model_pattern, input.effective_from),
@@ -910,7 +921,7 @@ fn save(
     status: StatusCode,
 ) -> Result<super::Answer, WriteError> {
     upsert_rate(tx, input)?;
-    let Some(saved) = find_rate(tx, &input.model_pattern, input.effective_from) else {
+    let Some(saved) = find_rate(tx, &input.model_pattern, input.effective_from)? else {
         // Go's "vanished after write" — a 500. Nothing is committed yet, so
         // rolling back and forwarding is safe.
         return Err(WriteError::Fallback(format!(
@@ -1017,7 +1028,7 @@ fn delete_rate(db_path: &Path, query: &str) -> Result<super::Answer, WriteError>
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| WriteError::Fallback(format!("begin delete rate: {e}")))?;
 
-    if find_rate(&tx, &pattern, from).is_none() {
+    if find_rate(&tx, &pattern, from)?.is_none() {
         return Err(WriteError::NotFound {
             resource: "rate".to_string(),
             id: rate_key(&pattern, from),
@@ -1396,7 +1407,7 @@ mod tests {
 
     fn stored_rate(file: &tempfile::NamedTempFile, pattern: &str, from: &str) -> Option<Rate> {
         let conn = rusqlite::Connection::open(file.path()).expect("open");
-        find_rate(&conn, pattern, at(from))
+        find_rate(&conn, pattern, at(from)).expect("read the catalog")
     }
 
     fn body_of(answer: super::super::Answer) -> String {
