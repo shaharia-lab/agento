@@ -877,9 +877,14 @@ said whether the categories covered every route, and two escaped all of them
 A prose table has the same problem one release later, so the table is
 **generated and cross-checked** instead:
 
-- `desktop/parity/write_routes_parity_test.go` runs `chi.Walk` over the **real
-  router** — `&api.Server{}` is enough, since `Mount` only takes method values —
-  and classifies every non-GET route against a `dispositions` map. A route the
+- `desktop/parity/write_routes_parity_test.go` runs `chi.Walk` over the router
+  **`server.New` actually builds**, reached through `Server.Routes()`, and
+  classifies every non-GET route against a `dispositions` map. Asking the router
+  rather than rebuilding its mounts is deliberate: an earlier version
+  reconstructed them by hand and missed the webhook, and the next root-level
+  mount would have escaped the same way. Zero-value dependencies are enough,
+  because nothing is dereferenced at construction and `Mount` registers every
+  route unconditionally. A route the
   router has and the map does not classify **fails the Go suite**; a
   classification naming a route the router no longer has fails it too.
 - `desktop/parity/write_routes.json` is what that produces: method, route,
@@ -918,8 +923,9 @@ two guards, and its effect is an agent run through the dispatcher — which is
 #275's executor by another name.
 
 **Dropped (2), which is not the same as deferred.** The two WhatsApp routes are
-`false` in the table for a reason that will never be resolved: `whatsmeow` is not
-being ported, and they die with the sidecar rather than moving (#273).
+`dropped` in the table — a status of their own, because the reason will never be
+resolved: `whatsmeow` is not being ported, and they die with the sidecar rather
+than moving (#273).
 
 The walk covers **both** mounts, not just `/api`: `internal/server/server.go`
 also mounts the Telegram webhook handler at the root, and

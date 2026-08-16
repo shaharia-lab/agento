@@ -697,6 +697,17 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("/");
 
+            // Membership first: `status == "native"` collapses three legal
+            // values to a boolean, so a typo on a *deferred* row would compare
+            // false-to-false and assert nothing — silently, on the larger half.
+            assert!(
+                matches!(row.status.as_str(), "native" | "deferred" | "dropped"),
+                "{} {} has status {:?}; want native, deferred or dropped",
+                row.method,
+                row.route,
+                row.status,
+            );
+
             assert_eq!(
                 claims(&method, &concrete),
                 row.status == "native",
