@@ -5,23 +5,28 @@
 //!
 //! Go resolves three kinds of tool: the built-ins, the **local** in-process MCP
 //! server (`internal/tools`), and one MCP server per configured **integration**
-//! (`internal/integrations`). Rust has neither of the latter two — they are
-//! #277's and #282's — and an agent whose capabilities name them would get a
-//! subprocess with the tools silently missing, which is a worse answer than the
-//! sidecar's.
+//! (`internal/integrations`). The first two are here; the third is not, and an
+//! agent whose capabilities name an MCP server would get a subprocess with the
+//! tools silently missing, which is a worse answer than the sidecar's.
 //!
-//! So [`build_options`] refuses: an agent with `local` or `mcp` capabilities
-//! returns `Err`, the seam forwards, and Go runs that chat exactly as before.
-//! This is the same "a route moves only when Rust reproduces every effect" rule
-//! #274 established, applied per *agent* rather than per route — which is why
+//! So [`build_options`] refuses: an agent with `mcp` capabilities returns
+//! `Err`, the seam forwards, and Go runs that chat exactly as before. This is
+//! the same "a route moves only when Rust reproduces every effect" rule #274
+//! established, applied per *agent* rather than per route — which is why
 //! `chat::stream` also forwards `/input`, `/permission` and `/stop` for any chat
 //! it does not itself hold a live session for. Without that, a chat running on
 //! Go would have its stop button claimed by a Rust registry that never saw it.
+//!
+//! The `local` half of that refusal is gone as of #310: [`build_options`] starts
+//! the local tools server itself and hands back the handle, because the
+//! listener's life is the handle's — see [`crate::native::tools`]. That is what
+//! makes this function `async`.
 
 use rusqlite::OptionalExtension;
 
 use crate::claude::options::Options;
 use crate::claude::permissions::PermissionHandler;
+use crate::claude::InProcessMcpServer;
 use crate::native::agents::{Agent, Capabilities};
 
 /// Every built-in tool, as `allBuiltInTools` lists them. Order is Go's, because
@@ -73,19 +78,21 @@ pub struct RunSpec {
 /// Build the SDK options for one chat turn.
 ///
 /// `Err` means "this port cannot run this chat" and forwards to Go — never a
-/// user-visible failure.
-pub fn build_options(
+/// user-visible failure. Every failure here happens before a subprocess exists,
+/// including the one that binds a port: a local tools server that failed to
+/// start is dropped on the way out, so forwarding leaves nothing behind.
+///
+/// The second half of the pair is the **local tools listener**, `Some` only for
+/// an agent that named a local tool. The caller owns it, and dropping it stops
+/// the server — so it has to outlive the subprocess that dials it.
+pub async fn build_options(
     spec: &RunSpec,
     permission_handler: PermissionHandler,
-) -> Result<Options, String> {
+) -> Result<(Options, Option<InProcessMcpServer>), String> {
     let caps = spec.agent.as_ref().map(|a| &a.capabilities);
     if let Some(caps) = caps {
-        if capability_count(caps.local.as_ref()) > 0
-            || caps.mcp.as_ref().is_some_and(|m| !m.is_empty())
-        {
-            return Err(
-                "agent uses local or MCP tools, which are not ported yet (#277/#282)".to_string(),
-            );
+        if caps.mcp.as_ref().is_some_and(|m| !m.is_empty()) {
+            return Err("agent uses MCP tools, which are not ported yet (#311–#317)".to_string());
         }
     }
 
@@ -154,14 +161,28 @@ pub fn build_options(
 
     opts = opts.with_thinking(thinking_mode(spec.agent.as_ref()));
 
-    let allowed = allowed_tools(caps);
+    // `resolveToolsAndMCP`'s order is the `--allowedTools` argument's order, so
+    // it is part of the command line: built-ins first, then the local server's
+    // qualified names.
+    let mut allowed = allowed_tools(caps);
+    let local_tools;
+    (opts, local_tools) = start_local_tools(opts, caps, &mut allowed).await?;
+
     if !allowed.is_empty() {
         opts = opts.with_allowed_tools(allowed.iter().cloned());
-        // Go explicitly disallows every built-in that was not selected, so an
-        // allowlist is a denylist too.
+    }
+    // `appendDisallowedTools` keys on the agent's **explicit built-in list**,
+    // not on the allowlist it produced. The difference only shows once local
+    // tools exist: an agent naming `local: [current_time]` and no built-ins has
+    // a non-empty allowlist and still gets no `--disallowedTools` from Go, where
+    // subtracting the allowlist from the built-ins would deny all twelve.
+    if let Some(selected) = caps
+        .and_then(|c| c.built_in.as_deref())
+        .filter(|list| !list.is_empty())
+    {
         let disallowed: Vec<String> = ALL_BUILT_IN_TOOLS
             .iter()
-            .filter(|t| !allowed.iter().any(|a| a == *t))
+            .filter(|t| !selected.iter().any(|s| s == *t))
             .map(|t| (*t).to_string())
             .collect();
         if !disallowed.is_empty() {
@@ -170,7 +191,49 @@ pub fn build_options(
     }
 
     opts = opts.with_permission_handler(wrap_permission_handler(permission_handler, allowed));
-    Ok(opts)
+    Ok((opts, local_tools))
+}
+
+/// `resolveLocalTools`: register the in-process server and qualify the names the
+/// agent asked for.
+///
+/// Two rules ported exactly, both of which look like oversights until they are
+/// not:
+///
+/// - **The names are not checked against what the server hosts.** An agent
+///   naming a local tool that no longer exists gets `mcp__local-tools__gone` in
+///   its allowlist and a model that cannot call it, rather than a run that
+///   refuses to start. That is Go's behaviour and it is the kinder failure.
+/// - **`--strict-mcp-config` travels with the server**, because Go adds it
+///   whenever it registers any MCP server at all. Without it the CLI would also
+///   load the user's own `.mcp.json`, so an agent's allowlist would stop being
+///   the whole story about what it can reach.
+///
+/// The server is started **only** for an agent that named a local tool, which
+/// is `len(caps.Local) > 0` on the Go side. Go has one server per process and
+/// simply does not reference it otherwise; here not starting it is the same
+/// thing, minus a bound port.
+async fn start_local_tools(
+    opts: Options,
+    caps: Option<&Capabilities>,
+    allowed: &mut Vec<String>,
+) -> Result<(Options, Option<InProcessMcpServer>), String> {
+    let Some(local) = caps.and_then(|c| c.local.as_deref()) else {
+        return Ok((opts, None));
+    };
+    if local.is_empty() {
+        return Ok((opts, None));
+    }
+
+    let server = crate::native::tools::start_local_mcp_server()
+        .await
+        .map_err(|e| format!("starting local MCP server: {e}"))?;
+    let opts = opts
+        .with_mcp_server(crate::native::tools::LOCAL_MCP_SERVER_NAME, server.config())
+        .map_err(|e| format!("registering the local MCP server: {e}"))?
+        .with_strict_mcp_config();
+    allowed.extend(crate::native::tools::allowed_tool_names(local.iter()));
+    Ok((opts, Some(server)))
 }
 
 fn capability_count(list: Option<&crate::native::gojson::GoList<String>>) -> usize {
@@ -458,6 +521,19 @@ mod tests {
         )
     }
 
+    /// A `RunSpec` for an agent with `caps`, when the test is about the tools
+    /// rather than about the model.
+    fn spec_for(caps: Capabilities) -> RunSpec {
+        RunSpec {
+            agent: Some(agent_with(caps)),
+            no_agent_model: Box::new(String::new),
+            working_dir: String::new(),
+            settings_profile_id: String::new(),
+            resume_session_id: None,
+            chat_id: "c1".into(),
+        }
+    }
+
     fn no_op_handler() -> PermissionHandler {
         std::sync::Arc::new(|_, _, _| {
             Box::pin(async { crate::claude::permissions::PermissionResult::allow() })
@@ -469,12 +545,15 @@ mod tests {
     /// outright and never reads the user's default. Resolving it eagerly opened
     /// a second read-only SQLite connection and loaded the settings row on every
     /// turn, to discard the answer.
-    #[test]
-    fn an_agent_chat_never_resolves_the_no_agent_model() {
+    #[tokio::test]
+    async fn an_agent_chat_never_resolves_the_no_agent_model() {
         let mut agent = agent_with(Capabilities::default());
         agent.model = "agent-model".into();
         let (spec, calls) = spec_with(Some(agent));
-        let opts = build_options(&spec, no_op_handler()).expect("options");
+        let (opts, local) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+        assert!(local.is_none(), "no agent named a local tool");
 
         assert_eq!(opts.model, "agent-model");
         assert_eq!(
@@ -490,12 +569,15 @@ mod tests {
     /// `agentCfg.Model != ""`, so an agent with an empty one runs with **no
     /// model option at all** — the session's model and the user's default are
     /// never consulted for it.
-    #[test]
-    fn an_agent_with_no_model_runs_with_none_rather_than_the_no_agent_model() {
+    #[tokio::test]
+    async fn an_agent_with_no_model_runs_with_none_rather_than_the_no_agent_model() {
         let mut agent = agent_with(Capabilities::default());
         agent.model = String::new();
         let (spec, calls) = spec_with(Some(agent));
-        let opts = build_options(&spec, no_op_handler()).expect("options");
+        let (opts, local) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+        assert!(local.is_none(), "no agent named a local tool");
 
         // `with_model` is never called, so the SDK's own default stands —
         // which is what Go's `defaultOptions()` leaves in place too.
@@ -508,10 +590,13 @@ mod tests {
     }
 
     /// The one branch that does need it — and it is asked exactly once.
-    #[test]
-    fn a_chat_with_no_agent_resolves_its_model_once() {
+    #[tokio::test]
+    async fn a_chat_with_no_agent_resolves_its_model_once() {
         let (spec, calls) = spec_with(None);
-        let opts = build_options(&spec, no_op_handler()).expect("options");
+        let (opts, local) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+        assert!(local.is_none(), "no agent named a local tool");
 
         assert_eq!(opts.model, "no-agent-model");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -558,51 +643,138 @@ mod tests {
         assert!(allowed_tools(None).is_empty());
     }
 
-    /// The boundary this port draws: an agent needing tools Rust cannot supply
-    /// forwards, rather than running with them silently missing.
-    #[test]
-    fn an_agent_needing_mcp_refuses_to_build_options() {
+    /// The boundary this port still draws: an agent needing tools Rust cannot
+    /// supply forwards, rather than running with them silently missing. Since
+    /// #310 that is **integration/MCP tools only**.
+    #[tokio::test]
+    async fn an_agent_needing_mcp_refuses_to_build_options() {
         let mut mcp = BTreeMap::new();
         mcp.insert(
             "github".to_string(),
             crate::native::agents::McpCapability { tools: None },
         );
-        let spec = RunSpec {
-            agent: Some(agent_with(Capabilities {
-                built_in: None,
-                local: None,
-                mcp: Some(mcp.into()),
-            })),
-            no_agent_model: Box::new(String::new),
-            working_dir: String::new(),
-            settings_profile_id: String::new(),
-            resume_session_id: None,
-            chat_id: "c1".into(),
-        };
-        let handler: PermissionHandler = std::sync::Arc::new(|_, _, _| {
-            Box::pin(async { crate::claude::permissions::PermissionResult::allow() })
+        let spec = spec_for(Capabilities {
+            built_in: None,
+            local: None,
+            mcp: Some(mcp.into()),
         });
-        assert!(build_options(&spec, handler).is_err());
+        assert!(build_options(&spec, no_op_handler()).await.is_err());
     }
 
-    #[test]
-    fn an_agent_needing_local_tools_also_refuses() {
-        let spec = RunSpec {
-            agent: Some(agent_with(Capabilities {
-                built_in: None,
-                local: Some(vec!["now".into()].into()),
-                mcp: None,
-            })),
-            no_agent_model: Box::new(String::new),
-            working_dir: String::new(),
-            settings_profile_id: String::new(),
-            resume_session_id: None,
-            chat_id: "c1".into(),
-        };
-        let handler: PermissionHandler = std::sync::Arc::new(|_, _, _| {
-            Box::pin(async { crate::claude::permissions::PermissionResult::allow() })
+    /// The whole of #310: an agent naming a local tool builds options rather
+    /// than forwarding, and what it builds is Go's — the server registered
+    /// under `local-tools`, the qualified name in the allowlist, and
+    /// `--strict-mcp-config` alongside so the user's own `.mcp.json` cannot add
+    /// to what the agent may reach.
+    #[tokio::test]
+    async fn an_agent_naming_a_local_tool_runs_natively() {
+        let spec = spec_for(Capabilities {
+            built_in: None,
+            local: Some(vec!["current_time".into()].into()),
+            mcp: None,
         });
-        assert!(build_options(&spec, handler).is_err());
+        let (opts, local) = build_options(&spec, no_op_handler())
+            .await
+            .expect("a local tool is supplied natively now");
+
+        let server = local.expect("the listener is handed back, because dropping it stops it");
+        let registered = opts
+            .mcp_servers
+            .get("local-tools")
+            .expect("registered under the name the CLI prefixes with");
+        assert_eq!(registered["type"], "http");
+        assert_eq!(registered["url"], server.url());
+        assert!(opts.strict_mcp_config);
+        assert_eq!(
+            opts.allowed_tools,
+            vec!["mcp__local-tools__current_time".to_string()]
+        );
+    }
+
+    /// `appendDisallowedTools` keys on the agent's explicit built-in list, and
+    /// this agent has none — so Go sends no `--disallowedTools` even though its
+    /// allowlist is non-empty. Subtracting the allowlist from the built-ins
+    /// instead would deny all twelve and change what the agent can do.
+    #[tokio::test]
+    async fn naming_only_a_local_tool_disallows_nothing() {
+        let spec = spec_for(Capabilities {
+            built_in: None,
+            local: Some(vec!["current_time".into()].into()),
+            mcp: None,
+        });
+        let (opts, _local) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+        assert!(
+            opts.disallowed_tools.is_empty(),
+            "Go disallows nothing here: {:?}",
+            opts.disallowed_tools
+        );
+    }
+
+    /// Built-ins first, then the local server's qualified names — the order Go
+    /// appends them in, which is the order they reach `--allowedTools`. The
+    /// denylist is still the complement of the *built-in* list.
+    #[tokio::test]
+    async fn built_ins_and_local_tools_share_one_allowlist_in_gos_order() {
+        let spec = spec_for(Capabilities {
+            built_in: Some(vec!["Read".into(), "Bash".into()].into()),
+            local: Some(vec!["current_time".into(), "gone".into()].into()),
+            mcp: None,
+        });
+        let (opts, _local) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+
+        assert_eq!(
+            opts.allowed_tools,
+            vec![
+                "Read".to_string(),
+                "Bash".to_string(),
+                "mcp__local-tools__current_time".to_string(),
+                // A local tool the server does not host is still qualified —
+                // Go never checks, and a run that refused to start would be the
+                // worse failure.
+                "mcp__local-tools__gone".to_string(),
+            ]
+        );
+        assert!(!opts.disallowed_tools.contains(&"Read".to_string()));
+        assert!(opts.disallowed_tools.contains(&"Write".to_string()));
+        assert_eq!(opts.disallowed_tools.len(), ALL_BUILT_IN_TOOLS.len() - 2);
+    }
+
+    /// No local tools means no listener and no MCP server — a port bound for an
+    /// agent that never dials it is a leak, not a no-op.
+    #[tokio::test]
+    async fn an_agent_naming_no_local_tools_binds_nothing() {
+        let spec = spec_for(Capabilities::default());
+        let (opts, local) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+        assert!(local.is_none());
+        assert!(opts.mcp_servers.is_empty());
+        assert!(!opts.strict_mcp_config);
+    }
+
+    /// `local: []` — **present but empty** — is the distinction `GoList` exists
+    /// to preserve, and it decides whether the agent gets twelve built-ins or
+    /// none. Go's `len(caps.Local) > 0` makes an empty list the same as an
+    /// absent one on both counts: no listener, and still "names no tools at
+    /// all", so all the built-ins.
+    #[tokio::test]
+    async fn a_present_but_empty_local_list_is_the_same_as_none() {
+        let spec = spec_for(Capabilities {
+            built_in: None,
+            local: Some(vec![].into()),
+            mcp: None,
+        });
+        let (opts, local) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+        assert!(local.is_none());
+        assert!(opts.mcp_servers.is_empty());
+        assert!(!opts.strict_mcp_config);
+        assert_eq!(opts.allowed_tools.len(), ALL_BUILT_IN_TOOLS.len());
     }
 
     #[test]

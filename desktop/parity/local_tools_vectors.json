@@ -1,0 +1,206 @@
+{
+  "_comment": [
+    "Cross-language parity vectors for internal/tools, the local in-process MCP server.",
+    "Generated from Go, then frozen. Read by desktop/parity/local_tools_parity_test.go",
+    "(Go) and by desktop/src-tauri/src/native/tools/ (Rust). Every value is exactly what",
+    "Go produces, so a divergence fails one language against the other's real output",
+    "rather than against a belief about it.",
+    "'tools' is taken from a live tools/list over the server's own HTTP transport.",
+    "'current_time' is FormatCurrentTime at a fixed instant, since time.Now() would",
+    "pin one moment on one machine.",
+    "Regenerate with: go test ./desktop/parity/ -run TestLocalToolsVectors -update-local-tools-vectors"
+  ],
+  "server_name": "local-tools",
+  "tools": [
+    {
+      "name": "current_time",
+      "qualified_name": "mcp__local-tools__current_time",
+      "description": "Returns the current date and time for a given IANA timezone (e.g. UTC, America/New_York, Asia/Tokyo). Defaults to UTC.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "timezone": {
+            "description": "IANA timezone name, e.g. UTC or America/New_York. Defaults to UTC.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timezone"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "current_time": [
+    {
+      "timezone": "",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in UTC: Sun, 16 Aug 2026 21:07:34 UTC (ISO 8601: 2026-08-16T21:07:34Z)"
+    },
+    {
+      "timezone": "UTC",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in UTC: Sun, 16 Aug 2026 21:07:34 UTC (ISO 8601: 2026-08-16T21:07:34Z)"
+    },
+    {
+      "timezone": "EST",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in EST: Sun, 16 Aug 2026 16:07:34 EST (ISO 8601: 2026-08-16T16:07:34-05:00)"
+    },
+    {
+      "timezone": "America/New_York",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in America/New_York: Sun, 16 Aug 2026 17:07:34 EDT (ISO 8601: 2026-08-16T17:07:34-04:00)"
+    },
+    {
+      "timezone": "America/Sao_Paulo",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in America/Sao_Paulo: Sun, 16 Aug 2026 18:07:34 -03 (ISO 8601: 2026-08-16T18:07:34-03:00)"
+    },
+    {
+      "timezone": "Asia/Tokyo",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in Asia/Tokyo: Mon, 17 Aug 2026 06:07:34 JST (ISO 8601: 2026-08-17T06:07:34+09:00)"
+    },
+    {
+      "timezone": "Asia/Kolkata",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in Asia/Kolkata: Mon, 17 Aug 2026 02:37:34 IST (ISO 8601: 2026-08-17T02:37:34+05:30)"
+    },
+    {
+      "timezone": "Asia/Kathmandu",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in Asia/Kathmandu: Mon, 17 Aug 2026 02:52:34 +0545 (ISO 8601: 2026-08-17T02:52:34+05:45)"
+    },
+    {
+      "timezone": "Australia/Lord_Howe",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in Australia/Lord_Howe: Mon, 17 Aug 2026 07:37:34 +1030 (ISO 8601: 2026-08-17T07:37:34+10:30)"
+    },
+    {
+      "timezone": "Etc/GMT+5",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in Etc/GMT+5: Sun, 16 Aug 2026 16:07:34 -05 (ISO 8601: 2026-08-16T16:07:34-05:00)"
+    },
+    {
+      "timezone": "Europe/London",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in Europe/London: Sun, 16 Aug 2026 22:07:34 BST (ISO 8601: 2026-08-16T22:07:34+01:00)"
+    },
+    {
+      "timezone": "Pacific/Chatham",
+      "at": "2026-08-16T21:07:34Z",
+      "want": "Current time in Pacific/Chatham: Mon, 17 Aug 2026 09:52:34 +1245 (ISO 8601: 2026-08-17T09:52:34+12:45)"
+    },
+    {
+      "timezone": "utc",
+      "at": "2026-08-16T21:07:34Z",
+      "error": "unknown timezone \"utc\": unknown time zone utc"
+    },
+    {
+      "timezone": "Nowhere/Bad",
+      "at": "2026-08-16T21:07:34Z",
+      "error": "unknown timezone \"Nowhere/Bad\": unknown time zone Nowhere/Bad"
+    },
+    {
+      "timezone": "..",
+      "at": "2026-08-16T21:07:34Z",
+      "error": "unknown timezone \"..\": time: invalid location name"
+    },
+    {
+      "timezone": "a/../b",
+      "at": "2026-08-16T21:07:34Z",
+      "error": "unknown timezone \"a/../b\": time: invalid location name"
+    },
+    {
+      "timezone": "/etc/localtime",
+      "at": "2026-08-16T21:07:34Z",
+      "error": "unknown timezone \"/etc/localtime\": time: invalid location name"
+    },
+    {
+      "timezone": "",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in UTC: Fri, 16 Jan 2026 21:07:34 UTC (ISO 8601: 2026-01-16T21:07:34Z)"
+    },
+    {
+      "timezone": "UTC",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in UTC: Fri, 16 Jan 2026 21:07:34 UTC (ISO 8601: 2026-01-16T21:07:34Z)"
+    },
+    {
+      "timezone": "EST",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in EST: Fri, 16 Jan 2026 16:07:34 EST (ISO 8601: 2026-01-16T16:07:34-05:00)"
+    },
+    {
+      "timezone": "America/New_York",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in America/New_York: Fri, 16 Jan 2026 16:07:34 EST (ISO 8601: 2026-01-16T16:07:34-05:00)"
+    },
+    {
+      "timezone": "America/Sao_Paulo",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in America/Sao_Paulo: Fri, 16 Jan 2026 18:07:34 -03 (ISO 8601: 2026-01-16T18:07:34-03:00)"
+    },
+    {
+      "timezone": "Asia/Tokyo",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in Asia/Tokyo: Sat, 17 Jan 2026 06:07:34 JST (ISO 8601: 2026-01-17T06:07:34+09:00)"
+    },
+    {
+      "timezone": "Asia/Kolkata",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in Asia/Kolkata: Sat, 17 Jan 2026 02:37:34 IST (ISO 8601: 2026-01-17T02:37:34+05:30)"
+    },
+    {
+      "timezone": "Asia/Kathmandu",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in Asia/Kathmandu: Sat, 17 Jan 2026 02:52:34 +0545 (ISO 8601: 2026-01-17T02:52:34+05:45)"
+    },
+    {
+      "timezone": "Australia/Lord_Howe",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in Australia/Lord_Howe: Sat, 17 Jan 2026 08:07:34 +11 (ISO 8601: 2026-01-17T08:07:34+11:00)"
+    },
+    {
+      "timezone": "Etc/GMT+5",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in Etc/GMT+5: Fri, 16 Jan 2026 16:07:34 -05 (ISO 8601: 2026-01-16T16:07:34-05:00)"
+    },
+    {
+      "timezone": "Europe/London",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in Europe/London: Fri, 16 Jan 2026 21:07:34 GMT (ISO 8601: 2026-01-16T21:07:34Z)"
+    },
+    {
+      "timezone": "Pacific/Chatham",
+      "at": "2026-01-16T21:07:34Z",
+      "want": "Current time in Pacific/Chatham: Sat, 17 Jan 2026 10:52:34 +1345 (ISO 8601: 2026-01-17T10:52:34+13:45)"
+    },
+    {
+      "timezone": "utc",
+      "at": "2026-01-16T21:07:34Z",
+      "error": "unknown timezone \"utc\": unknown time zone utc"
+    },
+    {
+      "timezone": "Nowhere/Bad",
+      "at": "2026-01-16T21:07:34Z",
+      "error": "unknown timezone \"Nowhere/Bad\": unknown time zone Nowhere/Bad"
+    },
+    {
+      "timezone": "..",
+      "at": "2026-01-16T21:07:34Z",
+      "error": "unknown timezone \"..\": time: invalid location name"
+    },
+    {
+      "timezone": "a/../b",
+      "at": "2026-01-16T21:07:34Z",
+      "error": "unknown timezone \"a/../b\": time: invalid location name"
+    },
+    {
+      "timezone": "/etc/localtime",
+      "at": "2026-01-16T21:07:34Z",
+      "error": "unknown timezone \"/etc/localtime\": time: invalid location name"
+    }
+  ]
+}

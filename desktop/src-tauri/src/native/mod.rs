@@ -38,6 +38,7 @@ pub mod schedule;
 pub mod sessions;
 pub mod settings;
 pub mod tasks;
+pub mod tools;
 pub mod uploads;
 pub mod version;
 pub mod writes;

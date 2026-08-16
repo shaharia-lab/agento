@@ -176,12 +176,48 @@ where
                 .unwrap_or_else(|message| CallToolResult::error(vec![ContentBlock::text(message)]))
         }
     };
-    ToolDef(
-        call.name(name)
-            .description(description)
-            .parameters::<In>()
-            .into_tool_route(),
-    )
+    let mut route = call
+        .name(name)
+        .description(description)
+        .parameters::<In>()
+        .into_tool_route();
+    strip_schema_dialect(&mut route.attr);
+    ToolDef(route)
+}
+
+/// Drops the `$schema` dialect key `schemars` stamps on every generated schema.
+///
+/// Go's `google/jsonschema-go` emits none — a `tools/list` from `internal/tools`
+/// carries exactly `additionalProperties`, `properties`, `required` and `type` —
+/// and this schema does not travel alone: the CLI forwards it to the model as
+/// the tool's `input_schema`. Keeping the key would put a field in front of the
+/// model that the same tool hosted by the Go server does not have, on the one
+/// surface (#310–#317) where the two are meant to be indistinguishable.
+///
+/// `$schema` is the first of a class rather than the whole class. What is left
+/// is verified to match Go key for key **for a flat struct of required
+/// scalars**, which is what `current_time` is and all the parity vectors cover.
+/// `schemars` 1.2.2 and `google/jsonschema-go` are known to diverge on shapes
+/// the six integration ports will hit: an `Option<T>` renders as
+/// `"type": ["string","null"]` where a Go field with `omitempty` stays
+/// `"type":"string"` and merely drops out of `required`; a nested struct
+/// produces `$defs`/`$ref` where Go inlines; integers pick up a `"format"`.
+/// A parity vector for a nested/`Option` input is wanted before the first
+/// integration port lands, since this function's contract is "strip one key",
+/// not "reconcile two reflectors".
+///
+/// Replaces the `Arc` rather than mutating through it, and that is not
+/// fussiness: `rmcp` memoizes one generated schema per input type and hands
+/// every `ToolRoute` a clone of the same `Arc`, so `get_mut` would refuse and an
+/// in-place edit would reach into a process-wide cache. The clone is one map,
+/// once per tool at start-up.
+fn strip_schema_dialect(tool: &mut Tool) {
+    if !tool.input_schema.contains_key("$schema") {
+        return;
+    }
+    let mut schema = (*tool.input_schema).clone();
+    schema.remove("$schema");
+    tool.input_schema = std::sync::Arc::new(schema);
 }
 
 /// An MCP server whose whole surface is a set of [`ToolDef`]s.
@@ -369,6 +405,20 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
         assert!(required.contains(&"a".to_string()) && required.contains(&"b".to_string()));
+    }
+
+    /// `schemars` stamps a `$schema` dialect key on everything it generates and
+    /// `google/jsonschema-go` stamps none, so the key would be a field the model
+    /// sees from a Rust-hosted tool and not from the same Go-hosted one.
+    #[test]
+    fn the_schema_carries_no_dialect_key() {
+        let server = ToolServer::new("calc").with_tool(add_tool());
+        let tool = server.get_tool("add").expect("the tool is registered");
+        let schema = serde_json::to_value(&*tool.input_schema).unwrap();
+        assert!(
+            schema.get("$schema").is_none(),
+            "Go's reflected schemas carry no dialect key: {schema}"
+        );
     }
 
     #[test]
