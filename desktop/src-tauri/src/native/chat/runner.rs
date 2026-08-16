@@ -169,10 +169,7 @@ fn allowed_tools(caps: Option<&Capabilities>) -> Vec<String> {
     if capability_count(caps.built_in.as_ref()) > 0 {
         return caps.built_in.clone().unwrap_or_default();
     }
-    // `map_or(true, ..)` rather than `is_none_or`, which needs Rust 1.82 and
-    // this crate's MSRV is 1.77.
-    if capability_count(caps.local.as_ref()) == 0
-        && caps.mcp.as_ref().map_or(true, |m| m.is_empty())
+    if capability_count(caps.local.as_ref()) == 0 && caps.mcp.as_ref().is_none_or(|m| m.is_empty())
     {
         return ALL_BUILT_IN_TOOLS
             .iter()

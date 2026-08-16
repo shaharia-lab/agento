@@ -24,7 +24,9 @@
 //! * [`Options`] for configuration — note it splits across two channels, CLI
 //!   flags and the initialize message, and [`options`] documents which is
 //!   which.
-//! * [`start_in_process_mcp_server`] to expose local tools to the CLI.
+//! * [`new_tool`] and [`tool_server`] to expose local functions to the CLI as
+//!   tools; [`start_in_process_mcp_server`] when the server is not just a bag
+//!   of tools.
 //!
 //! ## Ported deliberately, not mechanically
 //!
@@ -62,6 +64,12 @@ pub mod permissions;
 pub mod process;
 pub mod session;
 pub mod sessions;
+pub mod tool;
+
+/// The MCP protocol implementation this SDK hosts tools with, re-exported so a
+/// caller building a server need not name the dependency. See [`mcp`] for why
+/// it is `rmcp` rather than the hand-rolled trait #281 shipped.
+pub use rmcp;
 
 /// The version reported to the CLI via `CLAUDE_AGENT_SDK_VERSION`, tracking the
 /// Go SDK release this was ported from.
@@ -71,10 +79,7 @@ pub use client::{query, run, InterruptReceipt, Stream, StreamControl};
 pub use errors::{Error, Result};
 pub use hooks::{hook_event, HookFunc, HookMatcher, HookOutput};
 pub use init_types::{AccountInfo, AgentInfo, ModelInfo, SlashCommand};
-pub use mcp::{
-    self_as_stdio_mcp_server, serve_stdio_mcp, start_in_process_mcp_server, InProcessMcpServer,
-    McpService,
-};
+pub use mcp::{start_in_process_mcp_server, InProcessMcpServer};
 pub use messages::{
     block, message_type, result_subtype, system_subtype, AssistantMessage, ContentBlock,
     ContentBlocks, Event, ModelUsage, Result as RunResult, SystemMessage, TaskStatus,
@@ -90,3 +95,4 @@ pub use permissions::{
 };
 pub use session::Session;
 pub use sessions::{get_session_messages, list_sessions, SessionSummary, SessionTranscript};
+pub use tool::{new_tool, tool_server, CancellationToken, ToolDef, ToolServer};
