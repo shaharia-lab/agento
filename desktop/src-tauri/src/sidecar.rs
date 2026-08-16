@@ -53,6 +53,16 @@ pub async fn spawn(app: &AppHandle, port: u16) -> Result<Sidecar, String> {
         // Bind loopback only. The Go server defaults to this too, but the
         // desktop app must never widen it, whatever the user's environment says.
         .env("AGENTO_BIND", "127.0.0.1")
+        // The shell owns the Claude session scan (#289). Two writers on one
+        // SQLite file is the hazard this port has been avoiding since #274, and
+        // the scan is a writer — so the child must not run one. `EnsureScan` is
+        // the single place a scan starts on the Go side, and this switches it
+        // off there, which covers both the boot scan and every read path's
+        // `ensureFresh`.
+        //
+        // This is not a tuning knob: with it unset the two processes would both
+        // scan, and with the shell's scanner removed nothing would.
+        .env("AGENTO_SCANNER", "off")
         .env("PORT", port.to_string());
 
     // Development runs against its own data directory.

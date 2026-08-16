@@ -91,6 +91,20 @@ pub struct Catalog {
 }
 
 /// Build the catalog exactly as `pricingService.Catalog` does.
+/// Just the catalog fingerprint.
+///
+/// Split out from [`catalog`] because the scan's freshness gate and `/status`
+/// need only this number, and building the whole catalog to get it is expensive
+/// in a way that scales with the corpus: `unpriced_models` runs a `UNION ALL`
+/// over `claude_session_cache` and `claude_subagent_cache` on an unindexed
+/// column. `/status` is polled by the sessions list every few seconds, so that
+/// was two full table scans on a timer to colour one badge. Go pays nothing
+/// comparable — its `pricingChanged()` compares an in-memory int.
+pub fn revision_of(db_path: &Path) -> Result<i64, String> {
+    let conn = db::open_read_only(db_path)?;
+    Ok(revision(&snapshot(&conn)?))
+}
+
 pub fn catalog(db_path: &Path) -> Result<Catalog, String> {
     let conn = db::open_read_only(db_path)?;
     let rates = snapshot(&conn)?;

@@ -151,6 +151,8 @@ src-tauri/src/
                  PUT/DELETE /{id} stay with Go: they reload/stop the live MCP server
     integration_credentials.rs the seven per-type validators, and the two failures
                  whose Go error text is not reproducible (both forward)
+    scan.rs      GET /api/claude-sessions/status, POST /refresh — and the scan
+                 itself: the shell owns it now, the sidecar runs with AGENTO_SCANNER=off
     fs.rs        GET /api/fs — the working-dir picker's listing (Unix; forwards on Windows)
     gopath.rs    Go's filepath.Clean/Dir/Join, pinned to vectors generated from Go
     query.rs     one query parameter, read the way r.URL.Query().Get reads it
@@ -765,6 +767,47 @@ either way is the easy mistake here.
 `find_claude_cli()` and then the bare name. The fallback matters — a GUI process
 inherits a minimal `PATH`, which is why that helper already existed for the
 startup banner — and the override is how the turn tests point at a fake CLI.
+
+### The scan is the shell's, and that is the port's first ownership flip (#289)
+
+Every route before this one could **forward on doubt**: `Err` meant "let the
+sidecar answer", so a ported route could only ever be as broken as an unported
+one. That property does not hold for the scan. Once the sidecar stops scanning
+there is no second implementation behind it — forwarding `/status` would ask Go
+about a scan Go is not running, and Go would answer `false`/`0`/`0` with
+complete confidence.
+
+So the flip is all of a piece, and has to stay that way:
+
+- `sidecar.rs` starts the child with **`AGENTO_SCANNER=off`**. On the Go side
+  that is checked in `Cache.EnsureScan`, which is the single place a scan
+  starts — it covers both the boot-time `StartBackgroundScan` and every read
+  path's `ensureFresh`, so no caller has to know. Unset means **on**, because a
+  plain `agento web` must keep scanning; an unrecognized value is also on, so a
+  typo cannot silently disable the scan.
+- `lib.rs` starts the boot scan, replacing `sessionCache.StartBackgroundScan()`.
+- `native/scan.rs` owns admission (one scan at a time), progress, the staleness
+  markers and the two endpoints.
+
+**The freshness probe is gone.** Answering a corpus read natively used to remove
+the very thing that kept the corpus fresh, because Go's handler called
+`ensureFresh` on the way past; `Answer::with_probe` put it back by firing a
+cheap request at the sidecar. Those call sites now call `scan::ensure_scan`
+directly — the same thing `Cache.List` does, one process earlier. `PROBE_PATH`,
+`Answer.probe` and `spawn_freshness_probe` are deleted rather than left dormant,
+because a probe that still fired would ask a sidecar that no longer scans to
+start a scan.
+
+**Verify a change here against the real corpus, not a fixture.** The failure that
+matters is a scan that runs, reports success and writes nothing, and a
+three-file fixture cannot tell that from a healthy one.
+`tests/scan_live.rs` copies the real database, forces a full re-read and asserts
+the row counts do not shrink and the markers are recorded. It is `#[ignore]`d
+(CI has no corpus), so run it by hand:
+
+```bash
+cargo test --test scan_live -- --ignored --nocapture
+```
 
 ### Do not port
 

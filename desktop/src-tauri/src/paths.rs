@@ -62,11 +62,29 @@ fn expand_tilde(dir: &str) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Serialises every test that reads or writes `HOME`.
+    ///
+    /// `HOME` is process-global, so a test that swaps it races any test that
+    /// reads it — and these read it twice (once directly, once inside
+    /// `expand_tilde`), so a swap landing between the two reads fails on a
+    /// mismatch that has nothing to do with the code. `native::scan`'s no-dirs
+    /// test has to swap it, because `claude_config_dirs` always walks the real
+    /// `~/.claude` first and would otherwise find the developer's own corpus.
+    ///
+    /// Lives here rather than in `native` because `HOME` is this module's
+    /// concern; the lock belongs with the thing it protects, so the next test
+    /// that touches `HOME` finds it without knowing about the scanner.
+    pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn tilde_expands_like_the_go_resolver() {
+        let _env = env_lock();
         let home = home().expect("a home directory");
         assert_eq!(expand_tilde("~"), Some(home.clone()));
         assert_eq!(
@@ -81,6 +99,7 @@ mod tests {
 
     #[test]
     fn database_sits_beside_the_data_dir() {
+        let _env = env_lock();
         let dir = data_dir().expect("a data dir");
         assert_eq!(database_path(), Some(dir.join("agento.db")));
     }
