@@ -35,9 +35,12 @@
 //! `claims` instead would leave a registry entry that claims nothing, and the
 //! two registry tests exist precisely to catch that shape. See [`super::gopath`].
 //!
-//! `POST /api/fs/mkdir` creates a directory and stays with Go. So does
-//! `POST /api/uploads`: **there is no upload read path** — `internal/api/uploads.go`
-//! registers one route and it writes a multipart body to disk.
+//! `POST /api/fs/mkdir` creates a directory and stays with Go.
+//!
+//! `POST /api/uploads` is **not** here either, and it is not Go's any more: it
+//! has no read path at all — `internal/api/uploads.go` registers one route and
+//! it writes a multipart body to disk — so it got its own module rather than
+//! joining a listing endpoint it shares nothing with. See [`super::uploads`].
 
 use axum::http::Method;
 use serde::Serialize;

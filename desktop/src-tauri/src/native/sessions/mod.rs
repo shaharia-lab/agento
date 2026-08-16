@@ -25,6 +25,7 @@
 //! all. It is fire-and-forget either way — the page never waits, exactly as
 //! `ListPage` never waits for the rescan it starts.
 
+pub mod continue_chat;
 pub mod corpus;
 pub mod detail;
 pub mod page;
@@ -54,6 +55,10 @@ enum Route<'a> {
     Facets,
     Projects,
     Detail(&'a str),
+    /// `POST /api/claude-sessions/{id}/continue` (#308) — the one write this
+    /// area owns, and the only two-segment route under the prefix that is not
+    /// somebody else's.
+    Continue(&'a str),
 }
 
 fn route_of(path: &str) -> Option<Route<'_>> {
@@ -64,7 +69,15 @@ fn route_of(path: &str) -> Option<Route<'_>> {
         _ => {}
     }
     let rest = path.strip_prefix("/api/claude-sessions/")?;
-    if rest.is_empty() || rest.contains('/') {
+    if rest.is_empty() {
+        return None;
+    }
+    if let Some(id) = rest.strip_suffix("/continue") {
+        // Still one segment before the suffix: `{id}/journey/continue` is not
+        // this route, and neither is `/continue` on its own.
+        return (!id.is_empty() && !id.contains('/')).then_some(Route::Continue(id));
+    }
+    if rest.contains('/') {
         return None;
     }
     // The remaining literal siblings are not session ids. `insights` cannot
@@ -78,7 +91,13 @@ fn route_of(path: &str) -> Option<Route<'_>> {
 }
 
 fn claims(method: &Method, path: &str) -> bool {
-    method == Method::GET && route_of(path).is_some()
+    match route_of(path) {
+        // The one write. Claimed for POST alone, so a GET of the same path
+        // still forwards and gets chi's own 405.
+        Some(Route::Continue(_)) => method == Method::POST,
+        Some(_) => method == Method::GET,
+        None => false,
+    }
 }
 
 /// Answer one of the four reads.
@@ -94,6 +113,10 @@ fn claims(method: &Method, path: &str) -> bool {
 /// would blank the "Scanning ~/.claude… 412 / 1,373" the list shows during a
 /// first run. They move when the scanner is wired in, which is phase 3.
 fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
+    if let Some(Route::Continue(id)) = route_of(req.path) {
+        return crate::native::writes::finish(continue_chat::continue_session(&ctx.db_path, id));
+    }
+
     if let Some(Route::Detail(id)) = route_of(req.path) {
         return match detail::get(&ctx.db_path, id)? {
             // Falling back lets Go answer its own 404 rather than this having

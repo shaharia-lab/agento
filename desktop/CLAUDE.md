@@ -157,6 +157,8 @@ src-tauri/src/
     scan.rs      GET /api/claude-sessions/status, POST /refresh — and the scan
                  itself: the shell owns it now, the sidecar runs with AGENTO_SCANNER=off
     fs.rs        GET /api/fs — the working-dir picker's listing (Unix; forwards on Windows)
+    uploads.rs   POST /api/uploads — the one multipart body, and the extension
+                 allowlist that is the route's whole security boundary
     gopath.rs    Go's filepath.Clean/Dir/Join, pinned to vectors generated from Go
     query.rs     one query parameter, read the way r.URL.Query().Get reads it
     pricing.rs   GET /api/pricing/catalog, plus the rate Resolver — and the
@@ -164,7 +166,9 @@ src-tauri/src/
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
-    sessions/    GET /api/claude-sessions, /facets, /projects and /{id}
+    sessions/    GET /api/claude-sessions, /facets, /projects and /{id}, plus
+                 POST /{id}/continue (#308)
+      continue_chat.rs the two writes that resume a Claude session as a chat
       detail.rs  one session re-read from its transcript, patched from the cache
       projects.rs the project picker's list, derived from the same walk a scan is
       corpus.rs  loads the lot
@@ -872,6 +876,45 @@ is ported is everything downstream of that call — settings → message → sen
 with a second writer that meant a native save left every scheduled-task email on
 the previous SMTP credentials until restart, silently. It reads the row now,
 which is what its own doc comment already promised.
+
+### Uploads, and the seam's second body cap (#308)
+
+`POST /api/uploads` is the **only multipart route in the API**, and claiming it
+cost the seam two small extensions, both in `proxy.rs`:
+
+- `native::Request` carries the `Content-Type`. A multipart body is unparseable
+  without the boundary, and the boundary is only in the header. Nothing else
+  reads it.
+- The body cap is per route. `MAX_NATIVE_BODY` is 8 MiB and stays there —
+  **over it a request is answered 400 rather than forwarded**, because
+  `to_bytes` has already consumed the body — so a 100 MiB upload needed its own
+  limit or the shell would have refused a file the server accepts. It is a
+  second constant rather than a raised one because the cost is real: the shell
+  buffers the whole body, where Go's `ParseMultipartForm` keeps 10 MiB and
+  spills the rest to temp files.
+
+The multipart reader is hand-written, because every crate in the ecosystem is
+built around an async byte *stream* and this handler runs on `spawn_blocking`
+with the body already in memory.
+
+Two rules the live parity run confirmed, both of which a reading of the Go
+would get wrong:
+
+- **`sanitizeExtension` is an allowlist, and `filepath.Ext(filepath.Base(f))`
+  is not `rfind('.')`.** `Ext` stops at a separator, so `evil.png/../x` has no
+  extension at all; `Base("")` is `"."` and `Ext(".")` is `"."`, so an empty
+  filename yields `"."` rather than `""`. Only `/` is a separator, because this
+  is the Unix `filepath` — a Windows-shaped name is one element, which is safe
+  only because the alphanumeric check rejects what the backslashes carry.
+- **A part named `file` with no filename is not a file.** `multipart.readForm`
+  puts it in `Form.Value`, so `FormFile` answers `ErrMissingFile` and the
+  handler 400s. Matching on the part name alone accepts a request Go rejects.
+
+`POST /api/claude-sessions/{id}/continue` moved with it. Go creates the chat and
+then updates it to carry the Claude session id; this does both in one
+transaction, which is a deliberate divergence with only one alternative: `Err`
+forwards, so a Rust failure *between* the two writes would leave Go's orphan
+chat **and** have Go create a second one.
 
 ### Do not port
 

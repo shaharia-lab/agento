@@ -747,3 +747,211 @@ async fn the_notification_settings_write_answers_match_go() {
     .await;
     assert_eq!(restored.0, 200);
 }
+
+// ─── Uploads and continue (#308) ──────────────────────────────────────────────
+
+/// Pin Go's answers for the one multipart route in the API.
+///
+/// The response is a single key, so what is actually being compared is the
+/// **filename**: `sanitizeExtension` is the boundary between a name the caller
+/// chose and a path this process creates, and the path it produces is injected
+/// straight into a prompt. A port that differed on which extensions it accepts
+/// would be invisible in the JSON and visible in the file the model is asked to
+/// read.
+///
+/// Each case is asked of the real server, so the assertions below are Go's
+/// behaviour rather than this port's reading of `filepath.Ext`.
+#[tokio::test]
+#[ignore = "requires a scratch Go instance; mutates it"]
+async fn the_upload_answers_match_go() {
+    require_scratch_instance();
+
+    const BOUNDARY: &str = "----parityWritesBoundary";
+    fn multipart(name: &str, filename: Option<&str>, content: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(format!("--{BOUNDARY}\r\n").as_bytes());
+        let disposition = match filename {
+            Some(f) => {
+                format!("Content-Disposition: form-data; name=\"{name}\"; filename=\"{f}\"\r\n")
+            }
+            None => format!("Content-Disposition: form-data; name=\"{name}\"\r\n"),
+        };
+        out.extend_from_slice(disposition.as_bytes());
+        out.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
+        out.extend_from_slice(content);
+        out.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+        out
+    }
+    let content_type = format!("multipart/form-data; boundary={BOUNDARY}");
+
+    // The happy path: 200, one key, an absolute path under tmp-uploads, and the
+    // extension carried through with its case intact.
+    let (status, body) = send_raw(
+        Method::POST,
+        "/api/uploads",
+        &content_type,
+        // A `\r\n` inside the content, which is what a reader that stops at the
+        // first line break would truncate.
+        multipart("file", Some("photo.PNG"), b"\x89PNG\r\n\x1a\ndata"),
+    )
+    .await;
+    assert_eq!(status, 200, "an upload is 200, not 201");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+    let path = json["path"].as_str().expect("path");
+    assert!(path.contains("/tmp-uploads/"), "{path}");
+    assert!(
+        path.ends_with(".PNG"),
+        "the extension keeps its case: {path}"
+    );
+    // `<unix-millis>-<uuid><ext>`: 13 digits, a hyphen, a 36-character UUID.
+    let name = path.rsplit('/').next().expect("basename");
+    let (millis, rest) = name.split_once('-').expect("millis-uuid");
+    assert!(millis.chars().all(|c| c.is_ascii_digit()), "{name}");
+    assert_eq!(rest.len(), 36 + ".PNG".len(), "{name}");
+
+    // The extension allowlist, as the server applies it.
+    for (filename, want_suffix) in [
+        ("archive.tar.gz", ".gz"),
+        ("report.2026", ".2026"),
+        // `filepath.Base` takes the last element, so a traversal has no
+        // extension left to take.
+        ("../../etc/passwd", ""),
+        // Anything non-alphanumeric after the dot fails the allowlist outright
+        // rather than being cleaned.
+        ("evil.p g", ""),
+        ("evil.p-g", ""),
+        ("noextension", ""),
+    ] {
+        let (status, body) = send_raw(
+            Method::POST,
+            "/api/uploads",
+            &content_type,
+            multipart("file", Some(filename), b"x"),
+        )
+        .await;
+        assert_eq!(status, 200, "{filename}");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        let path = json["path"].as_str().expect("path");
+        let name = path.rsplit('/').next().expect("basename");
+        if want_suffix.is_empty() {
+            // No extension at all: the generated name ends at the UUID.
+            assert_eq!(name.len(), 13 + 1 + 36, "{filename} → {name}");
+        } else {
+            assert!(name.ends_with(want_suffix), "{filename} → {name}");
+        }
+        // Whatever the caller sent, none of it is in the stored name.
+        assert!(!name.contains(".."), "{name}");
+        assert!(!name.contains("passwd"), "{name}");
+    }
+
+    // A part named `file` with **no filename** is a form *value* to
+    // `multipart.readForm`, so `FormFile` answers ErrMissingFile — even though
+    // a part with that name is right there.
+    let (status, body) = send_raw(
+        Method::POST,
+        "/api/uploads",
+        &content_type,
+        multipart("file", None, b"x"),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        String::from_utf8_lossy(&body).trim_end(),
+        r#"{"error":"missing required field: file"}"#
+    );
+
+    // A part under a different name is the same error.
+    let (status, body) = send_raw(
+        Method::POST,
+        "/api/uploads",
+        &content_type,
+        multipart("attachment", Some("x.png"), b"x"),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        String::from_utf8_lossy(&body).trim_end(),
+        r#"{"error":"missing required field: file"}"#
+    );
+
+    // Not multipart at all: the parse failure, whose message is shared with the
+    // size cap because MaxBytesReader surfaces through ParseMultipartForm.
+    let (status, body) = send_raw(
+        Method::POST,
+        "/api/uploads",
+        "application/json",
+        b"{}".to_vec(),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        String::from_utf8_lossy(&body).trim_end(),
+        r#"{"error":"file too large or invalid multipart form"}"#
+    );
+}
+
+/// Pin Go's answers for continuing a Claude session.
+///
+/// The 404 is the interesting one: it is the handler's own fixed string rather
+/// than a `service.NotFoundError`, so it does not carry the `resource "id" not
+/// found` shape every other 404 in this suite has.
+///
+/// The success path needs a real session id from this machine's corpus, so it
+/// is driven only when the list has one — the alternative is asserting against
+/// a 404 and calling it a test of the create path.
+#[tokio::test]
+#[ignore = "requires a scratch Go instance; mutates it"]
+async fn the_continue_session_answers_match_go() {
+    require_scratch_instance();
+
+    let missing = go_answer(
+        Method::POST,
+        "/api/claude-sessions/parity-writes-no-such-session/continue",
+        None,
+    )
+    .await;
+    assert_eq!(missing.0, 404);
+    assert_eq!(
+        String::from_utf8_lossy(&missing.1).trim_end(),
+        r#"{"error":"session not found"}"#,
+        "the handler writes its own string, not the service error's shape"
+    );
+
+    let (_, listed) = send(Method::GET, "/api/claude-sessions?limit=1", None).await;
+    let listed: serde_json::Value = serde_json::from_slice(&listed).expect("json");
+    let Some(session_id) = listed["items"]
+        .as_array()
+        .and_then(|items| items.first())
+        .and_then(|item| item["session_id"].as_str())
+    else {
+        panic!(
+            "the parity instance has no Claude sessions, so the create half of \
+             continue is not exercised — run this on a machine with a ~/.claude corpus"
+        );
+    };
+
+    let created = go_answer(
+        Method::POST,
+        &format!("/api/claude-sessions/{session_id}/continue"),
+        None,
+    )
+    .await;
+    assert_eq!(created.0, 201, "a continued chat is 201");
+    let body: serde_json::Value = serde_json::from_slice(&created.1).expect("json");
+    let chat_id = body["chat_id"].as_str().expect("chat_id").to_string();
+    // One key, and no others: this is a Go map, so a second one would sort.
+    assert_eq!(body.as_object().expect("object").len(), 1);
+
+    // The chat it made: no agent, the session's cwd and model, and the link
+    // that makes it a continuation rather than a new conversation.
+    let (status, chat) = send(Method::GET, &format!("/api/chats/{chat_id}"), None).await;
+    assert_eq!(status, 200);
+    let chat: serde_json::Value = serde_json::from_slice(&chat).expect("json");
+    let session = &chat["session"];
+    assert_eq!(session["sdk_session_id"], session_id);
+    assert_eq!(session["agent_slug"], "");
+    assert_eq!(session["title"], "New Chat");
+
+    let deleted = go_answer(Method::DELETE, &format!("/api/chats/{chat_id}"), None).await;
+    assert_eq!(deleted.0, 204);
+}
