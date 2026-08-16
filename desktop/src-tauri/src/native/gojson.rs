@@ -307,6 +307,100 @@ pub fn compact(src: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| src.to_string())
 }
 
+// ─── `encoding/json`'s Indent, for the files Go writes rather than serves ────
+
+/// `json.Indent` with an empty prefix, applied to compact Go-encoded JSON.
+///
+/// `json.MarshalIndent` is literally `Marshal` followed by `Indent`, so a port
+/// that already has [`to_vec_marshal`] gets the indented form by running this
+/// over its output rather than by growing a second `Formatter`. That is the
+/// faithful decomposition, and it is the one that keeps float spelling and HTML
+/// escaping in exactly one place.
+///
+/// The two rules that are easy to guess wrong, both taken from
+/// `encoding/json/indent.go`:
+///
+/// - **`:` becomes `": "`** — a colon *and a space*. Go adds spacing around
+///   punctuation on the way out, not while encoding.
+/// - **An empty object or array stays `{}` / `[]`.** The indent after an opening
+///   brace is *delayed* until a value actually follows, which is the whole point
+///   of the `need_indent` flag; writing the newline eagerly and trimming it back
+///   produces `{\n}` for `{}`.
+///
+/// This is Agento's settings files, not a response: the Claude settings profile
+/// surface writes `settings.json`, `settings_<slug>.json` and
+/// `settings_profiles.json` with `MarshalIndent` so a person can read them.
+pub fn indent(src: &[u8]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(src.len() * 2);
+    let mut depth = 0usize;
+    let mut need_indent = false;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    let newline = |out: &mut Vec<u8>, depth: usize| {
+        out.push(b'\n');
+        for _ in 0..depth {
+            out.extend_from_slice(b"  ");
+        }
+    };
+
+    for &byte in src {
+        // Punctuation inside a string is content, so the whole switch below is
+        // skipped for it — the same reason [`compact`] tracks string context.
+        if in_string {
+            out.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        if byte == b'"' {
+            if need_indent {
+                need_indent = false;
+                depth += 1;
+                newline(&mut out, depth);
+            }
+            in_string = true;
+            out.push(byte);
+            continue;
+        }
+
+        if need_indent && byte != b'}' && byte != b']' {
+            need_indent = false;
+            depth += 1;
+            newline(&mut out, depth);
+        }
+
+        match byte {
+            b'{' | b'[' => {
+                need_indent = true;
+                out.push(byte);
+            }
+            b',' => {
+                out.push(byte);
+                newline(&mut out, depth);
+            }
+            b':' => out.extend_from_slice(b": "),
+            b'}' | b']' => {
+                if need_indent {
+                    // An empty object or array: suppress the delayed indent.
+                    need_indent = false;
+                } else {
+                    depth = depth.saturating_sub(1);
+                    newline(&mut out, depth);
+                }
+                out.push(byte);
+            }
+            _ => out.push(byte),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
