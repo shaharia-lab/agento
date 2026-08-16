@@ -159,7 +159,12 @@ pub async fn run(
     };
     // Refuses for an agent whose tools this port cannot supply — before any
     // subprocess exists, so forwarding is safe.
-    let options = runner::build_options(&spec, handler)?;
+    //
+    // `local_tools` is the in-process MCP listener the CLI will dial for an
+    // agent that named one, and it is **not** an unused binding: dropping it
+    // stops the listener, so it has to be moved into the stream task and
+    // released only once the subprocess is gone.
+    let (options, local_tools) = runner::build_options(&spec, handler).await?;
 
     // The subprocess starts here, and these are the last two `Err`s. Both are
     // still safe to forward, but for different reasons and neither is obvious:
@@ -205,6 +210,11 @@ pub async fn run(
         // than there is the difference.
         drop(guard);
         session.close();
+        // After `close`, and explicitly rather than at the end of the block:
+        // the CLI can be mid-`tools/call` when the stream ends, and dropping
+        // the listener cancels every handler's token. Ordering it before
+        // `close` would cancel a tool call the subprocess is still waiting on.
+        drop(local_tools);
 
         // The commit is detached from the request on purpose, so a client that
         // disconnected mid-stream still has its turn persisted. Errors are

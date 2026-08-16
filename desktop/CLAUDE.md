@@ -138,10 +138,14 @@ src-tauri/src/
     writes.rs    what a write may answer, and what it hands back to Go
     chat/        the SSE turn and the three routes that steer it (#276)
       live.rs    the process-local live-session registry — why the four move together
-      runner.rs  an agent's config as SDK options; refuses what it cannot supply
+      runner.rs  an agent's config as SDK options; starts the local tools server
+                 (#310) and refuses only what it still cannot supply
       turn.rs    spawn, stream, and the AskUserQuestion continuation
       persist.rs what a finished turn writes, and what an interrupted one does not
       sse.rs     the frame bytes: raw pass-through vs the two synthetic events
+    tools/       the local in-process tools MCP server (#310) — `internal/tools`
+      mod.rs     the server name, the qualified `mcp__local-tools__…` names
+      current_time.rs  time.LoadLocation and RFC1123/RFC3339, pinned to vectors
     settings.rs  GET /api/settings and /settings/claude-config-dirs (a filesystem
                  probe; Unix, forwards on Windows); the preferences + config dirs
                  a read is scoped to; and `update`, the PUT — written and tested,
@@ -521,7 +525,7 @@ of the `Err` arms the cut-over has to turn into a real response.
 | 1 ✅ | Sidecar + proxy | — | done |
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
 | 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274, #275).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. The scheduler's *schedule computation* is ported and pinned (#275); its ownership is not, and is blocked — see below. |
-| 4 | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. WhatsApp is **not** among them — see below. |
+| 4 ← | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. WhatsApp is **not** among them — see below. |
 | 5 ← | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
 
 ### The session scanner (`src-tauri/src/native/scanner/`)
@@ -752,6 +756,42 @@ async move { … } }`. Moving it in makes the closure `FnOnce`. There is no
 `&self` to read from either: `ToolServer` is one shared type holding nothing
 integration-specific, so capture is the only channel. `claude/tool.rs`'s module
 docs carry a full worked example.
+
+**The first real caller is `native/tools/` (#310)**, the local in-process server
+— one tool, no credentials — and it is the file to read before porting an
+integration. Three things it settled that all six inherit:
+
+- **`new_tool` strips `$schema`.** `schemars` stamps a dialect key on every
+  schema it generates and `google/jsonschema-go` stamps none, so a Rust-hosted
+  tool would put a field in front of the model that the same Go-hosted tool does
+  not have. It is stripped by replacing the `Arc`, not through it: `rmcp`
+  memoizes one schema per input type and hands every route a clone, so an
+  in-place edit would reach into a process-wide cache. What is left matches Go
+  key for key — `additionalProperties`, `properties`, `required`, `type` — and
+  `#[serde(deny_unknown_fields)]` is what produces the first of those, which Go
+  reflects onto every struct and its server *validates* against.
+- **A tool's name is not renameable.** `mcp__local-tools__current_time` is in
+  agents' stored `capabilities.local` allowlists and in every `tool_use` block
+  already written to `chat_messages`. `desktop/parity/local_tools_vectors.json`
+  pins the server name, the tool names, the descriptions and the schemas, taken
+  from a **live `tools/list`** against the Go server rather than from its source;
+  it also pins `current_time`'s answer text across seventeen zones and two
+  instants, because that text lands in a stored `tool_result` and depends on the
+  tz database's abbreviations (`+0545`, `-05`) agreeing between Go's tzdata and
+  `chrono-tz`'s. Regenerate with
+  `go test ./desktop/parity/ -run TestLocalToolsVectors -update-local-tools-vectors`.
+- **The listener is per turn, not per process.** Go starts its one server in
+  `cmd/web.go` and shares it; here the handle *is* the lifetime, so
+  `build_options` starts one and hands it back, and `turn.rs` drops it **after**
+  `session.close()` — dropping it first would cancel a `tools/call` the
+  subprocess is still waiting on.
+
+One Go rule that only becomes visible once local tools exist:
+`appendDisallowedTools` keys on the agent's **explicit built-in list**, not on
+the allowlist it produced. An agent naming `local: [current_time]` and no
+built-ins has a non-empty `--allowedTools` and still gets no `--disallowedTools`;
+subtracting the allowlist from the twelve built-ins instead would deny all of
+them.
 
 ### Things that will bite
 
@@ -1007,9 +1047,12 @@ path cannot try to answer a chat turn with a `Vec<u8>`.
 
 **The four routes share a process-local registry, so they moved together** —
 `/messages` puts a session in, the others look one up. But not every chat *can*
-run natively: an agent whose tools come from an integration or the local MCP
-server needs #277/#282, and `runner::build_options` refuses those before any
-subprocess exists. That would strand `/stop` for a chat still running on Go, so
+run natively: an agent whose tools come from an **integration** still needs
+#311–#317, and `runner::build_options` refuses those before any subprocess
+exists. (The **local** server was the other half of that refusal and is gone —
+#310; `build_options` starts it, and is `async` for that reason, returning the
+listener handle alongside the options because dropping the handle stops the
+server.) That would strand `/stop` for a chat still running on Go, so
 the three steering routes answer natively **only when Rust holds a live session
 for that chat** and forward otherwise. Go then answers — correctly, because it
 is the side that has the session.
@@ -1546,23 +1589,24 @@ lines nothing could check until the flip. It follows the flip; it does not
 precede it.
 
 **The blocker, verified.** The flip needs Rust to *run* a task, and
-`chat/runner.rs::build_options` refuses any agent whose capabilities name the
-local in-process MCP server or an MCP server (#277/#282/#310–#317). For a chat
-that is safe — the three steering routes forward and Go answers, because Go
-holds the session. **For a scheduled task there is no second implementation
-behind it**: with the sidecar not scheduling, a task Rust cannot run does not
-fail, it *silently never runs*, and the job history has no row to show for it.
-That is the one property the whole port has relied on, absent.
+`chat/runner.rs::build_options` refuses any agent whose capabilities name an MCP
+server (#311–#317). For a chat that is safe — the three steering routes forward
+and Go answers, because Go holds the session. **For a scheduled task there is no
+second implementation behind it**: with the sidecar not scheduling, a task Rust
+cannot run does not fail, it *silently never runs*, and the job history has no
+row to show for it. That is the one property the whole port has relied on,
+absent.
 
 How much it strands: an agent is runnable natively only if its allowlist is
-built-ins only. Against 12 built-ins there are 61 integration tools across the
-six supported providers, plus `internal/tools`' local server, plus anything in
+built-ins plus local tools. Against 12 built-ins and `internal/tools`' one there
+are 61 integration tools across the six supported providers, plus anything in
 `mcps.yaml` — none of which Rust can supply, and the scheduled task that fetches
-a calendar or triages issues is the archetype rather than the edge. One of the
-two agents Agento *ships* (`agents/hello-world.yaml`) names `local:
-current_time` and would be stranded. (Neither `~/.agento` nor
-`~/.agento-desktop-dev` has an agent, task or integration on this machine, so
-that is the structural count, not a measured one.)
+a calendar or triages issues is the archetype rather than the edge. #310 moved
+one of the two agents Agento *ships* (`agents/hello-world.yaml`, which names
+`local: current_time`) off that list; the other side of the count is unchanged.
+(Neither `~/.agento` nor `~/.agento-desktop-dev` has an agent, task or
+integration on this machine, so that is the structural count, not a measured
+one.)
 
 There is also no escape hatch that keeps Go executing: the API has no
 "run this task now" route, so a Rust-owned timer has nothing to call. Adding one

@@ -60,9 +60,9 @@ fn migrated_with_chat(id: &str) -> tempfile::NamedTempFile {
 ///
 /// That is what makes `wrap_permission_handler` wrap the handler at all: an
 /// empty allowlist returns the inner one unwrapped, so a test that skipped the
-/// agent would exercise the bypass rather than the allowlist. `built_in` only —
-/// `runner::build_options` refuses an agent whose tools come from a local or MCP
-/// server, and would forward the whole turn to Go.
+/// agent would exercise the bypass rather than the allowlist. `built_in` only,
+/// so the allowlist is exactly the one tool — the local server has its own
+/// fixture below, and an agent naming an MCP server still forwards to Go.
 fn migrated_with_allowlisted_agent(id: &str) -> tempfile::NamedTempFile {
     let file = tempfile::NamedTempFile::new().expect("temp file");
     let mut conn = rusqlite::Connection::open(file.path()).expect("open");
@@ -75,6 +75,30 @@ fn migrated_with_allowlisted_agent(id: &str) -> tempfile::NamedTempFile {
     conn.execute(
         "INSERT INTO chat_sessions (id, title, agent_slug, created_at, updated_at)
          VALUES (?1, 'New Chat', 'gated', '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+        [id],
+    )
+    .expect("seed chat");
+    file
+}
+
+/// The same, plus an agent whose capabilities name the **local** in-process MCP
+/// server (#310) rather than a built-in.
+///
+/// That is the case `runner::build_options` used to refuse outright, so before
+/// #310 a chat on this agent forwarded to Go and none of the turn machinery ran
+/// at all.
+fn migrated_with_local_tool_agent(id: &str) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().expect("temp file");
+    let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+    agento_lib::native::migrate::apply(&mut conn).expect("migrate");
+    conn.execute(
+        "INSERT INTO agents (slug, name, capabilities) VALUES ('clock', 'Clock', ?1)",
+        [r#"{"local":["current_time"]}"#],
+    )
+    .expect("seed agent");
+    conn.execute(
+        "INSERT INTO chat_sessions (id, title, agent_slug, created_at, updated_at)
+         VALUES (?1, 'New Chat', 'clock', '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
         [id],
     )
     .expect("seed chat");
@@ -1079,4 +1103,123 @@ async fn collect_with_timeout(
     .await
     .expect("the turn should end rather than park on a wait nothing satisfies")
     .expect("body")
+}
+
+// ─── The local in-process tools server (#310) ─────────────────────────────────
+
+/// Drive one turn against a database the caller seeded, and collect its body.
+///
+/// [`run_turn`] makes its own agent-less chat; this is the same thing for the
+/// tests whose whole subject is *which agent* the chat names.
+async fn run_turn_on(
+    cli: &Path,
+    file: &tempfile::NamedTempFile,
+    chat_id: &str,
+    content: &str,
+) -> String {
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", cli);
+
+    let response = agento_lib::native::chat::turn::run(
+        file.path().to_path_buf(),
+        chat_id.to_string(),
+        content.to_string(),
+    )
+    .await
+    .expect("the turn should stream rather than forward");
+
+    assert_eq!(response.status(), 200);
+    let collected = collect_with_timeout(response).await;
+    String::from_utf8(collected.to_bytes().to_vec()).expect("utf8")
+}
+
+/// The acceptance criterion of #310, end to end: an agent whose only tool is
+/// the local in-process MCP server runs **natively**, and the tool it calls is
+/// really answered by this process.
+///
+/// The fake CLI does what the real one does with `--mcp-config`: it reads the
+/// server's URL and headers out of its own argv and dials the loopback
+/// listener. That makes this the one test covering the whole chain at once —
+/// `build_options` starting the server, `Options::build_args` putting it on the
+/// command line, the bearer token travelling in `headers`, the stateless
+/// transport answering a bare `tools/call`, and the answer text coming back as
+/// a `tool_result` the turn stores.
+///
+/// Before #310 none of it ran: `build_options` refused this agent and the whole
+/// turn forwarded to Go.
+#[tokio::test]
+async fn a_chat_using_a_local_tool_runs_natively_end_to_end() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        import urllib.request
+        # `--mcp-config` is inline JSON in argv, exactly as the real CLI reads
+        # it. A KeyError or a ValueError here is the assertion: it means the
+        # server was never registered under the name the CLI prefixes with.
+        cfg = json.loads(sys.argv[sys.argv.index("--mcp-config") + 1])
+        server = cfg["mcpServers"]["local-tools"]
+        headers = {"Content-Type": "application/json",
+                   "Accept": "application/json, text/event-stream"}
+        headers.update(server.get("headers") or {})
+        call = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "current_time",
+                                      "arguments": {"timezone": "Asia/Tokyo"}}}).encode()
+        reply = json.loads(urllib.request.urlopen(
+            urllib.request.Request(server["url"], data=call, headers=headers)).read().decode())
+        text = reply["result"]["content"][0]["text"]
+        say({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1",
+             "name": "mcp__local-tools__current_time",
+             "input": {"timezone": "Asia/Tokyo"}}]}})
+        say({"type": "user", "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": text}]}})
+        say({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": text}]}})
+        say({"type": "result", "subtype": "success", "is_error": False,
+             "result": text, "session_id": "sdk-local",
+             "usage": {"input_tokens": 1, "output_tokens": 2}})
+"#,
+    );
+
+    let id = unique_id("localtool");
+    let file = migrated_with_local_tool_agent(&id);
+    let body = run_turn_on(&cli, &file, &id, "what time is it in Tokyo?").await;
+
+    // The tool really ran in this process: only the local server could have
+    // produced this sentence, and only from Go's format string.
+    assert!(
+        body.contains("Current time in Asia/Tokyo: "),
+        "the local tool was never reached; body was: {body}"
+    );
+    assert!(body.contains("(ISO 8601: "), "body was: {body}");
+
+    // The block that gets stored carries the qualified name — the string that
+    // is already in existing agents' allowlists and in transcripts on disk.
+    let detail = chats::get(file.path(), &id)
+        .expect("get")
+        .expect("chat exists");
+    let assistant = detail
+        .messages
+        .iter()
+        .find(|m| m.role == "assistant")
+        .expect("assistant message");
+    let names: Vec<&str> = assistant
+        .blocks
+        .iter()
+        .map(|b| b.name.as_str())
+        .filter(|n| !n.is_empty())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["mcp__local-tools__current_time"],
+        "renaming either half of this breaks every agent that already names it"
+    );
 }
