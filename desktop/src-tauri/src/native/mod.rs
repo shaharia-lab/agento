@@ -33,6 +33,7 @@ pub mod pricing;
 pub mod query;
 pub mod scan;
 pub mod scanner;
+pub mod schedule;
 pub mod sessions;
 pub mod settings;
 pub mod tasks;

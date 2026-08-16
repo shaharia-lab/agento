@@ -17,6 +17,7 @@ dependencies = [
  "chrono-tz",
  "form_urlencoded",
  "http-body-util",
+ "iana-time-zone",
  "lettre",
  "libc",
  "log",
