@@ -601,6 +601,21 @@ mod tests {
             &route("/api/claude-sessions/a%20b/continue")
         ));
 
+        // Canonicality is a property of the **whole** path, not of a segment:
+        // one non-canonical escape anywhere leaves every segment raw, `r%201`
+        // included, even though on its own it would have decoded. This is the
+        // case a future `slug_of`/`route_of` change is most likely to get
+        // wrong, and it is why the rule is applied to the path rather than to
+        // each id.
+        assert_eq!(
+            route("/api/integrations/a%2Db/triggers/r%201"),
+            "/api/integrations/a%2Db/triggers/r%201"
+        );
+        assert!(claims(
+            &Method::PUT,
+            &route("/api/integrations/a%2Db/triggers/r%201")
+        ));
+
         // A malformed target has no route path at all: `url.ParseRequestURI`
         // rejects it, so Go answers 400 from inside `net/http` and the proxy
         // forwards rather than inventing one.

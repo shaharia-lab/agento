@@ -76,13 +76,18 @@ fn should_escape(c: u8) -> bool {
 /// `encodeQueryComponent`, and using it here would make every path holding a
 /// space look non-canonical and flip [`route_path`] to the wrong branch.
 pub fn escape_path(s: &str) -> String {
-    let bytes = s.as_bytes();
-    if !bytes.iter().copied().any(should_escape) {
-        return s.to_string();
-    }
+    escape_bytes(s.as_bytes())
+}
 
+/// The same function over bytes, which is what [`route_path`] needs.
+///
+/// A Go string is arbitrary bytes and `escape` is defined over them, so the
+/// canonical check has to run before anything demands UTF-8 — see
+/// [`route_path`]. The output is ASCII either way: every byte over 0x7F is
+/// escaped, so `char` is safe here for exactly the reason `should_escape` says.
+fn escape_bytes(bytes: &[u8]) -> String {
     const UPPERHEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut out = String::with_capacity(s.len());
+    let mut out = String::with_capacity(bytes.len());
     for &c in bytes {
         if should_escape(c) {
             out.push('%');
@@ -138,20 +143,28 @@ pub fn unescape_path(s: &str) -> Option<Vec<u8>> {
 ///   on it, so Go answers 400 from inside `net/http` and never reaches a
 ///   handler. Forwarding is how that 400 gets produced — reproducing it here
 ///   would mean reproducing the server's error page too.
-/// - the decoded path is not UTF-8 (`/api/agents/%FF`). Go carries it happily;
-///   Rust cannot put it in a `&str`, and every claim function and bound
-///   parameter downstream wants one. Rather than lossily converting — which
-///   would look up a *different* slug than Go looks up — the request forwards
-///   and Go answers it correctly.
+/// - the escaping is canonical **and** the decoded path is not UTF-8
+///   (`/api/agents/%FF`). Go carries it happily; Rust cannot put it in a `&str`,
+///   and every claim function and bound parameter downstream wants one. Rather
+///   than lossily converting — which would look up a *different* slug than Go
+///   looks up — the request forwards and Go answers it correctly.
+///
+/// **The canonical check runs on bytes, before anything demands UTF-8**, and the
+/// order is load-bearing: `/api/agents/%ff` decodes to the same unrepresentable
+/// byte as `/api/agents/%FF`, but its escaping is *not* canonical, so chi routes
+/// on the raw target — which is plain ASCII and perfectly carryable. Demanding
+/// UTF-8 first would forfeit that route path for no reason, and would make the
+/// case impossible to add to the vectors.
 pub fn route_path(raw: &str) -> Option<String> {
     let decoded = unescape_path(raw)?;
-    let decoded = String::from_utf8(decoded).ok()?;
     // `url.setPath`: the escaping is canonical exactly when re-encoding the
     // decoded path reproduces what arrived, and that is when `RawPath` stays
     // empty and chi falls through to the decoded `URL.Path`.
-    if escape_path(&decoded) == raw {
-        Some(decoded)
+    if escape_bytes(&decoded) == raw {
+        String::from_utf8(decoded).ok()
     } else {
+        // Non-canonical: chi routes on `RawPath`, which is the request target
+        // this was called with and therefore already a `&str`.
         Some(raw.to_string())
     }
 }
@@ -269,14 +282,22 @@ mod tests {
     }
 
     #[test]
-    fn a_non_utf8_path_forwards_rather_than_being_mangled() {
-        // Go routes `%FF` as a one-byte segment. Rust cannot carry it in a
-        // `&str`, and a lossy conversion would look up a different slug — so
-        // this forwards and Go answers.
+    fn a_non_utf8_path_forwards_only_when_that_is_what_chi_routes_on() {
+        // `%FF` is canonical, so chi routes on the *decoded* path: one byte Rust
+        // cannot carry in a `&str`, and a lossy conversion would look up a
+        // different slug. Forwarding is the only right answer.
         assert_eq!(route_path("/api/agents/%FF"), None);
         assert_eq!(
             unescape_path("/api/agents/%FF"),
             Some(b"/api/agents/\xff".to_vec())
+        );
+
+        // `%ff` decodes to the same byte and is *not* canonical, so chi routes
+        // on the raw target — plain ASCII, and perfectly carryable. Testing
+        // UTF-8 before the canonical check would forfeit this one for nothing.
+        assert_eq!(
+            route_path("/api/agents/%ff").as_deref(),
+            Some("/api/agents/%ff")
         );
     }
 

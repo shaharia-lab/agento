@@ -283,11 +283,16 @@ not — so **Go decodes exactly when the escaping is canonical**.
 `native/gourl.rs` is that rule, applied once in `proxy.rs` where `path` is
 derived, so no module's `slug_of`/`id_of` has to know about it and none of the
 five can drift apart. Both a blanket decode and a blanket raw match are wrong,
-in opposite directions, on rows of that table. A target whose escaping is
-malformed, or whose decoded path is not UTF-8, has **no** route path: the first
-is a 400 `net/http` answers before any handler and the second is a string Rust
-cannot carry, so both forward and Go answers. `desktop/parity/gourl_vectors.json`
-records what a live chi router actually did, not what the rule says it should.
+in opposite directions, on rows of that table — and canonicality is a property
+of the **whole** path, so one non-canonical escape anywhere leaves every segment
+raw. A target whose escaping is malformed, or whose escaping is canonical *and*
+whose decoded path is not UTF-8, has **no** route path: the first is a 400
+`net/http` answers before any handler and the second is a string Rust cannot
+carry, so both forward and Go answers. The order of those two checks is
+load-bearing — `/api/agents/%ff` decodes to the same unrepresentable byte as
+`%FF` but is not canonical, so chi routes on the raw target, which is plain
+ASCII. `desktop/parity/gourl_vectors.json` records what a live chi router
+actually did, not what the rule says it should.
 
 While every claimed route was a read this was invisible — a miss produced `Err`
 and forwarded, and Go answered correctly. It stopped being invisible when #274

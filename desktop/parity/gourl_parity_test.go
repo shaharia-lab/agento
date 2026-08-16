@@ -70,6 +70,12 @@ var routePathInputs = []string{
 	"/api/agents/a%2db",
 	"/api/agents/a%20b",
 	"/api/agents/caf%C3%A9",
+	// The lowercase sibling of the row above: same bytes, non-canonical, so chi
+	// routes on the raw target instead. It is also the case that proves the
+	// canonical check must run on *bytes* — `%ff` decodes to something Rust
+	// cannot hold, but the string chi routes on is plain ASCII.
+	"/api/agents/caf%c3%a9",
+	"/api/agents/%ff",
 	"/api/agents/a%2Fb",
 	"/api/agents/a%3Fb",
 	"/api/agents/a+b",
@@ -81,6 +87,10 @@ var routePathInputs = []string{
 	"/api/chats/a%20b/messages",
 	"/api/tasks/a%20b/run",
 	"/api/integrations/a%20b/triggers",
+	// The rule's least obvious consequence: canonicality is a property of the
+	// **whole** path, so one non-canonical escape anywhere leaves every segment
+	// raw — `r%201` included, even though on its own it would have decoded.
+	"/api/integrations/a%2Db/triggers/r%201",
 	"/api/claude-sessions/a%20b/insights",
 	"/api/agents/",
 	"/api/agents/a%2",
