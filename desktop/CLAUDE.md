@@ -451,6 +451,39 @@ conversation**, because `parentUuid` is `null` on exactly the event that starts
 one. The live diff caught it; no unit test would have, since the fixtures were
 all written by hand with the field present.
 
+**`serde` only consults the rule where it is attached, so a container needs its
+own** (#295). `null_is_zero_value` covers the *field*: `{"ids":null}` was
+already `None` while `{"ids":[null]}` stayed a type error, and Go answers `[""]`
+to the second with no error at all. `gojson::GoList<T>` is that one level down
+and `gojson::GoMap<V>` is the same for a `null` object *value*
+(`{"mcp":{"s":null}}` is the zero struct to Go); both keep the outer `Option`, so
+the nil-versus-empty distinction is untouched, and a newtype serializes as its
+inner value, so no response byte moves. They are on `BulkDeleteRequest.ids`
+(`chats.rs`, `tasks.rs`), on all three of `Capabilities`' lists plus its MCP map,
+and on `ServiceConfig.tools`, `CreateIntegrationRequest.services` and the trigger
+rule's two filter lists. On a *read* this class of bug degrades to a fallback; on
+the writes #274 claimed it is a **400 for a request Go applies**.
+
+**They are types rather than `deserialize_with` functions, and that is the whole
+lesson of #295.** Functions were the first version. `serde`'s derive makes a
+field carrying `deserialize_with` **required** — the `missing_field` path that
+lets a bare `Option` default to `None` is not generated — so every call site had
+to add `#[serde(default)]`. That attribute also feeds the derive's `visit_seq`
+arm, which rejects a short array only for fields with **no** default: adding it
+turned `{"capabilities":[]}` and `{"capabilities":{"mcp":{"s":[]}}}` from the 400
+Go answers into a created agent. A fix for a `null` would have shipped a widened
+**over-accept** — the one direction this port must not move in, because `Err`
+means forward and nothing errors when Rust accepts what Go refuses. A type needs
+no attribute at all, so the struct stays exactly as strict about its own shape.
+Pinned by `a_container_default_would_have_widened_the_struct_from_array_over_accept`.
+
+What is left standing, pinned by
+`a_full_length_positional_array_is_a_known_over_accept`: serde builds a struct
+from a **full-length** JSON array, positionally, so `{"capabilities":[[...],null,null]}`
+is accepted and Go answers 400. `writes::decode_body` guards that shape at the
+body level (#274) and nothing checks it for a value *inside* the body. It
+predates #295 and is tracked as **#337**.
+
 Genuinely unparseable input still fails, which is also what Go does — so the
 null case and the malformed case need separate tests.
 

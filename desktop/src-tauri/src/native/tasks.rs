@@ -479,7 +479,9 @@ fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, S
 #[derive(Debug, Default, serde::Deserialize)]
 #[serde(default)]
 struct BulkDeleteRequest {
-    ids: Option<Vec<String>>,
+    /// A `null` element is `""` to Go, not an error (#295) — and an empty id
+    /// simply matches no row, exactly as Go's does.
+    ids: Option<super::gojson::GoList<String>>,
 }
 
 /// Go's `maxQueryLimit`, reused as the bulk-delete cap.
@@ -892,6 +894,17 @@ mod tests {
             bulk_delete_job_history(file.path(), br#"{"ids":["j1","j3","nope"]}"#).expect("bulk");
         assert_eq!(answer.status, StatusCode::NO_CONTENT);
         assert_eq!(history_ids(&file), vec!["j2"]);
+    }
+
+    /// A `null` element is `""` to Go — no error — and an empty id matches no
+    /// row, so `j1` still goes. Reverting the deserializer makes this a 400 for
+    /// a request Go applies (#295).
+    #[test]
+    fn a_null_id_is_an_empty_string_rather_than_a_400() {
+        let file = migrated_with_history();
+        let answer = bulk_delete_job_history(file.path(), br#"{"ids":["j1",null]}"#).expect("bulk");
+        assert_eq!(answer.status, StatusCode::NO_CONTENT);
+        assert_eq!(history_ids(&file), vec!["j2", "j3"]);
     }
 
     #[test]

@@ -144,13 +144,20 @@ pub struct ScrubbedIntegration {
 }
 
 /// One enabled service of an integration. Mirrors `config.ServiceConfig`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServiceConfig {
     #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub enabled: bool,
     /// A nil slice is `null` and an empty one is `[]`; the stored value decides.
-    #[serde(default)]
-    pub tools: Option<Vec<String>>,
+    /// A `null` **element** is `""`, which is Go's answer too (#295).
+    ///
+    /// **No `#[serde(default)]`, deliberately.** It carried one until #295 made
+    /// it redundant — `Option<GoList<_>>` gets `None` from `missing_field`
+    /// without it — and its only remaining effect was the derive's `visit_seq`
+    /// arm, which admits an array with as many elements as the struct has
+    /// defaulted fields. That is what made `{"services":{"s":[]}}` a 201 where
+    /// Go answers 400. See [`super::gojson::GoList`].
+    pub tools: Option<super::gojson::GoList<String>>,
 }
 
 /// One tool an enabled, authenticated integration exposes. Mirrors
@@ -273,7 +280,7 @@ pub fn available_tools(db_path: &Path) -> Result<Vec<AvailableTool>, String> {
             if !service.enabled {
                 continue;
             }
-            for tool_name in service.tools.iter().flatten() {
+            for tool_name in service.tools.iter().flat_map(|tools| tools.iter()) {
                 tools.push(AvailableTool {
                     integration_id: cfg.id.clone(),
                     integration_name: cfg.name.clone(),
@@ -498,7 +505,9 @@ struct CreateIntegrationRequest {
     /// what keeps the two distinguishable.
     #[serde(deserialize_with = "super::gojson::captured_raw")]
     credentials: Option<Box<RawValue>>,
-    services: Option<BTreeMap<String, ServiceConfig>>,
+    /// A `null` **value** is the zero `ServiceConfig` to Go, not an error
+    /// (#295) — the same rule `Capabilities.mcp` carries.
+    services: Option<super::gojson::GoMap<ServiceConfig>>,
 }
 
 /// `handleCreateIntegration` → `integrationService.Create`.
@@ -568,7 +577,7 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
         enabled: req.enabled,
         id,
         name: req.name,
-        services: Some(services),
+        services: Some(services.0),
         integration_type: req.integration_type,
         updated_at: parse_written(&now)?,
     };
@@ -587,8 +596,9 @@ struct TriggerRuleRequest {
     enabled: bool,
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     filter_prefix: String,
-    filter_keywords: Option<Vec<String>>,
-    filter_chat_ids: Option<Vec<String>>,
+    /// A `null` element is `""` to Go, not an error (#295).
+    filter_keywords: Option<super::gojson::GoList<String>>,
+    filter_chat_ids: Option<super::gojson::GoList<String>>,
 }
 
 /// `handleCreateTriggerRule` → `triggerService.CreateRule`.
@@ -630,8 +640,8 @@ fn create_trigger_rule(
         agent_slug: req.agent_slug,
         enabled: req.enabled,
         filter_prefix: req.filter_prefix,
-        filter_keywords: req.filter_keywords,
-        filter_chat_ids: req.filter_chat_ids,
+        filter_keywords: req.filter_keywords.map(|list| list.0),
+        filter_chat_ids: req.filter_chat_ids.map(|list| list.0),
         created_at: stamp,
         updated_at: stamp,
     };
@@ -675,8 +685,8 @@ fn update_trigger_rule(
         agent_slug: req.agent_slug,
         enabled: req.enabled,
         filter_prefix: req.filter_prefix,
-        filter_keywords: req.filter_keywords,
-        filter_chat_ids: req.filter_chat_ids,
+        filter_keywords: req.filter_keywords.map(|list| list.0),
+        filter_chat_ids: req.filter_chat_ids.map(|list| list.0),
         created_at: existing.created_at,
         updated_at: parse_written(&now)?,
     };
@@ -1206,6 +1216,76 @@ mod tests {
             body_of(&answer)
         );
         assert_eq!(stored(&file, "SELECT services FROM integrations"), "{}");
+    }
+
+    /// The write surface carries the same containers `Capabilities` does, so it
+    /// carries the same rule (#295): a `null` service value is the zero
+    /// `ServiceConfig` to Go and a `null` tool is `""`, both with no error.
+    #[test]
+    fn a_null_inside_services_is_a_zero_value_rather_than_a_400() {
+        let file = migrated();
+        let answer = create(
+            file.path(),
+            br#"{"name":"W","type":"telegram","credentials":{"bot_token":"t"},
+                 "services":{"quiet":null,"loud":{"enabled":true,"tools":[null,"send"]}}}"#,
+        )
+        .expect("a body Go accepts");
+        assert_eq!(answer.status, axum::http::StatusCode::CREATED);
+
+        let stored_services = stored(&file, "SELECT services FROM integrations");
+        assert!(
+            stored_services.contains(r#""quiet":{"enabled":false,"tools":null}"#),
+            "{stored_services}"
+        );
+        assert!(
+            stored_services.contains(r#""tools":["","send"]"#),
+            "{stored_services}"
+        );
+
+        // A whole services map that is `null` is still nil, not `{}` — the
+        // nil-versus-empty distinction is untouched.
+        let file = migrated();
+        create(
+            file.path(),
+            br#"{"name":"W","type":"telegram","credentials":{"bot_token":"t"},"services":null}"#,
+        )
+        .expect("null map");
+        assert_eq!(stored(&file, "SELECT services FROM integrations"), "{}");
+
+        // And a wrongly-typed value still fails, which is Go's answer too —
+        // including the positional arrays that `#[serde(default)]` on `tools`
+        // used to admit. Dropping that attribute (redundant once `tools` is a
+        // `GoList`) is what closes them.
+        for services in [r#"{"s":1}"#, r#"{"s":[]}"#, r#"{"s":[true]}"#] {
+            let file = migrated();
+            let body = format!(
+                r#"{{"name":"W","type":"telegram","credentials":{{"bot_token":"t"}},"services":{services}}}"#
+            );
+            let err = create(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(
+                err.status(),
+                axum::http::StatusCode::BAD_REQUEST,
+                "{services}"
+            );
+        }
+    }
+
+    /// The trigger rule's two filter lists, same rule.
+    #[test]
+    fn a_null_filter_element_is_an_empty_string_rather_than_a_400() {
+        let file = migrated();
+        seed_integration(&file, "int-1");
+
+        let created = create_trigger_rule(
+            file.path(),
+            "int-1",
+            br#"{"name":"R","agent_slug":"a","filter_keywords":[null,"x"],"filter_chat_ids":[null]}"#,
+        )
+        .expect("a body Go accepts");
+        assert_eq!(created.status, axum::http::StatusCode::CREATED);
+        let body = body_of(&created);
+        assert!(body.contains(r#""filter_keywords":["","x"]"#), "{body}");
+        assert!(body.contains(r#""filter_chat_ids":[""]"#), "{body}");
     }
 
     /// Jira is the only type that rewrites what it stores.
