@@ -168,6 +168,7 @@ src-tauri/src/
     uploads.rs   POST /api/uploads — the one multipart body, and the extension
                  allowlist that is the route's whole security boundary
     gopath.rs    Go's filepath.Clean/Dir/Join, pinned to vectors generated from Go
+    gourl.rs     the path chi routes on — Go decodes only canonical escaping
     query.rs     one query parameter, read the way r.URL.Query().Get reads it
     pricing.rs   GET /api/pricing/catalog, plus the rate Resolver — and the
                  three rate writes (#306): add and correct are not one upsert
@@ -264,6 +265,34 @@ Two properties, both load-bearing:
 `no_two_endpoints_claim_the_same_request` guards the one thing a registry can
 get wrong that a match statement could not: two modules claiming one path, where
 the first listed silently wins and the other's tests keep passing.
+
+**Every `claims` function matches on the path *chi* routes on, not on the raw
+request target** (#294). They are different strings, and which one Go uses is a
+property of `url.setPath` rather than of the request: `net/http` decodes the
+target into a `url.URL` before any handler runs, and `chi`'s `Mux.routeHTTP`
+then routes on `RawPath` when it is set and on the decoded `Path` when it is
+not — so **Go decodes exactly when the escaping is canonical**.
+
+| request target | chi's segment |
+|---|---|
+| `/api/agents/a%2Db` | `a%2Db` — `-` needs no escaping, so the encoding does not round-trip |
+| `/api/agents/a%20b` | `a b` — a space *must* be escaped, so it does |
+| `/api/agents/caf%C3%A9` | `café` |
+| `/api/agents/a%2Fb` | `a%2Fb` — which is what keeps a one-segment route one segment |
+
+`native/gourl.rs` is that rule, applied once in `proxy.rs` where `path` is
+derived, so no module's `slug_of`/`id_of` has to know about it and none of the
+five can drift apart. Both a blanket decode and a blanket raw match are wrong,
+in opposite directions, on rows of that table. A target whose escaping is
+malformed, or whose decoded path is not UTF-8, has **no** route path: the first
+is a 400 `net/http` answers before any handler and the second is a string Rust
+cannot carry, so both forward and Go answers. `desktop/parity/gourl_vectors.json`
+records what a live chi router actually did, not what the rule says it should.
+
+While every claimed route was a read this was invisible — a miss produced `Err`
+and forwarded, and Go answered correctly. It stopped being invisible when #274
+and #276 claimed writes: `agents::update` *answers* 404 and `chats::patch`
+answers `chat not found` for a request Go would have applied to a real row.
 
 `AGENTO_DESKTOP_NATIVE` steers the whole seam:
 
