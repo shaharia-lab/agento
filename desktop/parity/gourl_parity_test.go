@@ -40,6 +40,14 @@ var updateGoURLVectors = flag.Bool("update-gourl-vectors", false,
 type routePathCase struct {
 	Raw string `json:"raw"`
 	// Go's `URL.Path`, or null when `ParseRequestURI` rejected the target.
+	//
+	// **Context only, never assert on it.** A Go string is arbitrary bytes and
+	// `json.Marshal` substitutes U+FFFD for the invalid ones, so the `%ff` row
+	// records `/api/agents/�` rather than the byte chi saw. It stays
+	// deterministic on both sides — Go compares marshaled bytes and Rust only
+	// interpolates this into a failure message — but a Go-side assertion on
+	// `Path` would not hold for that row. `route_path` is the field with the
+	// answer, and it is ASCII whenever it is non-null.
 	Path *string `json:"path"`
 	// Go's `URL.RawPath` — empty unless the escaping is non-canonical.
 	RawPath *string `json:"raw_path"`
