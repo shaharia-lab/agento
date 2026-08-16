@@ -330,7 +330,57 @@ pub fn compact(src: &str) -> String {
 /// This is Agento's settings files, not a response: the Claude settings profile
 /// surface writes `settings.json`, `settings_<slug>.json` and
 /// `settings_profiles.json` with `MarshalIndent` so a person can read them.
-pub fn indent(src: &[u8]) -> Vec<u8> {
+///
+/// # Precondition: the input is already compact
+///
+/// Named `indent_compact` because it is not `json.Indent`, which re-indents
+/// *any* well-formed JSON by discarding the whitespace it finds. This one only
+/// inserts, so pre-existing whitespace between tokens survives into the output
+/// and the result is wrong. That is not a limitation worth removing: the only
+/// callers hand it [`to_vec_marshal`]'s output, which is compact by
+/// construction, and `MarshalIndent` is defined as exactly that pair.
+pub fn indent_compact(src: &[u8]) -> Vec<u8> {
+    debug_assert!(
+        !has_whitespace_between_tokens(src),
+        "indent_compact needs Marshal's compact output; \
+         whitespace between tokens survives into the result"
+    );
+    indent_compact_inner(src)
+}
+
+/// Whether `src` carries whitespace outside a string — the precondition
+/// [`indent_compact`] asserts. Debug builds only, so the scan is free in
+/// release.
+#[cfg(debug_assertions)]
+fn has_whitespace_between_tokens(src: &[u8]) -> bool {
+    let mut in_string = false;
+    let mut escaped = false;
+    for &byte in src {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b' ' | b'\t' | b'\n' | b'\r' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+#[cfg(not(debug_assertions))]
+fn has_whitespace_between_tokens(_src: &[u8]) -> bool {
+    false
+}
+
+fn indent_compact_inner(src: &[u8]) -> Vec<u8> {
     let mut out: Vec<u8> = Vec::with_capacity(src.len() * 2);
     let mut depth = 0usize;
     let mut need_indent = false;

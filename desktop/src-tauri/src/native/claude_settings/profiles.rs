@@ -14,10 +14,24 @@
 //! later": there is no read here that does not write.
 //!
 //! It is also the one place `Mode::Diff`'s "never run a write" rule does not
-//! cover, since this *is* a `GET` — and it is harmless: the proxy runs Rust
-//! first and Go second, and seeding is idempotent, so Go's list finds the index
-//! Rust just wrote and re-seeds nothing. The two answers are the same bytes
-//! because the second call had nothing left to do.
+//! cover, since this *is* a `GET` — and it is harmless in the sense that
+//! matters: the proxy runs Rust first and Go second, and seeding is idempotent,
+//! so Go's list finds the index Rust just wrote and re-seeds nothing.
+//!
+//! **But that is also why the diff proves nothing about seeding.** Because Rust
+//! runs first, Go is reading Rust's own output: the two answers agree because
+//! the second call had nothing left to do, not because both implementations
+//! would have seeded the same index from an empty dir. A wrong `settings_default.json`
+//! diffs clean here. The unit tests below are what actually pin seeding, and
+//! `tests/parity_claude_settings.rs` compares the *files* rather than only the
+//! responses for the same reason. Note also that shadow mode writes into
+//! whatever Claude config dir the developer is running with, which is the second
+//! reason the parity suite insists on a scratch `CLAUDE_CONFIG_DIR`.
+//!
+//! It is deliberately **not** in `native::diff_exempt`: that list is for routes
+//! whose answers cannot agree by construction, and these agree. The problem is
+//! that the agreement is uninformative, which is a caveat rather than an
+//! exemption.
 //!
 //! # Which errors are answers, and which are forwarded
 //!
@@ -99,7 +113,11 @@ struct MetadataOut<'a> {
 
 /// `config.LoadProfilesMetadata`. A missing file is an empty index, not an
 /// error; anything else Go answers with a 500, so it forwards.
-fn load(dir: &str) -> Result<Vec<Profile>, WriteError> {
+///
+/// Public because the agent runner needs it: `LoadProfileFilePathIn` resolves a
+/// named settings profile through this same index, and there is now exactly one
+/// reader of it.
+pub fn load(dir: &str) -> Result<Vec<Profile>, WriteError> {
     let path = super::profiles_path(dir);
     let data = match std::fs::read(&path) {
         Ok(data) => data,
@@ -129,7 +147,7 @@ fn load(dir: &str) -> Result<Vec<Profile>, WriteError> {
 pub fn encode_index(profiles: &[Profile]) -> Result<Vec<u8>, String> {
     let compact = gojson::to_vec_marshal(&MetadataOut { profiles })
         .map_err(|e| format!("marshaling profiles index: {e}"))?;
-    Ok(gojson::indent(&compact))
+    Ok(gojson::indent_compact(&compact))
 }
 
 /// `saveProfilesMetadata`: `MarshalIndent` into the file, mode 0600.
@@ -156,12 +174,31 @@ fn ensure_default(dir: &str) -> Result<(), WriteError> {
     // An unreadable or unparseable settings.json seeds an empty object rather
     // than failing — the profile has to exist either way.
     let content = std::fs::read(settings_json_path(dir)).unwrap_or_else(|_| b"{}".to_vec());
-    let value = match go_any(&content) {
-        Decoded::Value(value) => value,
-        Decoded::NotJson | Decoded::NumberOutOfRange => Value::Object(serde_json::Map::new()),
-        // Go's parser would have succeeded; ours cannot say. Nothing but the
-        // directory has been touched, so forwarding is exact.
-        Decoded::Undecidable(reason) => return Err(WriteError::Fallback(reason)),
+    // `ensureDefaultProfileExists` calls `json.Unmarshal(content, &pretty)`,
+    // which is **whole-input**: trailing content after the first value fails it
+    // (`Unmarshal([]byte("{\"a\":1} junk"))` is `invalid character 'j' after
+    // top-level value`, verified against the Go toolchain) and Go seeds `{}`.
+    // `go_any` deliberately never calls `de.end()` — right for a request body a
+    // `json.Decoder` reads, wrong for a file `Unmarshal` reads — so the rule is
+    // reapplied here. `go_json_valid` is exactly "one value, trailing
+    // whitespace only", so it is the rule rather than a second copy of it.
+    //
+    // This propagates if it is wrong: every later `create` byte-copies the
+    // seeded file, so a `{"a":1}` Go would never have written travels into
+    // every profile made afterwards.
+    let value = if !go_json_valid(&content) {
+        Value::Object(serde_json::Map::new())
+    } else {
+        match go_any(&content) {
+            Decoded::Value(value) => value,
+            Decoded::NotJson | Decoded::NumberOutOfRange => Value::Object(serde_json::Map::new()),
+            // Go's parser would have succeeded; ours cannot say — a document
+            // past serde's 128-level limit, or bytes that are not UTF-8, which
+            // Go decodes with a U+FFFD substitution this port will not guess.
+            // Nothing but the directory has been touched, so forwarding is
+            // exact.
+            Decoded::Undecidable(reason) => return Err(WriteError::Fallback(reason)),
+        }
     };
     let out = marshal_indent(&value).map_err(WriteError::Fallback)?;
 
@@ -322,10 +359,20 @@ fn detail_body(profile: &Profile, dir: &str) -> Result<Vec<u8>, WriteError> {
     let mut settings = None;
     let mut exists = false;
     if let Ok(data) = std::fs::read(&profile.file_path) {
+        // Go's `json.Valid` accepts bytes that are not UTF-8 and its encoder
+        // then ships them verbatim. serde cannot build a `RawValue` from them,
+        // so this would have answered `exists: true` with `settings: null`
+        // where Go sends the document. Forward instead.
+        if !super::is_utf8(&data) {
+            return Err(WriteError::Fallback(format!(
+                "{} is not UTF-8; Go serves those bytes verbatim",
+                profile.file_path
+            )));
+        }
         // `json.Valid` only. An unparseable file is `exists: false` with a
         // `null` payload — an answer, not an error.
         if go_json_valid(&data) {
-            settings = raw_field(&data);
+            settings = Some(raw_field(&data).map_err(WriteError::Fallback)?);
             exists = true;
         }
     }
@@ -433,6 +480,15 @@ pub fn update(dir: &str, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
     let mut profiles = load(dir)?;
     let idx = find_index(&profiles, id).ok_or_else(|| not_found(id))?;
 
+    // Hoisted out of the closing `detail_body`, which is where it used to run.
+    // It forwards on a relative or out-of-dir recorded path — but by then the
+    // rename may have moved the file and `save` rewritten the index under the
+    // new id, so Go would look up the URL's *old* id, find nothing and answer
+    // 404 where Go alone would have answered 500. `delete`, `duplicate` and
+    // `set_default` all validate up front; this is the same rule, and it costs
+    // no parity because the check only ever decides forward-versus-answer.
+    validate_path_within_dir(&profiles[idx].file_path, dir)?;
+
     // `validateSettingsJSON` runs before any filesystem mutation so a rename
     // cannot land with the settings unwritten. Its `json.Valid` check cannot
     // fail — the bytes came out of a decoder — but the *second* parse, into
@@ -454,7 +510,15 @@ pub fn update(dir: &str, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
             match go_any(raw.as_bytes()) {
                 Decoded::Value(value) => Some(Ok(value)),
                 Decoded::NumberOutOfRange => Some(Err(())),
-                Decoded::NotJson => return Err(WriteError::InvalidBody),
+                // `go_json_valid` just passed over the same bytes, so this is
+                // the two parsers disagreeing rather than a malformed request.
+                // Forward — answering 400 here would be inventing a status Go
+                // has no reason to send.
+                Decoded::NotJson => {
+                    return Err(WriteError::Fallback(
+                        "settings re-parse disagrees with json.Valid; only Go can say".to_string(),
+                    ))
+                }
                 Decoded::Undecidable(reason) => return Err(WriteError::Fallback(reason)),
             }
         }
@@ -477,6 +541,11 @@ pub fn update(dir: &str, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
         }
         Some(Ok(value)) => {
             let out = marshal_indent(&value).map_err(WriteError::Fallback)?;
+            // Written without `validate_path_within_dir`, on purpose: Go's
+            // `writeProfileSettings` has no check either, so adding one here
+            // would refuse a write Go performs. The hoisted check above covers
+            // the recorded path this request arrived with; a path the *rename*
+            // produced is always `<dir>/settings_<id>.json`.
             let path = profiles[idx].file_path.clone();
             super::write_file(&path, &out)
                 .map_err(|e| WriteError::Fallback(format!("writing {path}: {e}")))?;
@@ -517,6 +586,12 @@ fn rename(
         let new_file_path = resolve_profile_file_path(dir, &new_id)?;
         // No file to move is not an error: the index is updated and the write
         // that follows creates it at the new path.
+        //
+        // Also no `validate_path_within_dir` — correct parity, not an oversight:
+        // Go's `moveProfileFile` reads the recorded path unchecked. The
+        // destination is safe by construction (`resolveProfileFilePath` runs
+        // `safeProfileID` first), so only the *source* is unvalidated, and it is
+        // a read.
         if let Ok(data) = std::fs::read(&profiles[idx].file_path) {
             super::write_file(&new_file_path, &data)
                 .map_err(|e| WriteError::Fallback(format!("writing {new_file_path}: {e}")))?;
@@ -819,6 +894,45 @@ mod tests {
         assert_eq!(read(&format!("{d}/settings_default.json")), "{}");
     }
 
+    /// **Seeding reads the file with `json.Unmarshal`, which is whole-input.**
+    /// Trailing content after the first value fails it, so Go seeds `{}` — where
+    /// a `json.Decoder`'s stream semantics would have seeded `{"a": 1}`. This
+    /// propagates: every later `create` byte-copies the seeded file.
+    #[test]
+    fn seeding_rejects_trailing_content_the_way_unmarshal_does() {
+        let root = dir();
+        let d = path_of(&root);
+        std::fs::write(settings_json_path(&d), r#"{"a":1} junk"#).expect("write");
+        ensure_default(&d).expect("seed");
+        assert_eq!(
+            read(&format!("{d}/settings_default.json")),
+            "{}",
+            "Unmarshal rejects trailing content, so Go seeds an empty object"
+        );
+
+        // …and the copy really does travel into the next profile.
+        create(&d, br#"{"name":"Copied"}"#).expect("create");
+        assert_eq!(read(&format!("{d}/settings_copied.json")), "{}");
+    }
+
+    /// A `settings.json` that is valid JSON to Go but not UTF-8: Go seeds the
+    /// document with U+FFFD substituted, which this port will not guess. It
+    /// forwards, having touched only the directory.
+    #[test]
+    fn seeding_from_a_non_utf8_settings_json_forwards() {
+        let root = dir();
+        let d = path_of(&root);
+        std::fs::write(settings_json_path(&d), b"{\"a\":\"\xff\"}").expect("write");
+        assert!(matches!(
+            ensure_default(&d).unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+        assert!(
+            !std::path::Path::new(&format!("{d}/settings_default.json")).exists(),
+            "the forward must leave no seeded profile behind"
+        );
+    }
+
     // ─── The two path traps ───────────────────────────────────────────────────
 
     /// **The named-profile trap.** The index records an absolute path; a read
@@ -925,6 +1039,18 @@ mod tests {
         assert!(
             body.contains("\"settings\":null,\"exists\":false"),
             "{body}"
+        );
+
+        // A file that is valid JSON to Go but not UTF-8 is neither of those
+        // answers: `json.Valid` passes and Go ships the bytes verbatim, so a
+        // `settings: null, exists: false` here would be a wrong answer. Forward.
+        std::fs::write(&profile.file_path, b"{\"a\":\"\xff\"}").expect("write");
+        assert!(
+            matches!(
+                detail_body(&profile, &d).unwrap_err(),
+                WriteError::Fallback(_)
+            ),
+            "non-UTF-8 profile settings must forward"
         );
     }
 
@@ -1103,6 +1229,123 @@ mod tests {
             assert_eq!(err.status(), StatusCode::BAD_REQUEST, "body {body:?}");
             assert_eq!(err.message(), "name is required", "body {body:?}");
         }
+    }
+
+    /// **A body past the scanner's 10000-level cap creates nothing.** `Decode`
+    /// errors `exceeded max depth` in Go, so `req.Name` stays empty and the
+    /// handler answers `400 name is required`. serde routes the unknown `junk`
+    /// field to `IgnoredAny`, whose skip is iterative and counts no depth, so
+    /// this used to decode with `name == "x"` and answer **201** — writing
+    /// `settings_x.json` and appending to the index for a request Go refuses.
+    #[test]
+    fn a_create_deeper_than_gos_scanner_is_400_and_writes_nothing() {
+        let root = dir();
+        let d = path_of(&root);
+        let body = format!(
+            r#"{{"name":"x","junk":{}{}}}"#,
+            "[".repeat(10000),
+            "]".repeat(10000)
+        );
+
+        let err = create(&d, body.as_bytes()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.message(), "name is required");
+
+        // Not the profile, not the seeded default, not the index: the decode
+        // fails before `ensure_default` runs.
+        assert!(!std::path::Path::new(&format!("{d}/settings_x.json")).exists());
+        assert!(!std::path::Path::new(&super::super::profiles_path(&d)).exists());
+        assert!(!std::path::Path::new(&format!("{d}/settings_default.json")).exists());
+    }
+
+    /// The same cap on `update`, which is a **400** and not the 422 a
+    /// hand-written depth check inside `validateSettingsJSON` produced: Go's
+    /// `Decode` fails first, so the service never runs. The 128–10000 band
+    /// still forwards, which is the neighbouring case easy to lose.
+    #[test]
+    fn an_update_deeper_than_gos_scanner_is_400_and_the_band_below_forwards() {
+        let root = dir();
+        let d = path_of(&root);
+        list(&d).expect("seed");
+
+        let too_deep = format!(
+            r#"{{"settings":{}{}}}"#,
+            "[".repeat(10001),
+            "]".repeat(10001)
+        );
+        let err = update(&d, "default", too_deep.as_bytes()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.message(), "invalid JSON body");
+
+        // Past serde's 128-level limit but inside Go's 10000: neither parser is
+        // the authority, so it forwards.
+        let band = format!(r#"{{"settings":{}{}}}"#, "[".repeat(200), "]".repeat(200));
+        assert!(matches!(
+            update(&d, "default", band.as_bytes()).unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+    }
+
+    /// **`update` validates the recorded path before it mutates anything.** It
+    /// used to reach `validate_path_within_dir` only in the closing
+    /// `detail_body` — after the rename had moved the file and `save` had
+    /// rewritten the index under the new id — so the forward sent Go a request
+    /// whose URL id no longer existed and Go answered 404 where Go alone would
+    /// have answered 500.
+    #[test]
+    fn update_validates_the_recorded_path_before_it_renames() {
+        let root = dir();
+        let d = path_of(&root);
+        let outside = dir();
+        let stray = format!("{}/settings_stray.json", path_of(&outside));
+        std::fs::write(&stray, "{}").expect("write");
+        save(
+            &d,
+            &[Profile {
+                id: "stray".to_string(),
+                name: "Stray".to_string(),
+                file_path: stray.clone(),
+                is_default: false,
+            }],
+        )
+        .expect("save");
+
+        assert!(matches!(
+            update(&d, "stray", br#"{"name":"Moved"}"#).unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+
+        // The forward has to be exact, which means the id in the URL still
+        // resolves on Go's side.
+        let profiles = load(&d).expect("load");
+        assert_eq!(profiles[0].id, "stray", "the index must be untouched");
+        assert_eq!(profiles[0].file_path, stray);
+        assert!(
+            !std::path::Path::new(&format!("{d}/settings_moved.json")).exists(),
+            "nothing may have moved"
+        );
+    }
+
+    /// A body that is not UTF-8 forwards from every write on this surface: Go
+    /// substitutes U+FFFD into the decoded string and carries on, and where it
+    /// puts the replacement character is not something this port reproduces.
+    #[test]
+    fn a_non_utf8_body_forwards_from_create_and_update() {
+        let root = dir();
+        let d = path_of(&root);
+        list(&d).expect("seed");
+
+        assert!(matches!(
+            create(&d, b"{\"name\":\"x\xffy\"}").unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+        assert!(matches!(
+            update(&d, "default", b"{\"settings\":{\"a\":\"\xff\"}}").unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+        // Neither may have written anything.
+        assert!(!std::path::Path::new(&format!("{d}/settings_xy.json")).exists());
+        assert_eq!(read(&format!("{d}/settings_default.json")), "{}");
     }
 
     // ─── The whole surface, against the answers Go gave ───────────────────────

@@ -39,11 +39,20 @@
 //! - **On disk**, every file this surface writes goes through
 //!   `json.MarshalIndent(v, "", "  ")` after a round trip through Go's `any` —
 //!   which sorts object keys, respells every number as a float64 and escapes
-//!   HTML. [`marshal_indent`] is that pair, and [`super::gojson::indent`] is the
-//!   `Indent` half.
+//!   HTML. [`marshal_indent`] is that pair, and
+//!   [`super::gojson::indent_compact`] is the `Indent` half.
 //! - **The profile file created by `POST .../profiles`** is neither: it is the
 //!   current default profile's bytes copied **verbatim**. Reformatting it would
 //!   be a diff on a file the user did not ask to change.
+//!
+//! ## …and the bytes are not always UTF-8
+//!
+//! `encoding/json` never rejects a document for its bytes and serde_json does,
+//! which is not a boundary disagreement but a different answer to "is this
+//! JSON". Every path that parses or re-emits bytes here guards with
+//! [`is_utf8`] and **forwards**, because Go's answer — U+FFFD substituted at
+//! whatever offsets `encoding/json` chooses — is not something this port can
+//! reproduce, only defer to.
 //!
 //! # The cache question
 //!
@@ -111,6 +120,16 @@ pub fn profiles_path(dir: &str) -> String {
 ///
 /// The mode matters: these files carry API keys and hook commands, and
 /// `std::fs::write` would create them `0666 & ~umask`.
+///
+/// **Truncate-then-write, not temp-file-then-rename**, and that is a choice.
+/// `os.WriteFile` truncates, so a crash between the truncate and the write
+/// leaves an empty file — and for `settings_profiles.json` an empty index
+/// orphans every profile. An atomic replace would be strictly better *and*
+/// byte-identical in final content, so it costs no parity. It is not done here
+/// because the crash window belongs to the Go original too: fixing it in one
+/// implementation and not the other means the desktop app and `agento web`
+/// survive a power cut differently, which is a worse thing to debug than the
+/// window itself. It is on the upstream list in `desktop/CLAUDE.md`.
 pub fn write_file(path: &str, data: &[u8]) -> io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
@@ -139,8 +158,36 @@ pub fn mkdir_all(dir: &str) -> io::Result<()> {
 // ─── Go's `any`, and the four ways its parse can end ──────────────────────────
 
 /// `encoding/json`'s `maxNestingDepth`. Its scanner refuses anything deeper, so
-/// `json.Valid` says **false** for a 10001-level document.
+/// `json.Valid` says **false** for a 10001-level document — and so does
+/// `json.Decoder.Decode`, which drives the same scanner.
 const GO_MAX_NESTING_DEPTH: usize = 10000;
+
+/// Whether `src` is UTF-8, which is the one place Go's JSON layer and serde's
+/// disagree about *validity* rather than about a boundary.
+///
+/// `encoding/json` never rejects a document for its bytes. `json.Valid` says
+/// true for `{"a":"x\xffy"}`, `Unmarshal` into `any` succeeds and substitutes
+/// U+FFFD, `MarshalIndent` writes the replacement character, and the encoder
+/// hands a `json.RawMessage` straight through byte for byte — all four verified
+/// against the Go toolchain. serde_json splits: its `ignore_str` does **not**
+/// validate, so [`go_json_valid`] agrees, but `parse_str` does, so every parse
+/// that actually materializes the string fails.
+///
+/// Left unguarded that produced five *wrong answers* rather than five forwards —
+/// a 400 where Go writes the file and answers 200, a seeded default profile
+/// whose bytes are not Go's, and a `settings` key silently missing from a 200.
+/// So every path that is about to parse or re-emit bytes checks this first and
+/// forwards, which is the only answer this port can be sure of: reproducing
+/// Go's substitution would mean reproducing where `encoding/json` puts the
+/// replacement character, and that is a guess.
+pub fn is_utf8(src: &[u8]) -> bool {
+    std::str::from_utf8(src).is_ok()
+}
+
+/// The `Fallback`/`Undecidable` reason every [`is_utf8`] guard reports.
+fn not_utf8_reason(what: &str) -> String {
+    format!("{what} is not UTF-8; Go substitutes U+FFFD and serde refuses to parse")
+}
 
 /// `json.Valid`: one complete JSON value, trailing whitespace allowed and
 /// nothing else.
@@ -237,12 +284,32 @@ pub enum Decoded {
 /// `serde_json::from_slice` would reject it, which is why this drives the
 /// `Deserializer` by hand and never calls `end()`.
 ///
+/// **It returns the first value's bytes**, and that is not a convenience. The
+/// caller's next step is `json.Unmarshal(raw, &any)` over exactly what `Decode`
+/// captured, so a port that handed it `body` again would be scanning bytes Go
+/// never looked at: `{"a":1} 1e999` is a 200 in Go and was a
+/// `400 invalid JSON settings` here, because [`numbers_fit_float64`] read the
+/// whole slice while the decode read only the head. One value in, one value on.
+///
 /// `Err(None)` is Go's decode error; `Err(Some(reason))` is a document this
 /// port's parser will not judge.
-pub fn decode_stream_head(body: &[u8]) -> Result<(), Option<String>> {
+pub fn decode_stream_head(body: &[u8]) -> Result<&[u8], Option<String>> {
+    // `json.Decoder` scans with `encoding/json`'s scanner, so the 10000-level
+    // cap applies to `Decode` exactly as it applies to `json.Valid`. Verified
+    // against Go 1.26.5: a 10001-deep body is `exceeded max depth`, which the
+    // handlers turn into their 400 — while serde's `ignore_value` is iterative
+    // and would have decoded it happily.
+    if nesting_depth_exceeds(body, GO_MAX_NESTING_DEPTH) {
+        return Err(None);
+    }
+    if !is_utf8(body) {
+        return Err(Some(not_utf8_reason("the request body")));
+    }
     let mut de = serde_json::Deserializer::from_slice(body);
-    match IgnoredAny::deserialize(&mut de) {
-        Ok(_) => Ok(()),
+    // `&RawValue` rather than `IgnoredAny`: its skip is the same iterative
+    // `ignore_value`, and it hands back the span that was skipped.
+    match <&RawValue>::deserialize(&mut de) {
+        Ok(raw) => Ok(raw.get().as_bytes()),
         Err(e) if is_recursion_limit(&e) => Err(Some(e.to_string())),
         Err(_) => Err(None),
     }
@@ -272,10 +339,31 @@ pub fn decode_stream_head(body: &[u8]) -> Result<(), Option<String>> {
 /// Duplicate keys forward for the reason `decode_body` documents: `encoding/json`
 /// keeps the last occurrence but type-checks every one, and serde refuses them
 /// outright, so only Go can answer. Safe because this runs before any mutation.
+///
+/// The two guards ahead of the decode are the two places serde and
+/// `encoding/json` disagree about the *body* rather than about a value:
+///
+/// - **Depth.** `Decode` drives `encoding/json`'s scanner, so it stops at 10000
+///   levels — including inside a field the struct ignores. serde routes an
+///   unknown field to `IgnoredAny`, whose skip is iterative and counts nothing,
+///   so `{"name":"x","junk":[×10001]}` decoded here with `name == "x"` and
+///   *created a profile Go refuses*, answering 201 where Go answers
+///   `400 name is required`. A state-changing divergence, which is why the
+///   check is on the body and not on the fields.
+/// - **UTF-8.** See [`is_utf8`]: Go substitutes U+FFFD into a `string` field
+///   and carries on, serde fails the decode. Forwarded rather than guessed.
 pub(crate) fn decode_request<T>(body: &[u8]) -> Result<T, WriteError>
 where
     T: serde::de::DeserializeOwned + Default,
 {
+    if nesting_depth_exceeds(body, GO_MAX_NESTING_DEPTH) {
+        // `json.Decoder`'s scanner stops at 10000, so this never reaches the
+        // struct's fields and the handler sees a zero-valued request.
+        return Err(WriteError::InvalidBody);
+    }
+    if !is_utf8(body) {
+        return Err(WriteError::Fallback(not_utf8_reason("the request body")));
+    }
     match first_token(body) {
         Some(b'{') => {
             let mut de = serde_json::Deserializer::from_slice(body);
@@ -309,7 +397,9 @@ fn trim_leading_space(body: &[u8]) -> &[u8] {
 /// step between them.
 pub fn decode_go_any(body: &[u8]) -> Decoded {
     match decode_stream_head(body) {
-        Ok(()) => go_any(body),
+        // The **first value's** bytes, not `body`: that is what Go's `Decode`
+        // captured and what its `Unmarshal` then sees.
+        Ok(first) => go_any(first),
         Err(None) => Decoded::NotJson,
         Err(Some(reason)) => Decoded::Undecidable(reason),
     }
@@ -318,6 +408,10 @@ pub fn decode_go_any(body: &[u8]) -> Decoded {
 /// `json.Unmarshal(raw, &v any)` for a body already known to be syntactically
 /// valid JSON.
 pub fn go_any(body: &[u8]) -> Decoded {
+    // Go parses these; serde refuses to. See [`is_utf8`].
+    if !is_utf8(body) {
+        return Decoded::Undecidable(not_utf8_reason("the value"));
+    }
     if !numbers_fit_float64(body) {
         return Decoded::NumberOutOfRange;
     }
@@ -424,14 +518,21 @@ fn widen_numbers(value: Value) -> Option<Value> {
 pub fn marshal_indent(value: &Value) -> Result<Vec<u8>, String> {
     let compact =
         gojson::to_vec_marshal(value).map_err(|e| format!("marshaling settings JSON: {e}"))?;
-    Ok(gojson::indent(&compact))
+    Ok(gojson::indent_compact(&compact))
 }
 
 /// Carry stored bytes to the wire the way a `json.RawMessage` field does:
 /// through Go's `compact`, so key order and number spelling survive.
-pub fn raw_field(bytes: &[u8]) -> Option<Box<RawValue>> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    RawValue::from_string(gojson::compact(text)).ok()
+///
+/// `Result` rather than `Option` on purpose. Every caller puts this behind a
+/// `skip_serializing_if` or a nullable field, so a `None` here would not be an
+/// error — it would be a **200 with the `settings` key quietly missing**, which
+/// is exactly what non-UTF-8 bytes used to produce. Callers now have to say what
+/// a failure means, and all of them say "forward".
+pub fn raw_field(bytes: &[u8]) -> Result<Box<RawValue>, String> {
+    let text = std::str::from_utf8(bytes).map_err(|_| not_utf8_reason("the stored bytes"))?;
+    RawValue::from_string(gojson::compact(text))
+        .map_err(|e| format!("re-emitting stored JSON: {e}"))
 }
 
 // ─── GET / PUT /api/claude-settings ───────────────────────────────────────────
@@ -466,6 +567,13 @@ pub fn get_settings(dir: &str) -> Result<super::Answer, String> {
         Err(e) => return Err(format!("reading {path}: {e}")),
     };
 
+    // Go serves these bytes verbatim through its encoder; serde cannot build a
+    // `RawValue` from them. Forwarding is the only right answer — dropping the
+    // key would have been `{"exists":true}` where Go sends the whole document.
+    if !is_utf8(&data) {
+        return Err(not_utf8_reason(&path));
+    }
+
     if !go_json_valid(&data) {
         // Also a 500 in Go ("Claude settings file contains invalid JSON").
         return Err(format!("{path} contains invalid JSON"));
@@ -473,7 +581,7 @@ pub fn get_settings(dir: &str) -> Result<super::Answer, String> {
 
     let body = gojson::to_vec(&ClaudeSettingsResponse {
         exists: true,
-        settings: raw_field(&data),
+        settings: Some(raw_field(&data)?),
     })
     .map_err(|e| format!("encoding claude settings: {e}"))?;
     Ok(super::Answer::json(body))
@@ -491,7 +599,8 @@ pub fn get_settings(dir: &str) -> Result<super::Answer, String> {
 /// and invisible, but reordering it would still be a port that guessed.
 pub fn put_settings(dir: &str, body: &[u8]) -> Result<super::Answer, WriteError> {
     // 1. `json.NewDecoder(r.Body).Decode(&incoming)` — `errInvalidJSONBody`.
-    decode_stream_head(body).map_err(|reason| match reason {
+    // `incoming` is the first value only, and step 4 parses *that*, not `body`.
+    let incoming = decode_stream_head(body).map_err(|reason| match reason {
         Some(reason) => WriteError::Fallback(reason),
         None => WriteError::InvalidBody,
     })?;
@@ -504,14 +613,21 @@ pub fn put_settings(dir: &str, body: &[u8]) -> Result<super::Answer, WriteError>
 
     // 4. `json.Unmarshal(incoming, &pretty)` — the handler's own message, which
     // is not `errInvalidJSONBody`.
-    let value = match go_any(body) {
+    let value = match go_any(incoming) {
         Decoded::Value(value) => value,
         Decoded::NumberOutOfRange => {
             return Err(WriteError::BadRequest("invalid JSON settings".to_string()))
         }
         Decoded::Undecidable(reason) => return Err(WriteError::Fallback(reason)),
-        // Unreachable: step 1 established the syntax.
-        Decoded::NotJson => return Err(WriteError::InvalidBody),
+        // Step 1 captured a complete value and checked its bytes, so this means
+        // the two parsers disagree about what JSON is. Forward rather than pick
+        // a side: the arm that used to answer 400 here was reachable through
+        // non-UTF-8 bytes, where Go writes the file and answers 200.
+        Decoded::NotJson => {
+            return Err(WriteError::Fallback(
+                "the decoded value does not re-parse; only Go can say".to_string(),
+            ))
+        }
     };
 
     let out = marshal_indent(&value).map_err(WriteError::Fallback)?;
@@ -521,7 +637,7 @@ pub fn put_settings(dir: &str, body: &[u8]) -> Result<super::Answer, WriteError>
 
     let answer = gojson::to_vec(&ClaudeSettingsResponse {
         exists: true,
-        settings: raw_field(&out),
+        settings: Some(raw_field(&out).map_err(WriteError::Fallback)?),
     })
     .map_err(|e| WriteError::Fallback(format!("encoding claude settings: {e}")))?;
     Ok(super::Answer::json(answer))
@@ -769,6 +885,91 @@ mod tests {
             decode_go_any(br#"{"a":1}trailing"#),
             Decoded::Value(_)
         ));
+        // …and *nothing* downstream may look at them either. `{"a":1} 1e999` is
+        // a 200 in Go, because `Decode` hands `Unmarshal` only `{"a":1}`. This
+        // was a `400 invalid JSON settings` while the number scan read the whole
+        // body — the case the assertion above missed, because `trailing`
+        // contains no number.
+        assert!(matches!(
+            decode_go_any(br#"{"a":1} 1e999"#),
+            Decoded::Value(_)
+        ));
+        // The first value is also all that is *written*.
+        assert_eq!(
+            decode_stream_head(br#"{"a":1} 1e999"#).expect("decodes"),
+            br#"{"a":1}"#
+        );
+    }
+
+    /// **`json.Decoder` enforces the scanner's 10000-level cap.** Verified
+    /// against Go 1.26.5: a 10001-deep body is `exceeded max depth` — including
+    /// when the depth is inside a field the struct ignores, where serde's
+    /// iterative `IgnoredAny` skip counts nothing and would have decoded it.
+    #[test]
+    fn a_decode_stops_where_gos_scanner_stops() {
+        #[derive(Debug, Default, Deserialize)]
+        #[serde(default)]
+        struct Probe {
+            name: String,
+        }
+
+        // Depth 10001: the object plus 10000 arrays.
+        let too_deep = format!(
+            r#"{{"name":"x","junk":{}{}}}"#,
+            "[".repeat(10000),
+            "]".repeat(10000)
+        );
+        assert_eq!(
+            decode_request::<Probe>(too_deep.as_bytes()).unwrap_err(),
+            WriteError::InvalidBody,
+            "Go's Decode errors, so `name` never lands and the handler 400s"
+        );
+        assert!(matches!(
+            decode_go_any(too_deep.as_bytes()),
+            Decoded::NotJson
+        ));
+
+        // Depth 10000 exactly: Go decodes it, and so must this.
+        let deep_enough = format!(
+            r#"{{"name":"x","junk":{}{}}}"#,
+            "[".repeat(9999),
+            "]".repeat(9999)
+        );
+        let decoded: Probe = decode_request(deep_enough.as_bytes()).expect("Go decodes this");
+        assert_eq!(decoded.name, "x");
+    }
+
+    /// **Go's JSON layer is not UTF-8-strict and serde's is.** Every one of
+    /// these is `true`/`Ok` in Go — `json.Valid`, `Unmarshal` into `any`,
+    /// `MarshalIndent`, and the encoder's `json.RawMessage` passthrough — so
+    /// none of them may be a Rust *answer*. They forward.
+    #[test]
+    fn bytes_that_are_not_utf8_forward_rather_than_answering() {
+        let src = b"{\"a\":\"\xff\"}";
+
+        // `json.Valid` says true, and so does this — the skip does not validate.
+        assert!(go_json_valid(src));
+        // …but every parse that materializes the string forwards.
+        assert!(matches!(go_any(src), Decoded::Undecidable(_)));
+        assert!(matches!(decode_go_any(src), Decoded::Undecidable(_)));
+        assert!(
+            decode_stream_head(src).unwrap_err().is_some(),
+            "a forward, not Go's decode error"
+        );
+
+        #[derive(Debug, Default, Deserialize)]
+        #[serde(default)]
+        struct Probe {
+            #[serde(deserialize_with = "gojson::null_is_zero_value")]
+            a: String,
+        }
+        assert!(matches!(
+            decode_request::<Probe>(src).unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+
+        // And the wire re-emission, which used to drop the key silently.
+        assert!(raw_field(src).is_err());
     }
 
     #[test]
@@ -875,7 +1076,7 @@ mod tests {
         let raw = b"{\n  \"z\": 1.50,\n  \"a\": \"<b>\"\n}";
         let body = gojson::to_vec(&ClaudeSettingsResponse {
             exists: true,
-            settings: raw_field(raw),
+            settings: raw_field(raw).ok(),
         })
         .expect("encode");
         assert_eq!(
@@ -921,7 +1122,7 @@ mod tests {
         );
         let body = gojson::to_vec(&ClaudeSettingsResponse {
             exists: true,
-            settings: raw_field(&out),
+            settings: raw_field(&out).ok(),
         })
         .expect("encode");
         assert_eq!(
@@ -987,6 +1188,17 @@ mod tests {
         // 500s — it forwards.
         write_file(&settings_json_path(&dir), b"not json").expect("write");
         assert!(get_settings(&dir).is_err());
+
+        // A file that is valid JSON to Go but not UTF-8. Go's `json.Valid`
+        // passes and its encoder ships the bytes verbatim, so the answer is
+        // `{"exists":true,"settings":{…}}`. serde cannot build that, and the
+        // old code dropped the key and answered `{"exists":true}` — a wrong
+        // answer where a forward was available.
+        write_file(&settings_json_path(&dir), b"{\"a\":\"\xff\"}").expect("write");
+        assert!(
+            get_settings(&dir).is_err(),
+            "non-UTF-8 settings must forward, not lose the `settings` key"
+        );
     }
 
     /// The write: every status and message, and the file left behind.
@@ -1013,11 +1225,31 @@ mod tests {
             "{\"exists\":true,\"settings\":{\"tiny\":0}}\n"
         );
 
-        // A `Decoder` stops at the first value.
+        // A `Decoder` stops at the first value — and so does everything after
+        // it, including the number scan. `1e999` past the first value is a 200.
         assert_eq!(
             body_of(put_settings(&dir, br#"{"trailing":true} and then some"#).expect("write")),
             "{\"exists\":true,\"settings\":{\"trailing\":true}}\n"
         );
+        assert_eq!(
+            body_of(put_settings(&dir, br#"{"trailing":true} 1e999"#).expect("write")),
+            "{\"exists\":true,\"settings\":{\"trailing\":true}}\n"
+        );
+
+        // Not UTF-8: Go writes the file with U+FFFD substituted and answers
+        // 200. This port cannot reproduce that, so it forwards rather than
+        // answering the 400 it used to.
+        assert!(matches!(
+            put_settings(&dir, b"{\"a\":\"\xff\"}").unwrap_err(),
+            WriteError::Fallback(_)
+        ));
+
+        // Deeper than the scanner's 10000 levels: `Decode` fails, so this is
+        // `errInvalidJSONBody` and not the second parse's message.
+        let too_deep = format!("{}{}", "[".repeat(10001), "]".repeat(10001));
+        let err = put_settings(&dir, too_deep.as_bytes()).unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.message(), "invalid JSON body");
 
         // A scalar is a JSON value, so it is written as one.
         assert_eq!(

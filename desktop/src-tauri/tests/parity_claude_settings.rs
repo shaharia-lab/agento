@@ -685,6 +685,142 @@ async fn the_profile_write_answers_match_go() {
     }
 }
 
+// ─── The two places Go's JSON layer is not serde's ────────────────────────────
+
+/// **`encoding/json` is not UTF-8-strict and serde_json is**, and Go's answers
+/// here are the ones that make that a divergence rather than a curiosity: it
+/// serves invalid bytes verbatim, decodes them into `any` with U+FFFD
+/// substituted, and writes the substituted document back. None of that is
+/// reproducible in Rust, so every one of these must be a **forward** — the port
+/// answering at all would be answering wrongly.
+///
+/// This is the live half: it asks Go what it really does. The unit tests assert
+/// Rust forwards for each of the same inputs.
+#[tokio::test]
+#[ignore = "needs a running parity instance and a scratch CLAUDE_CONFIG_DIR; it writes"]
+async fn bytes_that_are_not_utf8_are_gos_to_answer() {
+    let (_serial, dir) = enter().await;
+
+    // ── the read of a file Go accepts and Rust cannot re-emit ──
+    let raw: &[u8] = b"{\"model\":\"opus\",\"tag\":\"x\xffy\"}";
+    std::fs::write(format!("{dir}/settings.json"), raw).expect("write");
+
+    let go = fetch("/api/claude-settings").await;
+    assert!(
+        go.windows(2).any(|w| w == b"\xff\"") || String::from_utf8_lossy(&go).contains("\u{fffd}"),
+        "Go is expected to ship the stored bytes through its encoder; it sent {}",
+        String::from_utf8_lossy(&go)
+    );
+    assert!(
+        String::from_utf8_lossy(&go).contains(r#""exists":true"#),
+        "Go answers 200 with the document, so a Rust `{{\"exists\":true}}` \
+         would be a wrong answer rather than a missing one"
+    );
+    assert!(
+        claude_settings::get_settings(&dir).is_err(),
+        "the native read must forward, not drop the `settings` key"
+    );
+
+    // ── the write Go performs and Rust cannot reproduce ──
+    let (status, answer) = send_raw(
+        Method::PUT,
+        "/api/claude-settings",
+        "application/json",
+        b"{\"tag\":\"x\xffy\"}".to_vec(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        200,
+        "Go substitutes U+FFFD and writes the file: {}",
+        String::from_utf8_lossy(&answer)
+    );
+    assert!(matches!(
+        claude_settings::put_settings(&dir, b"{\"tag\":\"x\xffy\"}"),
+        Err(agento_lib::native::writes::WriteError::Fallback(_))
+    ));
+
+    // ── the same on a profile's own file ──
+    let id = create_profile("Parity Not Utf8").await;
+    std::fs::write(format!("{dir}/settings_{id}.json"), raw).expect("write");
+    let go = fetch(&format!("/api/claude-settings/profiles/{id}")).await;
+    assert!(
+        String::from_utf8_lossy(&go).contains(r#""exists":true"#),
+        "Go's `json.Valid` accepts these bytes, so the detail is `exists: true` \
+         with the document — not `settings: null`"
+    );
+    assert!(
+        finish(profiles::get(&dir, &id)).is_err(),
+        "the native detail must forward"
+    );
+    delete_profile(&id).await;
+
+    // Leave the shared dir holding something ordinary.
+    let (status, _) = send(
+        Method::PUT,
+        "/api/claude-settings",
+        Some(r#"{"model":"opus"}"#),
+    )
+    .await;
+    assert_eq!(status, 200);
+}
+
+/// **`json.Decoder.Decode` enforces `encoding/json`'s 10000-level cap**, even
+/// inside a field the request struct ignores — so a 10001-deep body never
+/// reaches `req.Name` and the create handler answers `400 name is required`.
+///
+/// serde routes an unknown field to `IgnoredAny`, whose skip is iterative and
+/// counts no depth, so this decoded with `name == "x"` and answered **201**:
+/// a profile file written and an index entry appended for a request Go refuses.
+/// The live half is here because the claim is about Go's scanner, not ours.
+#[tokio::test]
+#[ignore = "needs a running parity instance and a scratch CLAUDE_CONFIG_DIR; it writes"]
+async fn a_body_deeper_than_gos_scanner_creates_nothing() {
+    let (_serial, dir) = enter().await;
+
+    let body = format!(
+        r#"{{"name":"Parity Too Deep","junk":{}{}}}"#,
+        "[".repeat(10000),
+        "]".repeat(10000)
+    );
+    let (status, answer) = send(Method::POST, "/api/claude-settings/profiles", Some(&body)).await;
+    assert_eq!(status, 400, "Go's Decode stops at 10000 levels");
+    assert_eq!(
+        String::from_utf8_lossy(&answer).trim_end(),
+        r#"{"error":"name is required"}"#,
+        "the decode fails, so the handler sees an empty name"
+    );
+    assert!(
+        !std::path::Path::new(&format!("{dir}/settings_parity-too-deep.json")).exists(),
+        "Go wrote no profile file, so neither may the port"
+    );
+
+    // The port answers the same 400 — and, crucially, writes nothing either.
+    let native = native_body(
+        "create too deep",
+        finish(profiles::create(&dir, body.as_bytes())),
+        400,
+    );
+    assert_identical("create too deep", &answer, &native);
+    assert!(!std::path::Path::new(&format!("{dir}/settings_parity-too-deep.json")).exists());
+
+    // One level shallower is a real create in both, which is what makes the
+    // assertion above about the *cap* rather than about deep bodies generally.
+    let shallower = format!(
+        r#"{{"name":"Parity Deep Enough","junk":{}{}}}"#,
+        "[".repeat(9999),
+        "]".repeat(9999)
+    );
+    let (status, _) = send(
+        Method::POST,
+        "/api/claude-settings/profiles",
+        Some(&shallower),
+    )
+    .await;
+    assert_eq!(status, 201, "10000 levels is inside Go's cap");
+    delete_profile("parity-deep-enough").await;
+}
+
 // ─── The cache question, reproduced rather than reasoned about ────────────────
 
 /// **The evidence behind claiming the writes.**

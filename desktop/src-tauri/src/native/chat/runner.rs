@@ -236,24 +236,74 @@ fn stored_config_dir() -> String {
     crate::native::settings::load_stored(&conn).claude_config_dir
 }
 
-/// `LoadProfileFilePathIn`, reduced to the case this port supports: the unnamed
-/// fallback, `<config dir>/settings.json`.
+/// `config.LoadProfileFilePathIn` plus the caller's `os.Stat`: the settings file
+/// a run names with `--settings`, or `None` when there is none to name.
 ///
-/// A **named** profile records its own absolute path in
-/// `settings_profiles.json`, and reading that file is the settings-profile
-/// service's job rather than this one's — so a chat pinned to a named profile
-/// returns `None` here and simply gets no `--settings`, which is what Go does
-/// when the recorded path does not exist. Porting the profile lookup belongs
-/// with the profile CRUD.
+/// The two halves are separate rules and both matter (#242):
+///
+/// - **Which path.** An empty profile id is the unnamed fallback,
+///   `<config dir>/settings.json`, which follows the dir the run targets. A
+///   named profile keeps the **absolute path recorded in the index** — a
+///   profile is a file the user created and pointed at, so it is not rebuilt
+///   from the id. An id that matches nothing falls back to the *default*
+///   profile's path, and only then to `<config dir>/settings.json`.
+/// - **Whether to name it.** `--settings` on a missing path is an error rather
+///   than a no-op, so a path that is not a file is `None`.
+///
+/// Until this landed the runner returned `None` for every non-empty profile id,
+/// so a chat or task pinned to a named profile ran with **no `--settings` at
+/// all** while the Go server passed the recorded path — the same class of silent
+/// wrong-account failure #242 existed for.
 fn settings_file_in(config_dir: &str, profile_id: &str) -> Option<String> {
-    if !profile_id.is_empty() {
-        return None;
-    }
-    let path = std::path::Path::new(config_dir).join("settings.json");
+    // Go reads the index with `LoadProfilesMetadata()`, which resolves
+    // `ClaudeSettingsProfilesPath()` — the **run default** dir, not `config_dir`.
+    // That asymmetry is deliberate upstream and load-bearing here: profiles are
+    // a global CRUD surface, so an agent with its own `claude_config_dir` still
+    // resolves its named profile against the global index while its *fallback*
+    // follows its own dir. Reading the index out of the override would silently
+    // find nothing and hand the run the wrong account's settings.
+    //
+    // Resolved only for a *named* profile: the unnamed fallback reads no index,
+    // and this opens the database.
+    let index_dir = if profile_id.is_empty() {
+        String::new()
+    } else {
+        crate::native::settings::run_config_dir(&stored_config_dir())
+    };
+    settings_file_from(config_dir, &index_dir, profile_id)
+}
+
+/// [`settings_file_in`] with the index dir passed in, so the resolution can be
+/// driven over a scratch directory instead of the machine's real one.
+fn settings_file_from(config_dir: &str, index_dir: &str, profile_id: &str) -> Option<String> {
+    let path = profile_file_path_in(config_dir, index_dir, profile_id);
     match std::fs::metadata(&path) {
-        Ok(meta) if meta.is_file() => Some(path.to_string_lossy().into_owned()),
+        Ok(meta) if meta.is_file() => Some(path),
         _ => None,
     }
+}
+
+/// `config.LoadProfileFilePathIn`, path resolution only.
+fn profile_file_path_in(config_dir: &str, index_dir: &str, profile_id: &str) -> String {
+    let fallback = std::path::Path::new(config_dir)
+        .join("settings.json")
+        .to_string_lossy()
+        .into_owned();
+    if profile_id.is_empty() {
+        return fallback;
+    }
+    // `if err != nil { return fallback }` — an unreadable or malformed index is
+    // the fallback, not a failure.
+    let Ok(profiles) = crate::native::claude_settings::profiles::load(index_dir) else {
+        return fallback;
+    };
+    if let Some(profile) = profiles.iter().find(|p| p.id == profile_id) {
+        return profile.file_path.clone();
+    }
+    if let Some(profile) = profiles.iter().find(|p| p.is_default) {
+        return profile.file_path.clone();
+    }
+    fallback
 }
 
 /// Which `claude` binary to spawn.
@@ -469,21 +519,149 @@ mod tests {
         assert!(!out.contains("{{"));
     }
 
-    /// A named profile is not resolvable here, so it yields no `--settings`
-    /// rather than a guessed path.
-    #[test]
-    fn a_named_settings_profile_yields_no_settings_flag() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("settings.json"), "{}").expect("write");
-        let path = dir.path().to_string_lossy().into_owned();
-
-        assert!(settings_file_in(&path, "").is_some());
-        assert!(settings_file_in(&path, "profile-123").is_none());
+    /// Write a profiles index into `dir` and return its path prefix.
+    fn seed_index(
+        dir: &std::path::Path,
+        profiles: &[crate::native::claude_settings::profiles::Profile],
+    ) {
+        let bytes =
+            crate::native::claude_settings::profiles::encode_index(profiles).expect("encode");
+        std::fs::write(dir.join("settings_profiles.json"), bytes).expect("write index");
     }
 
+    fn profile(
+        id: &str,
+        file_path: &str,
+        is_default: bool,
+    ) -> crate::native::claude_settings::profiles::Profile {
+        crate::native::claude_settings::profiles::Profile {
+            id: id.to_string(),
+            name: id.to_string(),
+            file_path: file_path.to_string(),
+            is_default,
+        }
+    }
+
+    /// **A named profile resolves to the path the index records** — not to
+    /// `<dir>/settings.json`, and not to nothing. Before this was implemented a
+    /// run pinned to a named profile got no `--settings` at all while the Go
+    /// server passed the recorded path, which is a silent wrong-account run.
+    #[test]
+    fn a_named_settings_profile_resolves_to_its_recorded_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("settings.json"), "{}").expect("write");
+        // Deliberately *not* `settings_work.json`: the index is the authority,
+        // so a resolver that rebuilt the name from the id would miss this.
+        let recorded = dir.path().join("settings_renamed-since.json");
+        std::fs::write(&recorded, "{}").expect("write");
+        let recorded = recorded.to_string_lossy().into_owned();
+        seed_index(dir.path(), &[profile("work", &recorded, false)]);
+        let path = dir.path().to_string_lossy().into_owned();
+
+        assert_eq!(
+            settings_file_from(&path, &path, "work"),
+            Some(recorded.clone())
+        );
+        // The unnamed fallback still follows the *run* dir rather than the index.
+        assert_eq!(
+            settings_file_from(&path, &path, ""),
+            Some(
+                dir.path()
+                    .join("settings.json")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+    }
+
+    /// An id the index does not carry falls back to the **default** profile, and
+    /// only then to `<dir>/settings.json`. Both branches are Go's.
+    #[test]
+    fn an_unknown_profile_id_falls_back_to_the_default_then_to_settings_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("settings.json"), "{}").expect("write");
+        let fallback = dir
+            .path()
+            .join("settings.json")
+            .to_string_lossy()
+            .into_owned();
+        let default_path = dir.path().join("settings_default.json");
+        std::fs::write(&default_path, "{}").expect("write");
+        let default_path = default_path.to_string_lossy().into_owned();
+        let path = dir.path().to_string_lossy().into_owned();
+
+        seed_index(dir.path(), &[profile("default", &default_path, true)]);
+        assert_eq!(
+            settings_file_from(&path, &path, "no-such-profile"),
+            Some(default_path)
+        );
+
+        // No default either: the unnamed fallback.
+        seed_index(dir.path(), &[profile("other", "/nowhere/x.json", false)]);
+        assert_eq!(
+            settings_file_from(&path, &path, "no-such-profile"),
+            Some(fallback.clone())
+        );
+
+        // No index at all is the same fallback, not a failure.
+        std::fs::remove_file(dir.path().join("settings_profiles.json")).expect("rm");
+        assert_eq!(settings_file_from(&path, &path, "anything"), Some(fallback));
+    }
+
+    /// The index lives in the **run default** dir even when the run targets an
+    /// agent's own `claude_config_dir`, because profiles are a global surface —
+    /// while the unnamed fallback follows the run's dir. `LoadProfileFilePathIn`
+    /// takes `dir` for the fallback and calls `LoadProfilesMetadata()`, which
+    /// does not.
+    #[test]
+    fn the_index_is_read_from_the_global_dir_and_the_fallback_from_the_runs() {
+        let global = tempfile::tempdir().expect("tempdir");
+        let agent = tempfile::tempdir().expect("tempdir");
+        let recorded = global.path().join("settings_work.json");
+        std::fs::write(&recorded, "{}").expect("write");
+        let recorded = recorded.to_string_lossy().into_owned();
+        seed_index(global.path(), &[profile("work", &recorded, false)]);
+        std::fs::write(agent.path().join("settings.json"), "{}").expect("write");
+
+        let agent_dir = agent.path().to_string_lossy().into_owned();
+        let global_dir = global.path().to_string_lossy().into_owned();
+        assert_eq!(
+            settings_file_from(&agent_dir, &global_dir, "work"),
+            Some(recorded)
+        );
+        assert_eq!(
+            settings_file_from(&agent_dir, &global_dir, ""),
+            Some(
+                agent
+                    .path()
+                    .join("settings.json")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+    }
+
+    /// `--settings` on a missing path is an error rather than a no-op, so a
+    /// recorded path whose file has gone is named nothing at all.
     #[test]
     fn a_missing_settings_file_is_not_named() {
         let dir = tempfile::tempdir().expect("tempdir");
-        assert!(settings_file_in(&dir.path().to_string_lossy(), "").is_none());
+        assert!(settings_file_from(
+            &dir.path().to_string_lossy(),
+            &dir.path().to_string_lossy(),
+            ""
+        )
+        .is_none());
+
+        let path = dir.path().to_string_lossy().into_owned();
+        seed_index(
+            dir.path(),
+            &[profile(
+                "gone",
+                &format!("{path}/settings_gone.json"),
+                false,
+            )],
+        );
+        assert!(settings_file_from(&path, &path, "gone").is_none());
     }
 }
