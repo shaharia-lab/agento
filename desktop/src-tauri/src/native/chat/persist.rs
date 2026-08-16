@@ -142,12 +142,24 @@ fn truncate_title(content: &str, max: usize) -> String {
 ///
 /// # The `input` must never round-trip through a `Value`
 ///
-/// A `tool_use` input of `{"z":1.50,"a":1}` is stored verbatim by Go and
-/// re-emitted through `compact`, which preserves key order and number spelling.
-/// Decoding it into a `serde_json::Value` and re-encoding sorts the keys and
-/// drops the trailing zero — `{"a":1,"z":1.5}` — with nothing to signal it.
-/// This is not hypothetical: the first version of this function did exactly
-/// that, and `tests/chat_turn.rs` caught it. `RawValue` is what keeps the bytes.
+/// A `tool_use` input of `{"z":1.50,"a":1}` is stored by Go through `compact`,
+/// which preserves key order and number spelling. Decoding it into a
+/// `serde_json::Value` and re-encoding sorts the keys and drops the trailing
+/// zero — `{"a":1,"z":1.5}` — with nothing to signal it. This is not
+/// hypothetical: the first version of this function did exactly that, and
+/// `tests/chat_turn.rs` caught it. `RawValue` is what keeps the bytes.
+///
+/// # …and it is compacted **on store**, not on emit (#298)
+///
+/// This comment used to say Go stored the bytes verbatim and compacted them on
+/// the way out. It is the other way round: `chatService` marshals a struct
+/// holding a `json.RawMessage`, and `encoding/json` runs
+/// `compact(…, escapeHTML=true)` over a nested raw value as it marshals — so
+/// what reaches the column is already whitespace-stripped and has `<`, `>` and
+/// `&` escaped. Writing the SDK's bytes as-is left the two implementations'
+/// databases different for the same input. It was masked on read, since
+/// `chats::decode_blocks` compacts what it loads, which is exactly why nothing
+/// noticed.
 pub fn append_assistant_blocks(blocks: &mut Vec<MessageBlock>, raw: &[u8]) {
     #[derive(serde::Deserialize)]
     struct Envelope<'a> {
@@ -216,13 +228,16 @@ pub fn append_assistant_blocks(blocks: &mut Vec<MessageBlock>, raw: &[u8]) {
                     id: block.id.unwrap_or_default(),
                     name: block.name.unwrap_or_default(),
                     // `to_owned` on the borrowed raw copies the bytes, not a
-                    // parsed representation of them.
+                    // parsed representation of them — then `compact_raw` puts
+                    // them in the form Go's marshal would have stored, which is
+                    // where the column's bytes are decided.
                     input: block
                         .input
                         .map(|raw| serde_json::value::RawValue::from_string(raw.get().to_string()))
                         .transpose()
                         .ok()
-                        .flatten(),
+                        .flatten()
+                        .map(crate::native::gojson::compact_raw),
                 });
             }
             _ => {}
@@ -400,6 +415,65 @@ mod tests {
         assert_eq!(blocks[0].block_type, "thinking");
         assert_eq!(blocks[1].text, "hello");
         assert_eq!(blocks[2].name, "Bash");
+    }
+
+    /// The stored bytes are what Go's marshal would have written, not the SDK's
+    /// own (#298): whitespace stripped and `<`, `>`, `&` escaped, with the key
+    /// order and number spelling intact.
+    ///
+    /// Both halves matter and they pull in opposite directions — `compact` is
+    /// the one pass that does the first without doing what a `Value` round trip
+    /// would do to the second.
+    #[test]
+    fn a_stored_tool_use_input_is_compacted_the_way_gos_marshal_stores_one() {
+        let mut blocks = Vec::new();
+        append_assistant_blocks(
+            &mut blocks,
+            br#"{"message":{"content":[
+                {"type":"tool_use","id":"t1","name":"Bash","input":{ "z" : 1.50 , "cmd" : "ls & cat <f>" }}
+            ]}}"#,
+        );
+
+        // Exactly what Go writes for the same input — measured, not assumed:
+        // marshalling a struct holding this `json.RawMessage` yields
+        // `{"z":1.50,"cmd":"ls \u0026 cat \u003cf\u003e"}`.
+        let input = blocks[0].input.as_ref().expect("an input").get();
+        assert_eq!(input, r#"{"z":1.50,"cmd":"ls \u0026 cat \u003cf\u003e"}"#);
+    }
+
+    /// …and that is what lands in the column, since `append_message` marshals
+    /// the blocks. Asserted end to end because the read path compacts too, so a
+    /// verbatim write is invisible through the API — which is exactly why this
+    /// went unnoticed.
+    #[test]
+    fn the_blocks_column_holds_gos_bytes() {
+        let file = migrated();
+        let mut blocks = Vec::new();
+        append_assistant_blocks(
+            &mut blocks,
+            br#"{"message":{"content":[
+                {"type":"tool_use","id":"t1","name":"Bash","input":{ "z" : 1.50 , "cmd" : "a & b" }}
+            ]}}"#,
+        );
+        let state = TurnState {
+            assistant_text: "done".into(),
+            blocks,
+            ..Default::default()
+        };
+        commit(file.path(), &row(), "q", &state, true).expect("commit");
+
+        let conn = Connection::open(file.path()).expect("open");
+        let stored: String = conn
+            .query_row(
+                "SELECT blocks FROM chat_messages WHERE role = 'assistant'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert!(
+            stored.contains(r#""input":{"z":1.50,"cmd":"a \u0026 b"}"#),
+            "{stored}"
+        );
     }
 
     #[test]
