@@ -1,0 +1,240 @@
+{
+  "_comment": [
+    "Cross-language parity vectors for the path chi routes on.",
+    "Generated from Go, then frozen. Read by desktop/parity/gourl_parity_test.go",
+    "(Go) and by desktop/src-tauri/src/native/gourl.rs (Rust). 'route_path' is",
+    "observed from a live chi router, so a divergence fails one language against",
+    "the router's real behavior rather than against a belief about it.",
+    "Regenerate with: go test ./desktop/parity/ -run TestGoURLVectors -update-gourl-vectors"
+  ],
+  "route_path": [
+    {
+      "raw": "/api/agents/my-agent",
+      "path": "/api/agents/my-agent",
+      "raw_path": "",
+      "route_path": "/api/agents/my-agent"
+    },
+    {
+      "raw": "/api/agents/a-b",
+      "path": "/api/agents/a-b",
+      "raw_path": "",
+      "route_path": "/api/agents/a-b"
+    },
+    {
+      "raw": "/api/agents/a%2Db",
+      "path": "/api/agents/a-b",
+      "raw_path": "/api/agents/a%2Db",
+      "route_path": "/api/agents/a%2Db"
+    },
+    {
+      "raw": "/api/agents/a%2db",
+      "path": "/api/agents/a-b",
+      "raw_path": "/api/agents/a%2db",
+      "route_path": "/api/agents/a%2db"
+    },
+    {
+      "raw": "/api/agents/a%20b",
+      "path": "/api/agents/a b",
+      "raw_path": "",
+      "route_path": "/api/agents/a b"
+    },
+    {
+      "raw": "/api/agents/caf%C3%A9",
+      "path": "/api/agents/café",
+      "raw_path": "",
+      "route_path": "/api/agents/café"
+    },
+    {
+      "raw": "/api/agents/caf%c3%a9",
+      "path": "/api/agents/café",
+      "raw_path": "/api/agents/caf%c3%a9",
+      "route_path": "/api/agents/caf%c3%a9"
+    },
+    {
+      "raw": "/api/agents/%ff",
+      "path": "/api/agents/\ufffd",
+      "raw_path": "/api/agents/%ff",
+      "route_path": "/api/agents/%ff"
+    },
+    {
+      "raw": "/api/agents/a%2Fb",
+      "path": "/api/agents/a/b",
+      "raw_path": "/api/agents/a%2Fb",
+      "route_path": "/api/agents/a%2Fb"
+    },
+    {
+      "raw": "/api/agents/a%3Fb",
+      "path": "/api/agents/a?b",
+      "raw_path": "",
+      "route_path": "/api/agents/a?b"
+    },
+    {
+      "raw": "/api/agents/a+b",
+      "path": "/api/agents/a+b",
+      "raw_path": "",
+      "route_path": "/api/agents/a+b"
+    },
+    {
+      "raw": "/api/agents/a%2Bb",
+      "path": "/api/agents/a+b",
+      "raw_path": "/api/agents/a%2Bb",
+      "route_path": "/api/agents/a%2Bb"
+    },
+    {
+      "raw": "/api/agents/%7Euser",
+      "path": "/api/agents/~user",
+      "raw_path": "/api/agents/%7Euser",
+      "route_path": "/api/agents/%7Euser"
+    },
+    {
+      "raw": "/api/agents/~user",
+      "path": "/api/agents/~user",
+      "raw_path": "",
+      "route_path": "/api/agents/~user"
+    },
+    {
+      "raw": "/api/agents/a%25b",
+      "path": "/api/agents/a%b",
+      "raw_path": "",
+      "route_path": "/api/agents/a%b"
+    },
+    {
+      "raw": "/api/chats/11111111-2222-3333-4444-555555555555",
+      "path": "/api/chats/11111111-2222-3333-4444-555555555555",
+      "raw_path": "",
+      "route_path": "/api/chats/11111111-2222-3333-4444-555555555555"
+    },
+    {
+      "raw": "/api/chats/a%20b/messages",
+      "path": "/api/chats/a b/messages",
+      "raw_path": "",
+      "route_path": "/api/chats/a b/messages"
+    },
+    {
+      "raw": "/api/tasks/a%20b/run",
+      "path": "/api/tasks/a b/run",
+      "raw_path": "",
+      "route_path": "/api/tasks/a b/run"
+    },
+    {
+      "raw": "/api/integrations/a%20b/triggers",
+      "path": "/api/integrations/a b/triggers",
+      "raw_path": "",
+      "route_path": "/api/integrations/a b/triggers"
+    },
+    {
+      "raw": "/api/integrations/a%2Db/triggers/r%201",
+      "path": "/api/integrations/a-b/triggers/r 1",
+      "raw_path": "/api/integrations/a%2Db/triggers/r%201",
+      "route_path": "/api/integrations/a%2Db/triggers/r%201"
+    },
+    {
+      "raw": "/api/claude-sessions/a%20b/insights",
+      "path": "/api/claude-sessions/a b/insights",
+      "raw_path": "",
+      "route_path": "/api/claude-sessions/a b/insights"
+    },
+    {
+      "raw": "/api/agents/",
+      "path": "/api/agents/",
+      "raw_path": "",
+      "route_path": "/api/agents/"
+    },
+    {
+      "raw": "/api/agents/a%2",
+      "path": null,
+      "raw_path": null,
+      "route_path": null
+    },
+    {
+      "raw": "/api/agents/a%",
+      "path": null,
+      "raw_path": null,
+      "route_path": null
+    },
+    {
+      "raw": "/api/agents/a%zz",
+      "path": null,
+      "raw_path": null,
+      "route_path": null
+    }
+  ],
+  "escape_path": [
+    {
+      "value": "",
+      "want": ""
+    },
+    {
+      "value": "a-b",
+      "want": "a-b"
+    },
+    {
+      "value": "a b",
+      "want": "a%20b"
+    },
+    {
+      "value": "café",
+      "want": "caf%C3%A9"
+    },
+    {
+      "value": "a?b",
+      "want": "a%3Fb"
+    },
+    {
+      "value": "a/b",
+      "want": "a/b"
+    },
+    {
+      "value": "$\u0026+,/:;=@",
+      "want": "$\u0026+,/:;=@"
+    },
+    {
+      "value": "-_.~",
+      "want": "-_.~"
+    },
+    {
+      "value": "a%b",
+      "want": "a%25b"
+    },
+    {
+      "value": "a\tb",
+      "want": "a%09b"
+    },
+    {
+      "value": "a\"b",
+      "want": "a%22b"
+    },
+    {
+      "value": "a\u003cb\u003ec",
+      "want": "a%3Cb%3Ec"
+    },
+    {
+      "value": "a#b",
+      "want": "a%23b"
+    },
+    {
+      "value": "a[b]",
+      "want": "a%5Bb%5D"
+    },
+    {
+      "value": "a{b}",
+      "want": "a%7Bb%7D"
+    },
+    {
+      "value": "~user",
+      "want": "~user"
+    },
+    {
+      "value": "a+b",
+      "want": "a+b"
+    },
+    {
+      "value": "日本語",
+      "want": "%E6%97%A5%E6%9C%AC%E8%AA%9E"
+    },
+    {
+      "value": "a\u0000b",
+      "want": "a%00b"
+    }
+  ]
+}
