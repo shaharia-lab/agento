@@ -445,13 +445,13 @@ mod tests {
         assert!(!claims(&Method::GET, "/api/tasks/"));
         assert!(!claims(&Method::GET, "/api/job-history/"));
 
-        // Settings: the row read. The write re-applies the process-wide
-        // snapshots and triggers a rescan, neither of which Rust can do while
-        // Go owns the database — and the config-dir editor probes the
-        // filesystem rather than reading this row.
+        // Settings: the row read and, since #305, the config-dir probe. The
+        // write is implemented in `settings::update` but stays unclaimed: the
+        // sidecar holds its own copy of these preferences in memory and is
+        // still serving routes that read it — see that module's `claims`.
         assert!(claims(&Method::GET, "/api/settings"));
+        assert!(claims(&Method::GET, "/api/settings/claude-config-dirs"));
         assert!(!claims(&Method::PUT, "/api/settings"));
-        assert!(!claims(&Method::GET, "/api/settings/claude-config-dirs"));
         // A different tree entirely: Claude Code's own settings.json.
         assert!(!claims(&Method::GET, "/api/claude-settings"));
 
@@ -612,6 +612,7 @@ mod tests {
             "/api/job-history",
             "/api/job-history/abc-123",
             "/api/settings",
+            "/api/settings/claude-config-dirs",
             "/api/monitoring",
             "/api/version",
             "/api/version/update-check",
@@ -654,6 +655,7 @@ mod tests {
             "/api/job-history",
             "/api/job-history/abc-123",
             "/api/settings",
+            "/api/settings/claude-config-dirs",
             "/api/monitoring",
             "/api/version",
             "/api/version/update-check",

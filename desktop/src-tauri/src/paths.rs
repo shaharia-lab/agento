@@ -82,6 +82,54 @@ pub(crate) mod tests {
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// An environment variable swapped for the lifetime of the guard.
+    ///
+    /// Restoring in a trailing block at the end of the test is not enough: a
+    /// failed assertion panics past it, and [`env_lock`] deliberately recovers
+    /// from poisoning, so the swapped value **survives into every later test in
+    /// the same binary**. One real failure then becomes a cascade of unrelated
+    /// ones — or, worse, silences them, since several tests here skip
+    /// themselves when a variable is set. A `HOME` left pointing at a deleted
+    /// `TempDir` breaks every subsequent [`home`] read outright.
+    ///
+    /// Holding the guard alongside `env_lock()`'s is what makes the swap safe:
+    /// the lock serialises the tests, the guard bounds the swap to one of them.
+    pub(crate) struct EnvVar {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVar {
+        /// Set `name`, remembering what was there.
+        pub(crate) fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let guard = Self {
+                name,
+                previous: std::env::var_os(name),
+            };
+            std::env::set_var(name, value);
+            guard
+        }
+
+        /// Remove `name`, remembering what was there.
+        pub(crate) fn unset(name: &'static str) -> Self {
+            let guard = Self {
+                name,
+                previous: std::env::var_os(name),
+            };
+            std::env::remove_var(name);
+            guard
+        }
+    }
+
+    impl Drop for EnvVar {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(value) => std::env::set_var(self.name, value),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     #[test]
     fn tilde_expands_like_the_go_resolver() {
         let _env = env_lock();

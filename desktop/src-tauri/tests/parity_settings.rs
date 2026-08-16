@@ -25,8 +25,10 @@
 //! trusting a pass:
 //!
 //! - `PUT /api/settings` with a hidden project, a non-default idle threshold, a
-//!   font family and a `public_url`, so the string-list columns are exercised as
-//!   populated arrays rather than as `null`;
+//!   font family, a `public_url` and a second `claude_config_dirs` entry (any
+//!   existing absolute directory will do), so the string-list columns are
+//!   exercised as populated arrays rather than as `null` — and so the config-dir
+//!   read resolves a set with an order and a dedup in it rather than one entry;
 //! - `PUT /api/monitoring` with `otlp_headers` populated, so the `omitempty` map
 //!   is exercised as present as well as absent.
 //!
@@ -64,6 +66,43 @@ async fn the_settings_read_matches_the_live_go_response() {
         "the parity instance has never saved a settings list — both columns are \
          null, which diffs clean and proves nothing. Seed it with PUT /api/settings \
          (see this file's header).\n{body}"
+    );
+}
+
+/// The config-dir editor's source (#305).
+///
+/// Half a row read and half a **filesystem probe**, which is why #266 left it
+/// behind: `indexed` resolves the stored preferences the way `GET /api/settings`
+/// does, while `candidates` lists the home directory. Both halves are answered
+/// from the same process here, and the Go server runs from this shell — so the
+/// `HOME` and `CLAUDE_CONFIG_DIR` the two resolve against are the same ones.
+///
+/// The probe's *rules* are pinned by a unit test over a crafted home, because
+/// no developer's real one exercises the exclusions. What this adds is the
+/// resolution over whatever is actually there.
+#[tokio::test]
+#[ignore = "needs a running Agento instance and its database"]
+async fn the_claude_config_dirs_read_matches_the_live_go_response() {
+    let db_path = live_db();
+    let conn = db::open_read_only(&db_path).expect("opening the parity database");
+
+    let go = fetch("/api/settings/claude-config-dirs").await;
+    let native = gojson::to_vec(&settings::claude_config_dirs_response(&conn)).expect("encode");
+    assert_identical("settings/claude-config-dirs", &go, &native);
+
+    // A one-entry `indexed` is the answer an install that has configured
+    // nothing gives, and it diffs clean against itself while proving only that
+    // both sides can spell the default dir. Seed a second dir before trusting
+    // a pass — the order (default, run dir, extras) and the dedup are the parts
+    // that can be wrong.
+    let parsed: serde_json::Value = serde_json::from_slice(&go).expect("valid JSON");
+    let indexed = parsed["indexed"].as_array().map_or(0, Vec::len);
+    let candidates = parsed["candidates"].as_array().map_or(0, Vec::len);
+    assert!(
+        indexed > 1 || candidates > 0,
+        "the parity instance indexes exactly one config dir and has no candidate \
+         beside it, so this diffs the default dir against itself. Seed it with \
+         PUT /api/settings and a real `claude_config_dirs` entry (see the header).\n{parsed}"
     );
 }
 

@@ -806,8 +806,11 @@ mod tests {
 
         // A home with no `.claude`, so the walk finds nothing to list.
         let home = tempfile::tempdir().expect("tempdir");
-        let previous_home = std::env::var_os("HOME");
-        std::env::set_var("HOME", home.path());
+        // RAII, not a trailing restore: a failed assertion panics past any
+        // epilogue, and `env_lock` recovers from poisoning — so a leaked `HOME`
+        // pointing at a `TempDir` this test already deleted would break every
+        // later `paths::home()` in the binary.
+        let _home_var = crate::paths::tests::EnvVar::set("HOME", home.path());
 
         let file = migrated();
         let conn = rusqlite::Connection::open(file.path()).expect("open");
@@ -881,10 +884,6 @@ mod tests {
             let mut s = state().lock().expect("lock");
             s.no_dirs_at = None;
             s.files_done = 0;
-        }
-        match previous_home {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
         }
     }
 
