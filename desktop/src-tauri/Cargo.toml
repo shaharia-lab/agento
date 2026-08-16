@@ -65,7 +65,32 @@ tokio = { version = "1", features = [
     "io-std",
     "sync",
 ] }
-reqwest = { version = "0.12", default-features = false, features = ["stream"] }
+# `stream` is for the proxy's SSE pass-through and for the byte-capped reads the
+# ported integrations do — Go's `io.LimitReader(resp.Body, 2*1024*1024)` stops
+# *reading* at the cap, which a `bytes()` that buffers the whole body first
+# would not.
+#
+# **`rustls-tls`, added with #312.** Until the integrations landed, every hop
+# this client made was loopback (the Go sidecar, an in-process MCP server), so
+# no TLS backend was configured at all and a `https://api.github.com` request
+# would have failed at runtime with "URL scheme is not allowed". The reasoning
+# for *which* backend is the one already written on `lettre` below and it has
+# not changed: `native-tls` links the platform's OpenSSL/Schannel, the release
+# workflow builds five target triples, and the whole reason `rusqlite` is
+# `bundled` is that there is no C toolchain to arrange.
+#
+# `rustls-tls` is reqwest's **webpki-roots** spelling — Mozilla's root store
+# compiled in — rather than `rustls-tls-native-roots`, which reads the
+# platform's. Bundled roots for the same reason `lettre` uses them: an
+# integration that works on one developer's machine and fails on a user's
+# because their system store is arranged differently is a support problem with
+# nothing in the error to point at it, and the endpoints here are three public
+# SaaS APIs rather than anything behind a corporate MITM proxy. It also shares
+# `ring` with `lettre`, so no second crypto provider enters the tree.
+reqwest = { version = "0.12", default-features = false, features = [
+    "stream",
+    "rustls-tls",
+] }
 
 # Control requests are correlated by a v4 UUID, and hook callbacks are
 # registered under one. Go generates them from crypto/rand by hand; the format

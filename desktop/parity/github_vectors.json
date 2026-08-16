@@ -1,0 +1,1969 @@
+{
+  "_comment": [
+    "Cross-language parity vectors for internal/integrations/github, the GitHub",
+    "integration's in-process MCP server. Generated from Go, then frozen. Read by",
+    "desktop/parity/github_parity_test.go (Go) and by",
+    "desktop/src-tauri/src/native/integrations/github/ (Rust). Every value is exactly",
+    "what Go produces, so a divergence fails one language against the other's real",
+    "output rather than against a belief about it.",
+    "'tools' and 'hosting' come from live tools/list calls against servers built by",
+    "github.Start; 'calls' come from live tools/call calls against a scripted fake",
+    "GitHub that records the request each tool built.",
+    "'token' is a fixture, not a secret: it is recorded so the Bearer prefix is pinned.",
+    "Regenerate with: go test ./desktop/parity/ -run TestGitHubVectors -update-github-vectors"
+  ],
+  "integration_id": "gh-parity",
+  "server_name": "github-gh-parity",
+  "version": "1.0.0",
+  "token": "parity-pat-token",
+  "tools": [
+    {
+      "name": "create_issue",
+      "description": "Creates a new issue in a repository.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "assignees": {
+            "description": "Comma-separated usernames",
+            "type": "string"
+          },
+          "body": {
+            "description": "Issue body in Markdown",
+            "type": "string"
+          },
+          "labels": {
+            "description": "Comma-separated label names",
+            "type": "string"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          },
+          "title": {
+            "description": "required,Issue title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "title",
+          "body",
+          "labels",
+          "assignees"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "create_pull",
+      "description": "Creates a new pull request.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "description": "required,Target branch name",
+            "type": "string"
+          },
+          "body": {
+            "description": "PR body in Markdown",
+            "type": "string"
+          },
+          "draft": {
+            "description": "Create as draft. Default: false",
+            "type": "boolean"
+          },
+          "head": {
+            "description": "required,Source branch name",
+            "type": "string"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          },
+          "title": {
+            "description": "required,Pull request title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "title",
+          "head",
+          "base",
+          "body",
+          "draft"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "create_release",
+      "description": "Creates a new release in a repository.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "Release notes in Markdown",
+            "type": "string"
+          },
+          "draft": {
+            "description": "Create as draft",
+            "type": "boolean"
+          },
+          "generate_release_notes": {
+            "description": "Auto-generate notes",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Release name",
+            "type": "string"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "prerelease": {
+            "description": "Mark as pre-release",
+            "type": "boolean"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          },
+          "tag_name": {
+            "description": "required,Tag name",
+            "type": "string"
+          },
+          "target_commitish": {
+            "description": "Branch or commit SHA",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "tag_name",
+          "name",
+          "body",
+          "target_commitish",
+          "draft",
+          "prerelease",
+          "generate_release_notes"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_issue",
+      "description": "Gets details of a specific issue by number.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "number": {
+            "description": "required,Issue number",
+            "type": "integer"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "number"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_pull",
+      "description": "Gets details of a specific pull request by number.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "number": {
+            "description": "required,Pull request number",
+            "type": "integer"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "number"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_pull_diff",
+      "description": "Gets the diff of a pull request.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "number": {
+            "description": "required,Pull request number",
+            "type": "integer"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "number"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_repo",
+      "description": "Gets details of a specific repository by owner/name.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_run_logs",
+      "description": "Gets the download URL for a workflow run's logs. The GitHub API returns a redirect to a time-limited download URL.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          },
+          "run_id": {
+            "description": "required,Workflow run ID",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "run_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_workflow_run",
+      "description": "Gets details of a specific workflow run.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          },
+          "run_id": {
+            "description": "required,Workflow run ID",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "run_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_issues",
+      "description": "Lists issues for a repository.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "labels": {
+            "description": "Comma-separated label names",
+            "type": "string"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number. Default: 1",
+            "type": "integer"
+          },
+          "per_page": {
+            "description": "Results per page (max 100)",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          },
+          "sort": {
+            "description": "Sort: created, updated, comments",
+            "type": "string"
+          },
+          "state": {
+            "description": "Filter: open, closed, all. Default: open",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "state",
+          "labels",
+          "sort",
+          "per_page",
+          "page"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_pull_comments",
+      "description": "Lists review comments on a pull request.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "number": {
+            "description": "required,Pull request number",
+            "type": "integer"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number. Default: 1",
+            "type": "integer"
+          },
+          "per_page": {
+            "description": "Results per page (max 100)",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "number",
+          "per_page",
+          "page"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_pulls",
+      "description": "Lists pull requests for a repository.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "description": "Filter by base branch name",
+            "type": "string"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number. Default: 1",
+            "type": "integer"
+          },
+          "per_page": {
+            "description": "Results per page (max 100)",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          },
+          "sort": {
+            "description": "Sort: created, updated, popularity",
+            "type": "string"
+          },
+          "state": {
+            "description": "Filter: open, closed, all",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "state",
+          "sort",
+          "base",
+          "per_page",
+          "page"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_releases",
+      "description": "Lists releases for a repository.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number. Default: 1",
+            "type": "integer"
+          },
+          "per_page": {
+            "description": "Results per page (max 100)",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "per_page",
+          "page"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_repos",
+      "description": "Lists repositories for the authenticated user.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "description": "Page number. Default: 1",
+            "type": "integer"
+          },
+          "per_page": {
+            "description": "Results per page (max 100). Default: 30",
+            "type": "integer"
+          },
+          "sort": {
+            "description": "Sort by: created, updated, pushed, full_name",
+            "type": "string"
+          },
+          "visibility": {
+            "description": "Filter by visibility: all, public, private",
+            "type": "string"
+          }
+        },
+        "required": [
+          "visibility",
+          "sort",
+          "per_page",
+          "page"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_tags",
+      "description": "Lists tags for a repository.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number. Default: 1",
+            "type": "integer"
+          },
+          "per_page": {
+            "description": "Results per page (max 100)",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "per_page",
+          "page"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_workflow_runs",
+      "description": "Lists workflow runs for a repository.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "description": "Filter by branch name",
+            "type": "string"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number. Default: 1",
+            "type": "integer"
+          },
+          "per_page": {
+            "description": "Results per page (max 100)",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          },
+          "status": {
+            "description": "Filter: queued, in_progress, completed",
+            "type": "string"
+          },
+          "workflow_id": {
+            "description": "Workflow ID or file name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "workflow_id",
+          "status",
+          "branch",
+          "per_page",
+          "page"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_workflows",
+      "description": "Lists all workflows in a repository.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "page": {
+            "description": "Page number. Default: 1",
+            "type": "integer"
+          },
+          "per_page": {
+            "description": "Results per page (max 100)",
+            "type": "integer"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "per_page",
+          "page"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "search_code",
+      "description": "Searches for code across GitHub repositories using a query string.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "description": "Page number. Default: 1",
+            "type": "integer"
+          },
+          "per_page": {
+            "description": "Results per page (max 100). Default: 30",
+            "type": "integer"
+          },
+          "query": {
+            "description": "required,Search query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "per_page",
+          "page"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "trigger_workflow",
+      "description": "Triggers a workflow dispatch event.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "inputs": {
+            "description": "JSON-encoded workflow inputs",
+            "type": "string"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "ref": {
+            "description": "required,Git ref (branch or tag)",
+            "type": "string"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          },
+          "workflow_id": {
+            "description": "required,Workflow ID or file name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "workflow_id",
+          "ref",
+          "inputs"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "update_issue",
+      "description": "Updates an existing issue.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "New body in Markdown",
+            "type": "string"
+          },
+          "labels": {
+            "description": "Comma-separated label names",
+            "type": "string"
+          },
+          "number": {
+            "description": "required,Issue number",
+            "type": "integer"
+          },
+          "owner": {
+            "description": "required,Repository owner",
+            "type": "string"
+          },
+          "repo": {
+            "description": "required,Repository name",
+            "type": "string"
+          },
+          "state": {
+            "description": "New state: open or closed",
+            "type": "string"
+          },
+          "title": {
+            "description": "New title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "owner",
+          "repo",
+          "number",
+          "title",
+          "body",
+          "state",
+          "labels"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "hosting": [
+    {
+      "case": "every service enabled, no tool lists — an empty allowed set hosts everything",
+      "services": {
+        "actions": {
+          "enabled": true,
+          "tools": null
+        },
+        "issues": {
+          "enabled": true,
+          "tools": null
+        },
+        "pull_requests": {
+          "enabled": true,
+          "tools": null
+        },
+        "releases": {
+          "enabled": true,
+          "tools": null
+        },
+        "repos": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "tools": [
+        "create_issue",
+        "create_pull",
+        "create_release",
+        "get_issue",
+        "get_pull",
+        "get_pull_diff",
+        "get_repo",
+        "get_run_logs",
+        "get_workflow_run",
+        "list_issues",
+        "list_pull_comments",
+        "list_pulls",
+        "list_releases",
+        "list_repos",
+        "list_tags",
+        "list_workflow_runs",
+        "list_workflows",
+        "search_code",
+        "trigger_workflow",
+        "update_issue"
+      ]
+    },
+    {
+      "case": "no services at all",
+      "services": {},
+      "tools": []
+    },
+    {
+      "case": "a disabled service contributes neither its gate nor its tools",
+      "services": {
+        "issues": {
+          "enabled": false,
+          "tools": [
+            "list_issues"
+          ]
+        },
+        "repos": {
+          "enabled": true,
+          "tools": [
+            "list_repos"
+          ]
+        }
+      },
+      "tools": [
+        "list_repos"
+      ]
+    },
+    {
+      "case": "a non-empty allowed set is a filter across every enabled service",
+      "services": {
+        "actions": {
+          "enabled": true,
+          "tools": [
+            "get_run_logs"
+          ]
+        },
+        "issues": {
+          "enabled": true,
+          "tools": [
+            "create_issue",
+            "update_issue"
+          ]
+        },
+        "pull_requests": {
+          "enabled": true,
+          "tools": [
+            "get_pull_diff"
+          ]
+        },
+        "releases": {
+          "enabled": true,
+          "tools": [
+            "list_tags"
+          ]
+        },
+        "repos": {
+          "enabled": true,
+          "tools": [
+            "get_repo"
+          ]
+        }
+      },
+      "tools": [
+        "create_issue",
+        "get_pull_diff",
+        "get_repo",
+        "get_run_logs",
+        "list_tags",
+        "update_issue"
+      ]
+    },
+    {
+      "case": "the allowed set is a union over services, not a per-service list",
+      "services": {
+        "issues": {
+          "enabled": true,
+          "tools": null
+        },
+        "repos": {
+          "enabled": true,
+          "tools": [
+            "list_repos",
+            "list_issues"
+          ]
+        }
+      },
+      "tools": [
+        "list_issues",
+        "list_repos"
+      ]
+    },
+    {
+      "case": "a tool named by a disabled service is not allowed anywhere",
+      "services": {
+        "issues": {
+          "enabled": true,
+          "tools": null
+        },
+        "nope": {
+          "enabled": false,
+          "tools": [
+            "get_repo"
+          ]
+        },
+        "repos": {
+          "enabled": true,
+          "tools": [
+            "list_repos"
+          ]
+        }
+      },
+      "tools": [
+        "list_repos"
+      ]
+    }
+  ],
+  "calls": [
+    {
+      "case": "list_repos/zero values take the default page size and omit page",
+      "tool": "list_repos",
+      "arguments": {
+        "page": 0,
+        "per_page": 0,
+        "sort": "",
+        "visibility": ""
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/user/repos?per_page=30",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Repositories: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "list_repos/every filter set, and per_page over 100 falls back to 30",
+      "tool": "list_repos",
+      "arguments": {
+        "page": 3,
+        "per_page": 101,
+        "sort": "full_name",
+        "visibility": "private"
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/user/repos?page=3\u0026per_page=30\u0026sort=full_name\u0026visibility=private",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Repositories: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "list_repos/per_page 100 is the largest value that survives the clamp",
+      "tool": "list_repos",
+      "arguments": {
+        "page": 1,
+        "per_page": 100,
+        "sort": "",
+        "visibility": ""
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/user/repos?page=1\u0026per_page=100",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Repositories: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "list_repos/a negative per_page is a zero, not an error",
+      "tool": "list_repos",
+      "arguments": {
+        "page": 0,
+        "per_page": -5,
+        "sort": "",
+        "visibility": ""
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/user/repos?per_page=30",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Repositories: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "get_repo/a space and a slash in the segments, PathEscape'd",
+      "tool": "get_repo",
+      "arguments": {
+        "owner": "my org",
+        "repo": "a/b"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"full_name\":\"my org/a/b\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/my%20org/a%2Fb",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Repository: {\"full_name\":\"my org/a/b\"}"
+    },
+    {
+      "case": "get_repo/the reserved bytes a segment keeps, the ones it escapes, and UTF-8",
+      "tool": "get_repo",
+      "arguments": {
+        "owner": "a$\u0026+:=@b",
+        "repo": "café;日本語,x?y"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"full_name\":\"x\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/a$\u0026+:=@b/caf%C3%A9%3B%E6%97%A5%E6%9C%AC%E8%AA%9E%2Cx%3Fy",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Repository: {\"full_name\":\"x\"}"
+    },
+    {
+      "case": "get_repo/a non-2xx status is the API's own body, verbatim",
+      "tool": "get_repo",
+      "arguments": {
+        "owner": "octocat",
+        "repo": "ghost"
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\",\"status\":\"404\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/ghost",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "github API error: status 404: {\"message\":\"Not Found\",\"status\":\"404\"}"
+    },
+    {
+      "case": "get_repo/a 500 with an empty body still names the status",
+      "tool": "get_repo",
+      "arguments": {
+        "owner": "octocat",
+        "repo": "ghost"
+      },
+      "response": {
+        "status": 500,
+        "body": ""
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/ghost",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "github API error: status 500: "
+    },
+    {
+      "case": "search_code/QueryEscape, where a space is + and a tilde is not escaped",
+      "tool": "search_code",
+      "arguments": {
+        "page": 0,
+        "per_page": 0,
+        "query": "repo:o/r func foo+bar ~x/y\u0026z=1 *"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"total_count\":1,\"items\":[]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/search/code?per_page=30\u0026q=repo%3Ao%2Fr+func+foo%2Bbar+~x%2Fy%26z%3D1+%2A",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Search results: {\"total_count\":1,\"items\":[]}"
+    },
+    {
+      "case": "list_issues/every filter, and the sorted query Values.Encode produces",
+      "tool": "list_issues",
+      "arguments": {
+        "labels": "bug,help wanted",
+        "owner": "octocat",
+        "page": 2,
+        "per_page": 50,
+        "repo": "hello-world",
+        "sort": "updated",
+        "state": "all"
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/issues?labels=bug%2Chelp+wanted\u0026page=2\u0026per_page=50\u0026sort=updated\u0026state=all",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Issues: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "list_issues/empty filters drop out of the query entirely",
+      "tool": "list_issues",
+      "arguments": {
+        "labels": "",
+        "owner": "octocat",
+        "page": 0,
+        "per_page": 0,
+        "repo": "hello-world",
+        "sort": "",
+        "state": ""
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/issues?per_page=30",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Issues: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "get_issue/the number is formatted with %d, not escaped",
+      "tool": "get_issue",
+      "arguments": {
+        "number": 1347,
+        "owner": "octocat",
+        "repo": "hello-world"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"number\":1347}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/issues/1347",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Issue: {\"number\":1347}"
+    },
+    {
+      "case": "create_issue/a full body, whose keys json.Marshal sorts",
+      "tool": "create_issue",
+      "arguments": {
+        "assignees": "octocat,hubot",
+        "body": "It \u003cbroke\u003e \u0026 burned",
+        "labels": "bug, help wanted ,",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "title": "Found a bug"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"number\":1347}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/octocat/hello-world/issues",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"assignees\":[\"octocat\",\"hubot\"],\"body\":\"It \\u003cbroke\\u003e \\u0026 burned\",\"labels\":[\"bug\",\"help wanted\"],\"title\":\"Found a bug\"}"
+      },
+      "is_error": false,
+      "text": "Issue created: {\"number\":1347}"
+    },
+    {
+      "case": "create_issue/only the required title reaches the body",
+      "tool": "create_issue",
+      "arguments": {
+        "assignees": "",
+        "body": "",
+        "labels": "",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "title": "Bare"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"number\":1348}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/octocat/hello-world/issues",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"title\":\"Bare\"}"
+      },
+      "is_error": false,
+      "text": "Issue created: {\"number\":1348}"
+    },
+    {
+      "case": "create_issue/a labels string of only separators is a null, not an empty array",
+      "tool": "create_issue",
+      "arguments": {
+        "assignees": "",
+        "body": "",
+        "labels": " , , ",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "title": "Bare"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"number\":1349}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/octocat/hello-world/issues",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"labels\":null,\"title\":\"Bare\"}"
+      },
+      "is_error": false,
+      "text": "Issue created: {\"number\":1349}"
+    },
+    {
+      "case": "update_issue/every field set",
+      "tool": "update_issue",
+      "arguments": {
+        "body": "Text",
+        "labels": "bug",
+        "number": 1347,
+        "owner": "octocat",
+        "repo": "hello-world",
+        "state": "closed",
+        "title": "New"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"number\":1347,\"state\":\"closed\"}"
+      },
+      "request": {
+        "method": "PATCH",
+        "target": "/repos/octocat/hello-world/issues/1347",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"body\":\"Text\",\"labels\":[\"bug\"],\"state\":\"closed\",\"title\":\"New\"}"
+      },
+      "is_error": false,
+      "text": "Issue updated: {\"number\":1347,\"state\":\"closed\"}"
+    },
+    {
+      "case": "update_issue/an empty update still sends a body, and it is {}",
+      "tool": "update_issue",
+      "arguments": {
+        "body": "",
+        "labels": "",
+        "number": 1347,
+        "owner": "octocat",
+        "repo": "hello-world",
+        "state": "",
+        "title": ""
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"number\":1347}"
+      },
+      "request": {
+        "method": "PATCH",
+        "target": "/repos/octocat/hello-world/issues/1347",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{}"
+      },
+      "is_error": false,
+      "text": "Issue updated: {\"number\":1347}"
+    },
+    {
+      "case": "list_pulls/every filter",
+      "tool": "list_pulls",
+      "arguments": {
+        "base": "main",
+        "owner": "octocat",
+        "page": 0,
+        "per_page": 10,
+        "repo": "hello-world",
+        "sort": "popularity",
+        "state": "open"
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/pulls?base=main\u0026per_page=10\u0026sort=popularity\u0026state=open",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Pull requests: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "get_pull/the same %d path shape as get_issue",
+      "tool": "get_pull",
+      "arguments": {
+        "number": 42,
+        "owner": "octocat",
+        "repo": "hello-world"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"number\":42}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/pulls/42",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Pull request: {\"number\":42}"
+    },
+    {
+      "case": "create_pull/draft true adds the key; the three required fields are unconditional",
+      "tool": "create_pull",
+      "arguments": {
+        "base": "main",
+        "body": "Body \u0026 \u003cb\u003e",
+        "draft": true,
+        "head": "feature",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "title": "A PR"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"number\":43}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/octocat/hello-world/pulls",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"base\":\"main\",\"body\":\"Body \\u0026 \\u003cb\\u003e\",\"draft\":true,\"head\":\"feature\",\"title\":\"A PR\"}"
+      },
+      "is_error": false,
+      "text": "Pull request created: {\"number\":43}"
+    },
+    {
+      "case": "create_pull/draft false omits the key entirely",
+      "tool": "create_pull",
+      "arguments": {
+        "base": "main",
+        "body": "",
+        "draft": false,
+        "head": "feature",
+        "owner": "octocat",
+        "repo": "hello-world",
+        "title": "A PR"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"number\":44}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/octocat/hello-world/pulls",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"base\":\"main\",\"head\":\"feature\",\"title\":\"A PR\"}"
+      },
+      "is_error": false,
+      "text": "Pull request created: {\"number\":44}"
+    },
+    {
+      "case": "get_pull_diff/a non-JSON body under a caller-chosen Accept",
+      "tool": "get_pull_diff",
+      "arguments": {
+        "number": 42,
+        "owner": "octocat",
+        "repo": "hello-world"
+      },
+      "response": {
+        "status": 200,
+        "body": "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/pulls/42",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3.diff",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Diff:\ndiff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+    },
+    {
+      "case": "get_pull_diff/callRaw reports a non-2xx exactly as call does",
+      "tool": "get_pull_diff",
+      "arguments": {
+        "number": 42,
+        "owner": "octocat",
+        "repo": "hello-world"
+      },
+      "response": {
+        "status": 406,
+        "body": "{\"message\":\"Unsupported media type\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/pulls/42",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3.diff",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "github API error: status 406: {\"message\":\"Unsupported media type\"}"
+    },
+    {
+      "case": "list_pull_comments/no filters at all beyond paging",
+      "tool": "list_pull_comments",
+      "arguments": {
+        "number": 42,
+        "owner": "octocat",
+        "page": 0,
+        "per_page": 0,
+        "repo": "hello-world"
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/pulls/42/comments?per_page=30",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Comments: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "list_workflows/paging only",
+      "tool": "list_workflows",
+      "arguments": {
+        "owner": "octocat",
+        "page": 0,
+        "per_page": 0,
+        "repo": "hello-world"
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/actions/workflows?per_page=30",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Workflows: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "list_workflow_runs/no workflow_id takes the repository-wide path",
+      "tool": "list_workflow_runs",
+      "arguments": {
+        "branch": "main",
+        "owner": "octocat",
+        "page": 0,
+        "per_page": 0,
+        "repo": "hello-world",
+        "status": "completed",
+        "workflow_id": ""
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/actions/runs?branch=main\u0026per_page=30\u0026status=completed",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Workflow runs: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "list_workflow_runs/a workflow_id takes the per-workflow path and is PathEscape'd",
+      "tool": "list_workflow_runs",
+      "arguments": {
+        "branch": "",
+        "owner": "octocat",
+        "page": 0,
+        "per_page": 0,
+        "repo": "hello-world",
+        "status": "",
+        "workflow_id": "ci build.yml"
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/actions/workflows/ci%20build.yml/runs?per_page=30",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Workflow runs: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "trigger_workflow/inputs parse into a map[string]string and are sorted",
+      "tool": "trigger_workflow",
+      "arguments": {
+        "inputs": "{\"zebra\":\"z\",\"alpha\":\"a\"}",
+        "owner": "octocat",
+        "ref": "main",
+        "repo": "hello-world",
+        "workflow_id": "ci.yml"
+      },
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/octocat/hello-world/actions/workflows/ci.yml/dispatches",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"inputs\":{\"alpha\":\"a\",\"zebra\":\"z\"},\"ref\":\"main\"}"
+      },
+      "is_error": false,
+      "text": "Workflow dispatch triggered successfully."
+    },
+    {
+      "case": "trigger_workflow/no inputs at all sends only the ref",
+      "tool": "trigger_workflow",
+      "arguments": {
+        "inputs": "",
+        "owner": "octocat",
+        "ref": "main",
+        "repo": "hello-world",
+        "workflow_id": "ci.yml"
+      },
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/octocat/hello-world/actions/workflows/ci.yml/dispatches",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"ref\":\"main\"}"
+      },
+      "is_error": false,
+      "text": "Workflow dispatch triggered successfully."
+    },
+    {
+      "case": "trigger_workflow/a literal null parses to a nil map and is sent as null",
+      "tool": "trigger_workflow",
+      "arguments": {
+        "inputs": "null",
+        "owner": "octocat",
+        "ref": "main",
+        "repo": "hello-world",
+        "workflow_id": "ci.yml"
+      },
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/octocat/hello-world/actions/workflows/ci.yml/dispatches",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"inputs\":null,\"ref\":\"main\"}"
+      },
+      "is_error": false,
+      "text": "Workflow dispatch triggered successfully."
+    },
+    {
+      "case": "trigger_workflow/an array is not a JSON object",
+      "tool": "trigger_workflow",
+      "arguments": {
+        "inputs": "[\"a\",\"b\"]",
+        "owner": "octocat",
+        "ref": "main",
+        "repo": "hello-world",
+        "workflow_id": "ci.yml"
+      },
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": null,
+      "is_error": true,
+      "text": "parsing workflow inputs (must be a JSON object): json: cannot unmarshal array into Go value of type map[string]string"
+    },
+    {
+      "case": "trigger_workflow/a non-string value is not a map[string]string",
+      "tool": "trigger_workflow",
+      "arguments": {
+        "inputs": "{\"a\":1}",
+        "owner": "octocat",
+        "ref": "main",
+        "repo": "hello-world",
+        "workflow_id": "ci.yml"
+      },
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": null,
+      "is_error": true,
+      "text": "parsing workflow inputs (must be a JSON object): json: cannot unmarshal number into Go value of type string"
+    },
+    {
+      "case": "trigger_workflow/a syntactically invalid payload — the one divergence",
+      "tool": "trigger_workflow",
+      "arguments": {
+        "inputs": "not json",
+        "owner": "octocat",
+        "ref": "main",
+        "repo": "hello-world",
+        "workflow_id": "ci.yml"
+      },
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": null,
+      "is_error": true,
+      "text": "parsing workflow inputs (must be a JSON object): invalid character 'o' in literal null (expecting 'u')",
+      "rust_text": "parsing workflow inputs (must be a JSON object): expected ident at line 1 column 2"
+    },
+    {
+      "case": "trigger_workflow/a truncated payload ends the same way in both languages",
+      "tool": "trigger_workflow",
+      "arguments": {
+        "inputs": "{\"a\":",
+        "owner": "octocat",
+        "ref": "main",
+        "repo": "hello-world",
+        "workflow_id": "ci.yml"
+      },
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": null,
+      "is_error": true,
+      "text": "parsing workflow inputs (must be a JSON object): unexpected end of JSON input"
+    },
+    {
+      "case": "get_workflow_run/a run id inside float64's exact range",
+      "tool": "get_workflow_run",
+      "arguments": {
+        "owner": "octocat",
+        "repo": "hello-world",
+        "run_id": 15678900123
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"id\":15678900123}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/actions/runs/15678900123",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Workflow run: {\"id\":15678900123}"
+    },
+    {
+      "case": "get_workflow_run/a run id above 2^53 — the Go SDK rounds it, Rust does not",
+      "tool": "get_workflow_run",
+      "arguments": {
+        "owner": "octocat",
+        "repo": "hello-world",
+        "run_id": 10152021304050607
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"id\":10152021304050607}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/actions/runs/10152021304050608",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Workflow run: {\"id\":10152021304050607}",
+      "rust_target": "/repos/octocat/hello-world/actions/runs/10152021304050607"
+    },
+    {
+      "case": "get_run_logs/a 302 with a Location is the answer",
+      "tool": "get_run_logs",
+      "arguments": {
+        "owner": "octocat",
+        "repo": "hello-world",
+        "run_id": 42
+      },
+      "response": {
+        "status": 302,
+        "location": "https://objects.example.invalid/logs.zip?token=abc",
+        "body": ""
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/actions/runs/42/logs",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Logs download URL (time-limited zip archive): https://objects.example.invalid/logs.zip?token=abc"
+    },
+    {
+      "case": "get_run_logs/a 301 is a redirect too",
+      "tool": "get_run_logs",
+      "arguments": {
+        "owner": "octocat",
+        "repo": "hello-world",
+        "run_id": 42
+      },
+      "response": {
+        "status": 301,
+        "location": "https://objects.example.invalid/logs.zip",
+        "body": ""
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/actions/runs/42/logs",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Logs download URL (time-limited zip archive): https://objects.example.invalid/logs.zip"
+    },
+    {
+      "case": "get_run_logs/a 302 with no Location is its own sentence",
+      "tool": "get_run_logs",
+      "arguments": {
+        "owner": "octocat",
+        "repo": "hello-world",
+        "run_id": 42
+      },
+      "response": {
+        "status": 302,
+        "body": ""
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/actions/runs/42/logs",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "fetching logs URL for run 42: redirect response missing Location header"
+    },
+    {
+      "case": "get_run_logs/a non-redirect body is truncated at 512 bytes",
+      "tool": "get_run_logs",
+      "arguments": {
+        "owner": "octocat",
+        "repo": "hello-world",
+        "run_id": 42
+      },
+      "response": {
+        "status": 500,
+        "body": "{\"message\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/actions/runs/42/logs",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "fetching logs URL for run 42: github API error: status 500: {\"message\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    },
+    {
+      "case": "list_releases/paging only",
+      "tool": "list_releases",
+      "arguments": {
+        "owner": "octocat",
+        "page": 0,
+        "per_page": 0,
+        "repo": "hello-world"
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/releases?per_page=30",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Releases: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    },
+    {
+      "case": "create_release/every optional key present",
+      "tool": "create_release",
+      "arguments": {
+        "body": "Notes \u0026 \u003cem\u003emore\u003c/em\u003e",
+        "draft": true,
+        "generate_release_notes": true,
+        "name": "Version 1.0.0",
+        "owner": "octocat",
+        "prerelease": true,
+        "repo": "hello-world",
+        "tag_name": "v1.0.0",
+        "target_commitish": "main"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"id\":1,\"tag_name\":\"v1.0.0\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/octocat/hello-world/releases",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"body\":\"Notes \\u0026 \\u003cem\\u003emore\\u003c/em\\u003e\",\"draft\":true,\"generate_release_notes\":true,\"name\":\"Version 1.0.0\",\"prerelease\":true,\"tag_name\":\"v1.0.0\",\"target_commitish\":\"main\"}"
+      },
+      "is_error": false,
+      "text": "Release created: {\"id\":1,\"tag_name\":\"v1.0.0\"}"
+    },
+    {
+      "case": "create_release/false booleans omit their keys",
+      "tool": "create_release",
+      "arguments": {
+        "body": "",
+        "draft": false,
+        "generate_release_notes": false,
+        "name": "",
+        "owner": "octocat",
+        "prerelease": false,
+        "repo": "hello-world",
+        "tag_name": "v1.0.1",
+        "target_commitish": ""
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"id\":2,\"tag_name\":\"v1.0.1\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/repos/octocat/hello-world/releases",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "application/json",
+        "body": "{\"tag_name\":\"v1.0.1\"}"
+      },
+      "is_error": false,
+      "text": "Release created: {\"id\":2,\"tag_name\":\"v1.0.1\"}"
+    },
+    {
+      "case": "list_tags/paging only",
+      "tool": "list_tags",
+      "arguments": {
+        "owner": "octocat",
+        "page": 0,
+        "per_page": 0,
+        "repo": "hello-world"
+      },
+      "response": {
+        "status": 200,
+        "body": "[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/repos/octocat/hello-world/tags?per_page=30",
+        "authorization": "Bearer parity-pat-token",
+        "accept": "application/vnd.github.v3+json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Tags: [{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]"
+    }
+  ]
+}

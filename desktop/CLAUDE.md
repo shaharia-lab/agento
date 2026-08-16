@@ -119,6 +119,8 @@ src-tauri/src/
     permissions.rs / hooks.rs   the two callback round trips
     mcp.rs       loopback HTTP host for in-process MCP servers (rmcp, stateless)
     tool.rs      a tool is a function: derived schemas, runtime registration
+    schema_vectors.rs  tests only: which Go shapes schemars reproduces, and what
+                 a port must write for the ones it does not (#312)
     lenient.rs   Go's partial-decode semantics, which serde does not have
   native/        ported endpoints (phase 2+)
     active_time.rs the capped-gap rule, shared by the scanner and the pipeline
@@ -146,6 +148,12 @@ src-tauri/src/
     tools/       the local in-process tools MCP server (#310) — `internal/tools`
       mod.rs     the server name, the qualified `mcp__local-tools__…` names
       current_time.rs  time.LoadLocation and RFC1123/RFC3339, pinned to vectors
+    integrations/github/  the GitHub integration's MCP server (#312) — 20 tools
+      mod.rs     the server name, the allowed-set union and the service gates
+      client.rs  githubAPIBase, the two clients, the three read caps, the four
+                 failure sentences — and what a cancelled call answers
+      body.rs    json.Marshal over a Go map, and encoding/json's unmarshal errors
+      repos.rs / issues.rs / pulls.rs / actions.rs / releases.rs  one per service
     settings.rs  GET /api/settings and /settings/claude-config-dirs (a filesystem
                  probe; Unix, forwards on Windows); the preferences + config dirs
                  a read is scoped to; and `update`, the PUT — written and tested,
@@ -525,7 +533,7 @@ of the `Err` arms the cut-over has to turn into a real response.
 | 1 ✅ | Sidecar + proxy | — | done |
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
 | 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274, #275).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. The scheduler's *schedule computation* is ported and pinned (#275); its ownership is not, and is blocked — see below. |
-| 4 ← | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. WhatsApp is **not** among them — see below. |
+| 4 ← | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. **GitHub is done (#312)** — `native/integrations/github/`, the worked example for an *integration*; the registry that hosts it is #311. WhatsApp is **not** among them — see below. |
 | 5 ← | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
 
 ### The session scanner (`src-tauri/src/native/scanner/`)
@@ -759,24 +767,48 @@ docs carry a full worked example.
 
 **The first real caller is `native/tools/` (#310)**, the local in-process server
 — one tool, no credentials — and it is the file to read before porting an
-integration. Three things it settled that all six inherit:
+integration. Four things are settled before the six integration ports —
+three by #310 and one by #312 — and all six inherit every one:
 
-- **`new_tool` strips `$schema`.** `schemars` stamps a dialect key on every
-  schema it generates and `google/jsonschema-go` stamps none, so a Rust-hosted
-  tool would put a field in front of the model that the same Go-hosted tool does
-  not have. It is stripped by replacing the `Arc`, not through it: `rmcp`
-  memoizes one schema per input type and hands every route a clone, so an
-  in-place edit would reach into a process-wide cache. What is left matches Go
-  key for key — `additionalProperties`, `properties`, `required`, `type` — **for
-  a flat struct of required scalars**, which is all #310 has and all the vectors
-  cover. `#[serde(deny_unknown_fields)]` is what produces the first of those,
-  which Go reflects onto every struct and its server *validates* against.
-  `$schema` is the first of a class, not the whole class: `schemars` and
-  `google/jsonschema-go` are known to diverge on `Option<T>`
-  (`"type":["string","null"]` vs an `omitempty` field that stays
-  `"type":"string"` and just leaves `required`), on nested structs (`$defs`/
-  `$ref` vs inlined) and on integer `"format"`. Get a nested/`Option` parity
-  vector in before the first integration port lands.
+- **`new_tool` normalizes the schema towards Go's** (`normalize_go_schema`).
+  Three keys are dropped, and all three are keys `jsonschema.For` can never
+  emit, so removing one can only move a Rust schema towards Go's: `$schema`
+  (the dialect key `schemars` stamps on everything), `format` (`"int64"` for an
+  `i64`; Go's `Schema.Format` is only ever filled by hand) and `default`
+  (`#[serde(default)]` is the shape that reproduces `omitempty`, and `schemars`
+  advertises the default value it implies). They are dropped by replacing the
+  `Arc`, not through it: `rmcp` memoizes one schema per input type and hands
+  every route a clone, so an in-place edit would reach into a process-wide
+  cache. The walk is structure-aware rather than a key sweep — all three are
+  legal property *names* too. `#[serde(deny_unknown_fields)]` is what produces
+  `additionalProperties: false`, which Go reflects onto every struct and its
+  server *validates* against.
+- **The reflector divergence map is generated, and it is the file to read
+  before porting an integration** (#312).
+  `desktop/parity/jsonschema_reflect_vectors.json` reflects one reference struct
+  covering every shape class through `jsonschema.For`, and
+  `src-tauri/src/claude/schema_vectors.rs` declares the corresponding Rust
+  shapes and pins, per shape, whether they match and what to write when they do
+  not. Two findings drive every port:
+  - **`jsonschema:"required,…"` is not a directive.** `jsonschema-go` reads the
+    whole tag as the property's *description*, `required,` prefix included, and
+    marks a field optional only on `omitempty`/`omitzero`. No params struct in
+    the six integrations writes either, so **every field of all 62 tools is
+    required** and every description the model reads begins with `required,`.
+    Copy the tag verbatim into the doc comment; "fixing" it changes the wire.
+  - **An optional Go field is `#[serde(default)] String`, never
+    `Option<String>`.** `omitempty` moves a field out of `required` and leaves
+    its type alone; an `Option` renders `["string","null"]`, which is a
+    different type in front of the model.
+
+  Three divergences are left standing, each unreachable from #312 and each
+  documented at its site with what a port must do instead: a Go slice renders
+  `["null","array"]` (nothing in the integrations takes a list — every
+  multi-value input is a comma-separated `string` through `splitCSV`), a nested
+  struct is inlined by Go and lifted to `$defs`/`$ref` by `schemars` (every
+  params struct is flat; flatten yours), and a sized or unsigned integer
+  reflects as bounds in Go and as a format in Rust (use `i64`, which is what a
+  Go `int` and `int64` both are).
 - **Malformed arguments are the same *kind* of failure, with different
   wording.** Both servers answer a missing field, an extra field, a wrong type
   or an absent `arguments` with a `CallToolResult` carrying `IsError`, never a
@@ -809,6 +841,92 @@ the allowlist it produced. An agent naming `local: [current_time]` and no
 built-ins has a non-empty `--allowedTools` and still gets no `--disallowedTools`;
 subtracting the allowlist from the twelve built-ins instead would deny all of
 them.
+
+### The GitHub integration (`native/integrations/github/`, #312)
+
+The first of the six, and the largest: twenty tools over five service groups,
+token auth only. It is the file to read beside `native/tools/` before porting
+#313–#317 — that one settles *how to host a tool*, this one settles *how to port
+an integration*.
+
+**Where it lives, and why there.** `native/integrations.rs` stays a file and
+gains one `pub mod github;` line; the port is `native/integrations/github/`.
+Rust admits a `foo.rs` beside a `foo/` directory, so this is the layout that
+moves nothing — the alternative was renaming a 1,400-line module to
+`integrations/mod.rs` for the same result. `ServiceConfig` is reused from it
+rather than redeclared.
+
+**It is the server, not the registry.** `Start(ctx, cfg)` refuses an
+unauthenticated integration, parses `config.GitHubCredentials` and then hosts;
+only the hosting is here. The first two read the `auth` and `credentials`
+columns, which `native/integrations.rs` deliberately never selects, so nothing
+in this shell can supply them yet. #311 owns `Start`/`Stop`/`Reload` and
+`PUT`/`DELETE /api/integrations/{id}`, and is where a credential is first read;
+`start_github_mcp_server` takes the token it will have by then. `auth.go`'s
+`ValidatePAT` is unported for the same reason — no caller, and dead code trips
+clippy.
+
+**The gating rule reads backwards, and it is the thing a port gets wrong.** A
+service registers when its row says `enabled`; within it, a tool registers when
+the union of *every enabled service's* `tools` list names it — **or when that
+union is empty**. So all-enabled-with-no-lists hosts all twenty, and one name
+anywhere narrows every service at once. Both halves are in the vectors.
+
+**Four surfaces are pinned, not one.** `desktop/parity/github_vectors.json` is
+taken from the real Go server over its real MCP transport, against a fake GitHub
+that **records the request each tool built**: the hosted tool set, each
+description and input schema, the request (method, encoded target, headers,
+body) and the result text of every success and every failure path. The request
+half is what pins the things no response reveals — `url.PathEscape` per segment,
+`url.Values.Encode`'s sorted keys and `+`-for-space, the per-page clamp, and
+`json.Marshal`'s sorted keys and HTML escaping in every request body. Regenerate
+with
+`go test ./desktop/parity/ -run TestGitHubVectors -update-github-vectors`.
+
+Five things it brought that #313–#317 will want:
+
+- **`gourl.rs` now has all three of `net/url`'s escaping modes.**
+  `url.PathEscape` is `encodePathSegment` and escapes `/ ; , ?`;
+  `url.QueryEscape` is `encodeQueryComponent` and escapes everything reserved
+  **plus a space as `+`**. `form_urlencoded` — already in the tree — matches
+  neither: it escapes `~` where Go does not and keeps `*` where Go does not.
+  `gourl::Values` is `url.Values` restricted to `Set`, which is all any
+  integration uses. All pinned in `gourl_vectors.json`.
+- **A request body is a `BTreeMap` through `gojson::to_vec_marshal`**
+  (`github/body.rs`), which is what reproduces `json.Marshal` over a Go map:
+  sorted keys and `\u003c`/`\u003e`/`\u0026`. Watch the conditions — Go writes
+  a key only when it is non-empty or true, so `draft: false` sends **no key**,
+  an all-empty update sends `{}` (and therefore still sends `Content-Type`), and
+  a `labels` string of only separators sends `null` rather than `[]`, because
+  `splitCSV` returns a nil slice.
+- **The response bytes never round-trip through a JSON value.** Every success
+  sentence interpolates GitHub's own body verbatim; decoding and re-encoding
+  would reorder its keys and respell its numbers.
+- **A cancelled call answers Go's own sentence.** In Go a cancelled `ctx` is how
+  `client.Do` fails, so `calling GitHub %s %s: request failed` is what the model
+  reads there too — no divergence to invent. Every outbound call
+  `tokio::select!`s on the token, because `rmcp` spawns handlers detached.
+- **`reqwest` gained `rustls-tls`.** Every hop this shell made was loopback
+  until now, so no TLS backend was configured and `https://api.github.com` would
+  have failed at runtime. rustls with bundled webpki roots, for the reasoning
+  already written on `lettre`: five release triples, no C toolchain.
+
+Two divergences are pinned rather than reconciled, both in the vectors:
+
+- **`encoding/json`'s syntax-error vocabulary.** `trigger_workflow` parses a
+  caller-supplied document, and Go's `invalid character 'o' in literal null
+  (expecting 'u')` has no `serde_json` equivalent. Every *well-formed* document
+  matches exactly — including `null` parsing to a nil map with no error, and a
+  null value decoding to `""` — and a *truncated* one matches too
+  (`unexpected end of JSON input`). The vector's `rust_text` field carries the
+  one that does not.
+- **The Go MCP SDK rounds an integer argument above 2^53.** `mcp/tool.go`
+  unmarshals `arguments` into a `map[string]any`, applies schema defaults and
+  re-marshals before the typed decode, so an `int64` reaches a Go handler
+  rounded; `rmcp` deserializes straight into the input struct and does not.
+  Carried by the vector's `rust_target` field. Unreachable with a real GitHub
+  run id, and deliberately not reproduced — degrading Rust to match would be
+  worse than the divergence.
 
 ### Things that will bite
 
@@ -2050,6 +2168,16 @@ right:
 - **An unknown task's job history is `200 []`, not a 404.** Go never checks the
   task exists before listing its runs, so this must be *answered* rather than
   forwarded; only `/api/tasks/{id}` and `/api/job-history/{id}` 404.
+
+**Phase 4 has started.** `internal/tools` (#310) and the **GitHub integration**
+(#312) are ported: `native/tools/` and `native/integrations/github/`, both built
+on the typed-tool layer #282 settled and both pinned by parity vectors taken
+from the running Go server rather than from its source. Neither is *hosted* yet
+— the registry that starts and stops an integration's server, and the credential
+read that feeds it, are #311 — so `chat/runner.rs` still refuses an agent whose
+capabilities name MCP tools. #312 also produced the reflector divergence map
+(`parity/jsonschema_reflect_vectors.json` + `claude/schema_vectors.rs`), which
+is the file to read before starting #313–#317.
 
 Nothing else is ported. Every endpoint not listed above — every write path, the
 per-session reads and every other read — still forwards to Go.

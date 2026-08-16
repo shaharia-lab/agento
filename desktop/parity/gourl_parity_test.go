@@ -64,6 +64,11 @@ type gourlVectors struct {
 	Comment    []string        `json:"_comment"`
 	RoutePath  []routePathCase `json:"route_path"`
 	EscapePath []escapeCase    `json:"escape_path"`
+	// `url.PathEscape` and `url.QueryEscape` — the other two arms of
+	// `shouldEscape`, added with #312 because every integration builds its
+	// paths with the first and its queries with the second.
+	PathEscape  []escapeCase `json:"path_escape"`
+	QueryEscape []escapeCase `json:"query_escape"`
 }
 
 // routePathInputs cover each branch of `url.setPath`'s canonical check: a path
@@ -117,6 +122,22 @@ var escapePathInputs = []string{
 	"~user", "a+b", "日本語", "a\x00b",
 }
 
+// segmentAndQueryInputs run through **both** `url.PathEscape` and
+// `url.QueryEscape`, so the two vector blocks are the same inputs under the two
+// modes and a reader can see where the arms part company at a glance.
+//
+// The reserved set is spelled out one byte at a time because that is exactly
+// where `shouldEscape` branches: a segment escapes `/ ; , ?` and keeps
+// `$ & + : = @`, a query escapes all ten. The three inputs after it are the
+// bytes an off-the-shelf encoder gets wrong — `~` (Go keeps it, WHATWG form
+// encoding escapes it), `*` (the reverse), and a space (`+` in a query,
+// `%20` in a segment).
+var segmentAndQueryInputs = []string{
+	"", "a-b", "a b", "a/b", "a%b", "$", "&", "+", ",", "/", ":", ";", "=", "?", "@",
+	"-_.~", "~user", "a*b", "repo:o/r func foo+bar", "café", "日本語",
+	"a\tb", "a\nb", "a\"b", "a<b>c", "a#b", "a\x00b",
+}
+
 func TestGoURLVectors(t *testing.T) {
 	want := gourlVectors{
 		Comment: []string{
@@ -138,6 +159,12 @@ func TestGoURLVectors(t *testing.T) {
 		// whole point, since RawPath is left empty here.
 		u := url.URL{Path: in}
 		want.EscapePath = append(want.EscapePath, escapeCase{Value: in, Want: u.EscapedPath()})
+	}
+	for _, in := range segmentAndQueryInputs {
+		want.PathEscape = append(want.PathEscape,
+			escapeCase{Value: in, Want: url.PathEscape(in)})
+		want.QueryEscape = append(want.QueryEscape,
+			escapeCase{Value: in, Want: url.QueryEscape(in)})
 	}
 
 	encoded, err := json.MarshalIndent(want, "", "  ")
