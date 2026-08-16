@@ -38,6 +38,8 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-stream",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 

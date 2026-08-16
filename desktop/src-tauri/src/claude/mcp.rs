@@ -20,6 +20,16 @@
 //! it before phase 4 could settle it by accident. `desktop/CLAUDE.md` →
 //! "Hosting a tool" carries the reasoning.
 //!
+//! Go's `ServeStdioMCP` / `SelfAsStdioMCPServer` — hosting a server over the
+//! current process's stdin/stdout — are **not** ported. Nothing in Agento calls
+//! them; the whole point of this PR is that there is exactly one way to host a
+//! tool, and a second, untested one would undo that. [`McpStdioServer`] the
+//! *config* stays, because `internal/config/mcp.go` builds one for every
+//! external server in `mcps.yaml` — that is describing somebody else's
+//! subprocess, not hosting our own.
+//!
+//! [`McpStdioServer`]: super::options::McpStdioServer
+//!
 //! ## The transport is stateless, and that is a choice
 //!
 //! `rmcp`'s streamable-HTTP service defaults to sessions: a POST is answered on
@@ -34,18 +44,53 @@
 //! Stateless is spec-legal on both counts a client can notice — a server MAY
 //! decline to assign a session id, and MUST answer `405` to the `GET` that
 //! opens the optional server-initiated stream — and it is what removes session
-//! expiry, session storage and a per-session task from eight servers running in
-//! a desktop app. Flipping `legacy_session_mode` back on in `server_config()`
-//! is the one-line escape hatch if a future CLI turns out to need one.
+//! expiry, session storage and a per-session task from the seven servers a
+//! fully-integrated desktop app runs (six integrations plus `internal/tools`).
+//! Both properties are asserted in this module's own tests, not only in the
+//! `#[ignore]`d live suite: they are the two things a client notices, and a
+//! POST behaves identically in either mode, so nothing else here would catch a
+//! regression.
+//!
+//! Turning sessions back on is a **two**-line change — `legacy_session_mode`
+//! plus the session manager, which is [`NeverSessionManager`] precisely so that
+//! "stateless" is a property of the type rather than of a flag someone could
+//! flip halfway.
+//!
+//! ## Every server carries a bearer token
+//!
+//! This is the one place the port does **more** than Go, deliberately. Go's
+//! `StartInProcessMCPServer` binds an unauthenticated loopback port; from phase
+//! 4 that port answers `tools/call` using the user's live Slack, GitHub and
+//! Google credentials, and loopback is not a boundary between processes — any
+//! other program running as the user can dial it. The browser vector is already
+//! closed (the transport requires non-safelisted headers, so a page's `fetch`
+//! is preflighted and gets a bare `405`, and `allowed_hosts` blocks DNS
+//! rebinding), but nothing stopped a local process.
+//!
+//! So each server mints a random token at start and requires it as
+//! `Authorization: Bearer …`. It travels to the CLI in [`McpHttpServer`]'s
+//! `headers` map — a field that existed and was always empty — which the CLI
+//! sends on every request to that server; verified against the real CLI
+//! (2.1.224) and covered by `tests/claude_mcp_live.rs`. It costs one header
+//! compare per request.
+//!
+//! **What it does not buy**, stated so nobody over-trusts it: `--mcp-config` is
+//! inline JSON in the subprocess's argv (`options.rs`), so the token is legible
+//! to anything that can read `/proc/<pid>/cmdline` — the same user always, and
+//! any local user on a default Linux. What is closed is the caller that can
+//! only *speak HTTP* to a port it found: it now needs a secret it has no way to
+//! guess, where before the port alone was enough. Code already running as this
+//! user is not in scope and never was — it can read the integration credentials
+//! out of `agento.db` without going near an MCP port.
 
 use std::sync::Arc;
 
-use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use rmcp::ServerHandler;
 
 use super::errors::{Error, Result};
-use super::options::{McpHttpServer, McpStdioServer};
+use super::options::McpHttpServer;
 
 /// The streamable-HTTP settings every in-process server is hosted under.
 ///
@@ -59,6 +104,13 @@ fn server_config() -> StreamableHttpServerConfig {
     config.legacy_session_mode = false;
     config.json_response = true;
     config
+}
+
+/// Compares two credentials without an early exit, so a wrong token leaks
+/// nothing about the right one through response timing.
+fn credentials_match(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// A running in-process MCP server.
@@ -117,18 +169,49 @@ where
 
     let config = server_config();
     // Cancelling this is what tears down any work the transport has in flight;
-    // dropping the axum listener alone would leave it running.
+    // dropping the axum listener alone would leave it running. It is also the
+    // parent of every tool call's `CancellationToken`, so this is what lets a
+    // handler abort an outbound HTTP request when the handle goes away.
     let cancel = config.cancellation_token.clone();
     let mcp = StreamableHttpService::new(
         move || Ok(service.clone()),
-        Arc::new(LocalSessionManager::default()),
+        // Not `LocalSessionManager`: `legacy_session_mode: false` makes the
+        // session map unreachable, and a store nothing can write to is a
+        // question every later reader has to re-answer.
+        Arc::new(NeverSessionManager::default()),
         config,
     );
+
+    // 122 bits from the OS CSPRNG, which is what `Uuid::new_v4` is. Not a
+    // secret worth rotating — it lives and dies with this listener.
+    let expected = format!("Bearer {}", uuid::Uuid::new_v4().simple());
 
     // `fallback_service` rather than a route: Go mounts the handler as the
     // whole `http.Server`, so every path reaches it, and the CLI is free to
     // dial the bare origin or any path under it.
-    let app = axum::Router::new().fallback_service(mcp);
+    let app = axum::Router::new()
+        .fallback_service(mcp)
+        .layer(axum::middleware::from_fn({
+            let expected = expected.clone();
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let expected = expected.clone();
+                async move {
+                    let presented = request
+                        .headers()
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or_default();
+                    if credentials_match(presented, &expected) {
+                        next.run(request).await
+                    } else {
+                        axum::response::IntoResponse::into_response((
+                            axum::http::StatusCode::UNAUTHORIZED,
+                            "Unauthorized",
+                        ))
+                    }
+                }
+            }
+        }));
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let server_name = name.to_string();
@@ -144,55 +227,19 @@ where
         }
     });
 
+    // Several of these run at once on ports the OS picked, so "which port is
+    // Slack on" is otherwise unanswerable from a log. The token is not logged.
+    log::info!("claude: mcp {name:?}: serving on http://{addr}");
+
     Ok(InProcessMcpServer {
         config: McpHttpServer {
             server_type: "http".to_string(),
             url: format!("http://{addr}"),
-            headers: Default::default(),
+            headers: [("Authorization".to_string(), expected)]
+                .into_iter()
+                .collect(),
         },
         shutdown: Some(shutdown_tx),
-    })
-}
-
-/// Runs `service` as an MCP stdio server, reading from stdin and writing to
-/// stdout. Intended for a standalone binary registered via [`McpStdioServer`].
-///
-/// Blocks until stdin closes.
-pub async fn serve_stdio_mcp<S>(service: S) -> Result<()>
-where
-    S: ServerHandler,
-{
-    use rmcp::ServiceExt;
-
-    let running = service
-        .serve(rmcp::transport::stdio())
-        .await
-        .map_err(|e| Error::wrap("serving MCP over stdio", e))?;
-    running
-        .waiting()
-        .await
-        .map_err(|e| Error::wrap("serving MCP over stdio", e))?;
-    Ok(())
-}
-
-/// Returns an [`McpStdioServer`] that runs the current binary with the given
-/// extra arguments — the self-invoking MCP stdio pattern, where one executable
-/// is both the client and, under a flag, the server.
-pub fn self_as_stdio_mcp_server<I, S>(extra_args: I) -> Result<McpStdioServer>
-where
-    I: IntoIterator<Item = S>,
-    S: Into<String>,
-{
-    let exe = std::env::current_exe()
-        .map_err(|e| Error::wrap("resolve executable", e))?
-        .to_string_lossy()
-        .into_owned();
-
-    Ok(McpStdioServer {
-        server_type: "stdio".to_string(),
-        command: exe,
-        args: extra_args.into_iter().map(Into::into).collect(),
-        env: Default::default(),
     })
 }
 
@@ -202,18 +249,20 @@ mod tests {
     use super::*;
     use rmcp::model::{CallToolResult, ContentBlock};
 
-    /// The headers the MCP streamable-HTTP transport requires of every POST. A
-    /// request missing either is answered `406`/`415` before it reaches the
-    /// server, so the tests send what a conforming client sends.
-    async fn post(url: &str, body: &'static str) -> reqwest::Response {
-        reqwest::Client::new()
-            .post(url)
+    /// What a conforming client sends: the two headers the MCP streamable-HTTP
+    /// transport requires of every POST (a request missing either is answered
+    /// `406`/`415` before it reaches the server), plus whatever the handle's
+    /// own config carries — which is where the bearer token lives, exactly as
+    /// it does for the CLI.
+    async fn post(server: &InProcessMcpServer, body: &'static str) -> reqwest::Response {
+        let mut request = reqwest::Client::new()
+            .post(server.url())
             .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream")
-            .body(body)
-            .send()
-            .await
-            .unwrap()
+            .header("Accept", "application/json, text/event-stream");
+        for (name, value) in &server.config().headers {
+            request = request.header(name, value);
+        }
+        request.body(body).send().await.unwrap()
     }
 
     #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -226,7 +275,7 @@ mod tests {
         ToolServer::new("probe").with_tool(new_tool(
             "echo",
             "Echoes its input back.",
-            |input: EchoInput| async move {
+            |input: EchoInput, _ct| async move {
                 Ok(CallToolResult::success(vec![ContentBlock::text(
                     input.text,
                 )]))
@@ -254,11 +303,7 @@ mod tests {
             .await
             .unwrap();
 
-        let response = post(
-            server.url(),
-            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
-        )
-        .await;
+        let response = post(&server, r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#).await;
         assert_eq!(response.status(), 200);
         // Parsed by hand rather than via reqwest's `json` feature: this is
         // the only caller, and the feature would ship in the release binary.
@@ -268,7 +313,7 @@ mod tests {
         assert_eq!(body["result"]["tools"][0]["name"], "echo");
 
         let response = post(
-            server.url(),
+            &server,
             r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
         )
         .await;
@@ -282,7 +327,7 @@ mod tests {
             .unwrap();
 
         let response = post(
-            server.url(),
+            &server,
             r#"{"jsonrpc":"2.0","id":7,"method":"tools/call",
                 "params":{"name":"echo","arguments":{"text":"pong"}}}"#,
         )
@@ -313,11 +358,115 @@ mod tests {
         panic!("the listener outlived its handle");
     }
 
-    #[test]
-    fn the_self_stdio_config_points_at_this_binary() {
-        let cfg = self_as_stdio_mcp_server(["--mcp-server"]).unwrap();
-        assert_eq!(cfg.server_type, "stdio");
-        assert!(!cfg.command.is_empty());
-        assert_eq!(cfg.args, vec!["--mcp-server"]);
+    // The two properties `server_config()`'s stateless mode is *for*. Every
+    // other test here posts, and a POST is answered identically in either
+    // session mode — so without these two a flipped `legacy_session_mode`
+    // reaches `desktop` with the suite green.
+
+    #[tokio::test]
+    async fn initialize_mints_no_session_id() {
+        let server = start_in_process_mcp_server("probe", echo_server())
+            .await
+            .unwrap();
+
+        let response = post(
+            &server,
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2025-06-18","capabilities":{},
+                "clientInfo":{"name":"probe","version":"0"}}}"#,
+        )
+        .await;
+
+        assert_eq!(response.status(), 200);
+        assert!(
+            response.headers().get("mcp-session-id").is_none(),
+            "a stateless server assigns no session: {:?}",
+            response.headers()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_stream_get_is_method_not_allowed() {
+        let server = start_in_process_mcp_server("probe", echo_server())
+            .await
+            .unwrap();
+
+        let mut request = reqwest::Client::new()
+            .get(server.url())
+            .header("Accept", "text/event-stream");
+        for (name, value) in &server.config().headers {
+            request = request.header(name, value);
+        }
+        let response = request.send().await.unwrap();
+
+        // The spec's MUST for a server that does not offer the optional
+        // server-initiated stream.
+        assert_eq!(response.status(), 405);
+    }
+
+    #[tokio::test]
+    async fn a_request_without_the_bearer_token_is_rejected() {
+        let server = start_in_process_mcp_server("probe", echo_server())
+            .await
+            .unwrap();
+
+        let token = server
+            .config()
+            .headers
+            .get("Authorization")
+            .expect("the handle carries the token the CLI must send")
+            .clone();
+        assert!(token.starts_with("Bearer "));
+
+        let unauthenticated = reqwest::Client::new()
+            .post(server.url())
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            unauthenticated.status(),
+            401,
+            "another local process must not be able to call these tools"
+        );
+
+        let wrong = reqwest::Client::new()
+            .post(server.url())
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("Authorization", "Bearer 0000")
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn two_servers_do_not_share_a_token() {
+        let first = start_in_process_mcp_server("probe", echo_server())
+            .await
+            .unwrap();
+        let second = start_in_process_mcp_server("probe", echo_server())
+            .await
+            .unwrap();
+
+        let borrowed = reqwest::Client::new()
+            .post(second.url())
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("Authorization", &first.config().headers["Authorization"])
+            .body(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#)
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            borrowed.status(),
+            401,
+            "an integration's token must not open another integration's tools"
+        );
     }
 }

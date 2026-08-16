@@ -79,9 +79,7 @@ pub use client::{query, run, InterruptReceipt, Stream, StreamControl};
 pub use errors::{Error, Result};
 pub use hooks::{hook_event, HookFunc, HookMatcher, HookOutput};
 pub use init_types::{AccountInfo, AgentInfo, ModelInfo, SlashCommand};
-pub use mcp::{
-    self_as_stdio_mcp_server, serve_stdio_mcp, start_in_process_mcp_server, InProcessMcpServer,
-};
+pub use mcp::{start_in_process_mcp_server, InProcessMcpServer};
 pub use messages::{
     block, message_type, result_subtype, system_subtype, AssistantMessage, ContentBlock,
     ContentBlocks, Event, ModelUsage, Result as RunResult, SystemMessage, TaskStatus,
@@ -97,4 +95,4 @@ pub use permissions::{
 };
 pub use session::Session;
 pub use sessions::{get_session_messages, list_sessions, SessionSummary, SessionTranscript};
-pub use tool::{new_tool, tool_server, ToolDef, ToolServer};
+pub use tool::{new_tool, tool_server, CancellationToken, ToolDef, ToolServer};

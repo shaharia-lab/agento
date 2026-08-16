@@ -555,48 +555,112 @@ it, and the evidence came down one way:
   negotiation, `tools/list`, `tools/call`, the error codes and the content
   encoding. `schemars` (which `rmcp` already pulls) is that whole job.
 - **It costs almost nothing.** `rmcp` 3.1.2 with `server` +
-  `transport-streamable-http-server` + `transport-io` adds **14 crates** — 371 →
-  388 packages — and no measurable build time against a Tauri/GTK tree. Its
+  `transport-streamable-http-server` adds **nine packages** — 569 → 578 in
+  `Cargo.lock` — and no measurable build time against a Tauri/GTK tree. Its
   async and HTTP halves are already here: `tokio`, `http`, `http-body(-util)`,
   `tokio-stream`, `tokio-util`, `chrono`, `uuid`, `serde_json`, `thiserror`,
-  `tracing`, and `schemars` 1.2.2 was **already in the lock** (three schemars
-  majors arrive via Tauri). Genuinely new: `futures`, `rand`, `sse-stream`,
-  `pastey`, `base64`.
+  `base64`, `tracing`, and `schemars` 1.2.2 was **already in the lock** (three
+  schemars majors arrive via Tauri). The nine are `rmcp`, `sse-stream`,
+  `futures`, `pastey`, `rand`, `rand_core`, `chacha20`, and — because enabling
+  `schemars`'s derive is what `#[derive(JsonSchema)]` needs —
+  `schemars_derive` 1.2.2 and `serde_derive_internals` 0.30 alongside the 0.8 /
+  0.29 copies Tauri already brought.
 - **It mirrors Go rather than diverging from it.** Go delegates the protocol to
   `modelcontextprotocol/go-sdk` and keeps only the listener. This does the same
   with the same project's Rust SDK, so the seam stays where Go's is.
 
-Three consequences, each load-bearing:
+Consequences, each load-bearing:
 
 - **The crate's MSRV moved 1.77 → 1.88**, because `rmcp` 3.x declares 1.88 and
   cargo otherwise silently resolves `rmcp` 2.x, a superseded major. Both CI
   workflows install `stable`, so nothing was holding the floor at 1.77 — it was
   the Tauri template's value. It is not free: clippy's MSRV-gated lints wake up,
   which is why three `map_or(true, …)` sites became `is_none_or` in the same
-  change. Expect that whenever the floor moves.
+  change. Expect that whenever the floor moves. Note the floor is **declared,
+  not enforced**: with `stable` in both workflows and no `rust-toolchain.toml`,
+  nothing ever compiles at 1.88, so a 1.89-only API would land green. What
+  `rust-version` buys is the `rmcp` 3.x resolution and clippy's MSRV lints.
 - **The `macros` feature is off.** `#[tool_router]` / `#[tool]` fix a tool set at
-  compile time, and all eight of Agento's in-process servers choose their tools
+  compile time, and all seven of Agento's in-process servers choose their tools
   at **runtime** from the integration's `services[].tools` allowlist, over
   credentials read from the database. `ToolServer::add_tool` is that loop.
   Leaving the macros enabled would give the tree two ways to declare a tool for
   no caller's benefit.
+- **A tool's error is text the model reads, never a protocol error.** Go's
+  `mcp.AddTool` uses `ToolHandlerFor`, which packs a returned `error` into
+  `CallToolResult.Content` with `IsError` set — which is why every one of the 62
+  handlers reads `return nil, nil, fmt.Errorf("github: …: %w", err)` and why the
+  model retries on that text. So `new_tool`'s handler returns
+  `Result<CallToolResult, String>` and the wrapper builds
+  `CallToolResult::error` from an `Err`. There is deliberately **no way to raise
+  a JSON-RPC error from a handler**, exactly as there is none in Go: `rmcp`
+  renders one as "Tool result missing due to internal error", which tells the
+  model nothing. The practical cost is that `?` needs a `String`, so every
+  fallible call carries `.map_err(|e| format!("…: {e}"))` — the same context
+  `fmt.Errorf` supplies, and the same message the model gets.
+- **A handler takes the call's `CancellationToken`.** Go threads `ctx` into
+  every `http.NewRequestWithContext`, so a cancelled turn aborts the outbound
+  call. Rust does not inherit that: `rmcp` spawns a handler detached and
+  cancelling a request only cancels its token. A handler that cannot see the
+  token runs to completion, so a dropped `InProcessMcpServer` would leave
+  in-flight Slack/GitHub/Google calls alive in orphaned tasks. It is in the
+  signature from the start because widening it after #310–#317 is a 62-site
+  edit.
 - **The transport is stateless** (`json_response: true`,
-  `legacy_session_mode: false`), against `rmcp`'s session-based default and
+  `legacy_session_mode: false`, and `NeverSessionManager` so the map is gone
+  rather than merely unreachable), against `rmcp`'s session-based default and
   against Go's stateful handler. An in-process tool server has no
   server-to-client traffic — no sampling, no elicitation, no progress — so a
-  session buys nothing and costs per-session state in eight servers. It also
+  session buys nothing and costs per-session state in seven servers. It also
   keeps the module's contract literally what #281 wrote down: one POST, one JSON
-  reply, `202` for a notification. **This is verified against the real client,
-  not assumed** — `tests/claude_mcp_live.rs` (`--ignored`) has the Claude Code
-  CLI dial one and reports `✔ Connected`, which it reaches only by completing
-  the handshake over a server that issues no `Mcp-Session-Id` and answers `405`
-  to the stream `GET`. Re-run it if `server_config()` ever changes.
+  reply, `202` for a notification. The two things a client can notice — no
+  `Mcp-Session-Id`, and `405` for the stream `GET` — are asserted in `mcp.rs`'s
+  own tests, because a POST behaves the same in either mode and nothing else
+  would catch a regression. **It is also verified against the real client** —
+  `tests/claude_mcp_live.rs` (`--ignored`) has the Claude Code CLI dial one and
+  report `✔ Connected`. Re-run it if `server_config()` ever changes.
+- **Every server requires a bearer token, which Go's does not.** This is the one
+  deliberate divergence. Go binds an unauthenticated loopback port; from phase 4
+  that port answers `tools/call` with the user's live Slack, GitHub and Google
+  credentials, and loopback separates hosts, not processes — any other program
+  running as the user could call it. The browser is already shut out (the
+  transport needs non-safelisted headers, so a page's `fetch` is preflighted and
+  gets a bare `405`; `allowed_hosts` blocks DNS rebinding), but nothing stopped
+  a local process. So `start_in_process_mcp_server` mints a random token per
+  listener and requires `Authorization: Bearer …`, carried in `McpHttpServer`'s
+  `headers` — a field that existed and was always empty. The CLI sends
+  configured headers on every request; verified against 2.1.224 and covered by
+  the live test. Know its limit: `--mcp-config` is inline JSON in the
+  subprocess's argv, so the token is readable from `/proc/<pid>/cmdline`. What
+  it closes is the caller that can only speak HTTP to a port it found; code
+  already running as this user was never in scope, since it can read the
+  integration credentials straight out of `agento.db`.
+- **Go's `ServeStdioMCP` / `SelfAsStdioMCPServer` are not ported**, and
+  `transport-io` is off with them. Nothing in Agento calls either — a second,
+  untested hosting path in the PR whose thesis is that there is exactly one
+  would undo the thesis. `McpStdioServer` the *config type* stays: it describes
+  an external server from `mcps.yaml`, which is somebody else's subprocess.
+- **`rmcp`'s own `tracing` events now reach the log.** Nothing installs a
+  `tracing` subscriber and the app logs through `tauri-plugin-log` over `log`,
+  so every protocol-layer event was discarded — including "rejected request with
+  disallowed Host header". `tracing` is a direct dependency purely so its `log`
+  feature is on, which forwards to `log` while no subscriber exists;
+  `tests/claude_mcp_tracing.rs` asserts that rather than assuming it, and would
+  fail if a future dependency installed a subscriber.
 
 `NewTool[In, Out]`'s `Out` has no counterpart: it is Go's *structured* result,
 no Agento tool passes anything but `nil`, and `rmcp` puts the same thing in
 `CallToolResult::structured_content`. `WithTools` returns the server handle
 alongside the options, because a listener's life is a handle's here — an
 `Options` that owned it would tie the port to a `Clone` value.
+
+**The shape every ported tool takes**, and the one that does not compile: a
+handler is `Fn`, so a credential must be *captured and cloned per call*, not
+moved into the async block — `move |input, ct| { let token = token.clone();
+async move { … } }`. Moving it in makes the closure `FnOnce`. There is no
+`&self` to read from either: `ToolServer` is one shared type holding nothing
+integration-specific, so capture is the only channel. `claude/tool.rs`'s module
+docs carry a full worked example.
 
 ### Things that will bite
 

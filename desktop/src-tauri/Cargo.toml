@@ -8,6 +8,12 @@ edition = "2021"
 # to resolve it otherwise — it silently picks `rmcp` 2.x instead, which is a
 # superseded major. Both CI workflows install `stable`, so nothing here was
 # holding the floor at 1.77; it was the value Tauri's template shipped with.
+#
+# This is a **declaration, not a gate**: both workflows install `stable` and
+# there is no `rust-toolchain.toml`, so nothing in CI ever builds at 1.88 and a
+# 1.89-only API would land green. What the value does buy is real — it is what
+# makes cargo resolve `rmcp` 3.x — and clippy reads it for its MSRV-gated lints.
+# Treat a bump here as documentation until something pins a toolchain.
 rust-version = "1.88"
 
 [lib]
@@ -122,28 +128,48 @@ lettre = { version = "0.11.19", default-features = false, features = [
 # why it was taken over the hand-rolled JSON-RPC trait #281 left behind.
 #
 # `default-features = false` drops `macros`: `#[tool_router]` derives a tool set
-# at compile time, and every one of Agento's eight in-process servers picks its
-# tools at **runtime** from the integration's allowlist. Two ways to declare a
-# tool is exactly what issue #282 exists to prevent, so the macros stay off and
-# `claude::new_tool` is the only one.
+# at compile time, and every one of Agento's seven in-process servers picks its
+# tools at **runtime** from the integration's allowlist (six integrations —
+# google, github, slack, jira, confluence, telegram — plus `internal/tools`;
+# WhatsApp went in #273/#292). Two ways to declare a tool is exactly what issue
+# #282 exists to prevent, so the macros stay off and `claude::new_tool` is the
+# only one.
+#
+# `transport-io` is deliberately absent: it exists only to host a server over
+# this process's stdin/stdout, which nothing in Agento does. See
+# `src/claude/mcp.rs` for why Go's `ServeStdioMCP` is not ported.
 #
 # The transitive cost is small because the async and HTTP halves are already
-# here: of the crates this adds, only `futures`, `rand`, `sse-stream`, `pastey`
-# and `base64` are genuinely new — `tokio`, `http`, `http-body(-util)`,
-# `tokio-stream`, `tokio-util`, `chrono`, `uuid`, `serde_json`, `thiserror` and
-# `tracing` were all in the tree already.
+# here. Nine crates enter the lockfile, 569 → 578 packages: `rmcp` itself,
+# `sse-stream`, `futures`, `pastey`, `rand`, `rand_core`, `chacha20`, and —
+# from turning on `schemars`'s derive — `schemars_derive` and
+# `serde_derive_internals`. `tokio`, `http`, `http-body(-util)`, `tokio-stream`,
+# `tokio-util`, `chrono`, `uuid`, `serde_json`, `thiserror`, `base64`,
+# `schemars` and `tracing` were all in the tree already.
 rmcp = { version = "3.1.2", default-features = false, features = [
     "server",
     "transport-streamable-http-server",
-    "transport-io",
 ] }
+# `rmcp` hands a tool handler the call's `CancellationToken`, so its type is in
+# `claude::new_tool`'s public signature and every ported tool names it. Direct
+# rather than reached through `rmcp`, which does not re-export it. Already in
+# the tree via `tokio-stream` and `rmcp`; adds no package.
+tokio-util = { version = "0.7", default-features = false }
+# Not used directly — declared so the feature is. `rmcp` instruments itself with
+# `tracing`, this app logs through `tauri-plugin-log` over the `log` crate, and
+# nothing installs a `tracing` subscriber, so every protocol-layer event was
+# being dropped on the floor: "rejected request with disallowed Host header
+# (possible DNS rebinding attempt)" among them. The `log` feature makes
+# `tracing`'s macros fall back to `log::log!` whenever no subscriber has been
+# installed, which here is always. Also already in the tree; adds no package.
+tracing = { version = "0.1", features = ["log"] }
 # Reflection-derived JSON Schema — the whole of what the typed-tool layer buys,
 # and what `jsonschema:` struct tags do on the Go side. It must stay on the same
 # major `rmcp` uses (1.x today), or `#[derive(JsonSchema)]` would implement a
 # different trait than `ToolRoute::parameters` wants and fail to compile. It is
 # a direct dependency rather than a re-export so a tool's input struct can write
-# a plain `#[derive(JsonSchema)]`; cargo unifies it with rmcp's copy, so it adds
-# no crate to the tree.
+# a plain `#[derive(JsonSchema)]`; cargo unifies it with rmcp's copy, so the
+# library itself adds no package — only the two derive crates counted above.
 schemars = "1"
 
 # Graceful shutdown of the `claude` subprocess is close stdin → SIGTERM →

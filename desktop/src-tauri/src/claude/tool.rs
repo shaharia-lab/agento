@@ -6,25 +6,45 @@
 //! derived from the struct rather than written by hand — the job
 //! `jsonschema:` struct tags do on the Go side, done here by `schemars`.
 //!
+//! The example is the shape **every** ported tool takes, and the two things it
+//! does that are not obvious are the two things all 62 of them need: it
+//! captures a credential, and it clones that credential per call.
+//!
 //! ```no_run
-//! # use agento_lib::claude::{new_tool, tool_server};
-//! # use rmcp::model::CallToolResult;
+//! # use agento_lib::claude::{new_tool, tool_server, CancellationToken};
+//! # use rmcp::model::{CallToolResult, ContentBlock};
 //! # use schemars::JsonSchema;
 //! #[derive(serde::Deserialize, JsonSchema)]
-//! struct CurrentTimeInput {
-//!     /// IANA timezone name, e.g. UTC or America/New_York. Defaults to UTC.
-//!     timezone: Option<String>,
+//! struct SendMessageInput {
+//!     /// The chat to post to.
+//!     chat_id: String,
+//!     /// The message text.
+//!     text: String,
 //! }
 //!
-//! # async fn example() -> agento_lib::claude::Result<()> {
+//! # async fn post_to_telegram(
+//! #     bot_token: String,
+//! #     input: SendMessageInput,
+//! #     ct: CancellationToken,
+//! # ) -> std::result::Result<String, std::io::Error> { Ok(String::new()) }
+//! # async fn example(bot_token: String) -> agento_lib::claude::Result<()> {
 //! let server = tool_server(
-//!     "local-tools",
+//!     "telegram-42",
 //!     [new_tool(
-//!         "current_time",
-//!         "Returns the current date and time for a given IANA timezone.",
-//!         |input: CurrentTimeInput| async move {
-//!             let tz = input.timezone.unwrap_or_else(|| "UTC".to_string());
-//!             Ok(CallToolResult::success(vec![rmcp::model::ContentBlock::text(tz)]))
+//!         "send_message",
+//!         "Sends a message to a Telegram chat.",
+//!         move |input: SendMessageInput, ct: CancellationToken| {
+//!             // Cloned here, *outside* the async block, and this is not
+//!             // stylistic: moving `bot_token` into the block would consume the
+//!             // closure's own capture, making it `FnOnce` where `new_tool`
+//!             // needs `Fn` — the tool is called many times.
+//!             let bot_token = bot_token.clone();
+//!             async move {
+//!                 let body = post_to_telegram(bot_token, input, ct)
+//!                     .await
+//!                     .map_err(|e| format!("telegram: send_message: {e}"))?;
+//!                 Ok(CallToolResult::success(vec![ContentBlock::text(body)]))
+//!             }
 //!         },
 //!     )],
 //! )
@@ -34,7 +54,13 @@
 //! # }
 //! ```
 //!
-//! ## Two departures from Go, both deliberate
+//! Capture is the *only* channel a handler has for its credentials. `rmcp`
+//! offers a second form where the handler is a method taking `&S` — the server
+//! value — but [`ToolServer`] is one shared type across every integration and
+//! holds nothing integration-specific, so there is no `&self` to read a bot
+//! token from. What a tool needs, it closes over.
+//!
+//! ## Three departures from Go, all deliberate
 //!
 //! **Tools are added at runtime, not derived at compile time.** `rmcp` ships
 //! `#[tool_router]` / `#[tool]` macros that build a fixed tool set from an
@@ -50,6 +76,20 @@
 //! No Agento tool uses it — all sixty-odd return `nil` there — and `rmcp` folds
 //! the same thing into [`CallToolResult::structured_content`], so a caller that
 //! wants one sets that field instead of naming a second type parameter.
+//!
+//! **Go's `ctx` becomes a [`CancellationToken`], and it is a real parameter
+//! rather than a dropped one.** Go's handler signature is
+//! `func(ctx, *mcp.CallToolRequest, In)`; the request is `_` at every Agento
+//! call site, so it is not carried here, but `ctx` is threaded into every
+//! `http.NewRequestWithContext` an integration makes — cancelling the turn
+//! aborts the outbound Slack/GitHub/Google call. Rust does **not** inherit that
+//! for free: `rmcp` spawns a tool handler as a detached task and cancellation
+//! only cancels the token, never the task (`rmcp::service`'s serve loop calls
+//! `ct.cancel()` on the request's token and nothing else). A handler with no
+//! token to watch runs to completion after the caller has gone. So the token is
+//! in the signature, and a handler that makes a network call is expected to
+//! honour it — with `reqwest`, `tokio::select!` on `ct.cancelled()`. Widening
+//! the signature later would have been a 62-site edit.
 
 use std::future::Future;
 
@@ -59,13 +99,14 @@ use rmcp::handler::server::router::tool::{
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResponse, CallToolResult, Implementation, ListToolsResult,
-    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData, RoleServer, ServerHandler};
 use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
+pub use tokio_util::sync::CancellationToken;
 
 use super::errors::Result;
 use super::mcp::{start_in_process_mcp_server, InProcessMcpServer};
@@ -93,10 +134,30 @@ impl ToolDef {
 /// `In` supplies the tool's JSON Schema through `schemars`, so the description
 /// the model reads for each field is the doc comment on that field.
 ///
-/// An `Err(ErrorData)` becomes a JSON-RPC error the CLI surfaces as a failed
-/// tool call, which is what returning a non-nil `error` does in Go. A failure
-/// the *model* should see and retry belongs in an `Ok` carrying
-/// `is_error: true` instead.
+/// # The error type is a `String`, and the model reads it
+///
+/// This is Go's convention, ported exactly. `claude.NewTool` registers through
+/// `mcp.AddTool`, whose `ToolHandlerFor` documents that "an error result is
+/// treated as a tool error, rather than a protocol error, and is therefore
+/// packed into `CallToolResult.Content`, with `IsError` set" — so every
+/// `return nil, nil, fmt.Errorf("github: list issues: %w", err)` in an Agento
+/// integration is **text the model sees and retries on**. That is the whole
+/// reason those messages are written the way they are.
+///
+/// So a handler returns `Result<CallToolResult, String>` and the wrapper turns
+/// an `Err` into [`CallToolResult::error`] — a successful JSON-RPC response
+/// carrying `is_error: true` and the message as its text. There is no way to
+/// raise a *protocol* error from here, exactly as there is none in Go: `rmcp`
+/// would render one as "Tool result missing due to internal error", which tells
+/// the model nothing and gives it nothing to retry against.
+///
+/// The practical consequence for a port is that `?` needs a `String`, which
+/// means every fallible call carries its own `.map_err(|e| format!("…: {e}"))`.
+/// That is not friction to route around — it is the same context Go's
+/// `fmt.Errorf` wrap supplies, and it is the message the model gets.
+///
+/// The [`CancellationToken`] is the run's; see the module docs for why it is in
+/// the signature rather than dropped.
 pub fn new_tool<In, F, Fut>(
     name: impl Into<std::borrow::Cow<'static, str>>,
     description: impl Into<std::borrow::Cow<'static, str>>,
@@ -104,10 +165,17 @@ pub fn new_tool<In, F, Fut>(
 ) -> ToolDef
 where
     In: JsonSchema + DeserializeOwned + Send + 'static,
-    F: Fn(In) -> Fut + Clone + Send + Sync + 'static,
-    Fut: Future<Output = std::result::Result<CallToolResult, ErrorData>> + Send + 'static,
+    F: Fn(In, CancellationToken) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = std::result::Result<CallToolResult, String>> + Send + 'static,
 {
-    let call = move |Parameters(input): Parameters<In>| handler(input);
+    let call = move |Parameters(input): Parameters<In>, ct: CancellationToken| {
+        let running = handler(input, ct);
+        async move {
+            running
+                .await
+                .unwrap_or_else(|message| CallToolResult::error(vec![ContentBlock::text(message)]))
+        }
+    };
     ToolDef(
         call.name(name)
             .description(description)
@@ -268,11 +336,15 @@ mod tests {
     }
 
     fn add_tool() -> ToolDef {
-        new_tool("add", "Adds two numbers.", |input: AddInput| async move {
-            Ok(CallToolResult::success(vec![ContentBlock::text(
-                (input.a + input.b).to_string(),
-            )]))
-        })
+        new_tool(
+            "add",
+            "Adds two numbers.",
+            |input: AddInput, _ct| async move {
+                Ok(CallToolResult::success(vec![ContentBlock::text(
+                    (input.a + input.b).to_string(),
+                )]))
+            },
+        )
     }
 
     #[test]
@@ -312,7 +384,7 @@ mod tests {
             server.add_tool(new_tool(
                 "subtract",
                 "Subtracts.",
-                |input: AddInput| async move {
+                |input: AddInput, _ct| async move {
                     Ok(CallToolResult::success(vec![ContentBlock::text(
                         (input.a - input.b).to_string(),
                     )]))
@@ -342,24 +414,162 @@ mod tests {
         assert_eq!(registered["url"], server.url());
     }
 
+    /// One `tools/call`, sent the way the CLI sends it — including whatever
+    /// headers the handle's config carries.
+    async fn call(server: &InProcessMcpServer, body: &'static str) -> serde_json::Value {
+        let mut request = reqwest::Client::new()
+            .post(server.url())
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json, text/event-stream");
+        for (name, value) in &server.config().headers {
+            request = request.header(name, value);
+        }
+        let response = request.body(body).send().await.unwrap();
+        serde_json::from_str(&response.text().await.unwrap()).unwrap()
+    }
+
     #[tokio::test]
     async fn the_convenience_starter_hosts_the_tools() {
         let server = tool_server("calc", [add_tool()]).await.unwrap();
         assert!(server.url().starts_with("http://127.0.0.1:"));
 
-        let response = reqwest::Client::new()
-            .post(server.url())
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json, text/event-stream")
-            .body(
-                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
-                    "params":{"name":"add","arguments":{"a":2,"b":3}}}"#,
-            )
-            .send()
-            .await
-            .unwrap();
-        let body: serde_json::Value =
-            serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        let body = call(
+            &server,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"add","arguments":{"a":2,"b":3}}}"#,
+        )
+        .await;
         assert_eq!(body["result"]["content"][0]["text"], "5");
+    }
+
+    #[tokio::test]
+    async fn a_failing_handler_is_a_tool_error_the_model_reads() {
+        // The Go convention this ports: `return nil, nil, fmt.Errorf(…)` is
+        // text the model sees and retries on, not a JSON-RPC error it never
+        // gets shown.
+        let server = tool_server(
+            "calc",
+            [new_tool(
+                "divide",
+                "Divides.",
+                |input: AddInput, _ct| async move {
+                    if input.b == 0 {
+                        return Err("calc: divide: division by zero".to_string());
+                    }
+                    Ok(CallToolResult::success(vec![ContentBlock::text(
+                        (input.a / input.b).to_string(),
+                    )]))
+                },
+            )],
+        )
+        .await
+        .unwrap();
+
+        let body = call(
+            &server,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"divide","arguments":{"a":1,"b":0}}}"#,
+        )
+        .await;
+
+        assert!(
+            body.get("error").is_none(),
+            "a failing tool must not be a protocol error: {body}"
+        );
+        assert_eq!(body["result"]["isError"], true);
+        assert_eq!(
+            body["result"]["content"][0]["text"],
+            "calc: divide: division by zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_captured_credential_survives_repeated_calls() {
+        // The shape every ported tool takes: the closure owns the credential
+        // and hands out a clone per call. If it moved the value into the async
+        // block instead the closure would be `FnOnce` and this would not
+        // compile, which is the mistake the module docs call out.
+        let api_key = "s3cr3t".to_string();
+        let server = tool_server(
+            "calc",
+            [new_tool(
+                "whoami",
+                "Reports the captured credential.",
+                move |_input: AddInput, _ct: CancellationToken| {
+                    let api_key = api_key.clone();
+                    async move { Ok(CallToolResult::success(vec![ContentBlock::text(api_key)])) }
+                },
+            )],
+        )
+        .await
+        .unwrap();
+
+        for _ in 0..3 {
+            let body = call(
+                &server,
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+                    "params":{"name":"whoami","arguments":{"a":0,"b":0}}}"#,
+            )
+            .await;
+            assert_eq!(body["result"]["content"][0]["text"], "s3cr3t");
+        }
+    }
+
+    // `flavor = "multi_thread"`: the request is in flight on another task while
+    // this one drops the handle, and a current-thread runtime would not run
+    // both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropping_the_server_cancels_an_in_flight_handler() {
+        // The reason the token is in the signature at all. `rmcp` spawns a tool
+        // handler detached — cancelling a request cancels its token and nothing
+        // else — so a handler that does not watch it keeps its outbound HTTP
+        // call alive after the caller has gone.
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let (cancelled_tx, mut cancelled_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+
+        let server = tool_server(
+            "calc",
+            [new_tool(
+                "wait",
+                "Waits to be cancelled.",
+                move |_input: AddInput, ct: CancellationToken| {
+                    let started = started_tx.clone();
+                    let cancelled = cancelled_tx.clone();
+                    async move {
+                        let _ = started.send(());
+                        ct.cancelled().await;
+                        let _ = cancelled.send(());
+                        Ok(CallToolResult::success(vec![]))
+                    }
+                },
+            )],
+        )
+        .await
+        .unwrap();
+
+        let url = server.url().to_string();
+        let auth = server.config().headers["Authorization"].clone();
+        let in_flight = tokio::spawn(async move {
+            let _ = reqwest::Client::new()
+                .post(url)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json, text/event-stream")
+                .header("Authorization", auth)
+                .body(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+                        "params":{"name":"wait","arguments":{"a":0,"b":0}}}"#,
+                )
+                .send()
+                .await;
+        });
+
+        started_rx.recv().await.expect("the handler ran");
+        drop(server);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), cancelled_rx.recv())
+            .await
+            .expect("the handler's token was never cancelled")
+            .expect("the handler observed the cancellation");
+        in_flight.abort();
     }
 }

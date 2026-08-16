@@ -9,6 +9,10 @@
 //! job to `modelcontextprotocol/go-sdk`'s own handler, whose defaults are
 //! whatever that SDK ships.
 //!
+//! The same argument covers the second thing a real client has to agree with:
+//! every server requires an `Authorization: Bearer …` that travels in the
+//! config's `headers` map, and nothing in-process can prove the CLI sends it.
+//!
 //! So this suite asks the Claude Code CLI — the only client that will ever dial
 //! these servers — to connect to one and list its tools. It is `#[ignore]`d
 //! because it needs the CLI installed and a signed-in profile; `cargo test
@@ -56,7 +60,7 @@ async fn the_cli_connects_to_a_stateless_in_process_server() {
         [new_tool(
             "echo",
             "Echoes its input back.",
-            |input: EchoInput| async move {
+            |input: EchoInput, _ct| async move {
                 Ok(CallToolResult::success(vec![ContentBlock::text(
                     input.text,
                 )]))
@@ -73,16 +77,22 @@ async fn the_cli_connects_to_a_stateless_in_process_server() {
     // without connecting to anything.
     let dir = tempfile::tempdir().unwrap();
 
+    // `add-json` rather than `add --transport http`, because the config handed
+    // over is the *serialized `McpHttpServer`* — the same bytes
+    // `Options::with_mcp_server` puts in `--mcp-config`, headers and all. This
+    // is what makes the bearer token part of what the live run proves: without
+    // the header the CLI would get a `401` and report a failed connection.
+    let config = serde_json::to_string(server.config()).unwrap();
     let added = Command::new(cli)
-        .args(["mcp", "add", "--scope", "local", "--transport", "http"])
+        .args(["mcp", "add-json", "--scope", "local"])
         .arg("agento-probe")
-        .arg(server.url())
+        .arg(&config)
         .current_dir(dir.path())
         .output()
-        .expect("claude mcp add runs");
+        .expect("claude mcp add-json runs");
     assert!(
         added.status.success(),
-        "claude mcp add failed: {}",
+        "claude mcp add-json failed: {}",
         String::from_utf8_lossy(&added.stderr)
     );
 
@@ -105,10 +115,12 @@ async fn the_cli_connects_to_a_stateless_in_process_server() {
         .output();
 
     // "Connected" is the whole assertion, and it is enough: the CLI reaches it
-    // only by completing the initialize handshake over this transport. It does
-    // not print the tool list, so the tools themselves are covered by the unit
-    // tests — what cannot be covered there is whether a real client accepts a
-    // server that issues no session id and answers `405` to the stream `GET`.
+    // only by completing the initialize handshake over this transport, with the
+    // token, or it would have been turned away with a `401`. It does not print
+    // the tool list, so the tools themselves are covered by the unit tests —
+    // what cannot be covered there is whether a real client accepts a server
+    // that issues no session id, answers `405` to the stream `GET`, and demands
+    // a header the config told it to send.
     assert!(
         report.contains("Connected"),
         "the CLI could not connect to the stateless server:\n{report}"
