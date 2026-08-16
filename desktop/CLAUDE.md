@@ -1045,14 +1045,35 @@ worked. It is a transitional artifact and it goes away with #278, which is why
 #301 was answered by writing this down rather than by filling in the other half
 with spans that would then be deleted.
 
-**Application logs are the half that is reproduced, because they are not
+**The request log is the half that is reproduced, because it is not
 telemetry.** "Do not port" covers the exporters; Go's `internal/logger` is not
-on that list, and its service-layer `logger.Info` lines never depended on OTel
-being configured — the `otelslog` bridge is an optional add-on. The desktop
-equivalent is **one access line per `/api` request, emitted at the seam** in
-`proxy.rs::handle`: method, path, status, elapsed ms, and which implementation
-answered (`native`, `native-stream`, `forwarded`, `native-failed-forwarded`,
-`diff`).
+on that list, and its logging never depended on OTel being configured — the
+`otelslog` bridge is an optional add-on. The desktop equivalent is **one access
+line per `/api` request, emitted at the seam** in `proxy.rs::handle`: method,
+path, status, elapsed ms, and which implementation answered (`native`,
+`native-stream`, `forwarded`, `native-failed-forwarded`, `diff`).
+
+**Be precise about which Go log that is, because the gap is permanent and will
+otherwise be filed as a regression.** What is reproduced is Go's
+`requestLogger` (`internal/server/server.go`) — method, path, status, duration —
+which Go writes at **debug for every method**, and which the seam promotes to
+info for the requests worth keeping. Go's *service-layer* `Info` lines are a
+different animal and are **not** reproduced: `integration_service.go` writes
+`"integration created", "id", …, "name", …`, `chat_service.go` writes
+`"chat sessions bulk deleted", "count", …`. `POST /api/integrations 201 12ms
+native` carries neither the entity nor the outcome, and no access line can say
+how many chats a bulk delete took. The seam sees a *request*, not an operation.
+Worse for coverage, the background `Info` lines have no request behind them at
+all — `scheduler.go`'s `"task scheduled"`, `executor.go`'s
+`"task execution completed"`, `trigger/dispatcher.go`'s `"trigger rule matched"`,
+and the notification handler's — so the seam cannot reach them by construction.
+They come from the sidecar today; when #278 removes it they will need their own
+call sites in the Rust code that replaced them, and that is a piece of work
+nobody has scheduled. Go's line also carries a `request_id`, which is the thing
+that would let a `forwarded` line be matched against the sidecar's own record of
+the same request. Correlation is deliberately not attempted: it would mean
+minting an id here and threading a header through the forward, for a pairing
+only useful while both halves are running.
 
 At the seam and not in the handlers, for the reason the whole issue exists.
 `handle` is the one point every `/api` request passes through whether Rust,
@@ -1065,29 +1086,69 @@ return paths do not each need their own log call.
 
 Two rules there are deliberate and must survive anyone "improving" it:
 
-- **Non-`GET` at `info`, `GET` at `debug`.** `tauri_plugin_log` is built at
-  `LevelFilter::Info`, so by default the file holds the state-changing requests
-  — the ones Go logged at the service layer — and none of the polling. The
-  sessions list polls `GET /api/claude-sessions/status` on a timer for the whole
-  length of a scan; an info line per poll buries everything else, which is how a
-  log stops being read.
+- **Failures at `warn`, writes at `info`, successful reads at `debug`.**
+  `tauri_plugin_log` is built at `LevelFilter::Info`, so this three-way split is
+  what the file holds by default. Reads are at debug for one reason — volume:
+  the sessions list polls `GET /api/claude-sessions/status` on a timer for the
+  whole length of a scan, and an info line per poll buries everything else,
+  which is how a log stops being read. A read that answered 4xx or 5xx is not
+  that volume; it is the one read anybody wants in the file, so the status
+  outranks the method. Without that arm the first native `GET` handler to answer
+  404 as `Ok(Answer)` — the natural shape once a read stops wanting the Go
+  fallback — would be invisible, and so would a Go 5xx forwarded through on a
+  `GET`. `HEAD` and `OPTIONS` sit with the reads: the router is `any(handle)` so
+  both reach the seam, and neither changes anything. The split is reads against
+  writes, not `GET` against everything else.
 - **No bodies, no headers, no query string.** The bodies here are chat prompts,
   agent system prompts and integration credentials, and the query string carries
   search terms and project paths. The log is a plain file on disk. `log_path`
   drops the query in one place so there is one place to check that it does.
+  **The path itself is logged, and two route families put user-authored text in
+  it** — the agent slug (`routeAgentBySlug`, `internal/api/server.go`, derived
+  from the name the user typed) and the settings-profile id (`routeProfileByID`,
+  the same shape). So `PUT /api/agents/acme-corp-earnings-reviewer 200 6ms
+  native` writes a user's own wording to an unencrypted file. That is accepted
+  rather than overlooked: a name is not a body, and dropping the segment would
+  leave the line unable to say which agent was written, which is most of what it
+  is for. Nothing else in the route table carries user data in a path segment —
+  no filesystem path, no secret — and a route that wanted to would need to be
+  argued here first.
 
 It lands where a user can retrieve it, which is the only thing that makes this
 an answer rather than a gesture: `tauri_plugin_log`'s default targets are stdout
 **and** `LogDir`, so the line is written to Tauri's app-log directory —
 `~/.local/share/com.shaharialab.agento/logs/Agento.log` on Linux,
-`~/Library/Logs/com.shaharialab.agento/Agento.log` on macOS. Nothing in
-`lib.rs` needs to ask for that; it is what `Builder::new()` already does. A
-packaged `.app`/`.AppImage` has no console, so a stdout-only logger would have
-made the whole exercise unobservable.
+`~/Library/Logs/com.shaharialab.agento/Agento.log` on macOS,
+`%LOCALAPPDATA%\com.shaharialab.agento\logs\Agento.log` on Windows, which ships
+too. (`Path::app_log_dir` special-cases macOS to `~/Library/Logs/<identifier>`
+and everywhere else is `data_local_dir()/<identifier>/logs`; the file is named
+for the product, `Agento.log`.) Nothing in `lib.rs` needs to ask for the target;
+it is what `Builder::new()` already does. A packaged `.app`/`.AppImage`/`.exe`
+has no console, so a stdout-only logger would have made the whole exercise
+unobservable.
 
-One elapsed figure lies if read carelessly: on a `native-stream` line it is
-time-to-headers, not the turn's duration — the SSE body is still arriving when
-the line is written.
+**Retention is deliberate, and it is a #301 decision rather than a default.**
+`tauri_plugin_log`'s own defaults are `DEFAULT_MAX_FILE_SIZE = 40_000` bytes and
+`DEFAULT_ROTATION_STRATEGY = KeepOne` — and `KeepOne` does not mean "keep one
+archive", it means `rotate()` is `fs::remove_file(&self.path)`, so there is no
+archive. At roughly 90 bytes an access line that is ~440 requests of history and
+then a wipe, reached well inside one ordinary session and fastest in `diff`
+mode, where every compared request also logs `identical`. Harmless while the
+file held a handful of startup lines; fatal once it is the access log, because
+the situation the log exists for — a user who hits a bug an hour in — is exactly
+the one where the evidence has already been deleted. `lib.rs` therefore sets
+**5 MiB with `KeepSome(3)`**: three dated archives beside the live file, ~20 MiB
+and days of history. Both settings are load-bearing in the same way the default
+targets are, and neither should be dropped back to the default.
+
+The elapsed figure is time-to-headers whenever the body is still arriving, which
+is more lines than the `native-stream` label suggests. `forward` also streams —
+it builds its body with `Body::from_stream` — so any `forwarded` or
+`native-failed-forwarded` line for an SSE route reports the same thing. Under
+`AGENTO_DESKTOP_NATIVE=off`, a documented and supported mode, a three-minute
+chat turn logs `POST /api/chats/{id}/messages 200 9ms forwarded`. Only `native`
+and `diff` buffer the whole response before the line is written, and only they
+report a duration the request actually took.
 
 None of this is a property of the *data*. An `agento web` pointed at the same
 `~/.agento` exports OTel exactly as it always did; it is this build that

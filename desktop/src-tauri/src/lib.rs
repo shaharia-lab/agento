@@ -165,11 +165,29 @@ pub fn run() {
         // adding, never by replacing.
         //
         // `Info` is also what decides what that log contains: `proxy.rs` logs
-        // writes at info and reads at debug, so the file holds the
-        // state-changing requests without the UI's polling.
+        // failures at warn, writes at info and successful reads at debug, so
+        // the file holds the state-changing requests and everything that went
+        // wrong, without the UI's polling.
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
+                // Size and rotation are load-bearing for the same reason the
+                // targets are, and their defaults were not survivable once this
+                // file became the access log. `DEFAULT_MAX_FILE_SIZE` is 40_000
+                // bytes and `DEFAULT_ROTATION_STRATEGY` is `KeepOne` — which
+                // does not mean "keep one archive": `rotate()` is
+                // `fs::remove_file(&self.path)`, so there is no archive at all.
+                // At roughly 90 bytes an access line that is ~440 requests of
+                // history and then nothing, reached inside a single ordinary
+                // session and fastest in `diff` mode, where every compared
+                // request also logs `identical`. It was harmless while the file
+                // held a handful of startup lines; since #301 it is the record
+                // a user is asked to send when they hit a bug an hour in.
+                //
+                // 5 MiB × `KeepSome(3)` is three dated archives beside the live
+                // file, so ~20 MiB and days of history rather than minutes.
+                .max_file_size(5 * 1024 * 1024)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
                 .build(),
         )
         .invoke_handler(tauri::generate_handler![host_info])

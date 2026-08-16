@@ -144,11 +144,20 @@ fn max_body_for(path: &str) -> usize {
 /// The port's whole hazard is that the same user action is served by different
 /// code depending on whether its route has moved yet (#301). A log line that
 /// did not say which would be worse than none, because it reads as coverage.
+///
+/// Each variant names **which half of the seam the request was routed to**, not
+/// which function produced the bytes. The seam can reject a request before
+/// either handler runs — an over-cap body is answered 400 right here — and such
+/// a line still belongs to the half that claimed the route, because that is
+/// what the reader is trying to establish. The adjacent `warn!` says where it
+/// actually failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Served {
-    /// A native handler answered in full, body buffered.
+    /// The buffered native half took it: a handler answered in full, or the
+    /// seam rejected the request before one ran.
     Native,
-    /// A native handler answered with a stream still arriving.
+    /// The streaming native half took it: a handler answered with a stream
+    /// still arriving, or the seam rejected the request before one ran.
     NativeStream,
     /// The Go sidecar answered; Rust does not claim this route.
     Forwarded,
@@ -175,13 +184,30 @@ impl Served {
 /// What the access line is logged at.
 ///
 /// `tauri_plugin_log` is built at `LevelFilter::Info` in `lib.rs`, so this split
-/// is what the log actually contains by default: every state-changing request —
-/// the ones Go's service layer wrote its `logger.Info` lines for — and none of
-/// the reads. The UI polls `GET /api/claude-sessions/status` on a timer for the
-/// whole length of a scan; an info line per poll would bury everything else in
-/// the file, which is how a log stops being read.
-fn access_level(method: &Method) -> log::Level {
-    if method == Method::GET {
+/// is what the log actually contains by default: every state-changing request,
+/// every request that failed, and none of the successful reads. It is the same
+/// record Go's `requestLogger` (`internal/server/server.go`) writes, promoted
+/// out of debug for the half worth keeping — not Go's service-layer `Info`
+/// lines, which the seam cannot see. See `desktop/CLAUDE.md`.
+///
+/// Three arms rather than two, and the status arm is why:
+///
+/// - The argument for putting reads at debug is **volume**. The UI polls
+///   `GET /api/claude-sessions/status` on a timer for the whole length of a
+///   scan, and an info line per poll buries everything else, which is how a log
+///   stops being read.
+/// - A read that *failed* is not that volume. It is the one read anybody wants
+///   in the file, so a 4xx or 5xx outranks the method entirely. Without this
+///   arm the first native `GET` handler that answers 404 as `Ok(Answer)` — the
+///   natural shape once a read stops wanting the Go fallback — would be
+///   invisible, as would a Go 5xx forwarded through on a `GET`.
+/// - `HEAD` and `OPTIONS` reach here because the router is `any(handle)`, and
+///   neither changes anything. The split is reads against writes, not `GET`
+///   against everything else.
+fn access_level(method: &Method, status: StatusCode) -> log::Level {
+    if status.is_client_error() || status.is_server_error() {
+        log::Level::Warn
+    } else if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
         log::Level::Debug
     } else {
         log::Level::Info
@@ -235,12 +261,24 @@ async fn handle(State(state): State<ProxyState>, req: Request<Body>) -> Response
     // the app's log directory. Anyone tempted to add "just the request body for
     // debugging" is proposing to write the user's API tokens to it.
     //
-    // For a `native-stream` line the elapsed figure is time-to-headers, not the
-    // turn's duration — an SSE body is still arriving when this runs, so a
-    // 12 ms chat turn means the stream opened in 12 ms and says nothing about
-    // how long the answer took.
+    // The one exception is the path itself, and it is an accepted one rather
+    // than an oversight: two route families put user-authored text in a path
+    // segment — the agent slug (`routeAgentBySlug`, derived from the name the
+    // user typed) and the settings-profile id (`routeProfileByID`). A name is
+    // not a body, and dropping the segment would leave the line unable to say
+    // which agent was written, which is most of what it is for. Nothing else in
+    // the route table carries user data in a path segment; a route that wanted
+    // to would need to be argued here first.
+    //
+    // The elapsed figure is time-to-headers whenever the body is still
+    // arriving, which is more lines than it looks: `native-stream` always, and
+    // any `forwarded` / `native-failed-forwarded` line for an SSE route, since
+    // `forward` builds its body with `Body::from_stream` too — under
+    // `AGENTO_DESKTOP_NATIVE=off` a three-minute chat turn logs `200 9ms
+    // forwarded`. Only `native` and `diff` buffer the whole response before
+    // this runs, and only they report a duration the request actually took.
     log::log!(
-        access_level(&method),
+        access_level(&method, response.status()),
         "{} {} {} {}ms {}",
         method,
         path,
@@ -270,7 +308,7 @@ async fn dispatch(state: ProxyState, req: Request<Body>, path: String) -> (Respo
                 log::warn!("native stream for {path}: reading body failed: {e}");
                 return (
                     error_response(StatusCode::BAD_REQUEST, "could not read request body"),
-                    Served::Native,
+                    Served::NativeStream,
                 );
             }
         };
@@ -603,21 +641,77 @@ mod tests {
     }
 
     #[test]
-    fn writes_log_at_info_and_reads_at_debug() {
-        for method in [
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-            Method::OPTIONS,
-        ] {
+    fn writes_and_failures_log_at_info_or_above_and_successful_reads_at_debug() {
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
             assert_eq!(
-                access_level(&method),
+                access_level(&method, StatusCode::OK),
                 log::Level::Info,
                 "{method} should be logged at info"
             );
         }
-        assert_eq!(access_level(&Method::GET), log::Level::Debug);
+        // Reads. `HEAD` and `OPTIONS` reach the seam because the router is
+        // `any(handle)`, and neither changes anything, so they belong with
+        // `GET` rather than with the writes.
+        for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            assert_eq!(
+                access_level(&method, StatusCode::OK),
+                log::Level::Debug,
+                "{method} should be logged at debug"
+            );
+        }
+        // A failed read is not polling volume, and is the one read a reader
+        // wants in the default-level file.
+        assert_eq!(
+            access_level(&Method::GET, StatusCode::NOT_FOUND),
+            log::Level::Warn
+        );
+        assert_eq!(
+            access_level(&Method::GET, StatusCode::BAD_GATEWAY),
+            log::Level::Warn
+        );
+        assert_eq!(
+            access_level(&Method::POST, StatusCode::CONFLICT),
+            log::Level::Warn
+        );
+    }
+
+    /// The label→path mapping, which is the half that rots as ports land: a
+    /// wrong label is not a crash, it is a log that quietly misattributes the
+    /// work. Only one `dispatch` arm can be reached without a live sidecar —
+    /// a claimed route whose body is over [`max_body_for`] is answered 400 by
+    /// the seam itself, before any forward — so that is the arm pinned here,
+    /// and it is also the one where a wrong label is least visible, since the
+    /// UI renders the 400 as an ordinary error.
+    ///
+    /// `native::mode()` reads the environment once per process, so this asserts
+    /// the shipped default rather than forcing it. Under
+    /// `AGENTO_DESKTOP_NATIVE=off` nothing is claimed and the arm does not
+    /// exist; skipping is honest, where forcing the env would make the test
+    /// claim to have exercised a path it did not.
+    #[tokio::test]
+    async fn oversized_body_on_a_claimed_route_is_answered_natively() {
+        if native::mode() != native::Mode::On {
+            return;
+        }
+
+        let state = ProxyState {
+            // Never dialled: the arm under test returns before any forward. If
+            // this ever is dialled the test fails on the status rather than
+            // hanging, because nothing is listening on port 1.
+            upstream: "http://127.0.0.1:1".to_string(),
+            client: reqwest::Client::new(),
+        };
+        let path = "/api/agents".to_string();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(&path)
+            .body(Body::from(vec![0u8; MAX_NATIVE_BODY + 1]))
+            .expect("request");
+
+        let (response, served) = dispatch(state, req, path).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(served, Served::Native);
     }
 
     /// A logged path must never carry the query string: it holds search terms,
