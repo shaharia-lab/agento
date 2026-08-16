@@ -354,6 +354,45 @@ pub fn compact_raw(raw: Box<RawValue>) -> Box<RawValue> {
     RawValue::from_string(compacted).unwrap_or(raw)
 }
 
+/// Serialize an **embedded** raw value the way `encoding/json` emits one.
+///
+/// `encoding/json` runs `compact(…, escapeHTML=true)` over a `Marshaler`'s
+/// output, so a `json.RawMessage` nested inside a marshalled value is
+/// whitespace-stripped **and** has `<`, `>`, `&` and U+2028/9 escaped — while
+/// keeping its key order and number spelling. `serde_json` writes a `RawValue`'s
+/// bytes as-is through `write_raw_fragment`, which [`GoFormatter`] never sees,
+/// so an unescaped `&` ships where Go ships `\u0026`.
+///
+/// Attached to the field rather than applied at each construction site, so a
+/// future one cannot forget it: the type says how it is emitted.
+pub fn serialize_compacted<S>(raw: &RawValue, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::Error;
+    let compacted =
+        RawValue::from_string(compact(raw.get())).map_err(|e| S::Error::custom(e.to_string()))?;
+    compacted.serialize(serializer)
+}
+
+/// [`serialize_compacted`] for an optional field.
+///
+/// Only ever reached with `Some`, since every user pairs it with
+/// `skip_serializing_if = "Option::is_none"` — but `None` is written as `null`
+/// rather than unwrapped, so the two attributes stay independent.
+pub fn serialize_compacted_option<S>(
+    raw: &Option<Box<RawValue>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match raw {
+        Some(raw) => serialize_compacted(raw, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
 pub fn compact(src: &str) -> String {
     let bytes = src.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());

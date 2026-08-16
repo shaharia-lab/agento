@@ -53,8 +53,15 @@ use super::sse;
 const NOTIFY_CAPACITY: usize = 4;
 
 /// The synthetic event announcing an `AskUserQuestion`.
+///
+/// Go builds this frame with `json.Marshal` over a struct holding a
+/// `json.RawMessage`, and `encoding/json` compacts and HTML-escapes a nested
+/// raw value on the way out. `serde_json` writes one verbatim, so the SDK's own
+/// spacing and an unescaped `&` would ship where Go ships neither (#298) — hence
+/// `serialize_compacted` on the field rather than at each construction site.
 #[derive(Serialize)]
 struct UserInputRequired<'a> {
+    #[serde(serialize_with = "crate::native::gojson::serialize_compacted")]
     input: &'a RawValue,
 }
 
@@ -63,8 +70,12 @@ struct UserInputRequired<'a> {
 struct PermissionRequest {
     tool_name: String,
     /// `omitempty` on Go's `json.RawMessage` tests byte length, so an absent
-    /// input drops the key entirely.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// input drops the key entirely — and a present one is compacted and
+    /// escaped, for the reason on [`UserInputRequired`].
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::native::gojson::serialize_compacted_option"
+    )]
     input: Option<Box<RawValue>>,
 }
 
@@ -712,6 +723,38 @@ mod tests {
     fn a_malformed_assistant_event_yields_nothing_rather_than_failing() {
         assert!(extract_ask_user_question(b"not json").is_none());
         assert!(extract_ask_user_question(b"{}").is_none());
+    }
+
+    /// An embedded raw value is **compacted and HTML-escaped** on the way into
+    /// a synthetic frame, because `encoding/json` does that to a nested
+    /// `json.RawMessage` as it marshals (#298).
+    ///
+    /// Every expected string here was produced by Go: marshalling a struct
+    /// holding `json.RawMessage(`{ "q" : "a & b <c>" }`)` yields
+    /// `{"question":{"q":"a \u0026 b \u003cc\u003e"}}` — spacing gone, the
+    /// three characters escaped, and the key order and number spelling intact.
+    #[test]
+    fn a_synthetic_frames_input_is_compacted_and_escaped_the_way_go_marshals_one() {
+        // Spacing stripped, `&` and `<`/`>` escaped, `1.50` and the key order
+        // untouched — the last two are what a `serde_json::Value` would break.
+        let raw = RawValue::from_string(r#"{ "z" : 1.50 , "a" : "x & y <z>" }"#.into()).unwrap();
+        let frame = sse::json_frame("user_input_required", &UserInputRequired { input: &raw })
+            .expect("encode");
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            "event: user_input_required\ndata: {\"input\":{\"z\":1.50,\"a\":\"x \\u0026 y \\u003cz\\u003e\"}}\n\n"
+        );
+
+        // The same on the permission frame, which carries its input optionally.
+        let req = PermissionRequest {
+            tool_name: "Bash".into(),
+            input: Some(RawValue::from_string(r#"{ "command" : "ls & pwd" }"#.into()).unwrap()),
+        };
+        let frame = sse::json_frame("permission_request", &req).expect("encode");
+        assert_eq!(
+            String::from_utf8(frame).unwrap(),
+            "event: permission_request\ndata: {\"tool_name\":\"Bash\",\"input\":{\"command\":\"ls \\u0026 pwd\"}}\n\n"
+        );
     }
 
     /// `input` is omitted when absent, matching Go's `omitempty` on a

@@ -1015,9 +1015,20 @@ for that chat** and forward otherwise. Go then answers — correctly, because it
 is the side that has the session.
 
 Five rules that are silent when broken, all pinned by `tests/chat_turn.rs` —
-**except** the deny-with-the-user's-text half of `AskUserQuestion`, which is
-reached only through a `can_use_tool` control request the fake CLI does not yet
-issue. That gap is #298; do not read the list below as fully covered.
+including, since #298, the deny-with-the-user's-text half of `AskUserQuestion`.
+That one was the gap the claim used to paper over: the suite drove
+`AskUserQuestion` as an assistant `tool_use` block, which reaches
+`extract_ask_user_question` and the post-result continuation and **not the
+permission handler at all**. The fake CLI issues a real `can_use_tool` control
+request now, and the assertion is on what the SDK wrote *back* — the whole
+observable effect of that round trip is a `control_response`, so the fake CLI
+logs every stdin line and the tests read it. Reverting the deny to an allow
+leaves every frame unchanged and fails only there.
+
+Covered with it: `wrap_permission_handler`'s allowlist (a tool the agent does not
+name is denied **without a prompt** — the absence is the assertion), the
+`AskUserQuestion` bypass of that allowlist, and the `permission_request` frame
+with its allow and deny answers.
 
 - **`result` is not terminal.** With an `AskUserQuestion` pending the same
   subprocess carries on, so one HTTP request spans several turns and several
@@ -1058,6 +1069,24 @@ never saved settings ran on the SDK default rather than `sonnet` — two differe
 strings — and one who exported `AGENTO_DEFAULT_MODEL` had it silently ignored.
 `resolve` is the documented mirror of `Get()`, and every other caller in the port
 already goes through it.
+
+**An embedded raw value is compacted and HTML-escaped on the way out, and Go
+does it on the way *in*** (#298). `encoding/json` runs
+`compact(…, escapeHTML=true)` over a `Marshaler`'s output, so a nested
+`json.RawMessage` is whitespace-stripped and has `<`, `>`, `&` and U+2028/9
+escaped — while keeping its key order and number spelling. `serde_json` writes a
+`RawValue`'s bytes as-is through `write_raw_fragment`, which `GoFormatter` never
+sees. Two places that mattered:
+
+- the **synthetic SSE frames**: Go ships `{"question":"a \u0026 b"}` where Rust
+  shipped `{"question":"a & b"}`. `gojson::serialize_compacted` is attached to the
+  field rather than applied at each construction site, so a future one cannot
+  forget it;
+- the **stored `blocks` column**: Go compacts **on store**, not on emit — this
+  file and `persist.rs` both used to say the opposite — so writing the SDK's bytes
+  verbatim left the two implementations' databases different for the same input.
+  It was masked on read, because `chats::decode_blocks` compacts what it loads,
+  which is exactly why nothing noticed.
 
 **The `tool_use` input must never round-trip through a `serde_json::Value`.**
 The first version of `append_assistant_blocks` did, and turned `{"z":1.50,"a":1}`
