@@ -480,3 +480,173 @@ async fn the_integration_write_answers_match_go() {
         assert_eq!(gone.0, 204, "integration delete must be 204");
     }
 }
+
+// ─── Pricing rates (#306) ─────────────────────────────────────────────────────
+
+/// Pin Go's answers for the three rate writes.
+///
+/// The add-versus-correct split is the whole point of this surface, and its two
+/// refusals are what a port most easily collapses into one upsert — so both are
+/// driven here, including the **body** of the collision, which is not the bare
+/// `{"error": …}` every other 409 in this suite carries.
+///
+/// The pattern is deliberately one no seed row can collide with: the catalog on
+/// a copied database is already populated, and an add over a built-in row would
+/// be asserting against whatever the seed happens to hold today.
+#[tokio::test]
+#[ignore = "requires a scratch Go instance; mutates it"]
+async fn the_pricing_rate_write_answers_match_go() {
+    require_scratch_instance();
+
+    let pattern = "parity-writes-model";
+    let key = format!("{pattern}@2026-01-01T00:00:00Z");
+    let rate = |output: &str| {
+        format!(
+            r#"{{"provider":"parity","model_pattern":"{pattern}","match_type":"prefix",
+                 "display_name":"Parity Writes Model","input_per_mtok":5,
+                 "output_per_mtok":{output},"cache_write_5m_per_mtok":6.25,
+                 "cache_write_1h_per_mtok":10,"cache_read_per_mtok":0.5,
+                 "effective_from":"2026-01-01","source":"parity"}}"#
+        )
+    };
+    // A previous failed run may have left the row behind.
+    let _ = go_answer(
+        Method::DELETE,
+        &format!("/api/pricing/rates?model_pattern={pattern}&effective_from=2026-01-01"),
+        None,
+    )
+    .await;
+
+    let created = go_answer(Method::POST, "/api/pricing/rates", Some(&rate("25"))).await;
+    assert_eq!(created.0, 201, "an appended rate is 201");
+    let body: serde_json::Value = serde_json::from_slice(&created.1).expect("json");
+    // A bare date is midnight UTC, and the row comes back with the flags the
+    // store applied rather than an echo of the request.
+    assert_eq!(body["effective_from"], "2026-01-01T00:00:00Z");
+    assert_eq!(body["user_modified"], true);
+    assert_eq!(body["is_builtin"], false);
+    assert_eq!(body["billable"], true, "a nil *bool means billable");
+    assert_eq!(body["match_type"], "prefix");
+    // An untiered rate omits the key entirely rather than sending `[]`.
+    assert!(body.get("tiers").is_none(), "{body}");
+
+    // The collision carries the colliding row, so the UI can offer to correct
+    // it. Keys are a Go map's, so `error` precedes `existing`.
+    let conflict = go_answer(Method::POST, "/api/pricing/rates", Some(&rate("99"))).await;
+    assert_eq!(conflict.0, 409, "add refuses to overwrite");
+    let text = String::from_utf8_lossy(&conflict.1);
+    assert!(
+        text.starts_with(&format!(
+            r#"{{"error":"rate with id \"{key}\" already exists","existing":{{"id":"#
+        )),
+        "{text}"
+    );
+    let conflict_body: serde_json::Value = serde_json::from_slice(&conflict.1).expect("json");
+    assert_eq!(
+        conflict_body["existing"]["output_per_mtok"], 25.0,
+        "the add must not have overwritten the rate it collided with"
+    );
+
+    // Correcting is the other half, and it refuses to create.
+    let missing = go_answer(
+        Method::PUT,
+        "/api/pricing/rates",
+        Some(&rate("25").replace("2026-01-01", "2030-06-15")),
+    )
+    .await;
+    assert_eq!(missing.0, 404, "correct refuses to create");
+    assert_eq!(
+        String::from_utf8_lossy(&missing.1).trim_end(),
+        format!(r#"{{"error":"rate \"{pattern}@2030-06-15T00:00:00Z\" not found"}}"#)
+    );
+
+    let corrected = go_answer(Method::PUT, "/api/pricing/rates", Some(&rate("30"))).await;
+    assert_eq!(corrected.0, 200, "a correction is 200, not 201");
+    let corrected_body: serde_json::Value = serde_json::from_slice(&corrected.1).expect("json");
+    assert_eq!(corrected_body["output_per_mtok"], 30.0);
+    assert_eq!(
+        corrected_body["id"], body["id"],
+        "a correction edits the row rather than appending one"
+    );
+
+    // The handler's own 422s, which ship without the `validation error for …`
+    // prefix a service error carries — and the service's, which keep it.
+    let bad_date = go_answer(
+        Method::POST,
+        "/api/pricing/rates",
+        Some(&rate("25").replace(
+            r#""effective_from":"2026-01-01""#,
+            r#""effective_from":"nope""#,
+        )),
+    )
+    .await;
+    assert_eq!(bad_date.0, 422);
+    assert_eq!(
+        String::from_utf8_lossy(&bad_date.1).trim_end(),
+        r#"{"error":"effective_from must be YYYY-MM-DD or RFC3339"}"#
+    );
+
+    let not_billable = go_answer(
+        Method::POST,
+        "/api/pricing/rates",
+        Some(&rate("25").replace(
+            r#""source":"parity""#,
+            r#""source":"parity","billable":false"#,
+        )),
+    )
+    .await;
+    assert_eq!(not_billable.0, 422);
+    assert_eq!(
+        String::from_utf8_lossy(&not_billable.1).trim_end(),
+        r#"{"error":"validation error for \"billable\": a non-billable model must have every rate set to zero"}"#
+    );
+
+    let bad_json = go_answer(Method::POST, "/api/pricing/rates", Some("[]")).await;
+    assert_eq!(bad_json.0, 400, "a malformed body is 400, not 422");
+    assert_eq!(
+        String::from_utf8_lossy(&bad_json.1).trim_end(),
+        r#"{"error":"invalid JSON body"}"#
+    );
+
+    // Deleting takes its key from the query, because a model pattern is not
+    // path-safe. A missing one is a real 404; the key's own failures are 422.
+    let no_key = go_answer(Method::DELETE, "/api/pricing/rates", None).await;
+    assert_eq!(no_key.0, 422);
+    assert_eq!(
+        String::from_utf8_lossy(&no_key.1).trim_end(),
+        r#"{"error":"effective_from is required"}"#
+    );
+
+    let no_pattern = go_answer(
+        Method::DELETE,
+        "/api/pricing/rates?effective_from=2026-01-01",
+        None,
+    )
+    .await;
+    assert_eq!(no_pattern.0, 422);
+    assert_eq!(
+        String::from_utf8_lossy(&no_pattern.1).trim_end(),
+        r#"{"error":"validation error for \"model_pattern\": model_pattern is required"}"#
+    );
+
+    let gone = go_answer(
+        Method::DELETE,
+        &format!("/api/pricing/rates?model_pattern={pattern}&effective_from=2026-01-01"),
+        None,
+    )
+    .await;
+    assert_eq!(gone.0, 204);
+    assert!(gone.1.is_empty(), "204 carries no body");
+
+    let again = go_answer(
+        Method::DELETE,
+        &format!("/api/pricing/rates?model_pattern={pattern}&effective_from=2026-01-01"),
+        None,
+    )
+    .await;
+    assert_eq!(again.0, 404);
+    assert_eq!(
+        String::from_utf8_lossy(&again.1).trim_end(),
+        format!(r#"{{"error":"rate \"{key}\" not found"}}"#)
+    );
+}

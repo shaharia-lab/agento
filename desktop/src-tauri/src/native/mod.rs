@@ -346,7 +346,15 @@ mod tests {
         assert!(claims(&Method::GET, "/api/claude-sessions/facets"));
         assert!(claims(&Method::GET, "/api/claude-analytics"));
 
-        assert!(!claims(&Method::POST, "/api/pricing/rates"));
+        // The rate writes moved in #306. All three share one path and differ
+        // only by method, so a method this API does not have must not be
+        // swallowed by the path match.
+        assert!(claims(&Method::POST, "/api/pricing/rates"));
+        assert!(claims(&Method::PUT, "/api/pricing/rates"));
+        assert!(claims(&Method::DELETE, "/api/pricing/rates"));
+        assert!(!claims(&Method::GET, "/api/pricing/rates"));
+        assert!(!claims(&Method::PATCH, "/api/pricing/rates"));
+        assert!(!claims(&Method::POST, "/api/pricing/rates/"));
 
         // The scan lifecycle moved with the scan itself (#289). `status` and
         // `refresh` are single segments, so the detail route still has to
