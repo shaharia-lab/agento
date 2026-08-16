@@ -158,6 +158,15 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Relaunching after an update is the only reason this is here.
         .plugin(tauri_plugin_process::init())
+        // The default targets are stdout *and* the app log dir, and the second
+        // one is load-bearing since #301: `proxy.rs` writes an access line per
+        // /api request, and a packaged .app/.AppImage has no console to read it
+        // on. Calling `targets(...)` here would replace both — narrow it only by
+        // adding, never by replacing.
+        //
+        // `Info` is also what decides what that log contains: `proxy.rs` logs
+        // writes at info and reads at debug, so the file holds the
+        // state-changing requests without the UI's polling.
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)

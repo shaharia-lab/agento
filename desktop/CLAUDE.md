@@ -1026,6 +1026,73 @@ leaves `Idle` — immediately, at `Connecting` — and `Connecting` counts as
 success. It answers `ok: true` for an endpoint nothing is listening on, unless
 the failure lands inside the microseconds before the state is read.
 
+**#301 answered the other half: what this build *emits*.** #309 settled the
+config surface; the emission side was still undecided, and drifting. **No native
+handler starts an OTel span, and none will.** Go instruments every handler and
+service method (`otel.Tracer("agento").Start(ctx, "integration.create")`), but a
+span with no provider behind it is a no-op — the only thing emitting them from
+Rust could ever lead to is porting the exporters, which is the option declined
+directly above as the largest in the plan. Adding spans first and deciding later
+gets that order backwards.
+
+**Do not read the sidecar's remaining spans as coverage.** While it is bundled
+it still exports whatever it still serves, so a trace view shows a *shrinking,
+arbitrary* subset: exactly the routes that happen not to be ported yet. That is
+the port's progress rendered as a graph, not a statement about the app — anyone
+auditing "did the integration write stop happening?" from a trace is reading the
+wrong instrument, since a ported write leaves no trace precisely because it
+worked. It is a transitional artifact and it goes away with #278, which is why
+#301 was answered by writing this down rather than by filling in the other half
+with spans that would then be deleted.
+
+**Application logs are the half that is reproduced, because they are not
+telemetry.** "Do not port" covers the exporters; Go's `internal/logger` is not
+on that list, and its service-layer `logger.Info` lines never depended on OTel
+being configured — the `otelslog` bridge is an optional add-on. The desktop
+equivalent is **one access line per `/api` request, emitted at the seam** in
+`proxy.rs::handle`: method, path, status, elapsed ms, and which implementation
+answered (`native`, `native-stream`, `forwarded`, `native-failed-forwarded`,
+`diff`).
+
+At the seam and not in the handlers, for the reason the whole issue exists.
+`handle` is the one point every `/api` request passes through whether Rust,
+Go or a fallback answers it, so the record covers claimed and unclaimed routes
+alike and **cannot go selectively sparse as the port advances** — a line per
+handler would be fifteen edits that drift, and the sixteenth port would forget
+one. It is the same shape Go got from wrapping the router in `otelhttp` rather
+than instrumenting each handler. `dispatch` exists only so that the eight-odd
+return paths do not each need their own log call.
+
+Two rules there are deliberate and must survive anyone "improving" it:
+
+- **Non-`GET` at `info`, `GET` at `debug`.** `tauri_plugin_log` is built at
+  `LevelFilter::Info`, so by default the file holds the state-changing requests
+  — the ones Go logged at the service layer — and none of the polling. The
+  sessions list polls `GET /api/claude-sessions/status` on a timer for the whole
+  length of a scan; an info line per poll buries everything else, which is how a
+  log stops being read.
+- **No bodies, no headers, no query string.** The bodies here are chat prompts,
+  agent system prompts and integration credentials, and the query string carries
+  search terms and project paths. The log is a plain file on disk. `log_path`
+  drops the query in one place so there is one place to check that it does.
+
+It lands where a user can retrieve it, which is the only thing that makes this
+an answer rather than a gesture: `tauri_plugin_log`'s default targets are stdout
+**and** `LogDir`, so the line is written to Tauri's app-log directory —
+`~/.local/share/com.shaharialab.agento/logs/Agento.log` on Linux,
+`~/Library/Logs/com.shaharialab.agento/Agento.log` on macOS. Nothing in
+`lib.rs` needs to ask for that; it is what `Builder::new()` already does. A
+packaged `.app`/`.AppImage` has no console, so a stdout-only logger would have
+made the whole exercise unobservable.
+
+One elapsed figure lies if read carelessly: on a `native-stream` line it is
+time-to-headers, not the turn's duration — the SSE body is still arriving when
+the line is written.
+
+None of this is a property of the *data*. An `agento web` pointed at the same
+`~/.agento` exports OTel exactly as it always did; it is this build that
+declines to.
+
 ### WhatsApp is dropped, not deferred (#273)
 
 `whatsmeow` has no Rust equivalent and will not be reimplemented. This is a
