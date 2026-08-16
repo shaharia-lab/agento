@@ -62,6 +62,12 @@ pub mod messages;
 pub mod options;
 pub mod permissions;
 pub mod process;
+/// The reflector divergence map: which Go shapes `schemars` reproduces and what
+/// a port must write for the ones it does not. Tests only — it declares
+/// reference types and asserts them against
+/// `desktop/parity/jsonschema_reflect_vectors.json`, and nothing ships from it.
+#[cfg(test)]
+pub mod schema_vectors;
 pub mod session;
 pub mod sessions;
 pub mod tool;

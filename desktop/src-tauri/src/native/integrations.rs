@@ -107,6 +107,19 @@
 //! only one of the orderings Go produces, which is why the live parity suite
 //! re-asks. See "Go itself is not always byte-stable" in `desktop/CLAUDE.md`.
 
+/// The GitHub integration's in-process MCP server (#312).
+///
+/// A submodule of a `.rs` module file rather than a sibling, which is the least
+/// disruptive of the two layouts: `native/integrations.rs` stays exactly where
+/// it is and keeps its history, and `native/integrations/github/` is where the
+/// six ports (#312–#317) collect. The alternative — moving this file to
+/// `native/integrations/mod.rs` — is a rename of a 1,400-line file for the same
+/// result.
+///
+/// Nothing here calls it. Hosting an integration's server is the registry's
+/// job, which is #311; this module still never reads a credential.
+pub mod github;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 

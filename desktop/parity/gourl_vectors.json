@@ -236,5 +236,225 @@
       "value": "a\u0000b",
       "want": "a%00b"
     }
+  ],
+  "path_escape": [
+    {
+      "value": "",
+      "want": ""
+    },
+    {
+      "value": "a-b",
+      "want": "a-b"
+    },
+    {
+      "value": "a b",
+      "want": "a%20b"
+    },
+    {
+      "value": "a/b",
+      "want": "a%2Fb"
+    },
+    {
+      "value": "a%b",
+      "want": "a%25b"
+    },
+    {
+      "value": "$",
+      "want": "$"
+    },
+    {
+      "value": "\u0026",
+      "want": "\u0026"
+    },
+    {
+      "value": "+",
+      "want": "+"
+    },
+    {
+      "value": ",",
+      "want": "%2C"
+    },
+    {
+      "value": "/",
+      "want": "%2F"
+    },
+    {
+      "value": ":",
+      "want": ":"
+    },
+    {
+      "value": ";",
+      "want": "%3B"
+    },
+    {
+      "value": "=",
+      "want": "="
+    },
+    {
+      "value": "?",
+      "want": "%3F"
+    },
+    {
+      "value": "@",
+      "want": "@"
+    },
+    {
+      "value": "-_.~",
+      "want": "-_.~"
+    },
+    {
+      "value": "~user",
+      "want": "~user"
+    },
+    {
+      "value": "a*b",
+      "want": "a%2Ab"
+    },
+    {
+      "value": "repo:o/r func foo+bar",
+      "want": "repo:o%2Fr%20func%20foo+bar"
+    },
+    {
+      "value": "café",
+      "want": "caf%C3%A9"
+    },
+    {
+      "value": "日本語",
+      "want": "%E6%97%A5%E6%9C%AC%E8%AA%9E"
+    },
+    {
+      "value": "a\tb",
+      "want": "a%09b"
+    },
+    {
+      "value": "a\nb",
+      "want": "a%0Ab"
+    },
+    {
+      "value": "a\"b",
+      "want": "a%22b"
+    },
+    {
+      "value": "a\u003cb\u003ec",
+      "want": "a%3Cb%3Ec"
+    },
+    {
+      "value": "a#b",
+      "want": "a%23b"
+    },
+    {
+      "value": "a\u0000b",
+      "want": "a%00b"
+    }
+  ],
+  "query_escape": [
+    {
+      "value": "",
+      "want": ""
+    },
+    {
+      "value": "a-b",
+      "want": "a-b"
+    },
+    {
+      "value": "a b",
+      "want": "a+b"
+    },
+    {
+      "value": "a/b",
+      "want": "a%2Fb"
+    },
+    {
+      "value": "a%b",
+      "want": "a%25b"
+    },
+    {
+      "value": "$",
+      "want": "%24"
+    },
+    {
+      "value": "\u0026",
+      "want": "%26"
+    },
+    {
+      "value": "+",
+      "want": "%2B"
+    },
+    {
+      "value": ",",
+      "want": "%2C"
+    },
+    {
+      "value": "/",
+      "want": "%2F"
+    },
+    {
+      "value": ":",
+      "want": "%3A"
+    },
+    {
+      "value": ";",
+      "want": "%3B"
+    },
+    {
+      "value": "=",
+      "want": "%3D"
+    },
+    {
+      "value": "?",
+      "want": "%3F"
+    },
+    {
+      "value": "@",
+      "want": "%40"
+    },
+    {
+      "value": "-_.~",
+      "want": "-_.~"
+    },
+    {
+      "value": "~user",
+      "want": "~user"
+    },
+    {
+      "value": "a*b",
+      "want": "a%2Ab"
+    },
+    {
+      "value": "repo:o/r func foo+bar",
+      "want": "repo%3Ao%2Fr+func+foo%2Bbar"
+    },
+    {
+      "value": "café",
+      "want": "caf%C3%A9"
+    },
+    {
+      "value": "日本語",
+      "want": "%E6%97%A5%E6%9C%AC%E8%AA%9E"
+    },
+    {
+      "value": "a\tb",
+      "want": "a%09b"
+    },
+    {
+      "value": "a\nb",
+      "want": "a%0Ab"
+    },
+    {
+      "value": "a\"b",
+      "want": "a%22b"
+    },
+    {
+      "value": "a\u003cb\u003ec",
+      "want": "a%3Cb%3Ec"
+    },
+    {
+      "value": "a#b",
+      "want": "a%23b"
+    },
+    {
+      "value": "a\u0000b",
+      "want": "a%00b"
+    }
   ]
 }

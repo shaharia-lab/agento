@@ -181,43 +181,138 @@ where
         .description(description)
         .parameters::<In>()
         .into_tool_route();
-    strip_schema_dialect(&mut route.attr);
+    normalize_go_schema(&mut route.attr);
     ToolDef(route)
 }
 
-/// Drops the `$schema` dialect key `schemars` stamps on every generated schema.
+/// Makes a `schemars` schema say what `google/jsonschema-go` says, for the
+/// shapes where the difference is mechanical.
 ///
-/// Go's `google/jsonschema-go` emits none — a `tools/list` from `internal/tools`
-/// carries exactly `additionalProperties`, `properties`, `required` and `type` —
-/// and this schema does not travel alone: the CLI forwards it to the model as
-/// the tool's `input_schema`. Keeping the key would put a field in front of the
-/// model that the same tool hosted by the Go server does not have, on the one
-/// surface (#310–#317) where the two are meant to be indistinguishable.
+/// A tool's input schema is not internal: `tools/list` hands it to the CLI and
+/// the CLI hands it to the model as the tool's `input_schema`. Any key one
+/// reflector emits and the other does not is a field in front of the model that
+/// the same tool hosted by the Go server does not have — on the one surface
+/// (#310–#317) where the two are meant to be indistinguishable.
 ///
-/// `$schema` is the first of a class rather than the whole class. What is left
-/// is verified to match Go key for key **for a flat struct of required
-/// scalars**, which is what `current_time` is and all the parity vectors cover.
-/// `schemars` 1.2.2 and `google/jsonschema-go` are known to diverge on shapes
-/// the six integration ports will hit: an `Option<T>` renders as
-/// `"type": ["string","null"]` where a Go field with `omitempty` stays
-/// `"type":"string"` and merely drops out of `required`; a nested struct
-/// produces `$defs`/`$ref` where Go inlines; integers pick up a `"format"`.
-/// A parity vector for a nested/`Option` input is wanted before the first
-/// integration port lands, since this function's contract is "strip one key",
-/// not "reconcile two reflectors".
+/// Three removals, and they are the three that are safe to make blindly —
+/// each is a key `jsonschema.For` can **never** emit, so removing it can only
+/// move a Rust schema towards Go's and never away from it:
 ///
-/// Replaces the `Arc` rather than mutating through it, and that is not
-/// fussiness: `rmcp` memoizes one generated schema per input type and hands
-/// every `ToolRoute` a clone of the same `Arc`, so `get_mut` would refuse and an
+/// 1. **`$schema`** — the dialect key `schemars` stamps on every schema it
+///    generates. `jsonschema-go` emits none, ever.
+/// 2. **`format`** — `schemars` writes `"format": "int64"` for an `i64`,
+///    `"uint32"` for a `u32` and so on. `Schema.Format` exists on the Go side
+///    but only a hand-written schema fills it, and no Agento tool writes one.
+///    #312's twenty GitHub tools — six of which take an `int` or an `int64` —
+///    would otherwise diverge on every one of them.
+/// 3. **`default`** — `#[serde(default)]` is the Rust shape that reproduces
+///    Go's `omitempty` (see below), and `schemars` reads it as metadata worth
+///    advertising: a defaulted `String` field picks up `"default": ""`.
+///    `jsonschema.For` sets no defaults, so the field would otherwise be
+///    optional in both languages and *described* differently in one. Removing
+///    it here is what keeps `#[serde(default)]` the whole of the guidance
+///    rather than a two-attribute incantation every port has to remember.
+///
+/// The walk is **structure-aware, not a key sweep**: all three are perfectly
+/// ordinary property *names*, so they are removed only where a subschema sits,
+/// and recursion follows the positions `schemars` can put one in.
+///
+/// # What is deliberately not reconciled, and what a port must write instead
+///
+/// `desktop/parity/jsonschema_reflect_vectors.json` is the generated map of
+/// every shape class, with the Rust half in [`super::schema_vectors`]. Three
+/// divergences are left standing because the fix belongs in the *port*, where
+/// the intent is known, rather than in a rewriter that would have to guess:
+///
+/// - **`Option<T>` is not an optional Go field.** `schemars` renders
+///   `"type": ["string","null"]`; a Go field with `omitempty` keeps
+///   `"type":"string"` and merely leaves `required`. Write
+///   `#[serde(default)] field: String`, not `Option<String>`. (Not needed by
+///   #312 at all: no params struct in `internal/integrations/github/` carries
+///   `omitempty`, so every field of all twenty tools is required.)
+/// - **A nested struct is inlined by Go** and lifted into `$defs`/`$ref` by
+///   `schemars`. Every Go params struct in the six integrations is flat; a port
+///   that needs nesting has to inline it, and that work belongs to the port
+///   that needs it rather than to a general de-referencer here.
+/// - **A sized integer carries bounds in Go, not a format.** `int32` reflects
+///   as `minimum`/`maximum` and `uint` as `minimum: 0`. Use `i64` for a Go
+///   `int` or `int64` — which is what every integer field in the integrations
+///   is — and nothing has to be reconciled.
+///
+/// # Why the `Arc` is replaced rather than written through
+///
+/// `rmcp` memoizes one generated schema per input type and hands every
+/// `ToolRoute` a clone of the same `Arc`, so `get_mut` would refuse and an
 /// in-place edit would reach into a process-wide cache. The clone is one map,
 /// once per tool at start-up.
-fn strip_schema_dialect(tool: &mut Tool) {
-    if !tool.input_schema.contains_key("$schema") {
+fn normalize_go_schema(tool: &mut Tool) {
+    let mut schema = (*tool.input_schema).clone();
+    if !normalize_object(&mut schema) {
         return;
     }
-    let mut schema = (*tool.input_schema).clone();
-    schema.remove("$schema");
     tool.input_schema = std::sync::Arc::new(schema);
+}
+
+/// One subschema: drop the two keys, then recurse. Reports whether anything
+/// changed, so an already-clean schema keeps its memoized `Arc`.
+fn normalize_object(schema: &mut serde_json::Map<String, serde_json::Value>) -> bool {
+    let mut changed = schema.remove("$schema").is_some();
+    changed |= schema.remove("format").is_some();
+    changed |= schema.remove("default").is_some();
+
+    // Positions holding a single subschema. The last six are unreachable from
+    // the integrations as they stand — nothing there is conditional or uses
+    // `flatten` — but they are what a *future* one would hit, and the failure
+    // is silent: a nested `$schema`/`format`/`default` under an unwalked
+    // keyword survives into a schema the model reads and nothing says so.
+    // `unevaluatedProperties`/`unevaluatedItems` are what `schemars` 1.x emits
+    // for `#[serde(flatten)]` under `deny_unknown_fields`, which is on for every
+    // params struct in this port.
+    for key in [
+        "items",
+        "additionalProperties",
+        "propertyNames",
+        "not",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+        "if",
+        "then",
+        "else",
+        "contains",
+    ] {
+        if let Some(serde_json::Value::Object(child)) = schema.get_mut(key) {
+            changed |= normalize_object(child);
+        }
+    }
+    // Positions holding a map of name → subschema. `properties` is why this
+    // walk is structure-aware: a tool may legitimately have a field called
+    // `format`, and a blind key sweep would delete it.
+    for key in [
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+    ] {
+        if let Some(serde_json::Value::Object(children)) = schema.get_mut(key) {
+            for child in children.values_mut() {
+                if let serde_json::Value::Object(child) = child {
+                    changed |= normalize_object(child);
+                }
+            }
+        }
+    }
+    // Positions holding a list of subschemas.
+    for key in ["allOf", "anyOf", "oneOf", "prefixItems"] {
+        if let Some(serde_json::Value::Array(children)) = schema.get_mut(key) {
+            for child in children.iter_mut() {
+                if let serde_json::Value::Object(child) = child {
+                    changed |= normalize_object(child);
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// An MCP server whose whole surface is a set of [`ToolDef`]s.
@@ -419,6 +514,51 @@ mod tests {
             schema.get("$schema").is_none(),
             "Go's reflected schemas carry no dialect key: {schema}"
         );
+    }
+
+    /// `jsonschema.For` never sets `Format`, so a `schemars` `"format"` is a
+    /// key the model would see from a Rust-hosted tool and not from the Go one.
+    /// Six of #312's twenty GitHub tools take an integer, so this is not a
+    /// corner.
+    #[test]
+    fn an_integer_carries_no_format_key() {
+        let server = ToolServer::new("calc").with_tool(add_tool());
+        let tool = server.get_tool("add").expect("the tool is registered");
+        let schema = serde_json::to_value(&*tool.input_schema).unwrap();
+        assert_eq!(schema["properties"]["a"]["type"], "integer");
+        assert!(
+            schema["properties"]["a"].get("format").is_none(),
+            "Go reflects an int64 as a bare integer: {schema}"
+        );
+    }
+
+    /// The reason the walk is structure-aware. `format` is a legal field name,
+    /// and a tool that has one must keep the property while still losing the
+    /// *keyword* on it.
+    #[test]
+    fn a_property_named_format_survives_the_normalization() {
+        #[allow(dead_code)] // reflected for its schema, never deserialized
+        #[derive(serde::Deserialize, JsonSchema)]
+        struct ExportInput {
+            /// The output format.
+            format: String,
+            /// How many rows.
+            limit: i64,
+        }
+
+        let server = ToolServer::new("export").with_tool(new_tool(
+            "export",
+            "Exports.",
+            |_input: ExportInput, _ct| async move { Ok(CallToolResult::success(vec![])) },
+        ));
+        let tool = server.get_tool("export").expect("registered");
+        let schema = serde_json::to_value(&*tool.input_schema).unwrap();
+        assert_eq!(schema["properties"]["format"]["type"], "string");
+        assert_eq!(
+            schema["properties"]["format"]["description"],
+            "The output format."
+        );
+        assert!(schema["properties"]["limit"].get("format").is_none());
     }
 
     #[test]
