@@ -932,14 +932,16 @@ why `apply_data_settings` is three lines where Go's is thirty. The obstacle is
 the **sidecar**, which does hold one and is still serving routes that read it:
 
 - `notificationServiceImpl.UpdateSettings` is a read-modify-write over
-  `settingsMgr.Get()` that persists the **whole** `user_settings` row. So a
-  native settings save followed by any SMTP save through the unported
-  `PUT /api/notifications/settings` rewrites `hidden_projects`,
-  `idle_gap_threshold_minutes` and both config-dir columns from the sidecar's
-  boot-time copy. Reproduced against a Go server built from this checkout: a
-  row edited to `["…/native-wrote-this"]` / 42 read back
+  `settingsMgr.Get()` that persists the **whole** `user_settings` row, so a
+  native settings save followed by one SMTP save through Go rewrites
+  `hidden_projects`, `idle_gap_threshold_minutes` and both config-dir columns
+  from the sidecar's boot-time copy. Reproduced against a Go server built from
+  this checkout: a row edited to `["…/native-wrote-this"]` / 42 read back
   `["…/hidden-one"]` / 25 after one unrelated notification save, with no error
-  anywhere. That is silent, total reversion of the Data & Analytics tab.
+  anywhere — silent, total reversion of the Data & Analytics tab. #307 has
+  since taken `PUT /api/notifications/settings` native, and its write touches
+  one column precisely so it cannot do this; but the Go method is unchanged and
+  `Err` still forwards, so the path is narrowed, not closed.
 - `config.ResolveAgentClaudeDir` resolves each run's Claude account from
   `claudeDirs.runOverride`, so scheduled tasks (#275) and Telegram triggers —
   both still Go's — would keep authenticating as the previous account.
