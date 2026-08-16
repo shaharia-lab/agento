@@ -570,13 +570,20 @@ struct InboundControlRequest {
     // can_use_tool
     #[serde(default)]
     tool_name: String,
-    /// One bounded, known divergence: Go's SDK holds this as a `json.RawMessage`,
-    /// so an inbound `"input": null` captures the four bytes `null` and its
-    /// `omitempty` emits `"input":null` onward. A plain `Option` collapses that
-    /// to `None`, so the key is dropped instead. Recorded rather than fixed
-    /// because the CLI always sends an object here, and because `src/claude/` is
-    /// the SDK port and does not depend on `native::gojson`'s `captured_raw` —
-    /// which is otherwise exactly the helper for it.
+    /// One bounded, known divergence, and only for an **explicit** `null` — an
+    /// absent key is dropped by both.
+    ///
+    /// Go's SDK holds this as a `json.RawMessage` (no `omitempty` here), so an
+    /// inbound `"input": null` captures the four bytes and survives to Agento's
+    /// own `permReq.Input` in `internal/api/chats.go`, *whose* `omitempty` tests
+    /// byte length and therefore emits `"input":null` on the `permission_request`
+    /// frame. A plain `Option` collapses it to `None` one layer earlier, so the
+    /// key is dropped instead.
+    ///
+    /// Recorded rather than fixed because the CLI always sends an object here,
+    /// and because `src/claude/` is the SDK port and does not depend on
+    /// `native::gojson`'s `captured_raw` — which is otherwise exactly the helper
+    /// for it.
     #[serde(default)]
     input: Option<Box<RawValue>>,
 

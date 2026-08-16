@@ -809,7 +809,7 @@ docs carry a full worked example.
   order and number spelling**. A tool_use `input` of `{"z":1.50,"a":1}` ships
   exactly that; decoding it into a `serde_json::Value` and re-encoding would
   ship `{"a":1,"z":1.5}` — reordered and respelled, with nothing to signal it.
-  `native/chats.rs::compact` is the byte pass that avoids it.
+  `native/gojson.rs::compact` is the byte pass that avoids it.
 - **The project filter differs between endpoints.** `/claude-analytics` matches
   `decoded_path`; `/claude-sessions` matches `project_path` literally, which is
   the dash-encoded name for some sessions and a real path for others. Sending
@@ -1079,14 +1079,21 @@ escaped — while keeping its key order and number spelling. `serde_json` writes
 sees. Two places that mattered:
 
 - the **synthetic SSE frames**: Go ships `{"question":"a \u0026 b"}` where Rust
-  shipped `{"question":"a & b"}`. `gojson::serialize_compacted` is attached to the
-  field rather than applied at each construction site, so a future one cannot
-  forget it;
+  shipped `{"question":"a & b"}`;
 - the **stored `blocks` column**: Go compacts **on store**, not on emit — this
   file and `persist.rs` both used to say the opposite — so writing the SDK's bytes
   verbatim left the two implementations' databases different for the same input.
   It was masked on read, because `chats::decode_blocks` compacts what it loads,
   which is exactly why nothing noticed.
+
+**The rule lives on the field, not at the construction site**, at all four of
+them: the two SSE structs in `chat/turn.rs`, plus `chats::MessageBlock::input`
+and `sessions::detail::NormalizedBlock::input`. `MessageBlock` is why — it has
+*two* sinks, the column via `persist::append_message` and the wire via
+`GET /api/chats/{id}`, and it had two independent compaction points, one of which
+was simply missing. A third construction path would have been silently wrong the
+same way. The call-site `compact_raw`s are left as belt-and-braces; compaction is
+idempotent, so nothing moved when the field-level rule went in.
 
 **The `tool_use` input must never round-trip through a `serde_json::Value`.**
 The first version of `append_assistant_blocks` did, and turned `{"z":1.50,"a":1}`
@@ -1356,7 +1363,7 @@ Three things here are silent when wrong:
   **key order and number spelling preserved**. On disk everything goes through
   `json.MarshalIndent` over Go's `any`: keys *sorted*, every number a float64,
   two-space indent, `": "` after each key, no trailing newline
-  (`gojson::indent`, which is `Indent` — `MarshalIndent` is literally `Marshal`
+  (`gojson::indent_compact`, which is `Indent` — `MarshalIndent` is literally `Marshal`
   then `Indent`, so it decomposes rather than needing a second `Formatter`). And
   a profile created by `POST .../profiles` is neither: it is a **verbatim** byte
   copy of the current default's file.

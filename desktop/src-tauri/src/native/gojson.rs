@@ -389,8 +389,17 @@ where
     S: serde::Serializer,
 {
     use serde::ser::Error;
+    let compacted = compact(raw.get());
+    // The no-op case is now the *only* case in practice — every construction
+    // site already compacts — so short-circuiting is what keeps this from
+    // costing an allocation and a full re-parse per `tool_use` input on every
+    // serialize, including a long transcript's worth on
+    // `GET /api/claude-sessions/{id}`. `compact_raw` has the same guard.
+    if compacted == raw.get() {
+        return raw.serialize(serializer);
+    }
     let compacted =
-        RawValue::from_string(compact(raw.get())).map_err(|e| S::Error::custom(e.to_string()))?;
+        RawValue::from_string(compacted).map_err(|e| S::Error::custom(e.to_string()))?;
     compacted.serialize(serializer)
 }
 
