@@ -39,6 +39,7 @@ use crate::claude::messages::Event;
 use crate::claude::permissions::{PermissionContext, PermissionResult};
 use crate::claude::session::Session;
 
+use super::error_json;
 use super::live::{registry, LiveSession};
 use super::runner::{self, RunSpec};
 use super::sse;
@@ -121,10 +122,17 @@ pub async fn run(
     };
     let (row, agent) = loaded;
 
-    let fallback_model = if row.model.is_empty() {
-        default_model(&db_path)
+    // Deliberately *not* resolved here: `runner::build_options` calls this only
+    // for a chat with no agent, which is the only branch Go reads the user's
+    // default in. Resolving eagerly opened a second read-only connection and
+    // loaded the settings row on every turn of every agent chat, to throw the
+    // answer away.
+    let fallback_model: Box<dyn Fn() -> String + Send + Sync> = if row.model.is_empty() {
+        let db_path = db_path.clone();
+        Box::new(move || default_model(&db_path))
     } else {
-        row.model.clone()
+        let model = row.model.clone();
+        Box::new(move || model.clone())
     };
 
     let (notify_tx, notify_rx) = mpsc::channel::<Notify>(NOTIFY_CAPACITY);
@@ -567,21 +575,6 @@ fn sse_response(body: Body) -> Response<Body> {
         .header(header::CONNECTION, "keep-alive")
         .header("X-Accel-Buffering", "no")
         .body(body)
-        .unwrap_or_else(|_| Response::new(Body::empty()))
-}
-
-/// A JSON error answered *before* the SSE headers — which is the only window in
-/// which an HTTP status can still say anything.
-fn error_json(status: StatusCode, message: &str) -> Response<Body> {
-    #[derive(Serialize)]
-    struct ErrorBody<'a> {
-        error: &'a str,
-    }
-    let body = crate::native::gojson::to_vec(&ErrorBody { error: message }).unwrap_or_default();
-    Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
         .unwrap_or_else(|_| Response::new(Body::empty()))
 }
 

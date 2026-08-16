@@ -47,8 +47,16 @@ pub struct RunSpec {
     /// The agent, or `None` for a chat with no agent slug — which Go models as
     /// a synthesized config carrying only a model.
     pub agent: Option<Agent>,
-    /// `session.model`, or the user's default when the session has none.
-    pub fallback_model: String,
+    /// The model a chat with **no agent** runs: `session.model`, or the user's
+    /// default when the session has none.
+    ///
+    /// A closure, because computing it opens a second read-only SQLite
+    /// connection and loads the settings row — and Go never does that for a
+    /// chat that names an agent. `resolveAgentConfig` returns the agent's own
+    /// config outright in that case and the default is only read in the
+    /// no-agent branch, so an eager value is work whose result is thrown away.
+    /// Called at most once, in the one arm below that needs it.
+    pub fallback_model: Box<dyn Fn() -> String + Send + Sync>,
     pub working_dir: String,
     pub settings_profile_id: String,
     /// `Some` resumes an existing CLI session; `None` pins a new one to the
@@ -112,12 +120,17 @@ pub fn build_options(
 
     opts = opts.with_claude_executable(claude_executable());
 
-    let model = spec
-        .agent
-        .as_ref()
-        .map(|a| a.model.clone())
-        .filter(|m| !m.is_empty())
-        .unwrap_or_else(|| spec.fallback_model.clone());
+    // `resolveAgentConfig` branches on whether the **chat names an agent**, not
+    // on whether that agent has a model: it returns the agent's config outright,
+    // and `runner.go` then sets a model only when `agentCfg.Model != ""`. So an
+    // agent with an empty model runs with **no model option at all** — neither
+    // the session's nor the user's default is consulted for it, and treating the
+    // fallback as a general default would run such an agent on a different model
+    // from the one Go picks.
+    let model = match spec.agent.as_ref() {
+        Some(agent) => agent.model.clone(),
+        None => (spec.fallback_model)(),
+    };
     if !model.is_empty() {
         opts = opts.with_model(model);
     }
@@ -396,6 +409,7 @@ pub fn load(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn agent_with(caps: Capabilities) -> Agent {
         Agent {
@@ -409,6 +423,93 @@ mod tests {
             capabilities: caps,
             claude_config_dir: String::new(),
         }
+    }
+
+    /// A `RunSpec` whose fallback records whether it was ever asked for.
+    ///
+    /// The count is the point: #299 is about *not* resolving it, and a test that
+    /// only checked the resulting model would pass with the work still being
+    /// done on every turn.
+    /// Note the models below are all distinct from [`DEFAULT_MODEL`], which is
+    /// what `Options::default()` already carries — `agent_with`'s happens to be
+    /// exactly that string, so a test reusing it could not tell "we set the
+    /// model" from "we never called `with_model`".
+    fn spec_with(agent: Option<Agent>) -> (RunSpec, std::sync::Arc<AtomicUsize>) {
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = std::sync::Arc::clone(&calls);
+        (
+            RunSpec {
+                agent,
+                fallback_model: Box::new(move || {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    "fallback-model".to_string()
+                }),
+                working_dir: String::new(),
+                settings_profile_id: String::new(),
+                resume_session_id: None,
+                chat_id: "c1".into(),
+            },
+            calls,
+        )
+    }
+
+    fn no_op_handler() -> PermissionHandler {
+        std::sync::Arc::new(|_, _, _| {
+            Box::pin(async { crate::claude::permissions::PermissionResult::allow() })
+        })
+    }
+
+    /// The whole of #299: a chat that names an agent never asks for the
+    /// fallback, because Go's `resolveAgentConfig` returns the agent's config
+    /// outright and never reads the user's default. Resolving it eagerly opened
+    /// a second read-only SQLite connection and loaded the settings row on every
+    /// turn, to discard the answer.
+    #[test]
+    fn an_agent_chat_never_resolves_the_fallback_model() {
+        let mut agent = agent_with(Capabilities::default());
+        agent.model = "agent-model".into();
+        let (spec, calls) = spec_with(Some(agent));
+        let opts = build_options(&spec, no_op_handler()).expect("options");
+
+        assert_eq!(opts.model, "agent-model");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "the fallback was resolved for a chat that cannot use it"
+        );
+    }
+
+    /// The other half of the same rule, and a real parity fix rather than a
+    /// cleanup: Go branches on whether the chat **names an agent**, not on
+    /// whether that agent has a model. `runner.go` sets a model only when
+    /// `agentCfg.Model != ""`, so an agent with an empty one runs with **no
+    /// model option at all** — the session's model and the user's default are
+    /// never consulted for it.
+    #[test]
+    fn an_agent_with_no_model_runs_with_none_rather_than_the_fallback() {
+        let mut agent = agent_with(Capabilities::default());
+        agent.model = String::new();
+        let (spec, calls) = spec_with(Some(agent));
+        let opts = build_options(&spec, no_op_handler()).expect("options");
+
+        // `with_model` is never called, so the SDK's own default stands —
+        // which is what Go's `defaultOptions()` leaves in place too.
+        assert_eq!(
+            opts.model,
+            crate::claude::options::DEFAULT_MODEL,
+            "an agent's empty model is not a request for the session's or the user's"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The one branch that does need it — and it is asked exactly once.
+    #[test]
+    fn a_chat_with_no_agent_resolves_the_fallback_once() {
+        let (spec, calls) = spec_with(None);
+        let opts = build_options(&spec, no_op_handler()).expect("options");
+
+        assert_eq!(opts.model, "fallback-model");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -467,7 +568,7 @@ mod tests {
                 local: None,
                 mcp: Some(mcp.into()),
             })),
-            fallback_model: String::new(),
+            fallback_model: Box::new(String::new),
             working_dir: String::new(),
             settings_profile_id: String::new(),
             resume_session_id: None,
@@ -487,7 +588,7 @@ mod tests {
                 local: Some(vec!["now".into()].into()),
                 mcp: None,
             })),
-            fallback_model: String::new(),
+            fallback_model: Box::new(String::new),
             working_dir: String::new(),
             settings_profile_id: String::new(),
             resume_session_id: None,

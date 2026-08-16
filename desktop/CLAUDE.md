@@ -1034,6 +1034,17 @@ issue. That gap is #298; do not read the list below as fully covered.
   the session row is still written: `updated_at`, the token totals, and on a
   first message a title derived from a message that was never stored.
 
+**The model a turn runs is the agent's or the fallback's — never both** (#299).
+`resolveAgentConfig` branches on whether the chat **names an agent**, not on
+whether that agent has a model: it returns the agent's config outright, and
+`runner.go` then sets a model only when `agentCfg.Model != ""`. So an agent with
+an empty model runs with **no model option at all**, and the session's model and
+the user's default are read only in the no-agent branch. `RunSpec.fallback_model`
+is a closure for that reason — resolving it eagerly opened a second read-only
+SQLite connection and loaded the settings row on every turn of every agent chat,
+to throw the answer away, *and* treated an agent's empty model as a request for a
+default it would never have got from Go.
+
 **The `tool_use` input must never round-trip through a `serde_json::Value`.**
 The first version of `append_assistant_blocks` did, and turned `{"z":1.50,"a":1}`
 into `{"a":1,"z":1.5}` — sorted and respelled, with nothing to signal it.
