@@ -46,7 +46,20 @@ type Server struct {
 	httpServer     *http.Server
 	monitoringMgr  *telemetry.MonitoringManager
 	webhookHandler WebhookMounter
+	// router is kept only so the route table can be asked for rather than
+	// reconstructed. `desktop/parity` walks it to check that every write route
+	// has a recorded decision about whether the Rust shell answers it; a walk
+	// that rebuilt this function's mounts by hand would miss the next one added
+	// here, which is the mistake that check exists to catch.
+	router chi.Router
 }
+
+// Routes exposes the mounted route table for inspection.
+//
+// Read-only by type: `chi.Routes` can be walked but not registered on. Its one
+// caller is `desktop/parity`, which enumerates the write surface and fails when
+// a route has no recorded decision — see `write_routes_parity_test.go`.
+func (s *Server) Routes() chi.Routes { return s.router }
 
 // New creates a new Server. Pass frontendFS=nil to proxy to Vite dev server on port 5173.
 // webhookHandler is optional; when non-nil, its routes are mounted at the root level.
@@ -107,6 +120,8 @@ func New(
 
 	// Static files + SPA fallback
 	r.Get("/*", s.spaHandler())
+
+	s.router = r
 
 	s.httpServer = &http.Server{
 		Addr:              net.JoinHostPort(s.listenHost(), strconv.Itoa(port)),

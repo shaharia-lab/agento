@@ -35,7 +35,11 @@
 //! `claims` instead would leave a registry entry that claims nothing, and the
 //! two registry tests exist precisely to catch that shape. See [`super::gopath`].
 //!
-//! `POST /api/fs/mkdir` creates a directory and stays with Go.
+//! `POST /api/fs/mkdir` is here too (#296). It was deferred by #293 as one of
+//! the two routes that escaped every category — ~20 lines, no database, no
+//! Go-side state, and `gopath::clean` already existed — so the rule "a route
+//! moves only when Rust can reproduce every effect it has" admits it outright:
+//! its one effect is a directory on disk.
 //!
 //! `POST /api/uploads` is **not** here either, and it is not Go's any more: it
 //! has no read path at all — `internal/api/uploads.go` registers one route and
@@ -43,9 +47,10 @@
 //! joining a listing endpoint it shares nothing with. See [`super::uploads`].
 
 use axum::http::Method;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::gopath;
+use super::writes::{decode_body, finish, WriteError};
 use crate::paths;
 
 /// One listed directory. Mirrors `api.fsEntry`.
@@ -131,6 +136,85 @@ pub fn list(raw_path: &str) -> Result<FsListResponse, String> {
     })
 }
 
+// ─── `POST /api/fs/mkdir` ─────────────────────────────────────────────────────
+
+/// `api.fsMkdirRequest`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct MkdirRequest {
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    path: String,
+}
+
+/// `map[string]string{"path": clean}` — one key, so nothing to sort.
+#[derive(Debug, Serialize)]
+struct MkdirResponse {
+    path: String,
+}
+
+/// `handleFSMkdir`.
+///
+/// Three things about it are easy to get wrong, and all three are Go's, not
+/// this port's:
+///
+/// - **`200`, not `201`.** Every other create in this API answers 201; this one
+///   goes through `writeJSON(w, http.StatusOK, …)`.
+/// - **The traversal guard is `strings.Contains(clean, "..")`, a substring test
+///   on the *cleaned* path.** `Clean` has already removed every `..` element a
+///   rooted path could have, so what survives the check is only a **filename**
+///   containing two dots — `/home/u/..hidden` is refused, and so is
+///   `/tmp/a..b`. That is a live directory name a user can type, and refusing
+///   it is the behaviour the frontend is written against.
+/// - **`0750` on every directory it creates**, which `std::fs::create_dir_all`
+///   does not do: it uses `0777 & !umask`. A directory the user's own umask
+///   would have made world-readable is a divergence with a security direction,
+///   so this goes through `DirBuilder` with the mode set.
+///
+/// The response body is built **before** the directory is created, per the
+/// write path's rule that nothing fallible may run after the effect. Here the
+/// consequence would in fact be benign — `MkdirAll` is idempotent, so the
+/// forward would re-run it to the same result — but the rule is cheaper to
+/// keep than to reason about each time.
+pub fn mkdir(body: &[u8]) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<MkdirRequest>(body)?;
+    if req.path.is_empty() {
+        return Err(WriteError::BadRequest("path is required".to_string()));
+    }
+
+    let clean = gopath::clean(&req.path);
+    // `filepath.IsAbs` is `strings.HasPrefix(path, "/")` on Unix.
+    if !clean.starts_with('/') || clean.contains("..") {
+        return Err(WriteError::BadRequest("invalid path".to_string()));
+    }
+
+    let encoded = super::gojson::to_vec(&MkdirResponse {
+        path: clean.clone(),
+    })
+    .map_err(|e| WriteError::Fallback(format!("encoding mkdir response: {e}")))?;
+
+    // Nothing below this line may return `Fallback`.
+    create_dir_all_0750(&clean)
+        .map_err(|e| WriteError::Fallback(format!("creating {clean:?}: {e}")))?;
+
+    Ok(super::Answer::json(encoded))
+}
+
+/// `os.MkdirAll(path, 0750)`.
+#[cfg(unix)]
+fn create_dir_all_0750(path: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o750)
+        .create(path)
+}
+
+#[cfg(not(unix))]
+fn create_dir_all_0750(_path: &str) -> std::io::Result<()> {
+    // Unreachable: `serve` refuses this route off Unix before it is called.
+    Err(std::io::Error::other("not ported for Windows"))
+}
+
 /// The `path` query parameter. No rule of its own on top of the decoding —
 /// `""` already means the home directory, which is what an absent key gives.
 pub fn path_param(query: &str) -> String {
@@ -146,10 +230,18 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
     serve,
 };
 
-/// The listing only. Platform-independent on purpose — see [`serve`].
+/// The listing and the one write. Platform-independent on purpose — see
+/// [`serve`].
 fn claims(method: &Method, path: &str) -> bool {
-    method == Method::GET && path == "/api/fs"
+    match *method {
+        Method::GET => path == "/api/fs",
+        Method::POST => path == PATH_MKDIR,
+        _ => false,
+    }
 }
+
+/// The write route, named so `claims` and `serve` cannot disagree about it.
+const PATH_MKDIR: &str = "/api/fs/mkdir";
 
 fn serve(_ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
     // Windows `filepath` is a different algorithm and unverified here, so the
@@ -157,7 +249,10 @@ fn serve(_ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, Strin
     // and it keeps the platform decision in one readable place rather than
     // making the route vanish from the registry.
     if !cfg!(unix) {
-        return Err("the fs listing is not ported for Windows path semantics".to_string());
+        return Err("the fs routes are not ported for Windows path semantics".to_string());
+    }
+    if req.path == PATH_MKDIR {
+        return finish(mkdir(req.body));
     }
     let listing = list(&path_param(req.query))?;
     let body = super::gojson::to_vec(&listing).map_err(|e| format!("encoding fs listing: {e}"))?;
@@ -305,13 +400,157 @@ mod tests {
         assert_eq!(path_param("other=1&path=/a"), "/a");
     }
 
+    // ─── `POST /api/fs/mkdir` (#296) ──────────────────────────────────────────
+
+    fn mkdir_body(dir: &str) -> String {
+        format!(
+            r#"{{"path":{}}}"#,
+            serde_json::to_string(dir).expect("json")
+        )
+    }
+
+    /// The happy path: parents are created, the answer is **200** (not the 201
+    /// every other create in this API uses), and the body carries the *cleaned*
+    /// path rather than the one that was sent.
     #[test]
-    fn only_the_listing_is_claimed() {
+    fn mkdir_creates_parents_and_answers_the_cleaned_path() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let target = format!("{}/a/b/c", root.path().to_str().expect("utf8"));
+
+        let answer = mkdir(mkdir_body(&target).as_bytes()).expect("mkdir");
+        assert_eq!(answer.status, super::super::StatusCode::OK);
+        assert_eq!(
+            String::from_utf8(answer.body.expect("body")).expect("utf-8"),
+            format!("{{\"path\":\"{target}\"}}\n")
+        );
+        assert!(std::path::Path::new(&target).is_dir());
+
+        // `MkdirAll` is idempotent, which is what makes the forward-on-error
+        // arm safe.
+        assert!(mkdir(mkdir_body(&target).as_bytes()).is_ok());
+    }
+
+    /// `Clean` runs **before** the guard, so a `..` that resolves away is fine
+    /// and the directory that gets created is the resolved one.
+    #[test]
+    fn a_dot_dot_that_cleans_away_is_accepted() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let root = root.path().to_str().expect("utf8");
+        let sent = format!("{root}/x/../y");
+
+        let answer = mkdir(mkdir_body(&sent).as_bytes()).expect("mkdir");
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf-8");
+        assert_eq!(body, format!("{{\"path\":\"{root}/y\"}}\n"));
+        assert!(std::path::Path::new(&format!("{root}/y")).is_dir());
+        assert!(!std::path::Path::new(&format!("{root}/x")).exists());
+    }
+
+    /// The guard is `strings.Contains(clean, "..")` — a **substring** test, not
+    /// an element test — so a filename with two dots in it is refused even
+    /// though it traverses nothing. Reproduced rather than improved: it is a
+    /// name a user can type, and the frontend is written against this answer.
+    #[test]
+    fn a_filename_containing_two_dots_is_refused_the_way_go_refuses_it() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let root = root.path().to_str().expect("utf8");
+
+        for name in ["..hidden", "a..b"] {
+            let target = format!("{root}/{name}");
+            let err = mkdir(mkdir_body(&target).as_bytes()).unwrap_err();
+            assert_eq!(err.message(), "invalid path", "{name}");
+            assert_eq!(err.status(), super::super::StatusCode::BAD_REQUEST);
+            assert!(!std::path::Path::new(&target).exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_relative_path_is_refused_and_an_absent_one_is_a_different_message() {
+        // `filepath.IsAbs` on Unix is a leading slash and nothing more.
+        let err = mkdir(br#"{"path":"relative/x"}"#).unwrap_err();
+        assert_eq!(err.message(), "invalid path");
+
+        // The empty check runs first, so it wins over the cleaned `"."` that
+        // would otherwise fail `IsAbs`.
+        for body in [
+            &br#"{}"#[..],
+            &br#"{"path":""}"#[..],
+            &br#"{"path":null}"#[..],
+        ] {
+            let err = mkdir(body).unwrap_err();
+            assert_eq!(err.message(), "path is required", "{:?}", body);
+            assert_eq!(err.status(), super::super::StatusCode::BAD_REQUEST);
+        }
+
+        // A `null` body is Go's zero value — no decode error — so it reaches
+        // the same validation rather than the decoder's 400.
+        assert_eq!(mkdir(b"null").unwrap_err().message(), "path is required");
+
+        // Genuinely malformed, and an array, are the decoder's own 400.
+        for body in [&b""[..], &b"{"[..], &b"[]"[..], &br#"["/tmp/x"]"#[..]] {
+            assert_eq!(
+                mkdir(body).unwrap_err(),
+                WriteError::InvalidBody,
+                "{body:?}"
+            );
+        }
+    }
+
+    /// `0750` on **every** directory created, where `std::fs::create_dir_all`
+    /// would have used `0777 & !umask`. The difference has a security
+    /// direction, so it is asserted rather than assumed.
+    #[cfg(unix)]
+    #[test]
+    fn every_created_directory_gets_gos_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("temp dir");
+        let umask = current_umask(root.path());
+        let root = root.path().to_str().expect("utf8");
+        mkdir(mkdir_body(&format!("{root}/outer/inner")).as_bytes()).expect("mkdir");
+
+        for dir in [format!("{root}/outer"), format!("{root}/outer/inner")] {
+            let mode = std::fs::metadata(&dir).expect("stat").permissions().mode();
+            // The umask applies to both implementations alike; 0750 under the
+            // usual 022 is 0750.
+            assert_eq!(mode & 0o777, 0o750 & !umask, "{dir}");
+        }
+    }
+
+    /// Read the effective umask **without touching it**: a directory created
+    /// with the default mode is `0o777 & !umask`, so the mask falls out of the
+    /// mode.
+    ///
+    /// `umask(2)` has no getter, and the set-and-restore trick that stands in
+    /// for one is process-global — these 600-odd tests share one binary and run
+    /// on many threads, several of them creating temp files whose mode is
+    /// derived from the umask at that instant. A two-syscall window where it
+    /// reads `0o777` is a `tempfile` created mode `0000` in another test, and a
+    /// failure nobody could attribute.
+    #[cfg(unix)]
+    fn current_umask(root: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+
+        let probe = root.join(".umask-probe");
+        std::fs::create_dir(&probe).expect("probe dir");
+        let mode = std::fs::metadata(&probe)
+            .expect("stat")
+            .permissions()
+            .mode()
+            & 0o777;
+        0o777 & !mode
+    }
+
+    #[test]
+    fn the_listing_and_the_mkdir_are_claimed_and_nothing_else_is() {
         assert!(claims(&Method::GET, "/api/fs"));
+        assert!(claims(&Method::POST, "/api/fs/mkdir"));
+        // Each route for its own method only, so the wrong pairing still
+        // forwards and gets chi's own 405.
         assert!(!claims(&Method::POST, "/api/fs"));
-        assert!(!claims(&Method::POST, "/api/fs/mkdir"));
         assert!(!claims(&Method::GET, "/api/fs/mkdir"));
+        assert!(!claims(&Method::DELETE, "/api/fs/mkdir"));
         assert!(!claims(&Method::GET, "/api/fs/"));
+        assert!(!claims(&Method::POST, "/api/fs/mkdir/deeper"));
         // Uploads has no read at all — one route, and it writes.
         assert!(!claims(&Method::POST, "/api/uploads"));
         assert!(!claims(&Method::GET, "/api/uploads"));
