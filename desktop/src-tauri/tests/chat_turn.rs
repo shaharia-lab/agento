@@ -736,10 +736,9 @@ async fn run_turn_answering_keeping_db(
 /// Drive a turn whose fake CLI issues a `can_use_tool`, answering the prompt
 /// through the live registry the way `/input` and `/permission` do.
 ///
-/// Returns the body and the fake CLI's directory, so the caller can assert on
-/// both the frames and what was written back.
+/// Returns the body; the caller reads what was written back from the fake CLI's
+/// own directory with [`control_response_for`].
 async fn run_permission_turn(
-    dir: &Path,
     cli: &Path,
     file: &tempfile::NamedTempFile,
     chat_id: &str,
@@ -777,15 +776,17 @@ async fn run_permission_turn(
         }
     });
 
+    // Bounded for the same reason `collect_with_timeout` is — and for the
+    // `Answer::None` case the bound is the *point*: if a prompt is raised that
+    // should not have been, nothing ever answers it and the turn parks.
     let collected = tokio::time::timeout(
         std::time::Duration::from_secs(20),
         response.into_body().collect(),
     )
     .await
-    .expect("the turn should end")
+    .expect("the turn parked — if nothing was meant to be answered, a prompt was raised that should not have been")
     .expect("body");
     deliver.abort();
-    let _ = dir;
     String::from_utf8(collected.to_bytes().to_vec()).expect("utf8")
 }
 
@@ -830,14 +831,7 @@ async fn an_ask_user_question_is_answered_by_denying_the_tool_with_the_users_tex
 
     let id = unique_id("perm-ask");
     let file = migrated_with_chat(&id);
-    let body = run_permission_turn(
-        dir.path(),
-        &cli,
-        &file,
-        &id,
-        Answer::Text("the second one".into()),
-    )
-    .await;
+    let body = run_permission_turn(&cli, &file, &id, Answer::Text("the second one".into())).await;
 
     // The prompt reaches the client as the synthetic event, carrying the tool's
     // own input.
@@ -883,8 +877,7 @@ async fn an_ordinary_tool_prompts_for_permission_and_the_answer_is_written_back(
 
         let id = unique_id("perm-tool");
         let file = migrated_with_chat(&id);
-        let body =
-            run_permission_turn(dir.path(), &cli, &file, &id, Answer::Permission(allow)).await;
+        let body = run_permission_turn(&cli, &file, &id, Answer::Permission(allow)).await;
 
         let frames = frames(&body);
         let prompt = frames
@@ -932,7 +925,7 @@ async fn a_tool_outside_the_agents_allowlist_is_denied_without_a_prompt() {
 
     let id = unique_id("perm-gated");
     let file = migrated_with_allowlisted_agent(&id);
-    let body = run_permission_turn(dir.path(), &cli, &file, &id, Answer::None).await;
+    let body = run_permission_turn(&cli, &file, &id, Answer::None).await;
 
     assert!(
         !body.contains("permission_request"),
@@ -974,7 +967,7 @@ async fn ask_user_question_bypasses_the_allowlist() {
 
     let id = unique_id("perm-bypass");
     let file = migrated_with_allowlisted_agent(&id);
-    let body = run_permission_turn(dir.path(), &cli, &file, &id, Answer::Text("mine".into())).await;
+    let body = run_permission_turn(&cli, &file, &id, Answer::Text("mine".into())).await;
 
     assert!(
         body.contains("user_input_required"),
@@ -1003,8 +996,6 @@ async fn run_turn_inner(
     content: &str,
     answer: Option<String>,
 ) -> (String, bool, tempfile::NamedTempFile) {
-    use http_body_util::BodyExt;
-
     let _env = env_lock().lock().await;
     let file = migrated_with_chat(chat_id);
     // The SDK resolves the executable from this variable, so the fake stands in
@@ -1053,7 +1044,7 @@ async fn run_turn_inner(
             }
             false
         });
-        let collected = response.into_body().collect().await.expect("body");
+        let collected = collect_with_timeout(response).await;
         answered = handle.await.unwrap_or(false);
         return (
             String::from_utf8(collected.to_bytes().to_vec()).expect("utf8"),
@@ -1062,10 +1053,30 @@ async fn run_turn_inner(
         );
     }
 
-    let collected = response.into_body().collect().await.expect("body");
+    let collected = collect_with_timeout(response).await;
     (
         String::from_utf8(collected.to_bytes().to_vec()).expect("utf8"),
         answered,
         file,
     )
+}
+
+/// Collect a turn's body, bounded.
+///
+/// A hang rather than a failure is this suite's characteristic break — the turn
+/// parks on a wait nothing will satisfy — so an unbounded `collect` turns a
+/// regression into a CI job that sits until the runner's own limit and reports
+/// nothing useful. The bound is what makes it a test failure with a name.
+async fn collect_with_timeout(
+    response: axum::http::Response<axum::body::Body>,
+) -> http_body_util::Collected<axum::body::Bytes> {
+    use http_body_util::BodyExt;
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("the turn should end rather than park on a wait nothing satisfies")
+    .expect("body")
 }

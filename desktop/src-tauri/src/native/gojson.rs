@@ -343,7 +343,26 @@ where
     Box::<RawValue>::deserialize(deserializer).map(Some)
 }
 
-/// with `json.Marshal`; this makes a hand-edited or older row match too.
+/// Re-encode a captured raw JSON value the way Go's `compact` does.
+///
+/// Marshalling a `json.RawMessage` runs `encoding/json`'s `compact` with HTML
+/// escaping on, which:
+///
+/// - drops whitespace *outside* strings,
+/// - escapes `<`, `>`, `&` and U+2028/U+2029 wherever they appear,
+/// - and **changes nothing else** — object keys keep the order they were stored
+///   in and numbers keep the digits they were stored with.
+///
+/// Those last two are why this is a byte pass rather than a decode/re-encode: a
+/// stored `{"z":1.50,"a":[1,2]}` stays `{"z":1.50,"a":[1,2]}`, while a
+/// `serde_json::Value` round trip would give `{"a":[1,2],"z":1.5}` — reordered
+/// and respelled, with nothing to signal it.
+///
+/// **Both implementations write compacted bytes** — Go because `chatService`
+/// marshals through a `json.RawMessage`, and this port since #298, which is what
+/// that issue fixed. Applying it on read as well is what makes a hand-edited or
+/// pre-#298 row match too; compaction is idempotent, so the two are not in
+/// tension.
 pub fn compact_raw(raw: Box<RawValue>) -> Box<RawValue> {
     let compacted = compact(raw.get());
     if compacted == raw.get() {

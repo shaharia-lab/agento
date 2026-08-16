@@ -98,10 +98,19 @@ pub struct MessageBlock {
     /// distinguishes: `omitempty` on a `json.RawMessage` tests the byte length,
     /// and the four bytes of `null` are not empty. Plain `Option` would collapse
     /// them, so [`captured_raw`] takes the value however it arrives.
+    ///
+    /// **Emitted through Go's compact, stated on the field** (#298). This struct
+    /// has *two* sinks — the `blocks` column via `persist::append_message`, and
+    /// the wire via `GET /api/chats/{id}` — and it had two independent
+    /// compaction points, one of which was simply missing until #298. A third
+    /// construction path would have been silently wrong the same way, so the
+    /// rule lives in the type. The existing call-site `compact_raw`s are
+    /// belt-and-braces: compaction is idempotent.
     #[serde(
         default,
         deserialize_with = "captured_raw",
-        skip_serializing_if = "Option::is_none"
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::gojson::serialize_compacted_option"
     )]
     pub input: Option<Box<RawValue>>,
 }
@@ -257,25 +266,9 @@ fn decode_blocks(stored: &str) -> Vec<MessageBlock> {
     blocks
 }
 
-/// Re-encode a captured raw JSON value the way Go's `compact` does.
-///
-/// Marshaling a `json.RawMessage` runs `encoding/json`'s `compact` with HTML
-/// escaping on, which:
-///
-/// - drops whitespace *outside* strings,
-/// - escapes `<`, `>`, `&` and U+2028/U+2029 wherever they appear,
-/// - and **changes nothing else** — object keys keep the order they were stored
-///   in and numbers keep the digits they were stored with.
-///
-/// Those last two are why this is a byte pass rather than a decode/re-encode:
-/// a stored `{"z":1.50,"a":[1,2]}` stays `{"z":1.50,"a":[1,2]}` on the wire,
-/// while a `serde_json::Value` round trip would emit `{"a":[1,2],"z":1.5}` —
-/// reordered and respelled, with nothing to signal it.
-///
-/// In practice the column is already compact and escaped, because Go wrote it
-/// The chat message blocks are carried verbatim; the compaction and raw-capture
-/// helpers live in [`super::gojson`] because the session-detail port needs the
-/// same pair for `tool_use` inputs.
+// The compaction and raw-capture helpers live in `super::gojson` — see
+// `compact_raw` there for what Go's `compact` does and why it is a byte pass —
+// because the session-detail port needs the same pair for `tool_use` inputs.
 use super::gojson::{captured_raw, compact_raw as compact_raw_json};
 
 // ─── The seam ─────────────────────────────────────────────────────────────────

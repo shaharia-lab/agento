@@ -570,6 +570,13 @@ struct InboundControlRequest {
     // can_use_tool
     #[serde(default)]
     tool_name: String,
+    /// One bounded, known divergence: Go's SDK holds this as a `json.RawMessage`,
+    /// so an inbound `"input": null` captures the four bytes `null` and its
+    /// `omitempty` emits `"input":null` onward. A plain `Option` collapses that
+    /// to `None`, so the key is dropped instead. Recorded rather than fixed
+    /// because the CLI always sends an object here, and because `src/claude/` is
+    /// the SDK port and does not depend on `native::gojson`'s `captured_raw` —
+    /// which is otherwise exactly the helper for it.
     #[serde(default)]
     input: Option<Box<RawValue>>,
 
