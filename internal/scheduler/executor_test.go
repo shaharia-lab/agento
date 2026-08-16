@@ -365,3 +365,42 @@ func TestScheduler_NoPublisherOnPausedTask(t *testing.T) {
 		s.ExportedExecuteTask(task.ID)
 	})
 }
+
+// TestStart_SurvivesATaskThatPanicsTheCronParser is the containment half of
+// issue #330.
+//
+// A cron task whose expression is exactly `CRON_TZ=UTC` can be saved —
+// `validateScheduleConfig` checks only that the expression is non-empty — and
+// scheduling it does not return an error, it *panics*: robfig slices the zone
+// name out with `strings.Index(spec, " ")`, which is -1 when the string carries
+// no space. `Start` runs on a goroutine off `initTaskScheduler` with nothing
+// above it recovering, so before this one such row stopped `agento web` from
+// starting at all, on every boot, recoverable only by hand-editing SQLite.
+//
+// The healthy task beside it is the actual assertion: the bad row must be
+// skipped, not take the rest of the boot with it.
+func TestStart_SurvivesATaskThatPanicsTheCronParser(t *testing.T) {
+	poisoned := buildTask("poisoned", "Bare CRON_TZ prefix")
+	poisoned.ScheduleType = storage.ScheduleCron
+	poisoned.ScheduleConfig = storage.ScheduleConfig{Expression: "CRON_TZ=UTC"}
+
+	healthy := buildTask("healthy", "Ordinary interval task")
+
+	s, err := scheduler.New(scheduler.Config{
+		TaskStore: newStubTaskStore(poisoned, healthy),
+		Logger:    newTestLogger(),
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = s.Stop() })
+
+	require.NotPanics(t, func() {
+		require.NoError(t, s.Start(context.Background()))
+	})
+
+	// ListTasks returns a map's iteration order, so the healthy task may be
+	// scheduled either before or after the poisoned one. Both orders must end
+	// with it scheduled.
+	assert.True(t, s.IsTaskScheduled("healthy"),
+		"a task that panics the parser must not stop the ones after it")
+	assert.False(t, s.IsTaskScheduled("poisoned"))
+}
