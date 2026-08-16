@@ -98,8 +98,13 @@ pub struct NormalizedBlock {
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
     /// Carried verbatim through `compact`, so a stored `{"z":1.50,"a":1}` ships
-    /// exactly that rather than a re-sorted, re-spelled copy.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// exactly that rather than a re-sorted, re-spelled copy — stated on the
+    /// field rather than at each construction site (#298), for the reason
+    /// `chats::MessageBlock::input` gives.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::native::gojson::serialize_compacted_option"
+    )]
     pub input: Option<Box<RawValue>>,
 }
 

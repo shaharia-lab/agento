@@ -56,6 +56,31 @@ fn migrated_with_chat(id: &str) -> tempfile::NamedTempFile {
     file
 }
 
+/// The same, plus an agent whose capabilities name **one** built-in tool.
+///
+/// That is what makes `wrap_permission_handler` wrap the handler at all: an
+/// empty allowlist returns the inner one unwrapped, so a test that skipped the
+/// agent would exercise the bypass rather than the allowlist. `built_in` only —
+/// `runner::build_options` refuses an agent whose tools come from a local or MCP
+/// server, and would forward the whole turn to Go.
+fn migrated_with_allowlisted_agent(id: &str) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().expect("temp file");
+    let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+    agento_lib::native::migrate::apply(&mut conn).expect("migrate");
+    conn.execute(
+        "INSERT INTO agents (slug, name, capabilities) VALUES ('gated', 'Gated', ?1)",
+        [r#"{"built_in":["Read"]}"#],
+    )
+    .expect("seed agent");
+    conn.execute(
+        "INSERT INTO chat_sessions (id, title, agent_slug, created_at, updated_at)
+         VALUES (?1, 'New Chat', 'gated', '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+        [id],
+    )
+    .expect("seed chat");
+    file
+}
+
 fn chat_row(id: &str) -> agento_lib::native::chat::runner::ChatRow {
     agento_lib::native::chat::runner::ChatRow {
         id: id.to_string(),
@@ -175,10 +200,24 @@ fn tool_use_input_survives_the_round_trip_byte_for_byte() {
 // ─── The sequence rules, against a real subprocess ────────────────────────────
 
 /// Writes an executable fake `claude` that replies with a scripted sequence.
+///
+/// Every stdin line is appended to `<dir>/stdin.jsonl`, which is what lets a
+/// test assert on what the SDK **wrote back** rather than only on the frames it
+/// emitted. The permission round trip is invisible without it: its whole
+/// observable effect on the CLI side is a `control_response`.
 fn fake_cli(dir: &Path, emit: &str) -> PathBuf {
     let script = format!(
         r#"#!/usr/bin/env {python}
 import json, sys, threading, time
+
+LOG = {log}
+_log = open(LOG, "a")
+_lock = threading.Lock()
+
+def record(entry):
+    with _lock:
+        _log.write(json.dumps(entry) + "\n")
+        _log.flush()
 
 def say(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
@@ -206,10 +245,12 @@ for line in sys.stdin:
         msg = json.loads(line)
     except Exception:
         continue
+    record(msg)
     req = msg.get("request") or {{}}
 {emit}
 "#,
         python = python3().unwrap_or_else(|| "python3".into()),
+        log = serde_json::to_string(&stdin_log(dir).to_string_lossy()).unwrap(),
         emit = emit,
     );
     let path = dir.join("fake-claude");
@@ -221,6 +262,44 @@ for line in sys.stdin:
             .expect("chmod fake CLI");
     }
     path
+}
+
+/// Where [`fake_cli`] records the lines it was sent.
+fn stdin_log(dir: &Path) -> PathBuf {
+    dir.join("stdin.jsonl")
+}
+
+/// Everything the SDK wrote to the CLI, decoded, in order.
+fn written(dir: &Path) -> Vec<serde_json::Value> {
+    let Ok(raw) = std::fs::read_to_string(stdin_log(dir)) else {
+        return Vec::new();
+    };
+    raw.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// The payload of the `control_response` answering `request_id`, polled until it
+/// appears — the SDK writes it from the reader task, after the frame the test
+/// was waiting on.
+async fn control_response_for(dir: &Path, request_id: &str) -> serde_json::Value {
+    for _ in 0..200 {
+        for line in written(dir) {
+            if line.get("type").and_then(|t| t.as_str()) != Some("control_response") {
+                continue;
+            }
+            let response = &line["response"];
+            if response.get("request_id").and_then(|r| r.as_str()) == Some(request_id) {
+                return response["response"].clone();
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    panic!(
+        "no control_response for {request_id:?}; wrote: {:?}",
+        written(dir)
+    );
 }
 
 /// Collect an SSE body into frames, splitting on the blank line.
@@ -301,18 +380,20 @@ async fn an_ask_user_question_keeps_the_stream_open_past_the_first_result() {
         if "second" not in text:
             raw('{"type":"assistant","message":{"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"z":1.50,"question":"which one?"}}]}}')
             say({"type": "result", "subtype": "success", "is_error": False,
-                 "result": "", "session_id": "sdk-1", "usage": {}})
+                 "result": "", "session_id": "sdk-1",
+                 "usage": {"input_tokens": 3, "output_tokens": 4}})
         else:
             say({"type": "assistant", "message": {"content": [
                 {"type": "text", "text": "thanks"}
             ]}})
             say({"type": "result", "subtype": "success", "is_error": False,
-                 "result": "final answer", "session_id": "sdk-1", "usage": {}})
+                 "result": "final answer", "session_id": "sdk-1",
+                 "usage": {"input_tokens": 5, "output_tokens": 6}})
 "#,
     );
 
     let id = unique_id("askuser");
-    let (body, answered) = run_turn_answering(&cli, &id, "hello", "second").await;
+    let (body, answered, db) = run_turn_answering_keeping_db(&cli, &id, "hello", "second").await;
     assert!(answered, "the answer was never delivered");
     let frames = frames(&body);
     let names: Vec<&str> = frames.iter().map(|(e, _)| e.as_str()).collect();
@@ -338,6 +419,53 @@ async fn an_ask_user_question_keeps_the_stream_open_past_the_first_result() {
     assert_eq!(
         frames[2].1, r#"{"input":{"z":1.50,"question":"which one?"}}"#,
         "the prompt must carry the tool input verbatim"
+    );
+
+    // The multi-turn persistence claim, which the frame names alone could not
+    // reach (#298): blocks and token totals **accumulate** across the turns of
+    // one request, while `assistant_text` is reset — so the stored reply is the
+    // *second* turn's text, not both concatenated, and the row carries both
+    // turns' tokens.
+    let conn = rusqlite::Connection::open(db.path()).expect("open");
+    let stored: Vec<(String, String)> = conn
+        .prepare("SELECT role, content FROM chat_messages WHERE session_id = ?1 ORDER BY id")
+        .expect("prepare")
+        .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect();
+    assert_eq!(
+        stored,
+        vec![
+            ("user".to_string(), "hello".to_string()),
+            ("assistant".to_string(), "final answer".to_string()),
+        ],
+        "one user message and the *last* turn's text, not both turns concatenated"
+    );
+
+    // Both `tool_use` blocks survive, in order — that is the accumulation half.
+    let blocks: String = conn
+        .query_row(
+            "SELECT blocks FROM chat_messages WHERE role = 'assistant'",
+            [],
+            |r| r.get(0),
+        )
+        .expect("blocks");
+    assert!(blocks.contains(r#""name":"AskUserQuestion""#), "{blocks}");
+
+    let (input, output): (i64, i64) = conn
+        .query_row(
+            "SELECT total_input_tokens, total_output_tokens FROM chat_sessions WHERE id = ?1",
+            [&id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("totals");
+    // 3+5 and 4+6: **both** turns' usage, which is the accumulation. Resetting
+    // per turn the way `assistant_text` is reset would store 5 and 6.
+    assert_eq!(
+        (input, output),
+        (8, 10),
+        "token totals accumulate across the turns of one request"
     );
 }
 
@@ -580,18 +708,274 @@ async fn assert_released(id: &str, which: &str) {
 
 /// Drive one turn against the fake CLI and collect the whole SSE body.
 async fn run_turn(cli: &Path, chat_id: &str, content: &str) -> String {
-    let (body, _) = run_turn_inner(cli, chat_id, content, None).await;
+    let (body, _, _db) = run_turn_inner(cli, chat_id, content, None).await;
     body
 }
 
-/// The same, answering the first `user_input_required` with `answer`.
-async fn run_turn_answering(
+/// The same, answering the first `user_input_required` with `answer` — and
+/// keeping the database, so the caller can assert on what the turn **stored**
+/// rather than only on the frames it emitted.
+async fn run_turn_answering_keeping_db(
     cli: &Path,
     chat_id: &str,
     content: &str,
     answer: &str,
-) -> (String, bool) {
+) -> (String, bool, tempfile::NamedTempFile) {
     run_turn_inner(cli, chat_id, content, Some(answer.to_string())).await
+}
+
+// ─── The permission round trip (#298) ─────────────────────────────────────────
+//
+// Until now `tests/chat_turn.rs` drove `AskUserQuestion` as an assistant
+// `tool_use` block, which exercises `extract_ask_user_question` and the
+// post-result continuation — and *not* the permission handler. Everything below
+// goes through a real `can_use_tool` control request, which is the only way to
+// reach `build_permission_handler`, `wrap_permission_handler`, and the deny
+// that carries the user's answer back to the model.
+
+/// Drive a turn whose fake CLI issues a `can_use_tool`, answering the prompt
+/// through the live registry the way `/input` and `/permission` do.
+///
+/// Returns the body; the caller reads what was written back from the fake CLI's
+/// own directory with [`control_response_for`].
+async fn run_permission_turn(
+    cli: &Path,
+    file: &tempfile::NamedTempFile,
+    chat_id: &str,
+    answer: Answer,
+) -> String {
+    use http_body_util::BodyExt;
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", cli);
+
+    let response = agento_lib::native::chat::turn::run(
+        file.path().to_path_buf(),
+        chat_id.to_string(),
+        "hello".to_string(),
+    )
+    .await
+    .expect("the turn should stream");
+
+    let id = chat_id.to_string();
+    let deliver = tokio::spawn(async move {
+        for _ in 0..200 {
+            if let Some((_, input_tx, perm_tx)) =
+                agento_lib::native::chat::live::registry().get(&id)
+            {
+                let sent = match &answer {
+                    Answer::Text(text) => input_tx.send(text.clone()).await.is_ok(),
+                    Answer::Permission(allow) => perm_tx.send(*allow).await.is_ok(),
+                    Answer::None => return,
+                };
+                if sent {
+                    return;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    });
+
+    // Bounded for the same reason `collect_with_timeout` is — and for the
+    // `Answer::None` case the bound is the *point*: if a prompt is raised that
+    // should not have been, nothing ever answers it and the turn parks.
+    let collected = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("the turn parked — if nothing was meant to be answered, a prompt was raised that should not have been")
+    .expect("body");
+    deliver.abort();
+    String::from_utf8(collected.to_bytes().to_vec()).expect("utf8")
+}
+
+enum Answer {
+    /// `POST /input` — the `AskUserQuestion` reply.
+    Text(String),
+    /// `POST /permission` — the allow/deny for an ordinary tool.
+    Permission(bool),
+    /// Nothing is answered, because nothing should be asked.
+    None,
+}
+
+/// The headline rule `desktop/CLAUDE.md` listed as "pinned by
+/// `tests/chat_turn.rs`" and which nothing actually reached: **`AskUserQuestion`
+/// is answered by *denying* the tool with the user's text as the message.** That
+/// is how the answer gets to the model without the tool ever running.
+///
+/// Reverting `PermissionResult::deny(answer)` to an `allow` — the obvious
+/// "fix" — leaves every frame in this test unchanged and fails only on the
+/// written-back behaviour.
+#[tokio::test]
+async fn an_ask_user_question_is_answered_by_denying_the_tool_with_the_users_text() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        say({"type": "control_request", "request_id": "perm-1",
+             "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion",
+                         "input": {"question": "which one?"}}})
+    elif msg.get("type") == "control_response":
+        say({"type": "result", "subtype": "success", "is_error": False,
+             "result": "done", "session_id": "sdk-1", "usage": {}})
+"#,
+    );
+
+    let id = unique_id("perm-ask");
+    let file = migrated_with_chat(&id);
+    let body = run_permission_turn(&cli, &file, &id, Answer::Text("the second one".into())).await;
+
+    // The prompt reaches the client as the synthetic event, carrying the tool's
+    // own input.
+    let frames = frames(&body);
+    let names: Vec<&str> = frames.iter().map(|(e, _)| e.as_str()).collect();
+    assert!(
+        names.contains(&"user_input_required"),
+        "no prompt frame; body was: {body}"
+    );
+
+    // …and the answer goes back as a **denial**, not an allow.
+    let answered = control_response_for(dir.path(), "perm-1").await;
+    assert_eq!(answered["behavior"], "deny", "answered: {answered}");
+    assert_eq!(answered["message"], "the second one");
+}
+
+/// An ordinary tool is a genuine allow/deny prompt, answered through
+/// `/permission`. The frame is `permission_request` and it carries the tool's
+/// name.
+#[tokio::test]
+async fn an_ordinary_tool_prompts_for_permission_and_the_answer_is_written_back() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+
+    for (allow, want_behavior) in [(true, "allow"), (false, "deny")] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cli = fake_cli(
+            dir.path(),
+            r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        say({"type": "control_request", "request_id": "perm-1",
+             "request": {"subtype": "can_use_tool", "tool_name": "Bash",
+                         "input": {"command": "ls"}}})
+    elif msg.get("type") == "control_response":
+        say({"type": "result", "subtype": "success", "is_error": False,
+             "result": "done", "session_id": "sdk-1", "usage": {}})
+"#,
+        );
+
+        let id = unique_id("perm-tool");
+        let file = migrated_with_chat(&id);
+        let body = run_permission_turn(&cli, &file, &id, Answer::Permission(allow)).await;
+
+        let frames = frames(&body);
+        let prompt = frames
+            .iter()
+            .find(|(event, _)| event == "permission_request")
+            .unwrap_or_else(|| panic!("no permission_request frame; body was: {body}"));
+        assert_eq!(prompt.1, r#"{"tool_name":"Bash","input":{"command":"ls"}}"#);
+
+        let answered = control_response_for(dir.path(), "perm-1").await;
+        assert_eq!(answered["behavior"], want_behavior, "answered: {answered}");
+        if !allow {
+            // Go's own wording, which the frontend shows.
+            assert_eq!(answered["message"], "Permission denied by user");
+        }
+    }
+}
+
+/// `wrap_permission_handler`'s allowlist: a tool the agent does not name is
+/// denied **without the user ever seeing a prompt**.
+///
+/// The absence is the assertion, so this also proves the frame in the previous
+/// test was not incidental — and nothing answers here, because nothing should
+/// be asked.
+#[tokio::test]
+async fn a_tool_outside_the_agents_allowlist_is_denied_without_a_prompt() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        say({"type": "control_request", "request_id": "perm-1",
+             "request": {"subtype": "can_use_tool", "tool_name": "Bash",
+                         "input": {"command": "rm -rf /"}}})
+    elif msg.get("type") == "control_response":
+        say({"type": "result", "subtype": "success", "is_error": False,
+             "result": "done", "session_id": "sdk-1", "usage": {}})
+"#,
+    );
+
+    let id = unique_id("perm-gated");
+    let file = migrated_with_allowlisted_agent(&id);
+    let body = run_permission_turn(&cli, &file, &id, Answer::None).await;
+
+    assert!(
+        !body.contains("permission_request"),
+        "a tool outside the allowlist must not reach the user; body was: {body}"
+    );
+
+    let answered = control_response_for(dir.path(), "perm-1").await;
+    assert_eq!(answered["behavior"], "deny", "answered: {answered}");
+    assert_eq!(
+        answered["message"],
+        "tool \"Bash\" is not in this agent's allowed capabilities"
+    );
+}
+
+/// …and `AskUserQuestion` is exempt from that allowlist, because it is the
+/// interactive Q&A mechanism rather than a capability. The same agent, which
+/// names only `Read`, still prompts for it.
+#[tokio::test]
+async fn ask_user_question_bypasses_the_allowlist() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        say({"type": "control_request", "request_id": "perm-1",
+             "request": {"subtype": "can_use_tool", "tool_name": "AskUserQuestion",
+                         "input": {"question": "which?"}}})
+    elif msg.get("type") == "control_response":
+        say({"type": "result", "subtype": "success", "is_error": False,
+             "result": "done", "session_id": "sdk-1", "usage": {}})
+"#,
+    );
+
+    let id = unique_id("perm-bypass");
+    let file = migrated_with_allowlisted_agent(&id);
+    let body = run_permission_turn(&cli, &file, &id, Answer::Text("mine".into())).await;
+
+    assert!(
+        body.contains("user_input_required"),
+        "AskUserQuestion must reach the user even when the agent does not name it; body was: {body}"
+    );
+    let answered = control_response_for(dir.path(), "perm-1").await;
+    assert_eq!(answered["behavior"], "deny");
+    assert_eq!(answered["message"], "mine");
 }
 
 /// Serialises the turn tests.
@@ -611,9 +995,7 @@ async fn run_turn_inner(
     chat_id: &str,
     content: &str,
     answer: Option<String>,
-) -> (String, bool) {
-    use http_body_util::BodyExt;
-
+) -> (String, bool, tempfile::NamedTempFile) {
     let _env = env_lock().lock().await;
     let file = migrated_with_chat(chat_id);
     // The SDK resolves the executable from this variable, so the fake stands in
@@ -662,17 +1044,39 @@ async fn run_turn_inner(
             }
             false
         });
-        let collected = response.into_body().collect().await.expect("body");
+        let collected = collect_with_timeout(response).await;
         answered = handle.await.unwrap_or(false);
         return (
             String::from_utf8(collected.to_bytes().to_vec()).expect("utf8"),
             answered,
+            file,
         );
     }
 
-    let collected = response.into_body().collect().await.expect("body");
+    let collected = collect_with_timeout(response).await;
     (
         String::from_utf8(collected.to_bytes().to_vec()).expect("utf8"),
         answered,
+        file,
     )
+}
+
+/// Collect a turn's body, bounded.
+///
+/// A hang rather than a failure is this suite's characteristic break — the turn
+/// parks on a wait nothing will satisfy — so an unbounded `collect` turns a
+/// regression into a CI job that sits until the runner's own limit and reports
+/// nothing useful. The bound is what makes it a test failure with a name.
+async fn collect_with_timeout(
+    response: axum::http::Response<axum::body::Body>,
+) -> http_body_util::Collected<axum::body::Bytes> {
+    use http_body_util::BodyExt;
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        response.into_body().collect(),
+    )
+    .await
+    .expect("the turn should end rather than park on a wait nothing satisfies")
+    .expect("body")
 }

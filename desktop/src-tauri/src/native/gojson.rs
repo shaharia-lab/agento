@@ -343,7 +343,26 @@ where
     Box::<RawValue>::deserialize(deserializer).map(Some)
 }
 
-/// with `json.Marshal`; this makes a hand-edited or older row match too.
+/// Re-encode a captured raw JSON value the way Go's `compact` does.
+///
+/// Marshalling a `json.RawMessage` runs `encoding/json`'s `compact` with HTML
+/// escaping on, which:
+///
+/// - drops whitespace *outside* strings,
+/// - escapes `<`, `>`, `&` and U+2028/U+2029 wherever they appear,
+/// - and **changes nothing else** — object keys keep the order they were stored
+///   in and numbers keep the digits they were stored with.
+///
+/// Those last two are why this is a byte pass rather than a decode/re-encode: a
+/// stored `{"z":1.50,"a":[1,2]}` stays `{"z":1.50,"a":[1,2]}`, while a
+/// `serde_json::Value` round trip would give `{"a":[1,2],"z":1.5}` — reordered
+/// and respelled, with nothing to signal it.
+///
+/// **Both implementations write compacted bytes** — Go because `chatService`
+/// marshals through a `json.RawMessage`, and this port since #298, which is what
+/// that issue fixed. Applying it on read as well is what makes a hand-edited or
+/// pre-#298 row match too; compaction is idempotent, so the two are not in
+/// tension.
 pub fn compact_raw(raw: Box<RawValue>) -> Box<RawValue> {
     let compacted = compact(raw.get());
     if compacted == raw.get() {
@@ -352,6 +371,54 @@ pub fn compact_raw(raw: Box<RawValue>) -> Box<RawValue> {
     // Compacting valid JSON leaves valid JSON, so the fallback is unreachable —
     // and keeping the original is the harmless direction if it ever is not.
     RawValue::from_string(compacted).unwrap_or(raw)
+}
+
+/// Serialize an **embedded** raw value the way `encoding/json` emits one.
+///
+/// `encoding/json` runs `compact(…, escapeHTML=true)` over a `Marshaler`'s
+/// output, so a `json.RawMessage` nested inside a marshalled value is
+/// whitespace-stripped **and** has `<`, `>`, `&` and U+2028/9 escaped — while
+/// keeping its key order and number spelling. `serde_json` writes a `RawValue`'s
+/// bytes as-is through `write_raw_fragment`, which [`GoFormatter`] never sees,
+/// so an unescaped `&` ships where Go ships `\u0026`.
+///
+/// Attached to the field rather than applied at each construction site, so a
+/// future one cannot forget it: the type says how it is emitted.
+pub fn serialize_compacted<S>(raw: &RawValue, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::Error;
+    let compacted = compact(raw.get());
+    // The no-op case is now the *only* case in practice — every construction
+    // site already compacts — so short-circuiting is what keeps this from
+    // costing an allocation and a full re-parse per `tool_use` input on every
+    // serialize, including a long transcript's worth on
+    // `GET /api/claude-sessions/{id}`. `compact_raw` has the same guard.
+    if compacted == raw.get() {
+        return raw.serialize(serializer);
+    }
+    let compacted =
+        RawValue::from_string(compacted).map_err(|e| S::Error::custom(e.to_string()))?;
+    compacted.serialize(serializer)
+}
+
+/// [`serialize_compacted`] for an optional field.
+///
+/// Only ever reached with `Some`, since every user pairs it with
+/// `skip_serializing_if = "Option::is_none"` — but `None` is written as `null`
+/// rather than unwrapped, so the two attributes stay independent.
+pub fn serialize_compacted_option<S>(
+    raw: &Option<Box<RawValue>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match raw {
+        Some(raw) => serialize_compacted(raw, serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 pub fn compact(src: &str) -> String {
