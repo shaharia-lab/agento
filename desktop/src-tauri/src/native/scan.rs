@@ -275,6 +275,19 @@ pub fn force_scan(db_path: PathBuf) {
 }
 
 /// How long to wait before re-admitting a scan that found no readable dir.
+///
+/// The exact value is deliberately low-stakes: `/refresh` bypasses it, so this
+/// is a floor on automatic retries and never a deadline the user is stuck
+/// behind. Too long is bounded by a button the UI already has; too short only
+/// wastes a cheap walk. Anything from seconds to minutes behaves the same.
+///
+/// **Known narrower edge, not fixed here:** this covers the no-readable-dir
+/// return specifically, not the general case of "a scan that recorded no
+/// markers". A `run_scan` that fails before applying — `open_read_write` denied
+/// on a read-only filesystem while `open_read_only` still succeeds — leaves the
+/// same gate open with no cooldown. It is rarer, it is what Go does too, and
+/// naming it beats generalising a rate limit over failure paths that should be
+/// loud rather than throttled.
 const NO_DIRS_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn ensure_scan_inner(db_path: PathBuf, force: bool) {
@@ -742,6 +755,102 @@ mod tests {
             "a panicking scan must not leave the scan wedged — this needs \
              panic=unwind in every profile, see Cargo.toml"
         );
+    }
+
+    /// The cooldown is the one decision in this file that nothing else pins.
+    ///
+    /// It exists because the no-readable-dir return records **no markers** — so
+    /// the gate that admitted the scan is still open, and without this every
+    /// gated request would admit another. A fresh install with no `~/.claude`
+    /// is exactly that state. The four properties below are the whole contract:
+    /// the drift must survive, the gate must stay open, automatic retries must
+    /// be refused, and `/refresh` must still get through.
+    #[test]
+    fn a_scan_with_no_readable_dir_arms_a_cooldown_without_recording_markers() {
+        let _serialised = scan_state_lock();
+
+        // A home with no `.claude`, so the walk finds nothing to list.
+        let home = tempfile::tempdir().expect("tempdir");
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let file = migrated();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let now = super::super::gotime::now_go_text();
+        seed_scanned_at_for(file.path(), &conn, &now);
+        // An out-of-date scanner version, so the gate is open for a reason that
+        // only a recorded marker could close.
+        conn.execute(
+            "UPDATE claude_cache_metadata SET scanner_version = ?1 WHERE id = 1",
+            [CURRENT_SCANNER_VERSION - 1],
+        )
+        .expect("age the version");
+        drop(conn);
+
+        state().lock().expect("lock").no_dirs_at = None;
+        run_scan(file.path()).expect("a scan with nothing to walk still succeeds");
+
+        // (a) The marker did not advance: the drift is still recorded.
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let version: i64 = conn
+            .query_row(
+                "SELECT scanner_version FROM claude_cache_metadata WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("scanner_version");
+        assert_eq!(
+            version,
+            CURRENT_SCANNER_VERSION - 1,
+            "a scan that listed nothing must not claim a re-read it never did"
+        );
+        drop(conn);
+
+        // (b) …so the gate is still open and the work stays retryable.
+        assert!(
+            needs_scan(file.path()),
+            "the drift must survive, or an unplugged drive drops a pending re-read for good"
+        );
+
+        // (c) But an automatic retry is refused, which is the point.
+        state().lock().expect("lock").files_done = 42;
+        ensure_scan(file.path().to_path_buf());
+        assert_eq!(
+            state().lock().expect("lock").files_done,
+            42,
+            "a gated request inside the cooldown must not admit another scan"
+        );
+
+        // (d) …while the user asking explicitly still gets through.
+        force_scan(file.path().to_path_buf());
+        for _ in 0..200 {
+            if state().lock().expect("lock").files_done != 42 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_ne!(
+            state().lock().expect("lock").files_done,
+            42,
+            "/refresh must bypass the cooldown, or the button would do nothing"
+        );
+
+        // Leave the process as we found it for the tests sharing this state.
+        for _ in 0..200 {
+            if !state().lock().expect("lock").in_progress {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        {
+            let mut s = state().lock().expect("lock");
+            s.no_dirs_at = None;
+            s.files_done = 0;
+        }
+        match previous_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     /// `EnsureScan` admits one scan, so a double-click cannot start a second
