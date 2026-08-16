@@ -11,6 +11,18 @@ pub mod paths;
 mod proxy;
 mod sidecar;
 
+// The seam's two fallbacks are destructors and caught panics: `proxy.rs` turns a
+// panicking native handler into an `Err` that forwards to the Go sidecar, and
+// `native/scan.rs` clears its in-progress flag from a `Drop` guard. `panic =
+// "abort"` runs neither, so setting it would silently delete both — and no test
+// could catch it, because the test profile always unwinds. Fail the build
+// instead. See `[profile.release]` in Cargo.toml.
+#[cfg(panic = "abort")]
+compile_error!(
+    "agento's desktop shell requires panic=\"unwind\": aborting disables the \
+     native-handler fallback in proxy.rs and the scan guard in native/scan.rs"
+);
+
 use serde::Serialize;
 use tauri::{Manager, WindowEvent};
 
@@ -179,6 +191,16 @@ pub fn run() {
 
                 handle.manage(sc);
                 handle.manage(AppPorts { proxy, upstream });
+
+                // The scan is ours now (#289): the sidecar is started with
+                // AGENTO_SCANNER=off, so nothing else will do this. Replaces the
+                // `sessionCache.StartBackgroundScan()` the Go server used to run
+                // on boot, and like it, it does not block startup — the window
+                // opens while the corpus is still being read, and the sessions
+                // list reports progress from `GET /api/claude-sessions/status`.
+                if let Some(db) = crate::paths::database_path() {
+                    crate::native::scan::ensure_scan(db);
+                }
 
                 // Release builds load the UI from the proxy, which makes the
                 // page same-origin with the API. Debug builds load Vite, which

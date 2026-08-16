@@ -15,13 +15,15 @@
 //! so: transcripts would stop being re-read, a rate edit would never reach
 //! stored costs, and the list would serve indefinitely stale figures.
 //!
-//! Rather than reimplement that decision — four pieces of metadata, a TTL, a
-//! pricing fingerprint and a user-set threshold, each of which could drift out
-//! of step with the Go original — this delegates it. `freshness_probe` names a
-//! cheap request against the sidecar that goes through `ensureFresh` itself, so
-//! the *rules* stay in the code that owns them. It is fire-and-forget: the page
-//! never waits for it, exactly as `ListPage` never waits for the rescan it
-//! starts.
+//! That decision used to be **delegated** to the sidecar through a cheap probe
+//! request, so the rules stayed in the code that owned them. Since #289 the
+//! shell owns the scan, so there is no such code to delegate to and the rules
+//! are reimplemented in `native::scan::ensure_scan` — the TTL, the pricing
+//! fingerprint and the idle threshold, the same three `ensureFresh` asks.
+//!
+//! `triggers_scan` below is the other half: *which* routes ask the question at
+//! all. It is fire-and-forget either way — the page never waits, exactly as
+//! `ListPage` never waits for the rescan it starts.
 
 pub mod corpus;
 pub mod detail;
@@ -121,71 +123,58 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
         let facets = page::facets(&conn, &data_settings, &q)?;
         gojson::to_vec(&facets).map_err(|e| format!("encoding session facets: {e}"))?
     };
-    let answer = Answer::json(body);
-    Ok(match freshness_probe(req.path, &q) {
-        Some(probe) => answer.with_probe(probe),
-        None => answer,
-    })
+    // Go's handler reaches the corpus through `Cache.List`, which calls
+    // `ensureFresh` on the way past — so answering natively used to remove the
+    // trigger, and the freshness probe existed to put it back by asking the
+    // sidecar. Now that Rust owns the scan, this starts it directly.
+    if triggers_scan(req.path, &q) {
+        super::scan::ensure_scan(ctx.db_path.clone());
+    }
+    Ok(Answer::json(body))
 }
 
 #[cfg(test)]
 mod tests_db;
 
-/// The request to fire at the Go sidecar to keep the corpus fresh, if this
-/// route is one that would have triggered a rescan.
+/// Whether this route is one that would have triggered a rescan in Go.
 ///
-/// A continuation — a request carrying a cursor — deliberately returns `None`,
+/// A continuation — a request carrying a cursor — deliberately returns `false`,
 /// matching `ListPage`: freshness is a property of the scroll, decided when it
 /// starts, and re-deciding it per page would put four metadata queries behind
 /// every scroll tick to reach a conclusion the first page already reached.
-pub fn freshness_probe(path: &str, q: &query::SessionQuery) -> Option<&'static str> {
+pub fn triggers_scan(path: &str, q: &query::SessionQuery) -> bool {
     match path {
-        "/api/claude-sessions" if q.cursor.is_empty() => Some(PROBE_PATH),
-        "/api/claude-sessions/facets" => Some(PROBE_PATH),
-        _ => None,
+        "/api/claude-sessions" => q.cursor.is_empty(),
+        "/api/claude-sessions/facets" => true,
+        _ => false,
     }
 }
-
-/// The cheapest request that still runs `ensureFresh`: one page of one row,
-/// unfiltered. The filter is irrelevant — freshness is a property of the
-/// corpus, not of the query.
-///
-/// Public because every ported corpus read needs it, not just this one:
-/// `Cache.Analytics` calls `ensureFresh` too, so `/api/claude-analytics` fires
-/// the same probe.
-pub const PROBE_PATH: &str = "/api/claude-sessions?limit=1";
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn a_first_page_probes_and_a_continuation_does_not() {
+    fn a_first_page_scans_and_a_continuation_does_not() {
         let mut q = query::SessionQuery::default();
-        assert_eq!(
-            freshness_probe("/api/claude-sessions", &q),
-            Some(PROBE_PATH)
-        );
+        assert!(triggers_scan("/api/claude-sessions", &q));
 
         q.cursor = "abc".into();
-        assert_eq!(freshness_probe("/api/claude-sessions", &q), None);
+        assert!(!triggers_scan("/api/claude-sessions", &q));
     }
 
     #[test]
-    fn facets_always_probe_since_go_always_checks() {
+    fn facets_always_scan_since_go_always_checks() {
         let q = query::SessionQuery {
             cursor: "abc".into(),
             ..Default::default()
         };
-        assert_eq!(
-            freshness_probe("/api/claude-sessions/facets", &q),
-            Some(PROBE_PATH)
-        );
+        assert!(triggers_scan("/api/claude-sessions/facets", &q));
     }
 
     #[test]
-    fn an_unrelated_route_never_probes() {
+    fn an_unrelated_route_never_scans() {
         let q = query::SessionQuery::default();
-        assert_eq!(freshness_probe("/api/pricing/catalog", &q), None);
+        assert!(!triggers_scan("/api/pricing/catalog", &q));
     }
 }

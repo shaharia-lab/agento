@@ -26,9 +26,8 @@
 //! `Cache.Analytics` calls `ensureFresh` before it answers, so opening a
 //! dashboard after a rate edit starts the re-cost rather than waiting for
 //! someone to open the sessions list. Serving this route from Rust removes that
-//! trigger, so the handler fires the same probe the sessions list does — see
-//! `sessions::PROBE_PATH`, which delegates the decision to the Go code that
-//! owns the rules rather than reimplementing four pieces of metadata here.
+//! trigger, so the handler calls `native::scan::ensure_scan` — which asks the
+//! same three questions `ensureFresh` asks before it starts anything (#289).
 
 pub mod buckets;
 pub mod cards;
@@ -44,7 +43,7 @@ use rusqlite::Connection;
 use self::params::AnalyticsParams;
 use self::report::AnalyticsReport;
 use crate::native::pricing::Resolver;
-use crate::native::sessions::{self, corpus};
+use crate::native::sessions::corpus;
 use crate::native::settings::DataSettings;
 use crate::native::{db, gojson, settings, Answer, Ctx, Endpoint, Request};
 
@@ -65,10 +64,10 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
     let report = analytics(&conn, &data_settings, req.query)?;
     // Cache.Analytics runs ensureFresh before it answers, so a dashboard
     // opened after a rate edit starts the re-cost.
+    super::scan::ensure_scan(ctx.db_path.clone());
     Ok(Answer::json(
         gojson::to_vec(&report).map_err(|e| format!("encoding claude analytics: {e}"))?,
-    )
-    .with_probe(sessions::PROBE_PATH))
+    ))
 }
 
 /// Build the report for one request's query string.
