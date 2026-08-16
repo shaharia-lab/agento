@@ -156,7 +156,8 @@ src-tauri/src/
     fs.rs        GET /api/fs — the working-dir picker's listing (Unix; forwards on Windows)
     gopath.rs    Go's filepath.Clean/Dir/Join, pinned to vectors generated from Go
     query.rs     one query parameter, read the way r.URL.Query().Get reads it
-    pricing.rs   GET /api/pricing/catalog, plus the rate Resolver
+    pricing.rs   GET /api/pricing/catalog, plus the rate Resolver — and the
+                 three rate writes (#306): add and correct are not one upsert
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
@@ -644,6 +645,23 @@ So the writes that moved are the ones that are only rows: the agent CRUD, the
 chat CRUD (**not** `/messages`, `/input`, `/permission`, `/stop`), and the two
 job-history deletes. Everything else still forwards, and the `claims` tests in
 each module say which and why.
+
+**The pricing rate writes are the exception that proves the rule (#306).** They
+are only rows too — but a rate edit has an effect outside the table: #188's
+per-session costs are *stored*, so they keep the pre-edit figure until every
+transcript is re-read. Go's `afterRateChange` invalidates its cache and lets the
+next read's freshness gate do it; since #289 that scan is the shell's, so
+`native::scan::after_pricing_change` is the other half of the port rather than a
+nicety. It runs after the commit and is best-effort by construction: an error
+there would forward the request to Go and write the rate a second time.
+
+Three things about that surface a port collapses by accident, each recorded at
+its site in `native/pricing.rs`: add and correct are **two endpoints, not an
+upsert** (and the 409 carries the colliding row, so it is not the bare
+`{"error": …}` every other conflict is); `effective_from` is truncated to
+seconds or the read-back after the save finds nothing; and `UpsertRate` **clears
+the rate's bands**, because `Rate::price` picks a band before applying any price
+and a correction that left them would save and then change nothing.
 
 Four things the write path establishes:
 

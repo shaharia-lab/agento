@@ -195,6 +195,38 @@ fn invalidate(conn: &rusqlite::Connection) -> Result<(), String> {
     .map_err(|e| format!("invalidating claude session cache: {e}"))
 }
 
+/// `Server.afterRateChange` (`internal/api/pricing.go`), with the half only
+/// this process can do any more.
+///
+/// Go invalidates its in-memory session cache and stops there: its own read
+/// paths call `ensureFresh`, which notices the catalog fingerprint has drifted
+/// and re-reads every transcript so #188's **stored** per-session costs
+/// re-price. Since #289 the sidecar runs with `AGENTO_SCANNER=off`, so there is
+/// no second implementation behind that — invalidating alone would leave every
+/// cached cost at its pre-edit figure with nothing anywhere to say so. Hence the
+/// [`ensure_scan`] call: the drift is what admits it, exactly as it admits Go's.
+///
+/// Both halves are **best effort by design**. This runs after the rate write has
+/// committed, and everything after a commit must be infallible — returning an
+/// error here would forward the request to Go, which would apply the write a
+/// second time. A failure to invalidate costs at most an hour of stale costs,
+/// which the TTL then clears; a second rate row would be data the user did not
+/// ask for.
+pub fn after_pricing_change(db_path: &Path) {
+    match super::db::open_read_write(db_path) {
+        Ok(conn) => {
+            if let Err(e) = invalidate(&conn) {
+                log::warn!("native pricing: failed to invalidate the session cache: {e}");
+            }
+        }
+        Err(e) => log::warn!("native pricing: failed to open the database to invalidate: {e}"),
+    }
+    // `ensure_scan`, not `force_scan`: the pricing drift the write just created
+    // is exactly what the gate looks for, and going through it keeps one
+    // definition of "does this corpus need re-reading".
+    ensure_scan(db_path.to_path_buf());
+}
+
 fn last_scanned_at(conn: &rusqlite::Connection) -> String {
     match stored_scan_time(conn) {
         // Go reads the column into a `time.Time` and formats it RFC 3339 in UTC.
