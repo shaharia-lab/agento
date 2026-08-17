@@ -330,6 +330,116 @@ impl<V> From<std::collections::BTreeMap<String, V>> for GoMap<V> {
     }
 }
 
+/// A nested struct that decodes from a JSON **object only**, as Go's does
+/// (#337).
+///
+/// # The shape this closes
+///
+/// `serde` builds a struct from a JSON *array*, positionally, and `encoding/json`
+/// answers `cannot unmarshal array into Go value of type …`.
+/// [`super::writes::decode_body`] guards that at the **body** level — #274 added
+/// the object check because `POST /api/agents` with `["My Agent"]` would
+/// otherwise have created an agent — but nothing checked a value *inside* the
+/// body:
+///
+/// ```json
+/// {"capabilities":[["Read"],null,null]}
+/// {"capabilities":{"mcp":{"g":[null]}}}
+/// ```
+///
+/// Both were accepted here and are 400 to Go. The accepted set was not even
+/// uniform, which is what made it hard to reason about: the derive's `visit_seq`
+/// errors only when the array runs out of elements for a field that has **no**
+/// default, so what a struct accepted was exactly "as many elements as it has
+/// fields without a default" — three for `Capabilities`, one for
+/// `McpCapability`, two for `ServiceConfig`, and *zero* for the notification
+/// structs, whose every field carries `#[serde(default)]`.
+///
+/// **This is the direction that matters.** Every other decode divergence in the
+/// port has been an over-*reject* — a request Go applies is refused, which is
+/// visible and safe, and which `Err`-means-forward turns into Go's own answer.
+/// This one is an over-*accept*: it writes a row Go refuses, so the two
+/// implementations' databases diverge with nothing to report it, and the
+/// fallback cannot help because nothing errors.
+///
+/// # Why a type, and not a `deserialize_with`
+///
+/// The same lesson [`GoList`] carries, and #336 proved it again by trying the
+/// other way for #295: `serde`'s derive makes a field carrying
+/// `deserialize_with` **required**, so every call site must add
+/// `#[serde(default)]` — and that attribute is exactly what opens the
+/// `visit_seq` arm. A fix applied to the field would widen the hole it was
+/// closing. A type needs no attribute at all.
+///
+/// # How it works, and what it costs
+///
+/// `deserialize_map` is the whole mechanism: `serde_json` answers it with
+/// `invalid type: sequence` for anything that is not `{`, and the visitor then
+/// hands the `MapAccess` to `T`'s own derived impl, so the inner struct's
+/// strictness, field names and `deserialize_with` rules are untouched.
+///
+/// Serialization is a newtype and therefore transparent, so **no response byte
+/// moves** — the wrapper is on request *and* response structs (`Capabilities` is
+/// both) and only the decode side can tell.
+///
+/// `null` and "missing" still work, because both are decided one level out:
+/// `Option<GoStruct<T>>` gets `None` from `visit_none` and from `missing_field`
+/// respectively, and `GoMap<GoStruct<T>>` maps a `null` **value** to the zero
+/// struct, which is #295's rule unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct GoStruct<T>(pub T);
+
+impl<'de, T> serde::Deserialize<'de> for GoStruct<T>
+where
+    T: serde::Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ObjectOnly<T>(std::marker::PhantomData<T>);
+
+        impl<'de, T> serde::de::Visitor<'de> for ObjectOnly<T>
+        where
+            T: serde::Deserialize<'de>,
+        {
+            type Value = GoStruct<T>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a JSON object")
+            }
+
+            fn visit_map<A>(self, map: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                T::deserialize(serde::de::value::MapAccessDeserializer::new(map)).map(GoStruct)
+            }
+        }
+
+        deserializer.deserialize_map(ObjectOnly(std::marker::PhantomData))
+    }
+}
+
+impl<T> std::ops::Deref for GoStruct<T> {
+    type Target = T;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<T> std::ops::DerefMut for GoStruct<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl<T> From<T> for GoStruct<T> {
+    fn from(value: T) -> Self {
+        Self(value)
+    }
+}
+
 /// Deserialize a value as-is, including an explicit `null`.
 ///
 /// `Option<Box<RawValue>>`'s own impl turns `null` into `None`, which would drop
@@ -771,7 +881,7 @@ mod tests {
 
     // ─── #295: a `null` inside a container ───────────────────────────────────
 
-    #[derive(Debug, Default, serde::Deserialize)]
+    #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
     #[serde(default)]
     struct Listy {
         ids: Option<GoList<String>>,
@@ -870,14 +980,93 @@ mod tests {
         assert!(serde_json::from_str::<Listy>(r#"[]"#).is_ok());
     }
 
-    /// A full-length array **is** still accepted, by serde's positional
-    /// `visit_seq`, and Go refuses it — deferred to #337, not introduced here.
-    /// Recorded so the next reader finds it rather than rediscovering it.
+    /// A full-length array used to be **accepted**, by serde's positional
+    /// `visit_seq`, where Go refuses it. That was the last shape #295 left
+    /// standing, and #337 closed it with [`GoStruct`].
+    ///
+    /// Inverted rather than deleted: the assertion is the boundary between the
+    /// two changes, and `Strict` still stands for `Capabilities` — so the wrap
+    /// has to be applied *by the holder*, exactly as `AgentRequest` applies it.
+    /// `Strict` itself, unwrapped, is still built from a sequence, which is what
+    /// the second half asserts and what makes "a field cannot protect itself"
+    /// concrete.
     #[test]
-    fn a_full_length_positional_array_is_a_known_over_accept() {
-        let parsed: Strict = serde_json::from_str(r#"[{"s":{"ids":["x"]}},"y"]"#)
-            .expect("serde builds a struct from a sequence positionally");
+    fn a_full_length_positional_array_is_refused_once_the_holder_wraps_it() {
+        let body = r#"[{"s":{"ids":["x"]}},"y"]"#;
+
+        let wrapped = serde_json::from_str::<GoStruct<Strict>>(body);
+        assert!(
+            wrapped.is_err(),
+            "a JSON array must not build a struct (#337)"
+        );
+
+        // Unwrapped, serde still does it. This is not a wish — it is why the
+        // rule lives on the holder rather than on the struct.
+        let parsed: Strict =
+            serde_json::from_str(body).expect("serde still builds it positionally");
         assert_eq!(parsed.other.as_deref(), Some("y"));
+    }
+
+    /// Everything [`GoStruct`] must leave alone, which is most of its behaviour.
+    #[test]
+    fn a_wrapped_struct_keeps_every_rule_but_the_array_one() {
+        #[derive(Debug, Default, serde::Deserialize)]
+        struct Holder {
+            inner: Option<GoStruct<Inner>>,
+            map: Option<GoMap<GoStruct<Inner>>>,
+        }
+
+        // An object decodes, and the inner struct's own rules still apply —
+        // including #295's null element.
+        let parsed: Holder = serde_json::from_str(r#"{"inner":{"ids":[null]}}"#).expect("object");
+        assert_eq!(
+            parsed.inner.expect("inner").ids.as_deref(),
+            Some(&vec![String::new()])
+        );
+
+        // Missing and explicit `null` are decided one level out, by `Option`,
+        // so neither reaches the visitor.
+        let parsed: Holder = serde_json::from_str(r#"{}"#).expect("missing");
+        assert!(parsed.inner.is_none());
+        let parsed: Holder = serde_json::from_str(r#"{"inner":null}"#).expect("null");
+        assert!(parsed.inner.is_none());
+
+        // A `null` map **value** is still the zero struct (#295) — the wrapper
+        // sits inside `GoMap`, which resolves the null before it is reached.
+        let parsed: Holder = serde_json::from_str(r#"{"map":{"s":null}}"#).expect("null value");
+        assert!(parsed.map.expect("map")["s"].ids.is_none());
+
+        // And the shape it exists for, at both depths.
+        assert!(serde_json::from_str::<Holder>(r#"{"inner":[null]}"#).is_err());
+        assert!(serde_json::from_str::<Holder>(r#"{"map":{"s":[null]}}"#).is_err());
+
+        // A scalar is refused too, as it always was and as Go refuses it.
+        assert!(serde_json::from_str::<Holder>(r#"{"inner":"x"}"#).is_err());
+        assert!(serde_json::from_str::<Holder>(r#"{"inner":3}"#).is_err());
+    }
+
+    /// The wrapper is a **decode-time** rule: it is a newtype, so it serializes
+    /// as its inner value and no response byte moves. `Capabilities` is on both
+    /// sides of the wire, so this is load-bearing rather than incidental.
+    #[test]
+    fn a_wrapped_struct_serializes_as_its_inner_value() {
+        #[derive(serde::Serialize)]
+        struct Out {
+            inner: GoStruct<Listy>,
+        }
+
+        assert_eq!(
+            String::from_utf8(
+                to_vec_marshal(&Out {
+                    inner: GoStruct(Listy {
+                        ids: Some(GoList(vec!["a".to_string()])),
+                    }),
+                })
+                .expect("encode")
+            )
+            .expect("utf-8"),
+            r#"{"inner":{"ids":["a"]}}"#
+        );
     }
 
     /// The half that must *not* change: `null` is a zero value, but a wrong
