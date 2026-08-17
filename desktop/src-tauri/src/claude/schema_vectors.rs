@@ -31,8 +31,11 @@
 //! and uses only `string`, `int`, `int64` and `bool` — which is why the twenty
 //! schemas in `github_vectors.json` match exactly, and #317's six in
 //! `confluence_vectors.json`, #316's nine in `jira_vectors.json` and #315's seven
-//! in `slack_vectors.json` with them. The map exists so #313 and #314 do not each
-//! rediscover the boundary.
+//! in `slack_vectors.json` with them. The map exists so #313 does not rediscover
+//! the boundary — and #314 is the first port to **reach** one of the standing
+//! divergences rather than only read about it: Telegram's `create_poll` takes a
+//! `[]string`, so `messaging::go_string_slice` adds the `null` the guidance below
+//! says a port that needs one must add itself.
 
 use std::collections::BTreeMap;
 

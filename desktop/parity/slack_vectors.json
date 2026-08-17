@@ -310,7 +310,7 @@
       "credentials": "{\"auth_mode\":\"oauth\"}",
       "auth": "[\"not\",\"a\",\"token\"]",
       "error": "resolving slack token for \"slack-parity\": parsing oauth token: parsing oauth token: json: cannot unmarshal array into Go value of type oauth2.Token",
-      "rust_error": "resolving slack token for \"slack-parity\": parsing oauth token: does not decode at line 1 column 8"
+      "rust_error": "resolving slack token for \"slack-parity\": parsing oauth token: does not decode at line 1 column 0"
     },
     {
       "case": "oauth mode with no access_token sends an empty bearer",

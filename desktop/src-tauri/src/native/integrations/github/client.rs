@@ -56,8 +56,8 @@ pub const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// had to export `SetAPIBase` to be redirectable at all. Both callers here are
 /// in-crate, so `#[cfg(test)]` costs nothing and compiles the whole thing out —
 /// which is what [`api_base_lock`] below already does, for the same reason.
-/// #313 and #314 each add their own seam and should follow this, as #315 did —
-/// Slack's base is a package variable too. #317's is a constructor argument
+/// #313 adds the last seam and should follow this, as #314 and #315 did —
+/// Slack's and Telegram's bases are package variables too. #317's is a constructor argument
 /// rather than a static, because a Confluence site URL is per row; #316 needs
 /// none at all, because `jira.Start` does not validate the site URL and so a
 /// parity run can simply store the fake's URL.
