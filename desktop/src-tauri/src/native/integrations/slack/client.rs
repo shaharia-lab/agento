@@ -222,20 +222,37 @@ async fn read_slack_response(
     // Only `ok` and `error` are decoded, and everything else in the envelope is
     // ignored — so the body is returned to the caller **verbatim**, never
     // re-encoded from this value.
-    #[derive(serde::Deserialize)]
+    //
+    // Two `encoding/json` rules this has to carry, both of which a plain
+    // `#[derive(Deserialize)]` gets wrong in *opposite* directions:
+    //
+    // - **A JSON `null` is a zero value, not a type error.** Slack sends
+    //   `"error": null` on a success, so `{"ok":true,"error":null}` is an
+    //   ordinary success to Go and would be `invalid type: null, expected a
+    //   string` here. `null_is_zero_value` is `desktop/CLAUDE.md`'s rule for it.
+    // - **A JSON array is not a struct.** serde builds a struct from a sequence
+    //   positionally when every field has a default, so `[true]` would decode to
+    //   `ok: true` and turn Go's `cannot unmarshal array` into a *success* whose
+    //   text is the raw body. `GoStruct` refuses a non-map, which is #337's
+    //   over-accept and the direction this port must never move in.
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
     struct Envelope {
-        #[serde(default)]
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
         ok: bool,
-        #[serde(default)]
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
         error: String,
     }
-    let envelope: Envelope = serde_json::from_str(&body).map_err(|e| {
-        // `fmt.Errorf("parsing response: %w", err)`. `encoding/json`'s wording is
-        // not reproducible (see `github::body::parse_string_map`), so this
-        // carries serde's — a divergence the vectors pin. It cannot leak the
-        // token: the text being parsed is Slack's response, not the request.
-        format!("parsing response: {e}")
-    })?;
+    let envelope = serde_json::from_str::<crate::native::gojson::GoStruct<Envelope>>(&body)
+        .map(|wrapped| wrapped.0)
+        .map_err(|e| {
+            // `fmt.Errorf("parsing response: %w", err)`. `encoding/json`'s
+            // wording is not reproducible (see `github::body::parse_string_map`),
+            // so this carries serde's — a divergence the vectors pin. It cannot
+            // leak the token: the text being parsed is Slack's response, not the
+            // request.
+            format!("parsing response: {e}")
+        })?;
     if !envelope.ok {
         return Err(format!("slack API error ({method}): {}", envelope.error));
     }
@@ -350,6 +367,73 @@ mod tests {
             Err("calling Slack chat.postMessage: request failed".to_string())
         );
         set_api_base(None);
+    }
+
+    /// The two `encoding/json` rules the envelope decode has to carry, each of
+    /// which a plain derive gets wrong in the opposite direction.
+    ///
+    /// Both were verified against a real `json.Unmarshal` into the same two-field
+    /// struct before being fixed.
+    #[tokio::test]
+    async fn a_null_field_is_a_zero_value_and_an_array_is_not_a_struct() {
+        let _guard = api_base_lock().await;
+        let cases: &[(&str, Result<&str, &str>)] = &[
+            // Slack sends `"error": null` on a success. To Go that is the zero
+            // value and the call succeeds; a plain derive calls it a type error.
+            (
+                r#"{"ok":true,"error":null}"#,
+                Ok(r#"{"ok":true,"error":null}"#),
+            ),
+            (
+                r#"{"ok":false,"error":null}"#,
+                Err("slack API error (conversations.info): "),
+            ),
+            (
+                r#"{"ok":null}"#,
+                Err("slack API error (conversations.info): "),
+            ),
+        ];
+        for (body, want) in cases {
+            let got = reply(body).await;
+            assert_eq!(got.as_deref().map_err(String::as_str), *want, "{body}");
+        }
+
+        // …and the other direction: serde would build the struct positionally
+        // from a sequence, turning Go's parse error into a success.
+        for body in [r"[true]", r"[]", r#"[false,"boom"]"#] {
+            let got = reply(body).await;
+            assert!(
+                got.as_ref()
+                    .err()
+                    .is_some_and(|e| e.starts_with("parsing response: ")),
+                "{body} must not decode as a struct: {got:?}"
+            );
+        }
+        set_api_base(None);
+    }
+
+    /// One scripted 200 through the real client, for the two tests above.
+    async fn reply(body: &str) -> Result<String, String> {
+        let body = body.to_string();
+        let app = axum::Router::new().fallback(move || {
+            let body = body.clone();
+            async move { (StatusCode::OK, body) }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        set_api_base(Some(base));
+        Client::new(SECRET)
+            .call_form(
+                &CancellationToken::new(),
+                "conversations.info",
+                String::new(),
+            )
+            .await
     }
 
     /// The envelope decides, not the status — which is Slack's own convention and

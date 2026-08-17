@@ -472,6 +472,33 @@ func slackCallCases() []slackCallCase {
 			script:   slackResponseScript{Status: http.StatusOK, Body: `<html>nope</html>`},
 			rustText: "parsing response: expected value at line 1 column 1",
 		},
+		{
+			// Slack sends `"error": null` on a success. `encoding/json` reads a
+			// null as the zero value, so this is an ordinary success — where a
+			// plain serde derive calls it a type error and turns a Go success into
+			// a tool error.
+			name:   "get_channel_info/a null error field is a zero value, not a type error",
+			tool:   "get_channel_info",
+			args:   map[string]any{"channel": "C1"},
+			script: slackResponseScript{Status: http.StatusOK, Body: `{"ok":true,"error":null}`},
+		},
+		{
+			name:   "get_channel_info/a null ok field is a false one",
+			tool:   "get_channel_info",
+			args:   map[string]any{"channel": "C1"},
+			script: slackResponseScript{Status: http.StatusOK, Body: `{"ok":null}`},
+		},
+		{
+			// The other direction: serde builds a struct from a sequence
+			// positionally when every field has a default, so without `GoStruct`
+			// this would decode to `ok: true` and return the array as a success.
+			// Go refuses it, and the two refusals word it differently.
+			name:     "get_channel_info/a JSON array is not a struct",
+			tool:     "get_channel_info",
+			args:     map[string]any{"channel": "C1"},
+			script:   slackResponseScript{Status: http.StatusOK, Body: `[true]`},
+			rustText: "parsing response: invalid type: sequence, expected a JSON object at line 1 column 0",
+		},
 
 		// ─── rate limiting ───────────────────────────────────────────────────
 		{

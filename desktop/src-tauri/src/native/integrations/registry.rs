@@ -791,8 +791,30 @@ pub async fn start_filtered_server(
 /// in `native/integrations.rs` have already read the row and so call
 /// [`hosts_type`] directly rather than reading it a second time through the
 /// credential-carrying projection.
+/// The row's `type`, and **nothing else** — no `credentials`, no `auth`.
+///
+/// The point is what it does not select. [`HOSTING_COLUMNS`] is the one
+/// projection in the port that reads the secret columns, and its charter is to
+/// read them *to build a tool server*. Two callers only want to know whether the
+/// type is one this process hosts, and both are on hot paths for rows it does
+/// not: [`can_host`] runs per chat turn, and [`reload_if_secrets_changed`] runs
+/// per poll of an OAuth dialog — which the Google, WhatsApp and detail pages all
+/// poll. Answering that question through the secret-carrying projection would
+/// pull an unrelated integration's token into memory to decide it belongs to
+/// somebody else.
+fn type_of(db_path: &Path, id: &str) -> Result<Option<String>, String> {
+    let conn = crate::native::db::open_read_only(db_path)?;
+    conn.query_row("SELECT type FROM integrations WHERE id = ?1", [id], |row| {
+        row.get::<_, String>(0)
+    })
+    .optional()
+    .map_err(|e| format!("looking up integration {id:?}: {e}"))
+}
+
 pub fn can_host(db_path: &Path, id: &str) -> Result<bool, String> {
-    Ok(get_for_hosting(db_path, id)?.is_some_and(|row| hosts_type(&row.integration_type)))
+    // [`type_of`] rather than the hosting projection: this answers a question
+    // about the `type` column and has no business reading the other two.
+    Ok(type_of(db_path, id)?.is_some_and(|integration_type| hosts_type(&integration_type)))
 }
 
 /// `filterConfigTools`: keep only the requested tools, of only the enabled
@@ -991,19 +1013,28 @@ pub async fn reload_after_auth(db_path: &Path, id: &str) {
 /// (fingerprint moved), and a de-authentication (startable → not, which stops
 /// it).
 pub async fn reload_if_secrets_changed(db_path: &Path, id: &str) {
+    // The type first, through a projection that reads no secret: every page with
+    // an auth dialog polls this route, and most of those rows are types this
+    // process does not host.
+    match type_of(db_path, id) {
+        Ok(Some(integration_type)) if hosts_type(&integration_type) => {}
+        // Not ours, or deleted between the poll and this read. `stop` is the
+        // `DELETE` path's job and has already run; nothing to do here.
+        Ok(_) => return,
+        Err(e) => {
+            log::warn!("reloading integration {id:?} after an auth-status poll: {e}");
+            return;
+        }
+    }
+
     let row = match get_for_hosting(db_path, id) {
         Ok(Some(row)) => row,
-        // Deleted between the poll and this read, or unreadable. `stop` is the
-        // `DELETE` path's job and it has already run; nothing to do here.
         Ok(None) => return,
         Err(e) => {
             log::warn!("reloading integration {id:?} after an auth-status poll: {e}");
             return;
         }
     };
-    if !hosts_type(&row.integration_type) {
-        return;
-    }
 
     let want = row.is_startable().then(|| row.secrets_fingerprint());
     if want == registry().secrets(id) {

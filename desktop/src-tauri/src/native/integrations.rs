@@ -25,8 +25,10 @@
 //!   the old config: an integration still using a token the user just revoked,
 //!   with a 200 saying it worked. #311 did not solve that by adding a second
 //!   registry — it moved the *ownership*. The sidecar now runs with
-//!   `AGENTO_INTEGRATIONS=off` and [`registry`] is the only implementation,
-//!   which is #289's flip applied a second time.
+//!   `AGENTO_INTEGRATIONS=off:<types>` and [`registry`] is the only
+//!   implementation for the types named there, which is #289's flip applied a
+//!   second time — per type rather than per process, because a starter is not
+//!   always a pure MCP-server constructor. See `registry::HOSTED_TYPES`.
 //! - `POST /api/integrations` needed none of that: `Create` touches no registry
 //!   at all. That was verified against the whole of `integrationService.Create`
 //!   rather than inferred from its siblings, which is the point — `Create` and
@@ -462,10 +464,13 @@ fn segment(value: &str) -> Option<&str> {
 /// switched off, a native write there would have persisted the row and left the
 /// sidecar's server running on stale config — on an unauthenticated loopback
 /// port, holding a token the user had just revoked. The sidecar now runs with
-/// `AGENTO_INTEGRATIONS=off` and [`registry`] is the only implementation, so
-/// both effects are reproduced rather than lost. Note this is a property of the
-/// *process*, not of the six types: a Slack row is not hosted by anyone, which
-/// is a Slack integration that does nothing rather than one running twice.
+/// `AGENTO_INTEGRATIONS=off:<the types the shell hosts>` and [`registry`] is the
+/// only implementation **for those types**, so both effects are reproduced
+/// rather than lost. Note the switch is per type, not per process: a `telegram`
+/// row is still Go's, and a write for one is declined here and forwarded whole
+/// (see [`claims`]'s caller and `writes.rs`). Four of the six are the shell's as
+/// of #315 — `github`, `confluence`, `jira`, `slack` — and the list to read is
+/// `registry::HOSTED_TYPES`, never this comment.
 ///
 /// `POST /api/integrations` needed none of that, because `Create` is a pure row
 /// write: it never touches the registry, which was verified against the whole

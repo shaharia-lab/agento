@@ -681,6 +681,67 @@
       "rust_text": "parsing response: expected value at line 1 column 1"
     },
     {
+      "case": "get_channel_info/a null error field is a zero value, not a type error",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C1"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"error\":null}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"error\":null}"
+    },
+    {
+      "case": "get_channel_info/a null ok field is a false one",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C1"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":null}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1"
+      },
+      "is_error": true,
+      "text": "slack API error (conversations.info): "
+    },
+    {
+      "case": "get_channel_info/a JSON array is not a struct",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C1"
+      },
+      "response": {
+        "status": 200,
+        "body": "[true]"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1"
+      },
+      "is_error": true,
+      "text": "parsing response: json: cannot unmarshal array into Go value of type struct { OK bool \"json:\\\"ok\\\"\"; Error string \"json:\\\"error,omitempty\\\"\" }",
+      "rust_text": "parsing response: invalid type: sequence, expected a JSON object at line 1 column 0"
+    },
+    {
       "case": "send_message/429 is its own sentence, carrying Retry-After",
       "tool": "send_message",
       "arguments": {
