@@ -502,7 +502,7 @@ mod tests {
             ("RIFF1234WAVEmore", "audio/wave"),
             ("RIFF1234AVI more", "video/avi"),
             ("FORM1234AIFFmore", "audio/aiff"),
-            // Reachable through a JSON   escape.
+            // Reachable through a JSON \u0000 escape.
             ("OggS\u{0}", "application/ogg"),
             ("MThd\u{0}\u{0}\u{0}\u{6}", "audio/midi"),
             ("PK\u{3}\u{4}", "application/zip"),
