@@ -24,8 +24,8 @@
 //! **#311 narrowed the `mcp` half rather than removing it.** An agent is served
 //! natively when *every* name in `capabilities.mcp` is an integration this build
 //! can host — `registry::HOSTED_TYPES`, which today means `github` (#312) and
-//! `confluence` (#317), `jira` (#316) and `slack` (#315), and will mean the rest
-//! as #313 and #314 land. Three things
+//! `confluence` (#317), `jira` (#316), `slack` (#315) and `telegram` (#314), and
+//! will mean all six once #313 lands. Three things
 //! still forward, and [`mcp_plan`] is where each is decided:
 //!
 //! - **A name whose type is not hosted.** A `slack` row has no Rust starter;
@@ -389,7 +389,7 @@ fn mcp_plan(
         if !crate::native::integrations::registry::can_host(db_path, id)? {
             return Err(format!(
                 "agent uses MCP server {id:?}, which is not an integration this build \
-                 can host (#313, #314)"
+                 can host (#313)"
             ));
         }
         servers.push(McpServerSpec {
@@ -1078,17 +1078,13 @@ mod tests {
     fn an_mcp_name_this_build_cannot_host_forwards() {
         let file = db_with_integration("gh-1", "github");
 
-        // A type with no Rust starter. `telegram` while #314 is unwritten — the
-        // stand-in has to be a type that is genuinely unported, so it moves each
-        // time one lands.
-        let telegram = db_with_integration("tg-1", "telegram");
-        let err = mcp_plan(
-            Some(&caps_naming("tg-1", None)),
-            Some(telegram.path()),
-            false,
-        )
-        .expect_err("telegram cannot be hosted");
-        assert!(err.contains(r#"MCP server "tg-1""#), "{err}");
+        // A type with no Rust starter. `google` while #313 is unwritten — the
+        // stand-in has to be a type that is genuinely unported, so it has moved
+        // with each landing and this is the last move available.
+        let google = db_with_integration("gg-1", "google");
+        let err = mcp_plan(Some(&caps_naming("gg-1", None)), Some(google.path()), false)
+            .expect_err("google cannot be hosted");
+        assert!(err.contains(r#"MCP server "gg-1""#), "{err}");
 
         // A name with no integration row: `mcps.yaml` could still name it.
         assert!(mcp_plan(
@@ -1107,7 +1103,7 @@ mod tests {
         let mut mixed = caps_naming("gh-1", None);
         if let Some(mcp) = mixed.mcp.as_mut() {
             mcp.0.insert(
-                "tg-1".to_string(),
+                "gg-1".to_string(),
                 crate::native::agents::McpCapability { tools: None }.into(),
             );
         }

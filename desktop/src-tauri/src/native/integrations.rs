@@ -137,6 +137,7 @@ pub mod confluence;
 pub mod github;
 pub mod jira;
 pub mod slack;
+pub mod telegram;
 
 /// The Start/Stop/Reload lifecycle, and the one place in the port that reads
 /// `integrations.credentials` (#311).
@@ -484,22 +485,28 @@ fn segment(value: &str) -> Option<&str> {
 /// on the Go side. Returns the integration id the shell owes a reload for.
 ///
 /// `Reload` has seven callers in Go. Two are ported (`Update`, and `Delete` via
-/// `Stop`). One more — the telegram validator — and
-/// `completeOAuth` are unaffected, because the switch is per type and every type
-/// they can reach is still Go's: `startProviderCallback` supports exactly
-/// `google` and `slack`, so an OAuth completion never concerns a type this
-/// process hosts. That leaves `validateGitHubPATAuth` and, since #315–#317,
-/// `validateSlackTokenAuth`, `validateJiraTokenAuth` and
-/// `validateConfluenceAuth` — all behind
-/// `POST /api/integrations/{id}/auth/validate` — as the paths that write a
-/// credential for a hosted type and cannot tell anybody. Without this hook such
-/// an integration is never hosted in the session it is set up in — create, `PUT`
-/// and `auth/validate` all leave it unauthenticated or unheard, and it appears
-/// only at the next boot's `start_all`.
+/// `Stop`). Of the five that run inside the sidecar, **none is covered by the
+/// per-type gate any more**: as of #314 five of the six types are hosted here, so
+/// a `Reload` for one reaches nothing in that process.
+///
+/// Four are the token validators — `validateGitHubPATAuth` and, since #314–#317,
+/// `validateTelegramTokenAuth`, `validateSlackTokenAuth`, `validateJiraTokenAuth`
+/// and `validateConfluenceAuth` — all behind
+/// `POST /api/integrations/{id}/auth/validate`, which is the route this hook
+/// answers. Without it such an integration is never hosted in the session it is
+/// set up in: create, `PUT` and `auth/validate` all leave it unauthenticated or
+/// unheard, and it appears only at the next boot's `start_all`.
+///
+/// The fifth is `completeOAuth`, which this hook does **not** cover and which is
+/// not safe by the gate either — `startProviderCallback` supports `google` and
+/// `slack`, and `slack` has been hosted here since #315. Its token never crosses
+/// this proxy at all (the browser delivers it to a callback server the sidecar
+/// opens), so it is picked up from the *other* route below instead. See
+/// `registry::reload_if_secrets_changed`.
 ///
 /// The route predicate below is deliberately **type-blind**: it answers with the
 /// id for every integration, and `registry::reload_after_auth` reads the row's
-/// type through `can_host` before it does anything. So #313 and #314 need not touch
+/// type through `can_host` before it does anything. So #313 need not touch
 /// this — adding a string to `registry::HOSTED_TYPES` is what widens it.
 ///
 /// The reload runs **after** Go's answer, so the row is already written, and it
@@ -1971,7 +1978,7 @@ mod tests {
     /// reload strands a socket and a paired client that never connects.
     #[test]
     fn a_write_for_a_type_the_sidecar_hosts_forwards_without_touching_the_row() {
-        for integration_type in ["whatsapp", "telegram", "google"] {
+        for integration_type in ["whatsapp", "google"] {
             let file = migrated();
             Connection::open(file.path())
                 .expect("open")
