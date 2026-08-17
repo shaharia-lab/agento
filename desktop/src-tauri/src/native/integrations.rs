@@ -130,8 +130,10 @@
 /// [`registry`] calls it. Hosting an integration's server is the registry's
 /// job, and this module still never reads a credential — [`registry`] does,
 /// through a projection of its own that no response type can reach.
+pub mod base_url;
 pub mod confluence;
 pub mod github;
+pub mod jira;
 
 /// The Start/Stop/Reload lifecycle, and the one place in the port that reads
 /// `integrations.credentials` (#311).
@@ -476,12 +478,12 @@ fn segment(value: &str) -> Option<&str> {
 /// on the Go side. Returns the integration id the shell owes a reload for.
 ///
 /// `Reload` has seven callers in Go. Two are ported (`Update`, and `Delete` via
-/// `Stop`). Three more — the telegram, jira and slack validators — and
+/// `Stop`). Two more — the telegram and slack validators — and
 /// `completeOAuth` are unaffected, because the switch is per type and every type
 /// they can reach is still Go's: `startProviderCallback` supports exactly
 /// `google` and `slack`, so an OAuth completion never concerns a type this
-/// process hosts. That leaves `validateGitHubPATAuth` and, since #317,
-/// `validateConfluenceAuth` — both behind
+/// process hosts. That leaves `validateGitHubPATAuth` and, since #316 and #317,
+/// `validateJiraTokenAuth` and `validateConfluenceAuth` — all behind
 /// `POST /api/integrations/{id}/auth/validate` — as the paths that write a
 /// credential for a hosted type and cannot tell anybody. Without this hook such
 /// an integration is never hosted in the session it is set up in — create, `PUT`
@@ -490,7 +492,7 @@ fn segment(value: &str) -> Option<&str> {
 ///
 /// The route predicate below is deliberately **type-blind**: it answers with the
 /// id for every integration, and `registry::reload_after_auth` reads the row's
-/// type through `can_host` before it does anything. So #313–#316 need not touch
+/// type through `can_host` before it does anything. So #313–#315 need not touch
 /// this — adding a string to `registry::HOSTED_TYPES` is what widens it.
 ///
 /// The reload runs **after** Go's answer, so the row is already written, and it
@@ -1932,7 +1934,7 @@ mod tests {
     /// reload strands a socket and a paired client that never connects.
     #[test]
     fn a_write_for_a_type_the_sidecar_hosts_forwards_without_touching_the_row() {
-        for integration_type in ["slack", "whatsapp", "telegram", "jira", "google"] {
+        for integration_type in ["slack", "whatsapp", "telegram", "google"] {
             let file = migrated();
             Connection::open(file.path())
                 .expect("open")

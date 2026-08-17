@@ -75,6 +75,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 
 use crate::claude::{tool_server, InProcessMcpServer, Result, ToolDef};
 
+use super::base_url::{Base, Mismatch};
 use super::ServiceConfig;
 use client::Client;
 
@@ -326,7 +327,7 @@ pub fn validate_site_url(raw: &str) -> std::result::Result<String, String> {
         return Err("invalid site URL: it holds a control character".to_string());
     }
 
-    let (scheme, rest) = go_scheme(raw);
+    let (scheme, rest) = super::base_url::go_scheme(raw);
     // A URL with no scheme is a *relative* one to `net/url`, and it refuses one
     // whose first path segment holds a colon — because re-parsing the result
     // would read that colon as a scheme. `1https://acme.atlassian.net` is the
@@ -353,140 +354,36 @@ pub fn validate_site_url(raw: &str) -> std::result::Result<String, String> {
         // has nothing either language escapes — so `{:?}` is Go's rendering.
         return Err(format!("site URL must use HTTPS (got {scheme:?})"));
     }
-    if go_host(rest).is_empty() {
+    if super::base_url::go_host(rest).is_empty() {
         return Err("site URL must include a hostname".to_string());
     }
 
     let clean = raw.trim_end_matches('/');
 
-    // The shapes `client::Client::absolute` cannot work behind. See the section
-    // above for why each is refused here rather than per call.
-    //
-    // The authority goes first, ahead of even parsing the whole thing, because
-    // it is the one that decides *which server* the credentials reach — so it
-    // should be the sentence in the log whenever it applies, rather than
-    // whichever check happens to notice first.
-    //
-    // By allowlist rather than by comparison — see above for why a comparison
-    // between the two parsers cannot see an interpretation gap, and which three
-    // gaps this closes. The **whole** authority, userinfo included, rather than
-    // [`go_host`]'s post-`@` remainder: `@` and `\` are outside the set, and
-    // refusing them is what makes the two parsers agree on where the authority
-    // *ends* as well as on what it says. `evil.com\@acme.atlassian.net` has a
-    // perfectly plain host once the userinfo is stripped, which is the trap.
-    let authority = go_authority(rest);
-    let (host, port) = match authority.split_once(':') {
-        Some((host, port)) => (host, Some(port)),
-        None => (authority, None),
-    };
-    let plain_host = !host.is_empty()
-        && host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
-    // An empty port is Go's `Host` of `acme.atlassian.net:`, which dials 443 on
-    // both sides; anything else must be digits, as `validOptionalPort` requires.
-    let plain_port = port.is_none_or(|port| port.bytes().all(|b| b.is_ascii_digit()));
-    if !plain_host || !plain_port {
-        return Err("invalid site URL: its host is not a plain ASCII hostname".to_string());
-    }
-
-    let parsed = reqwest::Url::parse(clean)
-        .map_err(|_| "invalid site URL: it is not a URL this build can send a request to")?;
-    if parsed.query().is_some() || parsed.fragment().is_some() {
-        return Err("invalid site URL: a query or fragment leaves the path open".to_string());
-    }
-
-    // …and the path, which is a wrong endpoint on the right host.
-    let raw_path = base_path_of(clean);
-    let go_path = if raw_path.is_empty() {
-        // `url` renders a base with no path of its own as `/`; Go sends the
-        // tool's own leading slash and nothing before it.
-        "/".to_string()
-    } else {
-        // `setPath` decodes first and a **malformed** escape is a parse error
-        // there, so this gate runs whichever branch wins below. It is the
-        // `Option` alone: a well-formed escape decoding to bytes that are not
-        // UTF-8 is not an error to Go — `%FF` is a perfectly good path, and
-        // `EscapedPath()` renders it back as `%FF` — which is why
-        // `unescape_path` answers `Vec<u8>` and the fallback below escapes
-        // bytes rather than a `String`.
-        let decoded = crate::native::gourl::unescape_path(raw_path)
-            .ok_or("invalid site URL: its path does not decode")?;
-        // `EscapedPath()`: the raw text when it is validly encoded, and the
-        // re-escaped decode otherwise. Both branches are needed — see
-        // `gourl::valid_encoded_path`.
-        if crate::native::gourl::valid_encoded_path(raw_path) {
-            raw_path.to_string()
-        } else {
-            crate::native::gourl::escape_path_bytes(&decoded)
+    // Everything above is Go's own `ValidateSiteURL`. The rest is not: it is
+    // whether the base is one `client::Client` can send a request through where
+    // Go sends it, which `super::base_url` owns and #316 shares. Confluence maps
+    // a mismatch to a refusal because **Go refuses too** — this check is inside
+    // `Start`, so a base Go will not serve is an integration Go does not host;
+    // Jira's `Start` validates nothing and therefore answers per call instead.
+    // See that module's header.
+    Base::new(clean).map_err(|mismatch| match mismatch {
+        Mismatch::Authority => {
+            "invalid site URL: its host is not a plain ASCII hostname".to_string()
         }
-    };
-    if parsed.path() != go_path {
-        return Err("invalid site URL: net/url and url encode its path differently".to_string());
-    }
+        Mismatch::Unparseable => {
+            "invalid site URL: it is not a URL this build can send a request to".to_string()
+        }
+        Mismatch::QueryOrFragment => {
+            "invalid site URL: a query or fragment leaves the path open".to_string()
+        }
+        Mismatch::PathDoesNotDecode => "invalid site URL: its path does not decode".to_string(),
+        Mismatch::PathEncoding => {
+            "invalid site URL: net/url and url encode its path differently".to_string()
+        }
+    })?;
 
     Ok(clean.to_string())
-}
-
-/// The raw text of a site URL's path — everything from the `/` that ends the
-/// authority.
-///
-/// Raw rather than parsed, because the dot-segment check above exists precisely
-/// because parsing removes them.
-pub(super) fn base_path_of(clean: &str) -> &str {
-    let Some(rest) = clean.split_once("://").map(|(_, rest)| rest) else {
-        return "";
-    };
-    match rest.find('/') {
-        Some(start) => &rest[start..],
-        None => "",
-    }
-}
-
-/// `net/url`'s `getScheme`, lower-cased as `url.Parse` lower-cases it.
-///
-/// Answers `("", raw)` for anything without a valid scheme, which is what
-/// `getScheme` does for every case except a leading `:` — and that one is a
-/// parse error in Go, so it reaches the same refusal by a different route.
-fn go_scheme(raw: &str) -> (String, &str) {
-    for (i, c) in raw.char_indices() {
-        match c {
-            'a'..='z' | 'A'..='Z' => {}
-            '0'..='9' | '+' | '-' | '.' if i > 0 => {}
-            ':' if i > 0 => return (raw[..i].to_ascii_lowercase(), &raw[i + 1..]),
-            _ => return (String::new(), raw),
-        }
-    }
-    (String::new(), raw)
-}
-
-/// The whole authority `url.Parse` would take, userinfo and port included —
-/// everything between `//` and the first `/`, `?` or `#`.
-///
-/// Empty when there is no authority at all. Separate from [`go_host`] because
-/// the two checks want different halves: Go's own `u.Host == ""` question wants
-/// the host, and the allowlist in [`validate_site_url`] wants the userinfo too,
-/// since that is where a `\` hides.
-fn go_authority(rest: &str) -> &str {
-    let Some(authority) = rest.strip_prefix("//") else {
-        return "";
-    };
-    match authority.find(['/', '?', '#']) {
-        Some(end) => &authority[..end],
-        None => authority,
-    }
-}
-
-/// The host `url.Parse` would set, given everything after the scheme's colon.
-///
-/// Empty unless an authority is present (`//…`), and empty for an authority that
-/// is only userinfo — both of which Go answers with `u.Host == ""`.
-fn go_host(rest: &str) -> &str {
-    let authority = go_authority(rest);
-    match authority.rfind('@') {
-        Some(at) => &authority[at + 1..],
-        None => authority,
-    }
 }
 
 /// Go's `textResult`, shared by all six tools.
@@ -574,29 +471,6 @@ mod tests {
         )]);
         assert!(build_allowed_set(&services).is_empty());
         assert_eq!(names(&services), CONFLUENCE_TOOL_NAMES);
-    }
-
-    /// The scheme split, at the shapes `getScheme` distinguishes. Every one of
-    /// these is also a `validate_site_url` vector; this is the unit view of why.
-    #[test]
-    fn the_scheme_is_read_the_way_net_url_reads_it() {
-        for (raw, scheme) in [
-            ("https://acme.atlassian.net", "https"),
-            // `url.Parse` lower-cases the scheme, so this passes the gate.
-            ("HTTPS://acme.atlassian.net", "https"),
-            ("http://acme.atlassian.net", "http"),
-            ("ftp://acme", "ftp"),
-            // A scheme may hold digits, `+`, `-` and `.` after the first byte.
-            ("h2.c+x-y://acme", "h2.c+x-y"),
-            // No colon at all, a leading digit, and an invalid byte all mean
-            // *no scheme* rather than an error.
-            ("acme.atlassian.net", ""),
-            ("1https://acme", ""),
-            ("ht tps://acme", ""),
-            ("/wiki", ""),
-        ] {
-            assert_eq!(go_scheme(raw).0, scheme, "{raw}");
-        }
     }
 
     /// The refusal that matters most: a base where `url` and `net/url` read a
@@ -731,17 +605,6 @@ mod tests {
                 Ok(site.to_string()),
                 "{site} is a site URL Go serves"
             );
-        }
-    }
-
-    /// The host, at the shapes that make it empty — which is the second refusal.
-    #[test]
-    fn a_host_needs_an_authority_and_more_than_userinfo() {
-        assert_eq!(go_host("//acme.atlassian.net/wiki"), "acme.atlassian.net");
-        assert_eq!(go_host("//user:pw@acme:8443?x"), "acme:8443");
-        assert_eq!(go_host("//acme#frag"), "acme");
-        for rest in ["", "//", "//user@", "opaque", "/path"] {
-            assert!(go_host(rest).is_empty(), "{rest}");
         }
     }
 }
