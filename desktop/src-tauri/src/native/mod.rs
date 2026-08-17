@@ -333,15 +333,26 @@ pub fn after_forward(method: &Method, path: &str, status: StatusCode) {
     if !status.is_success() {
         return;
     }
-    let Some(id) = integrations::reload_after_forward(method, path).map(str::to_string) else {
+    let Some((id, trigger)) = integrations::reload_after_forward(method, path) else {
         return;
     };
+    let id = id.to_string();
     let Some(db_path) = paths::database_path() else {
         log::warn!("no data dir; not reloading integration {id:?} after {path}");
         return;
     };
     tokio::spawn(async move {
-        integrations::registry::reload_after_auth(&db_path, &id).await;
+        match trigger {
+            // A credential was just written: reload, as Go does.
+            integrations::Trigger::CredentialWritten => {
+                integrations::registry::reload_after_auth(&db_path, &id).await;
+            }
+            // A poll, not an event — so only if the row stopped matching what is
+            // running. See `registry::reload_if_secrets_changed`.
+            integrations::Trigger::AuthStatusPolled => {
+                integrations::registry::reload_if_secrets_changed(&db_path, &id).await;
+            }
+        }
     });
 }
 

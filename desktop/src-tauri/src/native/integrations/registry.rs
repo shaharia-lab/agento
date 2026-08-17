@@ -5,7 +5,7 @@
 //! integration: `Start` brings them all up at boot, `Reload` restarts one when
 //! its row changes, `Stop` tears one down when it is deleted. This module is
 //! that, for the types listed in [`HOSTED_TYPES`] — today `github` (#312),
-//! `confluence` (#317) and `jira` (#316).
+//! `confluence` (#317), `jira` (#316) and `slack` (#315).
 //!
 //! ## Why the ownership had to flip before the writes could move
 //!
@@ -44,7 +44,7 @@
 //! **The list is built here, by [`hosting_env_value`], from the same
 //! [`HOSTED_TYPES`] that [`hosts_type`] and the starter dispatch read.** That is
 //! the point of carrying it in the environment rather than hardcoding it on both
-//! sides: the shell is the process that knows what it hosts, so #313–#315 each
+//! sides: the shell is the process that knows what it hosts, so #313 and #314 each
 //! add one string to one list and the two halves cannot drift. The failure mode
 //! being designed against is a Rust slack starter landing while Go is never told
 //! to stop hosting slack — two processes on one integration — and its mirror is
@@ -84,8 +84,7 @@
 //!
 //! `Reload` has seven callers in Go and only two of them (`Update`, and
 //! `Delete` via `Stop`) are ported. Five run inside the sidecar. `completeOAuth`
-//! and the telegram and slack validators are fine **because the gate is
-//! per type**: they can only reach types Go still hosts, and
+//! and the telegram validator is fine **because the gate is per type**: they can only reach types Go still hosts, and
 //! `startProviderCallback` supports exactly `google` and `slack`, so an OAuth
 //! completion never concerns a hosted one. The other three —
 //! `validateGitHubPATAuth`, and since #316 and #317 `validateJiraTokenAuth` and
@@ -95,7 +94,7 @@
 //! seam fires [`reload_after_auth`] after forwarding a 2xx for that one route
 //! (`native::after_forward`). That hook needs no per-type list of its own: it
 //! runs for every id on the route and [`reload_after_auth`] reads the row's type
-//! through [`can_host`], so #313–#315 are covered the moment they add their
+//! through [`can_host`], so #313 and #314 are covered the moment they add their
 //! string to [`HOSTED_TYPES`]. The reload is idempotent and the response has
 //! already been produced, so doing it on the forward path costs nothing but a
 //! restart of a server that was about to be restarted anyway.
@@ -131,10 +130,23 @@ struct HostingRow {
     id: String,
     integration_type: String,
     enabled: bool,
-    /// `IsAuthenticated()`, computed in SQL so the token itself is never read.
+    /// `IsAuthenticated()`, computed in SQL so the predicate does not depend on
+    /// parsing [`Self::auth`].
     authenticated: bool,
     /// The raw `credentials` column. A secret.
     credentials: String,
+    /// The raw `auth` column. **Also a secret**, and the newer of the two.
+    ///
+    /// Until #315 this projection selected `auth` only as the boolean above, and
+    /// `native/integrations.rs` still never selects it at all — the rule that a
+    /// stored token cannot exist in this process to be echoed. Slack is the
+    /// exception that forced it: `resolveToken` reads
+    /// `cfg.ParseOAuthToken()` — the `auth` column parsed as an `oauth2.Token` —
+    /// whenever `credentials.auth_mode` is `oauth`, so the value is genuinely
+    /// needed to build the server. What has *not* changed is where it may go:
+    /// this struct still derives neither `Serialize` nor `Debug`, it is private
+    /// to this module, and only a `&str` ever leaves it.
+    auth: String,
     services: Option<BTreeMap<String, ServiceConfig>>,
 }
 
@@ -143,6 +155,21 @@ impl HostingRow {
     /// `Reload` apply before they reach a starter.
     fn is_startable(&self) -> bool {
         self.enabled && self.authenticated
+    }
+
+    /// A fingerprint of the two secret columns, for [`reload_if_secrets_changed`].
+    ///
+    /// A hash, so the registry's record of "what is this server running on" is
+    /// not a second place the token itself lives. `DefaultHasher` because the
+    /// question is only ever "did this change", within one process, against a
+    /// value this process wrote — there is nothing here for a collision to buy
+    /// an attacker that reading the database would not.
+    fn secrets_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.credentials.hash(&mut hasher);
+        self.auth.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// The services map a starter sees. A stored `null` is a nil Go map, which
@@ -157,8 +184,8 @@ impl HostingRow {
 /// One list, read by three things that must agree: [`hosts_type`] (which the
 /// native `PUT`/`DELETE` consult before they touch a row), the starter dispatch
 /// in [`start_for_type`], and [`hosting_env_value`], which tells the Go sidecar
-/// which types to stop hosting. #313–#315 each add one string here.
-pub const HOSTED_TYPES: &[&str] = &["github", "confluence", "jira"];
+/// which types to stop hosting. #313 and #314 each add one string here.
+pub const HOSTED_TYPES: &[&str] = &["github", "confluence", "jira", "slack"];
 
 /// Whether this process hosts an integration of the given type.
 pub fn hosts_type(integration_type: &str) -> bool {
@@ -194,6 +221,13 @@ struct State {
     /// since. A `DELETE` in that window therefore drops the new server instead
     /// of leaving a bound port holding a credential for a deleted row.
     generations: HashMap<String, u64>,
+    /// A fingerprint of the secrets each hosted server was **started with**.
+    ///
+    /// Only [`reload_if_secrets_changed`] reads it, and only to answer "is what
+    /// is running still what the row says". It is a hash rather than the values,
+    /// so this map is not a second place a token lives — see that function for
+    /// why the question needs asking at all.
+    secrets: HashMap<String, u64>,
 }
 
 /// The process-wide registry.
@@ -229,6 +263,7 @@ impl Registry {
     pub fn stop(&self, id: &str) {
         let mut state = self.lock();
         *state.generations.entry(id.to_string()).or_default() += 1;
+        state.secrets.remove(id);
         let removed = state.servers.remove(id);
         drop(state);
         if removed.is_some() {
@@ -256,19 +291,47 @@ impl Registry {
     /// Returns whether the handle was kept. A refused handle is dropped here,
     /// which fires its shutdown oneshot — so the listener the caller started
     /// goes away rather than outliving the row it was built from.
-    fn put_if_current(&self, id: &str, generation: u64, server: InProcessMcpServer) -> bool {
+    fn put_if_current(
+        &self,
+        id: &str,
+        generation: u64,
+        server: InProcessMcpServer,
+        secrets: u64,
+    ) -> bool {
         let mut state = self.lock();
         if state.generations.get(id).copied().unwrap_or_default() != generation {
             return false;
         }
         state.servers.insert(id.to_string(), server);
+        state.secrets.insert(id.to_string(), secrets);
         true
+    }
+
+    /// The fingerprint the server hosted under `id` was started with, or `None`
+    /// when nothing is hosted for it.
+    fn secrets(&self, id: &str) -> Option<u64> {
+        self.lock().secrets.get(id).copied()
     }
 
     /// Whether an integration is hosted right now. Nothing on the wire reads
     /// this; it exists so the lifecycle can be asserted.
     pub fn is_hosted(&self, id: &str) -> bool {
         self.lock().servers.contains_key(id)
+    }
+
+    /// The loopback URL a hosted server is listening on.
+    ///
+    /// Test-only, and it is how "did this reload actually restart anything"
+    /// is observed: `reload` binds a fresh port every time, so an unchanged URL
+    /// is proof that nothing was torn down. Not exposed outside tests because
+    /// nothing else needs it — `InProcessMcpServer` deliberately has no `Debug`,
+    /// and the URL is the one part of it that is safe to look at.
+    #[cfg(test)]
+    fn url(&self, id: &str) -> Option<String> {
+        self.lock()
+            .servers
+            .get(id)
+            .map(|server| server.url().to_string())
     }
 }
 
@@ -335,7 +398,7 @@ pub async fn reload(db_path: &Path, id: &str) -> Result<(), String> {
 async fn start_one(row: &HostingRow, generation: u64) -> Result<(), String> {
     let server = start_for_type(row).await?;
     let url = server.url().to_string();
-    if !registry().put_if_current(&row.id, generation, server) {
+    if !registry().put_if_current(&row.id, generation, server, row.secrets_fingerprint()) {
         log::info!(
             "integration MCP server discarded before it was recorded, \
              the integration was stopped while it started: id={:?} type={:?}",
@@ -369,6 +432,7 @@ async fn start_for_type(row: &HostingRow) -> Result<InProcessMcpServer, String> 
         "github" => start_github(&row.id, &row.services(), &row.credentials).await,
         "confluence" => start_confluence(&row.id, &row.services(), &row.credentials).await,
         "jira" => start_jira(&row.id, &row.services(), &row.credentials).await,
+        "slack" => start_slack(&row.id, &row.services(), &row.credentials, &row.auth).await,
         other => Err(format!(
             "no starter registered for integration type {other:?}"
         )),
@@ -493,6 +557,113 @@ async fn start_jira(
     .map_err(|e| format!("starting in-process MCP server for {id:?}: {e}"))
 }
 
+/// `slack.Start`'s first two steps — the auth check and `resolveToken` —
+/// followed by the third, which `native/integrations/slack` owns.
+///
+/// The token is the reason this starter takes `auth` where the others take only
+/// `credentials`: see [`resolve_slack_token`].
+async fn start_slack(
+    id: &str,
+    services: &BTreeMap<String, ServiceConfig>,
+    credentials: &str,
+    auth: &str,
+) -> Result<InProcessMcpServer, String> {
+    let token = resolve_slack_token(id, credentials, auth)?;
+    super::slack::start_slack_mcp_server(id, services, &token)
+        .await
+        .map_err(|e| format!("starting in-process MCP server for {id:?}: {e}"))
+}
+
+/// `resolveToken` (`slack/server.go`), wrapped as `Start` wraps it.
+///
+/// Three arms, and the third is the one a port drops:
+///
+/// - `bot_token` — the credentials blob, refusing an empty one.
+/// - `oauth` — `cfg.ParseOAuthToken()`, which is the **`auth` column** decoded
+///   as an `oauth2.Token`. This is the only place in the port that reads that
+///   column as a value; see [`HostingRow::auth`].
+/// - anything else, **including the empty string** — falls back to the bot token
+///   if it is non-empty, and only then fails. So a row whose `auth_mode` was
+///   never set still works, which is what makes this a fallback rather than a
+///   default.
+///
+/// Every message is Go's, and none of them interpolates a token. The one
+/// deliberate divergence is the `oauth` arm's decode failure: Go's carries
+/// `encoding/json`'s wording, and this carries line and column for
+/// [`github_token`]'s reason — the serde message quotes the offending value,
+/// which here *is* the access token.
+pub(super) fn resolve_slack_token(
+    id: &str,
+    credentials: &str,
+    auth: &str,
+) -> Result<String, String> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct SlackCredentials {
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        auth_mode: String,
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        bot_token: String,
+    }
+
+    let wrap = |message: String| format!("resolving slack token for {id:?}: {message}");
+
+    if credentials.is_empty() {
+        return Err(wrap(
+            "parsing slack credentials: credentials are empty".to_string(),
+        ));
+    }
+    let creds = serde_json::from_str::<Option<SlackCredentials>>(credentials)
+        .map(Option::unwrap_or_default)
+        .map_err(|e| {
+            wrap(format!(
+                "parsing slack credentials: does not decode at line {} column {}",
+                e.line(),
+                e.column()
+            ))
+        })?;
+
+    match creds.auth_mode.as_str() {
+        "bot_token" => {
+            if creds.bot_token.is_empty() {
+                return Err(wrap("bot_token is empty".to_string()));
+            }
+            Ok(creds.bot_token)
+        }
+        "oauth" => {
+            // `oauth2.Token`, of which only `access_token` is read. A Go
+            // `json.Unmarshal` into that struct would also reject a malformed
+            // `expiry` (it is a `time.Time`), which this does not — an
+            // unreachable difference, since the column is written by
+            // `SetOAuthToken`, and a log line either way.
+            #[derive(Default, serde::Deserialize)]
+            #[serde(default)]
+            struct OAuthToken {
+                #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+                access_token: String,
+            }
+            let token = serde_json::from_str::<Option<OAuthToken>>(auth)
+                .map(Option::unwrap_or_default)
+                .map_err(|e| {
+                    wrap(format!(
+                        "parsing oauth token: does not decode at line {} column {}",
+                        e.line(),
+                        e.column()
+                    ))
+                })?;
+            Ok(token.access_token)
+        }
+        other => {
+            if !creds.bot_token.is_empty() {
+                return Ok(creds.bot_token);
+            }
+            Err(wrap(format!(
+                "unsupported auth_mode {other:?} and no bot_token available"
+            )))
+        }
+    }
+}
+
 /// `config.AtlassianCredentials` — the struct Confluence and Jira share.
 ///
 /// Neither derives `Debug` nor `Serialize`, for [`HostingRow`]'s reason: a
@@ -603,10 +774,31 @@ pub async fn start_filtered_server(
         "github" => start_github(&row.id, &filtered, &row.credentials).await,
         "confluence" => start_confluence(&row.id, &filtered, &row.credentials).await,
         "jira" => start_jira(&row.id, &filtered, &row.credentials).await,
+        "slack" => start_slack(&row.id, &filtered, &row.credentials, &row.auth).await,
         other => Err(format!(
             "no starter registered for integration type {other:?}"
         )),
     }
+}
+
+/// The row's `type`, and **nothing else** — no `credentials`, no `auth`.
+///
+/// The point is what it does not select. [`HOSTING_COLUMNS`] is the one
+/// projection in the port that reads the secret columns, and its charter is to
+/// read them *to build a tool server*. Two callers only want to know whether the
+/// type is one this process hosts, and both are on hot paths for rows it does
+/// not: [`can_host`] runs per chat turn, and [`reload_if_secrets_changed`] runs
+/// per poll of an OAuth dialog — which the Google, WhatsApp and detail pages all
+/// poll. Answering that question through the secret-carrying projection would
+/// pull an unrelated integration's token into memory to decide it belongs to
+/// somebody else.
+fn type_of(db_path: &Path, id: &str) -> Result<Option<String>, String> {
+    let conn = crate::native::db::open_read_only(db_path)?;
+    conn.query_row("SELECT type FROM integrations WHERE id = ?1", [id], |row| {
+        row.get::<_, String>(0)
+    })
+    .optional()
+    .map_err(|e| format!("looking up integration {id:?}: {e}"))
 }
 
 /// Whether a run naming this integration can be served natively at all.
@@ -615,12 +807,13 @@ pub async fn start_filtered_server(
 /// *before* it starts anything: an agent that names a type Rust cannot host must
 /// forward the whole turn to Go rather than run with some of its tools missing.
 ///
-/// [`hosts_type`] is the predicate; this only adds the row read. The two writes
-/// in `native/integrations.rs` have already read the row and so call
-/// [`hosts_type`] directly rather than reading it a second time through the
-/// credential-carrying projection.
+/// [`hosts_type`] is the predicate and [`type_of`] is the whole of the read —
+/// one column, chosen because this question has no business touching the other
+/// two. The two writes in `native/integrations.rs` reach [`hosts_type`] by yet
+/// another route: they have already read the row for their own purposes, so they
+/// call it directly rather than reading anything a second time.
 pub fn can_host(db_path: &Path, id: &str) -> Result<bool, String> {
-    Ok(get_for_hosting(db_path, id)?.is_some_and(|row| hosts_type(&row.integration_type)))
+    Ok(type_of(db_path, id)?.is_some_and(|integration_type| hosts_type(&integration_type)))
 }
 
 /// `filterConfigTools`: keep only the requested tools, of only the enabled
@@ -675,7 +868,7 @@ fn filter_config_tools(
 /// point of that constant is that the column is not in it.
 const HOSTING_COLUMNS: &str = "SELECT id, type, enabled,
             (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
-            credentials, services
+            credentials, services, COALESCE(auth, '')
      FROM integrations";
 
 fn scan_hosting_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostingRow> {
@@ -689,6 +882,7 @@ fn scan_hosting_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HostingRow> {
         authenticated: authenticated != 0,
         credentials: row.get(4)?,
         services: decode_services(&services),
+        auth: row.get(6)?,
     })
 }
 
@@ -786,6 +980,72 @@ pub async fn reload_after_auth(db_path: &Path, id: &str) {
     }
 }
 
+/// Reload only if what the row says no longer matches what is hosted.
+///
+/// # The hole this fills, which #315 opened
+///
+/// Go's `handleOAuthToken` writes the token to the `auth` column and then calls
+/// `registry.Reload` — and `startProviderCallback` supports exactly `google` and
+/// `slack`. While neither was hosted here that was harmless, and
+/// `registry.rs`'s own header said so. **#315 made `slack` a hosted type**, so
+/// that `Reload` now reaches nothing and a Slack integration authenticated by
+/// OAuth would first be served at the next boot's [`start_all`].
+///
+/// [`reload_after_auth`] cannot cover it: that hook hangs off a *forwarded
+/// request*, and an OAuth token does not arrive on one. It is delivered by the
+/// browser to a callback server the **sidecar** opens on its own port, which
+/// this process never sees. The one part of the flow that does come through the
+/// proxy is the UI polling `GET /api/integrations/{id}/auth/status` while it
+/// waits, so that is where this hangs — which makes it **best-effort**: a user
+/// who closes the dialog before it completes is served at the next boot, as they
+/// were before. #318 owns the flow itself and is where that stops being true.
+///
+/// # Why conditional, where [`reload_after_auth`] is not
+///
+/// A poll is not an event. `reload` is unconditional by design — stop, then
+/// start, with a new port each time — so firing it per poll would restart the
+/// server every second the dialog is open and drop any in-flight `tools/call`
+/// with it. So this compares the row's current secrets against the ones the
+/// running server was started with and does nothing when they match. That covers
+/// every transition without churn: unauthenticated → authenticated (nothing
+/// hosted, now startable), a re-authentication that replaces the token
+/// (fingerprint moved), and a de-authentication (startable → not, which stops
+/// it).
+pub async fn reload_if_secrets_changed(db_path: &Path, id: &str) {
+    // The type first, through a projection that reads no secret: every page with
+    // an auth dialog polls this route, and most of those rows are types this
+    // process does not host.
+    match type_of(db_path, id) {
+        Ok(Some(integration_type)) if hosts_type(&integration_type) => {}
+        // Not ours, or deleted between the poll and this read. `stop` is the
+        // `DELETE` path's job and has already run; nothing to do here.
+        Ok(_) => return,
+        Err(e) => {
+            log::warn!("reloading integration {id:?} after an auth-status poll: {e}");
+            return;
+        }
+    }
+
+    let row = match get_for_hosting(db_path, id) {
+        Ok(Some(row)) => row,
+        Ok(None) => return,
+        Err(e) => {
+            log::warn!("reloading integration {id:?} after an auth-status poll: {e}");
+            return;
+        }
+    };
+
+    let want = row.is_startable().then(|| row.secrets_fingerprint());
+    if want == registry().secrets(id) {
+        return;
+    }
+
+    log::info!("integration {id:?} changed while its auth status was polled; reloading");
+    if let Err(e) = reload(db_path, id).await {
+        log::warn!("failed to reload integration server after auth: id={id:?} error={e}");
+    }
+}
+
 pub fn reload_blocking(db_path: &Path, id: &str) {
     let db_path = db_path.to_path_buf();
     let owned_id = id.to_string();
@@ -846,6 +1106,96 @@ mod tests {
 
     fn github_credentials() -> String {
         format!(r#"{{"auth_mode":"pat","personal_access_token":"{PAT}"}}"#)
+    }
+
+    /// The poll-driven reload: it fires on a change and, crucially, **not**
+    /// otherwise.
+    ///
+    /// #315 opened the hole this fills — Go reloads after an OAuth token lands
+    /// and `slack` is now hosted here, but the token arrives on the sidecar's own
+    /// callback port, so the UI's polling of `auth/status` is the only part of
+    /// the flow this process sees. A poll is not an event, so the anti-churn half
+    /// is as load-bearing as the firing half: `reload` rebinds the port and drops
+    /// in-flight calls, and the dialog polls every second.
+    #[tokio::test]
+    async fn a_polled_auth_status_reloads_on_a_change_and_not_on_a_poll() {
+        let file = db();
+        // Unauthenticated, so not startable. Slack would be the true subject, but
+        // its starter needs a live token to be interesting; the condition under
+        // test is type-blind and github is the type these tests already seed.
+        insert(
+            &file,
+            "gh-oauth",
+            "github",
+            true,
+            None,
+            &github_credentials(),
+            "{}",
+        );
+
+        // Nothing hosted and nothing startable: the poll must be a no-op rather
+        // than an attempt.
+        reload_if_secrets_changed(file.path(), "gh-oauth").await;
+        assert!(!registry().is_hosted("gh-oauth"));
+
+        // The token lands — which is what Go's `handleOAuthToken` does, and what
+        // it then tells nobody about.
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE integrations SET auth = ?1 WHERE id = 'gh-oauth'",
+                rusqlite::params![r#"{"login":"octocat"}"#],
+            )
+            .expect("authenticate");
+
+        reload_if_secrets_changed(file.path(), "gh-oauth").await;
+        assert!(
+            registry().is_hosted("gh-oauth"),
+            "the poll after the token landed must host it"
+        );
+        let first = registry()
+            .url("gh-oauth")
+            .expect("a hosted server has a url");
+
+        // …and every later poll must leave it exactly where it is. A changed
+        // port here would mean the dialog restarts the server once a second.
+        for _ in 0..3 {
+            reload_if_secrets_changed(file.path(), "gh-oauth").await;
+            assert_eq!(
+                registry().url("gh-oauth").as_deref(),
+                Some(first.as_str()),
+                "a poll that changed nothing must not rebind the port"
+            );
+        }
+
+        // A token *replaced* is a change, and must be picked up.
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE integrations SET credentials = ?1 WHERE id = 'gh-oauth'",
+                rusqlite::params![r#"{"auth_mode":"pat","personal_access_token":"ghp-second"}"#],
+            )
+            .expect("re-authenticate");
+        reload_if_secrets_changed(file.path(), "gh-oauth").await;
+        assert!(registry().is_hosted("gh-oauth"));
+        assert_ne!(
+            registry().url("gh-oauth").as_deref(),
+            Some(first.as_str()),
+            "a replaced credential must restart the server"
+        );
+
+        // …and a de-authentication stops it.
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "UPDATE integrations SET auth = NULL WHERE id = 'gh-oauth'",
+                [],
+            )
+            .expect("de-authenticate");
+        reload_if_secrets_changed(file.path(), "gh-oauth").await;
+        assert!(!registry().is_hosted("gh-oauth"));
+
+        registry().stop("gh-oauth");
     }
 
     /// The whole lifecycle over the one type Rust hosts.
@@ -928,7 +1278,7 @@ mod tests {
     /// two ways to put a credential on two open ports at once.
     #[test]
     fn the_sidecar_is_told_exactly_what_this_process_hosts() {
-        assert_eq!(hosting_env_value(), "off:github,confluence,jira");
+        assert_eq!(hosting_env_value(), "off:github,confluence,jira,slack");
         assert_eq!(
             hosting_env_value(),
             format!("off:{}", HOSTED_TYPES.join(",")),
@@ -937,11 +1287,12 @@ mod tests {
         assert!(hosts_type("github"));
         assert!(hosts_type("confluence"));
         assert!(hosts_type("jira"));
-        // The three types #313–#315 still owe. Go must keep hosting every one of
+        assert!(hosts_type("slack"));
+        // The two types #313 and #314 still owe. Go must keep hosting every one of
         // them, and `whatsapp` is the reason this is a list at all: its starter
         // opens a live whatsmeow connection that its status, reconnect and QR
         // endpoints read out of a package global.
-        for unported in ["slack", "telegram", "google", "whatsapp"] {
+        for unported in ["telegram", "google", "whatsapp"] {
             assert!(!hosts_type(unported), "{unported} is not hosted here");
             assert!(
                 !hosting_env_value().contains(unported),
@@ -997,7 +1348,7 @@ mod tests {
             .await
             .expect("a server to race with");
         assert!(
-            !registry().put_if_current("gh-race", generation, server),
+            !registry().put_if_current("gh-race", generation, server, 0),
             "a handle whose generation has moved must be refused"
         );
         assert!(!registry().is_hosted("gh-race"));
@@ -1007,7 +1358,7 @@ mod tests {
         let server = start_filtered_server(file.path(), "gh-race", &[])
             .await
             .expect("server");
-        assert!(registry().put_if_current("gh-race", generation, server));
+        assert!(registry().put_if_current("gh-race", generation, server, 0));
         assert!(registry().is_hosted("gh-race"));
         registry().stop("gh-race");
     }
@@ -1019,21 +1370,24 @@ mod tests {
         let file = db();
         insert(
             &file,
-            "sl-1",
-            "slack",
+            "tg-1",
+            "telegram",
             true,
             Some(r#"{"validated":true}"#),
-            r#"{"bot_token":"xoxb-secret"}"#,
+            r#"{"bot_token":"tg-secret"}"#,
             r#"{"chat":{"enabled":true,"tools":["post"]}}"#,
         );
 
         // `start_all` swallows it: one bad integration must not stop the others.
         start_all(file.path()).await.expect("start_all swallows it");
-        assert!(!registry().is_hosted("sl-1"));
+        assert!(!registry().is_hosted("tg-1"));
 
         // `reload` returns it, and its callers are the ones that swallow.
-        let err = reload(file.path(), "sl-1").await.expect_err("no starter");
-        assert_eq!(err, r#"no starter registered for integration type "slack""#);
+        let err = reload(file.path(), "tg-1").await.expect_err("no starter");
+        assert_eq!(
+            err,
+            r#"no starter registered for integration type "telegram""#
+        );
     }
 
     /// A row that has been deleted is `Ok(())`, not a failure — `DELETE` stops
@@ -1187,7 +1541,7 @@ mod tests {
     async fn a_filtered_server_refuses_the_way_go_refuses() {
         let file = db();
         insert(&file, "gh-off", "github", false, Some("{}"), "{}", "{}");
-        insert(&file, "sl-1", "slack", true, Some("{}"), "{}", "{}");
+        insert(&file, "tg-1", "telegram", true, Some("{}"), "{}", "{}");
 
         // `.err()` rather than `unwrap_err()`: the `Ok` side is an
         // `InProcessMcpServer`, which deliberately has no `Debug` — printing
@@ -1208,9 +1562,9 @@ mod tests {
             r#"integration "gh-off" is not enabled or not authenticated"#
         );
         assert_eq!(
-            refusal("sl-1").await,
-            r#"no starter registered for integration type "slack""#
+            refusal("tg-1").await,
+            r#"no starter registered for integration type "telegram""#
         );
-        assert!(!can_host(file.path(), "sl-1").expect("can_host"));
+        assert!(!can_host(file.path(), "tg-1").expect("can_host"));
     }
 }
