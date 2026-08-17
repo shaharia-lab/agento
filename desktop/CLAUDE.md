@@ -1134,24 +1134,40 @@ Four things that will recur in #313–#316:
   site URL that works. The base is therefore parsed on its own and its *rendered*
   path is the expected prefix; only the tool's suffix is compared against the
   bytes it built, which is sound because that half is fully `gourl`-encoded.
-- **Comparing two `url`-parsed values is blind to the base, and that is a
-  credential leak, not a tidiness point.** `url` treats `\` as an authority
-  separator for a special scheme; `net/url` does not, and rejects the userinfo
-  that results — so `https://evil.com\@acme.atlassian.net` is a parse error to Go
-  (nothing hosted) and host `evil.com` to `url`. Both sides of the guard would
-  then say `evil.com` and every tool would send the user's `Basic` credentials
-  there. `validate_site_url` therefore checks the base itself, once, at `Start`:
-  the host `url` resolved against the one `go_host` resolved (through `url` on
-  both sides, so case, IDN and the default port are not false differences), and
-  `url`'s rendering of the base path against Go's `escape(Path, encodePath)` —
-  which also covers Go escaping `\ ^ | [ ]` where `url` does not, and subsumes
-  the dot-segment case rather than special-casing it. Two more shapes have no
-  sound comparison at all and go with them: a base `url` cannot parse, and one
-  carrying its own `?` or `#`. Go accepts several of these, so each is pinned as
-  a `rust_error` divergence — refusing to host is logged and visible, where the
-  alternative is a request somewhere else. **#313–#316 inherit this**: any
-  integration whose API base comes out of the row needs the base validated, not
-  just the suffix.
+- **The base needs its own validation, and the authority half must be an
+  allowlist rather than a comparison.** This is where getting it wrong sends the
+  user's credentials to somebody else, so it is worth stating the shape of the
+  argument. Comparing the host `url` resolved against the host `net/url` would
+  have resolved catches only a disagreement about where the authority *ends*;
+  where the two read the same substring and *interpret* it differently, the
+  comparison is a tautology — it is the same parser on the same bytes. There are
+  at least three interpretation gaps, each of which grafts the site onto an
+  attacker's domain from a string that reads as the legitimate one:
+  `evil.com\@acme.atlassian.net` (Go: `invalid userinfo`; `url`: host
+  `evil.com`), `acme.atlassian.net%2Eevil.com` (Go: `invalid URL escape`; `url`:
+  `acme.atlassian.net.evil.com`), and a NO-BREAK SPACE between two labels (Go
+  keeps it literally; `url` IDNA-maps it and joins them). `parseHost` is itself
+  an allowlist — `integration_credentials::split_url` says so, having enumerated
+  every ASCII byte through it — so `validate_site_url` uses one too, and a
+  narrower one, because that module may forward what it is unsure of and this
+  one may not: ASCII letters, digits, `.`, `-`, `_`, optional numeric port,
+  applied to the **whole** authority so `@` and `\` are out. Nothing in that set
+  is transformed by either parser, so agreement is by construction. It refuses
+  four things Go serves — userinfo, an IPv6 literal, a non-ASCII host (which
+  Go's own IDNA-blind resolver cannot dial either) and a percent escape — each a
+  logged non-start.
+- **The path half compares against `EscapedPath()`, not against
+  `escape(Path, encodePath)`.** The second is only the first's *fallback*: Go
+  prefers the raw text whenever it is `validEncoded`, whose allowlist admits
+  `! $ & ' ( ) * + , ; = : @ [ ] %` regardless of `shouldEscape`. So `/a!b` and
+  `/a%2Fb` are sent verbatim and `url` renders them identically — comparing
+  against `escape` alone refuses a base that works. `gourl::valid_encoded_path`
+  is that rule; #316 needs it for Jira. The true refusals it keeps are `\` (Go
+  `%5C`, `url` `/`), `^`, `|` and the dot segments. Two more shapes have no
+  sound comparison at all: a base `url` cannot parse, and one carrying its own
+  `?` or `#`. Every refusal Go would have served is pinned as a `rust_error`
+  divergence. **#313–#316 inherit all of this**: any integration whose API base
+  comes out of the row needs the base validated, not just the tool's suffix.
 - **`SetBasicAuth` is `reqwest`'s `basic_auth`.** Both are
   `Basic base64(user + ":" + pass)` with standard (not URL-safe) alphabet. The
   vectors pin the encoded header rather than trusting that, because nothing in a

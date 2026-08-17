@@ -239,24 +239,36 @@ pub async fn start_confluence_mcp_server(
 /// disagree about the **base** — and the two do disagree, in one way that is a
 /// wrong path and one that is a different *host*:
 ///
-/// - **Authority.** `url` treats `\` as an authority separator for a special
-///   scheme; `net/url` does not, and rejects the userinfo that results. So
-///   `https://evil.com\@acme.atlassian.net` is a parse error to Go — nothing is
-///   hosted — while `url` reads the host as `evil.com` and the rest as a path.
-///   Both sides of `absolute`'s comparison would then say `evil.com`, and every
-///   tool would send the user's `Basic` credentials to it. So the host `url`
-///   resolved is compared against the one [`go_host`] resolved, through `url`
-///   on both sides so that case-folding, IDN and the default port cannot make a
-///   false difference.
-///   The comparison has teeth only where the two parsers **split** the
-///   authority differently, so it is paired with a flat refusal of a `%` in the
-///   raw authority — `net/url`'s `parseHost` decodes an escape and then rejects
-///   one that decoded to a byte it would have escaped (`%2E` is an error,
-///   `%C3%A9` is not), while `url` decodes them all. That gap is the same
-///   attack by another route: `https://acme.atlassian.net%2Eevil.com` is a
-///   parse error to Go and `acme.atlassian.net.evil.com` here. `split_url` in
-///   `native/integration_credentials.rs` forwards on the same byte for the same
-///   reason; there is nobody to forward to here, so it is a refusal.
+/// - **Authority — an allowlist, not a comparison.** This is where getting it
+///   wrong sends the user's `Basic` credentials to somebody else, and it is
+///   worth being explicit about why the obvious check does not work. Comparing
+///   the host `url` resolved against the host [`go_host`] resolved catches only
+///   a disagreement about where the authority *ends*; where the two read the
+///   same substring and *interpret* it differently the comparison is a
+///   tautology, because both sides are the same parser on the same bytes. And
+///   there are at least three interpretation gaps, each of which grafts the
+///   site onto an attacker's domain from a string that reads as the legitimate
+///   one:
+///
+///   | input | `net/url` | `url` |
+///   |---|---|---|
+///   | `evil.com\@acme.atlassian.net` | `invalid userinfo` | host `evil.com` |
+///   | `acme.atlassian.net%2Eevil.com` | `invalid URL escape` | host `acme.atlassian.net.evil.com` |
+///   | `acme.atlassian.net<U+00A0>evil.com` | that host, literally | IDNA-mapped |
+///
+///   `parseHost` is itself an allowlist — `split_url` in
+///   `native/integration_credentials.rs` says so, having enumerated every ASCII
+///   byte through it — so the sound shape here is an allowlist too, and a
+///   narrower one, because that module may forward what it is unsure of and
+///   this one may not. The rule is: ASCII letters, digits, `.`, `-` and `_`,
+///   with an optional `:`-separated numeric port. Nothing in that set is
+///   transformed by either parser, so agreement is by construction rather than
+///   by comparison.
+///
+///   It refuses four things Go serves, all deliberate and all logged
+///   non-starts: userinfo (`user:pw@host` — the row carries the credentials in
+///   their own fields), an IPv6 literal, a non-ASCII host (which Go's own
+///   IDNA-blind resolver cannot dial either), and a percent escape.
 /// - **Path encoding.** Go escapes `\ ^ |` in a path and `url` does not, and
 ///   `url` removes dot segments where `net/url` never does — so `/a\b` leaves
 ///   here as `/a/b` against Go's `/a%5Cb`, and `/a/../b` as `/b`. So `url`'s
@@ -336,33 +348,42 @@ pub fn validate_site_url(raw: &str) -> std::result::Result<String, String> {
     }
 
     let clean = raw.trim_end_matches('/');
+
     // The shapes `client::Client::absolute` cannot work behind. See the section
     // above for why each is refused here rather than per call.
+    //
+    // The authority goes first, ahead of even parsing the whole thing, because
+    // it is the one that decides *which server* the credentials reach — so it
+    // should be the sentence in the log whenever it applies, rather than
+    // whichever check happens to notice first.
+    //
+    // By allowlist rather than by comparison — see above for why a comparison
+    // between the two parsers cannot see an interpretation gap, and which three
+    // gaps this closes. The **whole** authority, userinfo included, rather than
+    // [`go_host`]'s post-`@` remainder: `@` and `\` are outside the set, and
+    // refusing them is what makes the two parsers agree on where the authority
+    // *ends* as well as on what it says. `evil.com\@acme.atlassian.net` has a
+    // perfectly plain host once the userinfo is stripped, which is the trap.
+    let authority = go_authority(rest);
+    let (host, port) = match authority.split_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    let plain_host = !host.is_empty()
+        && host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+    // An empty port is Go's `Host` of `acme.atlassian.net:`, which dials 443 on
+    // both sides; anything else must be digits, as `validOptionalPort` requires.
+    let plain_port = port.is_none_or(|port| port.bytes().all(|b| b.is_ascii_digit()));
+    if !plain_host || !plain_port {
+        return Err("invalid site URL: its host is not a plain ASCII hostname".to_string());
+    }
+
     let parsed = reqwest::Url::parse(clean)
         .map_err(|_| "invalid site URL: it is not a URL this build can send a request to")?;
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err("invalid site URL: a query or fragment leaves the path open".to_string());
-    }
-
-    // The host, which is the one disagreement that would send a credential
-    // somewhere else. Both sides go through `url` so that a lower-cased scheme,
-    // an IDN host or an explicit `:443` is not a false difference — what is
-    // being compared is *which host each parser found*, not how it spells one.
-    let authority = go_host(rest);
-    // The comparison below can only see a *split* the two parsers disagree on.
-    // Where they read the same substring and interpret it differently it is a
-    // tautology — and a `%` in a host is exactly that case, since `parseHost`
-    // decodes an escape and then rejects one that decoded to a byte it would
-    // have escaped, while `url` decodes them all. `%2E` is the reachable one.
-    if authority.contains('%') {
-        return Err("invalid site URL: its host holds a percent escape".to_string());
-    }
-    let go_authority = reqwest::Url::parse(&format!("https://{authority}"))
-        .map_err(|_| "invalid site URL: its host is not one this build can send to")?;
-    if go_authority.host() != parsed.host()
-        || go_authority.port_or_known_default() != parsed.port_or_known_default()
-    {
-        return Err("invalid site URL: net/url and url read a different host".to_string());
     }
 
     // …and the path, which is a wrong endpoint on the right host.
@@ -425,18 +446,29 @@ fn go_scheme(raw: &str) -> (String, &str) {
     (String::new(), raw)
 }
 
+/// The whole authority `url.Parse` would take, userinfo and port included —
+/// everything between `//` and the first `/`, `?` or `#`.
+///
+/// Empty when there is no authority at all. Separate from [`go_host`] because
+/// the two checks want different halves: Go's own `u.Host == ""` question wants
+/// the host, and the allowlist in [`validate_site_url`] wants the userinfo too,
+/// since that is where a `\` hides.
+fn go_authority(rest: &str) -> &str {
+    let Some(authority) = rest.strip_prefix("//") else {
+        return "";
+    };
+    match authority.find(['/', '?', '#']) {
+        Some(end) => &authority[..end],
+        None => authority,
+    }
+}
+
 /// The host `url.Parse` would set, given everything after the scheme's colon.
 ///
 /// Empty unless an authority is present (`//…`), and empty for an authority that
 /// is only userinfo — both of which Go answers with `u.Host == ""`.
 fn go_host(rest: &str) -> &str {
-    let Some(authority) = rest.strip_prefix("//") else {
-        return "";
-    };
-    let authority = match authority.find(['/', '?', '#']) {
-        Some(end) => &authority[..end],
-        None => authority,
-    };
+    let authority = go_authority(rest);
     match authority.rfind('@') {
         Some(at) => &authority[at + 1..],
         None => authority,
@@ -571,34 +603,46 @@ mod tests {
         ] {
             assert_eq!(
                 validate_site_url(site),
-                Err("invalid site URL: net/url and url read a different host".to_string()),
+                Err("invalid site URL: its host is not a plain ASCII hostname".to_string()),
                 "{site}"
             );
         }
 
-        // The same graft by the other route: `parseHost` rejects a `%` escape
-        // that decodes to a byte it would have escaped, and `url` decodes them
-        // all — so this reads as the legitimate host and dials a stranger's.
+        // …and every other way the two parsers read a different host from the
+        // same bytes. The second is a percent escape `parseHost` rejects and
+        // `url` decodes; the third is a byte Go keeps literal and `url`
+        // IDNA-maps, which joins the two labels into one attacker-controlled
+        // name. All three read as the legitimate site.
         for site in [
             "https://acme.atlassian.net%2Eevil.com",
             "https://acme.atlassian.net%41x.com",
-            // Go accepts this one (a percent-encoded IDN host); refusing it is
-            // the cost of not being able to tell the two apart without
-            // reproducing `parseHost`, and it is a logged non-start.
+            "https://acme.atlassian.net\u{a0}evil.com",
+            "https://exämple.net",
+            // Refused with them, and Go serves all four: userinfo (the row
+            // carries the credentials in their own fields), an IPv6 literal, a
+            // percent-encoded IDN host, and a non-numeric port.
+            "https://user:pw@acme.atlassian.net",
+            "https://[::1]:8443",
             "https://caf%C3%A9.example.com",
+            "https://acme.atlassian.net:80x",
         ] {
             assert_eq!(
                 validate_site_url(site),
-                Err("invalid site URL: its host holds a percent escape".to_string()),
+                Err("invalid site URL: its host is not a plain ASCII hostname".to_string()),
                 "{site}"
             );
         }
 
-        // …and the legitimate userinfo it must not be confused with.
-        assert_eq!(
-            validate_site_url("https://user:pw@acme.atlassian.net"),
-            Ok("https://user:pw@acme.atlassian.net".to_string())
-        );
+        // …and the ordinary hosts the allowlist must not catch.
+        for site in [
+            "https://acme.atlassian.net",
+            "https://ACME.Atlassian.NET",
+            "https://acme.atlassian.net:8443",
+            "https://intranet_wiki.corp",
+            "https://wiki-1.corp.example.com",
+        ] {
+            assert_eq!(validate_site_url(site), Ok(site.to_string()), "{site}");
+        }
     }
 
     /// The path half of the same disagreement, plus what it must still admit.

@@ -416,7 +416,7 @@ var confluenceSiteURLCases = []struct {
 		// Basic credentials to evil.com.
 		name:      "a backslash before the userinfo is a different host to url and a parse error to Go",
 		input:     `https://evil.com\@acme.atlassian.net`,
-		rustError: "invalid site URL: net/url and url read a different host",
+		rustError: "invalid site URL: its host is not a plain ASCII hostname",
 	},
 	{
 		// Milder, same root: Go escapes `\\ ^ | [ ]` in a path and `url` does
@@ -448,7 +448,25 @@ var confluenceSiteURLCases = []struct {
 		// legitimate host and resolves to a stranger's.
 		name:      "a percent escape in the host decodes to a different domain under url",
 		input:     "https://acme.atlassian.net%2Eevil.com",
-		rustError: "invalid site URL: its host holds a percent escape",
+		rustError: "invalid site URL: its host is not a plain ASCII hostname",
+	},
+	{
+		// The third mechanism, and the one that shows why the rule has to be an
+		// allowlist rather than a comparison between the two parsers: that is a
+		// NO-BREAK SPACE. Go keeps the host literally and cannot resolve it;
+		// `url` IDNA-maps it, joining the two labels into one name somebody else
+		// owns.
+		name:      "a byte Go keeps literal and url IDNA-maps joins two labels into one host",
+		input:     "https://acme.atlassian.net\u00a0evil.com",
+		rustError: "invalid site URL: its host is not a plain ASCII hostname",
+	},
+	{
+		// Refused, and Go serves it. A site URL is not where credentials belong
+		// — the row carries email and API token in their own fields — and
+		// admitting userinfo is what lets a backslash hide in front of the `@`.
+		name:      "userinfo is refused, because it is where a backslash hides",
+		input:     "https://user:pw@acme.atlassian.net",
+		rustError: "invalid site URL: its host is not a plain ASCII hostname",
 	},
 }
 

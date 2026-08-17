@@ -135,7 +135,7 @@
       "case": "a backslash before the userinfo is a different host to url and a parse error to Go",
       "input": "https://evil.com\\@acme.atlassian.net",
       "error": "invalid site URL: parse \"https://evil.com\\\\@acme.atlassian.net\": net/url: invalid userinfo",
-      "rust_error": "invalid site URL: net/url and url read a different host"
+      "rust_error": "invalid site URL: its host is not a plain ASCII hostname"
     },
     {
       "case": "a backslash in the base path is escaped by Go and converted by url",
@@ -157,7 +157,19 @@
       "case": "a percent escape in the host decodes to a different domain under url",
       "input": "https://acme.atlassian.net%2Eevil.com",
       "error": "invalid site URL: parse \"https://acme.atlassian.net%2Eevil.com\": invalid URL escape \"%2E\"",
-      "rust_error": "invalid site URL: its host holds a percent escape"
+      "rust_error": "invalid site URL: its host is not a plain ASCII hostname"
+    },
+    {
+      "case": "a byte Go keeps literal and url IDNA-maps joins two labels into one host",
+      "input": "https://acme.atlassian.net evil.com",
+      "clean": "https://acme.atlassian.net evil.com",
+      "rust_error": "invalid site URL: its host is not a plain ASCII hostname"
+    },
+    {
+      "case": "userinfo is refused, because it is where a backslash hides",
+      "input": "https://user:pw@acme.atlassian.net",
+      "clean": "https://user:pw@acme.atlassian.net",
+      "rust_error": "invalid site URL: its host is not a plain ASCII hostname"
     }
   ],
   "tools": [
