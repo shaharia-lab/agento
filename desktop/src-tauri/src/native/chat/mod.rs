@@ -11,9 +11,9 @@
 //! button would silently do nothing.
 //!
 //! But not every chat *can* run here: an agent whose tools come from an
-//! integration needs one MCP server per provider, and this port has one of the
-//! six still to write (#313), so `runner::build_options` refuses those and
-//! they keep running on the sidecar. Parts of that refusal have gone — the
+//! integration needs one MCP server per provider, and `whatsapp` has no Rust
+//! starter (it is dropped, not deferred), so `runner::build_options` refuses
+//! those and they keep running on the sidecar. Parts of that refusal have gone — the
 //! **local** in-process server (#310), then any agent whose `capabilities.mcp`
 //! names only hosted integrations (**github** since #311, **confluence** since
 //! #317, **jira** since #316, **slack** since #315, **telegram** since #314) — but each only shrinks the set of chats Go still holds; it does not

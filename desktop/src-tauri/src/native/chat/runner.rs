@@ -23,13 +23,13 @@
 //!
 //! **#311 narrowed the `mcp` half rather than removing it.** An agent is served
 //! natively when *every* name in `capabilities.mcp` is an integration this build
-//! can host — `registry::HOSTED_TYPES`, which today means `github` (#312) and
-//! `confluence` (#317), `jira` (#316), `slack` (#315) and `telegram` (#314), and
-//! will mean all six once #313 lands. Three things
+//! can host — `registry::HOSTED_TYPES`, which since #313 means **all six**:
+//! `github` (#312), `confluence` (#317), `jira` (#316), `slack` (#315),
+//! `telegram` (#314) and `google` (#313). Three things
 //! still forward, and [`mcp_plan`] is where each is decided:
 //!
-//! - **A name whose type is not hosted.** A `slack` row has no Rust starter;
-//!   running the turn here would drop its tools.
+//! - **A name whose type is not hosted.** A `whatsapp` row has no Rust starter
+//!   and will not get one; running the turn here would drop its tools.
 //! - **A name with no integration row at all.** Go would still resolve it if
 //!   `mcps.yaml` names it, and this build reads no `mcps.yaml`.
 //! - **Any `mcp` capability at all when `<data dir>/mcps.yaml` exists.** That
@@ -1078,13 +1078,19 @@ mod tests {
     fn an_mcp_name_this_build_cannot_host_forwards() {
         let file = db_with_integration("gh-1", "github");
 
-        // A type with no Rust starter. `google` while #313 is unwritten — the
-        // stand-in has to be a type that is genuinely unported, so it has moved
-        // with each landing and this is the last move available.
-        let google = db_with_integration("gg-1", "google");
-        let err = mcp_plan(Some(&caps_naming("gg-1", None)), Some(google.path()), false)
-            .expect_err("google cannot be hosted");
-        assert!(err.contains(r#"MCP server "gg-1""#), "{err}");
+        // A type with no Rust starter. The stand-in has to be a type that is
+        // genuinely unported, so it moved with each landing — and with #313 it
+        // has arrived at `whatsapp`, which is where it stays: whatsapp is not
+        // deferred but dropped, because its starter opens a live whatsmeow
+        // connection registered in a package global rather than merely a port.
+        let whatsapp = db_with_integration("wa-1", "whatsapp");
+        let err = mcp_plan(
+            Some(&caps_naming("wa-1", None)),
+            Some(whatsapp.path()),
+            false,
+        )
+        .expect_err("whatsapp cannot be hosted");
+        assert!(err.contains(r#"MCP server "wa-1""#), "{err}");
 
         // A name with no integration row: `mcps.yaml` could still name it.
         assert!(mcp_plan(

@@ -600,7 +600,7 @@ of the `Err` arms the cut-over has to turn into a real response.
 | 1 ✅ | Sidecar + proxy | — | done |
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
 | 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274, #275).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. The scheduler's *schedule computation* is ported and pinned (#275); its ownership is not, and is blocked — see below. |
-| 4 ← | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. **GitHub is done (#312)** — `native/integrations/github/`, the worked example for an *integration*. **The registry is done (#311)** — `native/integrations/registry.rs` plus `PUT`/`DELETE /api/integrations/{id}`, and the sidecar now runs with `AGENTO_INTEGRATIONS=off:<the types the shell hosts>`, so every type has exactly one owner. **Confluence is done (#317)** — `native/integrations/confluence/`, the smallest of the six and the one that shows what an integration adds over #312: a per-row API base, basic auth, and a `Start` check that is a decision. **Jira is done (#316)** — `native/integrations/jira/`, Confluence's twin, and the one that shows that a shared credential type does not mean shared behaviour: `jira.Start` validates nothing, so a bad base is answered per call instead of by refusing to host. **Slack is done (#315)** — `native/integrations/slack/`, the first that is not Atlassian-shaped: no model input in the URL at all, and the only integration whose token can come from the `auth` column. **Telegram is done (#314)** — `native/integrations/telegram/`, the outbound half, and the one that reached two reflector divergences the map had recorded as unreachable. **Google is ported (#313)** — `native/integrations/google/`, the last and the only one whose requests are built by a generated client rather than by the handlers, so its vectors are a specification rather than a confirmation; it is deliberately **not** in `HOSTED_TYPES` yet, and that flip is its own change. WhatsApp is **not** among them — but Go still hosts its rows, because its starter opens a live connection rather than just a port; see below. |
+| 4 ← | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. **GitHub is done (#312)** — `native/integrations/github/`, the worked example for an *integration*. **The registry is done (#311)** — `native/integrations/registry.rs` plus `PUT`/`DELETE /api/integrations/{id}`, and the sidecar now runs with `AGENTO_INTEGRATIONS=off:<the types the shell hosts>`, so every type has exactly one owner. **Confluence is done (#317)** — `native/integrations/confluence/`, the smallest of the six and the one that shows what an integration adds over #312: a per-row API base, basic auth, and a `Start` check that is a decision. **Jira is done (#316)** — `native/integrations/jira/`, Confluence's twin, and the one that shows that a shared credential type does not mean shared behaviour: `jira.Start` validates nothing, so a bad base is answered per call instead of by refusing to host. **Slack is done (#315)** — `native/integrations/slack/`, the first that is not Atlassian-shaped: no model input in the URL at all, and the only integration whose token can come from the `auth` column. **Telegram is done (#314)** — `native/integrations/telegram/`, the outbound half, and the one that reached two reflector divergences the map had recorded as unreachable. **Google is done (#313)** — `native/integrations/google/`, the last of the six and the only one whose requests are built by a generated client rather than by the handlers, so its vectors are a specification rather than a confirmation. **With its flip, `HOSTED_TYPES` covers every type the port will ever cover**, and the phase is closed. WhatsApp is **not** among them — but Go still hosts its rows, because its starter opens a live connection rather than just a port; see below. |
 | 5 ← | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
 
 ### The session scanner (`src-tauri/src/native/scanner/`)
@@ -1514,12 +1514,51 @@ token endpoint have to be redirectable. It hands credentials to whatever host it
 names — the token URL receives the `client_secret` and refresh token, the durable
 ones — so it is test-only, and the Rust equivalent is behind `#[cfg(test)]`.
 
-**`google` is deliberately absent from `HOSTED_TYPES`.** Nothing here runs in a
-shipped build yet: the sidecar still hosts Google and this is dormant code with
-its parity pinned. The flip is its own change, because the flip is where the risk
-in this series has actually lived — #315's hosting of Slack silently broke
-`completeOAuth`'s reload, and Google is the *other* provider
-`startProviderCallback` supports, so it lands on the same hook.
+**The flip landed as its own change**, after the port. That split was worth it
+for the reason it was made: the flip is where the risk in this series has lived —
+#315's hosting of Slack silently broke `completeOAuth`'s reload, and Google is the
+*other* provider `startProviderCallback` supports. With both hosted,
+`reload_if_secrets_changed` now covers **every** OAuth integration in the product,
+and there is no longer a case it does not have to catch.
+
+`start_google` is the only starter needing **both** secret columns for different
+things: `credentials` carries the OAuth2 client pair, `auth` carries the token.
+Slack reads `auth` too but only for an access token; here the whole `oauth2.Token`
+matters, because `expiry` decides whether the first tool call refreshes. That is
+also why `google_oauth_token` **refuses a row whose `expiry` does not parse**
+rather than skipping the field as Slack's does — a corrupt expiry means not
+hosted, not hosted-with-a-token-that-never-refreshes.
+
+The accept/reject boundary is measured, not read: the `starting` section of
+`google_vectors.json` records what `google.Start` does with thirty-one
+credential and auth shapes, and the Rust replay calls `google_start_inputs` —
+the function the starter itself calls — so the **order** of the three checks is
+pinned too, not just their sentences.
+
+**Two findings there are worth carrying forward.** The first is a trap Go's own
+writer sets: `omitempty` does not suppress a struct, so `SetOAuthToken` emits
+`"expiry":"0001-01-01T00:00:00Z"` for a token with no expiry rather than omitting
+the key — and `Token.Valid()` treats that zero `time.Time` as **never expiring**.
+Read as an ordinary instant it is permanently expired, the exact inverse, so
+`google_oauth_token` maps it to `None`. The vector that was meant to cover this
+originally tested the *absent* key, a spelling Go's writer can never produce.
+
+The second is that **`gotime::parse_rfc3339` is now the one Go-RFC3339 parser**,
+shared with `native/schedule`'s `run_at` (#275). `chrono::parse_from_rfc3339`
+disagrees with `time.Parse` in **five** ways, in both directions: it accepts a
+lowercase `t`/`z` and a leap second that Go refuses, and refuses a comma decimal
+separator, a one-digit hour and an offset hour past 23 that Go accepts. The last
+three are Go being *laxer*, which a stricter port turns into refusing input Go
+takes — a schedule that will not build, or an integration that will not host.
+#275 found three of the five and wrote `parse_from_rfc3339` plus three guards;
+#313 was about to add a second copy with two. Guarding a convenient library has
+been wrong twice for one reason — **the guard list has to be right about every
+disagreement** — so the shared version parses the grammar and delegates nothing
+but the calendar arithmetic. `GoTime::parse` is deliberately left on chrono: it
+reads `effective_from`, which only this application writes, normalized.
+
+`whatsapp` is now the stand-in in all three "unported type" tests, and it stays
+there: it is dropped rather than deferred.
 
 ### The integration registry, and the port's second ownership flip (#311)
 
@@ -1589,19 +1628,19 @@ asserts both halves, the fallback and the untouched row.
 run uses: `runner.go` reads the integration row afresh per run, builds a
 throwaway server and records nothing. Gating it would have broken every
 integration-using chat, scheduled task and Telegram trigger the sidecar still
-serves — which is now one type, #313's.
+serves — which since #313 is one type, `whatsapp`'s, and permanently so.
 The Go tests assert both halves, because the switch is only safe while that
 asymmetry holds.
 
 Two consequences worth knowing before touching this:
 
-- **Five of the six have starters here** — `github` (#312), `confluence` (#317),
-  `jira` (#316), `slack` (#315) and `telegram` (#314) — **and Go still hosts
-  `google` and `whatsapp`.** A type not
-  in `HOSTED_TYPES` reaches this module's own unregistered-type path — `no
-  starter registered for integration type "slack"`, logged and never surfaced —
-  but in practice it does not reach it at all, because the writes decline it
-  first. Nothing about a Slack or WhatsApp integration changed with this issue.
+- **All six have starters here** — `github` (#312), `confluence` (#317), `jira`
+  (#316), `slack` (#315), `telegram` (#314) and `google` (#313) — **and Go hosts
+  only `whatsapp`.** A type not in `HOSTED_TYPES` reaches this module's own
+  unregistered-type path — `no starter registered for integration type
+  "whatsapp"`, logged and never surfaced — but in practice it does not reach it
+  at all, because the writes decline it first. Nothing about a WhatsApp
+  integration changed with any of these issues, and nothing will.
 - **`reload` is unconditional.** Stop then start, no diff: there is a window
   with no server and the port changes on every save. Reproduced rather than
   improved on, because "nothing changed, skip it" is a different set of live
@@ -1948,12 +1987,11 @@ path cannot try to answer a chat turn with a `Vec<u8>`.
 **The four routes share a process-local registry, so they moved together** —
 `/messages` puts a session in, the others look one up. But not every chat *can*
 run natively: an agent whose tools come from an integration this build cannot
-host still needs #313's **flip** — the port itself has landed, but `google` is not
-in `HOSTED_TYPES` yet — and `runner::build_options` refuses those before any
-subprocess exists. (Most of that refusal is gone — the **local** server (#310)
+host still needs to fall back, and `runner::build_options` refuses those before
+any subprocess exists — but since #313 that is `whatsapp` alone. (Most of that refusal is gone — the **local** server (#310)
 and any agent naming only integrations in `HOSTED_TYPES`: **github** since #311,
 **confluence** since #317, **jira** since #316, **slack** since #315, **telegram**
-since #314. `build_options`
+since #314, **google** since #313 — which is all six. `build_options`
 starts each of them, and is `async` for that reason, returning the listener
 handles alongside the options because dropping one stops its server.) That would strand `/stop` for a chat still running on Go, so
 the three steering routes answer natively **only when Rust holds a live session
