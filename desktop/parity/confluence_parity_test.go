@@ -432,6 +432,24 @@ var confluenceSiteURLCases = []struct {
 		name:  "a pre-escaped base path is accepted, and so is the same path unescaped",
 		input: "https://intranet.example.com/a%20b",
 	},
+	{
+		// `EscapedPath` sends this verbatim even though `escape(Path,
+		// encodePath)` would render it `/a%21b`, because `validEncoded` admits
+		// `!`. A port comparing against `escape` alone would refuse a base that
+		// works — which is why gourl carries `valid_encoded_path`.
+		name:  "a base path validEncoded admits is sent verbatim, not re-escaped",
+		input: "https://intranet.example.com/a!b(c)[d]",
+	},
+	{
+		// The authority graft that a url-to-url comparison cannot see, because
+		// both parsers read the same substring and only disagree on what it
+		// means: `parseHost` rejects an escape that decodes to a byte it would
+		// have escaped, and `url` decodes them all. This reads as the
+		// legitimate host and resolves to a stranger's.
+		name:      "a percent escape in the host decodes to a different domain under url",
+		input:     "https://acme.atlassian.net%2Eevil.com",
+		rustError: "invalid site URL: its host holds a percent escape",
+	},
 }
 
 // ─── The call cases ──────────────────────────────────────────────────────────

@@ -147,6 +147,17 @@
       "case": "a pre-escaped base path is accepted, and so is the same path unescaped",
       "input": "https://intranet.example.com/a%20b",
       "clean": "https://intranet.example.com/a%20b"
+    },
+    {
+      "case": "a base path validEncoded admits is sent verbatim, not re-escaped",
+      "input": "https://intranet.example.com/a!b(c)[d]",
+      "clean": "https://intranet.example.com/a!b(c)[d]"
+    },
+    {
+      "case": "a percent escape in the host decodes to a different domain under url",
+      "input": "https://acme.atlassian.net%2Eevil.com",
+      "error": "invalid site URL: parse \"https://acme.atlassian.net%2Eevil.com\": invalid URL escape \"%2E\"",
+      "rust_error": "invalid site URL: its host holds a percent escape"
     }
   ],
   "tools": [

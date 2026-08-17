@@ -114,6 +114,38 @@ pub fn escape_path(s: &str) -> String {
     escape_bytes(s.as_bytes(), Encoding::Path)
 }
 
+/// Go's `validEncoded(s, encodePath)` — whether `net/url` would send `s` as it
+/// stands rather than re-escaping it.
+///
+/// This is the half of `URL.EscapedPath()` that is easy to miss, and missing it
+/// makes a faithful-looking comparison wrong. `EscapedPath` does **not** simply
+/// return `escape(Path, encodePath)`: when the raw text differs from that and is
+/// *validly encoded*, the raw text wins. And `validEncoded`'s allowlist is wider
+/// than `should_escape`'s — it admits `! $ & ' ( ) * + , ; = : @ [ ] %`
+/// unconditionally, "not specified in RFC 3986 but left alone by modern
+/// browsers".
+///
+/// So `/a!b` is sent verbatim even though `escape` would render it `/a%21b`,
+/// and `/a%2Fb` is sent verbatim even though its decoded form re-escapes to
+/// `/a/b`. A caller comparing another parser's output against `escape` alone
+/// would call both of those a divergence when they are not one.
+///
+/// The one caller today is `native/integrations/confluence`, which uses it to
+/// decide whether a stored site URL is one this build can send where Go sends
+/// it; #316 needs the same question answered for Jira.
+pub fn valid_encoded_path(s: &str) -> bool {
+    s.bytes().all(|c| match c {
+        b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' | b':'
+        | b'@' => true,
+        // "not specified in RFC 3986 but left alone by modern browsers"
+        b'[' | b']' => true,
+        // Percent-encoded, and `unescape` has the job of deciding whether it
+        // decodes at all.
+        b'%' => true,
+        _ => !should_escape(c, Encoding::Path),
+    })
+}
+
 /// Go's `url.PathEscape` — `escape(s, encodePathSegment)`.
 ///
 /// One segment, so `/` is escaped: this is what every
@@ -274,6 +306,37 @@ pub fn route_path(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// `validEncoded`'s allowlist is wider than `should_escape`'s, and the gap
+    /// is the whole reason this function exists rather than a caller comparing
+    /// against [`escape_path`]. Every byte here is one Go sends **verbatim**
+    /// while `escape` would rewrite it.
+    #[test]
+    fn valid_encoded_admits_what_escape_would_rewrite() {
+        for raw in [
+            "/a!b",
+            "/a(b)c",
+            "/a[b]",
+            "/a'b",
+            "/a*b",
+            "/a%2Fb",
+            "/a/../b",
+            "/a:b@c",
+            "/a$b&c",
+            "/a+b,c;d=e",
+            "/plain",
+            "",
+        ] {
+            assert!(valid_encoded_path(raw), "{raw}");
+        }
+        // …and the bytes it refuses, which are the ones `EscapedPath` re-escapes.
+        for raw in [
+            "/a b", "/a\\b", "/a^b", "/a|b", "/a\"b", "/a<b>c", "/a`b", "/a{b}", "/a#b", "/a?b",
+            "/café",
+        ] {
+            assert!(!valid_encoded_path(raw), "{raw}");
+        }
+    }
+
     use super::*;
     use serde::Deserialize;
 
