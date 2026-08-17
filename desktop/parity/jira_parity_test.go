@@ -129,10 +129,14 @@ type jiraHostingVector struct {
 // made Jira answer per call rather than refuse to host.
 type jiraSiteURLVector struct {
 	Case string `json:"case"`
-	// Substituted for the fake's URL wholesale, so this is an absolute URL and
-	// no request can reach the fake.
-	SiteURL string   `json:"site_url"`
-	Tools   []string `json:"tools"`
+	// An absolute URL that never resolves, used as-is by both languages. Empty
+	// when FakeAuthorityPrefix is set, because the fake's port is not stable
+	// across runs and each language substitutes its own.
+	SiteURL string `json:"site_url,omitempty"`
+	// Inserted in front of the fake's authority. Set only for the case where Go
+	// reaches the fake and this port refuses.
+	FakeAuthorityPrefix string   `json:"fake_authority_prefix,omitempty"`
+	Tools               []string `json:"tools"`
 	// What a tools/call answers on the Go side.
 	CallText string `json:"call_text"`
 	IsError  bool   `json:"is_error"`
@@ -299,9 +303,15 @@ var jiraHostingCases = []jiraHostingVector{
 // Each host is one that does not resolve, so Go's own answer is its transport
 // sentence and nothing leaves the machine.
 var jiraSiteURLCases = []struct {
-	name         string
-	siteURL      string
-	rustCallText string
+	name string
+	// An absolute URL that never resolves, used as-is.
+	siteURL string
+	// …or an authority prefix inserted in front of the **fake's** host, so Go
+	// reaches it and answers a real body. That is the only way to record the
+	// refusals this port *adds* over Go: with a host that does not resolve, Go
+	// fails too and the divergence is invisible.
+	fakeAuthorityPrefix string
+	rustCallText        string
 }{
 	{
 		// `url` treats `\` as an authority separator and `net/url` rejects the
@@ -329,6 +339,21 @@ var jiraSiteURLCases = []struct {
 		// diverges; it is here because it is the difference #277 pinned.
 		name:    "plaintext, which Jira's own validator allows and Confluence's does not",
 		siteURL: "http://jira.invalid",
+	},
+	{
+		// The one case where Go **succeeds** and this port refuses, which is
+		// what makes the refusals `Base::new` adds over Go observable at all.
+		// Userinfo is outside its authority allowlist, and it is outside it
+		// because that is where a `\` hides in front of the `@` — the graft
+		// #317 found. Go dials the fake and returns its body; the port answers
+		// the transport sentence and sends nothing.
+		//
+		// An IPv6-literal base is the same class and is not recorded here only
+		// because `httptest` binds 127.0.0.1; it is named in
+		// `native/integrations/base_url.rs` with the other three.
+		name:                "userinfo, which Go dials and this build refuses",
+		fakeAuthorityPrefix: "user:pw@",
+		rustCallText:        "calling Jira GET /rest/api/3/project: request failed",
 	},
 }
 
@@ -546,6 +571,19 @@ func jiraCallCases() []jiraCallCase {
 			args:     map[string]any{"key": "PROJ-1", "comment": "hi"},
 			script:   jiraResponseScript{Status: http.StatusCreated, Body: `{"id":"1"}`},
 		},
+		{
+			// A base ending in a bare `/` contributes one: Go concatenates raw
+			// text, so the target carries an **empty first segment**. `url` renders
+			// `https://x` and `https://x/` with the same `path()`, so a port that
+			// derived its prefix from the rendered path refused every call against
+			// such a base — silently, since nothing trims it for Jira and `Update`
+			// validates nothing.
+			name:     "get_issue/a base ending in a bare slash sends a double slash",
+			tool:     "get_issue",
+			basePath: "/",
+			args:     map[string]any{"key": "PROJ-1"},
+			script:   jiraOK(`{"key":"PROJ-1"}`),
+		},
 
 		// ─── the dot-segment refusal ─────────────────────────────────────────
 		{
@@ -660,8 +698,25 @@ func TestJiraVectors(t *testing.T) {
 	}
 
 	for _, c := range jiraSiteURLCases {
-		vector := runJiraSiteURLCase(t, ctx, c.name, c.siteURL)
+		siteURL := c.siteURL
+		if c.fakeAuthorityPrefix != "" {
+			// `srv.URL` is `http://127.0.0.1:PORT`; put the prefix in front of
+			// the authority so Go actually reaches the fake.
+			siteURL = strings.Replace(srv.URL, "http://", "http://"+c.fakeAuthorityPrefix, 1)
+			fake.arm(jiraOK(`{"values":[]}`))
+		}
+		vector := runJiraSiteURLCase(t, ctx, c.name, siteURL)
 		vector.RustCallText = c.rustCallText
+		if c.fakeAuthorityPrefix != "" {
+			// The fake's port is not stable across runs, so the resolved URL
+			// cannot be frozen; each language rebuilds it from its own fake.
+			vector.SiteURL = ""
+		}
+		// The recorded site URL is what the Rust half must use, so a case built
+		// from the fake's port has to carry the resolved value — and the port is
+		// not stable across runs, which is why the Rust half substitutes its own
+		// authority rather than reading this one verbatim. See `FAKE_AUTHORITY`.
+		vector.FakeAuthorityPrefix = c.fakeAuthorityPrefix
 		want.SiteURLs = append(want.SiteURLs, vector)
 	}
 

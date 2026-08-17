@@ -66,7 +66,14 @@ struct GoServiceConfig {
 #[derive(Deserialize)]
 struct SiteUrlVector {
     case: String,
+    /// An absolute URL that never resolves, used as-is.
+    #[serde(default)]
     site_url: String,
+    /// …or an authority prefix to insert in front of **this** run's fake, for
+    /// the one case where Go reaches it and this port refuses. The Go generator
+    /// could not freeze its own fake's port, so each language rebuilds the URL.
+    #[serde(default)]
+    fake_authority_prefix: String,
     tools: Vec<String>,
     call_text: String,
     is_error: bool,
@@ -241,13 +248,34 @@ fn the_hosted_tool_set_matches_the_go_vectors() {
 #[tokio::test]
 async fn a_site_url_go_serves_and_this_build_cannot_keeps_its_tools_and_refuses_its_calls() {
     let v = vectors();
-    assert!(v.site_urls.len() >= 4, "vectors look partial");
+    assert!(v.site_urls.len() >= 5, "vectors look partial");
+
+    // A fake, for the one case whose site URL points at it: Go dialled its own
+    // fake and got a body, so the divergence is only observable if this side
+    // could have reached one too. Nothing should arrive — that is the assertion.
+    let state = FakeState::default();
+    let app = axum::Router::new()
+        .fallback(serve_fake)
+        .with_state(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the fake");
+    let authority = listener.local_addr().expect("addr").to_string();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
 
     for case in &v.site_urls {
+        let site_url = if case.fake_authority_prefix.is_empty() {
+            case.site_url.clone()
+        } else {
+            format!("http://{}{authority}", case.fake_authority_prefix)
+        };
+
         let server = start_jira_mcp_server(
             &v.integration_id,
             &all_services(),
-            &case.site_url,
+            &site_url,
             &v.email,
             &v.api_token,
         )
@@ -262,7 +290,7 @@ async fn a_site_url_go_serves_and_this_build_cannot_keeps_its_tools_and_refuses_
 
         let tools = ToolServer::new(&v.server_name).with_tools(jira_tools(
             &all_services(),
-            &case.site_url,
+            &site_url,
             &v.email,
             &v.api_token,
         ));
@@ -274,14 +302,31 @@ async fn a_site_url_go_serves_and_this_build_cannot_keeps_its_tools_and_refuses_
             case.case
         );
 
+        state.arm(&ResponseScript {
+            status: 200,
+            body: String::new(),
+        });
         let result = call_tool(&server, "list_projects", &serde_json::json!({})).await;
-        let want = if case.rust_call_text.is_empty() {
-            &case.call_text
+        // Every text this port substitutes is a *failure* where Go produced
+        // something else, so `rust_call_text` carries `is_error` with it — and
+        // here that is not Go's flag at all: the userinfo case records a Go
+        // **success**, which is the whole reason it is in the vectors.
+        let (want, want_error) = if case.rust_call_text.is_empty() {
+            (&case.call_text, case.is_error)
         } else {
-            &case.rust_call_text
+            (&case.rust_call_text, true)
         };
         assert_eq!(result.text, *want, "{}: call text", case.case);
-        assert_eq!(result.is_error, case.is_error, "{}: is_error", case.case);
+        assert_eq!(result.is_error, want_error, "{}: is_error", case.case);
+        if !case.rust_call_text.is_empty() {
+            // Where the two diverge, the port's answer must be a refusal that
+            // never left the process — not a request Go would not have made.
+            assert!(
+                state.0.lock().expect("fake lock").seen.is_none(),
+                "{}: the refusal still reached the network",
+                case.case
+            );
+        }
         for secret in [&v.api_token, &v.email] {
             assert!(
                 !result.text.contains(secret),

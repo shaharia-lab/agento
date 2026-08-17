@@ -378,6 +378,24 @@
       ],
       "call_text": "calling Jira GET /rest/api/3/project: request failed",
       "is_error": true
+    },
+    {
+      "case": "userinfo, which Go dials and this build refuses",
+      "fake_authority_prefix": "user:pw@",
+      "tools": [
+        "add_comment",
+        "create_issue",
+        "get_issue",
+        "get_project",
+        "list_projects",
+        "list_transitions",
+        "search_issues",
+        "transition_issue",
+        "update_issue"
+      ],
+      "call_text": "Projects: {\"values\":[]}",
+      "is_error": false,
+      "rust_call_text": "calling Jira GET /rest/api/3/project: request failed"
     }
   ],
   "calls": [
@@ -889,6 +907,28 @@
       },
       "is_error": false,
       "text": "Comment added: {\"id\":\"1\"}"
+    },
+    {
+      "case": "get_issue/a base ending in a bare slash sends a double slash",
+      "tool": "get_issue",
+      "base_path": "/",
+      "arguments": {
+        "key": "PROJ-1"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"key\":\"PROJ-1\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "//rest/api/3/issue/PROJ-1",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Issue: {\"key\":\"PROJ-1\"}"
     },
     {
       "case": "get_issue/a dot-dot segment reaches a different endpoint under url",

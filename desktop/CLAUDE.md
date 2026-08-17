@@ -1230,6 +1230,17 @@ per-call dot-segment guard). Read its header before porting anything else whose
 API base comes out of the row; #313–#315 do not need it, because theirs are
 constants.
 
+**The base's path prefix comes from whether it contributed any path *text*, not
+from what `url` rendered.** `url::Url::parse` gives both `https://x` and
+`https://x/` a `path()` of `/`, while Go concatenates raw text — so
+`https://x/` + `/rest/api/3/project` goes on the wire as `//rest/api/3/project`,
+empty first segment intact. Deriving the prefix from the rendered path made such
+a base refuse every call. It is reachable on Jira and not on Confluence, and the
+asymmetry is the same one twice: `validate_site_url` trims trailing slashes
+before `Base::new` sees them, while `jira.Start` trims nothing — and `Update`
+validates nothing on either, so a user retyping the URL in the edit form can
+store one.
+
 Four things in `tools.go` that look like mistakes, are Go's behaviour, and are
 pinned:
 

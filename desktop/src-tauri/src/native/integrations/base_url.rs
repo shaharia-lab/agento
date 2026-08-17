@@ -195,9 +195,21 @@ impl Base {
 
         Ok(Self {
             raw: raw.to_string(),
-            prefix: match parsed.path() {
-                "/" => String::new(),
-                path => path.to_string(),
+            // Whether the base contributed any path *text*, not what `url`
+            // rendered — because `url` renders both `https://x` and `https://x/`
+            // as `/` and Go does not treat them alike. Go concatenates, so
+            // `https://x/` + `/rest/api/3/project` is `//rest/api/3/project` on
+            // the wire, with the empty first segment intact. Deriving the prefix
+            // from `parsed.path() == "/"` made that base refuse every call.
+            //
+            // Reachable on Jira and not on Confluence: `validate_site_url` trims
+            // trailing slashes before it gets here, while `jira.Start` trims
+            // nothing and `Update` validates nothing, so a user retyping the URL
+            // in the edit form can store one.
+            prefix: if raw_path.is_empty() {
+                String::new()
+            } else {
+                parsed.path().to_string()
             },
         })
     }
@@ -356,6 +368,49 @@ mod tests {
                 Base::new(raw).unwrap_or_else(|e| panic!("{raw} is a base Go serves: {e:?}"));
             assert_eq!(base.prefix, prefix, "{raw}");
         }
+    }
+
+    /// A base ending in a bare `/` contributes one, and `url` cannot tell you so.
+    ///
+    /// `url::Url::parse` renders both `https://x` and `https://x/` with
+    /// `path() == "/"`, but Go concatenates raw text: `https://x/` +
+    /// `/rest/api/3/project` goes on the wire as `//rest/api/3/project`, empty
+    /// first segment and all. Deriving the prefix from the *rendered* path made
+    /// such a base refuse every call — silently, on Jira, where nothing trims it
+    /// and nothing validates it on `PUT`.
+    #[test]
+    fn a_base_ending_in_a_slash_contributes_one() {
+        let bare = Base::new("https://acme.atlassian.net").expect("no path");
+        assert_eq!(bare.prefix(), "");
+        assert_eq!(
+            bare.resolve("/rest/api/3/project")
+                .expect("resolves")
+                .path(),
+            "/rest/api/3/project"
+        );
+
+        let slashed = Base::new("https://acme.atlassian.net/").expect("a bare slash");
+        assert_eq!(slashed.prefix(), "/");
+        assert_eq!(
+            slashed
+                .resolve("/rest/api/3/project")
+                .expect("resolves")
+                .path(),
+            "//rest/api/3/project",
+            "Go sends the empty first segment, so this must too"
+        );
+
+        // …and the same one step down, which never had the bug because the
+        // rendered path is not `/`.
+        let nested = Base::new("https://acme.atlassian.net/jira/").expect("a trailing slash");
+        assert_eq!(nested.prefix(), "/jira/");
+        assert_eq!(
+            nested
+                .resolve("/rest/api/3/project")
+                .expect("resolves")
+                .path(),
+            "/jira//rest/api/3/project"
+        );
     }
 
     /// The path half of the disagreement, and the two shapes with no comparison

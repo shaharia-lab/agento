@@ -95,13 +95,34 @@ pub struct Client {
 }
 
 impl Client {
+    /// Builds the client, checking the base **once**.
+    ///
+    /// A rejected base is logged here and nowhere else, which is the one place
+    /// this port is less visible than Confluence's: there a bad site URL fails
+    /// `Start`, so the registry logs it and the integration is plainly absent.
+    /// Here the server starts, all nine tools are advertised, and every call
+    /// answers a transport sentence — so without this line the only symptom
+    /// would be a Jira integration that never works and never says why. The
+    /// *reason* is logged and the site URL is not: it is a stored value from the
+    /// credentials blob and this is a shared log file.
     pub fn new(
         site_url: impl Into<String>,
         email: impl Into<String>,
         api_token: impl Into<String>,
     ) -> Self {
+        let base = match Base::new(&site_url.into()) {
+            Ok(base) => Some(base),
+            Err(mismatch) => {
+                log::warn!(
+                    "jira site URL cannot be used: {mismatch:?} — the server will host \
+                     its tools and every call will fail; see \
+                     native/integrations/base_url.rs"
+                );
+                None
+            }
+        };
         Self {
-            base: Base::new(&site_url.into()).ok(),
+            base,
             email: email.into(),
             api_token: api_token.into(),
         }
