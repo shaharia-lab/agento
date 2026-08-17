@@ -336,16 +336,45 @@ is logged and forwarded to Go rather than turned into a 500 — a ported route
 can only ever be as broken as an unported one. That is what makes flipping a
 route safe: the worst case is the behaviour the app had before.
 
-**The one place that property does not hold today is the guards** (#329): a
-natively-served request never reaches `internal/server/guards.go`, so neither
-`validateHost` nor `requireJSONContentType` applies to any ported route, and the
-guards' coverage shrinks with every endpoint the port claims. It has been true
-since #274 and it belongs with the proxy rather than with any one area, so it is
-tracked separately — but it is worth knowing while porting, because the surfaces
-being claimed now include `~/.claude/settings.json` and its `hooks` key, and
-since #296 `POST /api/fs/mkdir`, whose effect is a directory at an arbitrary
-absolute path. Both are bounded — mkdir creates an empty `0750` directory and
-nothing else — but they are the class of route that paragraph exists to flag.
+**The guards used to be the one place that property did not hold, and now they
+are not** (#329). A natively-served request never reached
+`internal/server/guards.go`, so neither `validateHost` nor
+`requireJSONContentType` applied to any ported route and the guards' coverage
+shrank with every endpoint the port claimed — true since #274, and increasingly
+pointed as the claimed surfaces came to include `~/.claude/settings.json` with
+its `hooks` key and `POST /api/fs/mkdir`.
+
+`src-tauri/src/guards.rs` is `guards.go` at the proxy, applied in `dispatch`
+**before** the seam decides who answers, so a claimed route and a forwarded one
+are refused identically. Four things about it are load-bearing:
+
+- **It is scoped to `/api`, exactly as Go's is.** `POST /webhooks/telegram/{id}`
+  is mounted at the root, arrives from Telegram's servers with a foreign `Host`
+  and is authenticated by its own secret token; a global guard would break
+  inbound triggers. `/health`, `/metrics` and the SPA are likewise untouched.
+- **For the content type the sidecar's copy is a second line. For the `Host` it
+  is not.** `forward` rewrites `Host` to the upstream authority — that is what
+  makes a proxied request indistinguishable from a same-origin one, and the
+  sidecar would 403 everything without it — so Go's `validateHost` has never
+  seen the browser's `Host`. The proxy is the only place it can be checked,
+  which is also why the check runs before `gourl::route_path`: the two "no route
+  path" cases forward, and forwarding is where the `Host` is lost.
+- **A body-less request is not exempt**, whatever the root `CLAUDE.md` said
+  before this change and whatever #329's own text repeated. `guards_test.go`
+  pins "a body-less DELETE is refused without the header", and the reason is in
+  `guards.go`'s comment: several state-changing endpoints take no body, and a
+  cross-origin `POST` with neither body nor `Content-Type` is *itself* a simple
+  request. `api.ts` sends the header on every request, so requiring it always
+  costs nothing.
+- **The two branches of `hostAllowed` that depend on deployment are not
+  reproduced.** Go admits the configured `PublicURL`'s host and, for a
+  non-loopback `AGENTO_BIND`, any bare IP literal. The proxy binds `127.0.0.1`
+  unconditionally and has no public URL, so `localhost` and loopback literals
+  are the whole set; adding either branch would widen the guard past anything
+  the app can be reached at.
+
+A rejection logs as `Served::Rejected` (`rejected`) rather than under either
+half, because the check runs before routing is decided.
 
 Because both implementations run at once, a ported route is verifiable:
 replay the same request against Rust and against Go and diff the JSON.

@@ -167,6 +167,11 @@ enum Served {
     NativeFailedForwarded,
     /// Shadow-diff mode: Go answered and Rust was computed alongside it.
     Diff,
+    /// Neither half was reached: `guards.rs` refused the request (#329). Its own
+    /// variant because it is the one line here that does *not* name a half of
+    /// the seam — the check runs before routing is decided, deliberately, so
+    /// that a claimed route and a forwarded one are guarded identically.
+    Rejected,
 }
 
 impl Served {
@@ -177,6 +182,7 @@ impl Served {
             Served::Forwarded => "forwarded",
             Served::NativeFailedForwarded => "native-failed-forwarded",
             Served::Diff => "diff",
+            Served::Rejected => "rejected",
         }
     }
 }
@@ -308,6 +314,23 @@ async fn dispatch(
     req: Request<Body>,
     raw_path: String,
 ) -> (Response<Body>, Served) {
+    // `internal/server/guards.go`, applied **before** the seam decides who
+    // answers (#329) — so a claimed route and a forwarded one are guarded
+    // identically, and the guards' coverage stops shrinking with every endpoint
+    // the port claims.
+    //
+    // Before the `gourl::route_path` resolution below, not after, and that
+    // ordering is the security-relevant one: `forward` rewrites the `Host` to
+    // the upstream authority, so anything that forwards has already lost the
+    // browser's `Host` by the time Go's own `validateHost` sees it. Leaving the
+    // two "no route path" cases unguarded would hand a rebinding request
+    // straight through. The cost is that a *malformed escape* is answered 415 or
+    // 403 here where Go answers 400 from inside `net/http` — a refusal either
+    // way, with no handler reached on either side.
+    if let Some((status, message)) = crate::guards::reject(&req) {
+        return (error_response(status, message), Served::Rejected);
+    }
+
     // From here on, the path every claim function sees is the one **chi** would
     // route on, not the raw request target (#294). They are not the same string:
     // `net/http` decodes the target into `url.URL` before any handler runs, and
@@ -691,6 +714,52 @@ mod tests {
             "native-failed-forwarded"
         );
         assert_eq!(Served::Diff.label(), "diff");
+        assert_eq!(Served::Rejected.label(), "rejected");
+    }
+
+    /// The guards run before the seam decides who answers, so a claimed route
+    /// and a forwarded one are refused identically (#329). Reachable without a
+    /// live sidecar for the same reason the over-cap case above is: the arm
+    /// returns before any forward.
+    #[tokio::test]
+    async fn a_guard_rejection_precedes_both_halves_of_the_seam() {
+        let state = ProxyState {
+            // Never dialled. If it ever is, the test fails on the status rather
+            // than hanging, because nothing is listening on port 1.
+            upstream: "http://127.0.0.1:1".to_string(),
+            client: reqwest::Client::new(),
+        };
+
+        // A claimed write route, and the shape that made #329 exploitable: a
+        // cross-origin `POST` carrying `text/plain` is a CORS simple request, so
+        // the browser sends it with no preflight.
+        let path = "/api/agents".to_string();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(&path)
+            .header(header::HOST, "localhost")
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::from(r#"{"name":"pwned","slug":"pwned"}"#))
+            .expect("request");
+
+        let (response, served) = dispatch(state.clone(), req, path.clone()).await;
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(served, Served::Rejected);
+
+        // And a route nothing claims, which would otherwise have been forwarded
+        // — port 1 is what proves it was not.
+        let path = "/api/settings".to_string();
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri(&path)
+            .header(header::HOST, "attacker.example.com")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .expect("request");
+
+        let (response, served) = dispatch(state, req, path).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(served, Served::Rejected);
     }
 
     #[test]
@@ -758,6 +827,10 @@ mod tests {
         let req = Request::builder()
             .method(Method::POST)
             .uri(&path)
+            // Both headers are required since #329: the guards run ahead of the
+            // seam, so a request without them never reaches the arm under test.
+            .header(header::HOST, "localhost")
+            .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(vec![0u8; MAX_NATIVE_BODY + 1]))
             .expect("request");
 
