@@ -126,7 +126,7 @@ struct TestSession {
 fn fixture(sessions: &[TestSession]) -> Connection {
     let conn = Connection::open_in_memory().expect("in-memory database");
     conn.execute_batch(SCHEMA).expect("schema");
-    for s in sessions {
+    for (i, s) in sessions.iter().enumerate() {
         let last = if s.last_activity.is_empty() {
             "2026-08-01 12:00:00 +0000 UTC"
         } else {
@@ -157,13 +157,18 @@ fn fixture(sessions: &[TestSession]) -> Connection {
             || s.sub_cost_usd != 0.0
             || s.sub_active_ms != 0
         {
+            // The agent id is per row, not a constant: `claude_subagent_cache`
+            // is keyed on `(parent_session_id, agent_id)`, so two rows sharing
+            // a session id — which the composite session key now admits —
+            // would otherwise collide here instead of expressing the shape.
             conn.execute(
                 "INSERT INTO claude_subagent_cache
                     (parent_session_id, agent_id, input_tokens, output_tokens,
                      total_cost_usd, active_duration_ms)
-                 VALUES (?, 'agent-1', ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, ?, ?, ?)",
                 rusqlite::params![
                     s.id,
+                    format!("agent-{i}"),
                     s.sub_input_tokens,
                     s.sub_output_tokens,
                     s.sub_cost_usd,
