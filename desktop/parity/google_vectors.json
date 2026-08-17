@@ -374,6 +374,146 @@
       ]
     }
   ],
+  "starting": [
+    {
+      "case": "the ordinary shape",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": ""
+    },
+    {
+      "case": "an empty auth column is unauthenticated",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "",
+      "error": "integration \"goog-parity\" has no auth token"
+    },
+    {
+      "case": "a literal null auth column is unauthenticated",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "null",
+      "error": "integration \"goog-parity\" has no auth token"
+    },
+    {
+      "case": "an empty auth object is authenticated and hosts",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{}",
+      "error": ""
+    },
+    {
+      "case": "no expiry at all is Go's zero time, which never expires",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"refresh_token\":\"1//y\"}",
+      "error": ""
+    },
+    {
+      "case": "a malformed expiry fails the auth parse",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"not a time\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"not a time\" as \"2006-01-02T15:04:05Z07:00\": cannot parse \"not a time\" as \"2006\""
+    },
+    {
+      "case": "an expiry without a zone fails too",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T00:00:00\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01T00:00:00\" as \"2006-01-02T15:04:05Z07:00\": cannot parse \"\" as \"Z07:00\""
+    },
+    {
+      "case": "a date-only expiry fails too",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01\" as \"2006-01-02T15:04:05Z07:00\": cannot parse \"\" as \"T\""
+    },
+    {
+      "case": "an offset expiry is accepted",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T00:00:00+05:30\"}",
+      "error": ""
+    },
+    {
+      "case": "a numeric expiry is a type error",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":1893456000}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: Time.UnmarshalJSON: input is not a JSON string"
+    },
+    {
+      "case": "a null expiry is the zero time",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":null}",
+      "error": ""
+    },
+    {
+      "case": "an empty string expiry fails",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"\" as \"2006-01-02T15:04:05Z07:00\": cannot parse \"\" as \"2006\""
+    },
+    {
+      "case": "a lowercase t and z separator",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01t00:00:00z\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01t00:00:00z\" as \"2006-01-02T15:04:05Z07:00\": cannot parse \"t00:00:00z\" as \"T\""
+    },
+    {
+      "case": "a one-digit fractional second",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T00:00:00.5Z\"}",
+      "error": ""
+    },
+    {
+      "case": "a trailing space after the zone fails",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T00:00:00Z \"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01T00:00:00Z \": extra text: \" \""
+    },
+    {
+      "case": "a leap second",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-06-30T23:59:60Z\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-06-30T23:59:60Z\": second out of range"
+    },
+    {
+      "case": "an out-of-range month",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-13-01T00:00:00Z\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-13-01T00:00:00Z\": month out of range"
+    },
+    {
+      "case": "an auth array is not a struct",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "[\"ya29.x\"]",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: json: cannot unmarshal array into Go value of type oauth2.Token"
+    },
+    {
+      "case": "empty credentials fail the credentials parse",
+      "credentials": "",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": "parsing google credentials for \"goog-parity\": credentials are empty"
+    },
+    {
+      "case": "a null credentials blob is a no-op, so the client id is empty",
+      "credentials": "null",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": ""
+    },
+    {
+      "case": "a credentials array is not a struct",
+      "credentials": "[\"cid\",\"secret\"]",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": "parsing google credentials for \"goog-parity\": json: cannot unmarshal array into Go value of type config.GoogleCredentials"
+    },
+    {
+      "case": "credentials that are not JSON at all",
+      "credentials": "nope",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": "parsing google credentials for \"goog-parity\": invalid character 'o' in literal null (expecting 'u')"
+    },
+    {
+      "case": "empty credentials fields still host",
+      "credentials": "{\"client_id\":\"\",\"client_secret\":\"\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": ""
+    }
+  ],
   "calls": [
     {
       "case": "create_event/a full event, with encoding/json's HTML escaping",

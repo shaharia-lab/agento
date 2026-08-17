@@ -1979,7 +1979,10 @@ mod tests {
     /// reload strands a socket and a paired client that never connects.
     #[test]
     fn a_write_for_a_type_the_sidecar_hosts_forwards_without_touching_the_row() {
-        for integration_type in ["whatsapp", "google"] {
+        // `whatsapp` alone since #313 landed google — and it is the case that
+        // makes this more than tidiness, per the doc comment above.
+        {
+            let integration_type = "whatsapp";
             let file = migrated();
             Connection::open(file.path())
                 .expect("open")

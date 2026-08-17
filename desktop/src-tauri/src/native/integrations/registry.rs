@@ -4,9 +4,10 @@
 //! Go keeps one long-lived in-process MCP server per enabled, authenticated
 //! integration: `Start` brings them all up at boot, `Reload` restarts one when
 //! its row changes, `Stop` tears one down when it is deleted. This module is
-//! that, for the types listed in [`HOSTED_TYPES`] — today five of the six:
-//! `github` (#312), `confluence` (#317), `jira` (#316), `slack` (#315) and
-//! `telegram` (#314).
+//! that, for the types listed in [`HOSTED_TYPES`] — since #313, **all six**:
+//! `github` (#312), `confluence` (#317), `jira` (#316), `slack` (#315),
+//! `telegram` (#314) and `google` (#313). `whatsapp` is not among them and is
+//! not waiting to be: see below.
 //!
 //! ## Why the ownership had to flip before the writes could move
 //!
@@ -27,7 +28,7 @@
 //!
 //! It is tempting to read a starter as a pure MCP-server constructor, in which
 //! case switching Go's hosting off costs a bound port and nothing else. That is
-//! true of five of the six. It is **not** true of `whatsapp`:
+//! true of all six of the ported types. It is **not** true of `whatsapp`:
 //! `internal/integrations/whatsapp/server.go` opens a real whatsmeow WebSocket,
 //! registers the live client in a package global and only then returns a server
 //! config, and `whatsapp/status.go`'s `ConnectionStatus` reads that global. So
@@ -85,8 +86,10 @@
 //!
 //! `Reload` has seven callers in Go and only two of them (`Update`, and
 //! `Delete` via `Stop`) are ported. Five run inside the sidecar, and as of #314
-//! **none of them is safe by the per-type gate any more** — five of the six types
-//! are hosted here, so a `Reload` for one reaches nothing in the sidecar.
+//! **none of them is safe by the per-type gate any more** — and as of #313 every
+//! one of the six is hosted here, so a `Reload` for any of them reaches nothing
+//! in the sidecar. There is no longer a type for which those callers happen to
+//! be harmless.
 //!
 //! Four are the token validators — `validateGitHubPATAuth` and, since #314–#317,
 //! `validateTelegramTokenAuth`, `validateSlackTokenAuth`, `validateJiraTokenAuth`
@@ -196,7 +199,14 @@ impl HostingRow {
 /// native `PUT`/`DELETE` consult before they touch a row), the starter dispatch
 /// in [`start_for_type`], and [`hosting_env_value`], which tells the Go sidecar
 /// which types to stop hosting. #313 adds the last string here.
-pub const HOSTED_TYPES: &[&str] = &["github", "confluence", "jira", "slack", "telegram"];
+pub const HOSTED_TYPES: &[&str] = &[
+    "github",
+    "confluence",
+    "jira",
+    "slack",
+    "telegram",
+    "google",
+];
 
 /// Whether this process hosts an integration of the given type.
 pub fn hosts_type(integration_type: &str) -> bool {
@@ -445,6 +455,7 @@ async fn start_for_type(row: &HostingRow) -> Result<InProcessMcpServer, String> 
         "jira" => start_jira(&row.id, &row.services(), &row.credentials).await,
         "slack" => start_slack(&row.id, &row.services(), &row.credentials, &row.auth).await,
         "telegram" => start_telegram(&row.id, &row.services(), &row.credentials).await,
+        "google" => start_google(&row.id, &row.services(), &row.credentials, &row.auth).await,
         other => Err(format!(
             "no starter registered for integration type {other:?}"
         )),
@@ -851,10 +862,175 @@ pub async fn start_filtered_server(
         "jira" => start_jira(&row.id, &filtered, &row.credentials).await,
         "slack" => start_slack(&row.id, &filtered, &row.credentials, &row.auth).await,
         "telegram" => start_telegram(&row.id, &filtered, &row.credentials).await,
+        "google" => start_google(&row.id, &filtered, &row.credentials, &row.auth).await,
         other => Err(format!(
             "no starter registered for integration type {other:?}"
         )),
     }
+}
+
+/// `google.Start`'s first two steps — the auth check and the two parses — then
+/// the third, which `native/integrations/google` owns.
+///
+/// Google is the only one of the six whose starter needs **both** secret
+/// columns and needs them for different things: `credentials` carries the OAuth2
+/// client pair, and `auth` carries the token itself. Slack reads `auth` too, but
+/// only for an access token; here the whole `oauth2.Token` matters, because
+/// `expiry` is what decides whether the first tool call refreshes.
+///
+/// Every sentence is Go's and is pinned by the `starting` section of
+/// `desktop/parity/google_vectors.json`.
+async fn start_google(
+    id: &str,
+    services: &BTreeMap<String, ServiceConfig>,
+    credentials: &str,
+    auth: &str,
+) -> Result<InProcessMcpServer, String> {
+    // `Start`'s own `if !cfg.IsAuthenticated()`, kept for the reason the others
+    // keep theirs: `StartFilteredServer` reaches a starter by a different path.
+    if auth.is_empty() || auth == "null" {
+        return Err(format!("integration {id:?} has no auth token"));
+    }
+
+    let (client_id, client_secret) = google_credentials(id, credentials)?;
+    let token = google_oauth_token(id, auth)?;
+
+    super::google::start_google_mcp_server(
+        id,
+        services,
+        std::sync::Arc::new(super::google::client::TokenSource::new(
+            client_id,
+            client_secret,
+            token,
+        )),
+    )
+    .await
+    .map_err(|e| format!("starting in-process MCP server for {id:?}: {e}"))
+}
+
+/// `cfg.ParseCredentials(&creds)` for `config.GoogleCredentials`, wrapped as
+/// `buildHTTPClient` wraps it.
+///
+/// Note what is **not** checked: an empty client id or secret. Go hosts a row
+/// with both empty and every refresh then fails at Google — measured, and not
+/// something to improve on here.
+pub(super) fn google_credentials(id: &str, credentials: &str) -> Result<(String, String), String> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct GoogleCredentials {
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        client_id: String,
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        client_secret: String,
+    }
+
+    if credentials.is_empty() {
+        return Err(format!(
+            "parsing google credentials for {id:?}: credentials are empty"
+        ));
+    }
+    // The three rules: a `null` is a no-op, an array is not a struct, and every
+    // field takes a JSON null as its zero value.
+    serde_json::from_str::<Option<crate::native::gojson::GoStruct<GoogleCredentials>>>(credentials)
+        .map(|wrapped| wrapped.map_or_else(GoogleCredentials::default, |wrapped| wrapped.0))
+        .map(|creds| (creds.client_id, creds.client_secret))
+        .map_err(|e| {
+            // The serde message is dropped for `github_token`'s reason: it
+            // quotes the offending value, which here is the client secret.
+            format!(
+                "parsing google credentials for {id:?}: does not decode at line {} column {}",
+                e.line(),
+                e.column()
+            )
+        })
+}
+
+/// `cfg.ParseOAuthToken()` for Google, wrapped as `buildHTTPClient` wraps it.
+///
+/// The interesting field is `expiry`, a Go `time.Time`, so **the whole token is
+/// refused when it does not parse** — an integration with a corrupt expiry is not
+/// hosted at all rather than hosted with a token that never refreshes. Slack's
+/// equivalent deliberately skips this check because it reads only
+/// `access_token`; here the value decides the refresh.
+pub(super) fn google_oauth_token(
+    id: &str,
+    auth: &str,
+) -> Result<super::google::client::Token, String> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct OAuthToken {
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        access_token: String,
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        refresh_token: String,
+        /// Absent, `null` and a valid RFC3339 string are all legal; anything
+        /// else fails the document. `Option<String>` rather than a time type
+        /// because the *shape* check and the *value* check produce different Go
+        /// sentences, and only a raw string can tell them apart.
+        expiry: Option<serde_json::Value>,
+    }
+
+    let wrap = |message: String| format!("parsing auth token for {id:?}: {message}");
+
+    let parsed = serde_json::from_str::<Option<crate::native::gojson::GoStruct<OAuthToken>>>(auth)
+        .map(|wrapped| wrapped.map_or_else(OAuthToken::default, |wrapped| wrapped.0))
+        .map_err(|e| {
+            // Go's carries `encoding/json`'s wording; this drops it because the
+            // serde message quotes the offending value, which here is the
+            // access token.
+            wrap(format!(
+                "parsing oauth token: does not decode at line {} column {}",
+                e.line(),
+                e.column()
+            ))
+        })?;
+
+    let expiry = match parsed.expiry {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(raw)) => Some(
+            parse_go_rfc3339(&raw)
+                .ok_or_else(|| wrap(format!("parsing oauth token: parsing time {raw:?}")))?,
+        ),
+        // `Time.UnmarshalJSON` checks the JSON shape before the layout.
+        Some(_) => {
+            return Err(wrap(
+                "parsing oauth token: Time.UnmarshalJSON: input is not a JSON string".to_string(),
+            ))
+        }
+    };
+
+    Ok(super::google::client::Token {
+        access_token: parsed.access_token,
+        refresh_token: parsed.refresh_token,
+        expiry,
+    })
+}
+
+/// Go's `time.RFC3339` layout, `2006-01-02T15:04:05Z07:00`, as `time.Parse`
+/// applies it — which is **stricter than `chrono`'s** `parse_from_rfc3339` in two
+/// ways that a stored token can actually reach, both measured against real Go:
+///
+/// - **The separators are case-sensitive.** `2030-01-01t00:00:00z` is a parse
+///   error to Go and accepted by chrono. Go's RFC3339 handling has been strict
+///   since 1.20.
+/// - **A leap second is out of range.** `2030-06-30T23:59:60Z` is
+///   `second out of range` to Go, where chrono represents it.
+///
+/// Everything else agrees: a numeric offset, fractional seconds of any length, a
+/// rejected trailing space, and rejected out-of-range components.
+fn parse_go_rfc3339(raw: &str) -> Option<std::time::SystemTime> {
+    // `T` and the `Z` form of the zone are literals in the layout, so their case
+    // is fixed. A numeric offset carries no letter to check.
+    if !raw.contains('T') || raw.contains('t') || raw.contains('z') {
+        return None;
+    }
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
+    // chrono encodes a leap second as nanosecond >= 1_000_000_000 rather than as
+    // a 60th second, which is how it survives its own parse.
+    if chrono::Timelike::nanosecond(&parsed) >= 1_000_000_000 {
+        return None;
+    }
+    Some(std::time::SystemTime::from(parsed.to_utc()))
 }
 
 /// The row's `type`, and **nothing else** — no `credentials`, no `auth`.
@@ -1065,7 +1241,19 @@ pub async fn reload_after_auth(db_path: &Path, id: &str) {
 /// `slack`. While neither was hosted here that was harmless, and
 /// `registry.rs`'s own header said so. **#315 made `slack` a hosted type**, so
 /// that `Reload` now reaches nothing and a Slack integration authenticated by
-/// OAuth would first be served at the next boot's [`start_all`].
+/// OAuth would first be served at the next boot's [`start_all`]. **#313 made
+/// `google` one too**, which means this hook now covers *both* providers
+/// `startProviderCallback` supports — every OAuth integration in the product
+/// depends on it, and there is no longer a case it does not have to catch.
+///
+/// Google is also the one where being served late costs the most, and for a
+/// reason peculiar to it: a Google token *expires*. Slack's does not, so a Slack
+/// row served at the next boot is merely served late; a Google row carries an
+/// `expiry` that [`super::google::client::TokenSource`] reads, so a token first
+/// picked up hours later may already need the refresh this process would then
+/// have to make on the first tool call. That still works — it is what the refresh
+/// is for — but it turns a silent staleness into a visible one, which is worth
+/// knowing when reading a bug report about a slow first Google call.
 ///
 /// [`reload_after_auth`] cannot cover it: that hook hangs off a *forwarded
 /// request*, and an OAuth token does not arrive on one. It is delivered by the
@@ -1356,7 +1544,7 @@ mod tests {
     fn the_sidecar_is_told_exactly_what_this_process_hosts() {
         assert_eq!(
             hosting_env_value(),
-            "off:github,confluence,jira,slack,telegram"
+            "off:github,confluence,jira,slack,telegram,google"
         );
         assert_eq!(
             hosting_env_value(),
@@ -1368,17 +1556,17 @@ mod tests {
         assert!(hosts_type("jira"));
         assert!(hosts_type("slack"));
         assert!(hosts_type("telegram"));
-        // The one type #313 still owes. Go must keep hosting every one of
-        // them, and `whatsapp` is the reason this is a list at all: its starter
-        // opens a live whatsmeow connection that its status, reconnect and QR
-        // endpoints read out of a package global.
-        for unported in ["google", "whatsapp"] {
-            assert!(!hosts_type(unported), "{unported} is not hosted here");
-            assert!(
-                !hosting_env_value().contains(unported),
-                "{unported} must not be switched off in the sidecar — nobody would host it"
-            );
-        }
+        assert!(hosts_type("google"));
+        // Go must keep hosting every type not on the list — and with #313 landed,
+        // `whatsapp` is the only one left, which is also the reason this is a
+        // list rather than a flag: its starter opens a live whatsmeow connection
+        // that its status, reconnect and QR endpoints read out of a package
+        // global, so switching it off costs the feature rather than a spare port.
+        assert!(!hosts_type("whatsapp"), "whatsapp is not hosted here");
+        assert!(
+            !hosting_env_value().contains("whatsapp"),
+            "whatsapp must not be switched off in the sidecar — nobody would host it"
+        );
     }
 
     /// A type claimed by `HOSTED_TYPES` but missing from the starter dispatch
@@ -1448,25 +1636,28 @@ mod tests {
     #[tokio::test]
     async fn an_unported_type_fails_the_way_gos_unregistered_type_does() {
         let file = db();
+        // `whatsapp` is the stand-in now that #313 has landed google. It is not
+        // a placeholder waiting for a port: its starter opens a live whatsmeow
+        // connection registered in a package global, so it stays Go's.
         insert(
             &file,
-            "gg-1",
-            "google",
+            "wa-1",
+            "whatsapp",
             true,
             Some(r#"{"validated":true}"#),
-            r#"{"client_id":"gg-secret"}"#,
-            r#"{"gmail":{"enabled":true,"tools":["send"]}}"#,
+            r#"{"session":"wa-secret"}"#,
+            r#"{"messaging":{"enabled":true,"tools":["send"]}}"#,
         );
 
         // `start_all` swallows it: one bad integration must not stop the others.
         start_all(file.path()).await.expect("start_all swallows it");
-        assert!(!registry().is_hosted("gg-1"));
+        assert!(!registry().is_hosted("wa-1"));
 
         // `reload` returns it, and its callers are the ones that swallow.
-        let err = reload(file.path(), "gg-1").await.expect_err("no starter");
+        let err = reload(file.path(), "wa-1").await.expect_err("no starter");
         assert_eq!(
             err,
-            r#"no starter registered for integration type "google""#
+            r#"no starter registered for integration type "whatsapp""#
         );
     }
 
@@ -1512,6 +1703,94 @@ mod tests {
             "the integration after the failing one must still be hosted"
         );
         registry().stop("zzz-github");
+    }
+
+    /// `google.Start`'s accept/reject boundary, replayed from the `starting`
+    /// section of `desktop/parity/google_vectors.json`.
+    ///
+    /// The other five integrations' credential parses are asserted by hand.
+    /// Google's is measured, for one reason: its `auth` column decodes as an
+    /// `oauth2.Token` whose `expiry` is a Go `time.Time`, so whether a stored
+    /// value is accepted is `time.Parse`'s decision and not something to guess
+    /// at. Two of the cases below are exactly where `chrono` and Go disagree —
+    /// a lowercase `t`/`z` separator and a leap second, both of which chrono
+    /// accepts and Go refuses.
+    ///
+    /// Only the accept/reject decision is compared. Go's sentences for a bad
+    /// `expiry` embed `time.Parse`'s own layout-diffing wording, and for a
+    /// malformed blob `encoding/json`'s — the second of which is dropped on
+    /// purpose, since serde's quotes the value, which here is the access token.
+    #[test]
+    fn google_start_accepts_exactly_what_go_accepts() {
+        #[derive(serde::Deserialize)]
+        struct StartVector {
+            case: String,
+            credentials: String,
+            auth: String,
+            error: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Vectors {
+            starting: Vec<StartVector>,
+        }
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../parity/google_vectors.json");
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("reading {path}: {e} — regenerate it from Go"));
+        let vectors: Vectors = serde_json::from_str(&raw).expect("parsing the google vectors");
+        assert!(vectors.starting.len() >= 20, "vectors look partial");
+
+        for case in &vectors.starting {
+            // `Start`'s own auth check, then the two parses, in Go's order.
+            let got = if case.auth.is_empty() || case.auth == "null" {
+                Err(r#"integration "goog-parity" has no auth token"#.to_string())
+            } else {
+                google_credentials("goog-parity", &case.credentials)
+                    .and_then(|_| google_oauth_token("goog-parity", &case.auth).map(|_| ()))
+            };
+
+            assert_eq!(
+                got.is_err(),
+                !case.error.is_empty(),
+                "{}: Go said {:?}, this said {:?}",
+                case.case,
+                case.error,
+                got.err().unwrap_or_default()
+            );
+
+            // Whatever it says, it must never name the secret it was handed.
+            if let Err(message) = google_credentials("goog-parity", &case.credentials) {
+                assert!(
+                    !message.contains("GOCSPX"),
+                    "{}: the client secret leaked: {message}",
+                    case.case
+                );
+            }
+        }
+    }
+
+    /// The two places `chrono` is more permissive than Go, called out on their
+    /// own because the vector loop above only proves the pair agree — this says
+    /// which rule is doing the work.
+    #[test]
+    fn the_expiry_parse_is_gos_layout_and_not_chronos() {
+        assert!(parse_go_rfc3339("2030-01-01T00:00:00Z").is_some());
+        assert!(parse_go_rfc3339("2030-01-01T00:00:00+05:30").is_some());
+        assert!(parse_go_rfc3339("2030-01-01T00:00:00.5Z").is_some());
+        // chrono accepts both of these; Go does not.
+        assert!(
+            parse_go_rfc3339("2030-01-01t00:00:00z").is_none(),
+            "Go's RFC3339 separators are case-sensitive"
+        );
+        assert!(
+            parse_go_rfc3339("2030-06-30T23:59:60Z").is_none(),
+            "a leap second is `second out of range` to Go"
+        );
+        // …and both agree on these.
+        assert!(parse_go_rfc3339("2030-01-01T00:00:00Z ").is_none());
+        assert!(parse_go_rfc3339("2030-13-01T00:00:00Z").is_none());
+        assert!(parse_go_rfc3339("2030-01-01").is_none());
+        assert!(parse_go_rfc3339("").is_none());
     }
 
     /// The credential parse: Go's two failure shapes, and neither may echo the
@@ -1670,7 +1949,7 @@ mod tests {
     async fn a_filtered_server_refuses_the_way_go_refuses() {
         let file = db();
         insert(&file, "gh-off", "github", false, Some("{}"), "{}", "{}");
-        insert(&file, "gg-1", "google", true, Some("{}"), "{}", "{}");
+        insert(&file, "wa-1", "whatsapp", true, Some("{}"), "{}", "{}");
 
         // `.err()` rather than `unwrap_err()`: the `Ok` side is an
         // `InProcessMcpServer`, which deliberately has no `Debug` — printing
@@ -1691,9 +1970,9 @@ mod tests {
             r#"integration "gh-off" is not enabled or not authenticated"#
         );
         assert_eq!(
-            refusal("gg-1").await,
-            r#"no starter registered for integration type "google""#
+            refusal("wa-1").await,
+            r#"no starter registered for integration type "whatsapp""#
         );
-        assert!(!can_host(file.path(), "gg-1").expect("can_host"));
+        assert!(!can_host(file.path(), "wa-1").expect("can_host"));
     }
 }

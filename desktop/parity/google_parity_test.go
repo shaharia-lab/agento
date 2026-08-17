@@ -195,6 +195,25 @@ type googleRefreshVector struct {
 	RustText       string               `json:"rust_text,omitempty"`
 }
 
+// googleStartVector records what `google.Start` does with a given credentials
+// and auth pair — hosted, or refused with which sentence.
+//
+// The registry's other five have hand-written credential parses with
+// hand-asserted sentences. Google gets vectors instead, for one reason: its
+// `auth` column decodes as an `oauth2.Token` whose `expiry` is a Go `time.Time`,
+// so the accept/reject boundary is `time.Time.UnmarshalJSON`'s and not something
+// worth guessing at. #313's first half was a lesson in what reading rather than
+// measuring costs.
+type googleStartVector struct {
+	Case        string `json:"case"`
+	Credentials string `json:"credentials"`
+	Auth        string `json:"auth"`
+	// Empty when Start succeeded.
+	Error string `json:"error"`
+	// A pinned divergence: Go's `encoding/json` wording for a malformed blob.
+	RustError string `json:"rust_error,omitempty"`
+}
+
 type googleHostingVector struct {
 	Case     string                          `json:"case"`
 	Services map[string]config.ServiceConfig `json:"services"`
@@ -213,6 +232,7 @@ type googleVectors struct {
 	NowPlaceholder string                `json:"now_placeholder"`
 	Tools          []googleToolVector    `json:"tools"`
 	Hosting        []googleHostingVector `json:"hosting"`
+	Starting       []googleStartVector   `json:"starting"`
 	Calls          []googleCallVector    `json:"calls"`
 	Refreshes      []googleRefreshVector `json:"refreshes"`
 }
@@ -452,6 +472,81 @@ var googleHostingCases = []googleHostingVector{
 			"drive":    {Enabled: true, Tools: []string{"list_files"}},
 			"calendar": {Enabled: false, Tools: []string{"create_event"}},
 		}},
+}
+
+// ─── The Start cases ─────────────────────────────────────────────────────────
+
+// googleValidCredentials is the shape the UI writes.
+const googleValidCredentials = `{"client_id":"` + googleClientID +
+	`","client_secret":"` + googleClientSecret + `"}`
+
+func googleStartCases() []googleStartVector {
+	// What `SetOAuthToken` writes: RFC3339Nano, because that is `time.Time`'s
+	// own marshaling.
+	const validAuth = `{"access_token":"ya29.x","token_type":"Bearer",` +
+		`"refresh_token":"1//y","expiry":"2030-01-01T00:00:00.123456789Z"}`
+
+	return []googleStartVector{
+		{Case: "the ordinary shape", Credentials: googleValidCredentials, Auth: validAuth},
+		{
+			// `IsAuthenticated` is `len(Auth) > 0 && Auth != "null"`, so both of
+			// these refuse before any parse.
+			Case: "an empty auth column is unauthenticated", Credentials: googleValidCredentials, Auth: "",
+		},
+		{Case: "a literal null auth column is unauthenticated", Credentials: googleValidCredentials, Auth: "null"},
+		{
+			// …but an empty *object* is authenticated, and parses, and hosts a
+			// server whose every call carries an empty bearer token. Go's.
+			Case: "an empty auth object is authenticated and hosts", Credentials: googleValidCredentials, Auth: "{}",
+		},
+		{Case: "no expiry at all is Go's zero time, which never expires",
+			Credentials: googleValidCredentials, Auth: `{"access_token":"ya29.x","refresh_token":"1//y"}`},
+		{
+			// The boundary this section exists for: `expiry` is a `time.Time`,
+			// so a non-RFC3339 value fails the whole decode.
+			Case: "a malformed expiry fails the auth parse", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"not a time"}`,
+		},
+		{Case: "an expiry without a zone fails too", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-01-01T00:00:00"}`},
+		{Case: "a date-only expiry fails too", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-01-01"}`},
+		{Case: "an offset expiry is accepted", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-01-01T00:00:00+05:30"}`},
+		{Case: "a numeric expiry is a type error", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":1893456000}`},
+		{Case: "a null expiry is the zero time", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":null}`},
+		{Case: "an empty string expiry fails", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":""}`},
+		{
+			// Go's RFC3339 parse has been strict since 1.20, so the case of the
+			// separators is worth pinning rather than assuming either way.
+			Case: "a lowercase t and z separator", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-01-01t00:00:00z"}`,
+		},
+		{Case: "a one-digit fractional second", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-01-01T00:00:00.5Z"}`},
+		{Case: "a trailing space after the zone fails", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-01-01T00:00:00Z "}`},
+		{Case: "a leap second", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-06-30T23:59:60Z"}`},
+		{Case: "an out-of-range month", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-13-01T00:00:00Z"}`},
+		{Case: "an auth array is not a struct", Credentials: googleValidCredentials, Auth: `["ya29.x"]`},
+		{Case: "empty credentials fail the credentials parse",
+			Credentials: "", Auth: validAuth},
+		{Case: "a null credentials blob is a no-op, so the client id is empty",
+			Credentials: "null", Auth: validAuth},
+		{Case: "a credentials array is not a struct", Credentials: `["cid","secret"]`, Auth: validAuth},
+		{Case: "credentials that are not JSON at all", Credentials: `nope`, Auth: validAuth},
+		{
+			// Neither field is checked for emptiness — Go hosts it and every
+			// refresh then fails at Google.
+			Case: "empty credentials fields still host", Credentials: `{"client_id":"","client_secret":""}`,
+			Auth: validAuth,
+		},
+	}
 }
 
 // ─── The call cases ──────────────────────────────────────────────────────────
@@ -1173,6 +1268,10 @@ func TestGoogleVectors(t *testing.T) {
 		want.Hosting = append(want.Hosting, hosting)
 	}
 
+	for _, c := range googleStartCases() {
+		want.Starting = append(want.Starting, runGoogleStartCase(t, ctx, c))
+	}
+
 	for _, c := range googleCallCases() {
 		want.Calls = append(want.Calls, runGoogleCallCase(t, ctx, session, fake, c))
 	}
@@ -1211,6 +1310,32 @@ func TestGoogleVectors(t *testing.T) {
 			"without anything in this repository changing.",
 			googleVectorsFile)
 	}
+}
+
+// runGoogleStartCase calls the real `google.Start` and records whether it hosted
+// and, if not, exactly what it said.
+func runGoogleStartCase(
+	t *testing.T, ctx context.Context, c googleStartVector,
+) googleStartVector {
+	t.Helper()
+
+	cfg := &config.IntegrationConfig{
+		ID:          googleParityID,
+		Name:        "Google (parity)",
+		Type:        "google",
+		Enabled:     true,
+		Credentials: json.RawMessage(c.Credentials),
+		Auth:        json.RawMessage(c.Auth),
+		Services:    googleAllServices(),
+	}
+
+	if _, err := google.Start(ctx, cfg); err != nil {
+		c.Error = err.Error()
+		if strings.Contains(c.Error, googleClientSecret) {
+			t.Fatalf("%s: the client secret leaked into a Start error: %s", c.Case, c.Error)
+		}
+	}
+	return c
 }
 
 func googleHostedTools(
