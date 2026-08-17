@@ -140,8 +140,9 @@ src-tauri/src/
     writes.rs    what a write may answer, and what it hands back to Go
     chat/        the SSE turn and the three routes that steer it (#276)
       live.rs    the process-local live-session registry — why the four move together
-      runner.rs  an agent's config as SDK options; starts the local tools server
-                 (#310) and refuses only what it still cannot supply
+      runner.rs  an agent's config as SDK options; starts the local tools
+                 server (#310) and one per github integration (#311), and
+                 refuses only what it still cannot supply
       turn.rs    spawn, stream, and the AskUserQuestion continuation
       persist.rs what a finished turn writes, and what an interrupted one does not
       sse.rs     the frame bytes: raw pass-through vs the two synthetic events
@@ -170,8 +171,13 @@ src-tauri/src/
       smtp.rs      go-mail's TLS policy — `ssl_tls` is *STARTTLS*, not SMTPS
     integrations.rs GET /api/integrations, /{id}, /available-tools, /{id}/triggers —
                  credentials are never selected and auth is a bool made in SQL;
-                 plus POST /api/integrations and the trigger-rule writes (#277).
-                 PUT/DELETE /{id} stay with Go: they reload/stop the live MCP server
+                 plus POST /api/integrations, the trigger-rule writes (#277) and
+                 PUT/DELETE /{id} (#311)
+    integrations/registry.rs
+                 Start/Reload/Stop for the MCP servers of HOSTED_TYPES — the one
+                 list both processes are configured from (the sidecar is started
+                 with AGENTO_INTEGRATIONS=off:<it>). The one place a credential
+                 is read, behind its own projection
     integration_credentials.rs the seven per-type validators, and the two failures
                  whose Go error text is not reproducible (both forward)
     scan.rs      GET /api/claude-sessions/status, POST /refresh — and the scan
@@ -533,7 +539,7 @@ of the `Err` arms the cut-over has to turn into a real response.
 | 1 ✅ | Sidecar + proxy | — | done |
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
 | 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274, #275).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. The scheduler's *schedule computation* is ported and pinned (#275); its ownership is not, and is blocked — see below. |
-| 4 ← | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. **GitHub is done (#312)** — `native/integrations/github/`, the worked example for an *integration*; the registry that hosts it is #311. WhatsApp is **not** among them — see below. |
+| 4 ← | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. **GitHub is done (#312)** — `native/integrations/github/`, the worked example for an *integration*. **The registry is done (#311)** — `native/integrations/registry.rs` plus `PUT`/`DELETE /api/integrations/{id}`, and the sidecar now runs with `AGENTO_INTEGRATIONS=off:<the types the shell hosts>`, so every type has exactly one owner. #313–#317 are each "add a starter **and its name to `HOSTED_TYPES`**", which is the one list both processes are configured from. WhatsApp is **not** among them — but Go still hosts its rows, because its starter opens a live connection rather than just a port; see below. |
 | 5 ← | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
 
 ### The session scanner (`src-tauri/src/native/scanner/`)
@@ -738,6 +744,17 @@ Consequences, each load-bearing:
   it closes is the caller that can only speak HTTP to a port it found; code
   already running as this user was never in scope, since it can read the
   integration credentials straight out of `agento.db`.
+- **Every tool handler's HTTP client must set a timeout; it is what bounds
+  shutdown.** Since #311 a dropped `InProcessMcpServer` shuts down
+  **gracefully** — `axum::serve` waits for in-flight requests before the
+  cancellation token fires — so a `tools/call` crossing a reload gets its answer
+  instead of a 500. That is Go's behaviour (`Shutdown(context.Background())`,
+  equally unbounded), and it means the only ceiling on the drain is the slowest
+  handler. `github::client` sets 15s and nothing holds a long-lived stream
+  (`legacy_session_mode: false` makes the stream `GET` a `405`), so today the
+  bound is real. A handler added by #313–#317 with no client timeout would fail
+  no test while leaving a revoked credential answering `tools/call` for as long
+  as its socket stays open. Set the timeout on the client, not on the drain.
 - **Go's `ServeStdioMCP` / `SelfAsStdioMCPServer` are not ported**, and
   `transport-io` is off with them. Nothing in Agento calls either — a second,
   untested hosting path in the PR whose thesis is that there is exactly one
@@ -877,12 +894,13 @@ rather than redeclared.
 **It is the server, not the registry.** `Start(ctx, cfg)` refuses an
 unauthenticated integration, parses `config.GitHubCredentials` and then hosts;
 only the hosting is here. The first two read the `auth` and `credentials`
-columns, which `native/integrations.rs` deliberately never selects, so nothing
-in this shell can supply them yet. #311 owns `Start`/`Stop`/`Reload` and
-`PUT`/`DELETE /api/integrations/{id}`, and is where a credential is first read;
-`start_github_mcp_server` takes the token it will have by then. `auth.go`'s
-`ValidatePAT` is unported for the same reason — no caller, and dead code trips
-clippy.
+columns, which `native/integrations.rs` deliberately never selects — so they
+live in `native/integrations/registry.rs` (#311), which owns
+`Start`/`Stop`/`Reload`, `PUT`/`DELETE /api/integrations/{id}`, and the one
+projection in the port that reads a credential. `start_github_mcp_server` takes
+the token from it. `auth.go`'s `ValidatePAT` is still unported — its route
+(`POST /api/integrations/{id}/auth/validate`) dials GitHub and stays with Go, so
+it would be dead code, which trips clippy.
 
 **The gating rule reads backwards, and it is the thing a port gets wrong.** A
 service registers when its row says `enabled`; within it, a tool registers when
@@ -1014,6 +1032,176 @@ Four divergences are pinned rather than reconciled, all in the vectors:
   legitimate trips it, because `gourl`'s escaping already covers every byte in
   `url`'s path and query encode sets. **#313–#317 each build URLs the same way
   and need the same guard.**
+
+### The integration registry, and the port's second ownership flip (#311)
+
+`native/integrations/registry.rs` is `internal/integrations/registry.go`:
+`start_all` at boot, `reload(id)` on every `PUT /api/integrations/{id}`,
+`stop(id)` on every `DELETE`, over a process-wide `OnceLock` keyed by
+integration id — the shape `native::scan::state` and `native::chat::live` use.
+The handle *is* the cancel: dropping an `InProcessMcpServer` stops its listener,
+so there is no second map for the `context.CancelFunc`s Go keeps.
+
+**It is the only implementation *for the types it hosts*, and that is what let
+the two writes move.** #277 left `PUT`/`DELETE /api/integrations/{id}` with Go
+because Rust had no server to reload, and a native write would have persisted
+the row while the sidecar kept serving the old config. What makes that sharper
+than ordinary staleness is the listener: Go's
+`claude.StartInProcessMCPServer` binds an **unauthenticated** loopback port and
+the server closes over the credential it was started with, so a sidecar that
+never hears `Reload`/`Stop` answers `tools/call` with a token the user just
+revoked for the rest of its life. A security regression rather than a staleness
+one.
+
+So `AGENTO_INTEGRATIONS` is `AGENTO_SCANNER`'s sibling, added by this issue and
+set by `sidecar.rs` alongside it — with one difference that is the whole design:
+**it carries a list**. `off:github` means "github is somebody else's; everything
+else is still yours". A bare `off` means every type, an empty list (`off:`) and
+anything unrecognized mean none, so both typos fail toward hosting. On the Go
+side it is a `hostedTypes` set snapshotted into `IntegrationRegistry` at
+construction and consulted by `Start` (per row) and `Reload` (per stored row's
+type). `Stop` is **ungated**: stopping only ever removes a server that process
+started, so for a type it does not host the maps are already empty — while a
+guard there would be the one thing able to make a server unstoppable.
+
+**Why a list and not a bool: a starter is not always a pure MCP-server
+constructor.** It reads as one, and for five of the six it is — so switching Go
+off costs a bound port and the port is what the flip exists to remove. `whatsapp`
+is the counterexample: `internal/integrations/whatsapp/server.go` opens a real
+whatsmeow WebSocket, registers the live client in a package global and only then
+returns a server config, and `whatsapp/status.go` reads that global. So a
+process-wide off switch does not cost WhatsApp a port, it costs WhatsApp:
+`GET /{id}/whatsapp/status` pinned to `{"connected":false}`, `POST
+/{id}/whatsapp/reconnect` a 200 that does nothing, and a freshly QR-paired
+client that never connects. Note this is *not* in tension with "WhatsApp is
+dropped, not deferred" (#273): the **port** drops it, but the rows are live data
+the sidecar still serves, and the sidecar is still shipped.
+
+**The list is built in Rust and travels in the environment.** `registry.rs`'s
+`HOSTED_TYPES` is the single list; `hosts_type` reads it, the starter dispatch
+must cover it (`a_hosted_type_always_has_a_starter`), and `hosting_env_value`
+renders it into what `sidecar.rs` sets. That shape was chosen over a constant
+hardcoded on both sides because of which failure it makes impossible: the shell
+is the process that *knows* what it hosts, so #313–#317 each add one string in
+one place. The failure being designed against is a Rust slack starter landing
+while Go is never told to stop hosting slack — two processes on one integration —
+and its mirror is the WhatsApp bug above. A hardcoded Go list would have to be
+edited in lockstep with a Rust table, in another language, in another PR.
+
+**The native writes decline what Go still hosts.** `update` and `delete` read
+the row's `type` and, if it is not `hosts_type`, return `WriteError::Fallback`
+so Go serves the whole request and fires its own `Reload`/`Stop`. The check is
+**pre-write** — straight after the existence read, before any mutation — because
+a `Fallback` forwards the request and Go re-applies it; see the invariant in
+`writes.rs`. Without it the stranded-listener bug would be relocated rather than
+removed. `a_write_for_a_type_the_sidecar_hosts_forwards_without_touching_the_row`
+asserts both halves, the fallback and the untouched row.
+
+**It deliberately does not gate `StartFilteredServer`.** That is what an agent
+run uses: `runner.go` reads the integration row afresh per run, builds a
+throwaway server and records nothing. Gating it would have broken every
+integration-using chat, scheduled task and Telegram trigger the sidecar still
+serves — which is most of them, since five of the six types are #313–#317's.
+The Go tests assert both halves, because the switch is only safe while that
+asymmetry holds.
+
+Two consequences worth knowing before touching this:
+
+- **Only `github` has a starter here, and Go still hosts the rest.** A type not
+  in `HOSTED_TYPES` reaches this module's own unregistered-type path — `no
+  starter registered for integration type "slack"`, logged and never surfaced —
+  but in practice it does not reach it at all, because the writes decline it
+  first. Nothing about a Slack or WhatsApp integration changed with this issue.
+- **`reload` is unconditional.** Stop then start, no diff: there is a window
+  with no server and the port changes on every save. Reproduced rather than
+  improved on, because "nothing changed, skip it" is a different set of live
+  ports after the same sequence of requests. What is **not** reproduced is Go's
+  orphan. No lock is held across the stop, the async row read and the start, so
+  a `DELETE` landing in that window would have Go leave a map entry nobody reads
+  and Rust leave a *bound port holding a credential* for a row that no longer
+  exists — the class of thing this issue exists to prevent. `Registry::stop`
+  therefore bumps a per-id generation, and `put_if_current` refuses a handle
+  whose generation moved since the caller read the row; the refused handle is
+  dropped, which fires its shutdown oneshot. `start_all` snapshots generations
+  *before* it lists the table, because it is spawned at boot while the proxy is
+  already answering. Two concurrent `reload`s were already safe —
+  `HashMap::insert` drops the displaced handle.
+
+**Not every `Reload` caller is covered by the two ported writes.** Go's `Reload`
+has seven callers; `Update` and `Delete` are the ported two. Four of the
+remaining five — the confluence, telegram, jira and slack validators — and
+`completeOAuth` are fine *because the gate is per type*: every type they can
+reach is still Go's, and `startProviderCallback` supports exactly `google` and
+`slack`, so an OAuth completion never concerns a hosted type. That leaves
+`validateGitHubPATAuth`, behind `POST /api/integrations/{id}/auth/validate`,
+which writes a credential for a type the shell hosts and cannot tell it. Without
+a hook a GitHub integration would only be hosted at the *next boot's*
+`start_all`. So the seam runs in the other direction for that one route:
+`native::after_forward` (called by the proxy with Go's status in hand) fires
+`registry::reload_after_auth` on a 2xx, spawned rather than awaited — which is
+what Go's own `reloadIntegration` does with it. `integrations::reload_after_forward`
+is the route predicate and the place to read why the list is one entry long.
+
+**Shutdown is graceful, and it took one line's placement.** Go stops a server
+with `httpServer.Shutdown(context.Background())` and hands each tool handler the
+*HTTP request's* context, so a `tools/call` in flight when the server is torn
+down runs to completion and its response is delivered. `claude/mcp.rs` used to
+fire the transport's `CancellationToken` **as** the graceful-shutdown signal —
+and that token is the parent of every tool call's, so the in-flight outbound
+request was aborted and the client got a 500 instead of a result. It now fires
+after `axum::serve` returns, which keeps the teardown (a detached handler cannot
+outlive its listener) without the abort.
+
+That window is not exotic: an unconditional reload on every integration save
+means a model mid-`create_issue` when the user hits Save is the ordinary case.
+`a_tool_call_in_flight_survives_the_handles_drop` pins it, and it fails with the
+two lines swapped.
+
+**The runner refuses less, not nothing.** `chat/runner.rs::build_options` now
+serves an agent whose `capabilities.mcp` names only github integrations,
+starting one filtered server per name and handing the handles to the turn beside
+the local-tools one. Three things still forward: a name whose row is not
+`github`, a name with **no** integration row (Go would still resolve it from
+`mcps.yaml`), and — broader than it strictly needs to be — *any* `mcp`
+capability at all when `<data dir>/mcps.yaml` exists, because
+`resolveServerConfig` consults that file **before** the integrations and this
+build reads none. The server is registered under the **bare integration id**,
+not `github::server_name`'s `github-<id>`: the latter is `mcp.NewServer`'s
+implementation name and never appears on a tool, while the id is the
+`mcpServers` key and so the prefix on every qualified name already in an agent's
+allowlist.
+
+**Reading a credential is this module's job and nobody else's.** The rule in
+`native/integrations.rs` — `credentials` is never selected, `auth` collapses to
+a boolean in SQL — still holds there, and `registry.rs` is where the exception
+lives: its own `HOSTING_COLUMNS` projection into a `HostingRow` that derives
+neither `Serialize` **nor `Debug`** (a `{row:?}` in a log line is the same leak
+with a longer fuse), private to the module, with only a `&str` ever leaving it.
+A credential that fails to decode reports line and column and never the serde
+message, which quotes the offending value — the forwarding
+`native/integration_credentials.rs` already established. Note the native `PUT`
+does not read a credential at all: it rewrites `auth` **from itself in SQL**
+(`auth = CASE WHEN auth IS NOT NULL AND auth != '' AND auth != 'null' THEN auth
+ELSE NULL END`), which both preserves the token without holding it and
+reproduces Go's one real effect there — a column holding `''` or the literal
+four bytes `null` becomes SQL `NULL`, because `Save` writes `authJSON` only when
+`IsAuthenticated()`.
+
+**Three things about the `PUT` that read as bugs and are Go's behaviour**, all
+pinned by `parity_writes::the_integration_id_write_answers_match_go` against a
+live server: it runs **no** credential validation (`validateIntegrationCredentials`
+is `Create`'s alone, so an empty name, an empty type and a `{}` blob are all
+200s); a request omitting `credentials` **wipes** them, because the store's
+upsert overwrites the column wholesale; and an omitted `services` is stored and
+returned as `null`, not `{}`, because `Update` skips the `make(...)` that
+`Create` does.
+
+**Do not open the live database with a bare `rusqlite::Connection::open`.** It
+opens `READWRITE|CREATE`, and against a WAL database the Go sidecar currently
+holds it was observed to reset the log — a row created two API calls earlier was
+gone from *Go's own* view immediately afterwards. `native::db::open_read_only`
+and `open_read_write` (the helpers the app's own handlers use, pragmas and busy
+timeout included) are fine; the parity suites use those.
 
 ### Things that will bite
 
@@ -1164,22 +1352,22 @@ Regenerate with `go test ./desktop/parity/ -run TestWriteRoutes
 -update-write-routes`, *after* deciding about whatever changed. Read the file
 for the per-route detail; the standing summary is:
 
-**Native (35 of 51).** Agent and chat CRUD and the job-history deletes (#274); the
+**Native (37 of 51).** Agent and chat CRUD and the job-history deletes (#274); the
 chat turn and its three steering routes (#276); `POST /api/integrations` and the
-three trigger-rule writes (#277); `/claude-sessions/refresh` (#289); the three
+three trigger-rule writes (#277); `/claude-sessions/refresh` (#289);
+`PUT`/`DELETE /integrations/{id}` (#311); the three
 pricing rate writes (#306); the two notification writes (#307); `POST /uploads`
 and `/claude-sessions/{id}/continue` (#308); `PUT /monitoring` and
 `/monitoring/test`, which answer **501** (#309); the Claude settings file and
 the five profile writes (#327); and `POST /fs/mkdir` plus
 `PATCH /claude-sessions/{id}` (#296).
 
-**Deferred (14), each by the effect Rust does not own.** The five task writes
-register or unregister a cron entry (#275). `PUT`/`DELETE /integrations/{id}`
-reload and stop the live in-process MCP server (#282). `PUT /settings` resolves
-through a snapshot the sidecar still holds, with no `AGENTO_SCANNER=off`
-equivalent to switch the Go half off (#305). Five more talk to somebody else's
+**Deferred (12), each by the effect Rust does not own.** The five task writes
+register or unregister a cron entry (#275). `PUT /settings` resolves
+through a snapshot the sidecar still holds, with no off switch for the Go half
+(#305). Five more talk to somebody else's
 server — the two `auth/*` routes and the three Telegram `webhook/*` ones. The
-fourteenth is `POST /webhooks/telegram/{id}`, the one write outside `/api`:
+twelfth is `POST /webhooks/telegram/{id}`, the one write outside `/api`:
 inbound from Telegram, authenticated by its own secret token rather than by the
 two guards, and its effect is an agent run through the dispatcher — which is
 #275's executor by another name.
@@ -1269,12 +1457,12 @@ path cannot try to answer a chat turn with a `Vec<u8>`.
 
 **The four routes share a process-local registry, so they moved together** —
 `/messages` puts a session in, the others look one up. But not every chat *can*
-run natively: an agent whose tools come from an **integration** still needs
-#311–#317, and `runner::build_options` refuses those before any subprocess
-exists. (The **local** server was the other half of that refusal and is gone —
-#310; `build_options` starts it, and is `async` for that reason, returning the
-listener handle alongside the options because dropping the handle stops the
-server.) That would strand `/stop` for a chat still running on Go, so
+run natively: an agent whose tools come from an integration this build cannot
+host still needs #313–#317, and `runner::build_options` refuses those before any
+subprocess exists. (Two halves of that refusal are gone — the **local** server
+(#310) and any agent naming only **github** integrations (#311). `build_options`
+starts each of them, and is `async` for that reason, returning the listener
+handles alongside the options because dropping one stops its server.) That would strand `/stop` for a chat still running on Go, so
 the three steering routes answer natively **only when Rust holds a live session
 for that chat** and forward otherwise. Go then answers — correctly, because it
 is the side that has the session.
@@ -1418,7 +1606,13 @@ So the flip is all of a piece, and has to stay that way:
   starts — it covers both the boot-time `StartBackgroundScan` and every read
   path's `ensureFresh`, so no caller has to know. Unset means **on**, because a
   plain `agento web` must keep scanning; an unrecognized value is also on, so a
-  typo cannot silently disable the scan.
+  typo cannot silently disable the scan. It has a sibling since #311 —
+  `AGENTO_INTEGRATIONS`, same four off-values and the same unset-means-on
+  rule — so this is now a shape rather than a one-off. Note where the sibling
+  *departs*: it carries a list of integration types (`off:github`) rather than
+  switching a subsystem off wholesale, because one of the six starters opens a
+  live connection the sidecar's own endpoints read. See "The integration
+  registry" above before copying this shape a third time.
 - `lib.rs` starts the boot scan, replacing `sessionCache.StartBackgroundScan()`.
 - `native/scan.rs` owns admission (one scan at a time), progress, the staleness
   markers and the two endpoints.
@@ -1554,9 +1748,15 @@ the **sidecar**, which does hold one and is still serving routes that read it:
 
 #274's rule decides it: *a route moves only when Rust can reproduce every effect
 it has*, and "the sidecar now agrees" is one of this route's effects. #289's
-flip worked because `AGENTO_SCANNER=off` switched the Go half off; there is no
-equivalent here, and forward-after-write is just the forward. It turns on with
-the cut-over that deletes the sidecar.
+flip worked because `AGENTO_SCANNER=off` switched the Go half off, and #311's
+because `AGENTO_INTEGRATIONS=off:<types>` does the same for the MCP servers of
+the types the shell hosts —
+so the mechanism is established and the question here is only whether it
+applies. It does not: those two switch off a *subsystem* the sidecar owns,
+while `SettingsManager` is a snapshot the sidecar **reads** on paths it is
+still serving, and there is no switch that makes those paths read the row
+instead. Forward-after-write is just the forward. It turns on with the
+cut-over that deletes the sidecar.
 
 Three things the write itself pins, each captured from a live Go server:
 
@@ -1811,8 +2011,8 @@ lines nothing could check until the flip. It follows the flip; it does not
 precede it.
 
 **The blocker, verified.** The flip needs Rust to *run* a task, and
-`chat/runner.rs::build_options` refuses any agent whose capabilities name an MCP
-server (#311–#317). For a chat that is safe — the three steering routes forward
+`chat/runner.rs::build_options` still refuses an agent whose capabilities name
+an MCP server this build cannot host — five of the six providers (#313–#317). For a chat that is safe — the three steering routes forward
 and Go answers, because Go holds the session. **For a scheduled task there is no
 second implementation behind it**: with the sidecar not scheduling, a task Rust
 cannot run does not fail, it *silently never runs*, and the job history has no
@@ -1839,8 +2039,11 @@ So `cmd/web.go` is **untouched** — no `AGENTO_SCHEDULER` gate was added, becau
 a gate whose only correct setting is "on" is a switch for turning tasks off. The
 flip is one commit when `build_options` can supply every tool source: gate
 `initTaskScheduler` on `AGENTO_SCHEDULER` the way `Cache.EnsureScan` is gated on
-`AGENTO_SCANNER` (unset = on, unrecognized = on, so a plain `agento web` is
-unchanged and a typo cannot disable it), set it from `sidecar.rs`, port the
+`AGENTO_SCANNER` and `IntegrationRegistry` on `AGENTO_INTEGRATIONS` (unset = on,
+unrecognized = on, so a plain `agento web` is
+unchanged and a typo cannot disable it — and note the integrations switch also
+carries a *list*, which a scheduler gate would not need), set it from
+`sidecar.rs`, port the
 executor, and move `POST/PUT/DELETE /api/tasks` and the pause/resume actions —
 which #274 left with Go precisely because each also calls
 `ScheduleTask`/`UnscheduleTask`, and a row written without a registration is a
@@ -1864,8 +2067,9 @@ The two options not taken, and why:
   build has no providers. A 200 there tells the user telemetry is on while
   nothing is emitted. It would also be stale a second way before the cut-over,
   since the sidecar builds its providers once at `Update` and a native write
-  cannot reach them — the same wall #305 hit on `PUT /api/settings`, with no
-  `AGENTO_SCANNER=off` equivalent to switch the Go half off.
+  cannot reach them — the same wall #305 hit on `PUT /api/settings`. #289 and
+  #311 both got past it by switching the Go half off; there is no such switch
+  for a provider set the sidecar has already built.
 - **Porting the exporters** is the largest option in the plan and reverses the
   decision above.
 
@@ -2052,6 +2256,17 @@ What that means in the code, and the part that is easy to get wrong:
   trade, and it is a removal that happens *then*, not one this issue skipped.
 - `GET /api/integrations/{id}/whatsapp/*` stays unclaimed and forwards. Nothing
   calls it any more, so it dies with the sidecar rather than needing removal.
+- **The sidecar must keep *hosting* a whatsapp row, not merely answering about
+  it** (#311). This is where "dropped, not deferred" is easiest to over-apply.
+  `whatsapp/server.go`'s starter is not a plain MCP-server constructor: it opens
+  a whatsmeow WebSocket and registers the live client in a package global that
+  `ConnectionStatus`, `POST /{id}/whatsapp/reconnect` and QR pairing all read.
+  So `AGENTO_INTEGRATIONS` names the types the *shell* hosts rather than
+  switching Go's hosting off wholesale — a process-wide switch would leave
+  `whatsapp/status` permanently `{"connected":false}`, reconnect a 200 that does
+  nothing and a freshly paired client that never connects. The row's data
+  surviving is one requirement; its connection surviving until the sidecar goes
+  is another.
 
 ---
 
@@ -2259,10 +2474,15 @@ right:
 **Phase 4 has started.** `internal/tools` (#310) and the **GitHub integration**
 (#312) are ported: `native/tools/` and `native/integrations/github/`, both built
 on the typed-tool layer #282 settled and both pinned by parity vectors taken
-from the running Go server rather than from its source. Neither is *hosted* yet
-— the registry that starts and stops an integration's server, and the credential
-read that feeds it, are #311 — so `chat/runner.rs` still refuses an agent whose
-capabilities name MCP tools. #312 also produced the reflector divergence map
+from the running Go server rather than from its source. **#311 hosts them**:
+`native/integrations/registry.rs` is the Start/Reload/Stop lifecycle and the one
+place a credential is read, `PUT`/`DELETE /api/integrations/{id}` are native, and
+the sidecar runs with `AGENTO_INTEGRATIONS=off:<the types the shell hosts>` so
+every type has a single owner — the second ownership flip after the scan's, and
+the one that had to be *per type*, since `whatsapp`'s starter opens a live
+connection the sidecar's own endpoints read. `chat/runner.rs` therefore refuses
+only an agent naming an integration Rust cannot host, which is the five types
+#313–#317 cover. #312 also produced the reflector divergence map
 (`parity/jsonschema_reflect_vectors.json` + `claude/schema_vectors.rs`), which
 is the file to read before starting #313–#317.
 

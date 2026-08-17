@@ -1,43 +1,54 @@
-//! The integration reads, plus the writes that have no effect outside the
-//! database: `GET /api/integrations`, `GET /api/integrations/{id}`,
+//! The integration reads and every integration write that is not an OAuth
+//! flow, a webhook registration or WhatsApp: `GET /api/integrations`,
+//! `GET|PUT|DELETE /api/integrations/{id}`,
 //! `GET /api/integrations/available-tools`,
 //! `GET|POST /api/integrations/{id}/triggers`,
 //! `PUT|DELETE /api/integrations/{id}/triggers/{rid}` and
 //! `POST /api/integrations`.
 //!
 //! Mirrors `handleListIntegrations`, `handleGetIntegration`,
-//! `handleAvailableTools`, `handleCreateIntegration`
+//! `handleAvailableTools`, `handleCreateIntegration`,
+//! `handleUpdateIntegration`, `handleDeleteIntegration`
 //! (`internal/api/integrations.go`) and the trigger-rule handlers
 //! (`internal/api/trigger_rules.go`) over `SQLiteIntegrationStore` and
 //! `SQLiteTriggerStore`.
 //!
-//! ## Which writes moved, and the rule that decided it (#277)
+//! ## Which writes moved, and the rule that decided it (#277, #311)
 //!
 //! A route moves only when Rust reproduces **every** effect it has, and the
 //! integration writes split cleanly on that test:
 //!
 //! - `PUT /api/integrations/{id}` calls `registry.Reload(id)` and `DELETE`
 //!   calls `registry.Stop(id)` — they restart the **live in-process MCP
-//!   server**. Rust has none to restart until #282, so both stay with Go. A
-//!   native write there would persist the row and leave the running integration
-//!   on stale config: an integration still using a token the user just revoked,
-//!   with a 200 saying it worked.
-//! - `POST /api/integrations` touches no registry at all. That was verified
-//!   against the whole of `integrationService.Create` rather than inferred from
-//!   its siblings, which is the point — `Create` and `Update` look alike and
-//!   differ exactly here.
-//! - The trigger-rule writes are safe for a different reason: the dispatcher
-//!   calls `ListRules` **per inbound message**
-//!   (`internal/trigger/dispatcher.go`), so there is no cached rule set for a
-//!   native write to leave stale.
+//!   server**. #277 left both with Go because Rust had none to restart, and a
+//!   native write would have persisted the row while the sidecar kept serving
+//!   the old config: an integration still using a token the user just revoked,
+//!   with a 200 saying it worked. #311 did not solve that by adding a second
+//!   registry — it moved the *ownership*. The sidecar now runs with
+//!   `AGENTO_INTEGRATIONS=off` and [`registry`] is the only implementation,
+//!   which is #289's flip applied a second time.
+//! - `POST /api/integrations` needed none of that: `Create` touches no registry
+//!   at all. That was verified against the whole of `integrationService.Create`
+//!   rather than inferred from its siblings, which is the point — `Create` and
+//!   `Update` look alike and differ exactly here.
+//! - The trigger-rule writes are safe for a third reason: the dispatcher calls
+//!   `ListRules` **per inbound message** (`internal/trigger/dispatcher.go`), so
+//!   there is no cached rule set for a native write to leave stale.
 //!
-//! ## A create is the one native path that handles a secret
+//! ## The writes that handle a secret, and the one that does not read one
 //!
 //! Everything below the "Secrets" note is about never *reading* credentials.
 //! That cannot hold for a create, because the caller supplies them in the
 //! request body and they have to reach the column. So `create` carries them as
 //! a borrowed `RawValue` from decode to `INSERT`, and the response is still
 //! built from [`ScrubbedIntegration`], which has no field to leak them through.
+//! [`update`] does the same on the way in — and on the way *out* it keeps the
+//! rule intact by rewriting `auth` **from itself in SQL**, so the token it
+//! preserves is never a value this process holds.
+//!
+//! Reading a credential is [`registry`]'s job and is deliberately in a different
+//! file. It has its own projection, it derives neither `Serialize` nor `Debug`,
+//! and nothing that builds a response can reach it.
 //!
 //! **That guarantee is not local to this module.** It also depends on
 //! `writes::decode_body` deserializing from the request's *original bytes*
@@ -116,9 +127,19 @@
 /// `native/integrations/mod.rs` — is a rename of a 1,400-line file for the same
 /// result.
 ///
-/// Nothing here calls it. Hosting an integration's server is the registry's
-/// job, which is #311; this module still never reads a credential.
+/// [`registry`] calls it. Hosting an integration's server is the registry's
+/// job, and this module still never reads a credential — [`registry`] does,
+/// through a projection of its own that no response type can reach.
 pub mod github;
+
+/// The Start/Stop/Reload lifecycle, and the one place in the port that reads
+/// `integrations.credentials` (#311).
+///
+/// Kept out of this file deliberately. The "Secrets" note below is a rule about
+/// *this* module — the column is never selected here and `auth` is a boolean
+/// before it leaves SQLite — and it stays literally true with the secrets
+/// projection living next door, where nothing that builds a response can see it.
+pub mod registry;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -430,24 +451,62 @@ fn segment(value: &str) -> Option<&str> {
 
 /// Which of this module's routes are native, by method.
 ///
-/// **The integration `{id}` writes are deliberately absent.** `PUT` calls
+/// **The integration `{id}` writes moved in #311**, and what let them move was
+/// not a new implementation but a change of *owner*. `PUT` calls
 /// `registry.Reload(id)` and `DELETE` calls `registry.Stop(id)`
-/// (`internal/service/integration_service.go`), which start and stop the *live
-/// in-process MCP server* for that integration. Rust has no MCP server to
-/// reload until #282, so a native write would persist the row and leave the
-/// running integration on stale config — the failure would show up as an
-/// integration that keeps using a revoked token, with nothing in the response
-/// to suggest it. `POST /api/integrations` is safe because `Create` is a pure
-/// row write: it never touches the registry, which was verified against the
-/// whole function rather than assumed from its siblings.
+/// (`internal/service/integration_service.go`); until the Go half could be
+/// switched off, a native write there would have persisted the row and left the
+/// sidecar's server running on stale config — on an unauthenticated loopback
+/// port, holding a token the user had just revoked. The sidecar now runs with
+/// `AGENTO_INTEGRATIONS=off` and [`registry`] is the only implementation, so
+/// both effects are reproduced rather than lost. Note this is a property of the
+/// *process*, not of the six types: a Slack row is not hosted by anyone, which
+/// is a Slack integration that does nothing rather than one running twice.
 ///
-/// The trigger-rule writes are safe for a different reason: the dispatcher
+/// `POST /api/integrations` needed none of that, because `Create` is a pure row
+/// write: it never touches the registry, which was verified against the whole
+/// function rather than assumed from its siblings.
+///
+/// The trigger-rule writes are safe for a different reason again: the dispatcher
 /// calls `ListRules` **per inbound message** (`internal/trigger/dispatcher.go`),
 /// so there is no cached rule set for a native write to leave stale.
+/// A **forwarded** request whose Go handler rewrites `auth` and then fires
+/// `registry.Reload` — which, for a type this shell hosts, now reaches nothing
+/// on the Go side. Returns the integration id the shell owes a reload for.
+///
+/// `Reload` has seven callers in Go. Two are ported (`Update`, and `Delete` via
+/// `Stop`). Four more — the confluence, telegram, jira and slack validators —
+/// and `completeOAuth` are unaffected, because the switch is per type and every
+/// type they can reach is still Go's: `startProviderCallback` supports exactly
+/// `google` and `slack`, so an OAuth completion never concerns a type this
+/// process hosts. That leaves `validateGitHubPATAuth`, behind
+/// `POST /api/integrations/{id}/auth/validate`, as the one path that writes a
+/// credential for a hosted type and cannot tell anybody. Without this hook a
+/// GitHub integration is never hosted in the session it is set up in — create,
+/// `PUT` and `auth/validate` all leave it unauthenticated or unheard, and it
+/// appears only at the next boot's `start_all`.
+///
+/// The reload runs **after** Go's answer, so the row is already written, and it
+/// is idempotent — the worst case is restarting a server that was about to be
+/// restarted. Go fires its own from a goroutine (`reloadIntegration`), so doing
+/// it off the response path is parity rather than a shortcut.
+pub fn reload_after_forward<'a>(method: &Method, path: &'a str) -> Option<&'a str> {
+    if method != Method::POST {
+        return None;
+    }
+    segment(
+        path.strip_prefix("/api/integrations/")?
+            .strip_suffix("/auth/validate")?,
+    )
+}
+
 fn claims(method: &Method, path: &str) -> bool {
     match route_of(path) {
         Some(Route::List) => method == Method::GET || method == Method::POST,
-        Some(Route::AvailableTools) | Some(Route::Get(_)) => method == Method::GET,
+        Some(Route::AvailableTools) => method == Method::GET,
+        Some(Route::Get(_)) => {
+            method == Method::GET || method == Method::PUT || method == Method::DELETE
+        }
         Some(Route::Triggers(_)) => method == Method::GET || method == Method::POST,
         Some(Route::Trigger(..)) => method == Method::PUT || method == Method::DELETE,
         None => false,
@@ -459,6 +518,8 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
     if req.method != Method::GET {
         return match route_of(req.path) {
             Some(Route::List) => finish(create(db, req.body)),
+            Some(Route::Get(id)) if req.method == Method::PUT => finish(update(db, id, req.body)),
+            Some(Route::Get(id)) if req.method == Method::DELETE => finish(delete(db, id)),
             Some(Route::Triggers(id)) => finish(create_trigger_rule(db, id, req.body)),
             Some(Route::Trigger(id, rid)) if req.method == Method::PUT => {
                 finish(update_trigger_rule(db, id, rid, req.body))
@@ -595,6 +656,226 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
         updated_at: parse_written(&now)?,
     };
     encode_created(&created)
+}
+
+/// `UpdateIntegrationRequest`.
+///
+/// Field for field identical to [`CreateIntegrationRequest`] today, and a
+/// separate type all the same — Go keeps the two apart "to allow future
+/// divergence (e.g. the integration type is immutable after creation)", and
+/// collapsing them here would be the port deciding that for it.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct UpdateIntegrationRequest {
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    name: String,
+    #[serde(
+        rename = "type",
+        deserialize_with = "super::gojson::null_is_zero_value"
+    )]
+    integration_type: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    enabled: bool,
+    /// Carried as raw bytes from decode to `UPDATE`, never through a
+    /// `serde_json::Value` — which would sort keys and respell numbers, and
+    /// Go stores this column verbatim. See `writes::decode_body`.
+    #[serde(deserialize_with = "super::gojson::captured_raw")]
+    credentials: Option<Box<RawValue>>,
+    services: Option<super::gojson::GoMap<ServiceConfig>>,
+}
+
+/// `handleUpdateIntegration` → `integrationService.Update`, then
+/// `registry.Reload(id)`.
+///
+/// **There is no credential validation on this path.**
+/// `validateIntegrationCredentials` is called by `Create` and by nothing else,
+/// so a `PUT` carrying `{}`, garbage, or no `credentials` key at all is a 200 —
+/// as are an empty `name` and an empty `type`. Adding the create-side checks
+/// here would refuse requests Go applies.
+///
+/// Three things the store's upsert does that look like bugs and are the
+/// behaviour to reproduce:
+///
+/// - **`credentials` is overwritten wholesale.** A `PUT` that omits the key
+///   stores `""` — it wipes the secret rather than preserving it. The frontend
+///   always sends the whole object; a hand-written request does not have to.
+/// - **`services` is not defaulted.** `Create` fills a nil map with `make(...)`
+///   before saving; `Update` does not, so an omitted `services` is the literal
+///   `null` in the column *and* `null` in the response, where a create would
+///   have said `{}`.
+/// - **`created_at` is not in the upsert's `DO UPDATE SET` list at all**, which
+///   is why nothing here writes it. `cfg.CreatedAt = existing.CreatedAt` exists
+///   only to fill the response.
+fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<UpdateIntegrationRequest>(body)?;
+
+    let conn = open_for_write(db_path)?;
+    let Some(existing) = existing_for_update(&conn, id)? else {
+        return Err(WriteError::NotFound {
+            resource: "integration".to_string(),
+            id: id.to_string(),
+        });
+    };
+    decline_a_type_go_still_hosts(id, &existing.integration_type)?;
+    // **Before the write, not after.** Its input comes out of the database, so
+    // unlike the timestamps this process formats itself it can genuinely fail —
+    // and a `Fallback` after `conn.execute` would forward to Go, which re-runs
+    // the whole `PUT`: a second `updated_at`, a second credential overwrite, a
+    // second reload. Go fails before saving here too, because
+    // `integrationService.Update` calls `s.Get` — which scans `created_at` —
+    // first. See the invariant in `writes.rs`.
+    let created_at = parse_stored(&existing.created_at)?;
+
+    let now = super::gotime::now_go_text();
+    let credentials = req
+        .credentials
+        .as_ref()
+        .map(|c| c.get().to_string())
+        .unwrap_or_default();
+    // `json.Marshal(cfg.Services)`: a nil map is `null`, an empty one is `{}`.
+    let services_json = super::gojson::to_vec_marshal(&req.services)
+        .map_err(|e| WriteError::Fallback(format!("marshaling services: {e}")))?;
+    let services_json = String::from_utf8(services_json)
+        .map_err(|e| WriteError::Fallback(format!("services json is not utf-8: {e}")))?;
+
+    // `auth` is rewritten **in SQL, from itself**, so the token is preserved
+    // without ever being read into this process — the rule the whole module is
+    // built on, kept on the one write that touches the column.
+    //
+    // The `CASE` is not decoration. `Save` writes `authJSON`, which is nil
+    // unless `cfg.IsAuthenticated()`, and `cfg.Auth` here is `existing.Auth`:
+    // the request body has no `auth` field, so `if !cfg.IsAuthenticated()` is
+    // *always* true on this path and the branch always preserves. What the
+    // round trip does change is the two non-token spellings — a column holding
+    // `''` or the literal four bytes `null` fails `IsAuthenticated`, so the
+    // update writes SQL `NULL` in its place.
+    conn.execute(
+        "UPDATE integrations SET
+            name = ?1, type = ?2, enabled = ?3,
+            credentials = ?4, services = ?5, updated_at = ?6,
+            auth = CASE
+                WHEN auth IS NOT NULL AND auth != '' AND auth != 'null' THEN auth
+                ELSE NULL
+            END
+         WHERE id = ?7",
+        rusqlite::params![
+            &req.name,
+            &req.integration_type,
+            i64::from(req.enabled),
+            &credentials,
+            &services_json,
+            &now,
+            id,
+        ],
+    )
+    .map_err(|e| WriteError::Fallback(format!("saving integration: {e}")))?;
+    drop(conn);
+
+    // **After the write, and its failure is swallowed.** Go logs a reload
+    // failure and answers 200 regardless: "row written, server dead" is the
+    // accepted outcome. It must never become a `Fallback` — the seam forwards
+    // one to Go, which would re-apply a write that already landed.
+    registry::reload_blocking(db_path, id);
+
+    let updated = ScrubbedIntegration {
+        authenticated: existing.authenticated,
+        created_at,
+        enabled: req.enabled,
+        id: id.to_string(),
+        name: req.name,
+        services: req.services.map(|services| services.0),
+        integration_type: req.integration_type,
+        updated_at: parse_written(&now)?,
+    };
+    let body = super::gojson::to_vec(&updated)
+        .map_err(|e| WriteError::Fallback(format!("encoding integration: {e}")))?;
+    Ok(super::Answer::json(body))
+}
+
+/// `handleDeleteIntegration` → `integrationService.Delete`.
+///
+/// The ordering is the reverse of the update's and is Go's: the existence check,
+/// then `registry.Stop(id)`, then the row delete. So a delete whose SQL fails
+/// leaves the server stopped and the row present — which is exactly what Go
+/// does, and is why stopping first is safe to reproduce rather than reorder.
+fn delete(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
+    let conn = open_for_write(db_path)?;
+    let Some(integration_type) = integration_type_of(&conn, id)? else {
+        return Err(WriteError::NotFound {
+            resource: "integration".to_string(),
+            id: id.to_string(),
+        });
+    };
+    // Before the `Stop` as well as before the row delete: a type the sidecar
+    // hosts has to be stopped by the sidecar, which only happens if Go serves
+    // the whole request.
+    decline_a_type_go_still_hosts(id, &integration_type)?;
+
+    registry::registry().stop(id);
+
+    conn.execute("DELETE FROM integrations WHERE id = ?1", [id])
+        .map_err(|e| WriteError::Fallback(format!("deleting integration: {e}")))?;
+    Ok(super::Answer::no_content())
+}
+
+/// What a `PUT` needs from the row it is replacing, and nothing else.
+///
+/// `created_at` because the response carries it and the column keeps it;
+/// `authenticated` because the response reports it — computed in SQL, so this
+/// stays a read that cannot hold a secret; `type` because it decides whether
+/// this process may answer at all. Absent means 404.
+struct ExistingIntegration {
+    created_at: String,
+    authenticated: bool,
+    integration_type: String,
+}
+
+fn existing_for_update(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<ExistingIntegration>, WriteError> {
+    conn.query_row(
+        "SELECT created_at,
+                (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
+                type
+         FROM integrations WHERE id = ?1",
+        [id],
+        |row| {
+            let authenticated: i64 = row.get(1)?;
+            Ok(ExistingIntegration {
+                created_at: row.get(0)?,
+                authenticated: authenticated != 0,
+                integration_type: row.get(2)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(|e| WriteError::Fallback(format!("looking up integration: {e}")))
+}
+
+/// Refuse, **before touching the row**, a write whose lifecycle effect belongs
+/// to the sidecar.
+///
+/// `AGENTO_INTEGRATIONS` names the types the shell hosts and Go keeps the rest
+/// (#311), so for a slack or whatsapp row it is Go that must fire `Reload` /
+/// `Stop` — and Go only does that from its own handler. Serving such a write
+/// here would persist the row and leave the sidecar's server on the old
+/// credential, which is precisely the stranded-listener bug this issue exists to
+/// remove, relocated rather than fixed. WhatsApp is the sharpest case: its
+/// "server" is a live whatsmeow connection registered in a package global, so a
+/// missed reload strands a socket, not a port.
+///
+/// A `Fallback` forwards the *whole* request, so Go re-reads the body and does
+/// everything. That is only safe while nothing has been written yet, which is
+/// why both callers check straight after their existence read and before any
+/// mutation — the invariant in `writes.rs`.
+fn decline_a_type_go_still_hosts(id: &str, integration_type: &str) -> Result<(), WriteError> {
+    if registry::hosts_type(integration_type) {
+        return Ok(());
+    }
+    Err(WriteError::Fallback(format!(
+        "integration {id:?} is of type {integration_type:?}, whose MCP server the sidecar hosts"
+    )))
 }
 
 /// `CreateTriggerRuleRequest` / `UpdateTriggerRuleRequest` — identical shapes.
@@ -790,6 +1071,20 @@ fn load_rule(conn: &rusqlite::Connection, rule_id: &str) -> Result<TriggerRule, 
         })
 }
 
+/// The type of an existing integration, or `None` for a 404. The `DELETE`'s
+/// half of [`existing_for_update`]: it needs the existence check and the type,
+/// and nothing else.
+fn integration_type_of(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<String>, WriteError> {
+    conn.query_row("SELECT type FROM integrations WHERE id = ?1", [id], |row| {
+        row.get::<_, String>(0)
+    })
+    .optional()
+    .map_err(|e| WriteError::Fallback(format!("looking up integration: {e}")))
+}
+
 fn integration_exists(conn: &rusqlite::Connection, id: &str) -> Result<bool, WriteError> {
     conn.query_row("SELECT 1 FROM integrations WHERE id = ?1", [id], |_| {
         Ok(true)
@@ -806,6 +1101,14 @@ fn integration_exists(conn: &rusqlite::Connection, id: &str) -> Result<bool, Wri
 fn parse_written(text: &str) -> Result<GoTime, WriteError> {
     GoTime::parse_go_string(text)
         .map_err(|e| WriteError::Fallback(format!("re-reading written timestamp: {e}")))
+}
+
+/// A timestamp this process is reading back rather than writing — the
+/// `created_at` a `PUT` preserves. Same parse as [`parse_written`], different
+/// thing to say when it fails.
+fn parse_stored(text: &str) -> Result<GoTime, WriteError> {
+    GoTime::parse_go_string(text)
+        .map_err(|e| WriteError::Fallback(format!("reading stored timestamp: {e}")))
 }
 
 fn open_for_write(db_path: &Path) -> Result<rusqlite::Connection, WriteError> {
@@ -1126,12 +1429,25 @@ mod tests {
         assert!(claims(&Method::PUT, "/api/integrations/abc/triggers/r1"));
         assert!(claims(&Method::DELETE, "/api/integrations/abc/triggers/r1"));
 
-        // The integration `{id}` writes did NOT move: `PUT` reloads and
-        // `DELETE` stops the live in-process MCP server, which Rust has no way
-        // to do until #282. Claiming either would persist the row and leave the
-        // running integration on stale config.
-        assert!(!claims(&Method::PUT, "/api/integrations/abc"));
-        assert!(!claims(&Method::DELETE, "/api/integrations/abc"));
+        // …and the two that moved in #311, once the sidecar stopped hosting
+        // the servers they reload and stop.
+        assert!(claims(&Method::PUT, "/api/integrations/abc"));
+        assert!(claims(&Method::DELETE, "/api/integrations/abc"));
+        // Still only those three methods on that path — chi has no others, so
+        // a PATCH must forward and get Go's 405.
+        assert!(!claims(&Method::PATCH, "/api/integrations/abc"));
+        assert!(!claims(&Method::POST, "/api/integrations/abc"));
+        // The collection has no PUT/DELETE.
+        assert!(!claims(&Method::PUT, "/api/integrations"));
+        assert!(!claims(&Method::DELETE, "/api/integrations"));
+        // `available-tools` sits in the `{id}` position and must not be
+        // swallowed by it — a DELETE there would otherwise try to delete an
+        // integration whose id is `available-tools`.
+        assert!(!claims(
+            &Method::DELETE,
+            "/api/integrations/available-tools"
+        ));
+        assert!(!claims(&Method::PUT, "/api/integrations/available-tools"));
 
         // A rule id is one segment, and the collection has no PUT/DELETE.
         assert!(!claims(&Method::PUT, "/api/integrations/abc/triggers"));
@@ -1340,6 +1656,351 @@ mod tests {
             "{}",
             err.message()
         );
+    }
+
+    // ─── The `{id}` writes (#311) ─────────────────────────────────────────────
+    //
+    // The literals below are Go's, captured from a live Go server built from
+    // this checkout by
+    // `desktop/src-tauri/tests/parity_writes.rs::the_integration_id_write_answers_match_go`,
+    // which is where they are re-asked against a running sidecar rather than
+    // asserted against a fixture. There is no vectors file for these: unlike
+    // `local_tools_vectors.json` and its siblings, nothing here is derived from
+    // a Go *function* a Go test could dump — the answers are a whole handler's,
+    // so the live suite is the capture.
+
+    /// A row the update path can be driven against, with a token and a
+    /// credential distinctive enough that a leak into any assertion is obvious.
+    fn seed_full_integration(file: &tempfile::NamedTempFile, id: &str, auth: Option<&str>) {
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                           created_at, updated_at)
+                 VALUES (?1, 'Original', 'github', 1, ?2, ?3,
+                         '{\"repos\":{\"enabled\":true,\"tools\":[\"list_repos\"]}}',
+                         '2026-01-01 00:00:00 +0000 UTC', '2026-01-02 00:00:00 +0000 UTC')",
+                rusqlite::params![id, format!(r#"{{"pat":"{SECRET}"}}"#), auth],
+            )
+            .expect("seed");
+    }
+
+    #[test]
+    fn updating_an_integration_answers_200_and_replaces_the_row() {
+        let file = migrated();
+        seed_full_integration(&file, "int-1", Some(r#"{"token":"KEEP-ME"}"#));
+
+        let answer = update(
+            file.path(),
+            "int-1",
+            br#"{"name":"Renamed","type":"github","enabled":false,
+                 "credentials":{"zebra":"z", "pat":"new","rate":1.50},
+                 "services":{"repos":{"enabled":true,"tools":["get_repo"]}}}"#,
+        )
+        .expect("update should succeed");
+
+        assert_eq!(answer.status, axum::http::StatusCode::OK);
+        let body = body_of(&answer);
+        // Alphabetical, because Go builds the response from a map.
+        assert!(
+            body.starts_with(r#"{"authenticated":true,"created_at":"#),
+            "{body}"
+        );
+        assert!(body.contains(r#""name":"Renamed""#), "{body}");
+        assert!(body.contains(r#""enabled":false"#), "{body}");
+        assert!(
+            body.contains(r#""services":{"repos":{"enabled":true,"tools":["get_repo"]}}"#),
+            "{body}"
+        );
+        // `created_at` is preserved from the stored row; `updated_at` is not.
+        assert!(
+            body.contains(r#""created_at":"2026-01-01T00:00:00Z""#),
+            "{body}"
+        );
+        assert!(!body.contains("2026-01-02T00:00:00Z"), "{body}");
+        // No secret, on either the way in or the way out.
+        assert!(!body.contains("credentials"), "{body}");
+        assert!(!body.contains("pat"), "{body}");
+        assert!(!body.contains("KEEP-ME"), "{body}");
+
+        // The credentials column is overwritten verbatim — key order, `1.50`
+        // and the space after the first comma all survive.
+        assert_eq!(
+            stored(&file, "SELECT credentials FROM integrations"),
+            r#"{"zebra":"z", "pat":"new","rate":1.50}"#
+        );
+        // …and the token is untouched, because the update rewrites `auth` from
+        // itself in SQL rather than reading it.
+        assert_eq!(
+            stored(&file, "SELECT auth FROM integrations"),
+            r#"{"token":"KEEP-ME"}"#
+        );
+        // `created_at` is not in the upsert's `DO UPDATE SET` list at all.
+        assert_eq!(
+            stored(&file, "SELECT created_at FROM integrations"),
+            "2026-01-01 00:00:00 +0000 UTC"
+        );
+    }
+
+    /// The store's upsert overwrites `credentials` wholesale, so a `PUT` that
+    /// omits the key **wipes the secret**. Not helpfully preserved: the write
+    /// has to be the one Go performs, or the two databases diverge on a column
+    /// nothing else can reconcile.
+    #[test]
+    fn a_put_that_omits_credentials_wipes_them() {
+        let file = migrated();
+        seed_full_integration(&file, "int-1", Some(r#"{"token":"t"}"#));
+
+        update(file.path(), "int-1", br#"{"name":"N","type":"github"}"#).expect("update");
+        assert_eq!(stored(&file, "SELECT credentials FROM integrations"), "");
+    }
+
+    /// `Update` does **not** default a nil services map the way `Create` does,
+    /// so an omitted `services` is the literal `null` in the column and in the
+    /// response — where a create would have said `{}`.
+    #[test]
+    fn an_omitted_services_map_stays_null_on_an_update() {
+        let file = migrated();
+        seed_full_integration(&file, "int-1", None);
+
+        let answer =
+            update(file.path(), "int-1", br#"{"name":"N","type":"github"}"#).expect("update");
+        assert!(
+            body_of(&answer).contains(r#""services":null"#),
+            "{}",
+            body_of(&answer)
+        );
+        assert_eq!(stored(&file, "SELECT services FROM integrations"), "null");
+
+        // An empty object is still an empty object, which is the distinction a
+        // `null`-defaulting port would lose.
+        let answer = update(
+            file.path(),
+            "int-1",
+            br#"{"name":"N","type":"github","services":{}}"#,
+        )
+        .expect("update");
+        assert!(
+            body_of(&answer).contains(r#""services":{}"#),
+            "{}",
+            body_of(&answer)
+        );
+        assert_eq!(stored(&file, "SELECT services FROM integrations"), "{}");
+    }
+
+    /// The `auth` round trip's two non-token spellings. `Save` writes `authJSON`,
+    /// which is nil unless `IsAuthenticated()` — so a column holding `''` or the
+    /// literal four bytes `null` becomes SQL `NULL`, and `authenticated` is
+    /// false either way.
+    #[test]
+    fn an_unauthenticated_row_stays_unauthenticated_and_its_auth_column_becomes_null() {
+        for stored_auth in [None, Some("null"), Some("")] {
+            let file = migrated();
+            seed_full_integration(&file, "int-1", stored_auth);
+
+            let answer =
+                update(file.path(), "int-1", br#"{"name":"N","type":"github"}"#).expect("update");
+            assert!(
+                body_of(&answer).contains(r#""authenticated":false"#),
+                "{stored_auth:?}: {}",
+                body_of(&answer)
+            );
+            let after: Option<String> = Connection::open(file.path())
+                .expect("open")
+                .query_row("SELECT auth FROM integrations", [], |row| row.get(0))
+                .expect("query");
+            assert_eq!(after, None, "{stored_auth:?}: auth must be SQL NULL");
+        }
+    }
+
+    /// **No credential validation on update.** `validateIntegrationCredentials`
+    /// is `Create`'s and `Create`'s only, so every one of these is a 200 to Go —
+    /// including an empty name and an empty type, which a create refuses with a
+    /// 422.
+    #[test]
+    fn an_update_validates_nothing_a_create_would_have_refused() {
+        for body in [
+            &br#"{}"#[..],
+            br#"{"name":"","type":""}"#,
+            br#"{"name":"N","type":"github","credentials":{}}"#,
+            br#"{"name":"N","type":"github","credentials":"not an object"}"#,
+            br#"{"name":"N","type":"jira","credentials":{"site_url":"nonsense"}}"#,
+            br#"{"name":"N","type":"github","credentials":null}"#,
+        ] {
+            let file = migrated();
+            seed_full_integration(&file, "int-1", None);
+            let answer = update(file.path(), "int-1", body)
+                .unwrap_or_else(|e| panic!("{body:?} must be accepted, got {:?}", e.message()));
+            assert_eq!(answer.status, axum::http::StatusCode::OK, "{body:?}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_body_is_400_and_a_missing_row_is_404() {
+        let file = migrated();
+        seed_full_integration(&file, "int-1", None);
+
+        // The decode comes first, so a malformed body aimed at a missing row is
+        // a 400 rather than a 404 — the order Go's handler has.
+        let err = update(file.path(), "nope", b"not json at all").expect_err("malformed");
+        assert_eq!(err.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert_eq!(err.message(), "invalid JSON body");
+
+        let err = update(file.path(), "nope", br#"{"name":"N"}"#).expect_err("missing");
+        assert_eq!(err.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), r#"integration "nope" not found"#);
+
+        let err = delete(file.path(), "nope").expect_err("missing");
+        assert_eq!(err.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(err.message(), r#"integration "nope" not found"#);
+    }
+
+    #[test]
+    fn deleting_an_integration_answers_204_with_no_body_and_removes_the_row() {
+        let file = migrated();
+        seed_full_integration(&file, "int-1", Some(r#"{"token":"t"}"#));
+
+        let answer = delete(file.path(), "int-1").expect("delete");
+        assert_eq!(answer.status, axum::http::StatusCode::NO_CONTENT);
+        assert!(
+            answer.body.is_none(),
+            "a 204 carries no body and no Content-Type"
+        );
+        assert!(get(file.path(), "int-1").expect("get").is_none());
+    }
+
+    /// A row whose MCP server the **sidecar** still hosts must be forwarded
+    /// whole, because only Go's own handler fires the `Reload`/`Stop` that
+    /// process needs. WhatsApp is the case that makes this more than tidiness:
+    /// its "server" is a live whatsmeow connection registered in a package
+    /// global that the status, reconnect and QR endpoints read, so a missed
+    /// reload strands a socket and a paired client that never connects.
+    #[test]
+    fn a_write_for_a_type_the_sidecar_hosts_forwards_without_touching_the_row() {
+        for integration_type in [
+            "slack",
+            "whatsapp",
+            "telegram",
+            "jira",
+            "confluence",
+            "google",
+        ] {
+            let file = migrated();
+            Connection::open(file.path())
+                .expect("open")
+                .execute(
+                    "INSERT INTO integrations (id, name, type, enabled, credentials, auth,
+                                               services, created_at, updated_at)
+                     VALUES ('int-1', 'Original', ?1, 1, ?2, '{\"token\":\"KEEP-ME\"}', '{}',
+                             '2026-01-01 00:00:00 +0000 UTC', '2026-01-02 00:00:00 +0000 UTC')",
+                    rusqlite::params![integration_type, format!(r#"{{"pat":"{SECRET}"}}"#)],
+                )
+                .expect("seed");
+
+            for err in [
+                update(
+                    file.path(),
+                    "int-1",
+                    br#"{"name":"Renamed","type":"github","enabled":false}"#,
+                )
+                .expect_err("must forward"),
+                delete(file.path(), "int-1").expect_err("must forward"),
+            ] {
+                assert!(
+                    matches!(err, WriteError::Fallback(_)),
+                    "{integration_type}: {err:?}"
+                );
+            }
+
+            // **Nothing was written.** A `Fallback` forwards the whole request
+            // and Go re-applies it, so a partial write here would be applied
+            // twice — the invariant in `writes.rs`.
+            assert_eq!(stored(&file, "SELECT name FROM integrations"), "Original");
+            assert_eq!(
+                stored(&file, "SELECT type FROM integrations"),
+                integration_type
+            );
+            assert_eq!(
+                stored(&file, "SELECT CAST(enabled AS TEXT) FROM integrations"),
+                "1"
+            );
+            assert_eq!(
+                stored(&file, "SELECT credentials FROM integrations"),
+                format!(r#"{{"pat":"{SECRET}"}}"#)
+            );
+            assert_eq!(
+                stored(&file, "SELECT updated_at FROM integrations"),
+                "2026-01-02 00:00:00 +0000 UTC"
+            );
+        }
+
+        // …and the one type this process does host is served natively.
+        let file = migrated();
+        seed_full_integration(&file, "int-1", Some(r#"{"token":"t"}"#));
+        assert_eq!(
+            update(file.path(), "int-1", br#"{"name":"N","type":"github"}"#)
+                .expect("github is ours")
+                .status,
+            axum::http::StatusCode::OK
+        );
+        assert_eq!(
+            delete(file.path(), "int-1").expect("github is ours").status,
+            axum::http::StatusCode::NO_CONTENT
+        );
+    }
+
+    /// `created_at` comes out of the database, so unlike the timestamps this
+    /// process formats itself it can genuinely fail to parse — and its
+    /// `Fallback` therefore has to happen **before** the `UPDATE`, or Go's
+    /// re-run would be the second application of a write that already landed.
+    #[test]
+    fn an_unparseable_created_at_forwards_before_anything_is_written() {
+        let file = migrated();
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                           created_at, updated_at)
+                 VALUES ('int-1', 'Original', 'github', 1, '{}', NULL, '{}',
+                         'not a timestamp', '2026-01-02 00:00:00 +0000 UTC')",
+                [],
+            )
+            .expect("seed");
+
+        let err = update(
+            file.path(),
+            "int-1",
+            br#"{"name":"Renamed","type":"github"}"#,
+        )
+        .expect_err("an unparseable stored timestamp forwards");
+        assert!(matches!(err, WriteError::Fallback(_)), "{err:?}");
+
+        assert_eq!(stored(&file, "SELECT name FROM integrations"), "Original");
+        assert_eq!(
+            stored(&file, "SELECT updated_at FROM integrations"),
+            "2026-01-02 00:00:00 +0000 UTC",
+            "the row must be untouched: Go re-runs the whole PUT"
+        );
+    }
+
+    /// The one route the seam owes a reload after Go has answered it (#311).
+    #[test]
+    fn only_a_successful_auth_validate_asks_the_shell_to_reload() {
+        assert_eq!(
+            reload_after_forward(&Method::POST, "/api/integrations/int-1/auth/validate"),
+            Some("int-1")
+        );
+        // Not a POST, not that route, and no empty or multi-segment id.
+        for (method, path) in [
+            (Method::GET, "/api/integrations/int-1/auth/validate"),
+            (Method::POST, "/api/integrations/int-1/auth/start"),
+            (Method::POST, "/api/integrations/int-1"),
+            (Method::POST, "/api/integrations//auth/validate"),
+            (Method::POST, "/api/integrations/a/b/auth/validate"),
+            (Method::POST, "/api/agents"),
+        ] {
+            assert_eq!(reload_after_forward(&method, path), None, "{method} {path}");
+        }
     }
 
     fn seed_integration(file: &tempfile::NamedTempFile, id: &str) {

@@ -56,6 +56,21 @@
 //! "stateless" is a property of the type rather than of a flag someone could
 //! flip halfway.
 //!
+//! ## Shutdown is graceful, like Go's
+//!
+//! Dropping an [`InProcessMcpServer`] stops the listener accepting and lets the
+//! requests already on a connection finish, which is what
+//! `httpServer.Shutdown(context.Background())` does on the Go side. The
+//! difference is not academic: since #311 a `PUT /api/integrations/{id}`
+//! reloads the integration's server unconditionally, so "a tool call in flight
+//! during a shutdown" is an ordinary Tuesday rather than a race to reason about.
+//!
+//! It rests on one line's placement — the transport's `CancellationToken` is
+//! fired **after** `axum::serve` returns, not as the shutdown signal — because
+//! that token is the parent of every tool call's, so signalling with it aborts
+//! the outbound HTTP request the handler is waiting on. Both halves are still
+//! wanted: the abort is what stops a detached handler outliving its listener.
+//!
 //! ## Every server carries a bearer token
 //!
 //! This is the one place the port does **more** than Go, deliberately. Go's
@@ -168,10 +183,11 @@ where
         .map_err(|e| Error::Other(format!("claude: mcp {name:?}: local address: {e}")))?;
 
     let config = server_config();
-    // Cancelling this is what tears down any work the transport has in flight;
-    // dropping the axum listener alone would leave it running. It is also the
-    // parent of every tool call's `CancellationToken`, so this is what lets a
-    // handler abort an outbound HTTP request when the handle goes away.
+    // Cancelling this is what tears down any work the transport still holds
+    // after the listener is gone; dropping the axum listener alone would leave
+    // it running. It is also the parent of every tool call's
+    // `CancellationToken`, which is why it is fired **after** the graceful
+    // shutdown completes rather than as the shutdown signal — see below.
     let cancel = config.cancellation_token.clone();
     let mcp = StreamableHttpService::new(
         move || Ok(service.clone()),
@@ -219,9 +235,25 @@ where
         let served = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
                 let _ = shutdown_rx.await;
-                cancel.cancel();
             })
             .await;
+        // **Shutdown is graceful, and the ordering here is the whole of it.**
+        //
+        // Go stops the server with `httpServer.Shutdown(context.Background())`
+        // and gives each tool handler the *HTTP request's* context, so a
+        // `tools/call` in flight when the server ctx is cancelled runs to
+        // completion and its response is delivered. `#311` reloads the server
+        // on every `PUT /api/integrations/{id}`, which makes that window
+        // routine rather than exotic: a model mid-`create_issue` when the user
+        // saves the integration form gets its answer.
+        //
+        // `cancel` is the parent of every tool call's `CancellationToken`, so
+        // firing it *as* the shutdown signal aborted the outbound HTTP request
+        // the handler was awaiting — the response the client was still on the
+        // connection for became an error. Firing it after `serve` returns keeps
+        // the teardown (an orphaned detached handler cannot outlive the
+        // listener) without the abort.
+        cancel.cancel();
         if let Err(e) = served {
             log::warn!("claude: mcp {server_name:?}: server stopped: {e}");
         }
@@ -245,7 +277,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::super::tool::{new_tool, ToolServer};
+    use super::super::tool::{new_tool, CancellationToken, ToolServer};
     use super::*;
     use rmcp::model::{CallToolResult, ContentBlock};
 
@@ -356,6 +388,90 @@ mod tests {
             }
         }
         panic!("the listener outlived its handle");
+    }
+
+    /// A `tools/call` already in flight when the handle is dropped still gets
+    /// its answer — Go's `Shutdown(context.Background())` is graceful, and
+    /// #311's unconditional reload on every integration `PUT` is what makes
+    /// that window routine.
+    ///
+    /// The tool sleeps rather than blocking on anything real so the drop can be
+    /// timed against it; what it proves is the ordering, which is that the
+    /// transport's cancellation token is fired after `serve` returns and not as
+    /// the shutdown signal. With the two swapped this test gets a transport
+    /// error instead of a result.
+    ///
+    /// The drop is sequenced on a signal from inside the handler rather than on
+    /// a sleep, so a loaded machine cannot turn "the POST had not arrived yet"
+    /// into a failure.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_tool_call_in_flight_survives_the_handles_drop() {
+        #[derive(serde::Deserialize, schemars::JsonSchema)]
+        struct SlowInput {
+            /// Milliseconds to wait before answering.
+            millis: u64,
+        }
+
+        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let server = start_in_process_mcp_server(
+            "probe",
+            ToolServer::new("probe").with_tool(new_tool(
+                "slow",
+                "Answers after a delay.",
+                move |input: SlowInput, ct: CancellationToken| {
+                    let started = started_tx.clone();
+                    async move {
+                        let _ = started.send(());
+                        // Waiting on the token as well as on the clock is what
+                        // makes an abort observable as a *different answer*
+                        // rather than as a hang: it is the same token a
+                        // cancelled turn fires, and it is the parent token this
+                        // test is about.
+                        tokio::select! {
+                            () = tokio::time::sleep(
+                                std::time::Duration::from_millis(input.millis)) => {
+                                Ok(CallToolResult::success(vec![ContentBlock::text("done")]))
+                            }
+                            () = ct.cancelled() => Err("cancelled".to_string()),
+                        }
+                    }
+                },
+            )),
+        )
+        .await
+        .unwrap();
+
+        let url = server.url().to_string();
+        let headers = server.config().headers.clone();
+        let call = tokio::spawn(async move {
+            let mut request = reqwest::Client::new()
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json, text/event-stream");
+            for (name, value) in &headers {
+                request = request.header(name, value);
+            }
+            request
+                .body(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+                        "params":{"name":"slow","arguments":{"millis":400}}}"#,
+                )
+                .send()
+                .await
+        });
+
+        started_rx.recv().await.expect("the handler is running");
+        drop(server);
+
+        let response = call.await.expect("the request task").expect("a response");
+        assert_eq!(response.status(), 200);
+        let body: serde_json::Value =
+            serde_json::from_str(&response.text().await.unwrap()).unwrap();
+        assert_eq!(
+            body["result"]["content"][0]["text"], "done",
+            "an in-flight tool call must run to completion across a shutdown, \
+             as it does in Go: {body}"
+        );
     }
 
     // The two properties `server_config()`'s stateless mode is *for*. Every
