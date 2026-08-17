@@ -1511,6 +1511,490 @@
       "text": "downloading drive file \"f3\": googleapi: Error 403: Insufficient Permission, insufficientPermissions"
     },
     {
+      "case": "create_event/one error whose message differs takes the More details branch",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "{\"error\":{\"code\":403,\"message\":\"Insufficient Permission\",\"errors\":[{\"message\":\"a different message\",\"reason\":\"insufficientPermissions\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 403: Insufficient Permission\nMore details:\nReason: insufficientPermissions, Message: a different message\n"
+    },
+    {
+      "case": "create_event/an error carrying details renders them as an indented block",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 429,
+          "body": "{\"error\":{\"code\":429,\"message\":\"Quota exceeded\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.ErrorInfo\",\"reason\":\"RATE_LIMIT_EXCEEDED\",\"domain\":\"googleapis.com\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 429: Quota exceeded\nDetails:\n[\n  {\n    \"@type\": \"type.googleapis.com/google.rpc.ErrorInfo\",\n    \"domain\": \"googleapis.com\",\n    \"reason\": \"RATE_LIMIT_EXCEEDED\"\n  }\n]"
+    },
+    {
+      "case": "create_event/details and errors together",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 400,
+          "body": "{\"error\":{\"code\":400,\"message\":\"Bad\",\"details\":[{\"a\":1}],\"errors\":[{\"reason\":\"r1\",\"message\":\"m1\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 400: Bad\nDetails:\n[\n  {\n    \"a\": 1\n  }\n]\n\nMore details:\nReason: r1, Message: m1\n"
+    },
+    {
+      "case": "create_event/an error with neither code nor message but an errors array",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "{\"error\":{\"errors\":[{\"reason\":\"r\",\"message\":\"m\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 403: \nMore details:\nReason: r, Message: m\n"
+    },
+    {
+      "case": "create_event/a top-level array error body is unwrapped",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "[{\"error\":{\"code\":403,\"message\":\"from an array\"}}]"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 403: from an array"
+    },
+    {
+      "case": "create_event/a null element in the errors array is a zero value",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "{\"error\":{\"code\":403,\"message\":\"Denied\",\"errors\":[null]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 403: Denied\nMore details:\nReason: , Message: \n"
+    },
+    {
+      "case": "create_event/omitempty applies to summary and dateTime, not only description",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-01-01T00:00:00Z",
+        "start": "",
+        "summary": ""
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"ev1\",\"summary\":\"Standup\",\"htmlLink\":\"https://cal/ev1\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-01-01T00:00:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"timeZone\":\"UTC\"}}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Event created: Standup\nID: ev1\nLink: https://cal/ev1"
+    },
+    {
+      "case": "create_file/an empty name sends no name key in the metadata",
+      "tool": "create_file",
+      "arguments": {
+        "content": "x",
+        "mime_type": "",
+        "name": ""
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f13\",\"name\":\"\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\"}\n"
+            },
+            {
+              "content_type": "text/plain; charset=utf-8",
+              "body": "x"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: \nID: f13\nLink: l"
+    },
+    {
+      "case": "create_file/content beginning BM sniffs as image/bmp",
+      "tool": "create_file",
+      "arguments": {
+        "content": "BMI calculator results",
+        "mime_type": "",
+        "name": "bmi.txt"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f14\",\"name\":\"bmi.txt\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"bmi.txt\"}\n"
+            },
+            {
+              "content_type": "image/bmp",
+              "body": "BMI calculator results"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: bmi.txt\nID: f14\nLink: l"
+    },
+    {
+      "case": "create_file/content beginning %PDF- sniffs as application/pdf",
+      "tool": "create_file",
+      "arguments": {
+        "content": "%PDF-1.4 not really",
+        "mime_type": "",
+        "name": "a"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f15\",\"name\":\"a\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a\"}\n"
+            },
+            {
+              "content_type": "application/pdf",
+              "body": "%PDF-1.4 not really"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a\nID: f15\nLink: l"
+    },
+    {
+      "case": "create_file/content beginning GIF89a sniffs as image/gif",
+      "tool": "create_file",
+      "arguments": {
+        "content": "GIF89a still text",
+        "mime_type": "",
+        "name": "a"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f16\",\"name\":\"a\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a\"}\n"
+            },
+            {
+              "content_type": "image/gif",
+              "body": "GIF89a still text"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a\nID: f16\nLink: l"
+    },
+    {
+      "case": "create_file/content beginning ID3 sniffs as audio/mpeg",
+      "tool": "create_file",
+      "arguments": {
+        "content": "ID3 v2 notes",
+        "mime_type": "",
+        "name": "a"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f17\",\"name\":\"a\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a\"}\n"
+            },
+            {
+              "content_type": "audio/mpeg",
+              "body": "ID3 v2 notes"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a\nID: f17\nLink: l"
+    },
+    {
+      "case": "create_file/a control byte past 512 bytes does not reach the sniff",
+      "tool": "create_file",
+      "arguments": {
+        "content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u0000",
+        "mime_type": "",
+        "name": "a"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f18\",\"name\":\"a\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a\"}\n"
+            },
+            {
+              "content_type": "text/plain; charset=utf-8",
+              "body": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u0000"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a\nID: f18\nLink: l"
+    },
+    {
+      "case": "create_file/a control byte inside 512 bytes does",
+      "tool": "create_file",
+      "arguments": {
+        "content": "aaaaaaaaaa\u0000",
+        "mime_type": "",
+        "name": "a"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f19\",\"name\":\"a\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a\"}\n"
+            },
+            {
+              "content_type": "application/octet-stream",
+              "body": "aaaaaaaaaa\u0000"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a\nID: f19\nLink: l"
+    },
+    {
+      "case": "read_email/a null element in parts is skipped, not a decode failure",
+      "tool": "read_email",
+      "arguments": {
+        "message_id": "m"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"payload\":{\"mimeType\":\"multipart/mixed\",\"headers\":[],\"parts\":[null,{\"mimeType\":\"text/plain\",\"body\":{\"data\":\"aGk=\"}}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/m?alt=json\u0026format=full\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Subject: \nFrom: \nDate: \n\nhi"
+    },
+    {
+      "case": "create_event/a 204 renders zero values rather than failing to decode",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 204,
+          "body": ""
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Event created: \nID: \nLink: "
+    },
+    {
       "case": "view_events/a zero-fraction float is an integer to Go and not to serde",
       "tool": "view_events",
       "arguments": {
@@ -1542,6 +2026,7 @@
     {
       "case": "a token an hour from expiry is reused without a refresh",
       "expires_in": 3600,
+      "no_refresh_token": false,
       "token_response": null,
       "api_response": {
         "status": 200,
@@ -1560,6 +2045,7 @@
     {
       "case": "a token with no expiry never refreshes",
       "expires_in": null,
+      "no_refresh_token": false,
       "token_response": null,
       "api_response": {
         "status": 200,
@@ -1578,6 +2064,7 @@
     {
       "case": "a token five seconds from expiry refreshes inside the delta",
       "expires_in": 5,
+      "no_refresh_token": false,
       "token_response": {
         "status": 200,
         "body": "{\"access_token\":\"ya29.refreshed\",\"token_type\":\"Bearer\",\"expires_in\":3599}"
@@ -1605,6 +2092,7 @@
     {
       "case": "an expired token refreshes and the new access token reaches the request",
       "expires_in": -60,
+      "no_refresh_token": false,
       "token_response": {
         "status": 200,
         "body": "{\"access_token\":\"ya29.refreshed-2\",\"token_type\":\"Bearer\",\"expires_in\":3599}"
@@ -1630,8 +2118,24 @@
       "text": "No files found."
     },
     {
+      "case": "an expired token with no refresh token is refused before any request",
+      "expires_in": -60,
+      "no_refresh_token": true,
+      "token_response": null,
+      "api_response": {
+        "status": 200,
+        "body": "{\"files\":[]}"
+      },
+      "refresh_request": null,
+      "api_request": null,
+      "is_error": true,
+      "text": "listing drive files: Get \"«api»/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=1\u0026prettyPrint=false\": oauth2: token expired and refresh token is not set",
+      "rust_text": "listing drive files: oauth2: token expired and refresh token is not set"
+    },
+    {
       "case": "a refused refresh surfaces as the tool's own failure",
       "expires_in": -60,
+      "no_refresh_token": false,
       "token_response": {
         "status": 400,
         "body": "{\"error\":\"invalid_grant\",\"error_description\":\"Token has been expired or revoked.\"}"

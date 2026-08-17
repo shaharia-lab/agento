@@ -31,6 +31,37 @@
 //!   its content type — rather than the byte stream.
 //! - `Accept-Encoding: gzip`, which both sides send but neither controls.
 //!
+//! ## Four small divergences that are known and left standing
+//!
+//! Each was found by review, checked against the Go source, and judged not worth
+//! the machinery — but "we did not notice" and "we decided not to" are different
+//! things, so they are written down rather than left implicit:
+//!
+//! - **Dot segments in a path parameter.** `.` is unreserved, so
+//!   [`expand_path_segment`] passes `..` through, and `reqwest::Url` then
+//!   normalizes it away — `download_file` with a `file_id` of `..` requests the
+//!   Drive *collection* where Go requests `/files/..`. Go never normalizes,
+//!   because it expands the template after resolving it. Fixing this means not
+//!   using `Url` at all, since both `parse` and `join` normalize; the input is
+//!   nonsense either way and both answers are errors from Google.
+//! - **`status_line` uses `canonical_reason()`** where Go reads the reason phrase
+//!   off the wire, so a non-standard status or a custom phrase renders
+//!   differently inside `oauth2: cannot fetch token: …`.
+//! - **The `Authorization` scheme is the literal `Bearer`**, where Go title-cases
+//!   `Token.TokenType`. Google always says `Bearer`.
+//! - **`expires_in` must be a JSON number here.** Go's `expirationTime` goes
+//!   through `json.Number`, which also accepts `"3600"` as a string; Google sends
+//!   a number.
+//!
+//! ## The upload shape is settled only under 16 MiB
+//!
+//! `googleapi.DefaultUploadChunkSize` is 16 MiB, above which `PrepareUpload`
+//! switches to a **resumable** upload: a different endpoint, `uploadType=resumable`,
+//! an `X-Upload-Content-Type` header and a two-phase POST/PUT. This port always
+//! sends `uploadType=multipart`. `create_file`'s content arrives as a JSON string
+//! in a `tools/call`, so reaching 16 MiB means a 16 MiB tool argument; if that
+//! ever becomes reachable, this is the thing to port.
+//!
 //! # The token source
 //!
 //! `buildHTTPClient` wraps the stored token in `oauth2.Config.TokenSource` and
@@ -249,6 +280,15 @@ impl TokenSource {
 
     /// The refresh request, measured against `golang.org/x/oauth2`.
     async fn refresh(&self, ct: &CancellationToken, current: &Token) -> Result<Token, String> {
+        // `tokenRefresher.Token` refuses **before opening a socket** when there
+        // is no refresh token (`oauth2.go:274`). Reproducing the refusal is not
+        // only about the sentence: without it this port POSTs the user's
+        // `client_secret` to Google on a request Go never sends. A re-consent
+        // without `prompt=consent` is exactly how a row ends up in this state.
+        if current.refresh_token.is_empty() {
+            return Err(NO_REFRESH_TOKEN.to_string());
+        }
+
         // `url.Values.Encode()` — sorted keys, and the client credentials in the
         // **body** because `google.Endpoint` declares `AuthStyleInParams`. A
         // `Basic` header here would be a different request.
@@ -394,6 +434,9 @@ fn status_line(status: reqwest::StatusCode) -> String {
 /// It names nothing: the request holds the `client_secret` and the refresh
 /// token, and a `reqwest::Error`'s `Display` can carry the URL.
 const REFRESH_FAILED: &str = "oauth2: cannot fetch token: request failed";
+
+/// `tokenRefresher.Token`'s refusal when the stored token has no refresh token.
+const NO_REFRESH_TOKEN: &str = "oauth2: token expired and refresh token is not set";
 
 fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
@@ -562,86 +605,162 @@ impl Client {
 /// is a pinned divergence rather than an attempt.
 const TRANSPORT_FAILED: &str = "the request could not be sent";
 
-/// `googleapi.Error.Error()`, measured across every shape it takes.
+/// `googleapi.CheckResponse` + `Error.Error()`, ported statement by statement
+/// rather than case by case.
 ///
-/// Four forms, and the port reproduces all four:
+/// It was first written as a four-case `match` over an earlier reading, and
+/// review found three of the four branch conditions wrong. The shapes below are
+/// all pinned by `desktop/parity/google_vectors.json`, but the reason this is now
+/// a transcription of the Go function rather than a table of its outputs is that
+/// the table was the bug: every case it did not list, it got wrong silently.
 ///
-/// | body | text |
-/// |---|---|
-/// | one error with a reason | `googleapi: Error 403: Insufficient Permission, insufficientPermissions` |
-/// | no `errors` array | `googleapi: Error 404: Not Found` |
-/// | several errors | `googleapi: Error 400: Bad Request\nMore details:\nReason: r1, Message: m1\n…` |
-/// | not a Google error document | `googleapi: got HTTP response code 403 with body: …` |
+/// The three that were wrong, each a real Google response:
 ///
-/// This text reaches the model inside every tool's own wrapper, so it is a
-/// parity surface rather than a log line.
+/// - **The one-error form is conditional** on the sub-error's message equalling
+///   the top-level one. When they differ — the normal shape for a validation
+///   error, where the top level is generic and the item specific — Go takes the
+///   `More details` branch.
+/// - **`error.details` was dropped entirely.** It is the modern envelope
+///   (`google.rpc.ErrorInfo`, `QuotaFailure`) and it is what a real quota error
+///   carries, rendered as an indented JSON block.
+/// - **The raw-form test is `errors.is_empty() && message.is_empty()`**, not
+///   "no code and no message" — an `errors` array alone takes the structured
+///   branch, with the code defaulting to the HTTP status.
+///
+/// This text reaches the model inside every tool's own wrapper, so it is a parity
+/// surface rather than a log line.
 fn googleapi_error(status: reqwest::StatusCode, body: &str) -> String {
-    #[derive(Default, serde::Deserialize)]
-    #[serde(default)]
-    struct Detail {
-        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
-        message: String,
-        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
-        reason: String,
-    }
-    #[derive(Default, serde::Deserialize)]
-    #[serde(default)]
-    struct Inner {
-        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
-        code: i64,
-        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
-        message: String,
-        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
-        errors: Vec<Detail>,
-    }
-    #[derive(Default, serde::Deserialize)]
-    #[serde(default)]
-    struct Envelope {
-        error: Option<crate::native::gojson::GoStruct<Inner>>,
-    }
-
-    let parsed = serde_json::from_str::<Option<crate::native::gojson::GoStruct<Envelope>>>(body)
-        .ok()
-        .and_then(|wrapped| wrapped.map(|wrapped| wrapped.0))
-        .and_then(|envelope| envelope.error)
-        .map(|wrapped| wrapped.0);
-
-    // `googleapi.CheckResponse` only produces an `*Error` when the document has
-    // an `error` **object**; `{"error":"invalid_grant"}` is a string and falls
-    // through to the raw form, which is why a token-endpoint style error reads
-    // differently from an API one.
-    let Some(inner) = parsed.filter(|inner| inner.code != 0 || !inner.message.is_empty()) else {
-        return format!(
+    let raw = || {
+        format!(
             "googleapi: got HTTP response code {} with body: {body}",
             status.as_u16()
-        );
+        )
     };
 
-    let code = if inner.code != 0 {
-        inner.code
+    // `errorReplyFromBody`: a body beginning with `[` is unwrapped as an array of
+    // replies and the first is taken.
+    let trimmed = body.trim_start();
+    let parsed = if trimmed.starts_with('[') {
+        serde_json::from_str::<Vec<crate::native::gojson::GoStruct<Envelope>>>(body)
+            .ok()
+            .and_then(|replies| replies.into_iter().next())
+            .and_then(|wrapped| wrapped.0.error)
     } else {
-        i64::from(status.as_u16())
+        // `CheckResponse` only produces an `*Error` when the document has an
+        // `error` **object**; `{"error":"invalid_grant"}` is a string and falls
+        // through to the raw form, which is why a token-endpoint style error
+        // reads differently from an API one.
+        serde_json::from_str::<Option<crate::native::gojson::GoStruct<Envelope>>>(body)
+            .ok()
+            .and_then(|wrapped| wrapped.map(|wrapped| wrapped.0))
+            .and_then(|envelope| envelope.error)
     };
-    match inner.errors.len() {
-        0 => format!("googleapi: Error {code}: {}", inner.message),
-        1 => format!(
-            "googleapi: Error {code}: {}, {}",
-            inner.message, inner.errors[0].reason
-        ),
-        _ => {
-            let mut out = format!(
-                "googleapi: Error {code}: {}\nMore details:\n",
-                inner.message
-            );
-            for detail in &inner.errors {
-                out.push_str(&format!(
-                    "Reason: {}, Message: {}\n",
-                    detail.reason, detail.message
-                ));
-            }
-            out
+    let Some(inner) = parsed.map(|wrapped| wrapped.0) else {
+        return raw();
+    };
+
+    // `Error()`'s own first line, and the only place the raw form is reachable
+    // from a document that *did* parse.
+    if inner.errors.is_empty() && inner.message.is_empty() {
+        return raw();
+    }
+
+    // `CheckResponse` defaults a zero code to the HTTP status.
+    let code = if inner.code == 0 {
+        i64::from(status.as_u16())
+    } else {
+        inner.code
+    };
+
+    let mut out = format!("googleapi: Error {code}: ");
+    out.push_str(&inner.message);
+
+    if !inner.details.is_empty() {
+        // `json.NewEncoder(&buf).SetIndent("", "  ").Encode(details)` — Go's
+        // sorted keys and HTML escaping, two-space indent, and the encoder's
+        // trailing newline, which the `TrimSpace` below removes when no errors
+        // section follows it.
+        if let Ok(compact) = crate::native::gojson::to_vec_marshal(&inner.details) {
+            let indented = crate::native::gojson::indent_compact(&compact);
+            out.push_str("\nDetails:\n");
+            out.push_str(&String::from_utf8_lossy(&indented));
+            out.push('\n');
         }
     }
+
+    if inner.errors.is_empty() {
+        // `strings.TrimSpace`, which is what removes the encoder's newline.
+        return out.trim().to_string();
+    }
+
+    let details = inner.details();
+    if details.len() == 1 && details[0].message == inner.message {
+        out.push_str(&format!(", {}", details[0].reason));
+        return out;
+    }
+
+    // `Fprintln` — hence the newline after the colon as well as before.
+    out.push_str("\nMore details:\n");
+    for detail in details {
+        out.push_str(&format!(
+            "Reason: {}, Message: {}\n",
+            detail.reason, detail.message
+        ));
+    }
+    out
+}
+
+/// One entry of `googleapi.Error.Errors`.
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct ErrorItem {
+    #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+    message: String,
+    #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+    reason: String,
+}
+
+/// `googleapi.Error`, reduced to the fields `Error()` reads.
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct GoogleError {
+    #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+    code: i64,
+    #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+    message: String,
+    /// Kept as raw values because `Error()` re-encodes them; `[]interface{}` in
+    /// Go, so any shape is legal here.
+    #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+    details: Vec<serde_json::Value>,
+    /// `Errors []ErrorItem` is a **value** slice in Go, so a `null` element
+    /// unmarshals to the zero `ErrorItem` rather than failing the document. The
+    /// `Option` is what reproduces that; `GoStruct` still refuses an array, which
+    /// is the rule the rest of this port follows.
+    #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+    errors: Vec<Option<crate::native::gojson::GoStruct<ErrorItem>>>,
+}
+
+impl GoogleError {
+    /// The `errors` array with every `null` collapsed to its zero value.
+    fn details(&self) -> Vec<ErrorItem> {
+        self.errors
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_ref()
+                    .map_or_else(ErrorItem::default, |wrapped| ErrorItem {
+                        message: wrapped.0.message.clone(),
+                        reason: wrapped.0.reason.clone(),
+                    })
+            })
+            .collect()
+    }
+}
+
+#[derive(Default, serde::Deserialize)]
+#[serde(default)]
+struct Envelope {
+    error: Option<crate::native::gojson::GoStruct<GoogleError>>,
 }
 
 /// A boundary of the shape `googleapi`'s writer produces — 60 lowercase hex
@@ -740,6 +859,58 @@ mod tests {
         assert_eq!(
             googleapi_error(forbidden, "not json at all"),
             "googleapi: got HTTP response code 403 with body: not json at all"
+        );
+
+        // The branch the earlier four-case version got wrong: the one-error form
+        // requires the sub-error's message to *equal* the top-level one, so a
+        // differing message takes `More details`. Pinned in the vectors too.
+        assert_eq!(
+            googleapi_error(
+                forbidden,
+                r#"{"error":{"code":403,"message":"Insufficient Permission","errors":[{"message":"a different message","reason":"insufficientPermissions"}]}}"#
+            ),
+            "googleapi: Error 403: Insufficient Permission\nMore details:\nReason: insufficientPermissions, Message: a different message\n"
+        );
+        // `errors` alone is enough to take the structured branch, and the code
+        // defaults to the HTTP status.
+        assert_eq!(
+            googleapi_error(
+                forbidden,
+                r#"{"error":{"errors":[{"reason":"r","message":"m"}]}}"#
+            ),
+            "googleapi: Error 403: \nMore details:\nReason: r, Message: m\n"
+        );
+        // `Errors` is a value slice, so a null element is the zero item.
+        assert_eq!(
+            googleapi_error(
+                forbidden,
+                r#"{"error":{"code":403,"message":"Denied","errors":[null]}}"#
+            ),
+            "googleapi: Error 403: Denied\nMore details:\nReason: , Message: \n"
+        );
+        // …but an array is still not a struct, which is what keeps `GoStruct`
+        // meaningful here: Go fails the document and falls to the raw form.
+        let arrayed = r#"{"error":{"code":403,"message":"Denied","errors":[[]]}}"#;
+        assert_eq!(
+            googleapi_error(forbidden, arrayed),
+            format!("googleapi: got HTTP response code 403 with body: {arrayed}")
+        );
+        // A body beginning `[` is unwrapped by `errorReplyFromBody`.
+        assert_eq!(
+            googleapi_error(
+                forbidden,
+                r#"[{"error":{"code":403,"message":"from an array"}}]"#
+            ),
+            "googleapi: Error 403: from an array"
+        );
+        // `details` renders as an indented block, and the encoder's trailing
+        // newline is trimmed when nothing follows it.
+        assert_eq!(
+            googleapi_error(
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                r#"{"error":{"code":429,"message":"Quota exceeded","details":[{"reason":"RATE_LIMIT"}]}}"#
+            ),
+            "googleapi: Error 429: Quota exceeded\nDetails:\n[\n  {\n    \"reason\": \"RATE_LIMIT\"\n  }\n]"
         );
     }
 

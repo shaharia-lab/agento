@@ -1424,6 +1424,32 @@ first time, and none was visible from either side's source:
    the one the port did not have:
    `oauth2: "invalid_grant" "Token has been expired or revoked."`.
 
+Review then found more of the same shape, each confirmed by adding a vector and
+reading what real Go answered — which is the workflow to repeat here:
+
+4. **`googleapi.Error.Error()` is not a four-case table.** The one-error form is
+   conditional on the sub-error's message *equalling* the top-level one (the
+   normal validation-error shape has them differ, and takes `More details`);
+   `error.details` — the modern `google.rpc.ErrorInfo` envelope a real quota error
+   carries — was dropped entirely; the raw-form test is "no errors **and** no
+   message", not "no code and no message"; and a body beginning `[` is unwrapped
+   by `errorReplyFromBody`. It is now a transcription of the Go function rather
+   than a table of its outputs, because the table *was* the bug: every case it did
+   not list, it got wrong silently.
+5. **`omitempty` reaches past `description`.** `calendar.Event.Summary`,
+   `EventDateTime.DateTime` and `drive.File.Name` all carry it, so an empty
+   `start` sends an object holding nothing but its time zone.
+6. **`tokenRefresher` refuses before opening a socket** when the stored token has
+   no refresh token — the state a re-consent without `prompt=consent` leaves a row
+   in. Reproducing it is not only about the sentence: without it the port POSTs
+   the user's `client_secret` on a request Go never sends.
+7. **Gmail's `parts` is the one array where a `null` element is graceful** —
+   `extractBody` nil-checks it — so it is `Vec<Option<GoStruct<_>>>` where its
+   siblings are not, and `googleapi.Error.Errors` needs the same because it is a
+   Go **value** slice.
+8. **An empty 2xx body is a zero value, not a decode failure**
+   (`DecodeResponse` returns untouched on a 204).
+
 A fourth was found by trying to *vector* it: **a response body of exactly `null`
 panics every one of the eight Go tools.** The generated clients decode into a
 `**T`, `json.Unmarshal` of `null` into a pointer-to-pointer nils the pointer, and
@@ -1446,9 +1472,16 @@ Google-specific behaviour the other five never reached:
   sentence whose number does not match its body. Go's, and pinned.
 - **`create_file`'s media type is sniffed from the content**, not taken from the
   tool's `mime_type` argument, which reaches the metadata JSON alone.
-  `drive::detect_content_type` implements the subset of
-  `net/http.DetectContentType` a JSON **string** can reach — a PNG's `0x89` cannot
-  arrive as one byte, so the binary signature table is deliberately not written.
+  `drive::detect_content_type` is `net/http.DetectContentType` ported **whole**,
+  including the 512-byte bound. It was first written as "the subset a JSON string
+  can reach", on the reasoning that a PNG's `0x89` would be UTF-8 encoded before
+  it arrived — sound for `0x89`, wrong for most of the table, since `BM`, `%PDF-`,
+  `%!PS-Adobe-`, `GIF87a`/`GIF89a`, `ID3`, `OTTO`, `ttcf`, `wOFF`, `wOF2`,
+  `RIFF…WAVE` and `FORM…AIFF` are pure ASCII. `BM` is the one that bites: content
+  beginning "BMI calculator results…" uploads as `image/bmp`. **The lesson
+  generalizes past this function** — an argument that some subset of a third
+  party's table is unreachable has to be right about every entry, and the cheaper
+  move is to transcribe the table.
 - **Drive's upload path is an absolute reference**, so it replaces the base's
   whole path: `/upload/drive/v3/files`, not something under `/drive/v3/`.
 - **Every clamp differs.** `view_events` and `list_files` cap at 100, `search_email`

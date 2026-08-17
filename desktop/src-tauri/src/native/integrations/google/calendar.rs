@@ -58,16 +58,31 @@ pub fn create_event(client: &Client) -> ToolDef {
         move |input: CreateEventInput, ct: CancellationToken| {
             let client = client.clone();
             async move {
-                // `calendar.Event` with `omitempty` everywhere: an empty
-                // description sends no key at all, and `TimeZone` is the
-                // handler's literal `"UTC"` on both ends.
+                // `calendar.Event` carries `omitempty` on **every** field, not
+                // just `description` — `Summary` and `EventDateTime.DateTime`
+                // too. So an empty start sends a `start` object holding nothing
+                // but its time zone, and an empty summary sends no key. Only
+                // `TimeZone` is unconditional, because it is the handler's own
+                // literal `"UTC"` rather than an argument.
+                let when = |value: &str| {
+                    let mut object = serde_json::Map::new();
+                    if !value.is_empty() {
+                        object.insert("dateTime".to_string(), Value::String(value.to_string()));
+                    }
+                    object.insert("timeZone".to_string(), Value::String("UTC".to_string()));
+                    Value::Object(object)
+                };
                 let mut event = json!({
-                    "end": {"dateTime": input.end, "timeZone": "UTC"},
-                    "start": {"dateTime": input.start, "timeZone": "UTC"},
-                    "summary": input.summary,
+                    "end": when(&input.end),
+                    "start": when(&input.start),
                 });
-                if !input.description.is_empty() {
-                    event["description"] = Value::String(input.description.clone());
+                for (key, value) in [
+                    ("description", &input.description),
+                    ("summary", &input.summary),
+                ] {
+                    if !value.is_empty() {
+                        event[key] = Value::String(value.clone());
+                    }
                 }
 
                 let body = super::marshal(&event)?;

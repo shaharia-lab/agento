@@ -121,6 +121,8 @@ struct CallVector {
 struct RefreshVector {
     case: String,
     expires_in: Option<i64>,
+    #[serde(default)]
+    no_refresh_token: bool,
     token_response: Option<ResponseScript>,
     api_response: ResponseScript,
     refresh_request: Option<RequestVector>,
@@ -622,7 +624,13 @@ async fn every_refresh_matches_the_go_vectors() {
             &v.client_secret,
             Token {
                 access_token: v.access_token.clone(),
-                refresh_token: v.refresh_token.clone(),
+                // An empty refresh token is the state `tokenRefresher` refuses
+                // on before opening a socket.
+                refresh_token: if case.no_refresh_token {
+                    String::new()
+                } else {
+                    v.refresh_token.clone()
+                },
                 // `None` is Go's zero `time.Time`, which never expires — and a
                 // negative offset is a token already past its expiry.
                 expiry: case.expires_in.map(|seconds| {

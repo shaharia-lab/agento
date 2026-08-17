@@ -274,8 +274,12 @@ struct MessagePart {
     body: Option<crate::native::gojson::GoStruct<MessagePartBody>>,
     #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
     headers: Vec<crate::native::gojson::GoStruct<Header>>,
+    /// `Parts []*MessagePart` is a **pointer** slice and `extractBody` has an
+    /// explicit nil check for it (`gmail.go:117`) — the one place in this
+    /// integration where Go handles a null element gracefully instead of
+    /// panicking. So a `null` here is a skipped part, not a decode failure.
     #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
-    parts: Vec<crate::native::gojson::GoStruct<MessagePart>>,
+    parts: Vec<Option<crate::native::gojson::GoStruct<MessagePart>>>,
 }
 
 impl MessagePart {
@@ -283,7 +287,7 @@ impl MessagePart {
         self.headers.iter().map(|wrapped| &wrapped.0)
     }
     fn parts(&self) -> impl Iterator<Item = &MessagePart> {
-        self.parts.iter().map(|wrapped| &wrapped.0)
+        self.parts.iter().flatten().map(|wrapped| &wrapped.0)
     }
 }
 

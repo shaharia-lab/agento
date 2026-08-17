@@ -186,6 +186,13 @@ pub(crate) fn decode<T>(raw: &str) -> std::result::Result<T, String>
 where
     T: Default + serde::de::DeserializeOwned,
 {
+    // `gensupport.DecodeResponse` returns without touching the target on a 204,
+    // so an empty 2xx body renders zero values rather than erroring. The status
+    // is gone by the time this runs, but an empty body is the only way to reach
+    // it: every other 2xx carries JSON.
+    if raw.is_empty() {
+        return Ok(T::default());
+    }
     serde_json::from_str::<Option<crate::native::gojson::GoStruct<T>>>(raw)
         .map(|wrapped| wrapped.map_or_else(T::default, |wrapped| wrapped.0))
         .map_err(|e| format!("decoding response: {e}"))

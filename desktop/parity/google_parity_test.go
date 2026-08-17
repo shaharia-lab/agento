@@ -181,6 +181,8 @@ type googleRefreshVector struct {
 	Case string `json:"case"`
 	// Seconds from now; nil is Go's zero `time.Time`, which never expires.
 	ExpiresIn *int64 `json:"expires_in"`
+	// The stored token carries no refresh token at all.
+	NoRefreshToken bool `json:"no_refresh_token"`
 	// The scripted answer from the token endpoint. Absent when no refresh is
 	// expected.
 	TokenResponse *googleResponseScript `json:"token_response"`
@@ -338,7 +340,7 @@ func (f *fakeGoogle) recordedToken() *googleRequestVector {
 // `time.Time`, which never expires.
 func googleSession(
 	t *testing.T, ctx context.Context,
-	services map[string]config.ServiceConfig, expiresIn *int64,
+	services map[string]config.ServiceConfig, expiresIn *int64, noRefreshToken bool,
 ) *mcp.ClientSession {
 	t.Helper()
 
@@ -357,6 +359,9 @@ func googleSession(
 		AccessToken:  googleAccessToken,
 		RefreshToken: googleRefreshToken,
 		TokenType:    "Bearer",
+	}
+	if noRefreshToken {
+		token.RefreshToken = ""
 	}
 	if expiresIn != nil {
 		token.Expiry = time.Now().Add(time.Duration(*expiresIn) * time.Second)
@@ -841,6 +846,174 @@ func googleCallCases() []googleCallCase {
 				Body: `{"error":{"code":403,"message":"Insufficient Permission","errors":[{"reason":"insufficientPermissions","message":"Insufficient Permission"}]}}`}},
 		},
 
+		// ─── googleapi.Error's remaining shapes, all found by review ─────────
+		{
+			// `Error()`'s one-error form is **conditional** on the sub-error's
+			// message equalling the top-level one. When they differ — the normal
+			// shape for a validation error, where the top level is generic and
+			// the item is specific — it takes the "More details" branch instead.
+			// The first fixture above passes only because its two messages
+			// happen to match.
+			name: "create_event/one error whose message differs takes the More details branch",
+			tool: "create_event",
+			args: map[string]any{
+				"summary": "s", "start": "2026-03-01T10:00:00Z",
+				"end": "2026-03-01T10:30:00Z", "description": "",
+			},
+			scripts: []googleResponseScript{{Status: http.StatusForbidden,
+				Body: `{"error":{"code":403,"message":"Insufficient Permission","errors":[{"message":"a different message","reason":"insufficientPermissions"}]}}`}},
+		},
+		{
+			// `error.details` is the modern envelope — `google.rpc.ErrorInfo`,
+			// `QuotaFailure` — and it is what a real quota error carries. Go
+			// renders it as an indented JSON block before the errors section.
+			name: "create_event/an error carrying details renders them as an indented block",
+			tool: "create_event",
+			args: map[string]any{
+				"summary": "s", "start": "2026-03-01T10:00:00Z",
+				"end": "2026-03-01T10:30:00Z", "description": "",
+			},
+			scripts: []googleResponseScript{{Status: http.StatusTooManyRequests,
+				Body: `{"error":{"code":429,"message":"Quota exceeded","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED","domain":"googleapis.com"}]}}`}},
+		},
+		{
+			name: "create_event/details and errors together",
+			tool: "create_event",
+			args: map[string]any{
+				"summary": "s", "start": "2026-03-01T10:00:00Z",
+				"end": "2026-03-01T10:30:00Z", "description": "",
+			},
+			scripts: []googleResponseScript{{Status: http.StatusBadRequest,
+				Body: `{"error":{"code":400,"message":"Bad","details":[{"a":1}],"errors":[{"reason":"r1","message":"m1"}]}}`}},
+		},
+		{
+			// An `errors` array alone is enough to take the structured branch:
+			// the raw-form test is `len(Errors) == 0 && Message == ""`, and the
+			// code defaults to the HTTP status.
+			name: "create_event/an error with neither code nor message but an errors array",
+			tool: "create_event",
+			args: map[string]any{
+				"summary": "s", "start": "2026-03-01T10:00:00Z",
+				"end": "2026-03-01T10:30:00Z", "description": "",
+			},
+			scripts: []googleResponseScript{{Status: http.StatusForbidden,
+				Body: `{"error":{"errors":[{"reason":"r","message":"m"}]}}`}},
+		},
+		{
+			// `errorReplyFromBody` explicitly handles a body beginning with `[`.
+			name: "create_event/a top-level array error body is unwrapped",
+			tool: "create_event",
+			args: map[string]any{
+				"summary": "s", "start": "2026-03-01T10:00:00Z",
+				"end": "2026-03-01T10:30:00Z", "description": "",
+			},
+			scripts: []googleResponseScript{{Status: http.StatusForbidden,
+				Body: `[{"error":{"code":403,"message":"from an array"}}]`}},
+		},
+		{
+			// `Errors` is a **value** slice, so a null element is the zero
+			// `ErrorItem` rather than a decode failure.
+			name: "create_event/a null element in the errors array is a zero value",
+			tool: "create_event",
+			args: map[string]any{
+				"summary": "s", "start": "2026-03-01T10:00:00Z",
+				"end": "2026-03-01T10:30:00Z", "description": "",
+			},
+			scripts: []googleResponseScript{{Status: http.StatusForbidden,
+				Body: `{"error":{"code":403,"message":"Denied","errors":[null]}}`}},
+		},
+
+		// ─── omitempty reaches more than description ─────────────────────────
+		{
+			// `calendar.Event.Summary` and `EventDateTime.DateTime` carry
+			// `omitempty` too, so an empty `start` sends a `start` object holding
+			// nothing but its time zone — and an empty summary sends no key.
+			name: "create_event/omitempty applies to summary and dateTime, not only description",
+			tool: "create_event",
+			args: map[string]any{
+				"summary": "", "start": "", "end": "2026-01-01T00:00:00Z", "description": "",
+			},
+			scripts: googleOK(createdEvent),
+		},
+		{
+			name:    "create_file/an empty name sends no name key in the metadata",
+			tool:    "create_file",
+			args:    map[string]any{"name": "", "content": "x", "mime_type": ""},
+			scripts: googleOK(`{"id":"f13","name":"","webViewLink":"l"}`),
+		},
+
+		// ─── DetectContentType is a table, not a text/binary test ────────────
+		{
+			// `BM` is a two-byte signature, so *any* content starting with those
+			// letters uploads as a bitmap. The port's claim that a binary
+			// signature "cannot arrive as one byte" is false for every ASCII
+			// one.
+			name:    "create_file/content beginning BM sniffs as image/bmp",
+			tool:    "create_file",
+			args:    map[string]any{"name": "bmi.txt", "content": "BMI calculator results", "mime_type": ""},
+			scripts: googleOK(`{"id":"f14","name":"bmi.txt","webViewLink":"l"}`),
+		},
+		{
+			name:    "create_file/content beginning %PDF- sniffs as application/pdf",
+			tool:    "create_file",
+			args:    map[string]any{"name": "a", "content": "%PDF-1.4 not really", "mime_type": ""},
+			scripts: googleOK(`{"id":"f15","name":"a","webViewLink":"l"}`),
+		},
+		{
+			name:    "create_file/content beginning GIF89a sniffs as image/gif",
+			tool:    "create_file",
+			args:    map[string]any{"name": "a", "content": "GIF89a still text", "mime_type": ""},
+			scripts: googleOK(`{"id":"f16","name":"a","webViewLink":"l"}`),
+		},
+		{
+			name:    "create_file/content beginning ID3 sniffs as audio/mpeg",
+			tool:    "create_file",
+			args:    map[string]any{"name": "a", "content": "ID3 v2 notes", "mime_type": ""},
+			scripts: googleOK(`{"id":"f17","name":"a","webViewLink":"l"}`),
+		},
+		{
+			// The sniff reads at most 512 bytes, so a control byte past that
+			// offset does not make the upload binary.
+			name: "create_file/a control byte past 512 bytes does not reach the sniff",
+			tool: "create_file",
+			args: map[string]any{
+				"name": "a", "content": strings.Repeat("a", 600) + "\u0000", "mime_type": "",
+			},
+			scripts: googleOK(`{"id":"f18","name":"a","webViewLink":"l"}`),
+		},
+		{
+			name: "create_file/a control byte inside 512 bytes does",
+			tool: "create_file",
+			args: map[string]any{
+				"name": "a", "content": strings.Repeat("a", 10) + "\u0000", "mime_type": "",
+			},
+			scripts: googleOK(`{"id":"f19","name":"a","webViewLink":"l"}`),
+		},
+
+		// ─── a null element in a Gmail parts array ───────────────────────────
+		{
+			// `extractBody` has an explicit nil check, so a null part is skipped
+			// — the one place in this integration where Go handles a null
+			// element gracefully rather than panicking.
+			name:    "read_email/a null element in parts is skipped, not a decode failure",
+			tool:    "read_email",
+			args:    map[string]any{"message_id": "m"},
+			scripts: googleOK(`{"payload":{"mimeType":"multipart/mixed","headers":[],"parts":[null,{"mimeType":"text/plain","body":{"data":"aGk="}}]}}`),
+		},
+
+		// ─── an empty 2xx body ───────────────────────────────────────────────
+		{
+			// `DecodeResponse` returns without touching the target on a 204, so
+			// the handler renders zero values rather than erroring.
+			name: "create_event/a 204 renders zero values rather than failing to decode",
+			tool: "create_event",
+			args: map[string]any{
+				"summary": "s", "start": "2026-03-01T10:00:00Z",
+				"end": "2026-03-01T10:30:00Z", "description": "",
+			},
+			scripts: []googleResponseScript{{Status: http.StatusNoContent, Body: ""}},
+		},
+
 		// ─── a zero-fraction float for an integer field ───────────────────────
 		{
 			name:      "view_events/a zero-fraction float is an integer to Go and not to serde",
@@ -861,6 +1034,9 @@ type googleRefreshCase struct {
 	tokenResponse *googleResponseScript
 	apiResponse   googleResponseScript
 	rustText      string
+	// Stores a token with no refresh token at all, which `tokenRefresher` short
+	// circuits on before opening a socket.
+	noRefreshToken bool
 }
 
 func googleSeconds(n int64) *int64 { return &n }
@@ -901,6 +1077,20 @@ func googleRefreshCases() []googleRefreshCase {
 			tokenResponse: &googleResponseScript{Status: http.StatusOK,
 				Body: `{"access_token":"ya29.refreshed-2","token_type":"Bearer","expires_in":3599}`},
 			apiResponse: ok,
+		},
+		{
+			// `tokenRefresher.Token` refuses **before** any request when there is
+			// no refresh token — which is the state a re-consent without
+			// `prompt=consent` leaves a row in. Reproducing the refusal is what
+			// keeps the port from transmitting the client secret on a request Go
+			// never sends.
+			name:           "an expired token with no refresh token is refused before any request",
+			expiresIn:      googleSeconds(-60),
+			noRefreshToken: true,
+			apiResponse:    ok,
+			// Only the `*url.Error` wrapper diverges; the sentence itself is
+			// reproduced, and so is the fact that no socket is opened.
+			rustText: "listing drive files: oauth2: token expired and refresh token is not set",
 		},
 		{
 			// The failure surfaces as the **tool's** failure, because `oauth2`'s
@@ -961,7 +1151,7 @@ func TestGoogleVectors(t *testing.T) {
 		NowPlaceholder: googleNowPlaceholder,
 	}
 
-	session := googleSession(t, ctx, googleAllServices(), googleHour())
+	session := googleSession(t, ctx, googleAllServices(), googleHour(), false)
 	listed, err := session.ListTools(ctx, nil)
 	if err != nil {
 		t.Fatalf("tools/list: %v", err)
@@ -1027,7 +1217,7 @@ func googleHostedTools(
 	t *testing.T, ctx context.Context, services map[string]config.ServiceConfig,
 ) []string {
 	t.Helper()
-	listed, err := googleSession(t, ctx, services, googleHour()).ListTools(ctx, nil)
+	listed, err := googleSession(t, ctx, services, googleHour(), false).ListTools(ctx, nil)
 	if err != nil {
 		t.Fatalf("tools/list: %v", err)
 	}
@@ -1103,7 +1293,7 @@ func runGoogleRefreshCase(
 	// transport, so the vector is about the token and nothing else.
 	session := googleSession(t, ctx,
 		map[string]config.ServiceConfig{"drive": {Enabled: true, Tools: []string{"list_files"}}},
-		c.expiresIn)
+		c.expiresIn, c.noRefreshToken)
 	args := jsonArgs(t, map[string]any{"query": "", "max_results": 1})
 	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "list_files", Arguments: args})
 	if err != nil {
@@ -1122,6 +1312,7 @@ func runGoogleRefreshCase(
 	return googleRefreshVector{
 		Case:           c.name,
 		ExpiresIn:      c.expiresIn,
+		NoRefreshToken: c.noRefreshToken,
 		TokenResponse:  c.tokenResponse,
 		APIResponse:    c.apiResponse,
 		RefreshRequest: fake.recordedToken(),
