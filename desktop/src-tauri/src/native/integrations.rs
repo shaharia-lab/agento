@@ -674,6 +674,14 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
         integration_type: req.integration_type,
         updated_at: parse_written(&now)?,
     };
+    // `integrationService.Create`'s own line. `name` is user-authored text the
+    // access line does not carry, and that is deliberate — see
+    // `writes::service_log_convention`.
+    log::info!(
+        "integration created id={:?} name={:?}",
+        created.id,
+        created.name
+    );
     encode_created(&created)
 }
 
@@ -810,6 +818,7 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     };
     let body = super::gojson::to_vec(&updated)
         .map_err(|e| WriteError::Fallback(format!("encoding integration: {e}")))?;
+    log::info!("integration updated id={id:?}");
     Ok(super::Answer::json(body))
 }
 
@@ -836,6 +845,7 @@ fn delete(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 
     conn.execute("DELETE FROM integrations WHERE id = ?1", [id])
         .map_err(|e| WriteError::Fallback(format!("deleting integration: {e}")))?;
+    log::info!("integration deleted id={id:?}");
     Ok(super::Answer::no_content())
 }
 
@@ -961,6 +971,11 @@ fn create_trigger_rule(
         updated_at: stamp,
     };
     insert_rule(&conn, &rule, &now)?;
+    log::info!(
+        "trigger rule created id={:?} integration_id={:?}",
+        rule.id,
+        rule.integration_id
+    );
     encode_created(&rule)
 }
 
@@ -1027,6 +1042,7 @@ fn update_trigger_rule(
 
     let body = super::gojson::to_vec(&rule)
         .map_err(|e| WriteError::Fallback(format!("encoding trigger rule: {e}")))?;
+    log::info!("trigger rule updated id={rule_id:?}");
     Ok(super::Answer::json(body))
 }
 
@@ -1045,6 +1061,7 @@ fn delete_trigger_rule(
     }
     conn.execute("DELETE FROM trigger_rules WHERE id = ?1", [rule_id])
         .map_err(|e| WriteError::Fallback(format!("deleting trigger rule: {e}")))?;
+    log::info!("trigger rule deleted id={rule_id:?}");
     Ok(super::Answer::no_content())
 }
 
@@ -2138,5 +2155,67 @@ mod tests {
             "{}",
             err.message()
         );
+    }
+
+    /// #335: the integration and trigger-rule writes' own lines.
+    ///
+    /// `integration created … name=` is the one line here that carries
+    /// user-authored text the access line does not, and it is deliberate — a
+    /// line that cannot say which integration was created is most of what it is
+    /// for. See `writes::service_log_convention`.
+    #[test]
+    fn the_integration_writes_log_their_entity_and_outcome() {
+        crate::native::writes::testlog::install();
+        let file = migrated();
+
+        create(
+            file.path(),
+            br#"{"name":"Logged Bot","type":"telegram","credentials":{"bot_token":"t"}}"#,
+        )
+        .expect("create");
+        let created = crate::native::writes::testlog::matching(r#"name="Logged Bot""#);
+        assert_eq!(created.len(), 1, "{created:?}");
+        assert!(
+            created[0].starts_with("INFO integration created id=\""),
+            "{}",
+            created[0]
+        );
+
+        seed_full_integration(&file, "logged-int", None);
+        update(
+            file.path(),
+            "logged-int",
+            br#"{"name":"N","type":"github"}"#,
+        )
+        .expect("update");
+        crate::native::writes::testlog::assert_info_once(r#"integration updated id="logged-int""#);
+
+        delete(file.path(), "logged-int").expect("delete");
+        crate::native::writes::testlog::assert_info_once(r#"integration deleted id="logged-int""#);
+    }
+
+    /// The trigger-rule half, whose create line carries both ids as Go's does.
+    #[test]
+    fn the_trigger_rule_writes_log_their_entity_and_outcome() {
+        crate::native::writes::testlog::install();
+        let file = migrated();
+        seed_integration(&file, "rule-int");
+
+        create_trigger_rule(file.path(), "rule-int", br#"{"agent_slug":"a"}"#).expect("create");
+        let id = stored(&file, "SELECT id FROM trigger_rules");
+        crate::native::writes::testlog::assert_info_once(&format!(
+            r#"trigger rule created id="{id}" integration_id="rule-int""#
+        ));
+
+        update_trigger_rule(file.path(), "rule-int", &id, br#"{"agent_slug":"b"}"#)
+            .expect("update");
+        crate::native::writes::testlog::assert_info_once(&format!(
+            r#"trigger rule updated id="{id}""#
+        ));
+
+        delete_trigger_rule(file.path(), "rule-int", &id).expect("delete");
+        crate::native::writes::testlog::assert_info_once(&format!(
+            r#"trigger rule deleted id="{id}""#
+        ));
     }
 }

@@ -275,6 +275,149 @@ pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Wri
     }
 }
 
+// ─── The service-layer log lines (#335) ───────────────────────────────────────
+
+/// The convention every service-layer log line in `native/` follows.
+///
+/// Nothing calls this; it exists so the rule has one address that a call site
+/// can link to, the way the endpoint registry documents the seam. The
+/// alternative — the rule restated at fifteen call sites — is what #301's own
+/// argument against per-handler logging is about.
+///
+/// #301 ported Go's `requestLogger` — one access line per `/api` request, at the
+/// seam, so it cannot go selectively sparse as routes move. It deliberately
+/// stopped there, and #335 is the other half: **an access line carries neither
+/// the entity nor the outcome.** `POST /api/integrations 201 12ms native` does
+/// not say which integration, under what name; `DELETE /api/chats 204 3ms
+/// native` cannot say how many sessions a bulk delete took. Only the handler
+/// knows, so unlike the access line these *have* to live at the call sites — and
+/// that is why they land **per subsystem, as its Go counterpart is ported**
+/// rather than as one pass. A line for a service the sidecar still answers would
+/// log an event this process did not cause.
+///
+/// Four rules, so fifteen call sites read as one record:
+///
+/// 1. **`message key=value …`, mirroring Go's `slog` call**, with the same
+///    message string and the same keys in the same order. The message is what a
+///    reader greps for, and a renamed one silently reworded every historical
+///    line.
+/// 2. **Every string value is `{:?}`; numbers are `{}`.** Go's `slog` quotes only
+///    when it must, but half of these values are user-authored — an integration
+///    name, an upload's filename — and one containing a space or an `=` makes an
+///    unquoted line unparseable. Quoting always is the only rule that does not
+///    depend on the value.
+/// 3. **`info`, and after the effect.** The seam's split is failures at `warn`,
+///    writes at `info`, successful reads at `debug`; these are all writes. Go
+///    logs after the store call returns, so a line means it happened — logging
+///    before the commit would announce a write a rollback then discarded.
+/// 4. **The `#301` privacy rule still holds: no bodies, no headers, no query
+///    string.** Two of these lines carry user-authored text that the access line
+///    does not, and both are deliberate rather than overlooked, on the same terms
+///    as the agent slug already in the path: `integration created … name=…`,
+///    because a line that cannot say which integration was created is most of
+///    what it is for; and `file uploaded path=…`, which is the destination
+///    filename under the uploads dir — Go logs it and the response body returns
+///    it. Nothing here logs a credential, a prompt or a message body, and a line
+///    that wanted to would need to be argued here first.
+///
+/// What is **not** here, and why, so the gap is not read as an omission: the
+/// scheduler's job-start/complete lines (#275), the trigger dispatcher's
+/// match/run lines and the notification handler's are produced by background
+/// work with no request behind them, in a subsystem the sidecar still owns. The
+/// five `… validated` lines in `integration_service.go` belong to
+/// `ValidateTokenAuth`, which is the deferred `auth/*` route. `PUT /api/settings`
+/// is deferred too (#305). None of them can be written until their subsystem
+/// moves; #278 is when this stops being optional, because until then the sidecar
+/// still emits its own lines for what it still serves.
+pub mod service_log_convention {}
+
+/// A `log` sink the write tests assert against.
+///
+/// A log line with no test is a line that quietly stops being emitted, which for
+/// this half of #301 is the whole failure mode — the record going sparse without
+/// anyone noticing. Installed once per process because `log::set_boxed_logger`
+/// allows exactly one; tests filter by their own row's id, so the shared buffer
+/// does not make them order-dependent.
+#[cfg(test)]
+pub(crate) mod testlog {
+    use std::sync::{Mutex, Once, OnceLock};
+
+    static LINES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    static INIT: Once = Once::new();
+
+    struct Capture;
+
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if let Ok(mut lines) = lines().lock() {
+                lines.push(format!("{} {}", record.level(), record.args()));
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    fn lines() -> &'static Mutex<Vec<String>> {
+        LINES.get_or_init(Mutex::default)
+    }
+
+    /// Start capturing. Idempotent, and safe to call from every test.
+    pub(crate) fn install() {
+        INIT.call_once(|| {
+            let _ = log::set_boxed_logger(Box::new(Capture));
+            log::set_max_level(log::LevelFilter::Trace);
+        });
+    }
+
+    /// Every captured line containing `needle`, level prefix included.
+    pub(crate) fn matching(needle: &str) -> Vec<String> {
+        install();
+        lines()
+            .lock()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter(|line| line.contains(needle))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Assert at least one line was emitted at `INFO` matching `needle`.
+    ///
+    /// For the two `count=` lines, which carry no id: Go's carries only the
+    /// count, so a suite sharing one buffer cannot tell two tests' lines apart
+    /// and "exactly one" would be order-dependent rather than true.
+    #[track_caller]
+    pub(crate) fn assert_info_present(needle: &str) {
+        let found = matching(needle);
+        assert!(!found.is_empty(), "no line for {needle:?}");
+        for line in &found {
+            assert!(line.starts_with("INFO "), "a write logs at info: {line:?}");
+        }
+    }
+
+    /// Assert exactly one line was emitted at `INFO` matching `needle`. Only
+    /// safe for a line carrying an id unique to the calling test.
+    #[track_caller]
+    pub(crate) fn assert_info_once(needle: &str) {
+        let found = matching(needle);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected one line for {needle:?}: {found:?}"
+        );
+        assert!(
+            found[0].starts_with("INFO "),
+            "a write logs at info: {:?}",
+            found[0]
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

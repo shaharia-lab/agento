@@ -2239,36 +2239,65 @@ line per `/api` request, emitted at the seam** in `proxy.rs::handle`: method,
 path, status, elapsed ms, and which implementation answered (`native`,
 `native-stream`, `forwarded`, `native-failed-forwarded`, `diff`).
 
-**Be precise about which Go log that is, because the gap is permanent and will
-otherwise be filed as a regression.** What is reproduced is Go's
+**Be precise about which Go log that is.** What is reproduced there is Go's
 `requestLogger` (`internal/server/server.go`) — method, path, status, duration —
 which Go writes at **debug for every method**, and which the seam promotes to
 info for the requests worth keeping. Go's *service-layer* `Info` lines are a
-different animal and are **not** reproduced: `integration_service.go` writes
-`"integration created", "id", …, "name", …`, `chat_service.go` writes
-`"chat sessions bulk deleted", "count", …`. `POST /api/integrations 201 12ms
-native` carries neither the entity nor the outcome, and no access line can say
-how many chats a bulk delete took. The seam sees a *request*, not an operation.
-Worse for coverage, the background `Info` lines have no request behind them at
-all — `scheduler.go`'s `"task scheduled"`, `executor.go`'s
+different animal and **could not be reproduced at the seam**: `POST
+/api/integrations 201 12ms native` carries neither the entity nor the outcome,
+and no access line can say how many chats a bulk delete took. The seam sees a
+*request*, not an operation.
+
+**#335 added them at the call sites, for the subsystems that are native today.**
+Sixteen lines, mirroring their Go counterpart's message and keys: the agent CRUD
+(#274), the chat CRUD and the turn's five (#276), the two job-history deletes
+(#274), `POST /api/integrations` plus the `{id}` writes and the three
+trigger-rule writes (#277, #347), and `POST /api/uploads` (#308).
+`writes::service_log_convention` is the rule — `message key=value`, every string
+value `{:?}`, `info` and **after** the effect — and it is a doc rather than a
+helper because the alternative is the rule restated sixteen times. Each line has
+a test: a `log` sink the write tests assert against
+(`writes::testlog`, and a second copy in `tests/chat_turn.rs`, which is a
+different crate), because a line with no test is a line that quietly stops being
+emitted — which for this half is the whole failure mode.
+
+Two of them carry user-authored text the access line does not, and both are
+deliberate on the same terms the agent slug in the path already is:
+`integration created … name=`, because a line that cannot say which integration
+was created is most of what it is for, and `file uploaded path=`, which is the
+*generated* destination under the uploads dir and which the response body
+returns anyway. Nothing logs a credential, a prompt or a message body.
+
+**What is still missing is missing by construction, and the list is the point.**
+The background `Info` lines have no request behind them at all —
+`scheduler.go`'s `"task scheduled"`, `executor.go`'s
 `"task execution completed"`, `trigger/dispatcher.go`'s `"trigger rule matched"`,
-and the notification handler's — so the seam cannot reach them by construction.
-They come from the sidecar today; when #278 removes it they will need their own
-call sites in the Rust code that replaced them, and that is a piece of work
-nobody has scheduled. Go's line also carries a `request_id`, which is the thing
+and the notification handler's — and they belong to subsystems the sidecar still
+owns, so a line here would log an event this process did not cause. The five
+`… validated` lines in `integration_service.go` belong to `ValidateTokenAuth`,
+i.e. the deferred `auth/*` routes; `PUT /api/settings`'s two are deferred with it
+(#305). They come from the sidecar today; **#278 is when this stops being
+optional**, because until then the sidecar still emits its own lines for what it
+still serves. That is why these land per subsystem as it is ported rather than as
+one pass. Go's line also carries a `request_id`, which is the thing
 that would let a `forwarded` line be matched against the sidecar's own record of
 the same request. Correlation is deliberately not attempted: it would mean
 minting an id here and threading a header through the forward, for a pairing
 only useful while both halves are running.
 
-At the seam and not in the handlers, for the reason the whole issue exists.
-`handle` is the one point every `/api` request passes through whether Rust,
-Go or a fallback answers it, so the record covers claimed and unclaimed routes
-alike and **cannot go selectively sparse as the port advances** — a line per
-handler would be fifteen edits that drift, and the sixteenth port would forget
-one. It is the same shape Go got from wrapping the router in `otelhttp` rather
-than instrumenting each handler. `dispatch` exists only so that the eight-odd
-return paths do not each need their own log call.
+**The access line is at the seam and not in the handlers, for the reason the
+whole issue exists.** `handle` is the one point every `/api` request passes
+through whether Rust, Go or a fallback answers it, so the record covers claimed
+and unclaimed routes alike and **cannot go selectively sparse as the port
+advances** — a line per handler would be fifteen edits that drift, and the
+sixteenth port would forget one. It is the same shape Go got from wrapping the
+router in `otelhttp` rather than instrumenting each handler. `dispatch` exists
+only so that the eight-odd return paths do not each need their own log call.
+
+The #335 lines are the ones that *have* to be per handler, and they accept that
+cost knowingly: only the handler knows the entity and the outcome, so there is no
+seam to put them at. Their protection against going sparse is a test per line
+rather than a single call site.
 
 Two rules there are deliberate and must survive anyone "improving" it:
 

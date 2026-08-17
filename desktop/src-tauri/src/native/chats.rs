@@ -427,6 +427,14 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     // Nothing below this line may return `Fallback`.
     tx.commit()
         .map_err(|e| WriteError::Fallback(format!("commit chat create: {e}")))?;
+    // `chatService.CreateSession`'s own line, with its three keys in Go's order
+    // — see `writes::service_log_convention`.
+    log::info!(
+        "chat session created session_id={:?} agent_slug={:?} settings_profile_id={:?}",
+        session.id,
+        req.agent_slug,
+        req.settings_profile_id
+    );
     Ok(super::Answer::json_status(StatusCode::CREATED, body))
 }
 
@@ -591,6 +599,7 @@ fn delete_one(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
     if affected == 0 {
         return Err(WriteError::Fallback(format!("session {id:?} not found")));
     }
+    log::info!("chat session deleted session_id={id:?}");
     Ok(super::Answer::no_content())
 }
 
@@ -614,6 +623,10 @@ fn bulk_delete(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError>
     conn.execute(&sql, rusqlite::params_from_iter(ids.iter()))
         .map_err(|e| WriteError::Fallback(format!("bulk deleting sessions: {e}")))?;
 
+    // Go's `count` is `len(ids)` — what was asked for, not what matched. An id
+    // that exists nowhere is not an error on this route, so the two numbers
+    // differ routinely and the line reports the request rather than the effect.
+    log::info!("chat sessions bulk deleted count={}", ids.len());
     Ok(super::Answer::no_content())
 }
 
@@ -1180,5 +1193,32 @@ mod tests {
         assert!(!claims(&Method::POST, "/api/chats/abc/permission"));
         assert!(!claims(&Method::POST, "/api/chats/abc/stop"));
         assert!(!claims(&Method::PATCH, "/api/chats"));
+    }
+
+    /// #335: the chat CRUD's own lines. `chat sessions bulk deleted count=` is
+    /// the clearest case for why the access line is not enough — `DELETE
+    /// /api/chats 204` cannot say how many.
+    #[test]
+    fn the_chat_writes_log_their_entity_and_outcome() {
+        crate::native::writes::testlog::install();
+        let file = migrated();
+
+        let id = created_id(&create(file.path(), b"{}").expect("create"));
+        crate::native::writes::testlog::assert_info_once(&format!(
+            r#"chat session created session_id="{id}" agent_slug="" settings_profile_id="""#
+        ));
+
+        delete_one(file.path(), &id).expect("delete");
+        crate::native::writes::testlog::assert_info_once(&format!(
+            r#"chat session deleted session_id="{id}""#
+        ));
+
+        let a = created_id(&create(file.path(), b"{}").expect("a"));
+        let b = created_id(&create(file.path(), b"{}").expect("b"));
+        // Three ids, two of which exist: Go's `count` is `len(ids)`, so the line
+        // reports what was asked for rather than what matched.
+        let payload = format!(r#"{{"ids":["{a}","{b}","never-existed"]}}"#);
+        bulk_delete(file.path(), payload.as_bytes()).expect("bulk");
+        crate::native::writes::testlog::assert_info_present("chat sessions bulk deleted count=3");
     }
 }

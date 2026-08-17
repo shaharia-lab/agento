@@ -517,6 +517,7 @@ fn delete_job_history(db_path: &Path, id: &str) -> Result<super::Answer, WriteEr
     tx.commit()
         .map_err(|e| WriteError::Fallback(format!("commit job history delete: {e}")))?;
 
+    log::info!("job history deleted id={id:?}");
     Ok(super::Answer::no_content())
 }
 
@@ -539,6 +540,8 @@ fn bulk_delete_job_history(db_path: &Path, body: &[u8]) -> Result<super::Answer,
     conn.execute(&sql, rusqlite::params_from_iter(ids.iter()))
         .map_err(|e| WriteError::Fallback(format!("bulk deleting job history: {e}")))?;
 
+    // `len(ids)`, as Go's is: what was asked for rather than what matched.
+    log::info!("job history bulk deleted count={}", ids.len());
     Ok(super::Answer::no_content())
 }
 
@@ -942,5 +945,18 @@ mod tests {
         assert!(!claims(&Method::POST, "/api/tasks/t1/pause"));
         assert!(!claims(&Method::POST, "/api/tasks/t1/resume"));
         assert!(!claims(&Method::DELETE, "/api/tasks/t1/job-history"));
+    }
+
+    /// #335: the two job-history deletes, which are all this module claims.
+    #[test]
+    fn the_job_history_deletes_log_their_entity_and_outcome() {
+        crate::native::writes::testlog::install();
+        let file = migrated_with_history();
+
+        delete_job_history(file.path(), "j1").expect("delete");
+        crate::native::writes::testlog::assert_info_once(r#"job history deleted id="j1""#);
+
+        bulk_delete_job_history(file.path(), br#"{"ids":["j2","j3"]}"#).expect("bulk");
+        crate::native::writes::testlog::assert_info_present("job history bulk deleted count=2");
     }
 }

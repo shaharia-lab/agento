@@ -129,6 +129,17 @@ fn upload(content_type: &str, body: &[u8], upload_dir: &Path) -> Result<super::A
     })?;
 
     // Nothing below this line may fail.
+    //
+    // `handleUpload`'s own line, with Go's three keys. `path` is the generated
+    // destination under the uploads dir rather than the name the user typed,
+    // and the response body returns it anyway — see
+    // `writes::service_log_convention`.
+    log::info!(
+        "file uploaded path={:?} size={} extension={:?}",
+        dest,
+        part.content.len(),
+        ext
+    );
     Ok(super::Answer::json(answer))
 }
 
@@ -612,5 +623,29 @@ mod tests {
         assert!(!claims(&Method::GET, "/api/uploads"));
         assert!(!claims(&Method::POST, "/api/uploads/"));
         assert!(!claims(&Method::POST, "/api/upload"));
+    }
+
+    /// #335: `handleUpload`'s own line. The path is the generated destination
+    /// under the uploads dir, which the response body returns anyway.
+    #[test]
+    fn an_upload_logs_its_path_size_and_extension() {
+        crate::native::writes::testlog::install();
+        let dir = dir();
+        let target = dir.path().join("logged-uploads");
+        upload(
+            &content_type(),
+            &body(&[("file", Some("photo.PNG"), b"\x89PNG\r\n\x1a\ndata")]),
+            &target,
+        )
+        .expect("upload");
+
+        let found = crate::native::writes::testlog::matching("file uploaded path=");
+        let line = found
+            .iter()
+            .find(|line| line.contains("logged-uploads"))
+            .unwrap_or_else(|| panic!("no line for this upload: {found:?}"));
+        assert!(line.starts_with("INFO "), "{line}");
+        assert!(line.contains(r#"extension=".PNG""#), "{line}");
+        assert!(line.contains("size=12"), "{line}");
     }
 }
