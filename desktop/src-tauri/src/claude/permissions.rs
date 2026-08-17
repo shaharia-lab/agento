@@ -108,13 +108,22 @@ pub struct PermissionContext {
 /// Go models the behaviour as a string whose zero value is a usage error; Rust
 /// makes the same distinction by making the enum have no default, so a handler
 /// cannot accidentally return "unset" and have it read as an allow.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum PermissionResult {
     Allow {
         /// Replaces the tool input before execution. `None` echoes the CLI's
         /// original input back verbatim — the CLI expects the input it should
         /// actually run, so this field is always sent.
-        updated_input: Option<serde_json::Value>,
+        ///
+        /// JSON **bytes**, not a `serde_json::Value`, because this is the input
+        /// the tool executes with. `serde_json` is built here without
+        /// `preserve_order`, so a `Value` round trip sorts the object's keys
+        /// and respells its numbers — on the *allow* path, the one where the
+        /// user said yes. Go's field is a `map[string]any` and its echo is a
+        /// `json.RawMessage`; one raw type covers both, and it is a superset
+        /// rather than a divergence, since a handler that wants Go's sorting
+        /// can serialise a map to get it.
+        updated_input: Option<Box<RawValue>>,
         /// Persistent permission mutations to apply.
         updated_permissions: Vec<PermissionUpdate>,
     },
@@ -124,6 +133,42 @@ pub enum PermissionResult {
         /// Stops the agent entirely after this tool call.
         interrupt: bool,
     },
+}
+
+/// Written out rather than derived because `RawValue` has no `PartialEq`.
+///
+/// Two updated inputs are equal when their **bytes** are, which is the only
+/// comparison this type can honestly offer: the whole reason the field is raw
+/// is that `{"z":1.50,"a":1}` and `{"a":1,"z":1.5}` are different answers here.
+impl PartialEq for PermissionResult {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                PermissionResult::Allow {
+                    updated_input: a_input,
+                    updated_permissions: a_perms,
+                },
+                PermissionResult::Allow {
+                    updated_input: b_input,
+                    updated_permissions: b_perms,
+                },
+            ) => {
+                a_input.as_deref().map(RawValue::get) == b_input.as_deref().map(RawValue::get)
+                    && a_perms == b_perms
+            }
+            (
+                PermissionResult::Deny {
+                    message: a_message,
+                    interrupt: a_interrupt,
+                },
+                PermissionResult::Deny {
+                    message: b_message,
+                    interrupt: b_interrupt,
+                },
+            ) => a_message == b_message && a_interrupt == b_interrupt,
+            _ => false,
+        }
+    }
 }
 
 impl PermissionResult {
