@@ -315,6 +315,36 @@ pub fn diff_exempt(path: &str) -> bool {
     path == "/api/claude-sessions/status"
 }
 
+/// Work the shell owes a request the **sidecar** answered.
+///
+/// The seam's usual direction is "Rust answers, Go is the fallback". This is the
+/// other one: a forwarded request can have an effect inside the shell, because
+/// `AGENTO_INTEGRATIONS` tells the sidecar not to host the integration types
+/// this process hosts — so Go's own `registry.Reload` after a successful
+/// `POST /api/integrations/{id}/auth/validate` reaches nothing, and the shell
+/// has to fire its own (#311). See `integrations::reload_after_forward` for why
+/// that is the only route on this list.
+///
+/// Called from the proxy after Go's response is in hand, and only for a 2xx.
+/// Spawned rather than awaited, which is what Go's own `reloadIntegration` does
+/// with it: the answer has already been produced and a restart is not something
+/// the client waits on.
+pub fn after_forward(method: &Method, path: &str, status: StatusCode) {
+    if !status.is_success() {
+        return;
+    }
+    let Some(id) = integrations::reload_after_forward(method, path).map(str::to_string) else {
+        return;
+    };
+    let Some(db_path) = paths::database_path() else {
+        log::warn!("no data dir; not reloading integration {id:?} after {path}");
+        return;
+    };
+    tokio::spawn(async move {
+        integrations::registry::reload_after_auth(&db_path, &id).await;
+    });
+}
+
 /// Answer a claimed request. `Err` means "fall back to the Go sidecar".
 pub fn serve(req: &Request) -> Result<Answer, String> {
     let ctx = Ctx {
@@ -548,18 +578,21 @@ mod tests {
             "/api/claude-sessions/abc/journey/continue"
         ));
 
-        // Integrations: the four reads, plus the writes with no live-server
-        // effect. Anything that reloads an MCP server, dials a remote service,
-        // or reads in-memory OAuth state stays with Go.
+        // Integrations: the four reads, plus every write that is not an OAuth
+        // flow, a webhook registration or WhatsApp. Anything that dials a
+        // remote service or reads in-memory OAuth state stays with Go.
         assert!(claims(&Method::GET, "/api/integrations"));
         assert!(claims(&Method::GET, "/api/integrations/available-tools"));
         assert!(claims(&Method::GET, "/api/integrations/abc"));
         assert!(claims(&Method::GET, "/api/integrations/abc/triggers"));
         assert!(claims(&Method::POST, "/api/integrations"));
         assert!(claims(&Method::PUT, "/api/integrations/abc/triggers/r1"));
-        // Still Go's: these start and stop the live MCP server (#282).
-        assert!(!claims(&Method::PUT, "/api/integrations/abc"));
-        assert!(!claims(&Method::DELETE, "/api/integrations/abc"));
+        // Ours since #311. These reload and stop the live MCP server, which is
+        // now hosted here and nowhere else — the sidecar runs with
+        // `AGENTO_INTEGRATIONS=off`.
+        assert!(claims(&Method::PUT, "/api/integrations/abc"));
+        assert!(claims(&Method::DELETE, "/api/integrations/abc"));
+        assert!(!claims(&Method::PATCH, "/api/integrations/abc"));
         assert!(!claims(&Method::GET, "/api/integrations/abc/auth/status"));
         assert!(!claims(
             &Method::GET,

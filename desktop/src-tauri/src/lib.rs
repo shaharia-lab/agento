@@ -226,6 +226,23 @@ pub fn run() {
                 // opens while the corpus is still being read, and the sessions
                 // list reports progress from `GET /api/claude-sessions/status`.
                 if let Some(db) = crate::paths::database_path() {
+                    // The integration MCP servers are ours too (#311): the
+                    // sidecar runs with AGENTO_INTEGRATIONS=off, so this
+                    // replaces the `reg.Start(ctx)` that `buildIntegrationRegistry`
+                    // used to run at boot. Spawned rather than awaited, for the
+                    // reason the scan is not blocking either — a GitHub row
+                    // binds a loopback listener and the window should not wait
+                    // on it — and a failure to read the list is logged, since
+                    // there is nothing better to do with it here.
+                    let integrations_db = db.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) =
+                            crate::native::integrations::registry::start_all(&integrations_db).await
+                        {
+                            log::warn!("some integrations failed to start: {e}");
+                        }
+                    });
+
                     crate::native::scan::ensure_scan(db);
                 }
 

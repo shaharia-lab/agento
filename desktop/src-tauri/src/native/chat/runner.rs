@@ -4,23 +4,39 @@
 //! # What this deliberately cannot do yet, and why that is safe
 //!
 //! Go resolves three kinds of tool: the built-ins, the **local** in-process MCP
-//! server (`internal/tools`), and one MCP server per configured **integration**
-//! (`internal/integrations`). The first two are here; the third is not, and an
-//! agent whose capabilities name an MCP server would get a subprocess with the
-//! tools silently missing, which is a worse answer than the sidecar's.
+//! server (`internal/tools`), and one server per name in `capabilities.mcp` —
+//! which `resolveServerConfig` looks up first in the `mcps.yaml` registry and
+//! then among the **integrations** (`internal/integrations`). An agent that
+//! reached a subprocess with some of those silently missing would be a worse
+//! answer than the sidecar's, so [`build_options`] returns `Err` for one, the
+//! seam forwards, and Go runs that chat exactly as before. This is the "a route
+//! moves only when Rust reproduces every effect" rule #274 established, applied
+//! per *agent* rather than per route — which is why `chat::stream` also forwards
+//! `/input`, `/permission` and `/stop` for any chat it does not itself hold a
+//! live session for. Without that, a chat running on Go would have its stop
+//! button claimed by a Rust registry that never saw it.
 //!
-//! So [`build_options`] refuses: an agent with `mcp` capabilities returns
-//! `Err`, the seam forwards, and Go runs that chat exactly as before. This is
-//! the same "a route moves only when Rust reproduces every effect" rule #274
-//! established, applied per *agent* rather than per route — which is why
-//! `chat::stream` also forwards `/input`, `/permission` and `/stop` for any chat
-//! it does not itself hold a live session for. Without that, a chat running on
-//! Go would have its stop button claimed by a Rust registry that never saw it.
+//! The `local` half of that refusal went in #310: [`build_options`] starts the
+//! local tools server itself and hands back the handle, because the listener's
+//! life is the handle's — see [`crate::native::tools`]. That is what makes this
+//! function `async`.
 //!
-//! The `local` half of that refusal is gone as of #310: [`build_options`] starts
-//! the local tools server itself and hands back the handle, because the
-//! listener's life is the handle's — see [`crate::native::tools`]. That is what
-//! makes this function `async`.
+//! **#311 narrowed the `mcp` half rather than removing it.** An agent is served
+//! natively when *every* name in `capabilities.mcp` is an integration this build
+//! can host, which today means `github` (#312) and will mean the rest as
+//! #313–#317 land. Three things still forward, and [`mcp_plan`] is
+//! where each is decided:
+//!
+//! - **A name that is not a github integration.** A `slack` row has no Rust
+//!   starter; running the turn here would drop its tools.
+//! - **A name with no integration row at all.** Go would still resolve it if
+//!   `mcps.yaml` names it, and this build reads no `mcps.yaml`.
+//! - **Any `mcp` capability at all when `<data dir>/mcps.yaml` exists.** That
+//!   file is what `resolveServerConfig` consults *before* the integrations, so
+//!   with one on disk a name could resolve to a different server in each
+//!   implementation. It is the one check that is broader than it needs to be,
+//!   and it is deliberate: the file is opt-in, the desktop app has no UI for it,
+//!   and a wrong answer here is a turn run against the wrong tool server.
 
 use rusqlite::OptionalExtension;
 
@@ -82,19 +98,23 @@ pub struct RunSpec {
 /// including the one that binds a port: a local tools server that failed to
 /// start is dropped on the way out, so forwarding leaves nothing behind.
 ///
-/// The second half of the pair is the **local tools listener**, `Some` only for
-/// an agent that named a local tool. The caller owns it, and dropping it stops
-/// the server — so it has to outlive the subprocess that dials it.
+/// The second half of the pair is the **tool listeners** this turn owns: the
+/// local tools server for an agent that named a local tool, plus one per
+/// integration in its `capabilities.mcp`. The caller owns them, and dropping one
+/// stops its server — so they have to outlive the subprocess that dials them.
 pub async fn build_options(
     spec: &RunSpec,
     permission_handler: PermissionHandler,
-) -> Result<(Options, Option<InProcessMcpServer>), String> {
+) -> Result<(Options, Vec<InProcessMcpServer>), String> {
     let caps = spec.agent.as_ref().map(|a| &a.capabilities);
-    if let Some(caps) = caps {
-        if caps.mcp.as_ref().is_some_and(|m| !m.is_empty()) {
-            return Err("agent uses MCP tools, which are not ported yet (#311–#317)".to_string());
-        }
-    }
+    // Decided **before** anything binds a port. Everything below this line
+    // either cannot fail or is dropped on the way out, so a forward leaves no
+    // listener behind.
+    let mcp_plan = mcp_plan(
+        caps,
+        crate::paths::database_path().as_deref(),
+        mcps_yaml_exists(),
+    )?;
 
     // `--include-partial-messages` is unconditional in Go, and it is what makes
     // `stream_event` frames exist at all — the UI's token-by-token rendering
@@ -167,6 +187,9 @@ pub async fn build_options(
     let mut allowed = allowed_tools(caps);
     let local_tools;
     (opts, local_tools) = start_local_tools(opts, caps, &mut allowed).await?;
+    let mut tool_servers: Vec<InProcessMcpServer> = local_tools.into_iter().collect();
+    opts =
+        start_integration_servers(opts, mcp_plan.as_ref(), &mut allowed, &mut tool_servers).await?;
 
     if !allowed.is_empty() {
         opts = opts.with_allowed_tools(allowed.iter().cloned());
@@ -191,7 +214,140 @@ pub async fn build_options(
     }
 
     opts = opts.with_permission_handler(wrap_permission_handler(permission_handler, allowed));
-    Ok((opts, local_tools))
+    Ok((opts, tool_servers))
+}
+
+/// One entry of `capabilities.mcp`, resolved far enough to say "this build can
+/// run this turn".
+#[derive(Debug)]
+struct McpServerSpec {
+    /// The integration id, which is both the `mcpServers` key and the prefix
+    /// the CLI puts on every tool that server hosts.
+    id: String,
+    tools: Vec<String>,
+}
+
+/// What this turn will host, and the database the rows came from.
+///
+/// `Debug` is safe and deliberate here, unlike on `registry::HostingRow`: this
+/// carries ids, tool names and a path, and no credential ever reaches it.
+#[derive(Debug)]
+struct McpPlan {
+    db_path: std::path::PathBuf,
+    servers: Vec<McpServerSpec>,
+}
+
+/// `resolveExternalMCP`'s inputs, checked before any of them is acted on.
+///
+/// `Ok(None)` is an agent that names no MCP server — the overwhelmingly common
+/// case, and one that must not open the database. `Err` forwards the whole
+/// turn; see the module header for the three shapes that take that path and why
+/// the third is broader than it strictly has to be.
+///
+/// `db_path` and `mcps_yaml_present` are parameters rather than reads so the
+/// decision can be driven over a scratch database instead of the machine's own.
+fn mcp_plan(
+    caps: Option<&Capabilities>,
+    db_path: Option<&std::path::Path>,
+    mcps_yaml_present: bool,
+) -> Result<Option<McpPlan>, String> {
+    let Some(mcp) = caps.and_then(|c| c.mcp.as_ref()).filter(|m| !m.is_empty()) else {
+        return Ok(None);
+    };
+
+    if mcps_yaml_present {
+        return Err(
+            "an mcps.yaml is present, and `resolveServerConfig` consults it before the \
+             integrations; this build reads none, so the turn goes to Go"
+                .to_string(),
+        );
+    }
+    let db_path = db_path.ok_or("no home directory to resolve the data dir".to_string())?;
+
+    let mut servers = Vec::with_capacity(mcp.len());
+    for (id, capability) in mcp.iter() {
+        if !crate::native::integrations::registry::can_host(db_path, id)? {
+            return Err(format!(
+                "agent uses MCP server {id:?}, which is not an integration this build \
+                 can host (#313–#317)"
+            ));
+        }
+        servers.push(McpServerSpec {
+            id: id.clone(),
+            tools: capability
+                .tools
+                .iter()
+                .flat_map(|list| list.iter())
+                .cloned()
+                .collect(),
+        });
+    }
+    Ok(Some(McpPlan {
+        db_path: db_path.to_path_buf(),
+        servers,
+    }))
+}
+
+/// `<data dir>/mcps.yaml` — `AppConfig.MCPsFile()`, which `cmd/web.go` passes to
+/// `LoadMCPRegistry` and which has no environment override on the `web` path.
+fn mcps_yaml_exists() -> bool {
+    crate::paths::data_dir()
+        .map(|dir| dir.join("mcps.yaml"))
+        .is_some_and(|path| path.is_file())
+}
+
+/// `resolveExternalMCP` over the integrations, once [`mcp_plan`] has
+/// said every one of them is hostable.
+///
+/// Registered under the **bare integration id**, because that is the
+/// `mcpServers` key Go uses (`StartInProcessMCPServer(ctx, cfg.ID, …)`) and so
+/// the prefix on every qualified tool name already in an agent's allowlist. The
+/// integration's *MCP implementation* name is `github-<id>`, a different string
+/// that never appears on a tool.
+///
+/// Two departures from Go, both deliberate:
+///
+/// - **A start failure forwards rather than being skipped.** Go's
+///   `resolveServerConfig` discards the error and returns `nil`, so the turn
+///   runs without that server's tools. Forwarding reaches the same place — Go
+///   runs the turn and skips the same server — with one fewer thing this port
+///   has to be right about, and it is the rule `start_local_tools` already
+///   follows.
+/// - **The map is a `BTreeMap`, so the order is stable.** Go ranges a map, so
+///   its own `--allowedTools` order for two MCP servers differs between runs.
+///   Strictly better, and it matches one of the orders Go produces.
+async fn start_integration_servers(
+    mut opts: Options,
+    plan: Option<&McpPlan>,
+    allowed: &mut Vec<String>,
+    servers: &mut Vec<InProcessMcpServer>,
+) -> Result<Options, String> {
+    let Some(plan) = plan else {
+        return Ok(opts);
+    };
+
+    for spec in &plan.servers {
+        let server = crate::native::integrations::registry::start_filtered_server(
+            &plan.db_path,
+            &spec.id,
+            &spec.tools,
+        )
+        .await?;
+        opts = opts
+            .with_mcp_server(&spec.id, server.config())
+            .map_err(|e| format!("registering the MCP server for {:?}: {e}", spec.id))?
+            // `appendToolOpts` adds `--strict-mcp-config` whenever it registers
+            // any server at all, so the CLI does not also load the user's own
+            // `.mcp.json`. Setting a bool, so saying it once per server is the
+            // same as saying it once.
+            .with_strict_mcp_config();
+        allowed.extend(crate::native::integrations::registry::allowed_tool_names(
+            &spec.id,
+            &spec.tools,
+        ));
+        servers.push(server);
+    }
+    Ok(opts)
 }
 
 /// `resolveLocalTools`: register the in-process server and qualify the names the
@@ -550,10 +706,10 @@ mod tests {
         let mut agent = agent_with(Capabilities::default());
         agent.model = "agent-model".into();
         let (spec, calls) = spec_with(Some(agent));
-        let (opts, local) = build_options(&spec, no_op_handler())
+        let (opts, servers) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
-        assert!(local.is_none(), "no agent named a local tool");
+        assert!(servers.is_empty(), "no agent named a local tool");
 
         assert_eq!(opts.model, "agent-model");
         assert_eq!(
@@ -574,10 +730,10 @@ mod tests {
         let mut agent = agent_with(Capabilities::default());
         agent.model = String::new();
         let (spec, calls) = spec_with(Some(agent));
-        let (opts, local) = build_options(&spec, no_op_handler())
+        let (opts, servers) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
-        assert!(local.is_none(), "no agent named a local tool");
+        assert!(servers.is_empty(), "no agent named a local tool");
 
         // `with_model` is never called, so the SDK's own default stands —
         // which is what Go's `defaultOptions()` leaves in place too.
@@ -593,10 +749,10 @@ mod tests {
     #[tokio::test]
     async fn a_chat_with_no_agent_resolves_its_model_once() {
         let (spec, calls) = spec_with(None);
-        let (opts, local) = build_options(&spec, no_op_handler())
+        let (opts, servers) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
-        assert!(local.is_none(), "no agent named a local tool");
+        assert!(servers.is_empty(), "no agent named a local tool");
 
         assert_eq!(opts.model, "no-agent-model");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
@@ -643,22 +799,154 @@ mod tests {
         assert!(allowed_tools(None).is_empty());
     }
 
-    /// The boundary this port still draws: an agent needing tools Rust cannot
-    /// supply forwards, rather than running with them silently missing. Since
-    /// #310 that is **integration/MCP tools only**.
-    #[tokio::test]
-    async fn an_agent_needing_mcp_refuses_to_build_options() {
+    // ─── Which agents this port will run (#310, #311) ─────────────────────────
+
+    fn caps_naming(server: &str, tools: Option<Vec<String>>) -> Capabilities {
         let mut mcp = BTreeMap::new();
         mcp.insert(
-            "github".to_string(),
-            crate::native::agents::McpCapability { tools: None },
+            server.to_string(),
+            crate::native::agents::McpCapability {
+                tools: tools.map(Into::into),
+            },
         );
-        let spec = spec_for(Capabilities {
+        Capabilities {
             built_in: None,
             local: None,
             mcp: Some(mcp.into()),
-        });
-        assert!(build_options(&spec, no_op_handler()).await.is_err());
+        }
+    }
+
+    fn db_with_integration(id: &str, integration_type: &str) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                       created_at, updated_at)
+             VALUES (?1, ?1, ?2, 1, '{\"auth_mode\":\"pat\",\"personal_access_token\":\"t\"}',
+                     '{\"ok\":true}',
+                     '{\"repos\":{\"enabled\":true,\"tools\":[\"list_repos\",\"get_repo\"]}}',
+                     '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+            rusqlite::params![id, integration_type],
+        )
+        .expect("seed");
+        file
+    }
+
+    /// An agent naming no MCP server must not open the database at all — the
+    /// overwhelmingly common case, and the reason the plan is an `Option`.
+    #[test]
+    fn no_mcp_capability_is_no_plan_and_no_database_read() {
+        assert!(mcp_plan(None, None, false).expect("no caps").is_none());
+        assert!(mcp_plan(Some(&Capabilities::default()), None, false)
+            .expect("no mcp")
+            .is_none());
+        // Present but empty is the same as absent, exactly as `local: []` is.
+        let empty = Capabilities {
+            built_in: None,
+            local: None,
+            mcp: Some(BTreeMap::new().into()),
+        };
+        assert!(mcp_plan(Some(&empty), None, false)
+            .expect("empty")
+            .is_none());
+    }
+
+    /// The three shapes that still forward, each for its own reason.
+    #[test]
+    fn an_mcp_name_this_build_cannot_host_forwards() {
+        let file = db_with_integration("gh-1", "github");
+
+        // A type with no Rust starter.
+        let slack = db_with_integration("sl-1", "slack");
+        let err = mcp_plan(Some(&caps_naming("sl-1", None)), Some(slack.path()), false)
+            .expect_err("slack cannot be hosted");
+        assert!(err.contains(r#"MCP server "sl-1""#), "{err}");
+
+        // A name with no integration row: `mcps.yaml` could still name it.
+        assert!(mcp_plan(
+            Some(&caps_naming("not-an-integration", None)),
+            Some(file.path()),
+            false
+        )
+        .is_err());
+
+        // An `mcps.yaml` on disk takes precedence over the integrations in Go,
+        // and this build reads none — so any MCP capability forwards.
+        assert!(mcp_plan(Some(&caps_naming("gh-1", None)), Some(file.path()), true).is_err());
+
+        // One unhostable name among several forwards the whole turn: a partial
+        // tool set is the failure the refusal exists to prevent.
+        let mut mixed = caps_naming("gh-1", None);
+        if let Some(mcp) = mixed.mcp.as_mut() {
+            mcp.0.insert(
+                "sl-1".to_string(),
+                crate::native::agents::McpCapability { tools: None },
+            );
+        }
+        assert!(mcp_plan(Some(&mixed), Some(file.path()), false).is_err());
+    }
+
+    /// The whole of #311's runner half: a github-only agent runs natively, with
+    /// the server registered under the **bare integration id** — the
+    /// `mcpServers` key Go uses, and the prefix on every qualified name already
+    /// in the agent's stored allowlist. The MCP implementation name
+    /// (`github-<id>`) must not appear anywhere on a tool.
+    #[tokio::test]
+    async fn a_github_agent_runs_natively_under_the_integration_id() {
+        let file = db_with_integration("gh-1", "github");
+        let caps = caps_naming("gh-1", Some(vec!["get_repo".into()]));
+
+        let plan = mcp_plan(Some(&caps), Some(file.path()), false)
+            .expect("hostable")
+            .expect("a plan");
+        let mut allowed = allowed_tools(Some(&caps));
+        let mut servers = Vec::new();
+        let opts =
+            start_integration_servers(Options::new(), Some(&plan), &mut allowed, &mut servers)
+                .await
+                .expect("started");
+
+        let [server] = &servers[..] else {
+            panic!("one integration, one listener");
+        };
+        let registered = opts
+            .mcp_servers
+            .get("gh-1")
+            .expect("registered under the integration id");
+        assert_eq!(registered["type"], "http");
+        assert_eq!(registered["url"], server.url());
+        assert!(
+            !opts.mcp_servers.contains_key("github-gh-1"),
+            "the implementation name is not the map key"
+        );
+        // `appendToolOpts` adds it whenever any MCP server is registered.
+        assert!(opts.strict_mcp_config);
+        assert_eq!(allowed, vec!["mcp__gh-1__get_repo".to_string()]);
+    }
+
+    /// Go appends a qualified name for whatever the agent asked for, registered
+    /// or not — the same rule the local tools follow.
+    #[tokio::test]
+    async fn an_unhosted_tool_name_is_still_qualified() {
+        let file = db_with_integration("gh-1", "github");
+        let caps = caps_naming("gh-1", Some(vec!["get_repo".into(), "gone".into()]));
+        let plan = mcp_plan(Some(&caps), Some(file.path()), false)
+            .expect("hostable")
+            .expect("a plan");
+
+        let mut allowed = Vec::new();
+        let mut servers = Vec::new();
+        start_integration_servers(Options::new(), Some(&plan), &mut allowed, &mut servers)
+            .await
+            .expect("started");
+        assert_eq!(
+            allowed,
+            vec![
+                "mcp__gh-1__get_repo".to_string(),
+                "mcp__gh-1__gone".to_string()
+            ]
+        );
     }
 
     /// The whole of #310: an agent naming a local tool builds options rather
@@ -673,11 +961,13 @@ mod tests {
             local: Some(vec!["current_time".into()].into()),
             mcp: None,
         });
-        let (opts, local) = build_options(&spec, no_op_handler())
+        let (opts, servers) = build_options(&spec, no_op_handler())
             .await
             .expect("a local tool is supplied natively now");
 
-        let server = local.expect("the listener is handed back, because dropping it stops it");
+        let [server] = &servers[..] else {
+            panic!("exactly one listener is handed back, because dropping it stops it");
+        };
         let registered = opts
             .mcp_servers
             .get("local-tools")
@@ -702,7 +992,7 @@ mod tests {
             local: Some(vec!["current_time".into()].into()),
             mcp: None,
         });
-        let (opts, _local) = build_options(&spec, no_op_handler())
+        let (opts, _servers) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
         assert!(
@@ -722,7 +1012,7 @@ mod tests {
             local: Some(vec!["current_time".into(), "gone".into()].into()),
             mcp: None,
         });
-        let (opts, _local) = build_options(&spec, no_op_handler())
+        let (opts, _servers) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
 
@@ -748,10 +1038,10 @@ mod tests {
     #[tokio::test]
     async fn an_agent_naming_no_local_tools_binds_nothing() {
         let spec = spec_for(Capabilities::default());
-        let (opts, local) = build_options(&spec, no_op_handler())
+        let (opts, servers) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
-        assert!(local.is_none());
+        assert!(servers.is_empty());
         assert!(opts.mcp_servers.is_empty());
         assert!(!opts.strict_mcp_config);
     }
@@ -768,10 +1058,10 @@ mod tests {
             local: Some(vec![].into()),
             mcp: None,
         });
-        let (opts, local) = build_options(&spec, no_op_handler())
+        let (opts, servers) = build_options(&spec, no_op_handler())
             .await
             .expect("options");
-        assert!(local.is_none());
+        assert!(servers.is_empty());
         assert!(opts.mcp_servers.is_empty());
         assert!(!opts.strict_mcp_config);
         assert_eq!(opts.allowed_tools.len(), ALL_BUILT_IN_TOOLS.len());

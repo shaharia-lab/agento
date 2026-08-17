@@ -50,7 +50,27 @@ mod parity_common;
 
 use parity_common::*;
 
+use agento_lib::native::db;
 use reqwest::Method;
+use rusqlite::OptionalExtension;
+
+/// Set an integration's `auth` column directly.
+///
+/// There is no endpoint that writes it: every path that does is an OAuth
+/// callback or a token validator that dials the provider, and neither belongs in
+/// a parity run. `db::open_read_write` is the helper the app's own native writes
+/// use against this same file while the sidecar holds it — pragmas and busy
+/// timeout included. A bare `rusqlite::Connection::open` is **not** the same
+/// thing and must not be substituted here; see [`the_integration_id_write_answers_match_go`].
+fn seed_auth(id: &str, auth: Option<&str>) {
+    db::open_read_write(&live_db())
+        .expect("opening the live database")
+        .execute(
+            "UPDATE integrations SET auth = ?2 WHERE id = ?1",
+            rusqlite::params![id, auth],
+        )
+        .expect("seeding auth");
+}
 
 /// Refuse to run against anything but a scratch instance.
 ///
@@ -479,6 +499,235 @@ async fn the_integration_write_answers_match_go() {
         .await;
         assert_eq!(gone.0, 204, "integration delete must be 204");
     }
+}
+
+/// Pin Go's answers for `PUT` and `DELETE /api/integrations/{id}` (#311).
+///
+/// Its own case rather than an addition to the one above, because the interest
+/// is entirely in what an *existing* row does across a replace — and because
+/// three of the answers are things only the database can show. The four
+/// assertions worth naming, each of which reads as a bug until it is checked
+/// against the real server:
+///
+/// - **A `PUT` that omits `credentials` wipes them.** The store's upsert
+///   overwrites the column wholesale, and `Update` runs no validator, so an
+///   omitted key stores `""`.
+/// - **An omitted `services` is `null`, not `{}`.** `Create` fills a nil map
+///   before saving and `Update` does not, so the same absence means different
+///   things on the two verbs.
+/// - **`auth` survives every `PUT`.** The request type has no `auth` field, so
+///   `cfg.IsAuthenticated()` is always false on this path and the token is
+///   always preserved — except that the two non-token spellings (`''` and the
+///   literal `null`) fail that same test and become SQL `NULL`.
+/// - **Nothing is validated.** An empty name, an empty type and a `{}`
+///   credentials blob are all 200s here and 422s on a create.
+#[tokio::test]
+#[ignore = "requires a scratch Go instance; mutates it"]
+async fn the_integration_id_write_answers_match_go() {
+    require_scratch_instance();
+
+    // Read a column straight out of the instance's database. Three of this
+    // case's answers are invisible on the wire by design — `credentials` and
+    // `auth` are scrubbed from every response — so the only way to see them is
+    // to look.
+    // **Read-only, through the crate's own helper**, never a bare
+    // `rusqlite::Connection::open`. That opens `SQLITE_OPEN_READWRITE|CREATE`
+    // and, against a WAL database the Go server currently holds, was observed to
+    // reset the log: the row created two lines earlier was gone from Go's *own*
+    // view immediately afterwards. Reading is the only thing wanted here anyway.
+    let column = |sql: &'static str, id: String| {
+        let db = live_db();
+        move || -> Option<String> {
+            db::open_read_only(&db)
+                .expect("opening the live database")
+                .query_row(sql, [&id], |row| row.get::<_, Option<String>>(0))
+                .optional()
+                .expect("querying the live database")
+                .flatten()
+        }
+    };
+
+    let created = go_answer(
+        Method::POST,
+        "/api/integrations",
+        Some(
+            r#"{"name":"P311","type":"telegram",
+                 "credentials":{"zebra":"z", "bot_token":"tok","rate":1.50},
+                 "services":{"messaging":{"enabled":true,"tools":["send_message"]}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(created.0, 201);
+    let id = serde_json::from_slice::<serde_json::Value>(&created.1).expect("json")["id"]
+        .as_str()
+        .expect("an id")
+        .to_string();
+    let created_at = serde_json::from_slice::<serde_json::Value>(&created.1).expect("json")
+        ["created_at"]
+        .as_str()
+        .expect("created_at")
+        .to_string();
+
+    let credentials = column(
+        "SELECT credentials FROM integrations WHERE id = ?1",
+        id.clone(),
+    );
+    let auth = column("SELECT auth FROM integrations WHERE id = ?1", id.clone());
+    let services = column(
+        "SELECT services FROM integrations WHERE id = ?1",
+        id.clone(),
+    );
+
+    // ── The happy path: a full replace ──
+    let updated = go_answer(
+        Method::PUT,
+        &format!("/api/integrations/{id}"),
+        Some(
+            r#"{"name":"Renamed","type":"telegram","enabled":true,
+                 "credentials":{"zebra":"z", "bot_token":"new","rate":1.50},
+                 "services":{"messaging":{"enabled":true,"tools":["read_chat"]}}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(updated.0, 200, "update must be 200, got {}", updated.0);
+    println!("update: {}", String::from_utf8_lossy(&updated.1));
+    let body: serde_json::Value = serde_json::from_slice(&updated.1).expect("json");
+    assert_eq!(body["name"], "Renamed");
+    assert_eq!(body["enabled"], true);
+    assert_eq!(
+        body["services"],
+        serde_json::json!({"messaging": {"enabled": true, "tools": ["read_chat"]}})
+    );
+    assert_eq!(
+        body["created_at"], created_at,
+        "created_at is preserved; it is not even in the upsert's DO UPDATE SET list"
+    );
+    assert_ne!(body["updated_at"], created_at, "updated_at is the write's");
+    assert!(
+        body.get("credentials").is_none(),
+        "credentials are scrubbed"
+    );
+    assert!(body.get("auth").is_none(), "auth is scrubbed");
+    // Stored verbatim: key order, `1.50` and the space after the first comma.
+    assert_eq!(
+        credentials().as_deref(),
+        Some(r#"{"zebra":"z", "bot_token":"new","rate":1.50}"#)
+    );
+
+    // ── The token survives, and the credential does not ──
+    // Seeded directly, because no endpoint writes `auth`: every path that does
+    // is an OAuth callback or a token validator that dials the provider.
+    // `open_read_write` is the helper the app's own native writes use against
+    // this same file while the sidecar holds it, pragmas and all.
+    seed_auth(&id, Some(r#"{"access_token":"KEEP-ME"}"#));
+
+    let stripped = go_answer(
+        Method::PUT,
+        &format!("/api/integrations/{id}"),
+        Some(r#"{"name":"N2","type":"telegram"}"#),
+    )
+    .await;
+    assert_eq!(stripped.0, 200);
+    let body: serde_json::Value = serde_json::from_slice(&stripped.1).expect("json");
+    assert_eq!(body["authenticated"], true, "the token is preserved");
+    assert_eq!(
+        body["services"],
+        serde_json::Value::Null,
+        "Update does not default a nil services map the way Create does"
+    );
+    assert_eq!(services().as_deref(), Some("null"));
+    assert_eq!(
+        credentials().as_deref(),
+        Some(""),
+        "a PUT that omits credentials wipes them"
+    );
+    assert_eq!(auth().as_deref(), Some(r#"{"access_token":"KEEP-ME"}"#));
+
+    // An empty *object* is still an empty object — the nil-versus-empty
+    // distinction is untouched.
+    let empty_services = go_answer(
+        Method::PUT,
+        &format!("/api/integrations/{id}"),
+        Some(r#"{"name":"N2","type":"telegram","services":{}}"#),
+    )
+    .await;
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&empty_services.1).expect("json")["services"],
+        serde_json::json!({})
+    );
+
+    // ── The two non-token spellings become SQL NULL ──
+    for spelling in ["null", ""] {
+        seed_auth(&id, Some(spelling));
+        let answer = go_answer(
+            Method::PUT,
+            &format!("/api/integrations/{id}"),
+            Some(r#"{"name":"N3","type":"telegram"}"#),
+        )
+        .await;
+        let body: serde_json::Value = serde_json::from_slice(&answer.1).expect("json");
+        assert_eq!(body["authenticated"], false, "auth {spelling:?}");
+        assert_eq!(auth(), None, "auth {spelling:?} must become SQL NULL");
+    }
+
+    // ── Nothing is validated on an update ──
+    for body in [
+        r#"{}"#,
+        r#"{"name":"","type":""}"#,
+        r#"{"name":"N","type":"telegram","credentials":{}}"#,
+        r#"{"name":"N","type":"jira","credentials":{"site_url":"nonsense"}}"#,
+        r#"{"name":"N","type":"telegram","credentials":null}"#,
+    ] {
+        let accepted = go_answer(Method::PUT, &format!("/api/integrations/{id}"), Some(body)).await;
+        assert_eq!(
+            accepted.0, 200,
+            "{body:?} is a 422 on a create and a 200 on an update"
+        );
+    }
+
+    // ── The failure paths ──
+    //
+    // The decode runs before the lookup, so a malformed body aimed at a missing
+    // row is a 400 and not a 404.
+    for path in [
+        format!("/api/integrations/{id}"),
+        "/api/integrations/nope".into(),
+    ] {
+        let malformed = go_answer(Method::PUT, &path, Some("not json at all")).await;
+        assert_eq!(malformed.0, 400, "{path}");
+        assert_eq!(
+            String::from_utf8_lossy(&malformed.1).trim_end(),
+            r#"{"error":"invalid JSON body"}"#
+        );
+    }
+
+    let missing = go_answer(
+        Method::PUT,
+        "/api/integrations/nope",
+        Some(r#"{"name":"N"}"#),
+    )
+    .await;
+    assert_eq!(missing.0, 404);
+    assert_eq!(
+        String::from_utf8_lossy(&missing.1).trim_end(),
+        r#"{"error":"integration \"nope\" not found"}"#
+    );
+
+    let missing = go_answer(Method::DELETE, "/api/integrations/nope", None).await;
+    assert_eq!(missing.0, 404);
+    assert_eq!(
+        String::from_utf8_lossy(&missing.1).trim_end(),
+        r#"{"error":"integration \"nope\" not found"}"#
+    );
+
+    // ── The delete ──
+    let deleted = go_answer(Method::DELETE, &format!("/api/integrations/{id}"), None).await;
+    assert_eq!(deleted.0, 204, "delete must be 204");
+    assert!(deleted.1.is_empty(), "204 carries no body");
+    assert_eq!(credentials(), None, "the row is gone");
+
+    let gone = go_answer(Method::GET, &format!("/api/integrations/{id}"), None).await;
+    assert_eq!(gone.0, 404);
 }
 
 // ─── Pricing rates (#306) ─────────────────────────────────────────────────────
