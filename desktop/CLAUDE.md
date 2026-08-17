@@ -1120,15 +1120,25 @@ Four things that will recur in #313–#316:
   because `Start` refuses a plaintext URL before it builds anything:
   `internal/integrations/confluence/parity.go`'s `StartAtSiteURL` is `Start` with
   that one line removed, and it is exported for the same reason `SetAPIBase` is.
-- **The dot-segment guard needs the *raw* base.** `client::absolute` is
-  `github::client::absolute`'s reasoning verbatim — `url::Url::parse` applies
+- **The dot-segment guard compares only the half a tool built.** `client::absolute`
+  is `github::client::absolute`'s reasoning verbatim — `url::Url::parse` applies
   WHATWG dot-segment removal and Go's `net/http` does not, so
   `get_page(page_id: "..")` would reach `/wiki/api/v2/` (the space listing) on a
-  request carrying the token. The difference is that the expected target cannot
-  be the `path` argument: it is whatever follows the authority in
-  `site_url + path`, recovered from the concatenated string *before* parsing,
-  since parsing is the thing being detected. A site URL whose authority is
-  followed by `?` or `#` has no faithful answer and is refused.
+  request carrying the token. What differs is what the expected target is
+  compared *against*. GitHub's base is a fixed, already-encoded string, so there
+  the whole target is the `path` argument. A site URL is per row and
+  **user-typed**, so it need not be encoded at all:
+  `https://intranet.example.com/my atlassian` is one Go accepts and sends as
+  `/my%20atlassian/…` through `EscapedPath`, and `url` encodes it identically —
+  so comparing against the raw concatenation would refuse every call against a
+  site URL that works. The base is therefore parsed on its own and its *rendered*
+  path is the expected prefix; only the tool's suffix is compared against the
+  bytes it built, which is sound because that half is fully `gourl`-encoded.
+  Three base shapes leave no sound comparison and `validate_site_url` refuses
+  them at `Start` instead — one `url` cannot parse, one carrying its own `?` or
+  `#`, and one holding a dot segment of its own. The last two Go accepts, so all
+  three are pinned as `rust_error` divergences; refusing to host is visible and
+  logged, where the alternative is silently moving every request.
 - **`SetBasicAuth` is `reqwest`'s `basic_auth`.** Both are
   `Basic base64(user + ":" + pass)` with standard (not URL-safe) alphabet. The
   vectors pin the encoded header rather than trusting that, because nothing in a

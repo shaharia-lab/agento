@@ -179,54 +179,57 @@ impl Client {
     /// option is to **refuse**: the model reads the sentence a transport failure
     /// produces rather than the answer to a question it did not ask. This is
     /// `github::client::absolute`'s reasoning verbatim, and #313–#316 each need
-    /// it; the difference here is only that the base is a per-row site URL, so
-    /// the target Go would have sent is recovered from the concatenated string
-    /// rather than being the argument.
+    /// it.
     ///
-    /// # Why the whole target is compared rather than `..` scanned for
+    /// # What is compared, and why it is not the raw string
     ///
-    /// An exact comparison catches anything else `url` normalizes, now or after
-    /// an upgrade, instead of the one shape known today. Nothing legitimate
-    /// trips it, and that is a property of `gourl`'s escaping rather than luck:
-    /// `encodePathSegment` escapes every byte in `url`'s path encode set and
-    /// `encodeQueryComponent` every byte in its query one, so there is nothing
-    /// left for `url` to percent-encode; existing `%XX` escapes are passed
-    /// through with their case intact, so Go's uppercase hex survives; and a
-    /// path with no `?` compares `""` against `query()`'s `None`. Host, scheme
-    /// and port are not compared at all, so `url`'s default-port and case
-    /// normalization cannot reach this.
+    /// GitHub's base is a fixed, already-encoded string, so there the whole
+    /// target could be compared against the `path` argument. A site URL is
+    /// per row and **user-typed**, so it is not necessarily encoded:
+    /// `https://intranet.example.com/my atlassian` is one Go accepts, and both
+    /// `net/url`'s `EscapedPath` and `url` send it as `/my%20atlassian/…`. They
+    /// agree — but the raw text does not, so comparing against the raw
+    /// concatenation would refuse every call for a site URL that works.
     ///
-    /// A site URL is not the fixed string GitHub's base is, so the expected
-    /// target is whatever follows the authority in `site_url + path`. A site URL
-    /// carrying its own `?` or `#` before any path — which
-    /// [`super::validate_site_url`] admits, since it only checks the scheme and
-    /// the host — has no faithful answer and is refused here rather than sent
-    /// somewhere unintended.
+    /// So the base is parsed **on its own** and its rendered path is the
+    /// expected prefix; only the tool's own suffix is compared against the raw
+    /// bytes it built. That is sound because the suffix *is* fully encoded, and
+    /// not by luck: `encodePathSegment` escapes every byte in `url`'s path
+    /// encode set and `encodeQueryComponent` every byte in its query one, so
+    /// there is nothing left for `url` to percent-encode; existing `%XX` escapes
+    /// are passed through with their case intact, so Go's uppercase hex
+    /// survives; and a path with no `?` compares `""` against `query()`'s
+    /// `None`. Host, scheme and port are not compared at all, so `url`'s
+    /// default-port and case normalization cannot reach this.
+    ///
+    /// The comparison stays **exact** rather than a `..` scan, so anything else
+    /// `url` normalizes in a tool's path — now or after an upgrade — is caught by
+    /// construction.
+    ///
+    /// [`super::validate_site_url`] has already refused the three base shapes
+    /// this cannot work behind: one `url` will not parse, one carrying its own
+    /// `?` or `#`, and one holding a dot segment of its own. The re-checks below
+    /// are cheap and keep the function total rather than trusting a caller.
     fn absolute(&self, path: &str) -> Result<reqwest::Url, String> {
-        let full = format!("{}{path}", self.site_url);
-        let url = reqwest::Url::parse(&full).map_err(|_| REQUEST_FAILED.to_string())?;
-        let Some(target) = go_request_target(&full) else {
+        let base = reqwest::Url::parse(&self.site_url).map_err(|_| REQUEST_FAILED.to_string())?;
+        if base.query().is_some() || base.fragment().is_some() {
             return Err(REQUEST_FAILED.to_string());
+        }
+        // `url` renders a base with no path of its own as `/`; the suffix
+        // supplies that slash, so the prefix is empty.
+        let prefix = match base.path() {
+            "/" => "",
+            other => other,
         };
-        let (want_path, want_query) = target.split_once('?').unwrap_or((target, ""));
-        if url.path() != want_path || url.query().unwrap_or("") != want_query {
+
+        let url = reqwest::Url::parse(&format!("{}{path}", self.site_url))
+            .map_err(|_| REQUEST_FAILED.to_string())?;
+        let (want_path, want_query) = path.split_once('?').unwrap_or((path, ""));
+        if url.path() != format!("{prefix}{want_path}") || url.query().unwrap_or("") != want_query {
             return Err(REQUEST_FAILED.to_string());
         }
         Ok(url)
     }
-}
-
-/// What `net/http` would put on the request line for `full`: everything from the
-/// first `/` after the authority.
-///
-/// Recovered from the raw string rather than from a parsed URL precisely because
-/// parsing is what normalizes — the thing [`Client::absolute`] exists to detect.
-/// `None` when the authority is followed by a `?` or a `#` instead of a path,
-/// which no site URL this port should serve produces; the caller refuses.
-fn go_request_target(full: &str) -> Option<&str> {
-    let rest = full.split_once("://")?.1;
-    let start = rest.find(['/', '?', '#'])?;
-    rest[start..].starts_with('/').then(|| &rest[start..])
 }
 
 /// Sends a request, racing the run's cancellation.
@@ -395,10 +398,45 @@ mod tests {
         assert_eq!(url.query(), Some("limit=50"));
     }
 
+    /// A base `url` re-encodes is **not** a refusal, and this is the case that
+    /// a raw-string comparison gets wrong.
+    ///
+    /// A site URL is user-typed, so it need not be percent-encoded.
+    /// `net/url`'s `EscapedPath` and `url` both send `/my atlassian` as
+    /// `/my%20atlassian`, so Go and this port agree on the wire — but the raw
+    /// text does not match either of them, and comparing against it would answer
+    /// `request failed` for every call against a site URL that works.
+    #[test]
+    fn a_base_the_url_crate_re_encodes_is_still_served() {
+        for (site, prefix) in [
+            (
+                "https://intranet.example.com/my atlassian",
+                "/my%20atlassian",
+            ),
+            ("https://intranet.example.com/café", "/caf%C3%A9"),
+            ("https://intranet.example.com/a%20b", "/a%20b"),
+        ] {
+            let url = client(site)
+                .absolute("/wiki/api/v2/spaces?limit=50")
+                .unwrap_or_else(|_| panic!("{site} is a site URL Go serves"));
+            assert_eq!(url.path(), format!("{prefix}/wiki/api/v2/spaces"), "{site}");
+            assert_eq!(url.query(), Some("limit=50"), "{site}");
+        }
+    }
+
+    /// …and the dot-segment guard still fires behind such a base, because only
+    /// the tool's own suffix is compared against the bytes it built.
+    #[test]
+    fn the_guard_still_fires_behind_a_re_encoded_base() {
+        assert_eq!(
+            client("https://intranet.example.com/my atlassian").absolute("/wiki/api/v2/pages/.."),
+            Err(REQUEST_FAILED.to_string())
+        );
+    }
+
     /// A site URL whose authority is followed by a `?` or a `#` has no faithful
-    /// target, so it is refused rather than sent somewhere unintended.
-    /// `validate_site_url` admits it, because Go's only checks the scheme and
-    /// the host.
+    /// target. `validate_site_url` refuses it, and so does this — the function
+    /// stays total rather than trusting a caller.
     #[test]
     fn a_site_url_that_is_not_a_prefix_of_the_target_is_refused() {
         for site in [

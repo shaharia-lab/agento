@@ -218,9 +218,34 @@ pub async fn start_confluence_mcp_server(
 ///   `https://user@` all have none.
 ///
 /// The returned value is `strings.TrimRight(rawURL, "/")` of the **raw** string,
-/// not of a re-rendered URL — so nothing is normalised, and
-/// `client::Client::absolute` is what catches a site URL this port cannot build
-/// Go's request from.
+/// not of a re-rendered URL — Go concatenates that string with every tool's
+/// path, so anything else would be a different request.
+///
+/// # The base has to be one this port can build Go's request from
+///
+/// Everything above is Go's. The last check is not, and it is what
+/// [`client::Client::absolute`] needs to be able to do its job: that guard
+/// compares the target `url::Url::parse` produced against the one Go would have
+/// sent, and it can only attribute a difference to the *tool's* path if the
+/// **base** survives `url` unchanged. Three shapes break that, and all three are
+/// refused here rather than at every call:
+///
+/// - A base `url` cannot parse at all — a non-numeric or out-of-range port, a
+///   bad `%` escape in the host. Go's `url.Parse` refuses most of these too, so
+///   this is mostly *closer* to Go than not checking; where Go accepts, the
+///   alternative is hosting six tools that answer `request failed` forever.
+/// - A base carrying its own `?` or `#`. The concatenation is then not a prefix
+///   of the target at all, and there is no faithful answer.
+/// - A base holding a `.` or `..` path segment. `url` collapses it and Go does
+///   not, which is [`client::Client::absolute`]'s whole subject — but a base is
+///   not model-supplied, so refusing to host is both safe and quiet, where
+///   letting it through would silently move every request to another endpoint.
+///
+/// Note what is deliberately **not** required: that the base is already
+/// percent-encoded. `https://intranet.example.com/my atlassian` is a site URL Go
+/// accepts and sends as `/my%20atlassian/…`, and `url` encodes it identically —
+/// so it is admitted, and `absolute` compares against `url`'s own rendering of
+/// the base rather than against the raw text.
 ///
 /// # The divergence, and why it is only a sentence
 ///
@@ -236,14 +261,11 @@ pub async fn start_confluence_mcp_server(
 /// blob, for the same reason and with the extra motive that Go's message quotes
 /// the caller's input back.
 ///
-/// So the **classification** is reproduced and the sentence is not: the two
-/// failures reachable from a stored site URL are refused here too, each under
-/// this port's own `invalid site URL: …` wording, and
-/// `confluence_vectors.json` pins both as divergences rather than hiding them.
-/// The remaining `url.Parse` failures (a non-numeric port, a bad `%` escape in
-/// the host) are *accepted* here and refused at the first request instead, by
-/// [`client::Client::absolute`] — a refusal either way, and one the vectors do
-/// not need to enumerate because it never reaches a different endpoint.
+/// So the **classification** is reproduced and the sentence is not: each refusal
+/// carries this port's own `invalid site URL: …` wording, and
+/// `confluence_vectors.json` pins every one as a `rust_error` divergence rather
+/// than hiding it — including the three above, which are refusals Go does not
+/// always make.
 pub fn validate_site_url(raw: &str) -> std::result::Result<String, String> {
     // `url.Parse`'s first act — `stringContainsCTLByte`, which is `< 0x20 ||
     // == 0x7f`, exactly `is_ascii_control`. Reproduced because letting a control
@@ -258,9 +280,16 @@ pub fn validate_site_url(raw: &str) -> std::result::Result<String, String> {
     // would read that colon as a scheme. `1https://acme.atlassian.net` is the
     // shape a person actually types, and without this it would fall through to
     // the "must use HTTPS" refusal, which names the wrong problem.
+    //
+    // The fragment and the query are cut first, because `net/url` cuts them
+    // first: `Parse` splits on `#` and `parse` splits on `?`, both *before* the
+    // check, so `acme?x:y` is a colon in the query and not in a path segment.
+    // The prefix test is `/`, not `//`, for the same reason it is in `parse` —
+    // a rooted path is not a relative reference.
+    let head = raw.split(['#', '?']).next().unwrap_or("");
     if scheme.is_empty()
-        && !raw.starts_with("//")
-        && raw
+        && !head.starts_with('/')
+        && head
             .split('/')
             .next()
             .is_some_and(|first| first.contains(':'))
@@ -275,7 +304,37 @@ pub fn validate_site_url(raw: &str) -> std::result::Result<String, String> {
     if go_host(rest).is_empty() {
         return Err("site URL must include a hostname".to_string());
     }
-    Ok(raw.trim_end_matches('/').to_string())
+
+    let clean = raw.trim_end_matches('/');
+    // The three shapes `client::Client::absolute` cannot work behind. See the
+    // section above for why each is refused here rather than per call.
+    let parsed = reqwest::Url::parse(clean)
+        .map_err(|_| "invalid site URL: it is not a URL this build can send a request to")?;
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("invalid site URL: a query or fragment leaves the path open".to_string());
+    }
+    if base_path_of(clean)
+        .split('/')
+        .any(|segment| segment == "." || segment == "..")
+    {
+        return Err("invalid site URL: it holds a dot segment".to_string());
+    }
+    Ok(clean.to_string())
+}
+
+/// The raw text of a site URL's path — everything from the `/` that ends the
+/// authority.
+///
+/// Raw rather than parsed, because the dot-segment check above exists precisely
+/// because parsing removes them.
+fn base_path_of(clean: &str) -> &str {
+    let Some(rest) = clean.split_once("://").map(|(_, rest)| rest) else {
+        return "";
+    };
+    match rest.find('/') {
+        Some(start) => &rest[start..],
+        None => "",
+    }
 }
 
 /// `net/url`'s `getScheme`, lower-cased as `url.Parse` lower-cases it.

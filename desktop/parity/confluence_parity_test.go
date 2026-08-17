@@ -121,8 +121,13 @@ type confluenceResponseScript struct {
 }
 
 type confluenceCallVector struct {
-	Case      string                   `json:"case"`
-	Tool      string                   `json:"tool"`
+	Case string `json:"case"`
+	Tool string `json:"tool"`
+	// The path appended to the fake's own URL to make this case's site URL,
+	// empty for the fake's root. A site URL is per row, so the base is part of
+	// every request a tool builds — and the only part that is not already
+	// percent-encoded, since a person typed it.
+	BasePath  string                   `json:"base_path,omitempty"`
 	Arguments json.RawMessage          `json:"arguments"`
 	Response  confluenceResponseScript `json:"response"`
 	// nil when the tool answered without making a request. No Confluence tool
@@ -356,6 +361,51 @@ var confluenceSiteURLCases = []struct {
 		input:     "https://acme.atlassian.net/\n",
 		rustError: "invalid site URL: it holds a control character",
 	},
+	{
+		// `getScheme` errors on a leading colon rather than answering "no
+		// scheme", so this is a parse failure too.
+		name:      "a leading colon is a parse failure, worded differently",
+		input:     ":acme.atlassian.net",
+		rustError: "invalid site URL: its first path segment holds a colon",
+	},
+	{
+		// `Parse` cuts the fragment and `parse` cuts the query **before** the
+		// relative-path colon check, so a colon in either is not a colon in the
+		// first path segment. Both fall through to the scheme refusal.
+		name:  "a colon in the query is not a colon in the first path segment",
+		input: "acme.atlassian.net?x:y",
+	},
+	{
+		name:  "a colon in the fragment is not one either",
+		input: "acme.atlassian.net#x:y",
+	},
+	{
+		// A user-typed site URL need not be percent-encoded: Go sends
+		// `/my%20atlassian/...` via `EscapedPath`, and `url` encodes it
+		// identically, so this is accepted on both sides and the request the
+		// tools build matches. The call vectors below exercise it live.
+		name:  "an unencoded base path is accepted — both sides encode it the same way",
+		input: "https://intranet.example.com/my atlassian",
+	},
+	{
+		// The three shapes `client::Client::absolute` cannot work behind, all
+		// refused at Start rather than at every call. Go accepts the last two
+		// and hosts six tools; this port declines to host, which is the safe
+		// direction and is why each carries a rustError.
+		name:      "a port url::Url cannot represent is refused before it is hosted",
+		input:     "https://acme.atlassian.net:99999",
+		rustError: "invalid site URL: it is not a URL this build can send a request to",
+	},
+	{
+		name:      "a base carrying its own query leaves the path open",
+		input:     "https://acme.atlassian.net?a=b",
+		rustError: "invalid site URL: a query or fragment leaves the path open",
+	},
+	{
+		name:      "a base holding a dot segment would move every request",
+		input:     "https://acme.atlassian.net/a/../b",
+		rustError: "invalid site URL: it holds a dot segment",
+	},
 }
 
 // ─── The call cases ──────────────────────────────────────────────────────────
@@ -369,8 +419,11 @@ const confluenceOKBody = `{"results":[{"zebra":1,"id":10152021304050607,"rate":1
 
 // confluenceCallCase is a call vector before the live run fills in what happened.
 type confluenceCallCase struct {
-	name          string
-	tool          string
+	name string
+	tool string
+	// Appended to the fake's URL to make the site URL this case runs against;
+	// empty means the fake's own root.
+	basePath      string
 	args          map[string]any
 	script        confluenceResponseScript
 	rustText      string
@@ -595,6 +648,77 @@ func confluenceCallCases() []confluenceCallCase {
 			rustText:      "calling confluence API: request failed",
 			rustNoRequest: true,
 		},
+		// ─── a site URL with a base path of its own ──────────────────────────
+		//
+		// Every case above runs against a bare `http://127.0.0.1:port`, which
+		// hides the half of the request that is *not* built by a tool. A real
+		// Atlassian site URL is `https://acme.atlassian.net`, but a self-hosted
+		// one carries a path, and that path is user-typed and therefore not
+		// necessarily encoded. Go sends `EscapedPath()`; `url::Url::parse`
+		// encodes the same bytes the same way — so the two agree on the wire and
+		// a port that compared against the *raw* string would refuse every one
+		// of these.
+		{
+			name:     "list_spaces/a site URL with a base path prefixes the target",
+			tool:     "list_spaces",
+			basePath: "/atlassian",
+			args:     map[string]any{"limit": 0},
+			script:   confluenceOK(confluenceOKBody),
+		},
+		{
+			name:     "get_page/an unencoded base path is escaped by both sides",
+			tool:     "get_page",
+			basePath: "/my atlassian",
+			args:     map[string]any{"page_id": "98765", "body_format": ""},
+			script:   confluenceOK(`{"title":"Home"}`),
+		},
+		{
+			name:     "update_page/a base path prefixes the write too",
+			tool:     "update_page",
+			basePath: "/atlassian",
+			args: map[string]any{
+				"page_id": "1", "title": "t", "body": "b", "version": 2,
+			},
+			script: confluenceResponseScript{Status: http.StatusOK, Body: `{"id":"1"}`},
+		},
+		{
+			// The guard has to keep firing behind a base it did not build.
+			name:          "get_space/a dot segment behind a base path is still refused",
+			tool:          "get_space",
+			basePath:      "/atlassian",
+			args:          map[string]any{"space_id": ".."},
+			script:        confluenceResponseScript{Status: 404, Body: `{"message":"Not Found"}`},
+			rustText:      "calling confluence API: request failed",
+			rustNoRequest: true,
+		},
+
+		// ─── a zero-fraction float, which models do emit ─────────────────────
+		//
+		// `modelcontextprotocol/go-sdk` unmarshals `arguments` into a
+		// `map[string]any`, validates it against the reflected schema — where
+		// JSON Schema counts `50.0` as an `integer` — and re-marshals before the
+		// typed decode, so the handler sees 50. `serde_json::from_value::<i64>`
+		// refuses outright, so no handler runs and no request is made. The same
+		// divergence #312 pinned, and reachable on a **write** here.
+		{
+			name:          "list_spaces/a zero-fraction float is an integer to Go and not to serde",
+			tool:          "list_spaces",
+			args:          map[string]any{"limit": json.RawMessage("50.0")},
+			script:        confluenceOK(confluenceOKBody),
+			rustText:      "failed to deserialize parameters: invalid type: floating point `50.0`, expected i64",
+			rustNoRequest: true,
+		},
+		{
+			name: "update_page/the same float reaches the write path, where Go bumps the version",
+			tool: "update_page",
+			args: map[string]any{
+				"page_id": "1", "title": "t", "body": "b",
+				"version": json.RawMessage("41.0"),
+			},
+			script:        confluenceResponseScript{Status: http.StatusOK, Body: `{"id":"1"}`},
+			rustText:      "failed to deserialize parameters: invalid type: floating point `41.0`, expected i64",
+			rustNoRequest: true,
+		},
 	}
 }
 
@@ -666,8 +790,17 @@ func TestConfluenceVectors(t *testing.T) {
 		want.Hosting = append(want.Hosting, hosting)
 	}
 
+	// One session per distinct site URL. Most cases run against the fake's own
+	// root; the base-path ones need a server whose credentials carry that base,
+	// because a site URL is not a per-call argument.
+	sessions := map[string]*mcp.ClientSession{"": session}
 	for _, c := range confluenceCallCases() {
-		want.Calls = append(want.Calls, runConfluenceCallCase(t, ctx, session, fake, c))
+		if _, ok := sessions[c.basePath]; !ok {
+			sessions[c.basePath] = confluenceSession(
+				t, ctx, srv.URL+c.basePath, confluenceAllServices())
+		}
+		want.Calls = append(want.Calls,
+			runConfluenceCallCase(t, ctx, sessions[c.basePath], fake, c))
 	}
 
 	encoded, err := json.MarshalIndent(want, "", "  ")
@@ -758,6 +891,7 @@ func runConfluenceCallCase(
 	return confluenceCallVector{
 		Case:          c.name,
 		Tool:          c.tool,
+		BasePath:      c.basePath,
 		Arguments:     args,
 		Response:      c.script,
 		Request:       fake.recorded(),

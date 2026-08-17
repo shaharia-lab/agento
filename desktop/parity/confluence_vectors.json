@@ -91,6 +91,45 @@
       "input": "https://acme.atlassian.net/\n",
       "error": "invalid site URL: parse \"https://acme.atlassian.net/\\n\": net/url: invalid control character in URL",
       "rust_error": "invalid site URL: it holds a control character"
+    },
+    {
+      "case": "a leading colon is a parse failure, worded differently",
+      "input": ":acme.atlassian.net",
+      "error": "invalid site URL: parse \":acme.atlassian.net\": missing protocol scheme",
+      "rust_error": "invalid site URL: its first path segment holds a colon"
+    },
+    {
+      "case": "a colon in the query is not a colon in the first path segment",
+      "input": "acme.atlassian.net?x:y",
+      "error": "site URL must use HTTPS (got \"\")"
+    },
+    {
+      "case": "a colon in the fragment is not one either",
+      "input": "acme.atlassian.net#x:y",
+      "error": "site URL must use HTTPS (got \"\")"
+    },
+    {
+      "case": "an unencoded base path is accepted — both sides encode it the same way",
+      "input": "https://intranet.example.com/my atlassian",
+      "clean": "https://intranet.example.com/my atlassian"
+    },
+    {
+      "case": "a port url::Url cannot represent is refused before it is hosted",
+      "input": "https://acme.atlassian.net:99999",
+      "clean": "https://acme.atlassian.net:99999",
+      "rust_error": "invalid site URL: it is not a URL this build can send a request to"
+    },
+    {
+      "case": "a base carrying its own query leaves the path open",
+      "input": "https://acme.atlassian.net?a=b",
+      "clean": "https://acme.atlassian.net?a=b",
+      "rust_error": "invalid site URL: a query or fragment leaves the path open"
+    },
+    {
+      "case": "a base holding a dot segment would move every request",
+      "input": "https://acme.atlassian.net/a/../b",
+      "clean": "https://acme.atlassian.net/a/../b",
+      "rust_error": "invalid site URL: it holds a dot segment"
     }
   ],
   "tools": [
@@ -867,6 +906,149 @@
       "is_error": true,
       "text": "confluence API error (status 404): {\"message\":\"Not Found\"}",
       "rust_text": "calling confluence API: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "list_spaces/a site URL with a base path prefixes the target",
+      "tool": "list_spaces",
+      "base_path": "/atlassian",
+      "arguments": {
+        "limit": 0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/atlassian/wiki/api/v2/spaces?limit=50",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Spaces: {\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+    },
+    {
+      "case": "get_page/an unencoded base path is escaped by both sides",
+      "tool": "get_page",
+      "base_path": "/my atlassian",
+      "arguments": {
+        "body_format": "",
+        "page_id": "98765"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"title\":\"Home\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/my%20atlassian/wiki/api/v2/pages/98765?body-format=storage",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Page: {\"title\":\"Home\"}"
+    },
+    {
+      "case": "update_page/a base path prefixes the write too",
+      "tool": "update_page",
+      "base_path": "/atlassian",
+      "arguments": {
+        "body": "b",
+        "page_id": "1",
+        "title": "t",
+        "version": 2
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"id\":\"1\"}"
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/atlassian/wiki/api/v2/pages/1",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"representation\":\"storage\",\"value\":\"b\"},\"id\":\"1\",\"status\":\"current\",\"title\":\"t\",\"version\":{\"number\":3}}"
+      },
+      "is_error": false,
+      "text": "Page updated: {\"id\":\"1\"}"
+    },
+    {
+      "case": "get_space/a dot segment behind a base path is still refused",
+      "tool": "get_space",
+      "base_path": "/atlassian",
+      "arguments": {
+        "space_id": ".."
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/atlassian/wiki/api/v2/spaces/..",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "confluence API error (status 404): {\"message\":\"Not Found\"}",
+      "rust_text": "calling confluence API: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "list_spaces/a zero-fraction float is an integer to Go and not to serde",
+      "tool": "list_spaces",
+      "arguments": {
+        "limit": 50.0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/spaces?limit=50",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Spaces: {\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}",
+      "rust_text": "failed to deserialize parameters: invalid type: floating point `50.0`, expected i64",
+      "rust_no_request": true
+    },
+    {
+      "case": "update_page/the same float reaches the write path, where Go bumps the version",
+      "tool": "update_page",
+      "arguments": {
+        "body": "b",
+        "page_id": "1",
+        "title": "t",
+        "version": 41.0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"id\":\"1\"}"
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/wiki/api/v2/pages/1",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"representation\":\"storage\",\"value\":\"b\"},\"id\":\"1\",\"status\":\"current\",\"title\":\"t\",\"version\":{\"number\":42}}"
+      },
+      "is_error": false,
+      "text": "Page updated: {\"id\":\"1\"}",
+      "rust_text": "failed to deserialize parameters: invalid type: floating point `41.0`, expected i64",
       "rust_no_request": true
     }
   ]

@@ -17,13 +17,17 @@
 //! Three fields carry a *pinned divergence* rather than a match, each documented
 //! at its use below and in the Go generator:
 //!
-//! - `rust_error` — `net/url`'s parse-failure vocabulary, which is `%q`-quoted
-//!   Go string escaping over the caller's own input and reaches a log line
-//!   rather than the model. The refusal is reproduced; the sentence is not.
+//! - `rust_error` — the site-URL gate. Two kinds: `net/url`'s parse-failure
+//!   vocabulary (`%q`-quoted Go string escaping over the caller's own input,
+//!   reaching a log line rather than the model — the refusal is reproduced, the
+//!   sentence is not), and three bases Go accepts that this port refuses to host
+//!   because `client::Client::absolute` cannot work behind them.
 //! - `rust_text` — the dot-segment refusal, where this port answers the sentence
-//!   a transport failure produces rather than calling a different endpoint.
-//! - `rust_no_request` — the same case seen from the network: Go reached the
-//!   fake and this port never built the request.
+//!   a transport failure produces rather than calling a different endpoint; and
+//!   a zero-fraction float for an integer field, which the Go SDK re-marshals
+//!   into an integer and `serde_json` refuses.
+//! - `rust_no_request` — the same two cases seen from the network: Go reached
+//!   the fake and this port never built the request.
 //!
 //! Note there is **no `rust_target`**. #312 needed one because the Go MCP SDK
 //! rounds an integer argument above 2^53 before the handler sees it; the two
@@ -111,6 +115,11 @@ struct ResponseScript {
 struct CallVector {
     case: String,
     tool: String,
+    /// The path appended to the fake's URL to make this case's site URL, empty
+    /// for the fake's root. A site URL is per row, so a case that exercises a
+    /// base path needs its own server.
+    #[serde(default)]
+    base_path: String,
     arguments: Value,
     response: ResponseScript,
     request: Option<RequestVector>,
@@ -183,13 +192,29 @@ fn all_services() -> BTreeMap<String, ServiceConfig> {
 /// This is the check that keeps the user's API token off a plaintext connection,
 /// so the interesting assertion is the *accept* set — a port that admitted
 /// `http://` would still pass every other test in this file.
+/// `rust_error` is the whole answer wherever it is set, and it is set in two
+/// different situations — which is why it wins over both of the other fields
+/// rather than only over `error`:
+///
+/// - Go refused and this port refuses under different wording (`net/url`'s parse
+///   vocabulary), and
+/// - Go **accepted** and this port refuses, for the three bases
+///   `client::Client::absolute` cannot work behind. Those carry a `clean` value
+///   from Go and must still fail here.
 #[test]
 fn the_site_url_gate_matches_the_go_vectors() {
     let v = vectors();
-    assert!(v.site_urls.len() >= 10, "vectors look partial");
+    assert!(v.site_urls.len() >= 15, "vectors look partial");
     for case in &v.site_urls {
         let got = validate_site_url(&case.input);
-        if case.error.is_empty() {
+        if !case.rust_error.is_empty() {
+            assert_eq!(
+                got,
+                Err(case.rust_error.clone()),
+                "{}: a pinned divergence",
+                case.case
+            );
+        } else if case.error.is_empty() {
             assert_eq!(
                 got,
                 Ok(case.clean.clone()),
@@ -198,14 +223,7 @@ fn the_site_url_gate_matches_the_go_vectors() {
                 case.clean
             );
         } else {
-            // Where the wording diverges the vector says so; where it does not,
-            // Go's own sentence is the assertion.
-            let want = if case.rust_error.is_empty() {
-                &case.error
-            } else {
-                &case.rust_error
-            };
-            assert_eq!(got, Err(want.clone()), "{}: refusal", case.case);
+            assert_eq!(got, Err(case.error.clone()), "{}: refusal", case.case);
         }
     }
 }
@@ -387,19 +405,30 @@ async fn every_call_matches_the_go_vectors() {
         let _ = axum::serve(listener, app).await;
     });
 
-    let server = start_confluence_mcp_server(
-        &v.integration_id,
-        &all_services(),
-        &base,
-        &v.email,
-        &v.api_token,
-    )
-    .await
-    .expect("start the confluence server");
+    // One server per distinct site URL, as the Go generator opens one session
+    // per distinct base path. The site URL is a field on the client, not a
+    // per-call argument, so a base-path case cannot share the plain server.
+    let mut servers: BTreeMap<String, crate::claude::InProcessMcpServer> = BTreeMap::new();
+    for case in &v.calls {
+        if servers.contains_key(&case.base_path) {
+            continue;
+        }
+        let server = start_confluence_mcp_server(
+            &v.integration_id,
+            &all_services(),
+            &format!("{base}{}", case.base_path),
+            &v.email,
+            &v.api_token,
+        )
+        .await
+        .expect("start the confluence server");
+        servers.insert(case.base_path.clone(), server);
+    }
 
     for case in &v.calls {
+        let server = &servers[&case.base_path];
         state.arm(&case.response);
-        let result = call_tool(&server, &case.tool, &case.arguments).await;
+        let result = call_tool(server, &case.tool, &case.arguments).await;
 
         // The credentials must never reach the model, on either path.
         for secret in [&v.api_token, &v.email] {
@@ -411,13 +440,19 @@ async fn every_call_matches_the_go_vectors() {
             );
         }
 
-        let want_text = if case.rust_text.is_empty() {
-            &case.text
+        // Every text this port substitutes is a *failure* this port produces
+        // where Go produced something else, so `rust_text` carries `is_error`
+        // with it. That is not always Go's own flag: the zero-fraction-float
+        // cases script a 200, because what they pin is that Go went ahead —
+        // performing `update_page`'s write with the bumped version — while the
+        // decode here fails before any handler runs.
+        let (want_text, want_error) = if case.rust_text.is_empty() {
+            (&case.text, case.is_error)
         } else {
-            &case.rust_text
+            (&case.rust_text, true)
         };
         assert_eq!(result.text, *want_text, "{}: result text", case.case);
-        assert_eq!(result.is_error, case.is_error, "{}: is_error", case.case);
+        assert_eq!(result.is_error, want_error, "{}: is_error", case.case);
 
         let seen = state.0.lock().expect("fake lock").seen.take();
         let want_request = if case.rust_no_request {
