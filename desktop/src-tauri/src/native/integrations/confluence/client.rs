@@ -44,6 +44,7 @@ use reqwest::Method;
 use tokio_stream::StreamExt;
 
 use crate::claude::CancellationToken;
+use crate::native::integrations::base_url::Base;
 
 /// `maxResponseBytes`: 2 MiB, "keeping it small avoids flooding the LLM context".
 const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
@@ -82,7 +83,10 @@ const REQUEST_FAILED: &str = "calling confluence API: request failed";
 /// clone and holds nothing else.
 #[derive(Clone)]
 pub struct Client {
-    site_url: String,
+    /// `None` when the stored site URL is one this build cannot send a request
+    /// through — see [`super::super::base_url`]. Every call then answers Go's
+    /// own transport sentence.
+    base: Option<Base>,
     email: String,
     api_token: String,
 }
@@ -98,7 +102,7 @@ impl Client {
         api_token: impl Into<String>,
     ) -> Self {
         Self {
-            site_url: site_url.into(),
+            base: Base::new(&site_url.into()).ok(),
             email: email.into(),
             api_token: api_token.into(),
         }
@@ -157,96 +161,17 @@ impl Client {
     /// The URL a request to `path` goes to — or [`REQUEST_FAILED`], if this port
     /// cannot build the request Go builds.
     ///
-    /// # Why this exists, and why it refuses instead of correcting
-    ///
-    /// Go concatenates the site URL and `path`, hands the string to
-    /// `http.NewRequestWithContext`, and `net/http` writes `URL.RequestURI()` on
-    /// the wire **verbatim**. Nothing normalizes: `url.PathEscape` leaves `.` and
-    /// `..` alone (both are unreserved) and `net/url` does not remove dot
-    /// segments, so `get_page(page_id: "..")` asks Confluence for
-    /// `/wiki/api/v2/pages/..` and gets a 404.
-    ///
-    /// `reqwest` builds every request through `url::Url::parse`, which applies
-    /// WHATWG dot-segment removal for http(s). The same call would leave as
-    /// `/wiki/api/v2/` — the space *listing* rather than one page, on a request
-    /// already carrying the user's API token. `page_id`, `space_id` and
-    /// `parent_id` are model-supplied and every tool result carries
-    /// attacker-authored wiki content, so it is reachable under prompt
-    /// injection, and it applies to `update_page`'s write too. Escaping the dots
-    /// is not a fix — `%2E%2E` is collapsed as well.
-    ///
-    /// `reqwest` offers no way to send an unnormalized target, so the faithful
-    /// option is to **refuse**: the model reads the sentence a transport failure
-    /// produces rather than the answer to a question it did not ask. This is
-    /// `github::client::absolute`'s reasoning verbatim, and #313–#316 each need
-    /// it.
-    ///
-    /// # What is compared, and why it is not the raw string
-    ///
-    /// GitHub's base is a fixed, already-encoded string, so there the whole
-    /// target could be compared against the `path` argument. A site URL is
-    /// per row and **user-typed**, so it is not necessarily encoded:
-    /// `https://intranet.example.com/my atlassian` is one Go accepts, and both
-    /// `net/url`'s `EscapedPath` and `url` send it as `/my%20atlassian/…`. They
-    /// agree — but the raw text does not, so comparing against the raw
-    /// concatenation would refuse every call for a site URL that works.
-    ///
-    /// So the base is parsed **on its own** and its rendered path is the
-    /// expected prefix; only the tool's own suffix is compared against the raw
-    /// bytes it built. That is sound because the suffix *is* fully encoded, and
-    /// not by luck: `encodePathSegment` escapes every byte in `url`'s path
-    /// encode set and `encodeQueryComponent` every byte in its query one, so
-    /// there is nothing left for `url` to percent-encode; existing `%XX` escapes
-    /// are passed through with their case intact, so Go's uppercase hex
-    /// survives; and a path with no `?` compares `""` against `query()`'s
-    /// `None`. Host, scheme and port are not compared at all, so `url`'s
-    /// default-port and case normalization cannot reach this.
-    ///
-    /// The comparison stays **exact** rather than a `..` scan, so anything else
-    /// `url` normalizes in a tool's path — now or after an upgrade — is caught by
-    /// construction.
-    ///
-    /// # What this does not check, and who does
-    ///
-    /// Comparing two `url`-parsed values is blind to every place `url` and
-    /// `net/url` disagree about the **base** — most sharply the authority, where
-    /// `https://evil.com\@acme.atlassian.net` is a parse error to Go and host
-    /// `evil.com` to `url`. [`super::validate_site_url`] is the gate for those:
-    /// it runs once, at `Start`, and refuses a base whose host or path encoding
-    /// the two parsers read differently, so no `Client` should exist around one.
-    /// It is a per-call cost (a percent-decode and a re-encode) for a property
-    /// of a value that cannot change between calls, which is why it lives there
-    /// and not here.
-    ///
-    /// The three re-checks below are the cheap ones, kept so this function is
-    /// total rather than trusting its caller.
+    /// Both halves live in [`super::super::base_url`]: the base was checked once
+    /// when this client was constructed (a `None` there means every call refuses,
+    /// which cannot happen through `validate_site_url` and can through a test
+    /// that points a client anywhere), and `resolve` is the per-call dot-segment
+    /// guard `github::client::absolute` established. See that module's header for
+    /// why the base needs checking at all and why it is not a comparison.
     fn absolute(&self, path: &str) -> Result<reqwest::Url, String> {
-        let base = reqwest::Url::parse(&self.site_url).map_err(|_| REQUEST_FAILED.to_string())?;
-        if base.query().is_some() || base.fragment().is_some() {
-            return Err(REQUEST_FAILED.to_string());
-        }
-        // A dot segment in the base collapses on *both* sides of the comparison
-        // below, so it is the one shape the comparison cannot see.
-        if super::base_path_of(&self.site_url)
-            .split('/')
-            .any(|segment| segment == "." || segment == "..")
-        {
-            return Err(REQUEST_FAILED.to_string());
-        }
-        // `url` renders a base with no path of its own as `/`; the suffix
-        // supplies that slash, so the prefix is empty.
-        let prefix = match base.path() {
-            "/" => "",
-            other => other,
-        };
-
-        let url = reqwest::Url::parse(&format!("{}{path}", self.site_url))
-            .map_err(|_| REQUEST_FAILED.to_string())?;
-        let (want_path, want_query) = path.split_once('?').unwrap_or((path, ""));
-        if url.path() != format!("{prefix}{want_path}") || url.query().unwrap_or("") != want_query {
-            return Err(REQUEST_FAILED.to_string());
-        }
-        Ok(url)
+        self.base
+            .as_ref()
+            .and_then(|base| base.resolve(path))
+            .ok_or_else(|| REQUEST_FAILED.to_string())
     }
 }
 

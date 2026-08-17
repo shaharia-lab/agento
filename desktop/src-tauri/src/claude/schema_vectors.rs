@@ -30,8 +30,8 @@
 //! struct in `internal/integrations/github/` is flat, carries no `omitempty`,
 //! and uses only `string`, `int`, `int64` and `bool` — which is why the twenty
 //! schemas in `github_vectors.json` match exactly, and #317's six in
-//! `confluence_vectors.json` with them. The map exists so #313–#316 do not each
-//! rediscover the boundary.
+//! `confluence_vectors.json` and #316's nine in `jira_vectors.json` with them.
+//! The map exists so #313–#315 do not each rediscover the boundary.
 
 use std::collections::BTreeMap;
 

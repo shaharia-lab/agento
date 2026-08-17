@@ -1,0 +1,1013 @@
+{
+  "_comment": [
+    "Cross-language parity vectors for internal/integrations/jira, the Jira",
+    "integration's in-process MCP server. Generated from Go, then frozen. Read by",
+    "desktop/parity/jira_parity_test.go (Go) and by",
+    "desktop/src-tauri/src/native/integrations/jira/ (Rust). Every value is exactly",
+    "what Go produces, so a divergence fails one language against the other's real",
+    "output rather than against a belief about it.",
+    "'tools' and 'hosting' come from live tools/list calls against servers built by",
+    "jira.Start; 'calls' from live tools/call calls against a scripted fake Jira that",
+    "records the request each tool built; 'site_urls' pin that a site URL Go serves",
+    "and the Rust port cannot send a request through leaves the tool set untouched.",
+    "'email' and 'api_token' are fixtures, not secrets: they are recorded so the",
+    "base64 of the Basic header is pinned.",
+    "Regenerate with: go test ./desktop/parity/ -run TestJiraVectors -update-jira-vectors"
+  ],
+  "integration_id": "jira-parity",
+  "server_name": "jira-jira-parity",
+  "version": "1.0.0",
+  "email": "parity@example.com",
+  "api_token": "parity-jira-api-token",
+  "tools": [
+    {
+      "name": "add_comment",
+      "description": "Adds a comment to a Jira issue.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "comment": {
+            "description": "required,The text of the comment to add",
+            "type": "string"
+          },
+          "key": {
+            "description": "required,The issue key (e.g. PROJ-123)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "comment"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "create_issue",
+      "description": "Creates a new Jira issue in a project.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "description": "Optional description of the issue",
+            "type": "string"
+          },
+          "issue_type": {
+            "description": "required,Issue type name (e.g. Bug, Story, Task)",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Optional priority name (e.g. High, Medium, Low)",
+            "type": "string"
+          },
+          "project_key": {
+            "description": "required,The project key (e.g. PROJ)",
+            "type": "string"
+          },
+          "summary": {
+            "description": "required,Summary/title of the issue",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_key",
+          "issue_type",
+          "summary",
+          "description",
+          "priority"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_issue",
+      "description": "Gets details of a specific Jira issue by key (e.g. PROJ-123).",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "description": "required,The issue key (e.g. PROJ-123)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_project",
+      "description": "Gets details of a specific Jira project by key.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "description": "required,The project key (e.g. PROJ)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_projects",
+      "description": "Lists all accessible Jira projects.",
+      "input_schema": {
+        "additionalProperties": false,
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_transitions",
+      "description": "Lists available status transitions for a Jira issue.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "description": "required,The issue key (e.g. PROJ-123)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "search_issues",
+      "description": "Searches Jira issues using JQL (Jira Query Language).",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "jql": {
+            "description": "required,JQL query string (e.g. project = PROJ AND status = Open)",
+            "type": "string"
+          },
+          "max_results": {
+            "description": "Maximum number of issues to return (default 50, max 100)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "jql",
+          "max_results"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "transition_issue",
+      "description": "Transitions a Jira issue to a new status.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "description": "required,The issue key (e.g. PROJ-123)",
+            "type": "string"
+          },
+          "transition_id": {
+            "description": "required,The ID of the transition to perform",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "transition_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "update_issue",
+      "description": "Updates fields of an existing Jira issue.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "description": "Optional new description",
+            "type": "string"
+          },
+          "key": {
+            "description": "required,The issue key (e.g. PROJ-123)",
+            "type": "string"
+          },
+          "priority": {
+            "description": "Optional new priority name (e.g. High, Medium, Low)",
+            "type": "string"
+          },
+          "summary": {
+            "description": "Optional new summary/title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "summary",
+          "description",
+          "priority"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "hosting": [
+    {
+      "case": "the service enabled with no tool list — an empty allowed set hosts everything",
+      "services": {
+        "project_management": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "tools": [
+        "add_comment",
+        "create_issue",
+        "get_issue",
+        "get_project",
+        "list_projects",
+        "list_transitions",
+        "search_issues",
+        "transition_issue",
+        "update_issue"
+      ]
+    },
+    {
+      "case": "no services at all",
+      "services": {},
+      "tools": []
+    },
+    {
+      "case": "the service disabled contributes neither its gate nor its tools",
+      "services": {
+        "project_management": {
+          "enabled": false,
+          "tools": [
+            "get_issue"
+          ]
+        }
+      },
+      "tools": []
+    },
+    {
+      "case": "a non-empty allowed set is a filter",
+      "services": {
+        "project_management": {
+          "enabled": true,
+          "tools": [
+            "get_issue",
+            "add_comment"
+          ]
+        }
+      },
+      "tools": [
+        "add_comment",
+        "get_issue"
+      ]
+    },
+    {
+      "case": "an enabled but unknown service still narrows the one that exists",
+      "services": {
+        "other": {
+          "enabled": true,
+          "tools": [
+            "list_projects"
+          ]
+        },
+        "project_management": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "tools": [
+        "list_projects"
+      ]
+    },
+    {
+      "case": "a tool named by a disabled service is not allowed anywhere",
+      "services": {
+        "other": {
+          "enabled": false,
+          "tools": [
+            "create_issue"
+          ]
+        },
+        "project_management": {
+          "enabled": true,
+          "tools": [
+            "get_project"
+          ]
+        }
+      },
+      "tools": [
+        "get_project"
+      ]
+    }
+  ],
+  "site_urls": [
+    {
+      "case": "a backslash before the userinfo, which url reads as a different host",
+      "site_url": "https://evil.invalid\\@jira.invalid",
+      "tools": [
+        "add_comment",
+        "create_issue",
+        "get_issue",
+        "get_project",
+        "list_projects",
+        "list_transitions",
+        "search_issues",
+        "transition_issue",
+        "update_issue"
+      ],
+      "call_text": "creating request: parse \"https://evil.invalid\\\\@jira.invalid/rest/api/3/project\": net/url: invalid userinfo",
+      "is_error": true,
+      "rust_call_text": "calling Jira GET /rest/api/3/project: request failed"
+    },
+    {
+      "case": "a percent escape in the host, which url decodes to another domain",
+      "site_url": "https://jira.invalid%2Eevil.invalid",
+      "tools": [
+        "add_comment",
+        "create_issue",
+        "get_issue",
+        "get_project",
+        "list_projects",
+        "list_transitions",
+        "search_issues",
+        "transition_issue",
+        "update_issue"
+      ],
+      "call_text": "creating request: parse \"https://jira.invalid%2Eevil.invalid/rest/api/3/project\": invalid URL escape \"%2E\"",
+      "is_error": true,
+      "rust_call_text": "calling Jira GET /rest/api/3/project: request failed"
+    },
+    {
+      "case": "a dot segment in the base path, which url collapses",
+      "site_url": "https://jira.invalid/a/../b",
+      "tools": [
+        "add_comment",
+        "create_issue",
+        "get_issue",
+        "get_project",
+        "list_projects",
+        "list_transitions",
+        "search_issues",
+        "transition_issue",
+        "update_issue"
+      ],
+      "call_text": "calling Jira GET /rest/api/3/project: request failed",
+      "is_error": true
+    },
+    {
+      "case": "plaintext, which Jira's own validator allows and Confluence's does not",
+      "site_url": "http://jira.invalid",
+      "tools": [
+        "add_comment",
+        "create_issue",
+        "get_issue",
+        "get_project",
+        "list_projects",
+        "list_transitions",
+        "search_issues",
+        "transition_issue",
+        "update_issue"
+      ],
+      "call_text": "calling Jira GET /rest/api/3/project: request failed",
+      "is_error": true
+    }
+  ],
+  "calls": [
+    {
+      "case": "list_projects/no arguments at all, because the Go handler binds *struct{}",
+      "tool": "list_projects",
+      "arguments": {},
+      "response": {
+        "status": 200,
+        "body": "{\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/rest/api/3/project",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Projects: {\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+    },
+    {
+      "case": "list_projects/a non-2xx status is Jira's own body, verbatim",
+      "tool": "list_projects",
+      "arguments": {},
+      "response": {
+        "status": 403,
+        "body": "{\"message\":\"Forbidden \u003cyou\u003e\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/rest/api/3/project",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "jira API error: status 403: {\"message\":\"Forbidden \u003cyou\u003e\"}"
+    },
+    {
+      "case": "list_projects/a 204 is a success, and its empty body is the result",
+      "tool": "list_projects",
+      "arguments": {},
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": {
+        "method": "GET",
+        "target": "/rest/api/3/project",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Projects: "
+    },
+    {
+      "case": "get_project/a plain key, with the slash the constant does not carry",
+      "tool": "get_project",
+      "arguments": {
+        "key": "PROJ"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"key\":\"PROJ\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/rest/api/3/project/PROJ",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Project: {\"key\":\"PROJ\"}"
+    },
+    {
+      "case": "get_project/the reserved bytes a segment keeps, the ones it escapes, and UTF-8",
+      "tool": "get_project",
+      "arguments": {
+        "key": "a$\u0026+:=@b my key/x;y,z?q café日本語"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"key\":\"X\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/rest/api/3/project/a$\u0026+:=@b%20my%20key%2Fx%3By%2Cz%3Fq%20caf%C3%A9%E6%97%A5%E6%9C%AC%E8%AA%9E",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Project: {\"key\":\"X\"}"
+    },
+    {
+      "case": "search_issues/JQL goes in the body unescaped, and the clamp falls back to 50",
+      "tool": "search_issues",
+      "arguments": {
+        "jql": "project = PROJ AND status = \"In Progress\" \u0026 x",
+        "max_results": 0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/search",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"jql\":\"project = PROJ AND status = \\\"In Progress\\\" \\u0026 x\",\"maxResults\":50}"
+      },
+      "is_error": false,
+      "text": "Search results: {\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+    },
+    {
+      "case": "search_issues/over 100 falls back to 50 rather than clamping to 100",
+      "tool": "search_issues",
+      "arguments": {
+        "jql": "type=Bug",
+        "max_results": 101
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/search",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"jql\":\"type=Bug\",\"maxResults\":50}"
+      },
+      "is_error": false,
+      "text": "Search results: {\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+    },
+    {
+      "case": "search_issues/100 is the largest value that survives",
+      "tool": "search_issues",
+      "arguments": {
+        "jql": "type=Bug",
+        "max_results": 100
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/search",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"jql\":\"type=Bug\",\"maxResults\":100}"
+      },
+      "is_error": false,
+      "text": "Search results: {\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+    },
+    {
+      "case": "search_issues/a negative max_results is a zero, not an error",
+      "tool": "search_issues",
+      "arguments": {
+        "jql": "",
+        "max_results": -5
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/search",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"jql\":\"\",\"maxResults\":50}"
+      },
+      "is_error": false,
+      "text": "Search results: {\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+    },
+    {
+      "case": "get_issue/the constant already ends in a slash",
+      "tool": "get_issue",
+      "arguments": {
+        "key": "PROJ-123"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"key\":\"PROJ-123\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/rest/api/3/issue/PROJ-123",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Issue: {\"key\":\"PROJ-123\"}"
+    },
+    {
+      "case": "create_issue/the project key is path-escaped inside the body and nothing else is",
+      "tool": "create_issue",
+      "arguments": {
+        "description": "",
+        "issue_type": "Bug",
+        "priority": "",
+        "project_key": "MY PROJ/X",
+        "summary": "It \u003cbroke\u003e \u0026 burned"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"key\":\"PROJ-9\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/issue",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"fields\":{\"issuetype\":{\"name\":\"Bug\"},\"project\":{\"key\":\"MY%20PROJ%2FX\"},\"summary\":\"It \\u003cbroke\\u003e \\u0026 burned\"}}"
+      },
+      "is_error": false,
+      "text": "Issue created: {\"key\":\"PROJ-9\"}"
+    },
+    {
+      "case": "create_issue/a description becomes an ADF document, sorted at every level",
+      "tool": "create_issue",
+      "arguments": {
+        "description": "a \u003cb\u003e \u0026 c",
+        "issue_type": "Story",
+        "priority": "High",
+        "project_key": "PROJ",
+        "summary": "s"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"key\":\"PROJ-10\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/issue",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"fields\":{\"description\":{\"content\":[{\"content\":[{\"text\":\"a \\u003cb\\u003e \\u0026 c\",\"type\":\"text\"}],\"type\":\"paragraph\"}],\"type\":\"doc\",\"version\":1},\"issuetype\":{\"name\":\"Story\"},\"priority\":{\"name\":\"High\"},\"project\":{\"key\":\"PROJ\"},\"summary\":\"s\"}}"
+      },
+      "is_error": false,
+      "text": "Issue created: {\"key\":\"PROJ-10\"}"
+    },
+    {
+      "case": "create_issue/an empty description and priority leave no keys at all",
+      "tool": "create_issue",
+      "arguments": {
+        "description": "",
+        "issue_type": "",
+        "priority": "",
+        "project_key": "",
+        "summary": ""
+      },
+      "response": {
+        "status": 400,
+        "body": "{\"errors\":{\"project\":\"required\"}}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/issue",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"fields\":{\"issuetype\":{\"name\":\"\"},\"project\":{\"key\":\"\"},\"summary\":\"\"}}"
+      },
+      "is_error": true,
+      "text": "jira API error: status 400: {\"errors\":{\"project\":\"required\"}}"
+    },
+    {
+      "case": "update_issue/an all-empty update still sends a body, and the text ignores the response",
+      "tool": "update_issue",
+      "arguments": {
+        "description": "",
+        "key": "PROJ-1",
+        "priority": "",
+        "summary": ""
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ignored\":true}"
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/rest/api/3/issue/PROJ-1",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"fields\":{}}"
+      },
+      "is_error": false,
+      "text": "Issue PROJ-1 updated successfully."
+    },
+    {
+      "case": "update_issue/every field set, description as ADF",
+      "tool": "update_issue",
+      "arguments": {
+        "description": "d",
+        "key": "PROJ-1",
+        "priority": "Low",
+        "summary": "new"
+      },
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/rest/api/3/issue/PROJ-1",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"fields\":{\"description\":{\"content\":[{\"content\":[{\"text\":\"d\",\"type\":\"text\"}],\"type\":\"paragraph\"}],\"type\":\"doc\",\"version\":1},\"priority\":{\"name\":\"Low\"},\"summary\":\"new\"}}"
+      },
+      "is_error": false,
+      "text": "Issue PROJ-1 updated successfully."
+    },
+    {
+      "case": "update_issue/a key needing escaping appears escaped in the path and raw in the text",
+      "tool": "update_issue",
+      "arguments": {
+        "description": "",
+        "key": "a/b c",
+        "priority": "",
+        "summary": "s"
+      },
+      "response": {
+        "status": 200,
+        "body": "{}"
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/rest/api/3/issue/a%2Fb%20c",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"fields\":{\"summary\":\"s\"}}"
+      },
+      "is_error": false,
+      "text": "Issue a/b c updated successfully."
+    },
+    {
+      "case": "add_comment/the comment becomes an ADF document",
+      "tool": "add_comment",
+      "arguments": {
+        "comment": "looks good \u0026 \u003cshipped\u003e",
+        "key": "PROJ-1"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"id\":\"10000\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/issue/PROJ-1/comment",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"content\":[{\"content\":[{\"text\":\"looks good \\u0026 \\u003cshipped\\u003e\",\"type\":\"text\"}],\"type\":\"paragraph\"}],\"type\":\"doc\",\"version\":1}}"
+      },
+      "is_error": false,
+      "text": "Comment added: {\"id\":\"10000\"}"
+    },
+    {
+      "case": "add_comment/an empty comment is still a document",
+      "tool": "add_comment",
+      "arguments": {
+        "comment": "",
+        "key": "PROJ-1"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"id\":\"10001\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/issue/PROJ-1/comment",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"content\":[{\"content\":[{\"text\":\"\",\"type\":\"text\"}],\"type\":\"paragraph\"}],\"type\":\"doc\",\"version\":1}}"
+      },
+      "is_error": false,
+      "text": "Comment added: {\"id\":\"10001\"}"
+    },
+    {
+      "case": "list_transitions/a GET under the issue path",
+      "tool": "list_transitions",
+      "arguments": {
+        "key": "PROJ-1"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"transitions\":[{\"id\":\"31\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/rest/api/3/issue/PROJ-1/transitions",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Transitions: {\"transitions\":[{\"id\":\"31\"}]}"
+    },
+    {
+      "case": "transition_issue/the text ignores the response, like update_issue's",
+      "tool": "transition_issue",
+      "arguments": {
+        "key": "PROJ-1",
+        "transition_id": "31"
+      },
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/issue/PROJ-1/transitions",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"transition\":{\"id\":\"31\"}}"
+      },
+      "is_error": false,
+      "text": "Issue PROJ-1 transitioned successfully."
+    },
+    {
+      "case": "transition_issue/a failure is the API's body, not the cheerful sentence",
+      "tool": "transition_issue",
+      "arguments": {
+        "key": "PROJ-1",
+        "transition_id": "nope"
+      },
+      "response": {
+        "status": 400,
+        "body": "{\"errorMessages\":[\"bad transition\"]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/issue/PROJ-1/transitions",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"transition\":{\"id\":\"nope\"}}"
+      },
+      "is_error": true,
+      "text": "jira API error: status 400: {\"errorMessages\":[\"bad transition\"]}"
+    },
+    {
+      "case": "get_issue/a site URL with a base path prefixes the target",
+      "tool": "get_issue",
+      "base_path": "/jira",
+      "arguments": {
+        "key": "PROJ-1"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"key\":\"PROJ-1\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/jira/rest/api/3/issue/PROJ-1",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Issue: {\"key\":\"PROJ-1\"}"
+    },
+    {
+      "case": "add_comment/an unencoded base path is escaped by both sides, on a write",
+      "tool": "add_comment",
+      "base_path": "/my jira",
+      "arguments": {
+        "comment": "hi",
+        "key": "PROJ-1"
+      },
+      "response": {
+        "status": 201,
+        "body": "{\"id\":\"1\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/my%20jira/rest/api/3/issue/PROJ-1/comment",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"content\":[{\"content\":[{\"text\":\"hi\",\"type\":\"text\"}],\"type\":\"paragraph\"}],\"type\":\"doc\",\"version\":1}}"
+      },
+      "is_error": false,
+      "text": "Comment added: {\"id\":\"1\"}"
+    },
+    {
+      "case": "get_issue/a dot-dot segment reaches a different endpoint under url",
+      "tool": "get_issue",
+      "arguments": {
+        "key": ".."
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/rest/api/3/issue/..",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "jira API error: status 404: {\"message\":\"Not Found\"}",
+      "rust_text": "calling Jira GET /rest/api/3/issue/..: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "get_project/a single dot segment is sent literally too",
+      "tool": "get_project",
+      "arguments": {
+        "key": "."
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/rest/api/3/project/.",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "jira API error: status 404: {\"message\":\"Not Found\"}",
+      "rust_text": "calling Jira GET /rest/api/3/project/.: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "update_issue/dot segments reach the write path too",
+      "tool": "update_issue",
+      "arguments": {
+        "description": "",
+        "key": "..",
+        "priority": "",
+        "summary": "s"
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/rest/api/3/issue/..",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"fields\":{\"summary\":\"s\"}}"
+      },
+      "is_error": true,
+      "text": "jira API error: status 404: {\"message\":\"Not Found\"}",
+      "rust_text": "calling Jira PUT /rest/api/3/issue/..: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "list_transitions/a dot segment before a suffix is refused as well",
+      "tool": "list_transitions",
+      "arguments": {
+        "key": ".."
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/rest/api/3/issue/../transitions",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "jira API error: status 404: {\"message\":\"Not Found\"}",
+      "rust_text": "calling Jira GET /rest/api/3/issue/../transitions: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "search_issues/a zero-fraction float is an integer to Go and not to serde",
+      "tool": "search_issues",
+      "arguments": {
+        "jql": "type=Bug",
+        "max_results": 50.0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/rest/api/3/search",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1qaXJhLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"jql\":\"type=Bug\",\"maxResults\":50}"
+      },
+      "is_error": false,
+      "text": "Search results: {\"issues\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"key\":\"PROJ-1\"}]}",
+      "rust_text": "failed to deserialize parameters: invalid type: floating point `50.0`, expected i64",
+      "rust_no_request": true
+    }
+  ]
+}
