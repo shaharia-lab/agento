@@ -37,7 +37,7 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
 use super::db;
-use super::gojson::{GoList, GoMap};
+use super::gojson::{GoList, GoMap, GoStruct};
 use super::writes::{decode_body, finish, WriteError};
 
 /// One agent. Mirrors `config.AgentConfig`.
@@ -73,11 +73,18 @@ pub struct Agent {
 /// request Go applies. They are types rather than `deserialize_with` functions
 /// precisely so this struct needs no `#[serde(default)]`, which would also make
 /// it accept `{"capabilities":[]}` — see [`GoList`]'s header.
+///
+/// [`GoStruct`] is the third rule (#337) and closes what those two left: serde
+/// builds a struct from a **full-length** JSON array, positionally, so
+/// `{"capabilities":[["Read"],null,null]}` was accepted here and 400 to Go. It
+/// wraps the `mcp` *value* rather than this struct, because a field cannot
+/// protect itself — `AgentRequest.capabilities` carries the wrapper for this
+/// one.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Capabilities {
     pub built_in: Option<GoList<String>>,
     pub local: Option<GoList<String>>,
-    pub mcp: Option<GoMap<McpCapability>>,
+    pub mcp: Option<GoMap<GoStruct<McpCapability>>>,
 }
 
 /// Which tools from one MCP server an agent may use.
@@ -131,13 +138,22 @@ fn scan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
         // Go fails the whole request on unparsable capabilities rather than
         // serving an agent whose tool allowlist is unknown. So does this: the
         // error reaches the proxy, which falls back to Go.
-        capabilities: serde_json::from_str(&capabilities).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                7,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::other(format!("parsing capabilities: {e}"))),
-            )
-        })?,
+        //
+        // Through [`GoStruct`] (#337) so a stored *array* fails here too. Go's
+        // `json.Unmarshal` refuses one and this used to accept a full-length
+        // one positionally — reading `[["Read"],null,null]` as a real allowlist
+        // where Go fails the request. Neither implementation can write such a
+        // column, which is precisely why it has to be a type rather than an
+        // observation.
+        capabilities: serde_json::from_str::<GoStruct<Capabilities>>(&capabilities)
+            .map(|wrapped| wrapped.0)
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::other(format!("parsing capabilities: {e}"))),
+                )
+            })?,
         claude_config_dir: row.get(8)?,
     })
 }
@@ -236,7 +252,11 @@ struct AgentRequest {
     thinking: String,
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     system_prompt: String,
-    capabilities: Option<Capabilities>,
+    /// [`GoStruct`] so `{"capabilities":[["Read"],null,null]}` is the 400 Go
+    /// answers rather than a created agent (#337). The container
+    /// `#[serde(default)]` above is what makes the field itself optional; the
+    /// wrapper only decides what a *present* value may be shaped like.
+    capabilities: Option<GoStruct<Capabilities>>,
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     claude_config_dir: String,
 }
@@ -254,7 +274,7 @@ impl AgentRequest {
             thinking: self.thinking,
             permission_mode: String::new(),
             system_prompt: self.system_prompt,
-            capabilities: self.capabilities.unwrap_or_default(),
+            capabilities: self.capabilities.map(|c| c.0).unwrap_or_default(),
             claude_config_dir: self.claude_config_dir,
         }
     }
@@ -699,10 +719,12 @@ mod tests {
             "a stored [] must not read as an empty allowlist"
         );
 
-        // A *full-length* positional array is still accepted, by serde's
-        // `visit_seq`. That one predates #295 and is deferred to #337; it is
-        // asserted here so the boundary between the two is recorded rather than
-        // rediscovered.
+        // A *full-length* positional array used to be **accepted** here, by
+        // serde's `visit_seq` — the last shape #295 left standing, closed by
+        // `GoStruct` in #337. Inverted rather than deleted: this assertion is
+        // the boundary between the two changes, and it is the read half of the
+        // pair (`the_write_path_refuses_an_array_where_a_struct_belongs` is the
+        // write half).
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let conn = rusqlite::Connection::open(file.path()).expect("open");
         conn.execute_batch(SCHEMA).expect("schema");
@@ -711,7 +733,10 @@ mod tests {
             [],
         )
         .expect("insert");
-        assert!(list(file.path()).is_ok(), "known over-accept, see #337");
+        assert!(
+            list(file.path()).is_err(),
+            "a stored full-length array must not read as an allowlist (#337)"
+        );
     }
 
     // ─── Writes ───────────────────────────────────────────────────────────────
@@ -788,6 +813,80 @@ mod tests {
             let err = create(file.path(), body).unwrap_err();
             assert_eq!(err.status(), StatusCode::BAD_REQUEST, "{:?}", err);
         }
+    }
+
+    /// #337, on the routes it can actually create a row on.
+    ///
+    /// The accepted set was **not uniform**, which is why every length is
+    /// listed rather than one representative: the derive's `visit_seq` errors
+    /// only when the array runs out of elements for a field with no default, so
+    /// `Capabilities` (three such fields) needed three and `McpCapability` (one)
+    /// needed one. Everything shorter was already the 400 Go answers — pinned
+    /// above — and everything at or past the length was a **created row Go
+    /// refuses**, which is an over-accept and the one direction this port must
+    /// not move in.
+    #[test]
+    fn the_write_path_refuses_an_array_where_a_struct_belongs() {
+        let file = migrated();
+        for body in [
+            // `Capabilities` at exactly its length, and past it.
+            &br#"{"name":"C","slug":"c","capabilities":[["Read"],null,null]}"#[..],
+            &br#"{"name":"C","slug":"c","capabilities":[["Read"],null,null,"extra"]}"#[..],
+            // `McpCapability` as a map value, at its length and past it.
+            &br#"{"name":"C","slug":"c","capabilities":{"mcp":{"g":[null]}}}"#[..],
+            &br#"{"name":"C","slug":"c","capabilities":{"mcp":{"g":[["x"],"extra"]}}}"#[..],
+        ] {
+            let err = create(file.path(), body).unwrap_err();
+            assert_eq!(
+                err.status(),
+                StatusCode::BAD_REQUEST,
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+            // …and nothing was written. An over-accept is only interesting
+            // because of the row it leaves behind.
+            assert!(stored(&file, "c").is_none());
+        }
+
+        // The update path decodes the same body, so it refuses the same shapes.
+        create(file.path(), br#"{"name":"U","slug":"u"}"#).expect("create");
+        let err = update(
+            file.path(),
+            "u",
+            br#"{"name":"U","capabilities":[["Read"],null,null]}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    /// The other half, and the one a blunt fix would have broken: a **genuine**
+    /// array is still a genuine array. `built_in`, `local` and `mcp.*.tools` are
+    /// lists in Go too, so refusing arrays wholesale would have turned every
+    /// real agent into a 400.
+    #[test]
+    fn genuine_arrays_are_unaffected_by_the_struct_check() {
+        let file = migrated();
+        let answer = create(
+            file.path(),
+            br#"{"name":"G","slug":"g","capabilities":{
+                "built_in":["Read","Bash"],
+                "local":[],
+                "mcp":{"github":{"tools":["list_prs"]}}
+            }}"#,
+        )
+        .expect("a body Go accepts");
+        assert_eq!(answer.status, StatusCode::CREATED);
+
+        let caps = stored(&file, "g").expect("stored").capabilities;
+        assert_eq!(
+            caps.built_in,
+            Some(vec!["Read".into(), "Bash".into()].into())
+        );
+        assert_eq!(caps.local, Some(Vec::new().into()));
+        assert_eq!(
+            caps.mcp.expect("mcp")["github"].tools,
+            Some(vec!["list_prs".to_string()].into())
+        );
     }
 
     #[test]

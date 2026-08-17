@@ -184,6 +184,46 @@ pub fn finish(result: Result<super::Answer, WriteError>) -> Result<super::Answer
 ///   — a 422, not a 400. serde would reject it outright.
 ///
 /// Everything else — a number, a string, `true` — is a decode error in both.
+///
+/// # The same shape one level down (#337)
+///
+/// The array check above is at the **body** level and nothing here can reach
+/// inside one: `T` is opaque, and a recursive walk of the parsed `Value` would
+/// have to know which subtrees are structs and which are genuinely arrays, which
+/// is exactly the information the type carries and the `Value` does not. So the
+/// nested rule lives on the types, as [`super::gojson::GoStruct`], and this
+/// table is what makes "every write body" auditable rather than asserted. A
+/// partial check reads as coverage it does not have.
+///
+/// Every request body that reaches a typed decode, and what in it is a nested
+/// struct:
+///
+/// | body | nested struct | wrapped |
+/// |---|---|---|
+/// | `agents::AgentRequest` | `capabilities`, and `Capabilities.mcp`'s values | yes |
+/// | `integrations::CreateIntegrationRequest` | `services`' values | yes |
+/// | `integrations::UpdateIntegrationRequest` | `services`' values | yes |
+/// | `notifications::NotificationSettings` | `provider`, `preferences`, `NotificationPreferences.scheduled_tasks` | yes |
+/// | `integrations::TriggerRuleRequest` | — (two `GoList<String>`) | n/a |
+/// | `chats::CreateChatRequest`, `chats::PatchChatRequest` | — | n/a |
+/// | `chats::BulkDeleteRequest`, `tasks::BulkDeleteRequest` | — (`GoList<String>`) | n/a |
+/// | `pricing::RateRequest` | — (the bands are not expressible in a request) | n/a |
+/// | `sessions::update::UpdateRequest` | — | n/a |
+/// | `fs::MkdirRequest` | — | n/a |
+/// | `chat::{SendMessageRequest, ProvideInputRequest, PermissionRequestBody}` | — | n/a |
+/// | `claude_settings::profiles::{CreateRequest, UpdateRequest}` | — (`settings` is a `RawValue`, as Go's is) | n/a |
+/// | `settings::UserSettings` | — | route is `deferred` (#305) |
+///
+/// Two bodies deliberately have no struct at all and so no row here:
+/// `PUT /api/claude-settings` decodes into Go's `any` (`claude_settings::go_any`),
+/// and `POST /api/uploads` is multipart.
+///
+/// `settings::UserSettings` is the one row worth a caveat: it needs no wrapper
+/// because it holds no nested struct, but its `hidden_projects` and
+/// `claude_config_dirs` are plain `Vec<String>` rather than
+/// [`super::gojson::GoList`], so `[null]` is an over-*reject* there. That is
+/// #295's rule rather than this one, and the route still forwards, so it is
+/// recorded rather than changed.
 pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, WriteError> {
     if body.is_empty() {
         return Err(WriteError::InvalidBody);

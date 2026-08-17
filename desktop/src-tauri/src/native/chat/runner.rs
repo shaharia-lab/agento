@@ -1002,7 +1002,8 @@ mod tests {
             "github".to_string(),
             crate::native::agents::McpCapability {
                 tools: Some(vec!["list_prs".into()].into()),
-            },
+            }
+            .into(),
         );
         let caps = Capabilities {
             built_in: None,
@@ -1025,7 +1026,8 @@ mod tests {
             server.to_string(),
             crate::native::agents::McpCapability {
                 tools: tools.map(Into::into),
-            },
+            }
+            .into(),
         );
         Capabilities {
             built_in: None,
@@ -1099,7 +1101,7 @@ mod tests {
         if let Some(mcp) = mixed.mcp.as_mut() {
             mcp.0.insert(
                 "sl-1".to_string(),
-                crate::native::agents::McpCapability { tools: None },
+                crate::native::agents::McpCapability { tools: None }.into(),
             );
         }
         assert!(mcp_plan(Some(&mixed), Some(file.path()), false).is_err());
