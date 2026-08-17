@@ -1555,6 +1555,28 @@ into `{"a":1,"z":1.5}` — sorted and respelled, with nothing to signal it.
 literal bytes rather than `json.dumps`: Python normalises `1.50` to `1.5` and
 adds spaces, so a byte-exactness test cannot go through it.
 
+**The same rule holds in the other direction, on the input the tool actually
+runs with** (#342). `can_use_tool`'s allow arm echoes the CLI's own tool input
+back as `updatedInput`, and that echo used to go through a `serde_json::Value` —
+so the CLI ran a re-sorted, re-spelled payload, on the *allow* path. Go's
+`process.go` is `resp["updatedInput"] = envelope.Request.Input`, a
+`json.RawMessage`, echoed verbatim. `PermissionResult::Allow::updated_input` is
+therefore `Option<Box<RawValue>>` rather than a `Value` — bytes for both the
+echo and a handler's rewrite — which cost no call site, since every handler in
+the tree returns `PermissionResult::allow()`. Two consequences worth knowing:
+`PermissionResult`'s `PartialEq` is hand-written, because `RawValue` has none and
+byte equality is the only comparison the type can honestly offer; and
+`write_control_success_raw` builds the two control-response envelopes as structs
+whose **field order is the wire order**, spelled to match what `encoding/json`
+does to Go's `map[string]any` (`response` before `type`; `request_id` before
+`response` before `subtype`).
+
+Both halves are pinned by asserting the **whole** `"updatedInput":…` substring of
+the raw logged line — a per-key assertion passes against a reordered, respelled
+object, which is why `tests/claude_sdk.rs` grew a `logged_line` beside
+`logged_message`, and why the fake CLI now logs the stdin bytes it received
+rather than a `json.dumps` of the decoded object.
+
 **A disconnect has to be raced explicitly, not inferred.** The permission
 handler is awaited *inline on the SDK's reader task*, so while it is parked no
 events arrive and the stream loop has nothing to send — a closed tab is

@@ -58,6 +58,15 @@ def record(entry):
         log.write(json.dumps(entry) + "\n")
         log.flush()
 
+def record_raw(text):
+    # Stdin is logged as the bytes that arrived, not as a re-encode of the
+    # decoded object: json.loads/json.dumps sorts nothing but does respell
+    # numbers (1.50 -> 1.5), and byte fidelity of what the SDK writes is
+    # exactly what some of these tests are about.
+    with lock:
+        log.write(text + "\n")
+        log.flush()
+
 def say(obj):
     sys.stdout.write(json.dumps(obj) + "\n")
     sys.stdout.flush()
@@ -91,7 +100,7 @@ for line in sys.stdin:
         msg = json.loads(line)
     except Exception:
         continue
-    record(msg)
+    record_raw(line)
     req = msg.get("request") or {{}}
 {emit}
 "#,
@@ -155,6 +164,24 @@ fn logged_message(log_path: &Path, kind: &str) -> Option<serde_json::Value> {
     raw.lines()
         .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
         .find(|v| v.get("type").and_then(|t| t.as_str()) == Some(kind))
+}
+
+/// The same line, **unparsed**.
+///
+/// A `serde_json::Value` cannot answer a question about bytes: it sorts an
+/// object's keys and respells its numbers, so a test that decodes first can
+/// only ever assert what the port would produce even when it is wrong.
+fn logged_line(log_path: &Path, kind: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(log_path).ok()?;
+    raw.lines()
+        .find(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_owned))
+                .as_deref()
+                == Some(kind)
+        })
+        .map(str::to_owned)
 }
 
 fn options_for(exe: &Path) -> Options {
@@ -523,6 +550,104 @@ async fn an_allow_echoes_the_original_input_back_verbatim() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     panic!("the SDK never answered the permission request; a missing reply hangs the CLI");
+}
+
+#[tokio::test]
+async fn the_echoed_input_keeps_its_key_order_and_number_spelling() {
+    if python3().is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("stdin.jsonl");
+    // Written to stdout as raw bytes rather than through json.dumps, which
+    // would respell 1.50 before the SDK ever saw it.
+    let exe = fake_cli(
+        dir.path(),
+        &log,
+        r#"    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack_now(msg.get("request_id"))
+    elif msg.get("type") == "user":
+        sys.stdout.write('{"type":"control_request","request_id":"perm-4","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"z":1.50,"a":1}}}' + "\n")
+        sys.stdout.flush()"#,
+    );
+
+    let handler: claude::PermissionHandler =
+        std::sync::Arc::new(|_, _, _| Box::pin(async { PermissionResult::allow() }));
+
+    let opts = options_for(&exe)
+        .with_default_permissions()
+        .with_permission_handler(handler);
+    let _stream = query("write it", opts).await;
+
+    for _ in 0..250 {
+        if let Some(reply) = logged_line(&log, "control_response") {
+            // The whole substring, not one key's value: the defect this pins is
+            // a reordered key and a respelled number, and a per-key assertion
+            // passes against both. `serde_json` is built without
+            // `preserve_order`, so decoding the input into a `Value` and
+            // re-encoding it would ship {"a":1,"z":1.5} — a different payload
+            // for the tool to actually execute, on the path where the user said
+            // yes.
+            assert!(
+                reply.contains(r#""updatedInput":{"z":1.50,"a":1}"#),
+                "the echoed input was rewritten: {reply}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the SDK never answered the permission request");
+}
+
+#[tokio::test]
+async fn a_handler_that_rewrites_the_input_beats_the_echo() {
+    if python3().is_none() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("stdin.jsonl");
+    let exe = fake_cli(
+        dir.path(),
+        &log,
+        r#"    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack_now(msg.get("request_id"))
+    elif msg.get("type") == "user":
+        sys.stdout.write('{"type":"control_request","request_id":"perm-5","request":{"subtype":"can_use_tool","tool_name":"Write","input":{"path":"/etc/passwd"}}}' + "\n")
+        sys.stdout.flush()"#,
+    );
+
+    let handler: claude::PermissionHandler = std::sync::Arc::new(|_, _, _| {
+        Box::pin(async {
+            PermissionResult::Allow {
+                updated_input: Some(
+                    serde_json::value::RawValue::from_string(r#"{"path":"/tmp/safe"}"#.to_owned())
+                        .unwrap(),
+                ),
+                updated_permissions: Vec::new(),
+            }
+        })
+    });
+
+    let opts = options_for(&exe)
+        .with_default_permissions()
+        .with_permission_handler(handler);
+    let _stream = query("write it", opts).await;
+
+    for _ in 0..250 {
+        if let Some(reply) = logged_line(&log, "control_response") {
+            assert!(
+                reply.contains(r#""updatedInput":{"path":"/tmp/safe"}"#),
+                "the rewrite lost to the echo: {reply}"
+            );
+            assert!(
+                !reply.contains("/etc/passwd"),
+                "the original input survived the rewrite: {reply}"
+            );
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("the SDK never answered the permission request");
 }
 
 #[tokio::test]
