@@ -3,6 +3,7 @@
 // all build on it — and because its tests drive it against a scripted CLI from
 // outside the crate.
 pub mod claude;
+mod guards;
 mod menu;
 // `native` and `paths` are public so `tests/live_parity.rs` can diff a ported
 // endpoint against the running Go server without going through a window.
