@@ -314,8 +314,12 @@ var slackTokenCases = []struct {
 		name:        "oauth mode with an auth column that does not decode",
 		credentials: `{"auth_mode":"oauth"}`,
 		auth:        `["not","a","token"]`,
+		// Column 0 rather than a position inside the document: since #314 the
+		// decode goes through `GoStruct`, which refuses a non-map at the
+		// container before the derived impl sees a field. Go refuses it too
+		// (`cannot unmarshal array`), so only the wording differs.
 		rustError: "resolving slack token for \"slack-parity\": parsing oauth token: " +
-			"does not decode at line 1 column 8",
+			"does not decode at line 1 column 0",
 	},
 	{
 		// An `auth` column that decodes but carries no access token yields an

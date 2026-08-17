@@ -45,8 +45,8 @@
 //! **The list is built here, by [`hosting_env_value`], from the same
 //! [`HOSTED_TYPES`] that [`hosts_type`] and the starter dispatch read.** That is
 //! the point of carrying it in the environment rather than hardcoding it on both
-//! sides: the shell is the process that knows what it hosts, so #313 adds the last
-//! add one string to one list and the two halves cannot drift. The failure mode
+//! sides: the shell is the process that knows what it hosts, so #313 adds the
+//! last string to one list and the two halves cannot drift. The failure mode
 //! being designed against is a Rust slack starter landing while Go is never told
 //! to stop hosting slack — two processes on one integration — and its mirror is
 //! the WhatsApp bug above.
@@ -493,8 +493,8 @@ fn github_token(id: &str, credentials: &str) -> Result<String, String> {
     // Through `Option<T>`, because a literal `null` is a no-op to
     // `json.Unmarshal` and a type error to serde — the rule
     // `native/integration_credentials.rs` carries for the same columns.
-    serde_json::from_str::<Option<GitHubCredentials>>(credentials)
-        .map(Option::unwrap_or_default)
+    serde_json::from_str::<Option<crate::native::gojson::GoStruct<GitHubCredentials>>>(credentials)
+        .map(|wrapped| wrapped.map_or_else(GitHubCredentials::default, |wrapped| wrapped.0))
         .map(|creds| creds.personal_access_token)
         .map_err(|e| {
             // **The serde message is deliberately dropped.** It quotes the
@@ -625,15 +625,17 @@ pub(super) fn resolve_slack_token(
             "parsing slack credentials: credentials are empty".to_string(),
         ));
     }
-    let creds = serde_json::from_str::<Option<SlackCredentials>>(credentials)
-        .map(Option::unwrap_or_default)
-        .map_err(|e| {
-            wrap(format!(
-                "parsing slack credentials: does not decode at line {} column {}",
-                e.line(),
-                e.column()
-            ))
-        })?;
+    let creds = serde_json::from_str::<Option<crate::native::gojson::GoStruct<SlackCredentials>>>(
+        credentials,
+    )
+    .map(|wrapped| wrapped.map_or_else(SlackCredentials::default, |wrapped| wrapped.0))
+    .map_err(|e| {
+        wrap(format!(
+            "parsing slack credentials: does not decode at line {} column {}",
+            e.line(),
+            e.column()
+        ))
+    })?;
 
     match creds.auth_mode.as_str() {
         "bot_token" => {
@@ -654,15 +656,16 @@ pub(super) fn resolve_slack_token(
                 #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
                 access_token: String,
             }
-            let token = serde_json::from_str::<Option<OAuthToken>>(auth)
-                .map(Option::unwrap_or_default)
-                .map_err(|e| {
-                    wrap(format!(
-                        "parsing oauth token: does not decode at line {} column {}",
-                        e.line(),
-                        e.column()
-                    ))
-                })?;
+            let token =
+                serde_json::from_str::<Option<crate::native::gojson::GoStruct<OAuthToken>>>(auth)
+                    .map(|wrapped| wrapped.map_or_else(OAuthToken::default, |wrapped| wrapped.0))
+                    .map_err(|e| {
+                        wrap(format!(
+                            "parsing oauth token: does not decode at line {} column {}",
+                            e.line(),
+                            e.column()
+                        ))
+                    })?;
             Ok(token.access_token)
         }
         other => {
@@ -686,6 +689,24 @@ async fn start_telegram(
     services: &BTreeMap<String, ServiceConfig>,
     credentials: &str,
 ) -> Result<InProcessMcpServer, String> {
+    let token = telegram_bot_token(id, credentials)?;
+    super::telegram::start_telegram_mcp_server(id, services, &token)
+        .await
+        .map_err(|e| format!("starting in-process MCP server for {id:?}: {e}"))
+}
+
+/// `cfg.ParseCredentials(&creds)` for `config.TelegramCredentials`, wrapped as
+/// `telegram.Start` wraps it.
+///
+/// `pub(super)` so the sentences can be asserted directly: they are hand-written
+/// rather than vector-pinned, and one of them would carry the bot token if the
+/// serde message were kept.
+///
+/// Note what is **not** checked: an empty bot token. `telegram.Start` reads
+/// `creds.BotToken` and hosts whatever it finds, so an empty one produces a
+/// server whose every call reaches `/bot/<method>` and 404s — Go's behaviour, and
+/// not something to improve on here.
+pub(super) fn telegram_bot_token(id: &str, credentials: &str) -> Result<String, String> {
     #[derive(Default, serde::Deserialize)]
     #[serde(default)]
     struct TelegramCredentials {
@@ -698,28 +719,24 @@ async fn start_telegram(
             "parsing telegram credentials for {id:?}: credentials are empty"
         ));
     }
-    // Through `Option<T>`, because a literal `null` is a no-op to
-    // `json.Unmarshal` and a type error to serde.
-    let token = serde_json::from_str::<Option<TelegramCredentials>>(credentials)
-        .map(Option::unwrap_or_default)
-        .map(|creds| creds.bot_token)
-        .map_err(|e| {
-            // The serde message is dropped for [`github_token`]'s reason: it
-            // quotes the offending value, which here is the bot token.
-            format!(
-                "parsing telegram credentials for {id:?}: does not decode at line {} column {}",
-                e.line(),
-                e.column()
-            )
-        })?;
-
-    // Note what is **not** checked: an empty bot token. `telegram.Start` reads
-    // `creds.BotToken` and hosts whatever it finds, so an empty one produces a
-    // server whose every call 404s at `/bot/<method>` — Go's behaviour, and not
-    // something to improve on here.
-    super::telegram::start_telegram_mcp_server(id, services, &token)
-        .await
-        .map_err(|e| format!("starting in-process MCP server for {id:?}: {e}"))
+    // `Option<GoStruct<T>>`: a literal `null` is a no-op to `json.Unmarshal` and
+    // a type error to serde, and a JSON **array** is a type error to Go and a
+    // positional struct to serde. Both directions matter here more than anywhere
+    // — a bogus token becomes a URL path segment.
+    serde_json::from_str::<Option<crate::native::gojson::GoStruct<TelegramCredentials>>>(
+        credentials,
+    )
+    .map(|wrapped| wrapped.map_or_else(TelegramCredentials::default, |wrapped| wrapped.0))
+    .map(|creds| creds.bot_token)
+    .map_err(|e| {
+        // The serde message is dropped for [`github_token`]'s reason: it quotes
+        // the offending value, which here is the bot token.
+        format!(
+            "parsing telegram credentials for {id:?}: does not decode at line {} column {}",
+            e.line(),
+            e.column()
+        )
+    })
 }
 
 /// `config.AtlassianCredentials` — the struct Confluence and Jira share.
@@ -762,8 +779,8 @@ fn atlassian_credentials(
     // Through `Option<T>`, because a literal `null` is a no-op to
     // `json.Unmarshal` and a type error to serde — the rule
     // `native/integration_credentials.rs` carries for the same columns.
-    serde_json::from_str::<Option<Raw>>(credentials)
-        .map(Option::unwrap_or_default)
+    serde_json::from_str::<Option<crate::native::gojson::GoStruct<Raw>>>(credentials)
+        .map(|wrapped| wrapped.map_or_else(Raw::default, |wrapped| wrapped.0))
         .map(|raw| AtlassianCredentials {
             site_url: raw.site_url,
             email: raw.email,
@@ -1519,6 +1536,55 @@ mod tests {
         assert_eq!(
             github_token("gh-1", &github_credentials()).expect("valid"),
             PAT
+        );
+
+        // …and a JSON **array** is a type error to Go, where serde would build
+        // the struct from it positionally. Measured against `json.Unmarshal`:
+        // `["tok"]` is `cannot unmarshal array into Go value of type
+        // config.GitHubCredentials`, so hosting a server for it would run one Go
+        // refuses to start.
+        assert!(github_token("gh-1", &format!(r#"[{PAT:?}]"#)).is_err());
+    }
+
+    /// The same three shapes for Telegram, which is the one integration where a
+    /// bogus token becomes a **URL path segment** rather than a header value.
+    ///
+    /// Hand-written rather than vector-pinned — `telegram.Start`'s wrapper is not
+    /// reachable from a `tools/call` — so the sentences are asserted here.
+    #[test]
+    fn a_telegram_credential_failure_never_carries_the_token() {
+        const BOT: &str = "123456:AAF-secret-bot-token";
+
+        assert_eq!(
+            telegram_bot_token("tg-1", "").unwrap_err(),
+            r#"parsing telegram credentials for "tg-1": credentials are empty"#
+        );
+
+        let err = telegram_bot_token("tg-1", &format!(r#"{{"bot_token":{BOT:?},"#))
+            .expect_err("truncated json");
+        assert!(
+            !err.contains(BOT),
+            "the bot token must not reach the log line: {err}"
+        );
+        assert!(err.contains("does not decode at line"), "{err}");
+
+        // A literal `null` is a zero value; a JSON array is a type error.
+        assert_eq!(
+            telegram_bot_token("tg-1", "null").expect("null decodes"),
+            ""
+        );
+        assert!(telegram_bot_token("tg-1", &format!(r#"[{BOT:?}]"#)).is_err());
+
+        assert_eq!(
+            telegram_bot_token("tg-1", &format!(r#"{{"bot_token":{BOT:?}}}"#)).expect("valid"),
+            BOT
+        );
+
+        // An **empty** bot token is deliberately not refused: `telegram.Start`
+        // hosts whatever it reads, so every call 404s at `/bot/<method>`.
+        assert_eq!(
+            telegram_bot_token("tg-1", r#"{"bot_token":""}"#).expect("empty is hosted"),
+            ""
         );
     }
 

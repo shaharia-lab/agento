@@ -485,18 +485,24 @@ fn segment(value: &str) -> Option<&str> {
 /// on the Go side. Returns the integration id the shell owes a reload for.
 ///
 /// `Reload` has seven callers in Go. Two are ported (`Update`, and `Delete` via
-/// `Stop`). None of the rest is left unaccounted for:
-/// `completeOAuth` are unaffected, because the switch is per type and every type
-/// they can reach is still Go's: `startProviderCallback` supports exactly
-/// `google` and `slack`, so an OAuth completion never concerns a type this
-/// process hosts. That leaves `validateGitHubPATAuth` and, since #314–#317,
-/// `validateTelegramTokenAuth`, `validateSlackTokenAuth`,
-/// `validateJiraTokenAuth` and `validateConfluenceAuth` — all behind
-/// `POST /api/integrations/{id}/auth/validate` — as the paths that write a
-/// credential for a hosted type and cannot tell anybody. Without this hook such
-/// an integration is never hosted in the session it is set up in — create, `PUT`
-/// and `auth/validate` all leave it unauthenticated or unheard, and it appears
-/// only at the next boot's `start_all`.
+/// `Stop`). Of the five that run inside the sidecar, **none is covered by the
+/// per-type gate any more**: as of #314 five of the six types are hosted here, so
+/// a `Reload` for one reaches nothing in that process.
+///
+/// Four are the token validators — `validateGitHubPATAuth` and, since #314–#317,
+/// `validateTelegramTokenAuth`, `validateSlackTokenAuth`, `validateJiraTokenAuth`
+/// and `validateConfluenceAuth` — all behind
+/// `POST /api/integrations/{id}/auth/validate`, which is the route this hook
+/// answers. Without it such an integration is never hosted in the session it is
+/// set up in: create, `PUT` and `auth/validate` all leave it unauthenticated or
+/// unheard, and it appears only at the next boot's `start_all`.
+///
+/// The fifth is `completeOAuth`, which this hook does **not** cover and which is
+/// not safe by the gate either — `startProviderCallback` supports `google` and
+/// `slack`, and `slack` has been hosted here since #315. Its token never crosses
+/// this proxy at all (the browser delivers it to a callback server the sidecar
+/// opens), so it is picked up from the *other* route below instead. See
+/// `registry::reload_if_secrets_changed`.
 ///
 /// The route predicate below is deliberately **type-blind**: it answers with the
 /// id for every integration, and `registry::reload_after_auth` reads the row's

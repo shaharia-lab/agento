@@ -34,7 +34,6 @@ use std::sync::OnceLock;
 use std::sync::RwLock;
 use std::time::Duration;
 
-use serde_json::value::RawValue;
 use tokio_stream::StreamExt;
 
 use crate::claude::CancellationToken;
@@ -121,8 +120,8 @@ fn http_client() -> Option<&'static reqwest::Client> {
 /// *absent* field is `nil` (which `string(nil)` renders as `""`) while an
 /// explicit `null` is the four bytes `null`. `Option<Box<RawValue>>` cannot tell
 /// those apart on its own — serde maps a JSON `null` to `None` — so
-/// [`raw_or_absent`] captures the null as a `RawValue` and lets `#[serde(default)]`
-/// supply the absent case. Both spellings reach the model verbatim in a result
+/// [`crate::native::gojson::captured_raw`] captures the null as a `RawValue` and
+/// lets `#[serde(default)]` supply the absent case. Both spellings reach the model verbatim in a result
 /// sentence, so the difference is observable.
 #[derive(Default, serde::Deserialize)]
 #[serde(default)]
@@ -131,8 +130,8 @@ pub struct TelegramResponse {
     pub ok: bool,
     #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
     pub description: String,
-    #[serde(deserialize_with = "raw_or_absent")]
-    result: Option<Box<RawValue>>,
+    #[serde(deserialize_with = "crate::native::gojson::captured_raw")]
+    result: Option<Box<serde_json::value::RawValue>>,
 }
 
 impl TelegramResponse {
@@ -141,19 +140,6 @@ impl TelegramResponse {
     pub fn result(&self) -> &str {
         self.result.as_ref().map_or("", |raw| raw.get())
     }
-}
-
-/// Captures an explicit `null` as a `RawValue` rather than as `None`.
-///
-/// `Option<Box<RawValue>>`'s own impl folds a JSON `null` into `None`, which
-/// would make `{"result":null}` and an absent `result` the same value — and they
-/// are not: Go renders the first as `null` and the second as the empty string,
-/// both of which land in a result sentence the model reads.
-fn raw_or_absent<'de, D>(deserializer: D) -> Result<Option<Box<RawValue>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
 /// Go's implicit client: a bot token and the requests made with it.
@@ -264,6 +250,15 @@ async fn read_capped(
                     break;
                 }
             }
+            // `fmt.Errorf("reading response: %w", err)` — the one place this
+            // module interpolates a cause, and the module header's rule says
+            // not to because the URL *is* the credential here. It is safe and
+            // the reason is narrow: a `bytes_stream` error is built without a
+            // URL attached, and reqwest's `Display` prints one only when it is
+            // (`error.rs`'s `if let Some(url) = &self.url`). That is an internal
+            // of a dependency, so
+            // `a_body_that_dies_mid_stream_still_names_nothing_secret` asserts it
+            // rather than trusting it.
             Some(Err(e)) => return Err(format!("reading response: {e}")),
         }
     }
@@ -420,6 +415,51 @@ mod tests {
         assert_eq!(message, "calling Telegram sendMessage: request failed");
         assert!(!message.contains(SECRET), "the bot token reached the model");
         assert!(!message.contains("127.0.0.1"));
+
+        set_api_base(None);
+    }
+
+    /// The body-phase failure, which is the one error in this module that
+    /// interpolates its cause.
+    ///
+    /// Go does too, so keeping it is parity — but the URL here carries the bot
+    /// token, so "reqwest does not attach a URL to a decode error" is load-bearing
+    /// and belongs in a test rather than in a comment alone.
+    #[tokio::test]
+    async fn a_body_that_dies_mid_stream_still_names_nothing_secret() {
+        let _guard = api_base_lock().await;
+
+        // A `Content-Length` larger than the body, so the connection ends before
+        // the promised bytes arrive and the *stream* fails rather than the send.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4096\r\n\r\n{\"ok\":true")
+                    .await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        set_api_base(Some(format!("http://{addr}")));
+
+        let message = Client::new(SECRET)
+            .call(&CancellationToken::new(), "getChat", b"{}".to_vec())
+            .await
+            .map(|response| response.result().to_string())
+            .expect_err("the body ends early");
+        assert!(
+            message.starts_with("reading response: ") || message.starts_with("calling Telegram "),
+            "unexpected sentence: {message}"
+        );
+        assert!(!message.contains(SECRET), "the bot token reached the model");
+        assert!(
+            !message.contains(&addr.to_string()),
+            "the URL reached the model: {message}"
+        );
 
         set_api_base(None);
     }
