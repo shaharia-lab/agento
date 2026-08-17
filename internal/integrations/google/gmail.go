@@ -9,14 +9,13 @@ import (
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/api/gmail/v1"
-	"google.golang.org/api/option"
 )
 
 // registerGmailTools adds Gmail MCP tools to the server.
 // Only tools whose names are in the allowed set are registered.
 // If allowed is empty, all tools are registered.
 func registerGmailTools(server *mcp.Server, httpClient *http.Client, allowed map[string]bool) {
-	gmailSvc, err := gmail.NewService(context.Background(), option.WithHTTPClient(httpClient))
+	gmailSvc, err := gmail.NewService(context.Background(), clientOptions(httpClient)...)
 	if err != nil {
 		return
 	}

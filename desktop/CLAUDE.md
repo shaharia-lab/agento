@@ -600,7 +600,7 @@ of the `Err` arms the cut-over has to turn into a real response.
 | 1 ✅ | Sidecar + proxy | — | done |
 | 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
 | 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274, #275).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. The scheduler's *schedule computation* is ported and pinned (#275); its ownership is not, and is blocked — see below. |
-| 4 ← | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. **GitHub is done (#312)** — `native/integrations/github/`, the worked example for an *integration*. **The registry is done (#311)** — `native/integrations/registry.rs` plus `PUT`/`DELETE /api/integrations/{id}`, and the sidecar now runs with `AGENTO_INTEGRATIONS=off:<the types the shell hosts>`, so every type has exactly one owner. **Confluence is done (#317)** — `native/integrations/confluence/`, the smallest of the six and the one that shows what an integration adds over #312: a per-row API base, basic auth, and a `Start` check that is a decision. **Jira is done (#316)** — `native/integrations/jira/`, Confluence's twin, and the one that shows that a shared credential type does not mean shared behaviour: `jira.Start` validates nothing, so a bad base is answered per call instead of by refusing to host. **Slack is done (#315)** — `native/integrations/slack/`, the first that is not Atlassian-shaped: no model input in the URL at all, and the only integration whose token can come from the `auth` column. **Telegram is done (#314)** — `native/integrations/telegram/`, the outbound half, and the one that reached two reflector divergences the map had recorded as unreachable. #313 is the last, and is "add a starter **and its name to `HOSTED_TYPES`**", which is the one list both processes are configured from. WhatsApp is **not** among them — but Go still hosts its rows, because its starter opens a live connection rather than just a port; see below. |
+| 4 ← | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. **GitHub is done (#312)** — `native/integrations/github/`, the worked example for an *integration*. **The registry is done (#311)** — `native/integrations/registry.rs` plus `PUT`/`DELETE /api/integrations/{id}`, and the sidecar now runs with `AGENTO_INTEGRATIONS=off:<the types the shell hosts>`, so every type has exactly one owner. **Confluence is done (#317)** — `native/integrations/confluence/`, the smallest of the six and the one that shows what an integration adds over #312: a per-row API base, basic auth, and a `Start` check that is a decision. **Jira is done (#316)** — `native/integrations/jira/`, Confluence's twin, and the one that shows that a shared credential type does not mean shared behaviour: `jira.Start` validates nothing, so a bad base is answered per call instead of by refusing to host. **Slack is done (#315)** — `native/integrations/slack/`, the first that is not Atlassian-shaped: no model input in the URL at all, and the only integration whose token can come from the `auth` column. **Telegram is done (#314)** — `native/integrations/telegram/`, the outbound half, and the one that reached two reflector divergences the map had recorded as unreachable. **Google is ported (#313)** — `native/integrations/google/`, the last and the only one whose requests are built by a generated client rather than by the handlers, so its vectors are a specification rather than a confirmation; it is deliberately **not** in `HOSTED_TYPES` yet, and that flip is its own change. WhatsApp is **not** among them — but Go still hosts its rows, because its starter opens a live connection rather than just a port; see below. |
 | 5 ← | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
 
 ### The session scanner (`src-tauri/src/native/scanner/`)
@@ -1392,6 +1392,102 @@ serde, which folds a JSON null into `None`.
 
 Cap 10 MiB and timeout 60 seconds, the largest of the six on both counts.
 
+### The Google integration (`native/integrations/google/`, #313)
+
+`internal/integrations/google/` — eight tools across **three** service groups
+(`calendar`, `gmail`, `drive`) over an OAuth2 token that refreshes itself. Last
+of the six, and the only one that is not a port of hand-rolled HTTP.
+
+**Read this before changing anything here.** The other five build their requests
+with `http.NewRequest` and `json.Marshal`, so the port reproduces bytes visible in
+`tools.go`. Google calls the **generated** client libraries (`calendar/v3`,
+`gmail/v1`, `drive/v3`) over an `oauth2` transport, and what those put on the wire
+is in neither this repository nor the port. Every URL, query parameter, body field
+and sentence was therefore *recorded* off the real libraries against a fake
+endpoint — `desktop/parity/google_vectors.json` is not a confirmation of the port,
+it is the **only written specification** of what the third party's code generator
+emits. Three things the port had wrong were found by running those vectors for the
+first time, and none was visible from either side's source:
+
+1. **Path parameters use `googleapi.Expand`, not `url.PathEscape`.** The generated
+   clients expand RFC 6570 templates, which percent-encode everything outside the
+   unreserved set. `PathEscape` leaves the sub-delims alone, so a Gmail message id
+   containing `&` came out as `…%3Fd&e` — an `&` that starts a query parameter.
+   `client::expand_path_segment`; this is `googleapi`'s rule, not `net/url`'s,
+   which is why it is not in `gourl`.
+2. **Every JSON body carries a trailing newline**, because `googleapi` writes it
+   with `json.NewEncoder(…).Encode`. Both the plain `application/json` POSTs and
+   the metadata part of the `multipart/related` upload. One byte, on the wire,
+   applied once in `google::marshal`.
+3. **`oauth2.RetrieveError` has two forms** and picks between them on whether the
+   body named an error code, *not* on the status. A Google refresh refusal takes
+   the one the port did not have:
+   `oauth2: "invalid_grant" "Token has been expired or revoked."`.
+
+A fourth was found by trying to *vector* it: **a response body of exactly `null`
+panics every one of the eight Go tools.** The generated clients decode into a
+`**T`, `json.Unmarshal` of `null` into a pointer-to-pointer nils the pointer, and
+the handler then reads a field off it. That is a 200 with a two-word body, which a
+proxy or a misconfigured gateway produces. It joins the two nil-dereferences the
+handlers own — `msg.Payload.Headers` in `read_email`/`search_email`,
+`ev.Start.DateTime` in `view_events`. The port returns the zero value in all
+three; a panic cannot be recorded in a vector and is not a behavior worth
+reproducing, so the `null` case is deliberately **absent** from the vectors.
+
+Google-specific behaviour the other five never reached:
+
+- **`gourl::Values` stopped being single-valued for this.** Gmail's
+  `MetadataHeaders("Subject","From","Date")` encodes as three `metadataHeaders=`
+  pairs in insertion order under one sorted key, so `Values` is now a multimap
+  with `set` and `add`.
+- **`search_email` makes N+1 requests from one tool call**, and a failed fetch is
+  **skipped** rather than surfaced — while the count in the sentence is
+  `len(list.Messages)`, the *listed* total. A partial failure therefore produces a
+  sentence whose number does not match its body. Go's, and pinned.
+- **`create_file`'s media type is sniffed from the content**, not taken from the
+  tool's `mime_type` argument, which reaches the metadata JSON alone.
+  `drive::detect_content_type` implements the subset of
+  `net/http.DetectContentType` a JSON **string** can reach — a PNG's `0x89` cannot
+  arrive as one byte, so the binary signature table is deliberately not written.
+- **Drive's upload path is an absolute reference**, so it replaces the base's
+  whole path: `/upload/drive/v3/files`, not something under `/drive/v3/`.
+- **Every clamp differs.** `view_events` and `list_files` cap at 100, `search_email`
+  at 50, and all three fall back to 10 rather than to the cap.
+- **`q` is conditional for Drive and unconditional for Gmail** — an empty Drive
+  query sends no key, an empty Gmail search still sends `q=`.
+- **`download_file` is the only call that is not `alt=json`**, and the only result
+  that is the response body verbatim rather than a formatted summary.
+- **The three bases are not one host.** Gmail moved to `gmail.googleapis.com` and
+  carries `gmail/v1/` in its *relative* paths, where Calendar and Drive carry the
+  version in the base.
+
+**The token source is #318's, built here first.** #318 says of it: "Token refresh
+is shared with the Google MCP server. One implementation, not two."
+`client::TokenSource` is that implementation — 10-second `expiryDelta`, a zero
+expiry that never expires, credentials in the **body** (`AuthStyleInParams`, not a
+`Basic` header), an absent `refresh_token` keeping the old one, and nothing
+persisted. Adopt it in #318; do not write a second.
+
+Three things are pinned as **divergence** rather than matched, all recorded in the
+vectors so they cannot drift silently: `X-Goog-Api-Client` and `User-Agent` (they
+embed the Go toolchain and library versions — no Rust build can emit `gl-go/…`),
+the random `multipart/related` boundary (the *parts* are compared instead), and
+Go's `*url.Error` wrapper around a transport or refresh failure (it embeds the
+resolver's own message).
+
+`internal/integrations/google/parity.go` exports `SetEndpoints`, a **wider** seam
+than the other integrations' `SetAPIBase` because both the API base and the OAuth2
+token endpoint have to be redirectable. It hands credentials to whatever host it
+names — the token URL receives the `client_secret` and refresh token, the durable
+ones — so it is test-only, and the Rust equivalent is behind `#[cfg(test)]`.
+
+**`google` is deliberately absent from `HOSTED_TYPES`.** Nothing here runs in a
+shipped build yet: the sidecar still hosts Google and this is dormant code with
+its parity pinned. The flip is its own change, because the flip is where the risk
+in this series has actually lived — #315's hosting of Slack silently broke
+`completeOAuth`'s reload, and Google is the *other* provider
+`startProviderCallback` supports, so it lands on the same hook.
+
 ### The integration registry, and the port's second ownership flip (#311)
 
 `native/integrations/registry.rs` is `internal/integrations/registry.go`:
@@ -1819,7 +1915,8 @@ path cannot try to answer a chat turn with a `Vec<u8>`.
 **The four routes share a process-local registry, so they moved together** —
 `/messages` puts a session in, the others look one up. But not every chat *can*
 run natively: an agent whose tools come from an integration this build cannot
-host still needs #313, and `runner::build_options` refuses those before any
+host still needs #313's **flip** — the port itself has landed, but `google` is not
+in `HOSTED_TYPES` yet — and `runner::build_options` refuses those before any
 subprocess exists. (Most of that refusal is gone — the **local** server (#310)
 and any agent naming only integrations in `HOSTED_TYPES`: **github** since #311,
 **confluence** since #317, **jira** since #316, **slack** since #315, **telegram**

@@ -8,14 +8,13 @@ import (
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/api/calendar/v3"
-	"google.golang.org/api/option"
 )
 
 // registerCalendarTools adds Google Calendar MCP tools to the server.
 // Only tools whose names are in the allowed set are registered.
 // If allowed is empty, all tools are registered.
 func registerCalendarTools(server *mcp.Server, httpClient *http.Client, allowed map[string]bool) {
-	calSvc, err := calendar.NewService(context.Background(), option.WithHTTPClient(httpClient))
+	calSvc, err := calendar.NewService(context.Background(), clientOptions(httpClient)...)
 	if err != nil {
 		// If we can't create the service, skip registration — server will start without calendar tools.
 		return
