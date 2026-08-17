@@ -41,7 +41,7 @@
 
 use rusqlite::OptionalExtension;
 
-use crate::claude::options::Options;
+use crate::claude::options::{permission_mode, Options};
 use crate::claude::permissions::PermissionHandler;
 use crate::claude::InProcessMcpServer;
 use crate::native::agents::{Agent, Capabilities};
@@ -205,10 +205,16 @@ pub struct RunSpec {
     pub settings: std::sync::Arc<TurnSettings>,
     pub working_dir: String,
     pub settings_profile_id: String,
-    /// `Some` resumes an existing CLI session; `None` pins a new one to the
-    /// chat id so the two identifiers stay in step.
+    /// `Some` resumes an existing CLI session; `None` falls through to
+    /// [`Self::custom_session_id`].
     pub resume_session_id: Option<String>,
-    pub chat_id: String,
+    /// `RunOptions.CustomSessionID`. A chat turn passes its chat id, so a new
+    /// CLI session and the row that owns it share one identifier. **A scheduled
+    /// run passes `""`** — Go's `buildRunOptions` sets neither session field, so
+    /// the CLI generates its own id and `saveSessionResults` stores it back onto
+    /// the chat row afterwards. Pinning one there would be a different id from
+    /// the one the transcript is filed under.
+    pub custom_session_id: String,
 }
 
 /// Build the SDK options for one chat turn.
@@ -224,7 +230,7 @@ pub struct RunSpec {
 /// stops its server — so they have to outlive the subprocess that dials them.
 pub async fn build_options(
     spec: &RunSpec,
-    permission_handler: PermissionHandler,
+    permission_handler: Option<PermissionHandler>,
 ) -> Result<(Options, Vec<InProcessMcpServer>), String> {
     let caps = spec.agent.as_ref().map(|a| &a.capabilities);
     // Decided **before** anything binds a port. Everything below this line
@@ -265,10 +271,25 @@ pub async fn build_options(
         opts = opts.with_settings(path);
     }
 
-    // An interactive permission handler forces default permissions, overriding
-    // whatever the agent configured. That is Go's behaviour and it is why a
-    // `plan` or `dontAsk` agent still prompts in the chat UI.
-    opts = opts.with_default_permissions();
+    // `appendPermissionOpts`. An interactive permission handler forces default
+    // permissions, overriding whatever the agent configured — that is Go's
+    // behaviour and it is why a `plan` or `dontAsk` agent still prompts in the
+    // chat UI. **Without one the agent's own mode applies**, which is the
+    // branch a scheduled run takes (#275): nothing is there to answer a prompt,
+    // so a `bypass` agent must actually bypass rather than block forever.
+    opts = match permission_handler {
+        Some(_) => opts.with_default_permissions(),
+        None => match spec.agent.as_ref().map(|a| a.permission_mode.as_str()) {
+            Some("default") => opts.with_default_permissions(),
+            Some("plan") => opts.with_permission_mode(permission_mode::PLAN),
+            Some("dontAsk") => opts.with_permission_mode(permission_mode::DONT_ASK),
+            // "bypass", empty, unknown, or no agent at all. Go sets the mode
+            // *and* the bypass flag, so both are set here.
+            _ => opts
+                .with_permission_mode(permission_mode::BYPASS_PERMISSIONS)
+                .with_bypass_permissions(),
+        },
+    };
 
     opts = opts.with_claude_executable(claude_executable());
 
@@ -294,9 +315,15 @@ pub async fn build_options(
         }
     }
 
+    // `appendModelAndPromptOpts`: resume wins, then a custom id, then neither —
+    // and "neither" is a real branch rather than an impossible one, because a
+    // scheduled run supplies no custom id.
     match &spec.resume_session_id {
         Some(id) if !id.is_empty() => opts = opts.with_session_id_to_resume(id.clone()),
-        _ => opts = opts.with_session_id(spec.chat_id.clone()),
+        _ if !spec.custom_session_id.is_empty() => {
+            opts = opts.with_session_id(spec.custom_session_id.clone())
+        }
+        _ => {}
     }
 
     opts = opts.with_thinking(thinking_mode(spec.agent.as_ref()));
@@ -333,7 +360,11 @@ pub async fn build_options(
         }
     }
 
-    opts = opts.with_permission_handler(wrap_permission_handler(permission_handler, allowed));
+    // `if opts.PermissionHandler != nil` — the last thing Go appends, and the
+    // one option a scheduled run has none of.
+    if let Some(handler) = permission_handler {
+        opts = opts.with_permission_handler(wrap_permission_handler(handler, allowed));
+    }
     Ok((opts, tool_servers))
 }
 
@@ -678,14 +709,17 @@ fn claude_executable() -> String {
 }
 
 /// The two template variables Agento substitutes into a system prompt.
+///
+/// The substitution itself is [`crate::native::template::interpolate`], shared
+/// with the scheduler (#275) so there is one implementation of it. **The error
+/// is swallowed here, and that is a known divergence rather than a decision:**
+/// Go's `resolveSystemPrompt` propagates `MissingVariableError` and fails the
+/// turn, while this has always passed an unknown `{{name}}` through untouched.
+/// Preserved as-is because a scheduler port is the wrong place to change how a
+/// chat answers; the scheduler's own caller does propagate it, which is what a
+/// recorded failed run needs.
 fn interpolate(prompt: &str) -> String {
-    if !prompt.contains("{{") {
-        return prompt.to_string();
-    }
-    let now = chrono::Local::now();
-    prompt
-        .replace("{{current_date}}", &now.format("%Y-%m-%d").to_string())
-        .replace("{{current_time}}", &now.format("%H:%M:%S").to_string())
+    crate::native::template::interpolate(prompt).unwrap_or_else(|_| prompt.to_string())
 }
 
 /// The chat session row the turn runs against.
@@ -786,7 +820,7 @@ mod tests {
                 working_dir: String::new(),
                 settings_profile_id: String::new(),
                 resume_session_id: None,
-                chat_id: "c1".into(),
+                custom_session_id: "c1".into(),
             },
             calls,
         )
@@ -802,14 +836,16 @@ mod tests {
             working_dir: String::new(),
             settings_profile_id: String::new(),
             resume_session_id: None,
-            chat_id: "c1".into(),
+            custom_session_id: "c1".into(),
         }
     }
 
-    fn no_op_handler() -> PermissionHandler {
-        std::sync::Arc::new(|_, _, _| {
+    /// The chat's shape: `Some(handler)`, which is what forces default
+    /// permissions. `None` is the scheduled-run shape and has its own test.
+    fn no_op_handler() -> Option<PermissionHandler> {
+        Some(std::sync::Arc::new(|_, _, _| {
             Box::pin(async { crate::claude::permissions::PermissionResult::allow() })
-        })
+        }))
     }
 
     /// The whole of #299: a chat that names an agent never asks for the

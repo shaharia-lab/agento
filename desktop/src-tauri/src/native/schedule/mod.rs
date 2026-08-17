@@ -319,7 +319,7 @@ impl Fire {
         }
     }
 
-    fn is_zero(self) -> bool {
+    pub fn is_zero(self) -> bool {
         self == Fire::zero()
     }
 
@@ -665,6 +665,9 @@ pub fn fire_times(
         },
     }
 }
+
+pub mod executor;
+pub mod runtime;
 
 #[cfg(test)]
 mod tests_vectors;

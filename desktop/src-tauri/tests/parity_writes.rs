@@ -333,6 +333,145 @@ async fn the_job_history_delete_answers_match_go() {
     }
 }
 
+// ─── Scheduled tasks (#275) ───────────────────────────────────────────────────
+
+/// Pin Go's answers for the five task writes, which moved natively once the
+/// shell took the scheduler.
+///
+/// Every literal here is asserted against the Rust side by the unit tests in
+/// `native::tasks` — that pairing is what the write suite is for, since a write
+/// cannot be asked of both implementations at once. The validation wording is
+/// checked verbatim rather than by status alone: there are seven distinct 422
+/// messages and each names a different field path.
+#[tokio::test]
+#[ignore = "requires a scratch Go instance; mutates it"]
+async fn the_task_write_answers_match_go() {
+    require_scratch_instance();
+
+    // The seven validation failures, in the order `validateTask` reaches them.
+    for (body, want) in [
+        (
+            r#"{"prompt":"p"}"#,
+            r#"validation error for \"name\": name is required"#,
+        ),
+        (
+            r#"{"name":"n"}"#,
+            r#"validation error for \"prompt\": prompt is required"#,
+        ),
+        (
+            r#"{"name":"n","prompt":"p","timeout_minutes":241}"#,
+            r#"validation error for \"timeout_minutes\": timeout must be between 1 and 240 minutes"#,
+        ),
+        (
+            r#"{"name":"n","prompt":"p","schedule_type":"weekly"}"#,
+            r#"validation error for \"schedule_type\": must be run_immediately, one_off, interval, or cron"#,
+        ),
+        (
+            r#"{"name":"n","prompt":"p","schedule_type":"one_off"}"#,
+            r#"validation error for \"schedule_config.run_at\": run_at is required for one_off schedules"#,
+        ),
+        (
+            r#"{"name":"n","prompt":"p","schedule_type":"interval"}"#,
+            r#"validation error for \"schedule_config\": at least one of every_minutes, every_hours, or every_days is required for interval schedules"#,
+        ),
+        (
+            r#"{"name":"n","prompt":"p","schedule_type":"cron"}"#,
+            r#"validation error for \"schedule_config.expression\": expression is required for cron schedules"#,
+        ),
+    ] {
+        let (status, answer) = go_answer(Method::POST, "/api/tasks", Some(body)).await;
+        assert_eq!(status, 422, "for {body}");
+        assert_eq!(
+            String::from_utf8_lossy(&answer).trim_end(),
+            format!(r#"{{"error":"{want}"}}"#),
+            "for {body}"
+        );
+    }
+
+    // A malformed body is the handler's fixed 400, not the decoder's error.
+    let (status, answer) = go_answer(Method::POST, "/api/tasks", Some("not json")).await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        String::from_utf8_lossy(&answer).trim_end(),
+        r#"{"error":"invalid JSON body"}"#
+    );
+
+    // A create is 201 with the stored row, carrying Go's two defaults.
+    let (status, answer) = go_answer(
+        Method::POST,
+        "/api/tasks",
+        Some(r#"{"name":"parity-writes task","prompt":"p","schedule_type":"cron","schedule_config":{"expression":"0 2 * * *"}}"#),
+    )
+    .await;
+    assert_eq!(status, 201);
+    let created: serde_json::Value =
+        serde_json::from_slice(&answer).expect("the create answers a task");
+    assert_eq!(created["status"], "active", "an empty status defaults");
+    assert_eq!(created["timeout_minutes"], 30, "an unset timeout defaults");
+    // The five columns the request body cannot reach.
+    assert_eq!(created["working_directory"], "");
+    assert_eq!(created["model"], "");
+    assert_eq!(created["settings_profile_id"], "");
+    assert_eq!(created["stop_after_count"], 0);
+    let id = created["id"].as_str().expect("an id").to_string();
+
+    // Pause leaves the run history; resume clears it. The asymmetry is what
+    // makes a stop_after_count task runnable again.
+    let (status, answer) = go_answer(Method::POST, &format!("/api/tasks/{id}/pause"), None).await;
+    assert_eq!(status, 200);
+    let paused: serde_json::Value = serde_json::from_slice(&answer).expect("a task");
+    assert_eq!(paused["status"], "paused");
+
+    let (status, answer) = go_answer(Method::POST, &format!("/api/tasks/{id}/resume"), None).await;
+    assert_eq!(status, 200);
+    let resumed: serde_json::Value = serde_json::from_slice(&answer).expect("a task");
+    assert_eq!(resumed["status"], "active");
+    assert_eq!(resumed["run_count"], 0);
+    assert!(
+        resumed.get("last_run_at").is_none(),
+        "resume clears last_run_at, and the field is omitempty"
+    );
+
+    // An update carries created_at over from the stored row.
+    let (status, answer) = go_answer(
+        Method::PUT,
+        &format!("/api/tasks/{id}"),
+        Some(r#"{"name":"parity-writes renamed","prompt":"q","schedule_type":"cron","schedule_config":{"expression":"@hourly"}}"#),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let updated: serde_json::Value = serde_json::from_slice(&answer).expect("a task");
+    assert_eq!(updated["name"], "parity-writes renamed");
+    assert_eq!(
+        updated["created_at"], created["created_at"],
+        "an edit must not restamp created_at"
+    );
+
+    // The delete is 204 with no body at all, and the id routes are 404 after.
+    let (status, answer) = go_answer(Method::DELETE, &format!("/api/tasks/{id}"), None).await;
+    assert_eq!(status, 204);
+    assert!(answer.is_empty(), "a 204 carries no body");
+
+    for (method, path, body) in [
+        (Method::DELETE, format!("/api/tasks/{id}"), None),
+        (Method::POST, format!("/api/tasks/{id}/pause"), None),
+        (Method::POST, format!("/api/tasks/{id}/resume"), None),
+        (
+            Method::PUT,
+            format!("/api/tasks/{id}"),
+            Some(r#"{"name":"n","prompt":"p"}"#),
+        ),
+    ] {
+        let (status, answer) = go_answer(method.clone(), &path, body).await;
+        assert_eq!(status, 404, "for {method} {path}");
+        assert_eq!(
+            String::from_utf8_lossy(&answer).trim_end(),
+            format!(r#"{{"error":"task \"{id}\" not found"}}"#),
+            "for {method} {path}"
+        );
+    }
+}
+
 // ─── Integrations and trigger rules (#277) ────────────────────────────────────
 
 /// Pin Go's answers for the integration writes that moved, and for the two that

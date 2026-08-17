@@ -82,7 +82,7 @@
     {
       "method": "DELETE",
       "route": "/api/tasks/{id}",
-      "status": "deferred",
+      "status": "native",
       "owner": "#275",
       "reason": "unregisters the cron entry"
     },
@@ -257,21 +257,21 @@
     {
       "method": "POST",
       "route": "/api/tasks",
-      "status": "deferred",
+      "status": "native",
       "owner": "#275",
-      "reason": "registers a cron entry; a stored task that never fires is worse than none"
+      "reason": "registers a cron entry with the shell's own scheduler"
     },
     {
       "method": "POST",
       "route": "/api/tasks/{id}/pause",
-      "status": "deferred",
+      "status": "native",
       "owner": "#275",
       "reason": "unregisters the cron entry"
     },
     {
       "method": "POST",
       "route": "/api/tasks/{id}/resume",
-      "status": "deferred",
+      "status": "native",
       "owner": "#275",
       "reason": "re-registers the cron entry"
     },
@@ -362,7 +362,7 @@
     {
       "method": "PUT",
       "route": "/api/tasks/{id}",
-      "status": "deferred",
+      "status": "native",
       "owner": "#275",
       "reason": "re-registers the cron entry"
     }
