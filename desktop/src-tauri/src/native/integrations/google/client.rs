@@ -648,18 +648,20 @@ fn googleapi_error(status: reqwest::StatusCode, body: &str) -> String {
 /// characters.
 ///
 /// Random per request there and here, which is why the vectors pin the parts
-/// rather than the bytes.
+/// rather than the byte stream.
+///
+/// **The randomness has to be unpredictable, not merely varying.** Neither Go nor
+/// this port checks whether the boundary occurs inside the content being
+/// uploaded — Go can skip that because `googleapi` draws its boundary from
+/// `crypto/rand`, so the chance is negligible. A boundary derived from the clock
+/// and the thread id would not be: `create_file`'s `content` is a tool argument,
+/// so a model could be steered into supplying one that terminates the upload
+/// early and lets the rest of the file be read as MIME headers. Two `Uuid::v4`s
+/// are 64 CSPRNG-backed hex characters, which is the repo's existing way of
+/// asking for exactly this.
 fn multipart_boundary() -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    std::time::SystemTime::now().hash(&mut hasher);
-    std::thread::current().id().hash(&mut hasher);
-    let mut out = String::with_capacity(60);
-    let mut seed = hasher.finish();
-    while out.len() < 60 {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-        out.push_str(&format!("{:016x}", seed));
-    }
+    let mut out = uuid::Uuid::new_v4().simple().to_string();
+    out.push_str(&uuid::Uuid::new_v4().simple().to_string());
     out.truncate(60);
     out
 }
