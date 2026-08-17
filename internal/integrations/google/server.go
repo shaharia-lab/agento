@@ -9,9 +9,33 @@ import (
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
 	"golang.org/x/oauth2"
 	googleoauth "golang.org/x/oauth2/google"
+	"google.golang.org/api/option"
 
 	"github.com/shaharia-lab/agento/internal/config"
 )
+
+// apiEndpoint overrides the base URL of the three generated Google clients, and
+// oauthEndpoint overrides the OAuth2 endpoints used to refresh the access token.
+//
+// Both are empty/zero in a running server and are variables for the reason
+// `slackAPIBase` and `apiBaseURL` are in the sibling packages: `desktop/parity`
+// has to stand the **real** server up against a local fake, and a generator that
+// rebuilt the tool set from this source would freeze someone's reading of the
+// code rather than the code. See parity.go.
+var (
+	apiEndpoint   string
+	oauthEndpoint = googleoauth.Endpoint
+)
+
+// clientOptions returns the options every generated service is built with —
+// the shared OAuth2 client, plus the endpoint override when a test has set one.
+func clientOptions(httpClient *http.Client) []option.ClientOption {
+	opts := []option.ClientOption{option.WithHTTPClient(httpClient)}
+	if apiEndpoint != "" {
+		opts = append(opts, option.WithEndpoint(apiEndpoint))
+	}
+	return opts
+}
 
 // Start creates and starts an in-process MCP server for the given Google integration config.
 // Only tools listed in each service's Tools slice are registered. If a service has an empty
@@ -52,7 +76,7 @@ func buildHTTPClient(ctx context.Context, cfg *config.IntegrationConfig) (*http.
 	oauthCfg := &oauth2.Config{
 		ClientID:     creds.ClientID,
 		ClientSecret: creds.ClientSecret,
-		Endpoint:     googleoauth.Endpoint,
+		Endpoint:     oauthEndpoint,
 	}
 
 	// Create a token source that uses the stored token. The oauth2 library handles

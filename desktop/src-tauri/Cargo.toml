@@ -132,6 +132,11 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 # Effective-dated rates are timestamps, and their wire format has to match Go's
 # byte for byte. `clock` is only for "which rate is in force now".
 chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
+# Gmail's `send_email`/`read_email` are `base64.URLEncoding` — the **padded**
+# URL-safe alphabet — and reproducing the padding requirement is what keeps
+# `extractBody`'s part selection identical (#313). Already in the lock through
+# `rmcp`, so this is a direct name for a crate that was compiling anyway.
+base64 = "0.22"
 # Analytics buckets days, hours and weekdays in the *request's* timezone, so an
 # IANA name has to resolve to real offsets and real DST transitions. Go reaches
 # its own embedded tzdata through `time.LoadLocation`; this is the equivalent.

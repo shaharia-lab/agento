@@ -202,18 +202,21 @@ fn escape_bytes(bytes: &[u8], mode: Encoding) -> String {
     out
 }
 
-/// Go's `url.Values`, restricted to the one shape every caller here uses.
+/// Go's `url.Values` — a `map[string][]string`, sorted by key on encode.
 ///
-/// `url.Values` is a `map[string][]string`, but every construction in
-/// `internal/integrations/` is a sequence of `q.Set(k, v)` — which *replaces* —
-/// so one value per key models it exactly, and a `BTreeMap` gives
-/// [`Values::encode`] the sorted-key iteration `Encode` performs explicitly.
+/// It was a single value per key until #313, because every construction in
+/// `internal/integrations/` was a sequence of `q.Set(k, v)` and that models
+/// `Set`'s replace exactly. Google's generated clients broke the assumption:
+/// `search_email` sends `metadataHeaders` three times, and measured against the
+/// real library the result is `…&metadataHeaders=Subject&metadataHeaders=From&
+/// metadataHeaders=Date&…` — keys sorted, **values in insertion order**, which is
+/// what `Encode` does and what a single-valued map cannot express.
 ///
 /// The sorting is not cosmetic. It is what makes a request reproducible, which
 /// is what lets `desktop/parity/github_vectors.json` pin the encoded target of
 /// every paged tool.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct Values(std::collections::BTreeMap<String, String>);
+pub struct Values(std::collections::BTreeMap<String, Vec<String>>);
 
 impl Values {
     /// An empty set of parameters — `url.Values{}`.
@@ -221,26 +224,38 @@ impl Values {
         Self::default()
     }
 
-    /// `Values.Set`: replaces whatever was under `key`.
+    /// `Values.Set`: replaces whatever was under `key`, however many values it
+    /// held.
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.0.insert(key.into(), value.into());
+        self.0.insert(key.into(), vec![value.into()]);
     }
 
-    /// `Values.Encode`: `k=v` pairs joined by `&`, keys sorted, both halves
-    /// through [`query_escape`].
+    /// `Values.Add`: appends, keeping insertion order within the key.
+    ///
+    /// One caller — Google's `search_email` — and it is the reason this type
+    /// stopped being single-valued. See the type's own docs.
+    pub fn add(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.0.entry(key.into()).or_default().push(value.into());
+    }
+
+    /// `Values.Encode`: `k=v` pairs joined by `&`, keys sorted, values in the
+    /// order they were added, both halves through [`query_escape`].
     ///
     /// An empty set encodes to `""` — which the callers rely on, since they all
     /// append it after a literal `?` and Go produces a bare trailing `?` in
     /// exactly the same case.
     pub fn encode(&self) -> String {
         let mut out = String::new();
-        for (key, value) in &self.0 {
-            if !out.is_empty() {
-                out.push('&');
+        for (key, values) in &self.0 {
+            let key = query_escape(key);
+            for value in values {
+                if !out.is_empty() {
+                    out.push('&');
+                }
+                out.push_str(&key);
+                out.push('=');
+                out.push_str(&query_escape(value));
             }
-            out.push_str(&query_escape(key));
-            out.push('=');
-            out.push_str(&query_escape(value));
         }
         out
     }
@@ -317,6 +332,33 @@ pub fn route_path(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// `Encode` sorts keys and keeps each key's values in insertion order —
+    /// measured against the real `url.Values` through Google's generated client,
+    /// which sends `metadataHeaders` three times.
+    #[test]
+    fn repeated_values_keep_their_order_under_a_sorted_key() {
+        let mut values = Values::new();
+        values.set("format", "metadata");
+        values.add("metadataHeaders", "Subject");
+        values.add("metadataHeaders", "From");
+        values.add("metadataHeaders", "Date");
+        values.set("alt", "json");
+        values.set("prettyPrint", "false");
+        assert_eq!(
+            values.encode(),
+            "alt=json&format=metadata&metadataHeaders=Subject&metadataHeaders=From\
+             &metadataHeaders=Date&prettyPrint=false"
+                .replace(char::is_whitespace, "")
+        );
+
+        // `set` still replaces, however many values were there.
+        let mut values = Values::new();
+        values.add("k", "a");
+        values.add("k", "b");
+        values.set("k", "c");
+        assert_eq!(values.encode(), "k=c");
+    }
+
     /// `validEncoded`'s allowlist is wider than `should_escape`'s, and the gap
     /// is the whole reason this function exists rather than a caller comparing
     /// against [`escape_path`]. Every byte here is one Go sends **verbatim**

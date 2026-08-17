@@ -135,6 +135,7 @@
 pub mod base_url;
 pub mod confluence;
 pub mod github;
+pub mod google;
 pub mod jira;
 pub mod slack;
 pub mod telegram;
