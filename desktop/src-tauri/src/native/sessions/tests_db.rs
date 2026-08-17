@@ -24,7 +24,7 @@ use crate::native::settings::DataSettings;
 /// list reads. Kept in the shape `internal/storage/sqlite.go` produces.
 const SCHEMA: &str = "
     CREATE TABLE claude_session_cache (
-        session_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
         project_path TEXT NOT NULL DEFAULT '',
         preview TEXT NOT NULL DEFAULT '',
         custom_title TEXT NOT NULL DEFAULT '',
@@ -62,7 +62,12 @@ const SCHEMA: &str = "
         unpriced_tokens INTEGER NOT NULL DEFAULT 0,
         cost_by_model TEXT NOT NULL DEFAULT '',
         active_duration_ms INTEGER NOT NULL DEFAULT 0,
-        config_dir TEXT NOT NULL DEFAULT ''
+        config_dir TEXT NOT NULL DEFAULT '',
+        -- The real key, as `internal/storage/sqlite.go` declares it. It was
+        -- `session_id TEXT PRIMARY KEY` here, which made the one shape these
+        -- tests could not express — a session id under two project paths —
+        -- also the one that reached production broken (#344).
+        PRIMARY KEY (session_id, project_path)
     );
     CREATE TABLE claude_subagent_cache (
         parent_session_id TEXT NOT NULL,
@@ -462,4 +467,69 @@ fn a_drilldown_window_replaces_the_range_rather_than_narrowing_it() {
     );
 
     let _ = conn;
+}
+
+#[test]
+fn a_session_id_under_two_project_paths_keeps_both_rows_side_tables() {
+    // `claude_session_cache` is keyed on `(session_id, project_path)`, so
+    // copying one Claude account's history onto a machine that already has it
+    // — or simply resuming the same session id from two checkouts — puts one
+    // id on a page twice. `claude_session_pr` and `claude_subagent_cache` are
+    // keyed on the session id alone, so both rows must be handed the *same*
+    // entry. Draining the map instead gave the first row everything and every
+    // later row an empty list, which renders as "no linked PRs" rather than as
+    // an error (#344).
+    let conn = fixture(&[
+        TestSession {
+            id: "dup",
+            project: "/home/u/projects/alpha",
+            cost_usd: 2.0,
+            ..Default::default()
+        },
+        TestSession {
+            id: "dup",
+            project: "/home/u/projects/beta",
+            cost_usd: 1.0,
+            ..Default::default()
+        },
+    ]);
+    conn.execute(
+        "INSERT INTO claude_session_pr
+            (session_id, pr_number, pr_url, pr_repository, first_seen_at)
+         VALUES ('dup', 7, 'https://github.com/o/r/pull/7', 'o/r',
+                 '2026-08-01 11:00:00 +0000 UTC')",
+        [],
+    )
+    .expect("insert pr");
+    conn.execute(
+        "INSERT INTO claude_subagent_cache
+            (parent_session_id, agent_id, model, input_tokens, output_tokens,
+             total_cost_usd)
+         VALUES ('dup', 'agent-9', 'claude-haiku-4-5-20251001', 11, 22, 0.5)",
+        [],
+    )
+    .expect("insert sub-agent");
+
+    let page = list_page(&conn, &no_settings(), &SessionQuery::default()).expect("page");
+    assert_eq!(page.items.len(), 2, "both rows are on the page");
+    for s in &page.items {
+        assert_eq!(s.prs.len(), 1, "row {} lost its linked PRs", s.project_path);
+        assert_eq!(s.prs[0].pr_number, 7);
+        assert_eq!(
+            s.subagent_usage_by_model
+                .get("claude-haiku-4-5-20251001")
+                .map(|u| u.input_tokens),
+            Some(11),
+            "row {} lost its per-model delegated usage",
+            s.project_path
+        );
+        assert_eq!(
+            s.subagent_cost_by_model
+                .get("claude-haiku-4-5-20251001")
+                .map(|c| c.total_usd),
+            Some(0.5),
+            "row {} lost its per-model delegated cost",
+            s.project_path
+        );
+    }
 }
