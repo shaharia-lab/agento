@@ -261,9 +261,19 @@ pub async fn start_confluence_mcp_server(
 ///   byte through it — so the sound shape here is an allowlist too, and a
 ///   narrower one, because that module may forward what it is unsure of and
 ///   this one may not. The rule is: ASCII letters, digits, `.`, `-` and `_`,
-///   with an optional `:`-separated numeric port. Nothing in that set is
-///   transformed by either parser, so agreement is by construction rather than
-///   by comparison.
+///   with an optional `:`-separated numeric port.
+///
+///   **What that buys, stated exactly:** no character in the set is
+///   *transformed* by either parser, so no admitted host can be disguised as
+///   another — which is the property all three gaps above attack. It is not
+///   quite "the two dial the same address": WHATWG runs its IPv4 parser on any
+///   host whose last label is numeric, so `0x7f.1`, `127.1`, `010.0.0.1` and
+///   `2130706433` are literal names to `net/url` and addresses to `url`. That
+///   is left standing deliberately — none of them can be passed off as
+///   `acme.atlassian.net`, and Go's own outcome for them is a failed lookup
+///   rather than a working host, so nothing is redirected *away* from a host Go
+///   was reaching. Refusing an all-numeric final label would close it, at the
+///   cost of hostnames shaped like `1.2.3.4.5`.
 ///
 ///   It refuses four things Go serves, all deliberate and all logged
 ///   non-starts: userinfo (`user:pw@host` — the row carries the credentials in
@@ -393,10 +403,14 @@ pub fn validate_site_url(raw: &str) -> std::result::Result<String, String> {
         // tool's own leading slash and nothing before it.
         "/".to_string()
     } else {
-        // `setPath` decodes first and a bad escape is a parse error there, so
-        // this runs whichever branch of `EscapedPath` wins below.
+        // `setPath` decodes first and a **malformed** escape is a parse error
+        // there, so this gate runs whichever branch wins below. It is the
+        // `Option` alone: a well-formed escape decoding to bytes that are not
+        // UTF-8 is not an error to Go — `%FF` is a perfectly good path, and
+        // `EscapedPath()` renders it back as `%FF` — which is why
+        // `unescape_path` answers `Vec<u8>` and the fallback below escapes
+        // bytes rather than a `String`.
         let decoded = crate::native::gourl::unescape_path(raw_path)
-            .and_then(|bytes| String::from_utf8(bytes).ok())
             .ok_or("invalid site URL: its path does not decode")?;
         // `EscapedPath()`: the raw text when it is validly encoded, and the
         // re-escaped decode otherwise. Both branches are needed — see
@@ -404,7 +418,7 @@ pub fn validate_site_url(raw: &str) -> std::result::Result<String, String> {
         if crate::native::gourl::valid_encoded_path(raw_path) {
             raw_path.to_string()
         } else {
-            crate::native::gourl::escape_path(&decoded)
+            crate::native::gourl::escape_path_bytes(&decoded)
         }
     };
     if parsed.path() != go_path {
@@ -633,16 +647,43 @@ mod tests {
             );
         }
 
-        // …and the ordinary hosts the allowlist must not catch.
+        // …and the ordinary hosts the allowlist must not catch, including the
+        // shapes a self-hosted deployment actually takes: a single label, an
+        // IPv4 address, an underscore, a port and a base path.
         for site in [
             "https://acme.atlassian.net",
             "https://ACME.Atlassian.NET",
             "https://acme.atlassian.net:8443",
             "https://intranet_wiki.corp",
             "https://wiki-1.corp.example.com",
+            "https://confluence",
+            "https://10.0.0.5:8090/confluence",
+            "https://confluence.corp.local/wiki",
         ] {
             assert_eq!(validate_site_url(site), Ok(site.to_string()), "{site}");
         }
+    }
+
+    /// A base path whose escapes decode to bytes that are not UTF-8.
+    ///
+    /// Go's `Path` is arbitrary bytes, so `%FF` is a path it sends and
+    /// `EscapedPath()` renders back as `%FF`; `url` agrees. Demanding UTF-8
+    /// between the decode and the re-escape would refuse it, which is the rule
+    /// `gourl`'s own module docs state — `unescape_path` answers `Vec<u8>` for
+    /// exactly this reason.
+    #[test]
+    fn a_base_path_that_decodes_to_non_utf8_is_still_served() {
+        for site in [
+            "https://acme.atlassian.net/a%FFb",
+            "https://acme.atlassian.net/a%FF%FEb",
+        ] {
+            assert_eq!(validate_site_url(site), Ok(site.to_string()), "{site}");
+        }
+        // A *malformed* escape is a parse error to Go too, so that one refuses.
+        assert_eq!(
+            validate_site_url("https://acme.atlassian.net/a%zzb"),
+            Err("invalid site URL: its path does not decode".to_string())
+        );
     }
 
     /// The path half of the same disagreement, plus what it must still admit.

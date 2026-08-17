@@ -146,6 +146,17 @@ pub fn valid_encoded_path(s: &str) -> bool {
     })
 }
 
+/// [`escape_path`] over raw bytes.
+///
+/// A Go string is arbitrary bytes and `escape` is defined over them, so a
+/// caller that has just come out of [`unescape_path`] — which answers
+/// `Vec<u8>` for exactly that reason — must not have to demand UTF-8 first.
+/// `%FF` is a perfectly good path to Go, and `EscapedPath()` renders it back as
+/// `%FF`; requiring UTF-8 in between would refuse it.
+pub fn escape_path_bytes(bytes: &[u8]) -> String {
+    escape_bytes(bytes, Encoding::Path)
+}
+
 /// Go's `url.PathEscape` — `escape(s, encodePathSegment)`.
 ///
 /// One segment, so `/` is escaped: this is what every
@@ -310,6 +321,17 @@ mod tests {
     /// is the whole reason this function exists rather than a caller comparing
     /// against [`escape_path`]. Every byte here is one Go sends **verbatim**
     /// while `escape` would rewrite it.
+    /// [`escape_path_bytes`] is [`escape_path`] without the UTF-8 demand, and
+    /// the bytes that show it are the ones a `String` cannot hold.
+    #[test]
+    fn escaping_bytes_does_not_require_utf8() {
+        assert_eq!(escape_path_bytes(b"/a/b"), "/a/b");
+        assert_eq!(escape_path_bytes("/café".as_bytes()), "/caf%C3%A9");
+        // Not valid UTF-8, and a path Go both accepts and renders back.
+        assert_eq!(escape_path_bytes(b"/a\xffb"), "/a%FFb");
+        assert_eq!(escape_path_bytes(b"/\xff\xfe"), "/%FF%FE");
+    }
+
     #[test]
     fn valid_encoded_admits_what_escape_would_rewrite() {
         for raw in [

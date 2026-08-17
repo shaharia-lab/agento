@@ -468,6 +468,21 @@ var confluenceSiteURLCases = []struct {
 		input:     "https://user:pw@acme.atlassian.net",
 		rustError: "invalid site URL: its host is not a plain ASCII hostname",
 	},
+	{
+		// Go's `Path` is arbitrary bytes, so a well-formed escape decoding to
+		// something that is not UTF-8 is a path it sends and `EscapedPath()`
+		// renders back unchanged; `url` agrees. Demanding UTF-8 between the
+		// decode and the re-escape would refuse it, which is why
+		// `gourl::unescape_path` answers bytes.
+		name:  "a base path whose escapes decode to non-UTF-8 is still served",
+		input: "https://acme.atlassian.net/a%FFb",
+	},
+	{
+		// A *malformed* escape is `setPath`'s own parse error, so both refuse.
+		name:      "a malformed escape in the base path is a parse failure",
+		input:     "https://acme.atlassian.net/a%zzb",
+		rustError: "invalid site URL: its path does not decode",
+	},
 }
 
 // ─── The call cases ──────────────────────────────────────────────────────────
