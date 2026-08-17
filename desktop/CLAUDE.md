@@ -414,8 +414,13 @@ only a byte comparison catches all four.
      ./scripts/parity-instance.sh stop
      ```
      One suite per area (`tests/parity_<area>.rs`, sharing `tests/parity_common/`),
-     so a port runs its own diff and two ports do not edit one file. Drop the
-     `--test` flag to run them all — but note that `parity_writes` **mutates**,
+     so a port runs its own diff and two ports do not edit one file. **There is
+     no `tests/live_parity.rs`** — several issue templates say
+     `cargo test --test live_parity`, and that names nothing. Drop the
+     `--test` flag to run them all, and add **`--no-fail-fast`** when you do:
+     `cargo test` stops at the first failing test *binary*, so one red suite
+     hides every suite listed after it and a sweep reports one failure where
+     there are three. Note also that `parity_writes` **mutates**,
      unlike every other suite. It creates, renames and deletes rows, so it
      refuses to run unless `AGENTO_LIVE_URL` is set rather than falling back to
      the `:8990` default the read suites use. Start the scratch instance first.
