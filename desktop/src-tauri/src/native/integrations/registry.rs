@@ -4,8 +4,9 @@
 //! Go keeps one long-lived in-process MCP server per enabled, authenticated
 //! integration: `Start` brings them all up at boot, `Reload` restarts one when
 //! its row changes, `Stop` tears one down when it is deleted. This module is
-//! that, for the types listed in [`HOSTED_TYPES`] — today `github` (#312),
-//! `confluence` (#317), `jira` (#316) and `slack` (#315).
+//! that, for the types listed in [`HOSTED_TYPES`] — today five of the six:
+//! `github` (#312), `confluence` (#317), `jira` (#316), `slack` (#315) and
+//! `telegram` (#314).
 //!
 //! ## Why the ownership had to flip before the writes could move
 //!
@@ -44,7 +45,7 @@
 //! **The list is built here, by [`hosting_env_value`], from the same
 //! [`HOSTED_TYPES`] that [`hosts_type`] and the starter dispatch read.** That is
 //! the point of carrying it in the environment rather than hardcoding it on both
-//! sides: the shell is the process that knows what it hosts, so #313 and #314 each
+//! sides: the shell is the process that knows what it hosts, so #313 adds the last
 //! add one string to one list and the two halves cannot drift. The failure mode
 //! being designed against is a Rust slack starter landing while Go is never told
 //! to stop hosting slack — two processes on one integration — and its mirror is
@@ -83,21 +84,31 @@
 //! ## What still reaches Go's `Reload` and not this one
 //!
 //! `Reload` has seven callers in Go and only two of them (`Update`, and
-//! `Delete` via `Stop`) are ported. Five run inside the sidecar. `completeOAuth`
-//! and the telegram validator is fine **because the gate is per type**: they can only reach types Go still hosts, and
-//! `startProviderCallback` supports exactly `google` and `slack`, so an OAuth
-//! completion never concerns a hosted one. The other three —
-//! `validateGitHubPATAuth`, and since #316 and #317 `validateJiraTokenAuth` and
-//! `validateConfluenceAuth` — write a credential for a type
-//! *this* process hosts, from a handler that cannot tell it. Without a hook such
-//! an integration would first be hosted at the next boot's [`start_all`], so the
+//! `Delete` via `Stop`) are ported. Five run inside the sidecar, and as of #314
+//! **none of them is safe by the per-type gate any more** — five of the six types
+//! are hosted here, so a `Reload` for one reaches nothing in the sidecar.
+//!
+//! Four are the token validators — `validateGitHubPATAuth` and, since #314–#317,
+//! `validateTelegramTokenAuth`, `validateSlackTokenAuth`, `validateJiraTokenAuth`
+//! and `validateConfluenceAuth`. Each writes a credential for a type *this*
+//! process hosts, from a handler that cannot tell it. Without a hook such an
+//! integration would first be hosted at the next boot's [`start_all`], so the
 //! seam fires [`reload_after_auth`] after forwarding a 2xx for that one route
 //! (`native::after_forward`). That hook needs no per-type list of its own: it
 //! runs for every id on the route and [`reload_after_auth`] reads the row's type
-//! through [`can_host`], so #313 and #314 are covered the moment they add their
+//! through [`can_host`], so #313 is covered the moment it adds its
 //! string to [`HOSTED_TYPES`]. The reload is idempotent and the response has
 //! already been produced, so doing it on the forward path costs nothing but a
 //! restart of a server that was about to be restarted anyway.
+//!
+//! The fifth is `completeOAuth`, and it needed a **different** hook because its
+//! trigger never crosses the proxy: `startProviderCallback` supports `google`
+//! and `slack`, and since #315 the `slack` half concerns a hosted type, but the
+//! token is delivered by the browser to a callback server the *sidecar* opens on
+//! its own port. The only part of that flow this process sees is the UI polling
+//! `GET /api/integrations/{id}/auth/status`, which is a *poll* rather than an
+//! event — see [`reload_if_secrets_changed`] for why that one is conditional
+//! where [`reload_after_auth`] is not.
 //!
 //! ## Secrets
 //!
@@ -184,8 +195,8 @@ impl HostingRow {
 /// One list, read by three things that must agree: [`hosts_type`] (which the
 /// native `PUT`/`DELETE` consult before they touch a row), the starter dispatch
 /// in [`start_for_type`], and [`hosting_env_value`], which tells the Go sidecar
-/// which types to stop hosting. #313 and #314 each add one string here.
-pub const HOSTED_TYPES: &[&str] = &["github", "confluence", "jira", "slack"];
+/// which types to stop hosting. #313 adds the last string here.
+pub const HOSTED_TYPES: &[&str] = &["github", "confluence", "jira", "slack", "telegram"];
 
 /// Whether this process hosts an integration of the given type.
 pub fn hosts_type(integration_type: &str) -> bool {
@@ -433,6 +444,7 @@ async fn start_for_type(row: &HostingRow) -> Result<InProcessMcpServer, String> 
         "confluence" => start_confluence(&row.id, &row.services(), &row.credentials).await,
         "jira" => start_jira(&row.id, &row.services(), &row.credentials).await,
         "slack" => start_slack(&row.id, &row.services(), &row.credentials, &row.auth).await,
+        "telegram" => start_telegram(&row.id, &row.services(), &row.credentials).await,
         other => Err(format!(
             "no starter registered for integration type {other:?}"
         )),
@@ -664,6 +676,52 @@ pub(super) fn resolve_slack_token(
     }
 }
 
+/// `telegram.Start`'s first two steps — the auth check and the credential parse
+/// — followed by the third, which `native/integrations/telegram` owns.
+///
+/// `config.TelegramCredentials` is one field, so this needs no shared struct the
+/// way the two Atlassian ones do.
+async fn start_telegram(
+    id: &str,
+    services: &BTreeMap<String, ServiceConfig>,
+    credentials: &str,
+) -> Result<InProcessMcpServer, String> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct TelegramCredentials {
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        bot_token: String,
+    }
+
+    if credentials.is_empty() {
+        return Err(format!(
+            "parsing telegram credentials for {id:?}: credentials are empty"
+        ));
+    }
+    // Through `Option<T>`, because a literal `null` is a no-op to
+    // `json.Unmarshal` and a type error to serde.
+    let token = serde_json::from_str::<Option<TelegramCredentials>>(credentials)
+        .map(Option::unwrap_or_default)
+        .map(|creds| creds.bot_token)
+        .map_err(|e| {
+            // The serde message is dropped for [`github_token`]'s reason: it
+            // quotes the offending value, which here is the bot token.
+            format!(
+                "parsing telegram credentials for {id:?}: does not decode at line {} column {}",
+                e.line(),
+                e.column()
+            )
+        })?;
+
+    // Note what is **not** checked: an empty bot token. `telegram.Start` reads
+    // `creds.BotToken` and hosts whatever it finds, so an empty one produces a
+    // server whose every call 404s at `/bot/<method>` — Go's behaviour, and not
+    // something to improve on here.
+    super::telegram::start_telegram_mcp_server(id, services, &token)
+        .await
+        .map_err(|e| format!("starting in-process MCP server for {id:?}: {e}"))
+}
+
 /// `config.AtlassianCredentials` — the struct Confluence and Jira share.
 ///
 /// Neither derives `Debug` nor `Serialize`, for [`HostingRow`]'s reason: a
@@ -775,6 +833,7 @@ pub async fn start_filtered_server(
         "confluence" => start_confluence(&row.id, &filtered, &row.credentials).await,
         "jira" => start_jira(&row.id, &filtered, &row.credentials).await,
         "slack" => start_slack(&row.id, &filtered, &row.credentials, &row.auth).await,
+        "telegram" => start_telegram(&row.id, &filtered, &row.credentials).await,
         other => Err(format!(
             "no starter registered for integration type {other:?}"
         )),
@@ -1278,7 +1337,10 @@ mod tests {
     /// two ways to put a credential on two open ports at once.
     #[test]
     fn the_sidecar_is_told_exactly_what_this_process_hosts() {
-        assert_eq!(hosting_env_value(), "off:github,confluence,jira,slack");
+        assert_eq!(
+            hosting_env_value(),
+            "off:github,confluence,jira,slack,telegram"
+        );
         assert_eq!(
             hosting_env_value(),
             format!("off:{}", HOSTED_TYPES.join(",")),
@@ -1288,11 +1350,12 @@ mod tests {
         assert!(hosts_type("confluence"));
         assert!(hosts_type("jira"));
         assert!(hosts_type("slack"));
-        // The two types #313 and #314 still owe. Go must keep hosting every one of
+        assert!(hosts_type("telegram"));
+        // The one type #313 still owes. Go must keep hosting every one of
         // them, and `whatsapp` is the reason this is a list at all: its starter
         // opens a live whatsmeow connection that its status, reconnect and QR
         // endpoints read out of a package global.
-        for unported in ["telegram", "google", "whatsapp"] {
+        for unported in ["google", "whatsapp"] {
             assert!(!hosts_type(unported), "{unported} is not hosted here");
             assert!(
                 !hosting_env_value().contains(unported),
@@ -1370,23 +1433,23 @@ mod tests {
         let file = db();
         insert(
             &file,
-            "tg-1",
-            "telegram",
+            "gg-1",
+            "google",
             true,
             Some(r#"{"validated":true}"#),
-            r#"{"bot_token":"tg-secret"}"#,
-            r#"{"chat":{"enabled":true,"tools":["post"]}}"#,
+            r#"{"client_id":"gg-secret"}"#,
+            r#"{"gmail":{"enabled":true,"tools":["send"]}}"#,
         );
 
         // `start_all` swallows it: one bad integration must not stop the others.
         start_all(file.path()).await.expect("start_all swallows it");
-        assert!(!registry().is_hosted("tg-1"));
+        assert!(!registry().is_hosted("gg-1"));
 
         // `reload` returns it, and its callers are the ones that swallow.
-        let err = reload(file.path(), "tg-1").await.expect_err("no starter");
+        let err = reload(file.path(), "gg-1").await.expect_err("no starter");
         assert_eq!(
             err,
-            r#"no starter registered for integration type "telegram""#
+            r#"no starter registered for integration type "google""#
         );
     }
 
@@ -1541,7 +1604,7 @@ mod tests {
     async fn a_filtered_server_refuses_the_way_go_refuses() {
         let file = db();
         insert(&file, "gh-off", "github", false, Some("{}"), "{}", "{}");
-        insert(&file, "tg-1", "telegram", true, Some("{}"), "{}", "{}");
+        insert(&file, "gg-1", "google", true, Some("{}"), "{}", "{}");
 
         // `.err()` rather than `unwrap_err()`: the `Ok` side is an
         // `InProcessMcpServer`, which deliberately has no `Debug` — printing
@@ -1562,9 +1625,9 @@ mod tests {
             r#"integration "gh-off" is not enabled or not authenticated"#
         );
         assert_eq!(
-            refusal("tg-1").await,
-            r#"no starter registered for integration type "telegram""#
+            refusal("gg-1").await,
+            r#"no starter registered for integration type "google""#
         );
-        assert!(!can_host(file.path(), "tg-1").expect("can_host"));
+        assert!(!can_host(file.path(), "gg-1").expect("can_host"));
     }
 }
