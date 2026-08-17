@@ -238,8 +238,11 @@ ground truth for wire formats — better than reading Go structs. **GET only.**
 Never write to it. For write-path testing, start your own instance with
 `AGENTO_DATA_DIR` pointed at a scratch directory.
 
-Every `/api` request needs `Content-Type: application/json` — the server's
-guard runs before the handler, even for GETs. `api.ts` does this for you.
+Every state-changing `/api` request needs `Content-Type: application/json` —
+`POST`, `PUT`, `PATCH`, `DELETE`; the server's guard (`isStateChanging` in
+`internal/server/guards.go`) runs before the handler and 415s without it,
+including on the payload-free endpoints. `GET`/`HEAD`/`OPTIONS` are untouched.
+`api.ts` does this for you.
 
 **Desktop, not web.** The UI deliberately diverges from the Agento web app:
 three resizable panes per section, 13px type, 26px rows, hairline borders,
