@@ -38,6 +38,7 @@ use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock};
 
+use serde::Serialize;
 use serde_json::value::RawValue;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -48,7 +49,7 @@ use super::hooks::{build_hooks_for_initialize, HookRegistry};
 use super::init_types::decode_initialize_response;
 use super::messages::{error_event, message_type, parse_line, system_subtype, Event};
 use super::options::{thinking, Options};
-use super::permissions::{PermissionContext, PermissionResult};
+use super::permissions::{PermissionContext, PermissionResult, PermissionUpdate};
 use super::SDK_VERSION;
 
 /// Capacity of the event channel, matching Go's `make(chan Event, 32)`.
@@ -101,7 +102,12 @@ pub(crate) struct Shared {
 
 impl Shared {
     /// Serialises `value` as a JSON line and sends it to stdin.
-    pub(crate) async fn write(&self, value: &serde_json::Value) -> Result<()> {
+    ///
+    /// Generic over `Serialize` rather than taking a `serde_json::Value`, so a
+    /// caller that must not re-spell what it forwards can hand over a struct
+    /// carrying a `RawValue`. Routing that through a `Value` first would sort
+    /// its keys and respell its numbers — see `write_control_success_raw`.
+    pub(crate) async fn write<T: serde::Serialize + ?Sized>(&self, value: &T) -> Result<()> {
         let mut line = serde_json::to_vec(value)
             .map_err(|e| Error::wrap("encoding a message for stdin", e))?;
         line.push(b'\n');
@@ -617,19 +623,53 @@ async fn write_control_success(
     request_id: &str,
     payload: Option<serde_json::Value>,
 ) {
-    let mut response = serde_json::json!({
-        "subtype": "success",
-        "request_id": request_id,
-    });
-    if let Some(payload) = payload {
-        response["response"] = payload;
+    // Go builds this payload as a `map[string]any` too, so going through a
+    // `Value` here loses nothing: both sort the keys. Only the caller that
+    // forwards bytes it did not author needs the raw form below.
+    let raw = payload.and_then(|p| serde_json::value::to_raw_value(&p).ok());
+    write_control_success_raw(shared, request_id, raw.as_deref()).await;
+}
+
+/// The same, for a payload that is already JSON bytes and must stay them.
+///
+/// The two envelope structs exist so nothing on this path is rebuilt from a
+/// `serde_json::Value`. Their **field order is the wire order**, and it is
+/// spelled to match Go: `process.go` builds both envelopes as `map[string]any`,
+/// and `encoding/json` sorts map keys — hence `response` before `type`, and
+/// `request_id` before `response` before `subtype`. Reordering a field here
+/// changes the bytes the CLI receives.
+async fn write_control_success_raw(shared: &Shared, request_id: &str, payload: Option<&RawValue>) {
+    #[derive(Serialize)]
+    struct Body<'a> {
+        request_id: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        response: Option<&'a RawValue>,
+        subtype: &'static str,
     }
+
+    #[derive(Serialize)]
+    struct Line<'a> {
+        response: Body<'a>,
+        #[serde(rename = "type")]
+        kind: &'static str,
+    }
+
     let _ = shared
-        .write(&serde_json::json!({
-            "type": "control_response",
-            "response": response,
-        }))
+        .write(&Line {
+            response: Body {
+                request_id,
+                response: payload,
+                subtype: "success",
+            },
+            kind: "control_response",
+        })
         .await;
+}
+
+/// `omitempty` for a bool: Go drops `false`, and only sets `interrupt` at all
+/// when it is true.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Handles one inbound `control_request` and writes exactly one response.
@@ -665,12 +705,6 @@ pub(crate) async fn handle_control_request(
                 .and_then(|r| serde_json::from_value(r).ok())
                 .unwrap_or_default();
 
-            let original_input = envelope
-                .request
-                .input
-                .as_ref()
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw.get()).ok());
-
             let input_for_handler = envelope
                 .request
                 .input
@@ -684,37 +718,79 @@ pub(crate) async fn handle_control_request(
             )
             .await;
 
-            let payload = match result {
+            // Both arms are serialised to bytes here rather than to a
+            // `serde_json::Value`, because the allow arm carries the tool input
+            // the CLI is about to *execute*: a `Value` is a `BTreeMap` without
+            // `preserve_order`, so a round trip sorts the keys, respells the
+            // numbers (`1.50` → `1.5`) and truncates a decimal beyond f64. Go
+            // echoes `envelope.Request.Input` — a `json.RawMessage` — verbatim.
+            //
+            // Field order is the wire order and matches Go's sorted
+            // `map[string]any`: behavior < updatedInput < updatedPermissions,
+            // and behavior < interrupt < message.
+            let payload = match &result {
                 PermissionResult::Allow {
                     updated_input,
                     updated_permissions,
                 } => {
-                    let mut response = serde_json::json!({ "behavior": "allow" });
-                    // The CLI expects the input it should actually run; when
-                    // the handler does not rewrite it, echo the original back
-                    // verbatim.
-                    response["updatedInput"] = updated_input
-                        .or(original_input)
-                        .unwrap_or(serde_json::Value::Null);
-                    if !updated_permissions.is_empty() {
-                        response["updatedPermissions"] =
-                            serde_json::to_value(&updated_permissions).unwrap_or_default();
+                    #[derive(Serialize)]
+                    struct AllowResponse<'a> {
+                        behavior: &'static str,
+                        /// Always sent, `null` included: the CLI expects the
+                        /// input it should actually run, and Go marshals a nil
+                        /// `json.RawMessage` as `null` rather than dropping it.
+                        #[serde(rename = "updatedInput")]
+                        updated_input: Option<&'a RawValue>,
+                        #[serde(
+                            rename = "updatedPermissions",
+                            skip_serializing_if = "<[_]>::is_empty"
+                        )]
+                        updated_permissions: &'a [PermissionUpdate],
                     }
-                    response
+
+                    serde_json::value::to_raw_value(&AllowResponse {
+                        behavior: "allow",
+                        // When the handler does not rewrite it, echo the
+                        // original back — the same bytes, not the same value.
+                        updated_input: updated_input
+                            .as_deref()
+                            .or(envelope.request.input.as_deref()),
+                        updated_permissions,
+                    })
                 }
                 PermissionResult::Deny { message, interrupt } => {
-                    let mut response = serde_json::json!({
-                        "behavior": "deny",
-                        "message": message,
-                    });
-                    if interrupt {
-                        response["interrupt"] = serde_json::Value::Bool(true);
+                    #[derive(Serialize)]
+                    struct DenyResponse<'a> {
+                        behavior: &'static str,
+                        #[serde(skip_serializing_if = "is_false")]
+                        interrupt: bool,
+                        message: &'a str,
                     }
-                    response
+
+                    serde_json::value::to_raw_value(&DenyResponse {
+                        behavior: "deny",
+                        interrupt: *interrupt,
+                        message,
+                    })
                 }
             };
 
-            write_control_success(shared, request_id, Some(payload)).await;
+            // A failed encode is not a reason to leave the CLI waiting: every
+            // inbound control_request must be answered, and an unanswered one
+            // hangs it with no error on either side.
+            match payload {
+                Ok(payload) => {
+                    write_control_success_raw(shared, request_id, Some(&payload)).await;
+                }
+                Err(e) => {
+                    write_control_error(
+                        shared,
+                        request_id,
+                        &format!("encoding the permission response: {e}"),
+                    )
+                    .await;
+                }
+            }
         }
 
         "hook_callback" => {
