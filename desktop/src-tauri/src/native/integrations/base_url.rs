@@ -5,8 +5,8 @@
 //! needed the same answer. It is not general URL handling — it is one narrow
 //! question with one right answer, arrived at over four rounds of review on
 //! #317, and getting it wrong sent the user's `Basic` credentials to an
-//! attacker's host. #313–#315 do not need it (their API bases are constants);
-//! anything after them whose base comes out of the integration row does.
+//! attacker's host. #313–#315 do not need it — their API bases are constants,
+//! which #315 confirmed — and anything whose base comes out of the row does.
 //!
 //! # The problem
 //!

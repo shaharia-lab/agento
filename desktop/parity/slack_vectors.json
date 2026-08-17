@@ -1,0 +1,832 @@
+{
+  "_comment": [
+    "Cross-language parity vectors for internal/integrations/slack, the Slack",
+    "integration's in-process MCP server. Generated from Go, then frozen. Read by",
+    "desktop/parity/slack_parity_test.go (Go) and by",
+    "desktop/src-tauri/src/native/integrations/slack/ (Rust). Every value is exactly",
+    "what Go produces, so a divergence fails one language against the other's real",
+    "output rather than against a belief about it.",
+    "'tools' and 'hosting' come from live tools/list calls against servers built by",
+    "slack.Start; 'calls' from live tools/call calls against a scripted fake Slack",
+    "that records the request each tool built; 'tokens' pin resolveToken, including",
+    "that oauth mode reads the auth column rather than the credentials blob.",
+    "'token' is a fixture, not a secret: it is recorded so the Bearer prefix is pinned.",
+    "Regenerate with: go test ./desktop/parity/ -run TestSlackVectors -update-slack-vectors"
+  ],
+  "integration_id": "slack-parity",
+  "server_name": "slack-slack-parity",
+  "version": "1.0.0",
+  "token": "xoxb-parity-slack-token",
+  "tools": [
+    {
+      "name": "get_channel_info",
+      "description": "Gets detailed information about a Slack channel.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "description": "required,Channel ID to get info for",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_channels",
+      "description": "Lists Slack channels (public and private) the bot has access to.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "Pagination cursor for next page of results",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of channels to return (default 100, max 1000)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_users",
+      "description": "Lists users in the Slack workspace.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "Pagination cursor for next page of results",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of users to return (default 100, max 1000)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "read_messages",
+      "description": "Reads recent messages from a Slack channel.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "description": "required,Channel ID to read messages from",
+            "type": "string"
+          },
+          "cursor": {
+            "description": "Pagination cursor for next page of results",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of messages to return (default 20, max 100)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "channel",
+          "limit",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "search_messages",
+      "description": "Searches messages across the Slack workspace. Note: requires OAuth authentication (user token). This tool will return an error when used with a bot token.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "description": "Number of results to return per page (default 20, max 100)",
+            "type": "integer"
+          },
+          "page": {
+            "description": "Page number of results to return (default 1)",
+            "type": "integer"
+          },
+          "query": {
+            "description": "required,Search query string",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "count",
+          "page"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "send_message",
+      "description": "Sends a message to a Slack channel.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "description": "required,Channel ID to send the message to",
+            "type": "string"
+          },
+          "text": {
+            "description": "required,Text of the message to send",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "text"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "send_reply",
+      "description": "Sends a threaded reply to a message in a Slack channel.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "channel": {
+            "description": "required,Channel ID containing the thread",
+            "type": "string"
+          },
+          "text": {
+            "description": "required,Text of the reply",
+            "type": "string"
+          },
+          "thread_ts": {
+            "description": "required,Timestamp of the parent message to reply to",
+            "type": "string"
+          }
+        },
+        "required": [
+          "channel",
+          "thread_ts",
+          "text"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "hosting": [
+    {
+      "case": "the service enabled with no tool list — an empty allowed set hosts everything",
+      "services": {
+        "messaging": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "tools": [
+        "get_channel_info",
+        "list_channels",
+        "list_users",
+        "read_messages",
+        "search_messages",
+        "send_message",
+        "send_reply"
+      ]
+    },
+    {
+      "case": "no services at all",
+      "services": {},
+      "tools": []
+    },
+    {
+      "case": "the service disabled contributes neither its gate nor its tools",
+      "services": {
+        "messaging": {
+          "enabled": false,
+          "tools": [
+            "send_message"
+          ]
+        }
+      },
+      "tools": []
+    },
+    {
+      "case": "a non-empty allowed set is a filter",
+      "services": {
+        "messaging": {
+          "enabled": true,
+          "tools": [
+            "send_message",
+            "list_users"
+          ]
+        }
+      },
+      "tools": [
+        "list_users",
+        "send_message"
+      ]
+    },
+    {
+      "case": "an enabled but unknown service still narrows the one that exists",
+      "services": {
+        "messaging": {
+          "enabled": true,
+          "tools": null
+        },
+        "other": {
+          "enabled": true,
+          "tools": [
+            "read_messages"
+          ]
+        }
+      },
+      "tools": [
+        "read_messages"
+      ]
+    },
+    {
+      "case": "a tool named by a disabled service is not allowed anywhere",
+      "services": {
+        "messaging": {
+          "enabled": true,
+          "tools": [
+            "get_channel_info"
+          ]
+        },
+        "other": {
+          "enabled": false,
+          "tools": [
+            "send_reply"
+          ]
+        }
+      },
+      "tools": [
+        "get_channel_info"
+      ]
+    }
+  ],
+  "tokens": [
+    {
+      "case": "bot_token mode reads the credentials blob",
+      "credentials": "{\"auth_mode\":\"bot_token\",\"bot_token\":\"xoxb-parity-slack-token\"}",
+      "auth": "{\"team\":\"parity\"}",
+      "authorization": "Bearer xoxb-parity-slack-token"
+    },
+    {
+      "case": "oauth mode reads the auth column, not the credentials",
+      "credentials": "{\"auth_mode\":\"oauth\",\"bot_token\":\"xoxb-ignored-in-oauth-mode\"}",
+      "auth": "{\"access_token\":\"xoxp-parity-oauth-token\",\"token_type\":\"Bearer\"}",
+      "authorization": "Bearer xoxp-parity-oauth-token"
+    },
+    {
+      "case": "an unrecognized auth_mode falls back to a non-empty bot token",
+      "credentials": "{\"auth_mode\":\"\",\"bot_token\":\"xoxb-parity-slack-token\"}",
+      "auth": "{\"team\":\"parity\"}",
+      "authorization": "Bearer xoxb-parity-slack-token"
+    },
+    {
+      "case": "an unrecognized auth_mode with no bot token is refused",
+      "credentials": "{\"auth_mode\":\"magic\",\"bot_token\":\"\"}",
+      "auth": "{\"team\":\"parity\"}",
+      "error": "resolving slack token for \"slack-parity\": unsupported auth_mode \"magic\" and no bot_token available"
+    },
+    {
+      "case": "bot_token mode with an empty token is refused",
+      "credentials": "{\"auth_mode\":\"bot_token\",\"bot_token\":\"\"}",
+      "auth": "{\"team\":\"parity\"}",
+      "error": "resolving slack token for \"slack-parity\": bot_token is empty"
+    },
+    {
+      "case": "oauth mode with an auth column that does not decode",
+      "credentials": "{\"auth_mode\":\"oauth\"}",
+      "auth": "[\"not\",\"a\",\"token\"]",
+      "error": "resolving slack token for \"slack-parity\": parsing oauth token: parsing oauth token: json: cannot unmarshal array into Go value of type oauth2.Token",
+      "rust_error": "resolving slack token for \"slack-parity\": parsing oauth token: does not decode at line 1 column 8"
+    },
+    {
+      "case": "oauth mode with no access_token sends an empty bearer",
+      "credentials": "{\"auth_mode\":\"oauth\"}",
+      "auth": "{\"token_type\":\"Bearer\"}",
+      "authorization": "Bearer"
+    }
+  ],
+  "calls": [
+    {
+      "case": "list_channels/zero limit takes the 100 fallback and sends no cursor",
+      "tool": "list_channels",
+      "arguments": {
+        "cursor": "",
+        "limit": 0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.list",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "limit=100\u0026types=public_channel%2Cprivate_channel"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "list_channels/over 1000 falls back to 100, and a cursor is url-encoded",
+      "tool": "list_channels",
+      "arguments": {
+        "cursor": "dXNlcjpVMDYx a+b",
+        "limit": 1001
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.list",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "cursor=dXNlcjpVMDYx+a%2Bb\u0026limit=100\u0026types=public_channel%2Cprivate_channel"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "list_channels/1000 is the largest value that survives",
+      "tool": "list_channels",
+      "arguments": {
+        "cursor": "",
+        "limit": 1000
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.list",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "limit=1000\u0026types=public_channel%2Cprivate_channel"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "get_channel_info/one form field",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C0123"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C0123"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "get_channel_info/a channel needing form escaping",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "a b\u0026c=d/e日本語"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=a+b%26c%3Dd%2Fe%E6%97%A5%E6%9C%AC%E8%AA%9E"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "read_messages/the clamp is 100 and the fallback 20, not the listers' 1000 and 100",
+      "tool": "read_messages",
+      "arguments": {
+        "channel": "C1",
+        "cursor": "",
+        "limit": 101
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.history",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1\u0026limit=20"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "read_messages/100 survives, and a cursor is sent",
+      "tool": "read_messages",
+      "arguments": {
+        "channel": "C1",
+        "cursor": "next",
+        "limit": 100
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.history",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1\u0026cursor=next\u0026limit=100"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "send_message/a JSON body with the charset content type",
+      "tool": "send_message",
+      "arguments": {
+        "channel": "C1",
+        "text": "hello \u003cthere\u003e \u0026 welcome"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/chat.postMessage",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/json; charset=utf-8",
+        "body": "{\"channel\":\"C1\",\"text\":\"hello \\u003cthere\\u003e \\u0026 welcome\"}"
+      },
+      "is_error": false,
+      "text": "Message sent successfully. Response: {\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "send_reply/the same Slack method with one more key, and a different sentence",
+      "tool": "send_reply",
+      "arguments": {
+        "channel": "C1",
+        "text": "ack",
+        "thread_ts": "1727700000.000100"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/chat.postMessage",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/json; charset=utf-8",
+        "body": "{\"channel\":\"C1\",\"text\":\"ack\",\"thread_ts\":\"1727700000.000100\"}"
+      },
+      "is_error": false,
+      "text": "Reply sent successfully. Response: {\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "list_users/no channel field at all, unlike read_messages",
+      "tool": "list_users",
+      "arguments": {
+        "cursor": "",
+        "limit": 0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/users.list",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "limit=100"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "search_messages/count clamps at 100 and page has a floor of 1",
+      "tool": "search_messages",
+      "arguments": {
+        "count": 0,
+        "page": 0,
+        "query": "from:me in:#general"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/search.messages",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "count=20\u0026page=1\u0026query=from%3Ame+in%3A%23general"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "search_messages/page has no ceiling",
+      "tool": "search_messages",
+      "arguments": {
+        "count": 101,
+        "page": 999999,
+        "query": "x"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/search.messages",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "count=20\u0026page=999999\u0026query=x"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "search_messages/an empty query still sends the key",
+      "tool": "search_messages",
+      "arguments": {
+        "count": 50,
+        "page": 2,
+        "query": ""
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/search.messages",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "count=50\u0026page=2\u0026query="
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "list_users/a 200 carrying ok:false is a failure",
+      "tool": "list_users",
+      "arguments": {
+        "cursor": "",
+        "limit": 0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":false,\"error\":\"not_authed\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/users.list",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "limit=100"
+      },
+      "is_error": true,
+      "text": "slack API error (users.list): not_authed"
+    },
+    {
+      "case": "list_users/a 500 carrying ok:true is a success",
+      "tool": "list_users",
+      "arguments": {
+        "cursor": "",
+        "limit": 0
+      },
+      "response": {
+        "status": 500,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/users.list",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "limit=100"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+    },
+    {
+      "case": "get_channel_info/ok:false with no error field interpolates an empty one",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C1"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":false}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1"
+      },
+      "is_error": true,
+      "text": "slack API error (conversations.info): "
+    },
+    {
+      "case": "get_channel_info/a body that is not JSON",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C1"
+      },
+      "response": {
+        "status": 200,
+        "body": "\u003chtml\u003enope\u003c/html\u003e"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1"
+      },
+      "is_error": true,
+      "text": "parsing response: invalid character '\u003c' looking for beginning of value",
+      "rust_text": "parsing response: expected value at line 1 column 1"
+    },
+    {
+      "case": "get_channel_info/a null error field is a zero value, not a type error",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C1"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"error\":null}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"error\":null}"
+    },
+    {
+      "case": "get_channel_info/a null ok field is a false one",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C1"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":null}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1"
+      },
+      "is_error": true,
+      "text": "slack API error (conversations.info): "
+    },
+    {
+      "case": "get_channel_info/a bare null body is a no-op, not a parse failure",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C1"
+      },
+      "response": {
+        "status": 200,
+        "body": "null"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1"
+      },
+      "is_error": true,
+      "text": "slack API error (conversations.info): "
+    },
+    {
+      "case": "get_channel_info/a JSON array is not a struct",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C1"
+      },
+      "response": {
+        "status": 200,
+        "body": "[true]"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1"
+      },
+      "is_error": true,
+      "text": "parsing response: json: cannot unmarshal array into Go value of type struct { OK bool \"json:\\\"ok\\\"\"; Error string \"json:\\\"error,omitempty\\\"\" }",
+      "rust_text": "parsing response: invalid type: sequence, expected a JSON object at line 1 column 0"
+    },
+    {
+      "case": "send_message/429 is its own sentence, carrying Retry-After",
+      "tool": "send_message",
+      "arguments": {
+        "channel": "C1",
+        "text": "hi"
+      },
+      "response": {
+        "status": 429,
+        "retry_after": "30",
+        "body": ""
+      },
+      "request": {
+        "method": "POST",
+        "target": "/chat.postMessage",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/json; charset=utf-8",
+        "body": "{\"channel\":\"C1\",\"text\":\"hi\"}"
+      },
+      "is_error": true,
+      "text": "slack rate limited (chat.postMessage), retry after 30 seconds"
+    },
+    {
+      "case": "read_messages/429 with no Retry-After leaves an empty gap in the sentence",
+      "tool": "read_messages",
+      "arguments": {
+        "channel": "C1",
+        "cursor": "",
+        "limit": 0
+      },
+      "response": {
+        "status": 429,
+        "body": ""
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.history",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1\u0026limit=20"
+      },
+      "is_error": true,
+      "text": "slack rate limited (conversations.history), retry after  seconds"
+    },
+    {
+      "case": "list_channels/a zero-fraction float is an integer to Go and not to serde",
+      "tool": "list_channels",
+      "arguments": {
+        "cursor": "",
+        "limit": 100.0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.list",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "limit=100\u0026types=public_channel%2Cprivate_channel"
+      },
+      "is_error": false,
+      "text": "{\"ok\":true,\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"channels\":[]}",
+      "rust_text": "failed to deserialize parameters: invalid type: floating point `100.0`, expected i64",
+      "rust_no_request": true
+    }
+  ]
+}
