@@ -104,12 +104,22 @@ where
             format!("invalid {kind} credentials: credentials are empty"),
         ));
     };
-    // Through `Option<T>` rather than straight to `T`: a literal `null` is a
-    // *type error* to serde but leaves the zero value in Go, so a direct
-    // deserialize would forward `"credentials": null` instead of reporting the
-    // first missing field the way Go does.
-    serde_json::from_str::<Option<T>>(raw.get())
-        .map(Option::unwrap_or_default)
+    // Two wrappers, one Go rule each, and the request struct beside this one
+    // carries both on `services` for the same reasons (#295, #337):
+    //
+    // - `Option<T>` rather than straight to `T`, because a literal `null` is a
+    //   *type error* to serde and the zero value to Go — a direct deserialize
+    //   would forward `"credentials": null` instead of reporting the first
+    //   missing field the way Go does.
+    // - `GoStruct<T>`, because serde fills a struct from a JSON **array**
+    //   positionally when every field has a default, so `"credentials":["tok"]`
+    //   decoded to a populated struct, passed the non-empty check and **created
+    //   the row 201** where `validateTelegramCredentials` answers 422
+    //   `cannot unmarshal array`. This is the decode behind all seven per-type
+    //   validators, so it is the one place the rule decides whether a row is
+    //   written at all rather than only whether a server is hosted.
+    serde_json::from_str::<Option<super::gojson::GoStruct<T>>>(raw.get())
+        .map(|wrapped| wrapped.map_or_else(T::default, |wrapped| wrapped.0))
         .map_err(|e| {
             // **The error is deliberately not included.** serde_json quotes the
             // offending value, so a caller who sends
@@ -490,6 +500,31 @@ fn json_string(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// A JSON **array** where a credentials object belongs.
+    ///
+    /// serde fills a struct from a sequence positionally when every field has a
+    /// default, so this decoded to a populated struct, passed the non-empty check
+    /// and created the row — where Go answers 422 `cannot unmarshal array`. It
+    /// forwards now, which is how Go's own message reaches the caller verbatim.
+    ///
+    /// The same rule `services` has carried since #337, one field along in the
+    /// same request struct.
+    #[test]
+    fn a_json_array_is_not_a_credentials_object() {
+        for (kind, blob) in [
+            ("telegram", r#"["123456:AAF-token"]"#),
+            ("github", r#"["pat","ghp_x"]"#),
+            ("confluence", "[]"),
+        ] {
+            let raw = serde_json::value::RawValue::from_string(blob.to_string()).expect("raw");
+            let err = validate(kind, Some(&raw)).expect_err("an array must not be accepted");
+            assert!(
+                matches!(err, WriteError::Fallback(_)),
+                "{kind} {blob}: {err:?}"
+            );
+        }
+    }
+
     use super::*;
 
     fn raw(s: &str) -> Box<RawValue> {

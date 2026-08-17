@@ -451,9 +451,12 @@ mod tests {
             .await
             .map(|response| response.result().to_string())
             .expect_err("the body ends early");
+        // No disjunction with the send-path sentence: if the failure ever
+        // migrates there, this must fail loudly rather than quietly stop
+        // asserting the thing it exists for.
         assert!(
-            message.starts_with("reading response: ") || message.starts_with("calling Telegram "),
-            "unexpected sentence: {message}"
+            message.starts_with("reading response: "),
+            "this must fail in the body stream, not the send: {message}"
         );
         assert!(!message.contains(SECRET), "the bot token reached the model");
         assert!(
