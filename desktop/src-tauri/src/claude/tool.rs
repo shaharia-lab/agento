@@ -90,6 +90,18 @@
 //! in the signature, and a handler that makes a network call is expected to
 //! honour it — with `reqwest`, `tokio::select!` on `ct.cancelled()`. Widening
 //! the signature later would have been a 62-site edit.
+//!
+//! **What the token is *not*, since #311: a shutdown signal.** Dropping an
+//! [`super::InProcessMcpServer`] used to fire the transport's token — the parent
+//! of every call's — as the graceful-shutdown signal, which aborted whatever was
+//! in flight. Go's shutdown is graceful (`httpServer.Shutdown(context.Background())`,
+//! with each handler holding the *request's* context), so an in-flight
+//! `tools/call` there runs to completion and its answer is delivered; the token
+//! now fires only once `axum::serve` has drained, which is what makes the two
+//! match. It still fires, and that is still what stops a handler outliving its
+//! listener — it just fires *after* the work rather than instead of it. See
+//! `claude/mcp.rs`, and #311's unconditional reload for why the window is
+//! ordinary rather than exotic.
 
 use std::future::Future;
 
@@ -705,30 +717,39 @@ mod tests {
         }
     }
 
-    // `flavor = "multi_thread"`: the request is in flight on another task while
-    // this one drops the handle, and a current-thread runtime would not run
-    // both.
+    /// The token a handler is given is **the call's**: live while the call runs,
+    /// cancelled the moment it ends.
+    ///
+    /// This is what a handler's `tokio::select!` arm actually keys on, and it is
+    /// the reason a handler must not stash the token and keep using it — a
+    /// background task spawned from one would find it already cancelled.
+    ///
+    /// It replaces `dropping_the_server_cancels_an_in_flight_handler`, which
+    /// asserted the opposite of what this SDK now does. That test dropped the
+    /// server while a handler waited on the token and required the wait to end;
+    /// #311 made shutdown **graceful** to match Go's
+    /// `httpServer.Shutdown(context.Background())`, so the transport's token —
+    /// the parent of this one — fires only after `axum::serve` has drained, and
+    /// a handler that blocks on it now blocks the very shutdown that would fire
+    /// it. The in-flight half of the new contract is pinned in `claude/mcp.rs`,
+    /// where the ordering that produces it lives.
+    ///
+    /// `flavor = "multi_thread"`: the handler and the caller run concurrently.
     #[tokio::test(flavor = "multi_thread")]
-    async fn dropping_the_server_cancels_an_in_flight_handler() {
-        // The reason the token is in the signature at all. `rmcp` spawns a tool
-        // handler detached — cancelling a request cancels its token and nothing
-        // else — so a handler that does not watch it keeps its outbound HTTP
-        // call alive after the caller has gone.
-        let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        let (cancelled_tx, mut cancelled_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    async fn a_handler_gets_the_calls_own_token_live_while_the_call_runs() {
+        let (report_tx, mut report_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(CancellationToken, bool)>();
 
         let server = tool_server(
             "calc",
             [new_tool(
-                "wait",
-                "Waits to be cancelled.",
+                "report-token",
+                "Reports the token it was given.",
                 move |_input: AddInput, ct: CancellationToken| {
-                    let started = started_tx.clone();
-                    let cancelled = cancelled_tx.clone();
+                    let report = report_tx.clone();
                     async move {
-                        let _ = started.send(());
-                        ct.cancelled().await;
-                        let _ = cancelled.send(());
+                        let seen_live = !ct.is_cancelled();
+                        let _ = report.send((ct, seen_live));
                         Ok(CallToolResult::success(vec![]))
                     }
                 },
@@ -737,29 +758,24 @@ mod tests {
         .await
         .unwrap();
 
-        let url = server.url().to_string();
-        let auth = server.config().headers["Authorization"].clone();
-        let in_flight = tokio::spawn(async move {
-            let _ = reqwest::Client::new()
-                .post(url)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json, text/event-stream")
-                .header("Authorization", auth)
-                .body(
-                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
-                        "params":{"name":"wait","arguments":{"a":0,"b":0}}}"#,
-                )
-                .send()
-                .await;
-        });
+        let body = call(
+            &server,
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+                "params":{"name":"report-token","arguments":{"a":0,"b":0}}}"#,
+        )
+        .await;
+        assert!(body.get("error").is_none(), "{body}");
 
-        started_rx.recv().await.expect("the handler ran");
-        drop(server);
-
-        tokio::time::timeout(std::time::Duration::from_secs(5), cancelled_rx.recv())
-            .await
-            .expect("the handler's token was never cancelled")
-            .expect("the handler observed the cancellation");
-        in_flight.abort();
+        let (ct, seen_live) = report_rx.recv().await.expect("the handler ran");
+        assert!(
+            seen_live,
+            "the handler was handed an already-cancelled token, so a select! on \
+             it would abort every call immediately"
+        );
+        assert!(
+            ct.is_cancelled(),
+            "rmcp cancels the request's token when the call ends; a handler that \
+             kept it would be holding a dead one"
+        );
     }
 }

@@ -40,9 +40,9 @@
     {
       "method": "DELETE",
       "route": "/api/integrations/{id}",
-      "status": "deferred",
-      "owner": "#282",
-      "reason": "Stops the live in-process MCP server"
+      "status": "native",
+      "owner": "#311",
+      "reason": "stops the MCP server, which the shell now hosts; the sidecar runs with AGENTO_INTEGRATIONS=off"
     },
     {
       "method": "DELETE",
@@ -320,9 +320,9 @@
     {
       "method": "PUT",
       "route": "/api/integrations/{id}",
-      "status": "deferred",
-      "owner": "#282",
-      "reason": "Reloads the live in-process MCP server"
+      "status": "native",
+      "owner": "#311",
+      "reason": "reloads the MCP server, which the shell now hosts; the sidecar runs with AGENTO_INTEGRATIONS=off"
     },
     {
       "method": "PUT",

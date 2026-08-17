@@ -548,18 +548,21 @@ mod tests {
             "/api/claude-sessions/abc/journey/continue"
         ));
 
-        // Integrations: the four reads, plus the writes with no live-server
-        // effect. Anything that reloads an MCP server, dials a remote service,
-        // or reads in-memory OAuth state stays with Go.
+        // Integrations: the four reads, plus every write that is not an OAuth
+        // flow, a webhook registration or WhatsApp. Anything that dials a
+        // remote service or reads in-memory OAuth state stays with Go.
         assert!(claims(&Method::GET, "/api/integrations"));
         assert!(claims(&Method::GET, "/api/integrations/available-tools"));
         assert!(claims(&Method::GET, "/api/integrations/abc"));
         assert!(claims(&Method::GET, "/api/integrations/abc/triggers"));
         assert!(claims(&Method::POST, "/api/integrations"));
         assert!(claims(&Method::PUT, "/api/integrations/abc/triggers/r1"));
-        // Still Go's: these start and stop the live MCP server (#282).
-        assert!(!claims(&Method::PUT, "/api/integrations/abc"));
-        assert!(!claims(&Method::DELETE, "/api/integrations/abc"));
+        // Ours since #311. These reload and stop the live MCP server, which is
+        // now hosted here and nowhere else — the sidecar runs with
+        // `AGENTO_INTEGRATIONS=off`.
+        assert!(claims(&Method::PUT, "/api/integrations/abc"));
+        assert!(claims(&Method::DELETE, "/api/integrations/abc"));
+        assert!(!claims(&Method::PATCH, "/api/integrations/abc"));
         assert!(!claims(&Method::GET, "/api/integrations/abc/auth/status"));
         assert!(!claims(
             &Method::GET,

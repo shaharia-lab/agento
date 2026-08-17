@@ -966,9 +966,12 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
 ///
 /// #274's rule decides it: *a route moves only when Rust can reproduce every
 /// effect it has*, and one of this route's effects is "the sidecar now agrees".
-/// There is no `AGENTO_SCANNER=off` equivalent to switch that half off the way
-/// #289 switched off the Go scanner, and no forward-after-write that is not just
-/// the forward. So the handler is written, unit-tested against Go's literal
+/// #289 and #311 both got past that by switching the Go half off
+/// (`AGENTO_SCANNER`, `AGENTO_INTEGRATIONS`), but neither shape applies here:
+/// those switch off a *subsystem* the sidecar owns, while this is a snapshot the
+/// sidecar **reads** on paths it is still serving, and no switch makes those
+/// paths read the row instead. Nor is there a forward-after-write that is not
+/// just the forward. So the handler is written, unit-tested against Go's literal
 /// answers, and left unwired — exactly as `migrate::apply` was in #274 — and it
 /// turns on with the cut-over that removes the sidecar.
 ///

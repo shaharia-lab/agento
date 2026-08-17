@@ -27,8 +27,10 @@
 //!   would tell the user telemetry is on while nothing is emitted — and a
 //!   ported PUT would go stale a second way before the cut-over even arrives,
 //!   since the sidecar's providers are built once at `Update` and a native write
-//!   cannot reach them. There is no `AGENTO_SCANNER=off` equivalent to switch
-//!   the Go half off, which is the same wall #305 hit on `PUT /api/settings`.
+//!   cannot reach them. #289 and #311 both got past that wall by switching the
+//!   Go half off (`AGENTO_SCANNER`, `AGENTO_INTEGRATIONS`); there is no such
+//!   switch for a provider set the sidecar has already built, which is the same
+//!   wall #305 hit on `PUT /api/settings`.
 //! - **Porting the exporters** is the largest option in the plan and reverses a
 //!   decision the handover already records: OTel and Prometheus are server
 //!   concerns, and this app is not the server.

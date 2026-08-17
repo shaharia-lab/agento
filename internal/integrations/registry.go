@@ -1,11 +1,20 @@
 // Package integrations manages external service integrations (e.g. Google Calendar, Gmail, Drive)
 // that run as in-process MCP servers made available to Claude agents.
+//
+// There are two ways a server here comes to exist, and only one of them is a
+// *hosted* server. Start/Reload/Stop keep a long-lived server per integration,
+// recorded in the registry; StartFilteredServer builds a throwaway one per
+// agent run from a fresh row read, records nothing, and is what every run
+// actually uses. AGENTO_INTEGRATIONS switches the first off for this process
+// (see hostingDisabled) and deliberately does not touch the second.
 package integrations
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"sync"
 
 	claude "github.com/shaharia-lab/claude-agent-sdk-go/claude"
@@ -26,18 +35,66 @@ type IntegrationRegistry struct {
 	servers  map[string]claude.McpHTTPServer
 	cancels  map[string]context.CancelFunc
 	logger   *slog.Logger
+
+	// hostingOff reports that this process must not host any integration's
+	// long-lived MCP server. Snapshotted at construction from
+	// AGENTO_INTEGRATIONS — see hostingDisabled.
+	//
+	// It gates Start/Reload/Stop and nothing else: StartFilteredServer builds a
+	// server per agent run from a fresh row read and never touches the hosted
+	// maps, so a run that uses integration tools works exactly as before.
+	hostingOff bool
 }
 
 // NewRegistry creates a new IntegrationRegistry backed by the given store.
 func NewRegistry(store storage.IntegrationStore, logger *slog.Logger) *IntegrationRegistry {
 	return &IntegrationRegistry{
-		store:    store,
-		starters: make(map[string]ServerStarter),
-		servers:  make(map[string]claude.McpHTTPServer),
-		cancels:  make(map[string]context.CancelFunc),
-		logger:   logger,
+		store:      store,
+		starters:   make(map[string]ServerStarter),
+		servers:    make(map[string]claude.McpHTTPServer),
+		cancels:    make(map[string]context.CancelFunc),
+		logger:     logger,
+		hostingOff: hostingDisabled(),
 	}
 }
+
+// hostingDisabled reports whether this process has been told not to host
+// integration MCP servers.
+//
+// Read once: it is a deployment fact, not a setting, and re-reading it per call
+// would let a server start halfway through a run.
+//
+// The desktop app sets it, because its Rust shell owns the hosting (#311) and
+// two processes hosting one integration is the hazard — an unauthenticated
+// loopback listener in the sidecar would keep serving the credential it was
+// started with long after the Rust half had been told to reload or stop it.
+func hostingDisabled() bool {
+	hostingDisabledOnce.Do(func() {
+		hostingOff = hostingOffValue(os.Getenv("AGENTO_INTEGRATIONS"))
+	})
+	return hostingOff
+}
+
+// hostingOffValue is the parsing on its own, so it can be tested without the
+// sync.Once that makes the real reader deliberately un-resettable.
+//
+// Unset is **on**: a plain `agento web` must keep hosting its integrations, and
+// only a process that has been told otherwise stops. Anything unrecognized is
+// also on, for the same reason — a typo in the variable must not silently
+// disable every integration.
+func hostingOffValue(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "off", "0", "false", "disabled":
+		return true
+	default:
+		return false
+	}
+}
+
+var (
+	hostingDisabledOnce sync.Once
+	hostingOff          bool
+)
 
 // RegisterStarter registers a ServerStarter for a given integration type (e.g. "google").
 func (r *IntegrationRegistry) RegisterStarter(integrationType string, starter ServerStarter) {
@@ -47,7 +104,15 @@ func (r *IntegrationRegistry) RegisterStarter(integrationType string, starter Se
 }
 
 // Start launches in-process MCP servers for all enabled integrations that have a valid auth token.
+//
+// A no-op when this process has been told not to host them (AGENTO_INTEGRATIONS
+// off): the store is not even listed, because there is nothing to do with the
+// result.
 func (r *IntegrationRegistry) Start(ctx context.Context) error {
+	if r.hostingOff {
+		return nil
+	}
+
 	integrations, err := r.store.List(ctx)
 	if err != nil {
 		return fmt.Errorf("listing integrations: %w", err)
@@ -70,7 +135,16 @@ func (r *IntegrationRegistry) Start(ctx context.Context) error {
 }
 
 // Reload stops and restarts the MCP server for the integration with the given id.
+//
+// A no-op when hosting is off. This is the single choke point for every caller
+// that reacts to a config change — the update handler, the OAuth callback and
+// the five token validators all reach a server only through here — so one guard
+// covers all of them and no caller has to know.
 func (r *IntegrationRegistry) Reload(ctx context.Context, id string) error {
+	if r.hostingOff {
+		return nil
+	}
+
 	r.Stop(id)
 
 	cfg, err := r.store.Get(ctx, id)
@@ -87,7 +161,15 @@ func (r *IntegrationRegistry) Reload(ctx context.Context, id string) error {
 }
 
 // Stop cancels the running MCP server for the given integration id.
+//
+// Already a no-op when hosting is off, since nothing was ever recorded — but
+// spelled out, so the three lifecycle methods read the same way and a future
+// caller of startOne cannot make the maps non-empty behind this one's back.
 func (r *IntegrationRegistry) Stop(id string) {
+	if r.hostingOff {
+		return
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if cancel, ok := r.cancels[id]; ok {

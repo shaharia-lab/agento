@@ -116,6 +116,16 @@ var dispositions = map[string]disposition{
 	"PUT /api/integrations/{id}/triggers/{rid}":    {statusNative, "#277", "trigger rules are only rows"},
 	"DELETE /api/integrations/{id}/triggers/{rid}": {statusNative, "#277", "trigger rules are only rows"},
 
+	// ── Integrations that own live state, once the shell took it (#311) ─────
+	//
+	// The second ownership flip, and the same shape as #289's: the sidecar runs
+	// with AGENTO_INTEGRATIONS=off, so IntegrationRegistry.Start/Reload/Stop
+	// are no-ops there and the Rust registry is the only implementation. Until
+	// that switch existed a native write here would have left the sidecar
+	// hosting an unauthenticated loopback MCP server on a revoked credential.
+	"PUT /api/integrations/{id}":    {statusNative, "#311", "reloads the MCP server, which the shell now hosts; the sidecar runs with AGENTO_INTEGRATIONS=off"},
+	"DELETE /api/integrations/{id}": {statusNative, "#311", "stops the MCP server, which the shell now hosts; the sidecar runs with AGENTO_INTEGRATIONS=off"},
+
 	// ── The scan, which the shell now owns (#289) ───────────────────────────
 	"POST /api/claude-sessions/refresh": {statusNative, "#289", "the shell owns the scan; the sidecar runs with AGENTO_SCANNER=off"},
 
@@ -150,10 +160,6 @@ var dispositions = map[string]disposition{
 	"DELETE /api/tasks/{id}":      {statusDeferred, "#275", "unregisters the cron entry"},
 	"POST /api/tasks/{id}/pause":  {statusDeferred, "#275", "unregisters the cron entry"},
 	"POST /api/tasks/{id}/resume": {statusDeferred, "#275", "re-registers the cron entry"},
-
-	// ── Deferred: the live MCP server (#282) ────────────────────────────────
-	"PUT /api/integrations/{id}":    {statusDeferred, "#282", "Reloads the live in-process MCP server"},
-	"DELETE /api/integrations/{id}": {statusDeferred, "#282", "Stops the live in-process MCP server"},
 
 	// ── Deferred: it talks to somebody else's server ────────────────────────
 	"POST /api/integrations/{id}/auth/start":                {statusDeferred, "-", "mints an OAuth URL and holds the in-flight flow in memory"},
