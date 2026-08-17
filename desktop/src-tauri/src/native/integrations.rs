@@ -580,8 +580,27 @@ struct CreateIntegrationRequest {
     #[serde(deserialize_with = "super::gojson::captured_raw")]
     credentials: Option<Box<RawValue>>,
     /// A `null` **value** is the zero `ServiceConfig` to Go, not an error
-    /// (#295) — the same rule `Capabilities.mcp` carries.
-    services: Option<super::gojson::GoMap<ServiceConfig>>,
+    /// (#295) — the same rule `Capabilities.mcp` carries, and [`GoStruct`] is
+    /// the same third rule (#337): `{"services":{"s":[true,null]}}` filled a
+    /// `ServiceConfig` positionally where Go answers 400.
+    services: Option<super::gojson::GoMap<super::gojson::GoStruct<ServiceConfig>>>,
+}
+
+/// Drop the [`super::gojson::GoStruct`] wrappers a decoded `services` map
+/// carries.
+///
+/// The wrapper is a **decode-time** rule and serializes as its inner value, so
+/// the stored bytes and the response bytes are the same either way. Peeling it
+/// here is what keeps `ScrubbedIntegration` — a response type — free of a
+/// request-side concern.
+fn unwrap_services(
+    services: super::gojson::GoMap<super::gojson::GoStruct<ServiceConfig>>,
+) -> std::collections::BTreeMap<String, ServiceConfig> {
+    services
+        .0
+        .into_iter()
+        .map(|(name, service)| (name, service.0))
+        .collect()
 }
 
 /// `handleCreateIntegration` → `integrationService.Create`.
@@ -616,7 +635,7 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     let now = super::gotime::now_go_text();
     // `if cfg.Services == nil { cfg.Services = make(...) }` — so an absent
     // `services` is stored and echoed as `{}`, never as `null`.
-    let services = req.services.unwrap_or_default();
+    let services = unwrap_services(req.services.unwrap_or_default());
     let services_json = super::gojson::to_vec_marshal(&services)
         .map_err(|e| WriteError::Fallback(format!("marshaling services: {e}")))?;
     let services_json = String::from_utf8(services_json)
@@ -651,7 +670,7 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
         enabled: req.enabled,
         id,
         name: req.name,
-        services: Some(services.0),
+        services: Some(services),
         integration_type: req.integration_type,
         updated_at: parse_written(&now)?,
     };
@@ -681,7 +700,9 @@ struct UpdateIntegrationRequest {
     /// Go stores this column verbatim. See `writes::decode_body`.
     #[serde(deserialize_with = "super::gojson::captured_raw")]
     credentials: Option<Box<RawValue>>,
-    services: Option<super::gojson::GoMap<ServiceConfig>>,
+    /// Same two rules as the create side's: `null` value is the zero struct
+    /// (#295), and an array where a struct belongs is a 400 (#337).
+    services: Option<super::gojson::GoMap<super::gojson::GoStruct<ServiceConfig>>>,
 }
 
 /// `handleUpdateIntegration` → `integrationService.Update`, then
@@ -783,7 +804,7 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
         enabled: req.enabled,
         id: id.to_string(),
         name: req.name,
-        services: req.services.map(|services| services.0),
+        services: req.services.map(unwrap_services),
         integration_type: req.integration_type,
         updated_at: parse_written(&now)?,
     };
@@ -1584,8 +1605,18 @@ mod tests {
         // And a wrongly-typed value still fails, which is Go's answer too —
         // including the positional arrays that `#[serde(default)]` on `tools`
         // used to admit. Dropping that attribute (redundant once `tools` is a
-        // `GoList`) is what closes them.
-        for services in [r#"{"s":1}"#, r#"{"s":[]}"#, r#"{"s":[true]}"#] {
+        // `GoList`) is what closes the short ones; `GoStruct` (#337) closes the
+        // rest. `ServiceConfig` has one field without a default, so `[true]`
+        // was already refused and `[true,null]` — its full length — was the
+        // shape that got through and stored a row Go answers 400 to.
+        for services in [
+            r#"{"s":1}"#,
+            r#"{"s":[]}"#,
+            r#"{"s":[true]}"#,
+            r#"{"s":[true,null]}"#,
+            r#"{"s":[true,["send"]]}"#,
+            r#"{"s":[true,null,"extra"]}"#,
+        ] {
             let file = migrated();
             let body = format!(
                 r#"{{"name":"W","type":"telegram","credentials":{{"bot_token":"t"}},"services":{services}}}"#

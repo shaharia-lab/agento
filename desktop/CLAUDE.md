@@ -533,12 +533,41 @@ means forward and nothing errors when Rust accepts what Go refuses. A type needs
 no attribute at all, so the struct stays exactly as strict about its own shape.
 Pinned by `a_container_default_would_have_widened_the_struct_from_array_over_accept`.
 
-What is left standing, pinned by
-`a_full_length_positional_array_is_a_known_over_accept`: serde builds a struct
-from a **full-length** JSON array, positionally, so `{"capabilities":[[...],null,null]}`
-is accepted and Go answers 400. `writes::decode_body` guards that shape at the
-body level (#274) and nothing checks it for a value *inside* the body. It
-predates #295 and is tracked as **#337**.
+**`gojson::GoStruct<T>` is the third type, and it closes what those two left**
+(#337). serde builds a struct from a **full-length** JSON array, positionally, so
+`{"capabilities":[[...],null,null]}` was accepted and Go answers 400.
+`writes::decode_body` guards that shape at the *body* level (#274) and nothing
+checked it for a value *inside* the body — the one over-**accept** in the port,
+where every other decode divergence has been an over-reject. An over-reject is
+visible and `Err`-means-forward turns it into Go's own answer; an over-accept
+writes a row Go refuses, with nothing to report it.
+
+The accepted set was not uniform, which is what made it hard to see: the derive's
+`visit_seq` errors only when the array runs out of elements for a field with
+**no** default, so a struct accepted exactly "as many elements as it has fields
+without a default" — three for `Capabilities`, one for `McpCapability`, two for
+`ServiceConfig`, and **zero** for `SmtpConfig` and `ScheduledTasksPreferences`,
+whose every field carries `#[serde(default)]` because `deserialize_with` makes a
+field required. `{"provider":[]}` was a saved SMTP configuration.
+
+`deserialize_map` is the whole mechanism — `serde_json` answers it with
+`invalid type: sequence` for anything that is not `{`, and the visitor hands the
+`MapAccess` to `T`'s own derived impl, so the inner struct's strictness is
+untouched. It is a newtype, so it serializes as its inner value and **no response
+byte moves**; `null` and "missing" are still decided one level out by `Option`,
+and `GoMap<GoStruct<T>>` still maps a `null` value to the zero struct.
+
+**A field cannot protect itself, so the wrapper goes on the holder**:
+`AgentRequest.capabilities`, `Capabilities.mcp`'s values,
+`{Create,Update}IntegrationRequest.services`' values,
+`NotificationSettings.{provider,preferences}` and
+`NotificationPreferences.scheduled_tasks`. The stored `capabilities` column is
+read through it too, so a row neither implementation can write is refused rather
+than read as a real allowlist. `writes::decode_body`'s doc carries the **whole
+enumeration of write bodies** and which of them hold a nested struct, because a
+partial check reads as coverage it does not have. `a_full_length_positional_array`
+is inverted rather than deleted, on both the read side (`agents.rs`) and in
+`gojson.rs`.
 
 Genuinely unparseable input still fails, which is also what Go does — so the
 null case and the malformed case need separate tests.

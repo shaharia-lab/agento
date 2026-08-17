@@ -55,6 +55,7 @@ use axum::http::Method;
 use serde::{Deserialize, Serialize};
 
 use super::db;
+use super::gojson::GoStruct;
 use super::gotime::GoTime;
 use super::writes::{decode_body, finish, WriteError};
 
@@ -92,9 +93,15 @@ pub struct SmtpConfig {
 /// plain `bool` would not.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTasksPreferences {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// **No `#[serde(default)]`**: a bare `Option` already gets `None` from
+    /// `missing_field`, so the attribute was redundant — and its one remaining
+    /// effect was to feed the derive's `visit_seq` arm, which is #337's shape.
+    /// Belt-and-braces now that [`GoStruct`] wraps this at its one use site, but
+    /// #336 is the precedent: an attribute left behind after its field became
+    /// self-sufficient does nothing except open that arm.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub on_finished: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub on_failed: Option<bool>,
 }
 
@@ -102,7 +109,7 @@ pub struct ScheduledTasksPreferences {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NotificationPreferences {
     #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
-    pub scheduled_tasks: ScheduledTasksPreferences,
+    pub scheduled_tasks: GoStruct<ScheduledTasksPreferences>,
 }
 
 /// Mirrors `notification.NotificationSettings`, the shape stored in
@@ -111,10 +118,17 @@ pub struct NotificationPreferences {
 pub struct NotificationSettings {
     #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
     pub enabled: bool,
+    /// [`GoStruct`] because these two are the *worst* case of #337, not a
+    /// borderline one: every field of `SmtpConfig` and of
+    /// `ScheduledTasksPreferences` carries `#[serde(default)]` — each needs one,
+    /// since `deserialize_with` makes a field required — and the derive's
+    /// `visit_seq` arm errors only for a field *without* a default. So the
+    /// accepted array length was **zero and upwards**, and `{"provider":[]}` was
+    /// a saved SMTP configuration here and a 400 to Go.
     #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
-    pub provider: SmtpConfig,
+    pub provider: GoStruct<SmtpConfig>,
     #[serde(default, deserialize_with = "super::gojson::null_is_zero_value")]
-    pub preferences: NotificationPreferences,
+    pub preferences: GoStruct<NotificationPreferences>,
 }
 
 /// `service.maskedFieldSentinel`. Also what `PUT` reads back as "unchanged", so
@@ -263,7 +277,7 @@ fn update_settings(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteEr
     if incoming.provider.password == MASKED_FIELD_SENTINEL {
         let stored = decode_settings(&super::settings::load_stored(&conn).notification_settings)
             .map_err(|e| WriteError::Fallback(format!("loading existing settings: {e}")))?;
-        incoming.provider.password = stored.provider.password;
+        incoming.provider.password = stored.provider.0.password;
     }
 
     // `json.Marshal`, not the response encoder: this string is stored and read
@@ -499,7 +513,7 @@ mod tests {
             assert_eq!(settings.provider.port, 0, "{raw}");
             assert_eq!(
                 settings.preferences,
-                NotificationPreferences::default(),
+                GoStruct(NotificationPreferences::default()),
                 "{raw}"
             );
         }
@@ -680,6 +694,51 @@ mod tests {
 
         // …while the column holds the real one.
         assert!(stored_json(&file).contains(r#""password":"hunter2""#));
+    }
+
+    /// #337 on this route, which is the **worst** instance of it in the write
+    /// surface rather than a marginal one.
+    ///
+    /// Every field of `SmtpConfig` and of `ScheduledTasksPreferences` carries
+    /// `#[serde(default)]` — each needs one, since `deserialize_with` makes a
+    /// field required — and the derive's `visit_seq` arm errors only for a field
+    /// *without* a default. So the accepted array length was **zero and
+    /// upwards**: `{"provider":[]}` saved an SMTP configuration where Go answers
+    /// `cannot unmarshal array into Go struct field`.
+    #[test]
+    fn saving_settings_refuses_an_array_where_a_struct_belongs() {
+        for body in [
+            &br#"{"provider":[]}"#[..],
+            &br#"{"provider":["smtp.example.com",587]}"#[..],
+            &br#"{"preferences":[]}"#[..],
+            &br#"{"preferences":{"scheduled_tasks":[]}}"#[..],
+            &br#"{"preferences":{"scheduled_tasks":[true,false]}}"#[..],
+        ] {
+            let file = migrated();
+            let err = update_settings(file.path(), body).unwrap_err();
+            assert_eq!(
+                err.status(),
+                axum::http::StatusCode::BAD_REQUEST,
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+            // Nothing was written: an over-accept only matters for the row it
+            // leaves behind.
+            assert!(
+                !stored_json(&file).contains("smtp.example.com"),
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // The object forms all still save, including the `null`s #295 covers —
+        // the check is about the array shape and nothing else.
+        let file = migrated();
+        update_settings(
+            file.path(),
+            br#"{"enabled":true,"provider":null,"preferences":{"scheduled_tasks":null}}"#,
+        )
+        .expect("nulls are zero values, not arrays");
     }
 
     /// The sentinel round-trip. The UI never holds the real password, so a save
