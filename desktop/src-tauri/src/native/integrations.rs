@@ -134,6 +134,7 @@ pub mod base_url;
 pub mod confluence;
 pub mod github;
 pub mod jira;
+pub mod slack;
 
 /// The Start/Stop/Reload lifecycle, and the one place in the port that reads
 /// `integrations.credentials` (#311).
@@ -478,12 +479,13 @@ fn segment(value: &str) -> Option<&str> {
 /// on the Go side. Returns the integration id the shell owes a reload for.
 ///
 /// `Reload` has seven callers in Go. Two are ported (`Update`, and `Delete` via
-/// `Stop`). Two more — the telegram and slack validators — and
+/// `Stop`). One more — the telegram validator — and
 /// `completeOAuth` are unaffected, because the switch is per type and every type
 /// they can reach is still Go's: `startProviderCallback` supports exactly
 /// `google` and `slack`, so an OAuth completion never concerns a type this
-/// process hosts. That leaves `validateGitHubPATAuth` and, since #316 and #317,
-/// `validateJiraTokenAuth` and `validateConfluenceAuth` — all behind
+/// process hosts. That leaves `validateGitHubPATAuth` and, since #315–#317,
+/// `validateSlackTokenAuth`, `validateJiraTokenAuth` and
+/// `validateConfluenceAuth` — all behind
 /// `POST /api/integrations/{id}/auth/validate` — as the paths that write a
 /// credential for a hosted type and cannot tell anybody. Without this hook such
 /// an integration is never hosted in the session it is set up in — create, `PUT`
@@ -492,21 +494,51 @@ fn segment(value: &str) -> Option<&str> {
 ///
 /// The route predicate below is deliberately **type-blind**: it answers with the
 /// id for every integration, and `registry::reload_after_auth` reads the row's
-/// type through `can_host` before it does anything. So #313–#315 need not touch
+/// type through `can_host` before it does anything. So #313 and #314 need not touch
 /// this — adding a string to `registry::HOSTED_TYPES` is what widens it.
 ///
 /// The reload runs **after** Go's answer, so the row is already written, and it
 /// is idempotent — the worst case is restarting a server that was about to be
 /// restarted. Go fires its own from a goroutine (`reloadIntegration`), so doing
 /// it off the response path is parity rather than a shortcut.
-pub fn reload_after_forward<'a>(method: &Method, path: &'a str) -> Option<&'a str> {
-    if method != Method::POST {
-        return None;
+///
+/// # Two routes, two triggers
+///
+/// `POST …/auth/validate` is an **event**: a credential was just written, so the
+/// reload is unconditional, exactly as Go's is.
+///
+/// `GET …/auth/status` is a **poll**, added by #315. Go's `handleOAuthToken`
+/// reloads after an OAuth token lands, and `startProviderCallback` supports
+/// `google` and `slack` — so the moment `slack` became a hosted type, that
+/// reload started reaching nothing. The token itself never comes through this
+/// proxy (the browser delivers it to a callback server the *sidecar* opens), so
+/// the UI's polling of this route is the only part of the flow the shell can
+/// see. Being a poll, it must not fire an unconditional reload — see
+/// `registry::reload_if_secrets_changed`, which reloads only when the row stops
+/// matching what is running.
+pub fn reload_after_forward<'a>(method: &Method, path: &'a str) -> Option<(&'a str, Trigger)> {
+    let rest = path.strip_prefix("/api/integrations/")?;
+    if method == Method::POST {
+        if let Some(id) = rest.strip_suffix("/auth/validate") {
+            return segment(id).map(|id| (id, Trigger::CredentialWritten));
+        }
     }
-    segment(
-        path.strip_prefix("/api/integrations/")?
-            .strip_suffix("/auth/validate")?,
-    )
+    if method == Method::GET {
+        if let Some(id) = rest.strip_suffix("/auth/status") {
+            return segment(id).map(|id| (id, Trigger::AuthStatusPolled));
+        }
+    }
+    None
+}
+
+/// Why the shell is being asked to look at an integration again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Trigger {
+    /// A credential was written by a forwarded request. Reload unconditionally,
+    /// as Go does.
+    CredentialWritten,
+    /// The UI polled an in-flight OAuth flow. Reload only if something changed.
+    AuthStatusPolled,
 }
 
 fn claims(method: &Method, path: &str) -> bool {
@@ -1934,7 +1966,7 @@ mod tests {
     /// reload strands a socket and a paired client that never connects.
     #[test]
     fn a_write_for_a_type_the_sidecar_hosts_forwards_without_touching_the_row() {
-        for integration_type in ["slack", "whatsapp", "telegram", "google"] {
+        for integration_type in ["whatsapp", "telegram", "google"] {
             let file = migrated();
             Connection::open(file.path())
                 .expect("open")
@@ -2033,20 +2065,29 @@ mod tests {
         );
     }
 
-    /// The one route the seam owes a reload after Go has answered it (#311).
+    /// The two routes the seam owes something after Go has answered them — one
+    /// an event (#311) and one a poll (#315).
     #[test]
-    fn only_a_successful_auth_validate_asks_the_shell_to_reload() {
+    fn only_the_two_auth_routes_ask_the_shell_to_look_again() {
         assert_eq!(
             reload_after_forward(&Method::POST, "/api/integrations/int-1/auth/validate"),
-            Some("int-1")
+            Some(("int-1", Trigger::CredentialWritten))
         );
-        // Not a POST, not that route, and no empty or multi-segment id.
+        assert_eq!(
+            reload_after_forward(&Method::GET, "/api/integrations/int-1/auth/status"),
+            Some(("int-1", Trigger::AuthStatusPolled))
+        );
+        // The method matters on both, and neither admits an empty or
+        // multi-segment id.
         for (method, path) in [
             (Method::GET, "/api/integrations/int-1/auth/validate"),
+            (Method::POST, "/api/integrations/int-1/auth/status"),
             (Method::POST, "/api/integrations/int-1/auth/start"),
             (Method::POST, "/api/integrations/int-1"),
             (Method::POST, "/api/integrations//auth/validate"),
+            (Method::GET, "/api/integrations//auth/status"),
             (Method::POST, "/api/integrations/a/b/auth/validate"),
+            (Method::GET, "/api/integrations/a/b/auth/status"),
             (Method::POST, "/api/agents"),
         ] {
             assert_eq!(reload_after_forward(&method, path), None, "{method} {path}");

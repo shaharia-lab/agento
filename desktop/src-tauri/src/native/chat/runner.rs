@@ -24,8 +24,8 @@
 //! **#311 narrowed the `mcp` half rather than removing it.** An agent is served
 //! natively when *every* name in `capabilities.mcp` is an integration this build
 //! can host — `registry::HOSTED_TYPES`, which today means `github` (#312) and
-//! `confluence` (#317) and `jira` (#316), and will mean the rest as #313–#315
-//! land. Three things
+//! `confluence` (#317), `jira` (#316) and `slack` (#315), and will mean the rest
+//! as #313 and #314 land. Three things
 //! still forward, and [`mcp_plan`] is where each is decided:
 //!
 //! - **A name whose type is not hosted.** A `slack` row has no Rust starter;
@@ -389,7 +389,7 @@ fn mcp_plan(
         if !crate::native::integrations::registry::can_host(db_path, id)? {
             return Err(format!(
                 "agent uses MCP server {id:?}, which is not an integration this build \
-                 can host (#313–#315)"
+                 can host (#313, #314)"
             ));
         }
         servers.push(McpServerSpec {
@@ -1078,11 +1078,17 @@ mod tests {
     fn an_mcp_name_this_build_cannot_host_forwards() {
         let file = db_with_integration("gh-1", "github");
 
-        // A type with no Rust starter.
-        let slack = db_with_integration("sl-1", "slack");
-        let err = mcp_plan(Some(&caps_naming("sl-1", None)), Some(slack.path()), false)
-            .expect_err("slack cannot be hosted");
-        assert!(err.contains(r#"MCP server "sl-1""#), "{err}");
+        // A type with no Rust starter. `telegram` while #314 is unwritten — the
+        // stand-in has to be a type that is genuinely unported, so it moves each
+        // time one lands.
+        let telegram = db_with_integration("tg-1", "telegram");
+        let err = mcp_plan(
+            Some(&caps_naming("tg-1", None)),
+            Some(telegram.path()),
+            false,
+        )
+        .expect_err("telegram cannot be hosted");
+        assert!(err.contains(r#"MCP server "tg-1""#), "{err}");
 
         // A name with no integration row: `mcps.yaml` could still name it.
         assert!(mcp_plan(
@@ -1101,7 +1107,7 @@ mod tests {
         let mut mixed = caps_naming("gh-1", None);
         if let Some(mcp) = mixed.mcp.as_mut() {
             mcp.0.insert(
-                "sl-1".to_string(),
+                "tg-1".to_string(),
                 crate::native::agents::McpCapability { tools: None }.into(),
             );
         }
