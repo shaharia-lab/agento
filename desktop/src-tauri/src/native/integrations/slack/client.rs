@@ -235,6 +235,22 @@ async fn read_slack_response(
     //   `ok: true` and turn Go's `cannot unmarshal array` into a *success* whose
     //   text is the raw body. `GoStruct` refuses a non-map, which is #337's
     //   over-accept and the direction this port must never move in.
+    //
+    // A bare `null` body needs the same rule **one level further out**:
+    // `json.Unmarshal([]byte("null"), &envelope)` is a no-op returning `nil`, so
+    // Go falls through to the `!ok` branch. Hence `Option<GoStruct<_>>` — the
+    // idiom `resolve_slack_token` uses twice on the same rule.
+    //
+    // Two shapes are **accepted divergences**, both unreachable from
+    // `api.slack.com` and neither reproducible without hand-writing
+    // `Deserialize`, which is not worth it for a wording difference on a body
+    // Slack does not send:
+    //
+    // - `{"ok":false,"ok":true}` — `encoding/json` takes the last key and
+    //   succeeds; serde's derive refuses a duplicate field.
+    // - `{"OK":true}` — `encoding/json` falls back to case-insensitive field
+    //   matching and succeeds; serde matches names exactly, so this reads as
+    //   `ok: false`.
     #[derive(Default, serde::Deserialize)]
     #[serde(default)]
     struct Envelope {
@@ -243,8 +259,8 @@ async fn read_slack_response(
         #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
         error: String,
     }
-    let envelope = serde_json::from_str::<crate::native::gojson::GoStruct<Envelope>>(&body)
-        .map(|wrapped| wrapped.0)
+    let envelope = serde_json::from_str::<Option<crate::native::gojson::GoStruct<Envelope>>>(&body)
+        .map(|wrapped| wrapped.map_or_else(Envelope::default, |wrapped| wrapped.0))
         .map_err(|e| {
             // `fmt.Errorf("parsing response: %w", err)`. `encoding/json`'s
             // wording is not reproducible (see `github::body::parse_string_map`),
@@ -397,6 +413,13 @@ mod tests {
             let got = reply(body).await;
             assert_eq!(got.as_deref().map_err(String::as_str), *want, "{body}");
         }
+
+        // A bare `null` is a no-op to `json.Unmarshal`, so Go falls through to
+        // the `!ok` branch rather than failing to parse.
+        assert_eq!(
+            reply("null").await,
+            Err("slack API error (conversations.info): ".to_string())
+        );
 
         // …and the other direction: serde would build the struct positionally
         // from a sequence, turning Go's parse error into a success.

@@ -781,16 +781,6 @@ pub async fn start_filtered_server(
     }
 }
 
-/// Whether a run naming this integration can be served natively at all.
-///
-/// Separate from [`start_filtered_server`] because the caller has to decide
-/// *before* it starts anything: an agent that names a type Rust cannot host must
-/// forward the whole turn to Go rather than run with some of its tools missing.
-///
-/// [`hosts_type`] is the predicate; this only adds the row read. The two writes
-/// in `native/integrations.rs` have already read the row and so call
-/// [`hosts_type`] directly rather than reading it a second time through the
-/// credential-carrying projection.
 /// The row's `type`, and **nothing else** — no `credentials`, no `auth`.
 ///
 /// The point is what it does not select. [`HOSTING_COLUMNS`] is the one
@@ -811,9 +801,18 @@ fn type_of(db_path: &Path, id: &str) -> Result<Option<String>, String> {
     .map_err(|e| format!("looking up integration {id:?}: {e}"))
 }
 
+/// Whether a run naming this integration can be served natively at all.
+///
+/// Separate from [`start_filtered_server`] because the caller has to decide
+/// *before* it starts anything: an agent that names a type Rust cannot host must
+/// forward the whole turn to Go rather than run with some of its tools missing.
+///
+/// [`hosts_type`] is the predicate and [`type_of`] is the whole of the read —
+/// one column, chosen because this question has no business touching the other
+/// two. The two writes in `native/integrations.rs` reach [`hosts_type`] by yet
+/// another route: they have already read the row for their own purposes, so they
+/// call it directly rather than reading anything a second time.
 pub fn can_host(db_path: &Path, id: &str) -> Result<bool, String> {
-    // [`type_of`] rather than the hosting projection: this answers a question
-    // about the `type` column and has no business reading the other two.
     Ok(type_of(db_path, id)?.is_some_and(|integration_type| hosts_type(&integration_type)))
 }
 

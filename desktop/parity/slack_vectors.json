@@ -721,6 +721,26 @@
       "text": "slack API error (conversations.info): "
     },
     {
+      "case": "get_channel_info/a bare null body is a no-op, not a parse failure",
+      "tool": "get_channel_info",
+      "arguments": {
+        "channel": "C1"
+      },
+      "response": {
+        "status": 200,
+        "body": "null"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/conversations.info",
+        "authorization": "Bearer xoxb-parity-slack-token",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "channel=C1"
+      },
+      "is_error": true,
+      "text": "slack API error (conversations.info): "
+    },
+    {
       "case": "get_channel_info/a JSON array is not a struct",
       "tool": "get_channel_info",
       "arguments": {

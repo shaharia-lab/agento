@@ -489,6 +489,15 @@ func slackCallCases() []slackCallCase {
 			script: slackResponseScript{Status: http.StatusOK, Body: `{"ok":null}`},
 		},
 		{
+			// The same rule one level further out: `json.Unmarshal` of a bare
+			// `null` into a struct is a no-op returning nil, so Go falls through
+			// to the `!ok` branch rather than failing to parse.
+			name:   "get_channel_info/a bare null body is a no-op, not a parse failure",
+			tool:   "get_channel_info",
+			args:   map[string]any{"channel": "C1"},
+			script: slackResponseScript{Status: http.StatusOK, Body: `null`},
+		},
+		{
 			// The other direction: serde builds a struct from a sequence
 			// positionally when every field has a default, so without `GoStruct`
 			// this would decode to `ok: true` and return the array as a success.
