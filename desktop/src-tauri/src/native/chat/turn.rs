@@ -133,7 +133,10 @@ pub async fn run(
     };
     let (row, agent) = loaded;
 
-    let no_agent_model = no_agent_model_for(&db_path, &row.model);
+    // One `user_settings` read per turn, shared by the no-agent model below and
+    // by the config-dir resolution inside `build_options` (#340).
+    let settings = Arc::new(runner::TurnSettings::from_db(&db_path));
+    let no_agent_model = no_agent_model_for(Arc::clone(&settings), &row.model);
 
     let (notify_tx, notify_rx) = mpsc::channel::<Notify>(NOTIFY_CAPACITY);
     let (input_tx, input_rx) = mpsc::channel::<String>(1);
@@ -152,6 +155,7 @@ pub async fn run(
     let spec = RunSpec {
         agent,
         no_agent_model,
+        settings,
         working_dir: row.working_dir.clone(),
         settings_profile_id: row.settings_profile_id.clone(),
         resume_session_id: Some(row.sdk_session_id.clone()).filter(|s| !s.is_empty()),
@@ -599,36 +603,21 @@ fn sse_response(body: Body) -> Response<Body> {
 /// (`resolveAgentConfig` returns the agent's config outright otherwise).
 /// Resolving eagerly opened a read-only connection and loaded the settings row
 /// on every turn of every agent chat, to throw the answer away.
+///
+/// It reads through the turn's shared [`runner::TurnSettings`] rather than
+/// opening its own connection (#340) — that type carries the `resolve` rule this
+/// function used to carry, and carries it beside the config dir's, which is the
+/// other consumer of the same row.
 fn no_agent_model_for(
-    db_path: &std::path::Path,
+    settings: Arc<runner::TurnSettings>,
     session_model: &str,
 ) -> Box<dyn Fn() -> String + Send + Sync> {
     if session_model.is_empty() {
-        let db_path = db_path.to_path_buf();
-        Box::new(move || default_model(&db_path))
+        Box::new(move || settings.default_model())
     } else {
         let model = session_model.to_string();
         Box::new(move || model.clone())
     }
-}
-
-/// `settingsMgr.Get().DefaultModel`.
-///
-/// **`resolve`, not `load_stored`.** Go reads the *resolved* settings, and
-/// `SettingsManager.load` fills `"sonnet"` when nothing is stored before
-/// `applyEnvOverrides` applies `AGENTO_DEFAULT_MODEL` /
-/// `ANTHROPIC_DEFAULT_SONNET_MODEL`. The raw `SELECT` has neither, so a user who
-/// had never saved settings ran on the SDK's own default instead of `sonnet`,
-/// and one who exported `AGENTO_DEFAULT_MODEL` had it silently ignored —
-/// `settings::resolve` is the documented mirror of `Get()` and every other
-/// caller in the port already goes through it.
-fn default_model(db_path: &std::path::Path) -> String {
-    let Ok(conn) = crate::native::db::open_read_only(db_path) else {
-        return String::new();
-    };
-    crate::native::settings::resolve(crate::native::settings::load_stored(&conn))
-        .settings
-        .default_model
 }
 
 #[cfg(test)]
@@ -643,8 +632,10 @@ mod tests {
     fn a_session_model_is_used_verbatim_and_never_touches_the_database() {
         // A path that does not exist: if the row's model were ignored and the
         // settings read anyway, opening it would fail and this would be `""`.
-        let nowhere = std::path::Path::new("/nonexistent/agento/definitely-not-a-db");
-        let resolve = no_agent_model_for(nowhere, "session-model");
+        let settings = Arc::new(runner::TurnSettings::from_db(
+            "/nonexistent/agento/definitely-not-a-db",
+        ));
+        let resolve = no_agent_model_for(Arc::clone(&settings), "session-model");
         assert_eq!(resolve(), "session-model");
         // Idempotent — `build_options` calls it once, but nothing enforces that.
         assert_eq!(resolve(), "session-model");
@@ -672,7 +663,7 @@ mod tests {
         // Nothing stored: the raw column is empty and `resolve` fills Go's
         // default, so reading the row directly would have answered `""`.
         assert_eq!(
-            no_agent_model_for(file.path(), "")(),
+            no_agent_model_for(Arc::new(runner::TurnSettings::from_db(file.path())), "")(),
             from_env
                 .clone()
                 .unwrap_or_else(|| crate::native::settings::DEFAULT_MODEL.to_string())
@@ -689,7 +680,7 @@ mod tests {
         // `AGENTO_DEFAULT_MODEL`, which is `modelInFile`'s whole point.
         let hard_override = crate::native::settings::env_value("AGENTO_DEFAULT_MODEL");
         assert_eq!(
-            no_agent_model_for(file.path(), "")(),
+            no_agent_model_for(Arc::new(runner::TurnSettings::from_db(file.path())), "")(),
             hard_override.unwrap_or_else(|| "stored-model".to_string())
         );
     }
@@ -698,8 +689,10 @@ mod tests {
     /// option" rather than as a failure — the turn still runs.
     #[test]
     fn an_unreadable_database_yields_no_model_rather_than_an_error() {
-        let nowhere = std::path::Path::new("/nonexistent/agento/definitely-not-a-db");
-        assert_eq!(no_agent_model_for(nowhere, "")(), "");
+        let settings = Arc::new(runner::TurnSettings::from_db(
+            "/nonexistent/agento/definitely-not-a-db",
+        ));
+        assert_eq!(no_agent_model_for(settings, "")(), "");
     }
 
     #[test]

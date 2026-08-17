@@ -1526,6 +1526,43 @@ strings — and one who exported `AGENTO_DEFAULT_MODEL` had it silently ignored.
 `resolve` is the documented mirror of `Get()`, and every other caller in the port
 already goes through it.
 
+**One `user_settings` read per turn, and the two resolutions on top of it are not
+the same** (#340). Go needs no equivalent: `settingsMgr.Get()` is an in-memory
+snapshot, so the config dir and the default model are free reads of one value.
+This port has no manager, so each consumer opened its own read-only connection
+and decoded the same row — twice for an ordinary turn, three times for one pinned
+to a named settings profile, on the latency path of every message. #299 removed
+the eager *model* read; it did not remove the config-dir one, and the PR should
+not be read as having done so.
+
+`runner::TurnSettings` is the shared load: a `OnceLock` over the **stored** row,
+carried on `RunSpec` and shared with the `no_agent_model` closure via an `Arc`.
+The value is not that it saves a connection — it is that **two consumers of one
+row with different fields is the shape that drifts**, which is what #339's review
+found when one of them read `load_stored` where Go reads the resolved settings
+and the other already went through `resolve`. Putting the two accessors side by
+side makes the asymmetry legible, and it is a real asymmetry rather than an
+oversight:
+
+- `default_model()` is `settingsMgr.Get().DefaultModel`, so it goes through
+  `settings::resolve`.
+- `run_config_dir()` is `config.ClaudeRunConfigDir`, which reads
+  `claudeDirs.runOverride` — the value `ApplyClaudeDirs` **stored** — and applies
+  `CLAUDE_CONFIG_DIR` itself, ahead of it. Handing it the *resolved* row instead
+  would diverge for a `CLAUDE_CONFIG_DIR` that is set but not absolute: `resolve`
+  overwrites the field with it, `absolute_dir` then rejects it, and a stored
+  absolute dir Go would have used is skipped for the default.
+
+So the shared thing is the stored row, and `resolve` is applied where Go applies
+it and nowhere else. Two other properties are pinned by counting loads rather
+than argued: a turn reads the row **at most once** however many fields it wants,
+and an agent carrying an **absolute** `claude_config_dir` reads it **zero** times
+— `ResolveAgentClaudeDir` returns before `ClaudeRunConfigDir` for the same
+reason. An unreadable database is still `None` rather than a zero row, so the
+model stays `""` (i.e. "set no model option") rather than becoming `resolve`'s
+`"sonnet"`: a database this process cannot open is not a user who never saved
+settings.
+
 **An embedded raw value is compacted and HTML-escaped on the way out, and Go
 does it on the way *in*** (#298). `encoding/json` runs
 `compact(…, escapeHTML=true)` over a `Marshaler`'s output, so a nested

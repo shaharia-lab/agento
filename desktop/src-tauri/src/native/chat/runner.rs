@@ -63,6 +63,122 @@ const ALL_BUILT_IN_TOOLS: &[&str] = &[
     "NotebookEdit",
 ];
 
+/// The `user_settings` row a turn reads — **at most once**, however many of its
+/// fields are wanted (#340).
+///
+/// Go has no equivalent because it needs none: `settingsMgr.Get()` is an
+/// in-memory snapshot, so `ClaudeRunConfigDir` and `DefaultModel` are free reads
+/// of one value. This port has no manager, so each consumer used to open its own
+/// read-only connection and decode the same row — twice for an ordinary turn,
+/// three times for one pinned to a named settings profile, on the latency path
+/// of every message, for a value that changes about never.
+///
+/// The cost was not really the connection. It is that **two consumers of one row
+/// with different fields is the shape that drifts**: #339's review found that one
+/// of them read `load_stored` where Go reads the resolved settings, while the
+/// other already went through `resolve`. One load makes that impossible to get
+/// wrong twice — and it puts the two resolutions side by side, which is what
+/// makes the asymmetry below legible rather than accidental.
+///
+/// **Each accessor names the Go function it mirrors, and they do not agree**:
+///
+/// - [`Self::default_model`] is `settingsMgr.Get().DefaultModel`, so it goes
+///   through `settings::resolve` — that is what fills `"sonnet"` when nothing is
+///   stored and what applies `AGENTO_DEFAULT_MODEL` /
+///   `ANTHROPIC_DEFAULT_SONNET_MODEL`.
+/// - [`Self::run_config_dir`] is `config.ClaudeRunConfigDir`, which reads
+///   `claudeDirs.runOverride` — the value `ApplyClaudeDirs` **stored**, not the
+///   resolved settings — and applies `CLAUDE_CONFIG_DIR` itself, ahead of it.
+///   Passing it the resolved row instead would diverge for a
+///   `CLAUDE_CONFIG_DIR` that is set but not absolute: `resolve` overwrites the
+///   field with it, `absolute_dir` then rejects it, and a stored absolute dir Go
+///   would have used is skipped for the default.
+///
+/// So the shared thing is the **stored row**; `resolve` is a pure function
+/// applied where Go applies it, and nowhere else.
+pub struct TurnSettings {
+    /// `None` when there is no database to read — the case the unit tests use
+    /// to prove a branch never looked.
+    db_path: Option<std::path::PathBuf>,
+    /// `None` *inside* the lock means the row could not be read. That is
+    /// distinct from a zero row: both resolvers degrade to their own defaults
+    /// on it rather than to `resolve`'s, which is what the two separate reads
+    /// did and is why an unreadable database still yields "no model option"
+    /// rather than `"sonnet"`.
+    row: std::sync::OnceLock<Option<crate::native::settings::UserSettings>>,
+    /// Observability, so a test can assert "at most once" rather than assuming
+    /// it. A `OnceLock` makes over-reading unrepresentable; this makes
+    /// *under*-reading — a branch that should never have looked — visible.
+    loads: std::sync::atomic::AtomicUsize,
+}
+
+impl TurnSettings {
+    /// The settings behind `db_path`, read on first use.
+    pub fn from_db(db_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            db_path: Some(db_path.into()),
+            row: std::sync::OnceLock::new(),
+            loads: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// No database: every field is its zero value, and nothing is opened.
+    pub fn none() -> Self {
+        Self {
+            db_path: None,
+            row: std::sync::OnceLock::new(),
+            loads: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// The stored row, loaded once. An unreadable database is `None`, not a
+    /// failure: a turn that cannot see the settings still runs, on whatever
+    /// each resolver's own fallback is.
+    fn stored(&self) -> Option<&crate::native::settings::UserSettings> {
+        self.row
+            .get_or_init(|| {
+                self.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let db_path = self.db_path.as_deref()?;
+                let conn = crate::native::db::open_read_only(db_path).ok()?;
+                Some(crate::native::settings::load_stored(&conn))
+            })
+            .as_ref()
+    }
+
+    /// `settingsMgr.Get().DefaultModel` — see the type's docs for why this one
+    /// goes through `resolve` and [`Self::run_config_dir`] does not.
+    ///
+    /// No row at all answers `""`, which `build_options` reads as "set no model
+    /// option" rather than as a failure. Deliberately *not* `resolve`'s
+    /// `"sonnet"`: a database this process cannot open is not a user who has
+    /// never saved settings, and the turn is better off on the SDK's own
+    /// default than on a value invented from a read that did not happen.
+    pub(crate) fn default_model(&self) -> String {
+        let Some(row) = self.stored() else {
+            return String::new();
+        };
+        crate::native::settings::resolve(row.clone())
+            .settings
+            .default_model
+    }
+
+    /// `config.ClaudeRunConfigDir`: `CLAUDE_CONFIG_DIR`, else the stored global
+    /// setting, else the default.
+    fn run_config_dir(&self) -> String {
+        let stored = self
+            .stored()
+            .map_or("", |row| row.claude_config_dir.as_str());
+        crate::native::settings::run_config_dir(stored)
+    }
+
+    /// How many times the row was actually read. The acceptance criterion of
+    /// #340 is a number, so it is asserted rather than argued.
+    #[cfg(test)]
+    fn loads(&self) -> usize {
+        self.loads.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
 /// What the chat service knows about the turn before the subprocess starts.
 pub struct RunSpec {
     /// The agent, or `None` for a chat with no agent slug — which Go models as
@@ -83,6 +199,9 @@ pub struct RunSpec {
     /// no-agent branch, so an eager value is work whose result is thrown away.
     /// Called at most once, in the one arm below that needs it.
     pub no_agent_model: Box<dyn Fn() -> String + Send + Sync>,
+    /// The `user_settings` row, shared by every consumer in this file *and* by
+    /// the closure above — hence the `Arc`. See [`TurnSettings`].
+    pub settings: std::sync::Arc<TurnSettings>,
     pub working_dir: String,
     pub settings_profile_id: String,
     /// `Some` resumes an existing CLI session; `None` pins a new one to the
@@ -129,7 +248,7 @@ pub async fn build_options(
             .with_setting_sources(["project"]);
     }
 
-    let config_dir = resolve_agent_config_dir(spec.agent.as_ref());
+    let config_dir = resolve_agent_config_dir(spec.agent.as_ref(), &spec.settings);
     if config_dir != crate::native::settings::default_claude_config_dir()
         || std::env::var("CLAUDE_CONFIG_DIR").is_ok_and(|v| !v.is_empty())
     {
@@ -138,7 +257,7 @@ pub async fn build_options(
         opts = opts.with_env([("CLAUDE_CONFIG_DIR", config_dir.clone())]);
     }
 
-    if let Some(path) = settings_file_in(&config_dir, &spec.settings_profile_id) {
+    if let Some(path) = settings_file_in(&config_dir, &spec.settings_profile_id, &spec.settings) {
         // Only name a file that exists: a config dir Claude Code has never
         // written has no settings.json, and `--settings` on a missing path is
         // an error rather than a no-op.
@@ -448,11 +567,14 @@ fn wrap_permission_handler(inner: PermissionHandler, allowed: Vec<String>) -> Pe
 
 /// `ResolveAgentClaudeDir`: the agent's own override when it is absolute,
 /// otherwise the run default.
-fn resolve_agent_config_dir(agent: Option<&Agent>) -> String {
+fn resolve_agent_config_dir(agent: Option<&Agent>, settings: &TurnSettings) -> String {
     if let Some(agent) = agent {
         if !agent.claude_config_dir.is_empty() {
             let normalized = crate::native::settings::normalize(&agent.claude_config_dir);
             if let Some(dir) = crate::native::settings::absolute_dir(&normalized) {
+                // An absolute per-agent override answers outright, and the
+                // settings row is never touched — `ResolveAgentClaudeDir`
+                // returns before `ClaudeRunConfigDir` for the same reason.
                 return dir;
             }
         }
@@ -460,17 +582,7 @@ fn resolve_agent_config_dir(agent: Option<&Agent>) -> String {
     // A relative override is discarded rather than honoured: the subprocess
     // resolves it against its own cwd — inside the user's repo — and would read
     // it as trusted config.
-    crate::native::settings::run_config_dir(&stored_config_dir())
-}
-
-fn stored_config_dir() -> String {
-    let Some(db_path) = crate::paths::database_path() else {
-        return String::new();
-    };
-    let Ok(conn) = crate::native::db::open_read_only(&db_path) else {
-        return String::new();
-    };
-    crate::native::settings::load_stored(&conn).claude_config_dir
+    settings.run_config_dir()
 }
 
 /// `config.LoadProfileFilePathIn` plus the caller's `os.Stat`: the settings file
@@ -491,7 +603,7 @@ fn stored_config_dir() -> String {
 /// so a chat or task pinned to a named profile ran with **no `--settings` at
 /// all** while the Go server passed the recorded path — the same class of silent
 /// wrong-account failure #242 existed for.
-fn settings_file_in(config_dir: &str, profile_id: &str) -> Option<String> {
+fn settings_file_in(config_dir: &str, profile_id: &str, settings: &TurnSettings) -> Option<String> {
     // Go reads the index with `LoadProfilesMetadata()`, which resolves
     // `ClaudeSettingsProfilesPath()` — the **run default** dir, not `config_dir`.
     // That asymmetry is deliberate upstream and load-bearing here: profiles are
@@ -500,12 +612,13 @@ fn settings_file_in(config_dir: &str, profile_id: &str) -> Option<String> {
     // follows its own dir. Reading the index out of the override would silently
     // find nothing and hand the run the wrong account's settings.
     //
-    // Resolved only for a *named* profile: the unnamed fallback reads no index,
-    // and this opens the database.
+    // Resolved only for a *named* profile: the unnamed fallback reads no index.
+    // It costs nothing now — this is the same `TurnSettings` the config dir came
+    // from, so it is the row already in hand rather than a third connection.
     let index_dir = if profile_id.is_empty() {
         String::new()
     } else {
-        crate::native::settings::run_config_dir(&stored_config_dir())
+        settings.run_config_dir()
     };
     settings_file_from(config_dir, &index_dir, profile_id)
 }
@@ -668,6 +781,7 @@ mod tests {
                     counter.fetch_add(1, Ordering::SeqCst);
                     "no-agent-model".to_string()
                 }),
+                settings: std::sync::Arc::new(TurnSettings::none()),
                 working_dir: String::new(),
                 settings_profile_id: String::new(),
                 resume_session_id: None,
@@ -683,6 +797,7 @@ mod tests {
         RunSpec {
             agent: Some(agent_with(caps)),
             no_agent_model: Box::new(String::new),
+            settings: std::sync::Arc::new(TurnSettings::none()),
             working_dir: String::new(),
             settings_profile_id: String::new(),
             resume_session_id: None,
@@ -743,6 +858,109 @@ mod tests {
             "an agent's empty model is not a request for the session's or the user's"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// A settings row on disk, migrated and empty.
+    fn settings_db() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        drop(conn);
+        file
+    }
+
+    /// #340's acceptance, and the only form it can take: a number.
+    ///
+    /// Three consumers with different fields — the config dir, the settings
+    /// profile's index dir, and the no-agent model — used to open a read-only
+    /// connection each, on the latency path of every message.
+    #[tokio::test]
+    async fn a_turn_reads_the_settings_row_at_most_once() {
+        let file = settings_db();
+        let settings = std::sync::Arc::new(TurnSettings::from_db(file.path()));
+
+        let mut spec = spec_for(Capabilities::default());
+        spec.settings = std::sync::Arc::clone(&settings);
+        // A *named* profile is what reaches the index dir; the unnamed fallback
+        // reads no index at all.
+        spec.settings_profile_id = "work".into();
+
+        let (_opts, servers) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+        assert!(servers.is_empty(), "no agent named a local tool");
+
+        // And the fourth consumer, which an agent chat never reaches — asked
+        // here so the count covers every field a turn can want.
+        let _ = settings.default_model();
+
+        assert_eq!(
+            settings.loads(),
+            1,
+            "the settings row was read more than once for one turn"
+        );
+    }
+
+    /// The zero case, which is the other half of the same rule: an absolute
+    /// per-agent override answers outright, so nothing opens the database at
+    /// all. `ResolveAgentClaudeDir` returns before `ClaudeRunConfigDir` for
+    /// exactly this reason.
+    #[tokio::test]
+    async fn an_absolute_per_agent_override_never_reads_the_settings_row() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut agent = agent_with(Capabilities::default());
+        agent.claude_config_dir = dir.path().to_string_lossy().into_owned();
+
+        // A path that cannot be opened: a read would still answer, so only the
+        // counter can tell "did not need it" from "needed it and got nothing".
+        let settings = std::sync::Arc::new(TurnSettings::from_db(
+            "/nonexistent/agento/definitely-not-a-db",
+        ));
+        let mut spec = spec_for(Capabilities::default());
+        spec.agent = Some(agent);
+        spec.settings = std::sync::Arc::clone(&settings);
+
+        let (_opts, _servers) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+
+        assert_eq!(settings.loads(), 0);
+    }
+
+    /// The precedence itself, unchanged: an absolute per-agent override wins,
+    /// and anything else defers to `ClaudeRunConfigDir`.
+    ///
+    /// The second and third assertions are identities rather than literals, so
+    /// they hold whether or not the developer running them exports
+    /// `CLAUDE_CONFIG_DIR` — and they still fail if the fall-through arm stops
+    /// going through the shared row.
+    #[test]
+    fn the_config_dir_precedence_is_override_then_the_run_dir() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let absolute = dir.path().to_string_lossy().into_owned();
+        let file = settings_db();
+        let settings = TurnSettings::from_db(file.path());
+
+        let mut agent = agent_with(Capabilities::default());
+        agent.claude_config_dir = absolute.clone();
+        assert_eq!(
+            resolve_agent_config_dir(Some(&agent), &settings),
+            absolute,
+            "an absolute per-agent override is the run's dir"
+        );
+
+        // A relative override is discarded rather than honoured: the subprocess
+        // would resolve it against its own cwd, inside the user's repo.
+        agent.claude_config_dir = "relative/dir".into();
+        assert_eq!(
+            resolve_agent_config_dir(Some(&agent), &settings),
+            settings.run_config_dir()
+        );
+
+        assert_eq!(
+            resolve_agent_config_dir(None, &settings),
+            settings.run_config_dir()
+        );
     }
 
     /// The one branch that does need it — and it is asked exactly once.
