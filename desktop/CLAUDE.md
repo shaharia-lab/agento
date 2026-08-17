@@ -2555,6 +2555,19 @@ off-values and the same unset-means-on rule as `AGENTO_SCANNER`; unlike
 `AGENTO_INTEGRATIONS` it carries **no list**, because a scheduler is owned whole
 or not at all.
 
+**But the variable is set conditionally, which `AGENTO_SCANNER` is not**, and the
+reason is the one thing that makes this flip different from #289's: the task
+*writes* are behind the seam, and a registration has to happen in the process
+that stored the row. `may_serve` forwards every non-`GET` in both `Mode::Off` and
+`Mode::Diff`, so in those modes Go is the only writer — and a Go that had been
+told to stand down would store a task neither process ever schedules until the
+app restarts, which is exactly the split this change closes, reappearing through
+the escape hatch. `runtime::shell_owns_scheduler` is therefore the single
+predicate behind **both** halves: whether the sidecar is told to stand down, and
+whether `start` installs any timers. `AGENTO_DESKTOP_NATIVE=off` consequently
+means what it is documented to mean — the app behaves exactly as it did before
+the port.
+
 One detail in the Go half is not cosmetic: `initTaskScheduler` now returns
 `service.TaskScheduler`, the interface, rather than `*scheduler.Scheduler`.
 `taskService` checks `s.scheduler != nil`, and a typed nil pointer in an
@@ -2605,13 +2618,42 @@ while `buildRunOptions` sets neither session field, so the CLI generates one and
 empty capabilities **all twelve built-in tools** while a nil config gets none.
 `None` would run a no-agent task with no `--allowedTools` argument at all.
 
-**One deliberate divergence in the timer.** gocron parks for the whole interval;
-`sleep_until` wakes at most every 60 seconds and re-reads the **wall clock**.
-`tokio::time::sleep` is measured on `Instant`, which does not advance while the
-machine is suspended — on a laptop a single long park fires late by however long
-the lid was shut. The chunking rule is `next_chunk`, a pure function of the two
-clocks, because a test of the loop itself would wait the real duration: a paused
-tokio clock does not move `Utc::now()`.
+**One deliberate divergence in the timer, and one rule that is not a divergence
+at all.** gocron parks for the whole interval; `sleep_until` wakes at most every
+60 seconds and re-reads the **wall clock**, because `tokio::time::sleep` is
+measured on `Instant`, which does not advance while the machine is suspended — on
+a laptop a single long park fires late by however long the lid was shut. The
+chunking rule is `next_chunk`, a pure function of the two clocks, because a test
+of the loop itself would wait the real duration: a paused tokio clock does not
+move `Utc::now()`.
+
+Waking up is only half of it. **After each fire the loop re-anchors against
+`Utc::now()` via `advance_past_now`, rather than adding one interval**, which is
+what gocron's `selectExecJobsOutForRescheduling` does under its own "the machine
+went to sleep, and woke up some time later" comment. Stepping one interval at a
+time and firing whenever the result is past *replays every missed window*: a
+seven-minute task and a lid shut for eight hours is ~68 back-to-back Claude runs,
+68 chat sessions, 68 `job_history` rows and a `stop_after_count` budget gone in
+seconds. An NTP jump forward does the same. Note the walk is `while next < now`,
+so a fire landing *exactly* on the wake instant is due rather than skipped —
+gocron's `for next.Before(s.now())` has the same strictness, and it is only
+observable when the interval divides the gap.
+
+**Nothing blocking may run on the run's critical path.** `notifications::handle`
+reaches lettre's *blocking* `SmtpTransport`, and Go never had this problem:
+`eventbus.Publish` is a channel send picked up by worker goroutines. So
+`executor::publish` hands it to `spawn_blocking` and **does not await it** — the
+caller is still holding a scheduler semaphore permit, and an unreachable mail
+host would otherwise throttle the scheduler to three runs per SMTP timeout while
+starving the proxy and every in-flight SSE stream.
+
+**The run timeout is one deadline across three stages.** Go wraps the whole
+`agent.RunAgent` call; timing out only the event drain would let a subprocess
+that hangs before its first event leave the `job_history` row `running` forever
+*and* hold its permit for the life of the process. It is a shared
+`tokio::time::Instant` rather than one future wrapping all three, because
+`Session` has **no `Drop`**: cancelling a future that owns one abandons the
+subprocess instead of stopping it, so `close()` has to stay reachable.
 
 **Go's `scheduleTaskOnStartup` has no analogue.** It exists to `recover()` from
 `robfig/cron` panicking on an expression of exactly `CRON_TZ=UTC` (#330);

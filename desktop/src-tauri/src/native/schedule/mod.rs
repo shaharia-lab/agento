@@ -574,7 +574,7 @@ fn same_wall_clock(a: DateTime<Tz>, b: DateTime<Tz>) -> bool {
 
 /// `scheduler.advancePastNow`. `None` means the schedule is exhausted or has
 /// stopped making progress, which the caller treats as "remove the job".
-fn advance_past_now(sched: &JobSchedule, mut next: Fire, now: DateTime<Utc>) -> Option<Fire> {
+pub fn advance_past_now(sched: &JobSchedule, mut next: Fire, now: DateTime<Utc>) -> Option<Fire> {
     while next.instant < now {
         let n = sched.next(next);
         if n.is_zero() || n.instant <= next.instant {

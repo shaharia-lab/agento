@@ -46,7 +46,7 @@ use chrono_tz::Tz;
 use tokio::sync::Semaphore;
 use tokio::task::AbortHandle;
 
-use super::{build_job_definition, next_runs, setup, JobSchedule};
+use super::{advance_past_now, build_job_definition, next_runs, setup, JobSchedule};
 use crate::native::tasks::ScheduledTask;
 
 /// How long a job may park before it re-reads the wall clock. See the module
@@ -172,12 +172,25 @@ impl Scheduler {
                     super::executor::execute_task(&runner, &id).await;
                 });
 
-                let advanced = sched.next(next);
-                if advanced.is_zero() || advanced.instant <= next.instant {
-                    // Go's zero time: the schedule is exhausted. A one-time job
-                    // reaches this after its single run.
+                // **Re-anchor against the wall clock**, do not just add one
+                // interval. gocron's `selectExecJobsOutForRescheduling` computes
+                // `next` and then, `if next.Before(s.now())`, calls
+                // `advancePastNow` — its own comment says "the machine went to
+                // sleep, and woke up some time later".
+                //
+                // Advancing by one interval and firing whenever the result is
+                // past would *replay every missed fire*: a five-minute task and
+                // a shut lid for eight hours is ~96 back-to-back Claude runs,
+                // 96 chat sessions, 96 job_history rows and a
+                // `stop_after_count` budget gone in seconds. An NTP jump
+                // forward does the same. One fire on the first wake is both
+                // what gocron does and what a person expects.
+                //
+                // `None` is the schedule exhausted or no longer making
+                // progress — gocron removes the job, and so does returning.
+                let Some(advanced) = advance_past_now(&sched, sched.next(next), Utc::now()) else {
                     return;
-                }
+                };
                 next = advanced;
             }
         });
@@ -230,12 +243,40 @@ fn local_tz() -> Tz {
         .unwrap_or(Tz::UTC)
 }
 
+/// Whether **this build** owns the scheduler, which is true only when the seam
+/// is fully on.
+///
+/// The scheduler cannot be owned independently of the task writes, because each
+/// write also registers or unregisters a timer and the registration has to
+/// happen in the process that stored the row. `may_serve` forwards every
+/// non-`GET` in both [`Mode::Off`] and [`Mode::Diff`], so in those modes Go is
+/// the only writer — and a Go that had been told `AGENTO_SCHEDULER=off` would
+/// store a task neither process ever schedules until the app restarts. That is
+/// exactly the split this port set out to close, reappearing through the
+/// escape hatch.
+///
+/// So ownership follows the seam, in **both** directions: this decides whether
+/// `sidecar.rs` sets `AGENTO_SCHEDULER=off` *and* whether [`start`] installs any
+/// timers. `AGENTO_DESKTOP_NATIVE=off` therefore means what it is documented to
+/// mean — the app behaves exactly as it did before the port, with Go scheduling
+/// and Go writing.
+pub fn shell_owns_scheduler() -> bool {
+    crate::native::mode() == crate::native::Mode::On
+}
+
 /// `initTaskScheduler` + `Scheduler.Start`: load the active tasks, schedule
 /// each, and run.
 ///
 /// Called once, from the app's setup. Idempotent by way of the `OnceLock`: a
 /// second call is a no-op rather than a second scheduler.
 pub fn start(db_path: PathBuf) {
+    if !shell_owns_scheduler() {
+        // The sidecar was not told to stop scheduling either, so Go owns it and
+        // installing timers here would be the two-scheduler hazard.
+        log::info!("task scheduler left with the sidecar: the native seam is not fully on");
+        return;
+    }
+
     let scheduler = Arc::new(Scheduler {
         db_path,
         loc: local_tz(),
@@ -305,6 +346,7 @@ pub fn unschedule_if_running(task_id: &str) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Fire;
     use super::*;
 
     #[test]
@@ -343,6 +385,88 @@ mod tests {
             Some(WAKE_INTERVAL),
             "exactly the interval is not over it"
         );
+    }
+
+    /// The whole of finding #1 on PR #365, as a property of the advance rule.
+    ///
+    /// Models the timer loop exactly: a fire whose target is not in the future
+    /// costs no sleep, so the question is **how many times the loop comes round
+    /// before it genuinely parks**. With the advance re-anchored that is once;
+    /// stepping one interval at a time it is once per window that elapsed —
+    /// ~68 Claude runs here, and a `stop_after_count` budget gone in seconds.
+    ///
+    /// Seven minutes rather than five, deliberately: eight hours is not a whole
+    /// number of them, so the catch-up lands strictly *inside* a window instead
+    /// of on its edge. The edge is its own case below.
+    #[test]
+    fn a_missed_window_yields_one_fire_rather_than_one_per_missed_interval() {
+        let sched = JobSchedule::Duration {
+            every: chrono::Duration::minutes(7),
+            loc: Tz::UTC,
+        };
+        let scheduled_at = Utc::now();
+        let woke = scheduled_at + chrono::Duration::hours(8);
+
+        let mut next = Fire {
+            instant: scheduled_at + chrono::Duration::minutes(7),
+            offset: chrono::FixedOffset::east_opt(0).expect("UTC"),
+        };
+        let mut fires = 0;
+        while next.instant <= woke {
+            // `sleep_until` returns without awaiting, so this is a real fire.
+            assert_eq!(
+                next_chunk(next.instant, woke),
+                None,
+                "would not have parked"
+            );
+            fires += 1;
+            assert!(fires <= 5, "the loop is replaying missed fires");
+            next = advance_past_now(&sched, sched.next(next), woke).expect("a future fire");
+        }
+
+        assert_eq!(fires, 1, "one catch-up fire, not ~68");
+        assert!(
+            next.instant > woke && next.instant <= woke + chrono::Duration::minutes(7),
+            "and the schedule is re-anchored to the next window after the wake"
+        );
+    }
+
+    /// A fire due at exactly the current instant is **due**, not skipped.
+    ///
+    /// `advance_past_now` walks `while next < now`, so it stops *on* `now` — and
+    /// gocron's own loop is `for next.Before(s.now())`, the same strictness. The
+    /// distinction only shows when the sleep is a whole number of intervals, and
+    /// getting it backwards would silently drop one run of every task whose
+    /// interval happens to divide the gap.
+    #[test]
+    fn a_fire_landing_exactly_on_now_is_due_rather_than_skipped() {
+        let sched = JobSchedule::Duration {
+            every: chrono::Duration::minutes(5),
+            loc: Tz::UTC,
+        };
+        let scheduled_at = Utc::now();
+        // 8h is exactly 96 five-minute windows, so the advance lands on it.
+        let woke = scheduled_at + chrono::Duration::hours(8);
+        let stale = Fire {
+            instant: scheduled_at + chrono::Duration::minutes(5),
+            offset: chrono::FixedOffset::east_opt(0).expect("UTC"),
+        };
+
+        let caught_up = advance_past_now(&sched, sched.next(stale), woke).expect("a fire");
+        assert_eq!(caught_up.instant, woke, "stopped on now, not past it");
+    }
+
+    #[test]
+    fn an_exhausted_schedule_removes_the_job_rather_than_spinning() {
+        // A one-time job that has already run: `next` is the zero time, so the
+        // advance answers `None` and the loop returns.
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let sched = JobSchedule::OneTime(vec![past.fixed_offset()]);
+        let fired = Fire {
+            instant: past,
+            offset: chrono::FixedOffset::east_opt(0).expect("UTC"),
+        };
+        assert!(advance_past_now(&sched, sched.next(fired), Utc::now()).is_none());
     }
 
     #[test]

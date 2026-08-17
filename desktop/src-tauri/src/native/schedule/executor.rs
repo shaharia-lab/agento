@@ -375,27 +375,55 @@ async fn run_agent(
         u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60,
     );
 
-    let mut session = crate::claude::session::Session::new(options)
-        .await
-        .map_err(|e| format!("starting agent: {e}"))?;
-    if let Err(e) = session.send(prompt).await {
-        session.close();
-        drop(tool_servers);
-        return Err(format!("starting agent: sending prompt: {e}"));
-    }
+    // **One deadline across all three stages, not a timeout on the drain
+    // alone.** Go wraps the whole `agent.RunAgent` call, and the difference is
+    // not theoretical: a subprocess that hangs before its first event would
+    // leave the `job_history` row `running` forever *and* hold this run's
+    // scheduler permit for the life of the process — three of those and no
+    // scheduled task runs again.
+    //
+    // A shared `Instant` rather than a future wrapping all three, because
+    // `Session` has no `Drop`: cancelling a future that owns one abandons the
+    // subprocess instead of stopping it. Staged this way, `close()` is
+    // reachable on every path where a session exists.
+    let deadline = tokio::time::Instant::now() + timeout;
 
-    let collected = tokio::time::timeout(timeout, collect_run_result(&mut session)).await;
+    let mut session = match tokio::time::timeout_at(
+        deadline,
+        crate::claude::session::Session::new(options),
+    )
+    .await
+    {
+        Ok(Ok(session)) => session,
+        Ok(Err(e)) => {
+            drop(tool_servers);
+            return Err(format!("starting agent: {e}"));
+        }
+        Err(_) => {
+            drop(tool_servers);
+            return Err(DEADLINE_EXCEEDED.to_string());
+        }
+    };
+
+    let sent = tokio::time::timeout_at(deadline, session.send(prompt)).await;
+    let collected = match sent {
+        Ok(Ok(())) => tokio::time::timeout_at(deadline, collect_run_result(&mut session))
+            .await
+            .unwrap_or_else(|_| Err(DEADLINE_EXCEEDED.to_string())),
+        Ok(Err(e)) => Err(format!("starting agent: sending prompt: {e}")),
+        Err(_) => Err(DEADLINE_EXCEEDED.to_string()),
+    };
+
     session.close();
     // The in-process tool listeners outlive the subprocess and stop when
     // dropped, so this is after `close` rather than before it.
     drop(tool_servers);
-
-    match collected {
-        Ok(result) => result,
-        // `context.DeadlineExceeded` reaches Go's caller as the run error too.
-        Err(_) => Err("context deadline exceeded".to_string()),
-    }
+    collected
 }
+
+/// What `context.DeadlineExceeded` reaches Go's caller as, and therefore what
+/// lands in `job_history.error_message` for a run that ran out of time.
+const DEADLINE_EXCEEDED: &str = "context deadline exceeded";
 
 /// `collectRunResult`: drain every event, keep the last result.
 ///
@@ -638,6 +666,29 @@ fn record_failed_run(
     update_task_after_run(scheduler, task, started_at, "failed");
 }
 
+/// Hand a notification to the blocking pool and **do not wait for it**.
+///
+/// Go publishes to `eventbus`, which is a non-blocking channel send picked up by
+/// one of three worker goroutines — a scheduled run never waits on SMTP. This is
+/// the same shape, and both halves of it matter:
+///
+/// - **`spawn_blocking`**, because `smtp::send` is lettre's *blocking*
+///   transport. Called inline it parks a tokio worker for up to the SMTP
+///   timeout, and an unreachable mail host plus three finishing tasks starves
+///   the proxy and every in-flight SSE chat stream on a four-core machine.
+/// - **not awaited**, because the caller still holds the scheduler semaphore
+///   permit. Awaiting would let a dead SMTP server throttle the scheduler to
+///   three runs per timeout.
+///
+/// The payload is owned rather than borrowed for exactly that reason: it
+/// outlives this call.
+fn publish(db_path: &std::path::Path, event: &'static str, payload: Vec<(&'static str, String)>) {
+    let db_path = db_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        notifications::handle(&db_path, event, &payload);
+    });
+}
+
 /// `publishTaskFinished`. The keys are Go's, in Go's order — they become the
 /// email body, one `key: value` per line.
 fn publish_task_finished(
@@ -646,10 +697,10 @@ fn publish_task_finished(
     job: &JobHistory,
     chat_session_id: &str,
 ) {
-    notifications::handle(
+    publish(
         db_path,
         notifications::event::TASK_FINISHED,
-        &[
+        vec![
             ("Task ID", task.id.clone()),
             ("Task Name", task.name.clone()),
             ("Task Description", task.description.clone()),
@@ -665,10 +716,10 @@ fn publish_task_finished(
 
 /// `publishTaskFailed`.
 fn publish_task_failed(db_path: &std::path::Path, task: &ScheduledTask, error_message: &str) {
-    notifications::handle(
+    publish(
         db_path,
         notifications::event::TASK_FAILED,
-        &[
+        vec![
             ("Task ID", task.id.clone()),
             ("Task Name", task.name.clone()),
             ("Task Description", task.description.clone()),
