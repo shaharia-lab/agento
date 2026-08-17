@@ -192,6 +192,16 @@ pub async fn start_confluence_mcp_server(
 
 /// `ValidateSiteURL`: HTTPS, a hostname, and no trailing slash.
 ///
+/// **The second of two places that reason about `net/url`'s rules.** The first
+/// is `native/integration_credentials.rs`'s `split_url`, and the difference is
+/// which question is being asked: there it is *create* — may this row be stored
+/// — and forwarding the whole request to Go is always available, so it decides
+/// only the shapes it is sure of. Here it is *start* — may a stored row be
+/// hosted — and there is nobody to forward to, so this reproduces `getScheme`
+/// and the authority split outright and answers every input. #316 adds a third
+/// caller of the same Go rules with a different answer again, since Jira does
+/// not require HTTPS.
+///
 /// The **only** validation `Start` performs beyond the credential parse, and the
 /// one that matters: it is what stops an `http://` site URL carrying the user's
 /// API token in a `Basic` header over plaintext. #277 pinned that Confluence's
@@ -221,31 +231,45 @@ pub async fn start_confluence_mcp_server(
 /// not of a re-rendered URL — Go concatenates that string with every tool's
 /// path, so anything else would be a different request.
 ///
-/// # The base has to be one this port can build Go's request from
+/// # The base has to be one this port can send where Go sends it
 ///
-/// Everything above is Go's. The last check is not, and it is what
-/// [`client::Client::absolute`] needs to be able to do its job: that guard
-/// compares the target `url::Url::parse` produced against the one Go would have
-/// sent, and it can only attribute a difference to the *tool's* path if the
-/// **base** survives `url` unchanged. Three shapes break that, and all three are
-/// refused here rather than at every call:
+/// Everything above is Go's. The checks that follow are not, and they are what
+/// [`client::Client::absolute`] rests on. That guard compares two `url`-parsed
+/// targets, so it is blind by construction to any place `url` and `net/url`
+/// disagree about the **base** — and the two do disagree, in one way that is a
+/// wrong path and one that is a different *host*:
 ///
-/// - A base `url` cannot parse at all — a non-numeric or out-of-range port, a
-///   bad `%` escape in the host. Go's `url.Parse` refuses most of these too, so
-///   this is mostly *closer* to Go than not checking; where Go accepts, the
-///   alternative is hosting six tools that answer `request failed` forever.
-/// - A base carrying its own `?` or `#`. The concatenation is then not a prefix
-///   of the target at all, and there is no faithful answer.
-/// - A base holding a `.` or `..` path segment. `url` collapses it and Go does
-///   not, which is [`client::Client::absolute`]'s whole subject — but a base is
-///   not model-supplied, so refusing to host is both safe and quiet, where
-///   letting it through would silently move every request to another endpoint.
+/// - **Authority.** `url` treats `\` as an authority separator for a special
+///   scheme; `net/url` does not, and rejects the userinfo that results. So
+///   `https://evil.com\@acme.atlassian.net` is a parse error to Go — nothing is
+///   hosted — while `url` reads the host as `evil.com` and the rest as a path.
+///   Both sides of `absolute`'s comparison would then say `evil.com`, and every
+///   tool would send the user's `Basic` credentials to it. So the host `url`
+///   resolved is compared against the one [`go_host`] resolved, through `url`
+///   on both sides so that case-folding, IDN and the default port cannot make a
+///   false difference.
+/// - **Path encoding.** Go escapes `\ ^ | [ ]` in a path and `url` does not,
+///   and `url` removes dot segments where `net/url` never does — so
+///   `/a\b` leaves here as `/a/b` against Go's `/a%5Cb`, and `/a/../b` as
+///   `/b`. So `url`'s rendering of the base path is compared against Go's
+///   `escape(Path, encodePath)`, which is [`crate::native::gourl::escape_path`].
+///   That subsumes the dot-segment case rather than special-casing it.
+///
+/// Two more shapes have no sound comparison at all and are refused with them: a
+/// base `url` cannot parse (a non-numeric or out-of-range port, a bad `%`
+/// escape), and a base carrying its own `?` or `#`, after which the
+/// concatenation is not a prefix of the target.
 ///
 /// Note what is deliberately **not** required: that the base is already
 /// percent-encoded. `https://intranet.example.com/my atlassian` is a site URL Go
-/// accepts and sends as `/my%20atlassian/…`, and `url` encodes it identically —
-/// so it is admitted, and `absolute` compares against `url`'s own rendering of
-/// the base rather than against the raw text.
+/// accepts and sends as `/my%20atlassian/…` through `EscapedPath`, and `url`
+/// encodes it identically — the comparison above is against Go's *escaped*
+/// rendering, not against the raw text, so it is admitted.
+///
+/// The one shape this refuses and Go serves is a base path holding a
+/// pre-escaped reserved byte (`/a%2Fb`), where `EscapedPath` prefers the raw
+/// text over re-escaping `Path`. No Atlassian site URL takes that shape, and a
+/// refusal is a logged non-start rather than a request somewhere else.
 ///
 /// # The divergence, and why it is only a sentence
 ///
@@ -306,19 +330,42 @@ pub fn validate_site_url(raw: &str) -> std::result::Result<String, String> {
     }
 
     let clean = raw.trim_end_matches('/');
-    // The three shapes `client::Client::absolute` cannot work behind. See the
-    // section above for why each is refused here rather than per call.
+    // The shapes `client::Client::absolute` cannot work behind. See the section
+    // above for why each is refused here rather than per call.
     let parsed = reqwest::Url::parse(clean)
         .map_err(|_| "invalid site URL: it is not a URL this build can send a request to")?;
     if parsed.query().is_some() || parsed.fragment().is_some() {
         return Err("invalid site URL: a query or fragment leaves the path open".to_string());
     }
-    if base_path_of(clean)
-        .split('/')
-        .any(|segment| segment == "." || segment == "..")
+
+    // The host, which is the one disagreement that would send a credential
+    // somewhere else. Both sides go through `url` so that a lower-cased scheme,
+    // an IDN host or an explicit `:443` is not a false difference — what is
+    // being compared is *which host each parser found*, not how it spells one.
+    let go_authority = reqwest::Url::parse(&format!("https://{}", go_host(rest)))
+        .map_err(|_| "invalid site URL: its host is not one this build can send to")?;
+    if go_authority.host() != parsed.host()
+        || go_authority.port_or_known_default() != parsed.port_or_known_default()
     {
-        return Err("invalid site URL: it holds a dot segment".to_string());
+        return Err("invalid site URL: net/url and url read a different host".to_string());
     }
+
+    // …and the path, which is a wrong endpoint on the right host.
+    let raw_path = base_path_of(clean);
+    let go_path = if raw_path.is_empty() {
+        // `url` renders a base with no path of its own as `/`; Go sends the
+        // tool's own leading slash and nothing before it.
+        "/".to_string()
+    } else {
+        let decoded = crate::native::gourl::unescape_path(raw_path)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .ok_or("invalid site URL: its path does not decode")?;
+        crate::native::gourl::escape_path(&decoded)
+    };
+    if parsed.path() != go_path {
+        return Err("invalid site URL: net/url and url encode its path differently".to_string());
+    }
+
     Ok(clean.to_string())
 }
 
@@ -327,7 +374,7 @@ pub fn validate_site_url(raw: &str) -> std::result::Result<String, String> {
 ///
 /// Raw rather than parsed, because the dot-segment check above exists precisely
 /// because parsing removes them.
-fn base_path_of(clean: &str) -> &str {
+pub(super) fn base_path_of(clean: &str) -> &str {
     let Some(rest) = clean.split_once("://").map(|(_, rest)| rest) else {
         return "";
     };
@@ -479,6 +526,76 @@ mod tests {
             ("/wiki", ""),
         ] {
             assert_eq!(go_scheme(raw).0, scheme, "{raw}");
+        }
+    }
+
+    /// The refusal that matters most: a base where `url` and `net/url` read a
+    /// **different host**, which is how the user's `Basic` credentials would
+    /// leave for somebody else's server.
+    ///
+    /// `url` treats `\` as an authority separator for a special scheme, so it
+    /// reads `evil.com` as the host and `@acme.atlassian.net` as a path;
+    /// `net/url` does not, and rejects the userinfo that leaves, so Go hosts
+    /// nothing at all. A guard that compared two url-parsed values would agree
+    /// with itself and send the request. Pinned as a vector too, but asserted
+    /// here as well because it is the one failure with a blast radius.
+    #[test]
+    fn a_base_the_two_parsers_read_as_different_hosts_is_refused() {
+        for site in [
+            r"https://evil.com\@acme.atlassian.net",
+            r"https://evil.com\@acme.atlassian.net/wiki",
+        ] {
+            assert_eq!(
+                validate_site_url(site),
+                Err("invalid site URL: net/url and url read a different host".to_string()),
+                "{site}"
+            );
+        }
+
+        // …and the legitimate userinfo it must not be confused with.
+        assert_eq!(
+            validate_site_url("https://user:pw@acme.atlassian.net"),
+            Ok("https://user:pw@acme.atlassian.net".to_string())
+        );
+    }
+
+    /// The path half of the same disagreement, plus what it must still admit.
+    ///
+    /// Go escapes `\ ^ | [ ]` in a path and `url` does not; `url` removes dot
+    /// segments and `net/url` never does. But an *unencoded* path is fine —
+    /// both render `/my atlassian` as `/my%20atlassian` — which is the whole
+    /// reason the comparison is against Go's escaped form rather than the raw
+    /// text.
+    #[test]
+    fn a_base_path_the_two_parsers_encode_differently_is_refused() {
+        for site in [
+            r"https://acme.atlassian.net/a\b",
+            "https://acme.atlassian.net/a^b",
+            "https://acme.atlassian.net/a|b",
+            "https://acme.atlassian.net/a/../b",
+            "https://acme.atlassian.net/./a",
+        ] {
+            assert_eq!(
+                validate_site_url(site),
+                Err("invalid site URL: net/url and url encode its path differently".to_string()),
+                "{site}"
+            );
+        }
+
+        for site in [
+            "https://acme.atlassian.net",
+            "https://acme.atlassian.net:8443",
+            "https://intranet.example.com/atlassian",
+            "https://intranet.example.com/my atlassian",
+            "https://intranet.example.com/a%20b",
+            "https://intranet.example.com/café",
+            "https://intranet.example.com/a+b:c@d",
+        ] {
+            assert_eq!(
+                validate_site_url(site),
+                Ok(site.to_string()),
+                "{site} is a site URL Go serves"
+            );
         }
     }
 

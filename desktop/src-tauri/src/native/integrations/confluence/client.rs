@@ -206,13 +206,31 @@ impl Client {
     /// `url` normalizes in a tool's path — now or after an upgrade — is caught by
     /// construction.
     ///
-    /// [`super::validate_site_url`] has already refused the three base shapes
-    /// this cannot work behind: one `url` will not parse, one carrying its own
-    /// `?` or `#`, and one holding a dot segment of its own. The re-checks below
-    /// are cheap and keep the function total rather than trusting a caller.
+    /// # What this does not check, and who does
+    ///
+    /// Comparing two `url`-parsed values is blind to every place `url` and
+    /// `net/url` disagree about the **base** — most sharply the authority, where
+    /// `https://evil.com\@acme.atlassian.net` is a parse error to Go and host
+    /// `evil.com` to `url`. [`super::validate_site_url`] is the gate for those:
+    /// it runs once, at `Start`, and refuses a base whose host or path encoding
+    /// the two parsers read differently, so no `Client` should exist around one.
+    /// It is a per-call cost (a percent-decode and a re-encode) for a property
+    /// of a value that cannot change between calls, which is why it lives there
+    /// and not here.
+    ///
+    /// The three re-checks below are the cheap ones, kept so this function is
+    /// total rather than trusting its caller.
     fn absolute(&self, path: &str) -> Result<reqwest::Url, String> {
         let base = reqwest::Url::parse(&self.site_url).map_err(|_| REQUEST_FAILED.to_string())?;
         if base.query().is_some() || base.fragment().is_some() {
+            return Err(REQUEST_FAILED.to_string());
+        }
+        // A dot segment in the base collapses on *both* sides of the comparison
+        // below, so it is the one shape the comparison cannot see.
+        if super::base_path_of(&self.site_url)
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+        {
             return Err(REQUEST_FAILED.to_string());
         }
         // `url` renders a base with no path of its own as `/`; the suffix

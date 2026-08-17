@@ -1134,11 +1134,24 @@ Four things that will recur in #313–#316:
   site URL that works. The base is therefore parsed on its own and its *rendered*
   path is the expected prefix; only the tool's suffix is compared against the
   bytes it built, which is sound because that half is fully `gourl`-encoded.
-  Three base shapes leave no sound comparison and `validate_site_url` refuses
-  them at `Start` instead — one `url` cannot parse, one carrying its own `?` or
-  `#`, and one holding a dot segment of its own. The last two Go accepts, so all
-  three are pinned as `rust_error` divergences; refusing to host is visible and
-  logged, where the alternative is silently moving every request.
+- **Comparing two `url`-parsed values is blind to the base, and that is a
+  credential leak, not a tidiness point.** `url` treats `\` as an authority
+  separator for a special scheme; `net/url` does not, and rejects the userinfo
+  that results — so `https://evil.com\@acme.atlassian.net` is a parse error to Go
+  (nothing hosted) and host `evil.com` to `url`. Both sides of the guard would
+  then say `evil.com` and every tool would send the user's `Basic` credentials
+  there. `validate_site_url` therefore checks the base itself, once, at `Start`:
+  the host `url` resolved against the one `go_host` resolved (through `url` on
+  both sides, so case, IDN and the default port are not false differences), and
+  `url`'s rendering of the base path against Go's `escape(Path, encodePath)` —
+  which also covers Go escaping `\ ^ | [ ]` where `url` does not, and subsumes
+  the dot-segment case rather than special-casing it. Two more shapes have no
+  sound comparison at all and go with them: a base `url` cannot parse, and one
+  carrying its own `?` or `#`. Go accepts several of these, so each is pinned as
+  a `rust_error` divergence — refusing to host is logged and visible, where the
+  alternative is a request somewhere else. **#313–#316 inherit this**: any
+  integration whose API base comes out of the row needs the base validated, not
+  just the suffix.
 - **`SetBasicAuth` is `reqwest`'s `basic_auth`.** Both are
   `Basic base64(user + ":" + pass)` with standard (not URL-safe) alphabet. The
   vectors pin the encoded header rather than trusting that, because nothing in a

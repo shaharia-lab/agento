@@ -404,7 +404,33 @@ var confluenceSiteURLCases = []struct {
 	{
 		name:      "a base holding a dot segment would move every request",
 		input:     "https://acme.atlassian.net/a/../b",
-		rustError: "invalid site URL: it holds a dot segment",
+		rustError: "invalid site URL: net/url and url encode its path differently",
+	},
+	{
+		// The case that distinguishes the two parsers on the **authority**, and
+		// the reason the host is compared at all. `url` treats `\\` as an
+		// authority separator for a special scheme, so it reads the host as
+		// `evil.com` and the rest as a path; `net/url` does not, and rejects the
+		// userinfo that leaves. Go therefore hosts nothing. A port that compared
+		// only url-parsed values would agree with itself and send the user's
+		// Basic credentials to evil.com.
+		name:      "a backslash before the userinfo is a different host to url and a parse error to Go",
+		input:     `https://evil.com\@acme.atlassian.net`,
+		rustError: "invalid site URL: net/url and url read a different host",
+	},
+	{
+		// Milder, same root: Go escapes `\\ ^ | [ ]` in a path and `url` does
+		// not, so this would reach `/a/b` on the right host instead of
+		// `/a%5Cb`.
+		name:      "a backslash in the base path is escaped by Go and converted by url",
+		input:     `https://acme.atlassian.net/a\b`,
+		rustError: "invalid site URL: net/url and url encode its path differently",
+	},
+	{
+		// Accepted, and the pair that shows the path comparison is against Go's
+		// *escaped* rendering rather than the raw text.
+		name:  "a pre-escaped base path is accepted, and so is the same path unescaped",
+		input: "https://intranet.example.com/a%20b",
 	},
 }
 

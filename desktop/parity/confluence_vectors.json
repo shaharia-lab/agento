@@ -129,7 +129,24 @@
       "case": "a base holding a dot segment would move every request",
       "input": "https://acme.atlassian.net/a/../b",
       "clean": "https://acme.atlassian.net/a/../b",
-      "rust_error": "invalid site URL: it holds a dot segment"
+      "rust_error": "invalid site URL: net/url and url encode its path differently"
+    },
+    {
+      "case": "a backslash before the userinfo is a different host to url and a parse error to Go",
+      "input": "https://evil.com\\@acme.atlassian.net",
+      "error": "invalid site URL: parse \"https://evil.com\\\\@acme.atlassian.net\": net/url: invalid userinfo",
+      "rust_error": "invalid site URL: net/url and url read a different host"
+    },
+    {
+      "case": "a backslash in the base path is escaped by Go and converted by url",
+      "input": "https://acme.atlassian.net/a\\b",
+      "clean": "https://acme.atlassian.net/a\\b",
+      "rust_error": "invalid site URL: net/url and url encode its path differently"
+    },
+    {
+      "case": "a pre-escaped base path is accepted, and so is the same path unescaped",
+      "input": "https://intranet.example.com/a%20b",
+      "clean": "https://intranet.example.com/a%20b"
     }
   ],
   "tools": [
