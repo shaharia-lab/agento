@@ -16,6 +16,69 @@ use agento_lib::native::chat::persist;
 use agento_lib::native::chat::turn::TurnState;
 use agento_lib::native::chats;
 
+/// The `log` sink the #335 assertions read.
+///
+/// A separate copy from `writes::testlog` because this is a different crate and
+/// that one is `#[cfg(test)]` on the library. Installed once per process, since
+/// `log::set_boxed_logger` allows exactly one.
+mod testlog {
+    use std::sync::{Mutex, Once, OnceLock};
+
+    static LINES: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+    static INIT: Once = Once::new();
+
+    struct Capture;
+
+    impl log::Log for Capture {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            true
+        }
+        fn log(&self, record: &log::Record<'_>) {
+            if let Ok(mut lines) = lines().lock() {
+                lines.push(format!("{} {}", record.level(), record.args()));
+            }
+        }
+        fn flush(&self) {}
+    }
+
+    fn lines() -> &'static Mutex<Vec<String>> {
+        LINES.get_or_init(Mutex::default)
+    }
+
+    pub fn install() {
+        INIT.call_once(|| {
+            let _ = log::set_boxed_logger(Box::new(Capture));
+            log::set_max_level(log::LevelFilter::Trace);
+        });
+    }
+
+    pub fn matching(needle: &str) -> Vec<String> {
+        install();
+        lines()
+            .lock()
+            .map(|lines| {
+                lines
+                    .iter()
+                    .filter(|line| line.contains(needle))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The commit runs in a task detached from the request, so its line can
+    /// arrive after the body has ended.
+    pub async fn wait_for(needle: &str) -> String {
+        for _ in 0..200 {
+            if let Some(line) = matching(needle).into_iter().next() {
+                return line;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("no log line matching {needle:?}");
+    }
+}
+
 /// Skips when the machine has no `python3`, as the SDK suite does.
 fn python3() -> Option<String> {
     for candidate in ["python3", "python"] {
@@ -1222,4 +1285,69 @@ async fn a_chat_using_a_local_tool_runs_natively_end_to_end() {
         vec!["mcp__local-tools__current_time"],
         "renaming either half of this breaks every agent that already names it"
     );
+}
+
+/// #335: the five service-layer lines one `AskUserQuestion` turn produces.
+///
+/// Driven through this suite rather than a unit test for the reason the whole
+/// file exists: every one of them is a property of a *sequence*. `agent session
+/// started` needs a live subprocess, the three `AskUserQuestion` lines need a
+/// result that is not the end of the stream, and `message committed` is emitted
+/// from the task detached from the request — so it can arrive after the body
+/// has, which is why it is awaited rather than read.
+#[tokio::test]
+async fn one_turn_emits_the_service_layer_lines_go_emits() {
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    testlog::install();
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        text = json.dumps(msg.get("message", {}).get("content", ""))
+        if "second" not in text:
+            raw('{"type":"assistant","message":{"content":[{"type":"tool_use","id":"q1","name":"AskUserQuestion","input":{"question":"which one?"}}]}}')
+            say({"type": "result", "subtype": "success", "is_error": False,
+                 "result": "", "session_id": "sdk-logged",
+                 "usage": {"input_tokens": 1, "output_tokens": 1}})
+        else:
+            say({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "thanks"}
+            ]}})
+            say({"type": "result", "subtype": "success", "is_error": False,
+                 "result": "final answer", "session_id": "sdk-logged",
+                 "usage": {"input_tokens": 1, "output_tokens": 1}})
+"#,
+    );
+
+    let id = unique_id("logged");
+    let (_body, answered, _db) = run_turn_answering_keeping_db(&cli, &id, "hello", "second").await;
+    assert!(answered, "the prompt was never answered");
+
+    // Each line carries the chat id, so a suite running in parallel cannot
+    // supply another test's.
+    for needle in [
+        format!(r#"agent session started session_id="{id}""#),
+        format!(r#"AskUserQuestion detected in stream session_id="{id}""#),
+        format!(r#"sending user_input_required, waiting for answer session_id="{id}""#),
+        format!(r#"received user answer, resuming session session_id="{id}""#),
+    ] {
+        let found = testlog::matching(&needle);
+        assert_eq!(found.len(), 1, "expected one {needle:?}: {found:?}");
+        assert!(found[0].starts_with("INFO "), "{}", found[0]);
+    }
+
+    // The commit is detached from the request, so this one is awaited.
+    let committed = testlog::wait_for(&format!(r#"message committed session_id="{id}""#)).await;
+    assert!(
+        committed.contains(r#"sdk_session_id="sdk-logged""#),
+        "{committed}"
+    );
+    assert!(committed.starts_with("INFO "), "{committed}");
 }

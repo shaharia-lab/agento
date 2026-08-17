@@ -337,6 +337,9 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     let answer = encode(StatusCode::CREATED, &agent)?;
     tx.commit()
         .map_err(|e| WriteError::Fallback(format!("commit agent create: {e}")))?;
+    // `agentService.Create`'s own line, after the store call as Go's is — see
+    // `writes::service_log_convention`.
+    log::info!("agent created slug={:?}", agent.slug);
     Ok(answer)
 }
 
@@ -377,6 +380,7 @@ fn update(db_path: &Path, slug: &str, body: &[u8]) -> Result<super::Answer, Writ
     let answer = encode(StatusCode::OK, &agent)?;
     tx.commit()
         .map_err(|e| WriteError::Fallback(format!("commit agent update: {e}")))?;
+    log::info!("agent updated slug={slug:?}");
     Ok(answer)
 }
 
@@ -391,6 +395,7 @@ fn delete(db_path: &Path, slug: &str) -> Result<super::Answer, WriteError> {
         // its own 500, which is the behaviour the app has today.
         return Err(WriteError::Fallback(format!("agent {slug:?} not found")));
     }
+    log::info!("agent deleted slug={slug:?}");
     Ok(super::Answer::no_content())
 }
 
@@ -1091,5 +1096,28 @@ mod tests {
         assert!(!claims(&Method::PUT, "/api/agents"));
         assert!(!claims(&Method::DELETE, "/api/agents"));
         assert!(!claims(&Method::PATCH, "/api/agents/my-agent"));
+    }
+
+    /// #335: the access line says a `POST /api/agents` happened; only the
+    /// handler knows which agent. A line with no test is a line that quietly
+    /// stops being emitted, which for this half of #301 is the whole failure
+    /// mode.
+    #[test]
+    fn the_agent_writes_log_their_entity_and_outcome() {
+        crate::native::writes::testlog::install();
+        let file = migrated();
+
+        create(
+            file.path(),
+            br#"{"name":"Logged Agent","slug":"logged-agent"}"#,
+        )
+        .expect("create");
+        crate::native::writes::testlog::assert_info_once(r#"agent created slug="logged-agent""#);
+
+        update(file.path(), "logged-agent", br#"{"name":"Logged Agent 2"}"#).expect("update");
+        crate::native::writes::testlog::assert_info_once(r#"agent updated slug="logged-agent""#);
+
+        delete(file.path(), "logged-agent").expect("delete");
+        crate::native::writes::testlog::assert_info_once(r#"agent deleted slug="logged-agent""#);
     }
 }
