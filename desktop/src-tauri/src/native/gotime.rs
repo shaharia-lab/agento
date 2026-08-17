@@ -23,8 +23,14 @@ use serde::{Serialize, Serializer};
 pub struct GoTime(pub DateTime<FixedOffset>);
 
 impl GoTime {
-    /// Parse the RFC 3339 text SQLite holds, as `time.Parse(time.RFC3339, …)`
-    /// does on the Go side.
+    /// Parse the RFC 3339 text SQLite holds.
+    ///
+    /// This is `chrono`'s RFC 3339, which is **not** `time.Parse(time.RFC3339,
+    /// …)` — see [`parse_rfc3339`] for the five ways they disagree. The
+    /// difference is unreachable here: the only writer of `effective_from` is
+    /// this application, which normalizes to second precision on every write
+    /// path, so none of the five shapes can be stored. A reader of text some
+    /// *other* program wrote wants [`parse_rfc3339`].
     pub fn parse(text: &str) -> Result<Self, String> {
         DateTime::parse_from_rfc3339(text)
             .map(GoTime)
@@ -178,6 +184,172 @@ fn format_go_rfc3339(t: &DateTime<FixedOffset>) -> String {
     out
 }
 
+/// Go's zero `time.Time`, the instant `IsZero()` tests for.
+///
+/// It matters because `omitempty` does **not** suppress a struct: `json.Marshal`
+/// of an `oauth2.Token` with no expiry emits `"expiry":"0001-01-01T00:00:00Z"`
+/// rather than omitting the key, and `Token.Valid()` then treats that token as
+/// **never expiring**. Read as an ordinary instant it is permanently in the
+/// past, which inverts the meaning.
+pub const ZERO: chrono::NaiveDateTime = chrono::NaiveDateTime::new(
+    match chrono::NaiveDate::from_ymd_opt(1, 1, 1) {
+        Some(date) => date,
+        None => unreachable!(),
+    },
+    match chrono::NaiveTime::from_hms_opt(0, 0, 0) {
+        Some(time) => time,
+        None => unreachable!(),
+    },
+);
+
+/// `time.Parse(time.RFC3339, s)`, transcribed — for text Go wrote or that Go
+/// will judge.
+///
+/// [`GoTime::parse`] is `chrono`'s RFC 3339 and is fine for values this
+/// application wrote. This is for the two places that read somebody else's:
+/// `native/schedule`'s `one_off` `run_at`, which is free-form client input
+/// (#275), and `native/integrations/registry`'s Google `auth` expiry, which Go's
+/// `oauth2` wrote (#313).
+///
+/// It exists because **`chrono::DateTime::parse_from_rfc3339` disagrees with Go
+/// in five ways**, in both directions. The first three were found by a
+/// differential run of 636 shapes against a real `gocron.Scheduler` for #275;
+/// the last two by review of #313, from a Go program run against the pinned
+/// toolchain:
+///
+/// | value | Go | `parse_from_rfc3339` |
+/// |---|---|---|
+/// | `2026-06-01t12:00:00z` | error | accepted |
+/// | `2026-06-01T12:00:00,5Z` | accepted (12:00:00.5) | error |
+/// | `2026-06-30T23:59:60Z` | `second out of range` | accepted |
+/// | `2026-06-01T5:04:05Z` | accepted | error |
+/// | `2026-06-01T12:00:00+24:00` | accepted | error |
+///
+/// The last two are Go being *laxer*, which a stricter port turns into refusing
+/// input Go accepts — a schedule that will not build, or an integration that
+/// will not host. They exist because `parseStrictRFC3339`
+/// (`time/format_rfc3339.go`) has its extra checks compiled out behind
+/// `case true:`, so what a stored value actually meets is the **general**
+/// parser's laxity: `stdHour` takes one or two digits, `parseNanoseconds`
+/// accepts a comma, and the zone offset's hour is range-unchecked. If Go
+/// re-enables those checks — the source carries a TODO to do it behind a
+/// GODEBUG — this becomes stricter than it needs to be, which is the safe
+/// direction.
+///
+/// #275's version was `parse_from_rfc3339` plus three guards, and #313 was about
+/// to add a second copy with two. Guarding a convenient library has now been
+/// wrong twice for one reason: the guard list has to be right about *every*
+/// disagreement, and enumerating a third party's edge cases is the thing that
+/// keeps turning out incomplete. So this parses the grammar and delegates
+/// nothing but the calendar arithmetic.
+///
+/// What the general parser does not allow, and neither does this: a year that is
+/// not exactly four digits, a one-digit minute or second, a missing zone, and
+/// anything trailing.
+pub fn parse_rfc3339(s: &str) -> Option<DateTime<FixedOffset>> {
+    let bytes = s.as_bytes();
+    let digits = |from: usize, len: usize| -> Option<u32> {
+        let slice = s.get(from..from + len)?;
+        slice.bytes().all(|b| b.is_ascii_digit()).then_some(())?;
+        slice.parse::<u32>().ok()
+    };
+    let literal =
+        |at: usize, want: u8| -> Option<()> { (bytes.get(at) == Some(&want)).then_some(()) };
+
+    // `2006` — exactly four digits, the first of which must be one, so no sign.
+    let year = digits(0, 4)?;
+    literal(4, b'-')?;
+    let month = digits(5, 2)?;
+    literal(7, b'-')?;
+    let day = digits(8, 2)?;
+    // `T` is a literal in the layout, so its case is fixed — not `t`, not a
+    // space.
+    literal(10, b'T')?;
+
+    // `stdHour` is `getnum(value, false)`: one **or** two digits, unlike the
+    // minute and second, which are fixed-width.
+    let (hour, mut at) = match digits(11, 2) {
+        Some(two) if bytes.get(13) == Some(&b':') => (two, 13),
+        _ => (digits(11, 1)?, 12),
+    };
+    literal(at, b':')?;
+    let minute = digits(at + 1, 2)?;
+    literal(at + 3, b':')?;
+    let second = digits(at + 4, 2)?;
+    at += 6;
+
+    // `if len(value) >= 2 && commaOrPeriod(value[0]) && isDigit(value, 1)` — a
+    // comma is as good as a period, which is the form chrono refuses.
+    let mut nanos = 0u32;
+    if matches!(bytes.get(at), Some(b'.' | b',')) {
+        let fraction_at = at + 1;
+        let mut end = fraction_at;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+        if end == fraction_at {
+            return None;
+        }
+        // Scaled to nanoseconds, dropping anything past the ninth digit as
+        // `parseNanoseconds` drops it.
+        for index in 0..9 {
+            nanos *= 10;
+            if let Some(digit) = bytes
+                .get(fraction_at + index)
+                .filter(|b| b.is_ascii_digit())
+            {
+                nanos += u32::from(digit - b'0');
+            }
+        }
+        at = end;
+    }
+
+    // `Z07:00` — a literal `Z`, or a signed `hh:mm`.
+    let offset_seconds: i32 = match bytes.get(at) {
+        Some(b'Z') => {
+            at += 1;
+            0
+        }
+        Some(sign @ (b'+' | b'-')) => {
+            let negative = *sign == b'-';
+            let zone_hour = i32::try_from(digits(at + 1, 2)?).ok()?;
+            literal(at + 3, b':')?;
+            let zone_minute = i32::try_from(digits(at + 4, 2)?).ok()?;
+            at += 6;
+            // **No range check on the hour**: the general parser has none, so
+            // `+24:00` is a legal offset to Go.
+            let magnitude = (zone_hour * 60 + zone_minute) * 60;
+            if negative {
+                -magnitude
+            } else {
+                magnitude
+            }
+        }
+        _ => return None,
+    };
+    // "extra text" — anything left over fails.
+    if at != bytes.len() {
+        return None;
+    }
+
+    // The range checks `Parse` applies once it has the fields. `from_ymd_opt` is
+    // the day-in-month check; `and_hms_nano_opt` rejects hour 24, minute 60 and
+    // **second 60**, which is Go's `second out of range` for a leap second.
+    let naive = chrono::NaiveDate::from_ymd_opt(i32::try_from(year).ok()?, month, day)?
+        .and_hms_nano_opt(hour, minute, second, nanos)?;
+    // chrono's offset type is bounded at ±24h exclusive, so an offset Go accepts
+    // but chrono cannot represent is applied by hand and carried as UTC. The
+    // instant is identical; only the printed zone differs, and no caller prints
+    // one.
+    match FixedOffset::east_opt(offset_seconds) {
+        Some(offset) => naive.and_local_timezone(offset).single(),
+        None => naive
+            .checked_sub_signed(chrono::TimeDelta::seconds(offset_seconds.into()))?
+            .and_local_timezone(FixedOffset::east_opt(0)?)
+            .single(),
+    }
+}
+
 /// Read a DATETIME column as the `time.Time` the Go driver round-trips.
 ///
 /// One definition rather than one per module: it decides that an unparseable
@@ -192,6 +364,103 @@ pub fn from_sql_text(text: &str, index: usize) -> rusqlite::Result<GoTime> {
             Box::new(std::io::Error::other(e)),
         )
     })
+}
+
+#[cfg(test)]
+mod rfc3339_tests {
+    use super::*;
+    use chrono::Timelike;
+
+    /// The five disagreements [`parse_rfc3339`] exists for, each measured
+    /// against the pinned Go toolchain rather than reasoned about.
+    #[test]
+    fn the_five_places_chrono_disagrees_with_go() {
+        // Go rejects, chrono accepts.
+        assert!(parse_rfc3339("2026-06-01t12:00:00z").is_none());
+        assert!(parse_rfc3339("2026-06-01T12:00:00z").is_none());
+        assert!(parse_rfc3339("2026-06-01t12:00:00Z").is_none());
+        assert!(
+            parse_rfc3339("2026-06-30T23:59:60Z").is_none(),
+            "a leap second is `second out of range` to Go"
+        );
+
+        // Go accepts, chrono rejects. These are the direction that turns into
+        // refusing input Go takes.
+        let comma = parse_rfc3339("2026-06-01T12:00:00,5Z").expect("Go accepts a comma");
+        assert_eq!(comma.nanosecond(), 500_000_000);
+        assert_eq!(
+            comma,
+            parse_rfc3339("2026-06-01T12:00:00.5Z").expect("and a period")
+        );
+
+        let short_hour = parse_rfc3339("2026-06-01T5:04:05Z").expect("a one-digit hour");
+        assert_eq!(short_hour.hour(), 5);
+
+        let far_offset =
+            parse_rfc3339("2026-06-01T12:00:00+24:00").expect("the offset hour is unbounded");
+        assert_eq!(
+            far_offset.to_utc(),
+            parse_rfc3339("2026-05-31T12:00:00Z")
+                .expect("the same instant")
+                .to_utc(),
+            "an offset chrono cannot represent is still the right instant"
+        );
+    }
+
+    /// Everything both agree on, including the shapes that must be refused.
+    #[test]
+    fn the_ordinary_grammar_is_unchanged() {
+        assert!(parse_rfc3339("2026-06-01T12:00:00Z").is_some());
+        assert!(parse_rfc3339("2026-06-01T12:00:00+02:00").is_some());
+        assert!(parse_rfc3339("2026-06-01T12:00:00-05:30").is_some());
+        assert!(parse_rfc3339("2026-06-01T12:00:00.123456789Z").is_some());
+        // Digits past the ninth are dropped, not refused.
+        assert_eq!(
+            parse_rfc3339("2026-06-01T12:00:00.1234567891Z")
+                .expect("ten digits")
+                .nanosecond(),
+            123_456_789
+        );
+
+        for refused in [
+            "",
+            "2026-06-01",
+            "2026-06-01 12:00:00Z",
+            "2026-06-01T12:00:00",
+            "2026-06-01T12:00:00Z ",
+            "2026-13-01T12:00:00Z",
+            "2026-06-31T12:00:00Z",
+            "2026-06-01T24:00:00Z",
+            "2026-06-01T12:60:00Z",
+            "2026-06-01T12:00:00.Z",
+            // A one-digit minute or second is fixed-width in the layout.
+            "2026-06-01T12:0:00Z",
+            "2026-06-01T12:00:0Z",
+            // The year is exactly four digits and unsigned.
+            "226-06-01T12:00:00Z",
+            "+2026-06-01T12:00:00Z",
+            "12026-06-01T12:00:00Z",
+        ] {
+            assert!(
+                parse_rfc3339(refused).is_none(),
+                "{refused:?} must be refused"
+            );
+        }
+    }
+
+    /// The sentinel Go's own writer emits for a zero `time.Time`.
+    #[test]
+    fn the_zero_time_is_recognisable() {
+        let zero = parse_rfc3339("0001-01-01T00:00:00Z").expect("a valid instant");
+        assert_eq!(zero.naive_utc(), ZERO);
+        assert_ne!(
+            parse_rfc3339("0001-01-01T00:00:00+05:30")
+                .expect("valid")
+                .naive_utc(),
+            ZERO,
+            "an offset makes it a different instant, and not Go's zero"
+        );
+    }
 }
 
 #[cfg(test)]
