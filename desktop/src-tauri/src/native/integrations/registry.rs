@@ -886,14 +886,7 @@ async fn start_google(
     credentials: &str,
     auth: &str,
 ) -> Result<InProcessMcpServer, String> {
-    // `Start`'s own `if !cfg.IsAuthenticated()`, kept for the reason the others
-    // keep theirs: `StartFilteredServer` reaches a starter by a different path.
-    if auth.is_empty() || auth == "null" {
-        return Err(format!("integration {id:?} has no auth token"));
-    }
-
-    let (client_id, client_secret) = google_credentials(id, credentials)?;
-    let token = google_oauth_token(id, auth)?;
+    let (client_id, client_secret, token) = google_start_inputs(id, credentials, auth)?;
 
     super::google::start_google_mcp_server(
         id,
@@ -906,6 +899,31 @@ async fn start_google(
     )
     .await
     .map_err(|e| format!("starting in-process MCP server for {id:?}: {e}"))
+}
+
+/// Everything `google.Start` decides **before** it builds a server: the auth
+/// check, then the credentials parse, then the token parse — in that order,
+/// which is `Start` calling `IsAuthenticated` and then `buildHTTPClient` calling
+/// its two parses.
+///
+/// Split out of [`start_google`] so the order is testable without binding a
+/// port. The order is half of what the vectors pin — two of them have more than
+/// one thing wrong — and a test that rebuilt this chain itself would agree with
+/// whatever it had written rather than with the starter.
+pub(super) fn google_start_inputs(
+    id: &str,
+    credentials: &str,
+    auth: &str,
+) -> Result<(String, String, super::google::client::Token), String> {
+    // `Start`'s own `if !cfg.IsAuthenticated()`, kept for the reason the others
+    // keep theirs: `StartFilteredServer` reaches a starter by a different path.
+    // It runs first, so an empty auth beats a broken credentials blob.
+    if auth.is_empty() || auth == "null" {
+        return Err(format!("integration {id:?} has no auth token"));
+    }
+    let (client_id, client_secret) = google_credentials(id, credentials)?;
+    let token = google_oauth_token(id, auth)?;
+    Ok((client_id, client_secret, token))
 }
 
 /// `cfg.ParseCredentials(&creds)` for `config.GoogleCredentials`, wrapped as
@@ -968,6 +986,19 @@ pub(super) fn google_oauth_token(
         /// because the *shape* check and the *value* check produce different Go
         /// sentences, and only a raw string can tell them apart.
         expiry: Option<serde_json::Value>,
+        /// Declared but unread, and that is the point: Go decodes into the whole
+        /// `oauth2.Token`, so `{"token_type": 5}` fails the **document**. A
+        /// three-field struct here silently hosted a row Go refuses.
+        ///
+        /// Its value is deliberately not used for the `Authorization` scheme —
+        /// see `google::client`'s header on the hardcoded `Bearer`.
+        #[allow(dead_code)]
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        token_type: String,
+        /// Same: declared for the type check. The transport reads `expiry`.
+        #[allow(dead_code)]
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        expires_in: i64,
     }
 
     let wrap = |message: String| format!("parsing auth token for {id:?}: {message}");
@@ -987,10 +1018,18 @@ pub(super) fn google_oauth_token(
 
     let expiry = match parsed.expiry {
         None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(raw)) => Some(
-            parse_go_rfc3339(&raw)
-                .ok_or_else(|| wrap(format!("parsing oauth token: parsing time {raw:?}")))?,
-        ),
+        Some(serde_json::Value::String(raw)) => {
+            let parsed = crate::native::gotime::parse_rfc3339(&raw)
+                .ok_or_else(|| wrap(format!("parsing oauth token: parsing time {raw:?}")))?;
+            // **Go's zero `time.Time` is a valid parse of a token that never
+            // expires**, not a failure and not an instant in year 1.
+            // `omitempty` does not suppress a struct, so `SetOAuthToken` emits
+            // `"expiry":"0001-01-01T00:00:00Z"` rather than omitting the key,
+            // and `Token.Valid()` then reuses that token forever. Read as an
+            // ordinary instant it is permanently expired — the inverse.
+            (parsed.naive_utc() != crate::native::gotime::ZERO)
+                .then(|| std::time::SystemTime::from(parsed.to_utc()))
+        }
         // `Time.UnmarshalJSON` checks the JSON shape before the layout.
         Some(_) => {
             return Err(wrap(
@@ -1004,33 +1043,6 @@ pub(super) fn google_oauth_token(
         refresh_token: parsed.refresh_token,
         expiry,
     })
-}
-
-/// Go's `time.RFC3339` layout, `2006-01-02T15:04:05Z07:00`, as `time.Parse`
-/// applies it — which is **stricter than `chrono`'s** `parse_from_rfc3339` in two
-/// ways that a stored token can actually reach, both measured against real Go:
-///
-/// - **The separators are case-sensitive.** `2030-01-01t00:00:00z` is a parse
-///   error to Go and accepted by chrono. Go's RFC3339 handling has been strict
-///   since 1.20.
-/// - **A leap second is out of range.** `2030-06-30T23:59:60Z` is
-///   `second out of range` to Go, where chrono represents it.
-///
-/// Everything else agrees: a numeric offset, fractional seconds of any length, a
-/// rejected trailing space, and rejected out-of-range components.
-fn parse_go_rfc3339(raw: &str) -> Option<std::time::SystemTime> {
-    // `T` and the `Z` form of the zone are literals in the layout, so their case
-    // is fixed. A numeric offset carries no letter to check.
-    if !raw.contains('T') || raw.contains('t') || raw.contains('z') {
-        return None;
-    }
-    let parsed = chrono::DateTime::parse_from_rfc3339(raw).ok()?;
-    // chrono encodes a leap second as nanosecond >= 1_000_000_000 rather than as
-    // a 60th second, which is how it survives its own parse.
-    if chrono::Timelike::nanosecond(&parsed) >= 1_000_000_000 {
-        return None;
-    }
-    Some(std::time::SystemTime::from(parsed.to_utc()))
 }
 
 /// The row's `type`, and **nothing else** — no `credentials`, no `auth`.
@@ -1491,6 +1503,73 @@ mod tests {
         registry().stop("never-existed");
     }
 
+    /// The Google starter end to end, which nothing else covers.
+    ///
+    /// `a_hosted_type_always_has_a_starter` inserts empty credentials, so for
+    /// google it only ever reaches the `credentials are empty` arm — it proves
+    /// the dispatch arm exists and nothing more. `tests_vectors` covers
+    /// `start_google_mcp_server` with a hand-built `TokenSource`. What neither
+    /// touches is the glue this PR added: the precheck, the two parses being
+    /// wired to the columns they belong to, and the order of
+    /// `TokenSource::new`'s arguments — a swap there would send the client id as
+    /// the secret and fail only at refresh time, months later, on somebody's
+    /// laptop.
+    #[tokio::test]
+    async fn a_google_integration_starts_reloads_and_stops() {
+        let file = db();
+        insert(
+            &file,
+            "gg-1",
+            "google",
+            true,
+            // An hour out, so nothing tries to refresh while the test runs.
+            Some(
+                r#"{"access_token":"ya29.test","refresh_token":"1//test","expiry":"2099-01-01T00:00:00Z"}"#,
+            ),
+            r#"{"client_id":"cid.apps.googleusercontent.com","client_secret":"GOCSPX-test"}"#,
+            r#"{"gmail":{"enabled":true,"tools":["send_email"]}}"#,
+        );
+
+        start_all(file.path()).await.expect("start_all");
+        assert!(registry().is_hosted("gg-1"), "a valid google row must host");
+
+        reload(file.path(), "gg-1").await.expect("reload");
+        assert!(registry().is_hosted("gg-1"));
+
+        registry().stop("gg-1");
+        assert!(!registry().is_hosted("gg-1"));
+    }
+
+    /// The columns land in the right parameters — the failure that would
+    /// otherwise surface only at refresh time.
+    #[test]
+    fn the_credential_columns_are_not_swapped() {
+        let (client_id, client_secret, token) = google_start_inputs(
+            "gg-1",
+            r#"{"client_id":"CID","client_secret":"SECRET"}"#,
+            r#"{"access_token":"ACCESS","refresh_token":"REFRESH","expiry":"2099-01-01T00:00:00Z"}"#,
+        )
+        .expect("a valid row");
+        assert_eq!(client_id, "CID");
+        assert_eq!(client_secret, "SECRET");
+        assert_eq!(token.access_token, "ACCESS");
+        assert_eq!(token.refresh_token, "REFRESH");
+        assert!(token.expiry.is_some());
+
+        // Go's zero time is the sentinel its own writer emits, and it means
+        // "never expires" — not "expired in the year 1".
+        let (_, _, zero) = google_start_inputs(
+            "gg-1",
+            r#"{"client_id":"CID","client_secret":"SECRET"}"#,
+            r#"{"access_token":"ACCESS","expiry":"0001-01-01T00:00:00Z"}"#,
+        )
+        .expect("a zero expiry is a valid token");
+        assert!(
+            zero.expiry.is_none(),
+            "Go's zero time must reach the token source as `never expires`"
+        );
+    }
+
     /// Both flags gate hosting, exactly as they gate `available-tools`.
     #[tokio::test]
     async fn a_disabled_or_unauthenticated_integration_is_not_hosted() {
@@ -1712,14 +1791,19 @@ mod tests {
     /// Google's is measured, for one reason: its `auth` column decodes as an
     /// `oauth2.Token` whose `expiry` is a Go `time.Time`, so whether a stored
     /// value is accepted is `time.Parse`'s decision and not something to guess
-    /// at. Two of the cases below are exactly where `chrono` and Go disagree —
-    /// a lowercase `t`/`z` separator and a leap second, both of which chrono
-    /// accepts and Go refuses.
+    /// at. Five vectors are exactly where `chrono` and Go disagree, in both
+    /// directions.
     ///
-    /// Only the accept/reject decision is compared. Go's sentences for a bad
-    /// `expiry` embed `time.Parse`'s own layout-diffing wording, and for a
-    /// malformed blob `encoding/json`'s — the second of which is dropped on
-    /// purpose, since serde's quotes the value, which here is the access token.
+    /// It calls [`google_start_inputs`] — the function [`start_google`] itself
+    /// calls — rather than re-chaining the three checks, because the **order** is
+    /// half of what this pins: two vectors have more than one thing wrong, and a
+    /// test that rebuilt the chain would agree with itself whatever the starter
+    /// did.
+    ///
+    /// Sentences are compared exactly wherever Go's is reproducible. The two
+    /// classes that are not carry `rust_error` in the vector: `time.Parse`'s
+    /// layout-diffing wording, and `encoding/json`'s — the second dropped on
+    /// purpose, since serde's quotes the value, which here is a credential.
     #[test]
     fn google_start_accepts_exactly_what_go_accepts() {
         #[derive(serde::Deserialize)]
@@ -1728,6 +1812,8 @@ mod tests {
             credentials: String,
             auth: String,
             error: String,
+            #[serde(default)]
+            rust_error: String,
         }
         #[derive(serde::Deserialize)]
         struct Vectors {
@@ -1738,16 +1824,14 @@ mod tests {
         let raw = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("reading {path}: {e} — regenerate it from Go"));
         let vectors: Vectors = serde_json::from_str(&raw).expect("parsing the google vectors");
-        assert!(vectors.starting.len() >= 20, "vectors look partial");
+        assert!(vectors.starting.len() >= 30, "vectors look partial");
 
+        // Collected rather than asserted one at a time: a change to a shared
+        // sentence moves many cases at once, and seeing only the first is how a
+        // regeneration turns into several rounds.
+        let mut mismatches: Vec<String> = Vec::new();
         for case in &vectors.starting {
-            // `Start`'s own auth check, then the two parses, in Go's order.
-            let got = if case.auth.is_empty() || case.auth == "null" {
-                Err(r#"integration "goog-parity" has no auth token"#.to_string())
-            } else {
-                google_credentials("goog-parity", &case.credentials)
-                    .and_then(|_| google_oauth_token("goog-parity", &case.auth).map(|_| ()))
-            };
+            let got = google_start_inputs("goog-parity", &case.credentials, &case.auth);
 
             assert_eq!(
                 got.is_err(),
@@ -1755,42 +1839,51 @@ mod tests {
                 "{}: Go said {:?}, this said {:?}",
                 case.case,
                 case.error,
-                got.err().unwrap_or_default()
+                got.as_ref().err()
             );
 
-            // Whatever it says, it must never name the secret it was handed.
-            if let Err(message) = google_credentials("goog-parity", &case.credentials) {
-                assert!(
-                    !message.contains("GOCSPX"),
-                    "{}: the client secret leaked: {message}",
-                    case.case
-                );
+            match got {
+                Ok((client_id, client_secret, _)) => {
+                    // A swapped pair would only surface at refresh time, so the
+                    // happy path asserts which column landed where.
+                    assert!(
+                        client_secret.is_empty() || client_secret.starts_with("GOCSPX"),
+                        "{}: the client secret is not the secret column",
+                        case.case
+                    );
+                    assert!(
+                        !client_id.starts_with("GOCSPX"),
+                        "{}: the client id carries the secret",
+                        case.case
+                    );
+                }
+                Err(message) => {
+                    // Whatever it says, it must never name a credential.
+                    assert!(
+                        !message.contains("GOCSPX") && !message.contains("1//"),
+                        "{}: a credential leaked into a refusal: {message}",
+                        case.case
+                    );
+                    let want = if case.rust_error.is_empty() {
+                        &case.error
+                    } else {
+                        &case.rust_error
+                    };
+                    if &message != want {
+                        mismatches.push(format!(
+                            "  {}\n    go/expected: {want:?}\n    rust:        {message:?}",
+                            case.case
+                        ));
+                    }
+                }
             }
         }
-    }
-
-    /// The two places `chrono` is more permissive than Go, called out on their
-    /// own because the vector loop above only proves the pair agree — this says
-    /// which rule is doing the work.
-    #[test]
-    fn the_expiry_parse_is_gos_layout_and_not_chronos() {
-        assert!(parse_go_rfc3339("2030-01-01T00:00:00Z").is_some());
-        assert!(parse_go_rfc3339("2030-01-01T00:00:00+05:30").is_some());
-        assert!(parse_go_rfc3339("2030-01-01T00:00:00.5Z").is_some());
-        // chrono accepts both of these; Go does not.
         assert!(
-            parse_go_rfc3339("2030-01-01t00:00:00z").is_none(),
-            "Go's RFC3339 separators are case-sensitive"
+            mismatches.is_empty(),
+            "{} refusal sentence(s) differ from the vectors:\n{}",
+            mismatches.len(),
+            mismatches.join("\n")
         );
-        assert!(
-            parse_go_rfc3339("2030-06-30T23:59:60Z").is_none(),
-            "a leap second is `second out of range` to Go"
-        );
-        // …and both agree on these.
-        assert!(parse_go_rfc3339("2030-01-01T00:00:00Z ").is_none());
-        assert!(parse_go_rfc3339("2030-13-01T00:00:00Z").is_none());
-        assert!(parse_go_rfc3339("2030-01-01").is_none());
-        assert!(parse_go_rfc3339("").is_none());
     }
 
     /// The credential parse: Go's two failure shapes, and neither may echo the

@@ -23,13 +23,13 @@
 //!
 //! **#311 narrowed the `mcp` half rather than removing it.** An agent is served
 //! natively when *every* name in `capabilities.mcp` is an integration this build
-//! can host — `registry::HOSTED_TYPES`, which today means `github` (#312) and
-//! `confluence` (#317), `jira` (#316), `slack` (#315) and `telegram` (#314), and
-//! will mean all six once #313 lands. Three things
+//! can host — `registry::HOSTED_TYPES`, which since #313 means **all six**:
+//! `github` (#312), `confluence` (#317), `jira` (#316), `slack` (#315),
+//! `telegram` (#314) and `google` (#313). Three things
 //! still forward, and [`mcp_plan`] is where each is decided:
 //!
-//! - **A name whose type is not hosted.** A `slack` row has no Rust starter;
-//!   running the turn here would drop its tools.
+//! - **A name whose type is not hosted.** A `whatsapp` row has no Rust starter
+//!   and will not get one; running the turn here would drop its tools.
 //! - **A name with no integration row at all.** Go would still resolve it if
 //!   `mcps.yaml` names it, and this build reads no `mcps.yaml`.
 //! - **Any `mcp` capability at all when `<data dir>/mcps.yaml` exists.** That

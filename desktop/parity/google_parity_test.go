@@ -533,7 +533,58 @@ func googleStartCases() []googleStartVector {
 			Auth: `{"access_token":"ya29.x","expiry":"2030-06-30T23:59:60Z"}`},
 		{Case: "an out-of-range month", Credentials: googleValidCredentials,
 			Auth: `{"access_token":"ya29.x","expiry":"2030-13-01T00:00:00Z"}`},
+		{
+			// **The shape `SetOAuthToken` actually writes for a zero expiry.**
+			// `omitempty` does not suppress a struct, so Go emits the sentinel
+			// rather than omitting the key — and `Expiry.IsZero()` then makes the
+			// token never expire. The "no expiry at all" case above tests a
+			// spelling Go's own writer can never produce; this is the reachable
+			// one, and the port read it as *already expired*.
+			Case:        "Go's zero time is the sentinel its writer emits, and never expires",
+			Credentials: googleValidCredentials,
+			Auth:        `{"access_token":"ya29.x","refresh_token":"1//y","expiry":"0001-01-01T00:00:00Z"}`,
+		},
+		{
+			// Three forms `time.Parse` accepts that `chrono` refuses. Go's strict
+			// RFC3339 checks are compiled out (`case true:` in
+			// `format_rfc3339.go`), so the general parser's laxity is what a
+			// stored value actually meets.
+			Case: "a comma decimal separator", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-01-01T00:00:00,5Z"}`,
+		},
+		{Case: "a one-digit hour", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-01-01T5:04:05Z"}`},
+		{Case: "an offset hour of 24", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expiry":"2030-01-01T00:00:00+24:00"}`},
+		{
+			// `oauth2.Token` types these, so a mistyped one fails the document —
+			// which the port's three-field struct did not notice.
+			Case: "a numeric token_type is a type error", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","token_type":5}`,
+		},
+		{Case: "a string expires_in is a type error", Credentials: googleValidCredentials,
+			Auth: `{"access_token":"ya29.x","expires_in":"soon"}`},
 		{Case: "an auth array is not a struct", Credentials: googleValidCredentials, Auth: `["ya29.x"]`},
+		// ─── ordering: which check speaks when more than one could ───────────
+		{
+			// `Start` checks `IsAuthenticated` before it parses anything, so an
+			// empty auth wins over a broken credentials blob.
+			Case:        "an empty auth beats a broken credentials blob",
+			Credentials: `nope`, Auth: "",
+		},
+		{
+			// …and `buildHTTPClient` parses credentials before the token, so a
+			// broken credentials blob wins over a broken auth blob.
+			Case:        "a broken credentials blob beats a broken auth blob",
+			Credentials: `nope`, Auth: `{"access_token":"ya29.x","expiry":"not a time"}`,
+		},
+		{
+			// A malformed blob that *carries* the secret: the failure sentence
+			// must not echo it, which is the assertion the leak check exists for
+			// and previously never had a message derived from a secret at all.
+			Case:        "a truncated credentials blob carrying the secret",
+			Credentials: `{"client_secret":"` + googleClientSecret + `",`, Auth: validAuth,
+		},
 		{Case: "empty credentials fail the credentials parse",
 			Credentials: "", Auth: validAuth},
 		{Case: "a null credentials blob is a no-op, so the client id is empty",
@@ -547,6 +598,60 @@ func googleStartCases() []googleStartVector {
 			Auth: validAuth,
 		},
 	}
+}
+
+// googleRustStartErrors is the port's sentence for each Go sentence it does not
+// reproduce — a data table, deliberately, so that "which sentences diverge" is
+// something a reader counts rather than something a classifier decides.
+//
+// Exactly two classes appear here, and every other refusal in `starting` is
+// reproduced byte for byte and asserted as such:
+//
+//   - `time.Parse` diffs the value against the layout and names the token that
+//     failed. Transcribing that buys nothing; the port names the value it could
+//     not parse, which is not a secret.
+//   - `encoding/json` names the offending value, which for a credentials or auth
+//     blob *is* the credential. The port emits line and column instead, as the
+//     five sibling parses already do.
+//
+// A case missing from this map is asserted against Go's own text, so adding a
+// vector whose sentence cannot be reproduced fails loudly rather than silently
+// going unchecked.
+var googleRustStartErrors = map[string]string{
+	"a malformed expiry fails the auth parse":            expiryRefusal(`"not a time"`),
+	"an expiry without a zone fails too":                 expiryRefusal(`"2030-01-01T00:00:00"`),
+	"a date-only expiry fails too":                       expiryRefusal(`"2030-01-01"`),
+	"an empty string expiry fails":                       expiryRefusal(`""`),
+	"a lowercase t and z separator":                      expiryRefusal(`"2030-01-01t00:00:00z"`),
+	"a trailing space after the zone fails":              expiryRefusal(`"2030-01-01T00:00:00Z "`),
+	"a leap second":                                      expiryRefusal(`"2030-06-30T23:59:60Z"`),
+	"an out-of-range month":                              expiryRefusal(`"2030-13-01T00:00:00Z"`),
+	"a numeric token_type is a type error":               authDecodeRefusal(39),
+	"a string expires_in is a type error":                authDecodeRefusal(44),
+	"an auth array is not a struct":                      authDecodeRefusal(0),
+	"a broken credentials blob beats a broken auth blob": credentialsDecodeRefusal(2),
+	"a truncated credentials blob carrying the secret":   credentialsDecodeRefusal(47),
+	"a credentials array is not a struct":                credentialsDecodeRefusal(0),
+	"credentials that are not JSON at all":               credentialsDecodeRefusal(2),
+}
+
+func expiryRefusal(quoted string) string {
+	return fmt.Sprintf("parsing auth token for %q: parsing oauth token: parsing time %s",
+		googleParityID, quoted)
+}
+
+// The line is always 1: every blob in this table is a single line, which is what
+// a stored credentials or auth column is.
+func authDecodeRefusal(column int) string {
+	return fmt.Sprintf(
+		"parsing auth token for %q: parsing oauth token: does not decode at line 1 column %d",
+		googleParityID, column)
+}
+
+func credentialsDecodeRefusal(column int) string {
+	return fmt.Sprintf(
+		"parsing google credentials for %q: does not decode at line 1 column %d",
+		googleParityID, column)
 }
 
 // ─── The call cases ──────────────────────────────────────────────────────────
@@ -1334,6 +1439,7 @@ func runGoogleStartCase(
 		if strings.Contains(c.Error, googleClientSecret) {
 			t.Fatalf("%s: the client secret leaked into a Start error: %s", c.Case, c.Error)
 		}
+		c.RustError = googleRustStartErrors[c.Case]
 	}
 	return c
 }

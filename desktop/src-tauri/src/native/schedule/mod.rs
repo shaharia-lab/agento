@@ -11,10 +11,11 @@
 //! `cmd/web.go` starts the sidecar's scheduler on every boot. Ownership moves
 //! in one commit that stops the sidecar scheduling — the #289 model — and that
 //! commit is blocked on `chat/runner.rs::build_options`, which still refuses an
-//! agent whose tools come from an integration this build cannot host — one of
-//! the six (#313), since the local in-process server (#310), github (#311),
-//! confluence (#317), jira (#316), slack (#315) and telegram (#314) are no longer
-//! among them. A chat can forward to Go on that
+//! agent whose tools come from an integration this build cannot host. Since #313
+//! that is `whatsapp` alone — the local in-process server (#310), github (#311),
+//! confluence (#317), jira (#316), slack (#315), telegram (#314) and google
+//! (#313) are all hosted here — so the remaining blockers are that one type and
+//! the two non-integration forwards. A chat can forward to Go on that
 //! refusal; a scheduled task with no Go scheduler behind it would simply never
 //! run, with nothing to say so. See "The scheduler: the computation moved, the
 //! ownership did not" in `desktop/CLAUDE.md`.
@@ -191,51 +192,16 @@ pub fn build_job_definition(
 
 /// `time.Parse(time.RFC3339, s)`, which is not `chrono`'s RFC 3339.
 ///
-/// They disagree in both directions, and `run_at` is free-form client input, so
-/// the disagreement is reachable from `POST /api/tasks`:
-///
-/// - **Lowercase designators.** RFC 3339 §5.6 permits `t` and `z`; Go does not.
-///   Its fast path tests `s[10] == 'T'` and its fallback matches the layout's
-///   literal `T` and `Z` exactly, so `2026-06-01t12:00:00z` is a parse error.
-///   `chrono` accepts it and would schedule a one-off Go refuses.
-/// - **A comma decimal separator.** Go's fast path wants `.`, fails, and falls
-///   back to the general parser — which treats `,` and `.` alike — so
-///   `2026-06-01T12:00:00,5Z` is 12:00:00.5. `chrono` rejects it.
-/// - **A leap second.** `chrono` accepts `:60` and encodes it as a nanosecond
-///   past one billion; Go bounds the field at 59 and errors. Left in `chrono`'s
-///   representation it is not even a fire time — the schedule builds and then
-///   produces nothing.
-///
-/// Everything else is left to `chrono`: a differential run of 636 shapes
-/// through a real `gocron.Scheduler` found no other disagreement, including on
-/// component widths, the `+hh:mm` offset form and trailing text.
+/// They disagree in **five** ways, in both directions, and `run_at` is free-form
+/// client input, so every one of them is reachable from `POST /api/tasks`. The
+/// table and the transcription live in [`crate::native::gotime`], which is the
+/// single implementation: #275 found three of the five by a differential run of
+/// 636 shapes through a real `gocron.Scheduler`, and #313 needed the same parse
+/// for a Google token's `expiry` and found two more — a one-digit hour and an
+/// offset hour past 23, both of which Go accepts and this used to refuse to
+/// schedule.
 fn parse_go_rfc3339(s: &str) -> Option<DateTime<FixedOffset>> {
-    let bytes = s.as_bytes();
-    // Go's date/time separator is the layout's literal 'T'. Nothing else — not
-    // 't', not a space — matches it.
-    if bytes.get(10) != Some(&b'T') {
-        return None;
-    }
-    // ...and the zone is 'Z' or a numeric offset; a trailing 'z' is neither.
-    if bytes.last() == Some(&b'z') {
-        return None;
-    }
-    // `,` is a fractional-second separator for Go and not for chrono. It can
-    // only appear in that one position, since every other byte of an RFC 3339
-    // timestamp is fixed, so replacing all of them is replacing at most one.
-    let normalized;
-    let s = if s.contains(',') {
-        normalized = s.replace(',', ".");
-        normalized.as_str()
-    } else {
-        s
-    };
-    let parsed = DateTime::parse_from_rfc3339(s).ok()?;
-    // chrono's leap-second encoding: the extra second lives in `nanosecond`.
-    if parsed.nanosecond() >= 1_000_000_000 {
-        return None;
-    }
-    Some(parsed)
+    crate::native::gotime::parse_rfc3339(s)
 }
 
 /// Go's `time.Duration` arithmetic: `int64` nanoseconds that **wrap** rather

@@ -1530,11 +1530,32 @@ rather than skipping the field as Slack's does — a corrupt expiry means not
 hosted, not hosted-with-a-token-that-never-refreshes.
 
 The accept/reject boundary is measured, not read: the `starting` section of
-`google_vectors.json` records what `google.Start` does with twenty-three
-credential and auth shapes, and `parse_go_rfc3339` exists because **`chrono` is
-more permissive than Go in two ways a stored token can reach** — a lowercase
-`t`/`z` separator and a leap second, both of which chrono accepts and
-`time.Parse` refuses.
+`google_vectors.json` records what `google.Start` does with thirty-one
+credential and auth shapes, and the Rust replay calls `google_start_inputs` —
+the function the starter itself calls — so the **order** of the three checks is
+pinned too, not just their sentences.
+
+**Two findings there are worth carrying forward.** The first is a trap Go's own
+writer sets: `omitempty` does not suppress a struct, so `SetOAuthToken` emits
+`"expiry":"0001-01-01T00:00:00Z"` for a token with no expiry rather than omitting
+the key — and `Token.Valid()` treats that zero `time.Time` as **never expiring**.
+Read as an ordinary instant it is permanently expired, the exact inverse, so
+`google_oauth_token` maps it to `None`. The vector that was meant to cover this
+originally tested the *absent* key, a spelling Go's writer can never produce.
+
+The second is that **`gotime::parse_rfc3339` is now the one Go-RFC3339 parser**,
+shared with `native/schedule`'s `run_at` (#275). `chrono::parse_from_rfc3339`
+disagrees with `time.Parse` in **five** ways, in both directions: it accepts a
+lowercase `t`/`z` and a leap second that Go refuses, and refuses a comma decimal
+separator, a one-digit hour and an offset hour past 23 that Go accepts. The last
+three are Go being *laxer*, which a stricter port turns into refusing input Go
+takes — a schedule that will not build, or an integration that will not host.
+#275 found three of the five and wrote `parse_from_rfc3339` plus three guards;
+#313 was about to add a second copy with two. Guarding a convenient library has
+been wrong twice for one reason — **the guard list has to be right about every
+disagreement** — so the shared version parses the grammar and delegates nothing
+but the calendar arithmetic. `GoTime::parse` is deliberately left on chrono: it
+reads `effective_from`, which only this application writes, normalized.
 
 `whatsapp` is now the stand-in in all three "unported type" tests, and it stays
 there: it is dropped rather than deferred.
@@ -1607,19 +1628,19 @@ asserts both halves, the fallback and the untouched row.
 run uses: `runner.go` reads the integration row afresh per run, builds a
 throwaway server and records nothing. Gating it would have broken every
 integration-using chat, scheduled task and Telegram trigger the sidecar still
-serves — which is now one type, #313's.
+serves — which since #313 is one type, `whatsapp`'s, and permanently so.
 The Go tests assert both halves, because the switch is only safe while that
 asymmetry holds.
 
 Two consequences worth knowing before touching this:
 
-- **Five of the six have starters here** — `github` (#312), `confluence` (#317),
-  `jira` (#316), `slack` (#315) and `telegram` (#314) — **and Go still hosts
-  `google` and `whatsapp`.** A type not
-  in `HOSTED_TYPES` reaches this module's own unregistered-type path — `no
-  starter registered for integration type "slack"`, logged and never surfaced —
-  but in practice it does not reach it at all, because the writes decline it
-  first. Nothing about a Slack or WhatsApp integration changed with this issue.
+- **All six have starters here** — `github` (#312), `confluence` (#317), `jira`
+  (#316), `slack` (#315), `telegram` (#314) and `google` (#313) — **and Go hosts
+  only `whatsapp`.** A type not in `HOSTED_TYPES` reaches this module's own
+  unregistered-type path — `no starter registered for integration type
+  "whatsapp"`, logged and never surfaced — but in practice it does not reach it
+  at all, because the writes decline it first. Nothing about a WhatsApp
+  integration changed with any of these issues, and nothing will.
 - **`reload` is unconditional.** Stop then start, no diff: there is a window
   with no server and the port changes on every save. Reproduced rather than
   improved on, because "nothing changed, skip it" is a different set of live

@@ -468,11 +468,11 @@ fn segment(value: &str) -> Option<&str> {
 /// port, holding a token the user had just revoked. The sidecar now runs with
 /// `AGENTO_INTEGRATIONS=off:<the types the shell hosts>` and [`registry`] is the
 /// only implementation **for those types**, so both effects are reproduced
-/// rather than lost. Note the switch is per type, not per process: a `telegram`
+/// rather than lost. Note the switch is per type, not per process: a `whatsapp`
 /// row is still Go's, and a write for one is declined here and forwarded whole
-/// (see [`claims`]'s caller and `writes.rs`). Four of the six are the shell's as
-/// of #315 — `github`, `confluence`, `jira`, `slack` — and the list to read is
-/// `registry::HOSTED_TYPES`, never this comment.
+/// (see [`claims`]'s caller and `writes.rs`). All six are the shell's as of #313
+/// — `github`, `confluence`, `jira`, `slack`, `telegram`, `google` — and the
+/// list to read is `registry::HOSTED_TYPES`, never this comment.
 ///
 /// `POST /api/integrations` needed none of that, because `Create` is a pure row
 /// write: it never touches the registry, which was verified against the whole
