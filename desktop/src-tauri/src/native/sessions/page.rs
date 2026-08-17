@@ -324,9 +324,15 @@ fn attach_prs(conn: &Connection, sessions: &mut [SessionSummary]) {
         return;
     }
 
+    // `get`, never `remove`: `claude_session_cache` is keyed on
+    // `(session_id, project_path)` while `claude_session_pr` is keyed on the
+    // session id alone, so one id legitimately yields two rows on a page and
+    // draining the entry would leave every row after the first with `prs: []`.
+    // Go re-reads the map per row, and an empty list renders as "no linked
+    // PRs" rather than as an error, so the divergence would be silent.
     for s in sessions.iter_mut() {
-        if let Some(prs) = by_session.remove(&s.session_id) {
-            s.prs = prs;
+        if let Some(prs) = by_session.get(&s.session_id) {
+            s.prs = prs.clone();
         }
     }
 }
@@ -393,10 +399,14 @@ fn attach_subagent_usage_by_model(conn: &Connection, sessions: &mut [SessionSumm
         return;
     }
 
+    // `get`, never `remove` — same reason as `attach_prs` above:
+    // `claude_subagent_cache` is keyed on the parent session id alone, so a
+    // session id appearing under two project paths must not have its
+    // breakdown consumed by whichever of the two rows the page listed first.
     for s in sessions.iter_mut() {
-        if let Some((usage, cost)) = by_session.remove(&s.session_id) {
-            s.subagent_usage_by_model = usage;
-            s.subagent_cost_by_model = cost;
+        if let Some((usage, cost)) = by_session.get(&s.session_id) {
+            s.subagent_usage_by_model = usage.clone();
+            s.subagent_cost_by_model = cost.clone();
         }
     }
 }

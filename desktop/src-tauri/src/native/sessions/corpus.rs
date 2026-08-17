@@ -119,10 +119,16 @@ fn attach_subagent_usage_by_model(conn: &Connection, sessions: &mut [SessionSumm
         return;
     }
 
+    // `get`, never `remove`. `claude_session_cache` is keyed on
+    // `(session_id, project_path)` and `claude_subagent_cache` on the parent
+    // session id alone, so one id can appear under two project paths and
+    // draining the entry would leave the second row's breakdown empty — which
+    // falls back to the parent's model rather than failing. Go re-reads the map
+    // per row.
     for s in sessions.iter_mut() {
-        if let Some((usage, cost)) = by_session.remove(&s.session_id) {
-            s.subagent_usage_by_model = usage;
-            s.subagent_cost_by_model = cost;
+        if let Some((usage, cost)) = by_session.get(&s.session_id) {
+            s.subagent_usage_by_model = usage.clone();
+            s.subagent_cost_by_model = cost.clone();
         }
     }
 }
