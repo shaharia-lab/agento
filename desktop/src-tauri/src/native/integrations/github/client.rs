@@ -56,9 +56,10 @@ pub const DEFAULT_API_BASE: &str = "https://api.github.com";
 /// had to export `SetAPIBase` to be redirectable at all. Both callers here are
 /// in-crate, so `#[cfg(test)]` costs nothing and compiles the whole thing out —
 /// which is what [`api_base_lock`] below already does, for the same reason.
-/// #313–#316 each add their own seam and should follow this; #317's is a
+/// #313–#315 each add their own seam and should follow this. #317's is a
 /// constructor argument rather than a static, because a Confluence site URL is
-/// per row.
+/// per row; #316 needs none at all, because `jira.Start` does not validate the
+/// site URL and so a parity run can simply store the fake's URL.
 ///
 /// A `RwLock` rather than a `OnceLock` because a test points it at a loopback
 /// fake and then puts it back.
