@@ -1,0 +1,873 @@
+{
+  "_comment": [
+    "Cross-language parity vectors for internal/integrations/confluence, the",
+    "Confluence integration's in-process MCP server. Generated from Go, then frozen.",
+    "Read by desktop/parity/confluence_parity_test.go (Go) and by",
+    "desktop/src-tauri/src/native/integrations/confluence/ (Rust). Every value is",
+    "exactly what Go produces, so a divergence fails one language against the other's",
+    "real output rather than against a belief about it.",
+    "'site_urls' come from confluence.ValidateSiteURL; 'tools' and 'hosting' from live",
+    "tools/list calls against servers built by confluence.StartAtSiteURL; 'calls' from",
+    "live tools/call calls against a scripted fake Confluence that records the request",
+    "each tool built.",
+    "'email' and 'api_token' are fixtures, not secrets: they are recorded so the",
+    "base64 of the Basic header is pinned.",
+    "Regenerate with: go test ./desktop/parity/ -run TestConfluenceVectors -update-confluence-vectors"
+  ],
+  "integration_id": "cf-parity",
+  "server_name": "confluence-cf-parity",
+  "version": "1.0.0",
+  "email": "parity@example.com",
+  "api_token": "parity-confluence-api-token",
+  "site_urls": [
+    {
+      "case": "https with no trailing slash is returned unchanged",
+      "input": "https://acme.atlassian.net",
+      "clean": "https://acme.atlassian.net"
+    },
+    {
+      "case": "every trailing slash is trimmed, not just the last",
+      "input": "https://acme.atlassian.net///",
+      "clean": "https://acme.atlassian.net"
+    },
+    {
+      "case": "a base path survives, minus its trailing slash",
+      "input": "https://intranet.example.com/atlassian/",
+      "clean": "https://intranet.example.com/atlassian"
+    },
+    {
+      "case": "a port survives",
+      "input": "https://acme.atlassian.net:8443",
+      "clean": "https://acme.atlassian.net:8443"
+    },
+    {
+      "case": "the scheme is compared lower-cased, so this passes",
+      "input": "HTTPS://acme.atlassian.net",
+      "clean": "HTTPS://acme.atlassian.net"
+    },
+    {
+      "case": "plaintext is refused — the whole point of the check",
+      "input": "http://acme.atlassian.net",
+      "error": "site URL must use HTTPS (got \"http\")"
+    },
+    {
+      "case": "a bare host has no scheme at all",
+      "input": "acme.atlassian.net",
+      "error": "site URL must use HTTPS (got \"\")"
+    },
+    {
+      "case": "an empty string has no scheme either",
+      "input": "",
+      "error": "site URL must use HTTPS (got \"\")"
+    },
+    {
+      "case": "another scheme is named in the message",
+      "input": "ftp://acme.atlassian.net",
+      "error": "site URL must use HTTPS (got \"ftp\")"
+    },
+    {
+      "case": "https with no authority has no host",
+      "input": "https:acme.atlassian.net",
+      "error": "site URL must include a hostname"
+    },
+    {
+      "case": "https with an empty authority has no host",
+      "input": "https://",
+      "error": "site URL must include a hostname"
+    },
+    {
+      "case": "an authority that is only userinfo has no host",
+      "input": "https://user@",
+      "error": "site URL must include a hostname"
+    },
+    {
+      "case": "a leading digit means no scheme, and then the colon is a parse failure",
+      "input": "1https://acme.atlassian.net",
+      "error": "invalid site URL: parse \"1https://acme.atlassian.net\": first path segment in URL cannot contain colon",
+      "rust_error": "invalid site URL: its first path segment holds a colon"
+    },
+    {
+      "case": "a control character is a parse failure, worded differently",
+      "input": "https://acme.atlassian.net/\n",
+      "error": "invalid site URL: parse \"https://acme.atlassian.net/\\n\": net/url: invalid control character in URL",
+      "rust_error": "invalid site URL: it holds a control character"
+    }
+  ],
+  "tools": [
+    {
+      "name": "create_page",
+      "description": "Creates a new Confluence page in a given space.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "required,Page body content in Confluence storage format (XHTML)",
+            "type": "string"
+          },
+          "parent_id": {
+            "description": "Optional parent page ID to nest under",
+            "type": "string"
+          },
+          "space_id": {
+            "description": "required,The ID of the space to create the page in",
+            "type": "string"
+          },
+          "title": {
+            "description": "required,Title of the new page",
+            "type": "string"
+          }
+        },
+        "required": [
+          "space_id",
+          "title",
+          "body",
+          "parent_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_page",
+      "description": "Gets the content and metadata of a Confluence page by ID.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "body_format": {
+            "description": "Body format to return: storage or view (default: storage)",
+            "type": "string"
+          },
+          "page_id": {
+            "description": "required,The ID of the page to retrieve",
+            "type": "string"
+          }
+        },
+        "required": [
+          "page_id",
+          "body_format"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "get_space",
+      "description": "Gets details of a Confluence space by ID.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "space_id": {
+            "description": "required,The ID of the space to retrieve",
+            "type": "string"
+          }
+        },
+        "required": [
+          "space_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_spaces",
+      "description": "Lists Confluence spaces.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum number of spaces to return (1-250)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "search_content",
+      "description": "Searches Confluence content using CQL (Confluence Query Language).",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "cql": {
+            "description": "required,CQL query string (e.g. 'space = DEV AND type = page')",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum number of results to return (1-250)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cql",
+          "limit"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "update_page",
+      "description": "Updates an existing Confluence page.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "required,New page body content in Confluence storage format (XHTML)",
+            "type": "string"
+          },
+          "page_id": {
+            "description": "required,The ID of the page to update",
+            "type": "string"
+          },
+          "title": {
+            "description": "required,New title for the page",
+            "type": "string"
+          },
+          "version": {
+            "description": "required,Current version number of the page (incremented by 1 on update)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "page_id",
+          "title",
+          "body",
+          "version"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "hosting": [
+    {
+      "case": "the service enabled with no tool list — an empty allowed set hosts everything",
+      "services": {
+        "content": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "tools": [
+        "create_page",
+        "get_page",
+        "get_space",
+        "list_spaces",
+        "search_content",
+        "update_page"
+      ]
+    },
+    {
+      "case": "no services at all",
+      "services": {},
+      "tools": []
+    },
+    {
+      "case": "the service disabled contributes neither its gate nor its tools",
+      "services": {
+        "content": {
+          "enabled": false,
+          "tools": [
+            "list_spaces"
+          ]
+        }
+      },
+      "tools": []
+    },
+    {
+      "case": "a non-empty allowed set is a filter",
+      "services": {
+        "content": {
+          "enabled": true,
+          "tools": [
+            "get_page",
+            "list_spaces"
+          ]
+        }
+      },
+      "tools": [
+        "get_page",
+        "list_spaces"
+      ]
+    },
+    {
+      "case": "an enabled but unknown service still narrows the one that exists",
+      "services": {
+        "content": {
+          "enabled": true,
+          "tools": null
+        },
+        "other": {
+          "enabled": true,
+          "tools": [
+            "update_page"
+          ]
+        }
+      },
+      "tools": [
+        "update_page"
+      ]
+    },
+    {
+      "case": "a tool named by a disabled service is not allowed anywhere",
+      "services": {
+        "content": {
+          "enabled": true,
+          "tools": [
+            "get_space"
+          ]
+        },
+        "other": {
+          "enabled": false,
+          "tools": [
+            "create_page"
+          ]
+        }
+      },
+      "tools": [
+        "get_space"
+      ]
+    }
+  ],
+  "calls": [
+    {
+      "case": "list_spaces/a zero limit takes the 50 fallback",
+      "tool": "list_spaces",
+      "arguments": {
+        "limit": 0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/spaces?limit=50",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Spaces: {\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+    },
+    {
+      "case": "list_spaces/over 250 falls back too, rather than clamping to 250",
+      "tool": "list_spaces",
+      "arguments": {
+        "limit": 251
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/spaces?limit=50",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Spaces: {\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+    },
+    {
+      "case": "list_spaces/250 is the largest value that survives",
+      "tool": "list_spaces",
+      "arguments": {
+        "limit": 250
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/spaces?limit=250",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Spaces: {\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+    },
+    {
+      "case": "list_spaces/a negative limit is a zero, not an error",
+      "tool": "list_spaces",
+      "arguments": {
+        "limit": -5
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/spaces?limit=50",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Spaces: {\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+    },
+    {
+      "case": "list_spaces/a non-2xx status is the API's own body, verbatim",
+      "tool": "list_spaces",
+      "arguments": {
+        "limit": 1
+      },
+      "response": {
+        "status": 403,
+        "body": "{\"message\":\"Forbidden \u003cyou\u003e\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/spaces?limit=1",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "confluence API error (status 403): {\"message\":\"Forbidden \u003cyou\u003e\"}"
+    },
+    {
+      "case": "list_spaces/a 204 is a success, and its empty body is the result",
+      "tool": "list_spaces",
+      "arguments": {
+        "limit": 10
+      },
+      "response": {
+        "status": 204,
+        "body": ""
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/spaces?limit=10",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Spaces: "
+    },
+    {
+      "case": "get_space/a plain id",
+      "tool": "get_space",
+      "arguments": {
+        "space_id": "123456"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"key\":\"DEV\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/spaces/123456",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Space: {\"key\":\"DEV\"}"
+    },
+    {
+      "case": "get_space/the reserved bytes a segment keeps, the ones it escapes, and UTF-8",
+      "tool": "get_space",
+      "arguments": {
+        "space_id": "a$\u0026+:=@b my space/x;y,z?q café日本語"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"key\":\"X\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/spaces/a$\u0026+:=@b%20my%20space%2Fx%3By%2Cz%3Fq%20caf%C3%A9%E6%97%A5%E6%9C%AC%E8%AA%9E",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Space: {\"key\":\"X\"}"
+    },
+    {
+      "case": "search_content/CQL is query-escaped, so a space is a plus",
+      "tool": "search_content",
+      "arguments": {
+        "cql": "space = DEV AND type = page AND title ~ \"a\u0026b\"",
+        "limit": 0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/search?cql=space+%3D+DEV+AND+type+%3D+page+AND+title+~+%22a%26b%22\u0026limit=25",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Search results: {\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+    },
+    {
+      "case": "search_content/the fallback is 25 here, not list_spaces' 50",
+      "tool": "search_content",
+      "arguments": {
+        "cql": "type=page",
+        "limit": 300
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/search?cql=type%3Dpage\u0026limit=25",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Search results: {\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+    },
+    {
+      "case": "search_content/an empty CQL still sends the key",
+      "tool": "search_content",
+      "arguments": {
+        "cql": "",
+        "limit": 7
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/search?cql=\u0026limit=7",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Search results: {\"results\":[{\"zebra\":1,\"id\":10152021304050607,\"rate\":1.50, \"name\":\"x\"}]}"
+    },
+    {
+      "case": "get_page/an empty body_format takes the storage default",
+      "tool": "get_page",
+      "arguments": {
+        "body_format": "",
+        "page_id": "98765"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"title\":\"Home\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/pages/98765?body-format=storage",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Page: {\"title\":\"Home\"}"
+    },
+    {
+      "case": "get_page/an explicit format is passed through",
+      "tool": "get_page",
+      "arguments": {
+        "body_format": "view",
+        "page_id": "98765"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"title\":\"Home\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/pages/98765?body-format=view",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": false,
+      "text": "Page: {\"title\":\"Home\"}"
+    },
+    {
+      "case": "get_page/an unrecognized format is not corrected, only escaped",
+      "tool": "get_page",
+      "arguments": {
+        "body_format": "storage view\u0026x",
+        "page_id": "98765"
+      },
+      "response": {
+        "status": 400,
+        "body": "{\"message\":\"bad body-format\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/pages/98765?body-format=storage+view%26x",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "confluence API error (status 400): {\"message\":\"bad body-format\"}"
+    },
+    {
+      "case": "create_page/a nested body, sorted keys, and XHTML escaped",
+      "tool": "create_page",
+      "arguments": {
+        "body": "\u003cp\u003ehi \u0026amp; bye\u003c/p\u003e",
+        "parent_id": "",
+        "space_id": "SPACE1",
+        "title": "Release \u003c1.0\u003e \u0026 notes"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"id\":\"1\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/wiki/api/v2/pages",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"representation\":\"storage\",\"value\":\"\\u003cp\\u003ehi \\u0026amp; bye\\u003c/p\\u003e\"},\"spaceId\":\"SPACE1\",\"status\":\"current\",\"title\":\"Release \\u003c1.0\\u003e \\u0026 notes\"}"
+      },
+      "is_error": false,
+      "text": "Page created: {\"id\":\"1\"}"
+    },
+    {
+      "case": "create_page/a parent adds the one conditional key",
+      "tool": "create_page",
+      "arguments": {
+        "body": "\u003cp/\u003e",
+        "parent_id": "424242",
+        "space_id": "SPACE1",
+        "title": "Child"
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"id\":\"2\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/wiki/api/v2/pages",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"representation\":\"storage\",\"value\":\"\\u003cp/\\u003e\"},\"parentId\":\"424242\",\"spaceId\":\"SPACE1\",\"status\":\"current\",\"title\":\"Child\"}"
+      },
+      "is_error": false,
+      "text": "Page created: {\"id\":\"2\"}"
+    },
+    {
+      "case": "create_page/empty strings are still sent — only parent_id is conditional",
+      "tool": "create_page",
+      "arguments": {
+        "body": "",
+        "parent_id": "",
+        "space_id": "",
+        "title": ""
+      },
+      "response": {
+        "status": 400,
+        "body": "{\"message\":\"spaceId required\"}"
+      },
+      "request": {
+        "method": "POST",
+        "target": "/wiki/api/v2/pages",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"representation\":\"storage\",\"value\":\"\"},\"spaceId\":\"\",\"status\":\"current\",\"title\":\"\"}"
+      },
+      "is_error": true,
+      "text": "confluence API error (status 400): {\"message\":\"spaceId required\"}"
+    },
+    {
+      "case": "update_page/the version is incremented, and the id is in both the path and the body",
+      "tool": "update_page",
+      "arguments": {
+        "body": "\u003cp\u003ev2 \u0026lt;b\u0026gt;\u003c/p\u003e",
+        "page_id": "98765",
+        "title": "New title",
+        "version": 41
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"id\":\"98765\"}"
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/wiki/api/v2/pages/98765",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"representation\":\"storage\",\"value\":\"\\u003cp\\u003ev2 \\u0026lt;b\\u0026gt;\\u003c/p\\u003e\"},\"id\":\"98765\",\"status\":\"current\",\"title\":\"New title\",\"version\":{\"number\":42}}"
+      },
+      "is_error": false,
+      "text": "Page updated: {\"id\":\"98765\"}"
+    },
+    {
+      "case": "update_page/a zero version increments to one",
+      "tool": "update_page",
+      "arguments": {
+        "body": "b",
+        "page_id": "1",
+        "title": "t",
+        "version": 0
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"id\":\"1\"}"
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/wiki/api/v2/pages/1",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"representation\":\"storage\",\"value\":\"b\"},\"id\":\"1\",\"status\":\"current\",\"title\":\"t\",\"version\":{\"number\":1}}"
+      },
+      "is_error": false,
+      "text": "Page updated: {\"id\":\"1\"}"
+    },
+    {
+      "case": "update_page/a negative version is not clamped",
+      "tool": "update_page",
+      "arguments": {
+        "body": "b",
+        "page_id": "1",
+        "title": "t",
+        "version": -3
+      },
+      "response": {
+        "status": 409,
+        "body": "{\"message\":\"version conflict\"}"
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/wiki/api/v2/pages/1",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"representation\":\"storage\",\"value\":\"b\"},\"id\":\"1\",\"status\":\"current\",\"title\":\"t\",\"version\":{\"number\":-2}}"
+      },
+      "is_error": true,
+      "text": "confluence API error (status 409): {\"message\":\"version conflict\"}"
+    },
+    {
+      "case": "update_page/an id needing escaping appears escaped in the path and raw in the body",
+      "tool": "update_page",
+      "arguments": {
+        "body": "b",
+        "page_id": "a/b c",
+        "title": "t",
+        "version": 2
+      },
+      "response": {
+        "status": 200,
+        "body": "{\"id\":\"a/b c\"}"
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/wiki/api/v2/pages/a%2Fb%20c",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"representation\":\"storage\",\"value\":\"b\"},\"id\":\"a/b c\",\"status\":\"current\",\"title\":\"t\",\"version\":{\"number\":3}}"
+      },
+      "is_error": false,
+      "text": "Page updated: {\"id\":\"a/b c\"}"
+    },
+    {
+      "case": "get_space/a dot-dot segment reaches a different endpoint under url::Url",
+      "tool": "get_space",
+      "arguments": {
+        "space_id": ".."
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/spaces/..",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "confluence API error (status 404): {\"message\":\"Not Found\"}",
+      "rust_text": "calling confluence API: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "get_page/a single dot segment is sent literally too",
+      "tool": "get_page",
+      "arguments": {
+        "body_format": "",
+        "page_id": "."
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "GET",
+        "target": "/wiki/api/v2/pages/.?body-format=storage",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "",
+        "body": ""
+      },
+      "is_error": true,
+      "text": "confluence API error (status 404): {\"message\":\"Not Found\"}",
+      "rust_text": "calling confluence API: request failed",
+      "rust_no_request": true
+    },
+    {
+      "case": "update_page/dot segments reach the write path too",
+      "tool": "update_page",
+      "arguments": {
+        "body": "b",
+        "page_id": "..",
+        "title": "t",
+        "version": 1
+      },
+      "response": {
+        "status": 404,
+        "body": "{\"message\":\"Not Found\"}"
+      },
+      "request": {
+        "method": "PUT",
+        "target": "/wiki/api/v2/pages/..",
+        "authorization": "Basic cGFyaXR5QGV4YW1wbGUuY29tOnBhcml0eS1jb25mbHVlbmNlLWFwaS10b2tlbg==",
+        "accept": "application/json",
+        "content_type": "application/json",
+        "body": "{\"body\":{\"representation\":\"storage\",\"value\":\"b\"},\"id\":\"..\",\"status\":\"current\",\"title\":\"t\",\"version\":{\"number\":2}}"
+      },
+      "is_error": true,
+      "text": "confluence API error (status 404): {\"message\":\"Not Found\"}",
+      "rust_text": "calling confluence API: request failed",
+      "rust_no_request": true
+    }
+  ]
+}

@@ -11,9 +11,9 @@
 //! `cmd/web.go` starts the sidecar's scheduler on every boot. Ownership moves
 //! in one commit that stops the sidecar scheduling — the #289 model — and that
 //! commit is blocked on `chat/runner.rs::build_options`, which still refuses an
-//! agent whose tools come from an integration this build cannot host — five of
-//! the six (#313–#317), since the local in-process server (#310) and github
-//! (#311) are no longer among them. A chat can forward to Go on that
+//! agent whose tools come from an integration this build cannot host — four of
+//! the six (#313–#316), since the local in-process server (#310), github (#311)
+//! and confluence (#317) are no longer among them. A chat can forward to Go on that
 //! refusal; a scheduled task with no Go scheduler behind it would simply never
 //! run, with nothing to say so. See "The scheduler: the computation moved, the
 //! ownership did not" in `desktop/CLAUDE.md`.

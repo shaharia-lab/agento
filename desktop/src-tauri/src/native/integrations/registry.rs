@@ -4,7 +4,8 @@
 //! Go keeps one long-lived in-process MCP server per enabled, authenticated
 //! integration: `Start` brings them all up at boot, `Reload` restarts one when
 //! its row changes, `Stop` tears one down when it is deleted. This module is
-//! that, for the types listed in [`HOSTED_TYPES`] — today `github` alone.
+//! that, for the types listed in [`HOSTED_TYPES`] — today `github` (#312) and
+//! `confluence` (#317).
 //!
 //! ## Why the ownership had to flip before the writes could move
 //!
@@ -43,7 +44,7 @@
 //! **The list is built here, by [`hosting_env_value`], from the same
 //! [`HOSTED_TYPES`] that [`hosts_type`] and the starter dispatch read.** That is
 //! the point of carrying it in the environment rather than hardcoding it on both
-//! sides: the shell is the process that knows what it hosts, so #313–#317 each
+//! sides: the shell is the process that knows what it hosts, so #313–#316 each
 //! add one string to one list and the two halves cannot drift. The failure mode
 //! being designed against is a Rust slack starter landing while Go is never told
 //! to stop hosting slack — two processes on one integration — and its mirror is
@@ -82,18 +83,21 @@
 //! ## What still reaches Go's `Reload` and not this one
 //!
 //! `Reload` has seven callers in Go and only two of them (`Update`, and
-//! `Delete` via `Stop`) are ported. Five run inside the sidecar and **four of
-//! them are fine because the gate is per type**: the confluence, telegram, jira
-//! and slack validators can only reach types Go still hosts, and so can
-//! `completeOAuth`, since `startProviderCallback` supports exactly `google` and
-//! `slack`. The seventh is `validateGitHubPATAuth`, behind
-//! `POST /api/integrations/{id}/auth/validate` — a credential written for a type
-//! *this* process hosts, by a handler that cannot tell it. Without a hook a
-//! GitHub integration would first be hosted at the next boot's [`start_all`], so
-//! the seam fires [`reload_after_auth`] after forwarding a 2xx for that one
-//! route (`native::after_forward`). The reload is idempotent and the response
-//! has already been produced, so doing it on the forward path costs nothing but
-//! a restart of a server that was about to be restarted anyway.
+//! `Delete` via `Stop`) are ported. Five run inside the sidecar. `completeOAuth`
+//! and the telegram, jira and slack validators are fine **because the gate is
+//! per type**: they can only reach types Go still hosts, and
+//! `startProviderCallback` supports exactly `google` and `slack`, so an OAuth
+//! completion never concerns a hosted one. The other two — `validateGitHubPATAuth`
+//! and, since #317, `validateConfluenceAuth` — write a credential for a type
+//! *this* process hosts, from a handler that cannot tell it. Without a hook such
+//! an integration would first be hosted at the next boot's [`start_all`], so the
+//! seam fires [`reload_after_auth`] after forwarding a 2xx for that one route
+//! (`native::after_forward`). That hook needs no per-type list of its own: it
+//! runs for every id on the route and [`reload_after_auth`] reads the row's type
+//! through [`can_host`], so #313–#316 are covered the moment they add their
+//! string to [`HOSTED_TYPES`]. The reload is idempotent and the response has
+//! already been produced, so doing it on the forward path costs nothing but a
+//! restart of a server that was about to be restarted anyway.
 //!
 //! ## Secrets
 //!
@@ -152,8 +156,8 @@ impl HostingRow {
 /// One list, read by three things that must agree: [`hosts_type`] (which the
 /// native `PUT`/`DELETE` consult before they touch a row), the starter dispatch
 /// in [`start_for_type`], and [`hosting_env_value`], which tells the Go sidecar
-/// which types to stop hosting. #313–#317 each add one string here.
-pub const HOSTED_TYPES: &[&str] = &["github"];
+/// which types to stop hosting. #313–#316 each add one string here.
+pub const HOSTED_TYPES: &[&str] = &["github", "confluence"];
 
 /// Whether this process hosts an integration of the given type.
 pub fn hosts_type(integration_type: &str) -> bool {
@@ -362,6 +366,7 @@ async fn start_one(row: &HostingRow, generation: u64) -> Result<(), String> {
 async fn start_for_type(row: &HostingRow) -> Result<InProcessMcpServer, String> {
     match row.integration_type.as_str() {
         "github" => start_github(&row.id, &row.services(), &row.credentials).await,
+        "confluence" => start_confluence(&row.id, &row.services(), &row.credentials).await,
         other => Err(format!(
             "no starter registered for integration type {other:?}"
         )),
@@ -431,6 +436,95 @@ fn github_token(id: &str, credentials: &str) -> Result<String, String> {
         })
 }
 
+/// `confluence.Start`'s first three steps — the auth check, the credential parse
+/// and the site-URL normalisation — followed by the fourth, which
+/// `native/integrations/confluence` owns.
+///
+/// The auth check is Go's `if !cfg.IsAuthenticated()` inside `Start`, which is
+/// redundant with the caller's own skip and is kept for the same reason Go keeps
+/// it: `StartFilteredServer` reaches a starter by a different path.
+///
+/// Note the order: the site URL is validated **before** the server is built and
+/// therefore before the token is captured into any closure, so a plaintext site
+/// URL never gets as far as a client that could send a `Basic` header over it.
+async fn start_confluence(
+    id: &str,
+    services: &BTreeMap<String, ServiceConfig>,
+    credentials: &str,
+) -> Result<InProcessMcpServer, String> {
+    let creds = atlassian_credentials("confluence", id, credentials)?;
+    let site_url = super::confluence::validate_site_url(&creds.site_url)
+        .map_err(|e| format!("invalid site URL for {id:?}: {e}"))?;
+    super::confluence::start_confluence_mcp_server(
+        id,
+        services,
+        &site_url,
+        &creds.email,
+        &creds.api_token,
+    )
+    .await
+    .map_err(|e| format!("starting in-process MCP server for {id:?}: {e}"))
+}
+
+/// `config.AtlassianCredentials` — the struct Confluence and Jira share.
+///
+/// Neither derives `Debug` nor `Serialize`, for [`HostingRow`]'s reason: a
+/// `{creds:?}` in a log line is the same leak with a longer fuse.
+///
+/// `kind` is the word Go's wrapper uses (`parsing confluence credentials for %q`
+/// against `parsing jira credentials for %q`) — the struct is shared and the
+/// sentence is not, so #316 passes `"jira"` to the same function.
+struct AtlassianCredentials {
+    site_url: String,
+    email: String,
+    api_token: String,
+}
+
+fn atlassian_credentials(
+    kind: &str,
+    id: &str,
+    credentials: &str,
+) -> Result<AtlassianCredentials, String> {
+    #[derive(Default, serde::Deserialize)]
+    #[serde(default)]
+    struct Raw {
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        site_url: String,
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        email: String,
+        #[serde(deserialize_with = "crate::native::gojson::null_is_zero_value")]
+        api_token: String,
+    }
+
+    if credentials.is_empty() {
+        // Go's own `fmt.Errorf("credentials are empty")`, wrapped as `Start`
+        // wraps it.
+        return Err(format!(
+            "parsing {kind} credentials for {id:?}: credentials are empty"
+        ));
+    }
+    // Through `Option<T>`, because a literal `null` is a no-op to
+    // `json.Unmarshal` and a type error to serde — the rule
+    // `native/integration_credentials.rs` carries for the same columns.
+    serde_json::from_str::<Option<Raw>>(credentials)
+        .map(Option::unwrap_or_default)
+        .map(|raw| AtlassianCredentials {
+            site_url: raw.site_url,
+            email: raw.email,
+            api_token: raw.api_token,
+        })
+        .map_err(|e| {
+            // **The serde message is deliberately dropped**, for
+            // [`github_token`]'s reason: it quotes the offending value, so a
+            // malformed blob would put the API token itself into this log line.
+            format!(
+                "parsing {kind} credentials for {id:?}: does not decode at line {} column {}",
+                e.line(),
+                e.column()
+            )
+        })
+}
+
 // ─── The per-run server, which the hosting switch does not touch ──────────────
 
 /// `AllowedToolNames`: `mcp__<integration id>__<tool>`.
@@ -480,6 +574,7 @@ pub async fn start_filtered_server(
     let filtered = filter_config_tools(&row.services(), tools);
     match row.integration_type.as_str() {
         "github" => start_github(&row.id, &filtered, &row.credentials).await,
+        "confluence" => start_confluence(&row.id, &filtered, &row.credentials).await,
         other => Err(format!(
             "no starter registered for integration type {other:?}"
         )),
@@ -805,25 +900,19 @@ mod tests {
     /// two ways to put a credential on two open ports at once.
     #[test]
     fn the_sidecar_is_told_exactly_what_this_process_hosts() {
-        assert_eq!(hosting_env_value(), "off:github");
+        assert_eq!(hosting_env_value(), "off:github,confluence");
         assert_eq!(
             hosting_env_value(),
             format!("off:{}", HOSTED_TYPES.join(",")),
             "the switch must be built from the starter table, never written out"
         );
         assert!(hosts_type("github"));
-        // The five types #313–#317 still owe. Go must keep hosting every one of
+        assert!(hosts_type("confluence"));
+        // The four types #313–#316 still owe. Go must keep hosting every one of
         // them, and `whatsapp` is the reason this is a list at all: its starter
         // opens a live whatsmeow connection that its status, reconnect and QR
         // endpoints read out of a package global.
-        for unported in [
-            "slack",
-            "jira",
-            "telegram",
-            "confluence",
-            "google",
-            "whatsapp",
-        ] {
+        for unported in ["slack", "jira", "telegram", "google", "whatsapp"] {
             assert!(!hosts_type(unported), "{unported} is not hosted here");
             assert!(
                 !hosting_env_value().contains(unported),
