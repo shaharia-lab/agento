@@ -315,6 +315,36 @@ pub fn diff_exempt(path: &str) -> bool {
     path == "/api/claude-sessions/status"
 }
 
+/// Work the shell owes a request the **sidecar** answered.
+///
+/// The seam's usual direction is "Rust answers, Go is the fallback". This is the
+/// other one: a forwarded request can have an effect inside the shell, because
+/// `AGENTO_INTEGRATIONS` tells the sidecar not to host the integration types
+/// this process hosts — so Go's own `registry.Reload` after a successful
+/// `POST /api/integrations/{id}/auth/validate` reaches nothing, and the shell
+/// has to fire its own (#311). See `integrations::reload_after_forward` for why
+/// that is the only route on this list.
+///
+/// Called from the proxy after Go's response is in hand, and only for a 2xx.
+/// Spawned rather than awaited, which is what Go's own `reloadIntegration` does
+/// with it: the answer has already been produced and a restart is not something
+/// the client waits on.
+pub fn after_forward(method: &Method, path: &str, status: StatusCode) {
+    if !status.is_success() {
+        return;
+    }
+    let Some(id) = integrations::reload_after_forward(method, path).map(str::to_string) else {
+        return;
+    };
+    let Some(db_path) = paths::database_path() else {
+        log::warn!("no data dir; not reloading integration {id:?} after {path}");
+        return;
+    };
+    tokio::spawn(async move {
+        integrations::registry::reload_after_auth(&db_path, &id).await;
+    });
+}
+
 /// Answer a claimed request. `Err` means "fall back to the Go sidecar".
 pub fn serve(req: &Request) -> Result<Answer, String> {
     let ctx = Ctx {

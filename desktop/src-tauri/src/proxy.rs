@@ -505,16 +505,20 @@ async fn dispatch(
         }
     }
 
-    (
-        match forward(&state, req).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                log::error!("proxy error for {path}: {e}");
-                error_response(StatusCode::BAD_GATEWAY, &e)
-            }
-        },
-        Served::Forwarded,
-    )
+    // The seam runs in this direction too, for exactly one route: a forwarded
+    // request can have an effect the *shell* owns, because the sidecar has been
+    // told not to host the integration types this process hosts. See
+    // `native::after_forward`.
+    let method = req.method().clone();
+    let response = match forward(&state, req).await {
+        Ok(resp) => resp,
+        Err(e) => {
+            log::error!("proxy error for {path}: {e}");
+            error_response(StatusCode::BAD_GATEWAY, &e)
+        }
+    };
+    native::after_forward(&method, &path, response.status());
+    (response, Served::Forwarded)
 }
 
 /// Forward a request upstream, streaming both directions.

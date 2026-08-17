@@ -470,6 +470,36 @@ fn segment(value: &str) -> Option<&str> {
 /// The trigger-rule writes are safe for a different reason again: the dispatcher
 /// calls `ListRules` **per inbound message** (`internal/trigger/dispatcher.go`),
 /// so there is no cached rule set for a native write to leave stale.
+/// A **forwarded** request whose Go handler rewrites `auth` and then fires
+/// `registry.Reload` — which, for a type this shell hosts, now reaches nothing
+/// on the Go side. Returns the integration id the shell owes a reload for.
+///
+/// `Reload` has seven callers in Go. Two are ported (`Update`, and `Delete` via
+/// `Stop`). Four more — the confluence, telegram, jira and slack validators —
+/// and `completeOAuth` are unaffected, because the switch is per type and every
+/// type they can reach is still Go's: `startProviderCallback` supports exactly
+/// `google` and `slack`, so an OAuth completion never concerns a type this
+/// process hosts. That leaves `validateGitHubPATAuth`, behind
+/// `POST /api/integrations/{id}/auth/validate`, as the one path that writes a
+/// credential for a hosted type and cannot tell anybody. Without this hook a
+/// GitHub integration is never hosted in the session it is set up in — create,
+/// `PUT` and `auth/validate` all leave it unauthenticated or unheard, and it
+/// appears only at the next boot's `start_all`.
+///
+/// The reload runs **after** Go's answer, so the row is already written, and it
+/// is idempotent — the worst case is restarting a server that was about to be
+/// restarted. Go fires its own from a goroutine (`reloadIntegration`), so doing
+/// it off the response path is parity rather than a shortcut.
+pub fn reload_after_forward<'a>(method: &Method, path: &'a str) -> Option<&'a str> {
+    if method != Method::POST {
+        return None;
+    }
+    segment(
+        path.strip_prefix("/api/integrations/")?
+            .strip_suffix("/auth/validate")?,
+    )
+}
+
 fn claims(method: &Method, path: &str) -> bool {
     match route_of(path) {
         Some(Route::List) => method == Method::GET || method == Method::POST,
@@ -680,12 +710,21 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     let req = decode_body::<UpdateIntegrationRequest>(body)?;
 
     let conn = open_for_write(db_path)?;
-    let Some((created_at, authenticated)) = existing_for_update(&conn, id)? else {
+    let Some(existing) = existing_for_update(&conn, id)? else {
         return Err(WriteError::NotFound {
             resource: "integration".to_string(),
             id: id.to_string(),
         });
     };
+    decline_a_type_go_still_hosts(id, &existing.integration_type)?;
+    // **Before the write, not after.** Its input comes out of the database, so
+    // unlike the timestamps this process formats itself it can genuinely fail —
+    // and a `Fallback` after `conn.execute` would forward to Go, which re-runs
+    // the whole `PUT`: a second `updated_at`, a second credential overwrite, a
+    // second reload. Go fails before saving here too, because
+    // `integrationService.Update` calls `s.Get` — which scans `created_at` —
+    // first. See the invariant in `writes.rs`.
+    let created_at = parse_stored(&existing.created_at)?;
 
     let now = super::gotime::now_go_text();
     let credentials = req
@@ -739,8 +778,8 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     registry::reload_blocking(db_path, id);
 
     let updated = ScrubbedIntegration {
-        authenticated,
-        created_at: parse_stored(&created_at)?,
+        authenticated: existing.authenticated,
+        created_at,
         enabled: req.enabled,
         id: id.to_string(),
         name: req.name,
@@ -761,12 +800,16 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
 /// does, and is why stopping first is safe to reproduce rather than reorder.
 fn delete(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
     let conn = open_for_write(db_path)?;
-    if !integration_exists(&conn, id)? {
+    let Some(integration_type) = integration_type_of(&conn, id)? else {
         return Err(WriteError::NotFound {
             resource: "integration".to_string(),
             id: id.to_string(),
         });
-    }
+    };
+    // Before the `Stop` as well as before the row delete: a type the sidecar
+    // hosts has to be stopped by the sidecar, which only happens if Go serves
+    // the whole request.
+    decline_a_type_go_still_hosts(id, &integration_type)?;
 
     registry::registry().stop(id);
 
@@ -775,28 +818,64 @@ fn delete(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
     Ok(super::Answer::no_content())
 }
 
-/// The two things a `PUT` needs from the row it is replacing, and nothing else.
+/// What a `PUT` needs from the row it is replacing, and nothing else.
 ///
 /// `created_at` because the response carries it and the column keeps it;
 /// `authenticated` because the response reports it — computed in SQL, so this
-/// stays a read that cannot hold a secret. Absent means 404.
+/// stays a read that cannot hold a secret; `type` because it decides whether
+/// this process may answer at all. Absent means 404.
+struct ExistingIntegration {
+    created_at: String,
+    authenticated: bool,
+    integration_type: String,
+}
+
 fn existing_for_update(
     conn: &rusqlite::Connection,
     id: &str,
-) -> Result<Option<(String, bool)>, WriteError> {
+) -> Result<Option<ExistingIntegration>, WriteError> {
     conn.query_row(
         "SELECT created_at,
-                (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated
+                (auth IS NOT NULL AND auth != '' AND auth != 'null') AS authenticated,
+                type
          FROM integrations WHERE id = ?1",
         [id],
         |row| {
-            let created_at: String = row.get(0)?;
             let authenticated: i64 = row.get(1)?;
-            Ok((created_at, authenticated != 0))
+            Ok(ExistingIntegration {
+                created_at: row.get(0)?,
+                authenticated: authenticated != 0,
+                integration_type: row.get(2)?,
+            })
         },
     )
     .optional()
     .map_err(|e| WriteError::Fallback(format!("looking up integration: {e}")))
+}
+
+/// Refuse, **before touching the row**, a write whose lifecycle effect belongs
+/// to the sidecar.
+///
+/// `AGENTO_INTEGRATIONS` names the types the shell hosts and Go keeps the rest
+/// (#311), so for a slack or whatsapp row it is Go that must fire `Reload` /
+/// `Stop` — and Go only does that from its own handler. Serving such a write
+/// here would persist the row and leave the sidecar's server on the old
+/// credential, which is precisely the stranded-listener bug this issue exists to
+/// remove, relocated rather than fixed. WhatsApp is the sharpest case: its
+/// "server" is a live whatsmeow connection registered in a package global, so a
+/// missed reload strands a socket, not a port.
+///
+/// A `Fallback` forwards the *whole* request, so Go re-reads the body and does
+/// everything. That is only safe while nothing has been written yet, which is
+/// why both callers check straight after their existence read and before any
+/// mutation — the invariant in `writes.rs`.
+fn decline_a_type_go_still_hosts(id: &str, integration_type: &str) -> Result<(), WriteError> {
+    if registry::hosts_type(integration_type) {
+        return Ok(());
+    }
+    Err(WriteError::Fallback(format!(
+        "integration {id:?} is of type {integration_type:?}, whose MCP server the sidecar hosts"
+    )))
 }
 
 /// `CreateTriggerRuleRequest` / `UpdateTriggerRuleRequest` — identical shapes.
@@ -990,6 +1069,20 @@ fn load_rule(conn: &rusqlite::Connection, rule_id: &str) -> Result<TriggerRule, 
             resource: "trigger_rule".to_string(),
             id: rule_id.to_string(),
         })
+}
+
+/// The type of an existing integration, or `None` for a 404. The `DELETE`'s
+/// half of [`existing_for_update`]: it needs the existence check and the type,
+/// and nothing else.
+fn integration_type_of(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<String>, WriteError> {
+    conn.query_row("SELECT type FROM integrations WHERE id = ?1", [id], |row| {
+        row.get::<_, String>(0)
+    })
+    .optional()
+    .map_err(|e| WriteError::Fallback(format!("looking up integration: {e}")))
 }
 
 fn integration_exists(conn: &rusqlite::Connection, id: &str) -> Result<bool, WriteError> {
@@ -1567,9 +1660,14 @@ mod tests {
 
     // ─── The `{id}` writes (#311) ─────────────────────────────────────────────
     //
-    // The literals below are `desktop/parity/integration_writes_vectors.json`'s,
-    // captured from a live Go server built from this checkout. See that file's
-    // `_comment`.
+    // The literals below are Go's, captured from a live Go server built from
+    // this checkout by
+    // `desktop/src-tauri/tests/parity_writes.rs::the_integration_id_write_answers_match_go`,
+    // which is where they are re-asked against a running sidecar rather than
+    // asserted against a fixture. There is no vectors file for these: unlike
+    // `local_tools_vectors.json` and its siblings, nothing here is derived from
+    // a Go *function* a Go test could dump — the answers are a whole handler's,
+    // so the live suite is the capture.
 
     /// A row the update path can be driven against, with a token and a
     /// credential distinctive enough that a leak into any assertion is obvious.
@@ -1769,6 +1867,140 @@ mod tests {
             "a 204 carries no body and no Content-Type"
         );
         assert!(get(file.path(), "int-1").expect("get").is_none());
+    }
+
+    /// A row whose MCP server the **sidecar** still hosts must be forwarded
+    /// whole, because only Go's own handler fires the `Reload`/`Stop` that
+    /// process needs. WhatsApp is the case that makes this more than tidiness:
+    /// its "server" is a live whatsmeow connection registered in a package
+    /// global that the status, reconnect and QR endpoints read, so a missed
+    /// reload strands a socket and a paired client that never connects.
+    #[test]
+    fn a_write_for_a_type_the_sidecar_hosts_forwards_without_touching_the_row() {
+        for integration_type in [
+            "slack",
+            "whatsapp",
+            "telegram",
+            "jira",
+            "confluence",
+            "google",
+        ] {
+            let file = migrated();
+            Connection::open(file.path())
+                .expect("open")
+                .execute(
+                    "INSERT INTO integrations (id, name, type, enabled, credentials, auth,
+                                               services, created_at, updated_at)
+                     VALUES ('int-1', 'Original', ?1, 1, ?2, '{\"token\":\"KEEP-ME\"}', '{}',
+                             '2026-01-01 00:00:00 +0000 UTC', '2026-01-02 00:00:00 +0000 UTC')",
+                    rusqlite::params![integration_type, format!(r#"{{"pat":"{SECRET}"}}"#)],
+                )
+                .expect("seed");
+
+            for err in [
+                update(
+                    file.path(),
+                    "int-1",
+                    br#"{"name":"Renamed","type":"github","enabled":false}"#,
+                )
+                .expect_err("must forward"),
+                delete(file.path(), "int-1").expect_err("must forward"),
+            ] {
+                assert!(
+                    matches!(err, WriteError::Fallback(_)),
+                    "{integration_type}: {err:?}"
+                );
+            }
+
+            // **Nothing was written.** A `Fallback` forwards the whole request
+            // and Go re-applies it, so a partial write here would be applied
+            // twice — the invariant in `writes.rs`.
+            assert_eq!(stored(&file, "SELECT name FROM integrations"), "Original");
+            assert_eq!(
+                stored(&file, "SELECT type FROM integrations"),
+                integration_type
+            );
+            assert_eq!(
+                stored(&file, "SELECT CAST(enabled AS TEXT) FROM integrations"),
+                "1"
+            );
+            assert_eq!(
+                stored(&file, "SELECT credentials FROM integrations"),
+                format!(r#"{{"pat":"{SECRET}"}}"#)
+            );
+            assert_eq!(
+                stored(&file, "SELECT updated_at FROM integrations"),
+                "2026-01-02 00:00:00 +0000 UTC"
+            );
+        }
+
+        // …and the one type this process does host is served natively.
+        let file = migrated();
+        seed_full_integration(&file, "int-1", Some(r#"{"token":"t"}"#));
+        assert_eq!(
+            update(file.path(), "int-1", br#"{"name":"N","type":"github"}"#)
+                .expect("github is ours")
+                .status,
+            axum::http::StatusCode::OK
+        );
+        assert_eq!(
+            delete(file.path(), "int-1").expect("github is ours").status,
+            axum::http::StatusCode::NO_CONTENT
+        );
+    }
+
+    /// `created_at` comes out of the database, so unlike the timestamps this
+    /// process formats itself it can genuinely fail to parse — and its
+    /// `Fallback` therefore has to happen **before** the `UPDATE`, or Go's
+    /// re-run would be the second application of a write that already landed.
+    #[test]
+    fn an_unparseable_created_at_forwards_before_anything_is_written() {
+        let file = migrated();
+        Connection::open(file.path())
+            .expect("open")
+            .execute(
+                "INSERT INTO integrations (id, name, type, enabled, credentials, auth, services,
+                                           created_at, updated_at)
+                 VALUES ('int-1', 'Original', 'github', 1, '{}', NULL, '{}',
+                         'not a timestamp', '2026-01-02 00:00:00 +0000 UTC')",
+                [],
+            )
+            .expect("seed");
+
+        let err = update(
+            file.path(),
+            "int-1",
+            br#"{"name":"Renamed","type":"github"}"#,
+        )
+        .expect_err("an unparseable stored timestamp forwards");
+        assert!(matches!(err, WriteError::Fallback(_)), "{err:?}");
+
+        assert_eq!(stored(&file, "SELECT name FROM integrations"), "Original");
+        assert_eq!(
+            stored(&file, "SELECT updated_at FROM integrations"),
+            "2026-01-02 00:00:00 +0000 UTC",
+            "the row must be untouched: Go re-runs the whole PUT"
+        );
+    }
+
+    /// The one route the seam owes a reload after Go has answered it (#311).
+    #[test]
+    fn only_a_successful_auth_validate_asks_the_shell_to_reload() {
+        assert_eq!(
+            reload_after_forward(&Method::POST, "/api/integrations/int-1/auth/validate"),
+            Some("int-1")
+        );
+        // Not a POST, not that route, and no empty or multi-segment id.
+        for (method, path) in [
+            (Method::GET, "/api/integrations/int-1/auth/validate"),
+            (Method::POST, "/api/integrations/int-1/auth/start"),
+            (Method::POST, "/api/integrations/int-1"),
+            (Method::POST, "/api/integrations//auth/validate"),
+            (Method::POST, "/api/integrations/a/b/auth/validate"),
+            (Method::POST, "/api/agents"),
+        ] {
+            assert_eq!(reload_after_forward(&method, path), None, "{method} {path}");
+        }
     }
 
     fn seed_integration(file: &tempfile::NamedTempFile, id: &str) {

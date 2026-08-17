@@ -63,21 +63,33 @@ pub async fn spawn(app: &AppHandle, port: u16) -> Result<Sidecar, String> {
         // This is not a tuning knob: with it unset the two processes would both
         // scan, and with the shell's scanner removed nothing would.
         .env("AGENTO_SCANNER", "off")
-        // The shell owns the integration MCP servers too (#311), for a sharper
-        // reason than the scan's. Go's `StartInProcessMCPServer` binds an
-        // **unauthenticated** loopback listener that closes over the credential
-        // it was started with; with `PUT`/`DELETE /api/integrations/{id}` served
-        // natively the child never hears `Reload`/`Stop`, so a token the user
-        // just revoked would keep answering `tools/call` on an open port for the
-        // rest of the sidecar's life. `IntegrationRegistry.Start`/`Reload`/`Stop`
-        // are the only three places a hosted server appears, and this switches
-        // all of them off.
+        // The shell owns the integration MCP servers **of the types it hosts**
+        // (#311), for a sharper reason than the scan's. Go's
+        // `StartInProcessMCPServer` binds an *unauthenticated* loopback listener
+        // that closes over the credential it was started with; with
+        // `PUT`/`DELETE /api/integrations/{id}` served natively the child never
+        // hears `Reload`/`Stop`, so a token the user just revoked would keep
+        // answering `tools/call` on an open port for the rest of the sidecar's
+        // life.
+        //
+        // The value is a **list**, built from `registry::HOSTED_TYPES` rather
+        // than written out here, and that is load-bearing in both directions. A
+        // type the shell hosts and Go does not switch off is two processes on
+        // one integration. A type Go switches off and the shell does not host is
+        // hosted by nobody — which for `whatsapp` is not a spare port but the
+        // feature: its starter opens a live whatsmeow WebSocket and registers
+        // the client in a package global that the status, reconnect and QR
+        // pairing endpoints read. Deriving the list from the starter table means
+        // #313–#317 each add one string in one place.
         //
         // It does **not** switch off `StartFilteredServer`, which is what an
         // agent run uses: that reads the integration row afresh per run and
         // records nothing, so a chat or scheduled task the sidecar still serves
         // keeps reaching its integration tools.
-        .env("AGENTO_INTEGRATIONS", "off")
+        .env(
+            "AGENTO_INTEGRATIONS",
+            crate::native::integrations::registry::hosting_env_value(),
+        )
         .env("PORT", port.to_string());
 
     // Development runs against its own data directory.

@@ -4,9 +4,7 @@
 //! Go keeps one long-lived in-process MCP server per enabled, authenticated
 //! integration: `Start` brings them all up at boot, `Reload` restarts one when
 //! its row changes, `Stop` tears one down when it is deleted. This module is
-//! that, and since #311 it is the **only** implementation of it — the sidecar
-//! runs with `AGENTO_INTEGRATIONS=off` (`sidecar.rs`), which no-ops all three
-//! on the Go side.
+//! that, for the types listed in [`HOSTED_TYPES`] — today `github` alone.
 //!
 //! ## Why the ownership had to flip before the writes could move
 //!
@@ -18,38 +16,84 @@
 //! and the server closes over the credential it was started with, so a sidecar
 //! that never hears `Reload`/`Stop` keeps answering `tools/call` with a token
 //! the user just revoked, for the rest of the process's life. That is a security
-//! regression, not a staleness one, and it applies to all six integration types
-//! rather than only the one Rust can host.
+//! regression, not a staleness one.
 //!
-//! So the fix is #289's, applied a second time: give the Go half an off switch,
-//! and let one process own the state. `AGENTO_INTEGRATIONS` has exactly
-//! `AGENTO_SCANNER`'s semantics — `off`/`0`/`false`/`disabled` off, unset on,
-//! unrecognized on — and gates `Start`/`Reload`/`Stop` and nothing else.
+//! So the fix is #289's, applied a second time — but **per type, not per
+//! process**, which is the one way it differs from the scan.
 //!
-//! **It deliberately does not gate `StartFilteredServer`**, which is what every
-//! agent run uses: `runner.go` builds a per-run server from a fresh row read and
-//! never touches the hosted map. That is what keeps a chat, a scheduled task or
-//! a Telegram trigger the sidecar still serves able to reach its integration
-//! tools while only GitHub is ported here.
+//! ## Why the switch carries a list
 //!
-//! ## What is hosted, and what happens to the rest
+//! It is tempting to read a starter as a pure MCP-server constructor, in which
+//! case switching Go's hosting off costs a bound port and nothing else. That is
+//! true of five of the six. It is **not** true of `whatsapp`:
+//! `internal/integrations/whatsapp/server.go` opens a real whatsmeow WebSocket,
+//! registers the live client in a package global and only then returns a server
+//! config, and `whatsapp/status.go`'s `ConnectionStatus` reads that global. So
+//! `GET /api/integrations/{id}/whatsapp/status`, the reconnect endpoint and QR
+//! pairing all work only in the process that started the integration. Turning Go
+//! hosting off wholesale does not cost WhatsApp a port; it costs WhatsApp.
 //!
-//! Go registers a starter per *type*; only `github` has a Rust one (#312).
-//! Every other type takes the path Go's own unregistered type takes — the error
-//! `no starter registered for integration type "slack"`, **logged and never
-//! surfaced**, because `Start` swallows it and `Update`'s caller swallows
-//! `Reload`'s. A user with a Slack integration therefore sees exactly what a
-//! user with a mistyped type saw before: the row saves, and nothing is hosted.
-//! #313–#317 fill the table in.
+//! Hence `AGENTO_INTEGRATIONS=off:<types>`: `off`/`0`/`false`/`disabled`
+//! optionally followed by `:` and the comma-separated types the *shell* hosts.
+//! Unset is on, unrecognized is on, and an empty list is on — the same
+//! fail-toward-hosting rule `AGENTO_SCANNER` has. On the Go side it gates
+//! `Start` and `Reload` per row; `Stop` is ungated there, because stopping can
+//! only ever remove a server that process started.
+//!
+//! **The list is built here, by [`hosting_env_value`], from the same
+//! [`HOSTED_TYPES`] that [`hosts_type`] and the starter dispatch read.** That is
+//! the point of carrying it in the environment rather than hardcoding it on both
+//! sides: the shell is the process that knows what it hosts, so #313–#317 each
+//! add one string to one list and the two halves cannot drift. The failure mode
+//! being designed against is a Rust slack starter landing while Go is never told
+//! to stop hosting slack — two processes on one integration — and its mirror is
+//! the WhatsApp bug above.
+//!
+//! ## What happens to a type neither side hosts
+//!
+//! Nothing changes for it: Go still hosts every type not in [`HOSTED_TYPES`],
+//! exactly as it did before this module existed. What *this* module does with
+//! one is take the path Go's own unregistered type takes — the error `no starter
+//! registered for integration type "slack"`, **logged and never surfaced** —
+//! but it never gets the chance, because the native `PUT`/`DELETE` decline a row
+//! whose type is not [`hosts_type`] and forward the whole request to Go, which
+//! then fires its own `Reload`/`Stop`. That refusal is a *pre-write* one; see
+//! `native/integrations.rs` and the invariant in `writes.rs`.
 //!
 //! ## Reload is not restart-if-changed
 //!
-//! `Reload` stops and starts **unconditionally**, holding no lock across the
-//! two, so there is a window with no server and the port changes every time.
-//! That is Go's behaviour and it is reproduced rather than improved on: a
-//! "nothing changed, skip it" check would be a different set of live ports after
-//! the same sequence of requests. Shutdown is graceful on both sides — see
-//! `claude/mcp.rs`, where the ordering that makes it so is one line's placement.
+//! `Reload` stops and starts **unconditionally**, so there is a window with no
+//! server and the port changes every time. That is Go's behaviour and it is
+//! reproduced rather than improved on: a "nothing changed, skip it" check would
+//! be a different set of live ports after the same sequence of requests. What is
+//! *not* reproduced is Go's orphan: no lock is held across the stop, the async
+//! row read and the start, so a `DELETE` landing in that window would leave a
+//! bound port holding a credential for a row that no longer exists. Go's
+//! equivalent orphan is a map entry nobody reads; this one is the thing the
+//! whole issue exists to prevent, so [`Registry::stop`] bumps a per-id
+//! generation and a start only records its handle if the generation it observed
+//! before reading the row still stands. Both concurrent-`reload` handles are
+//! still safe on their own — `HashMap::insert` drops the displaced one and
+//! `Drop` fires the shutdown oneshot.
+//!
+//! Shutdown is graceful on both sides — see `claude/mcp.rs`, where the ordering
+//! that makes it so is one line's placement.
+//!
+//! ## What still reaches Go's `Reload` and not this one
+//!
+//! `Reload` has seven callers in Go and only two of them (`Update`, and
+//! `Delete` via `Stop`) are ported. Five run inside the sidecar and **four of
+//! them are fine because the gate is per type**: the confluence, telegram, jira
+//! and slack validators can only reach types Go still hosts, and so can
+//! `completeOAuth`, since `startProviderCallback` supports exactly `google` and
+//! `slack`. The seventh is `validateGitHubPATAuth`, behind
+//! `POST /api/integrations/{id}/auth/validate` — a credential written for a type
+//! *this* process hosts, by a handler that cannot tell it. Without a hook a
+//! GitHub integration would first be hosted at the next boot's [`start_all`], so
+//! the seam fires [`reload_after_auth`] after forwarding a 2xx for that one
+//! route (`native::after_forward`). The reload is idempotent and the response
+//! has already been produced, so doing it on the forward path costs nothing but
+//! a restart of a server that was about to be restarted anyway.
 //!
 //! ## Secrets
 //!
@@ -103,11 +147,48 @@ impl HostingRow {
     }
 }
 
+/// The integration types **this** process hosts.
+///
+/// One list, read by three things that must agree: [`hosts_type`] (which the
+/// native `PUT`/`DELETE` consult before they touch a row), the starter dispatch
+/// in [`start_for_type`], and [`hosting_env_value`], which tells the Go sidecar
+/// which types to stop hosting. #313–#317 each add one string here.
+pub const HOSTED_TYPES: &[&str] = &["github"];
+
+/// Whether this process hosts an integration of the given type.
+pub fn hosts_type(integration_type: &str) -> bool {
+    HOSTED_TYPES.contains(&integration_type)
+}
+
+/// The value `sidecar.rs` puts in `AGENTO_INTEGRATIONS`.
+///
+/// Derived from [`HOSTED_TYPES`] rather than written out, so the sidecar cannot
+/// be told to stop hosting a type this build does not start. An empty list would
+/// render as `off:`, which the Go parser reads as "host everything" — the safe
+/// direction, and the reason the list is joined rather than the switch being a
+/// bare `off`.
+pub fn hosting_env_value() -> String {
+    format!("off:{}", HOSTED_TYPES.join(","))
+}
+
 /// The hosted servers, keyed by integration id — `IntegrationRegistry.servers`
 /// and `.cancels` in one map, because in Rust the handle *is* the cancel: a
 /// dropped [`InProcessMcpServer`] fires the shutdown oneshot.
 pub struct Registry {
-    servers: Mutex<HashMap<String, InProcessMcpServer>>,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
+    servers: HashMap<String, InProcessMcpServer>,
+    /// Bumped by every [`Registry::stop`], and never reset.
+    ///
+    /// This is what closes the window `reload` opens by design: a start records
+    /// the generation it saw *before* the row read that justified it, and
+    /// [`Registry::put_if_current`] refuses a handle whose generation has moved
+    /// since. A `DELETE` in that window therefore drops the new server instead
+    /// of leaving a bound port holding a credential for a deleted row.
+    generations: HashMap<String, u64>,
 }
 
 /// The process-wide registry.
@@ -120,42 +201,69 @@ pub struct Registry {
 pub fn registry() -> &'static Registry {
     static REGISTRY: OnceLock<Registry> = OnceLock::new();
     REGISTRY.get_or_init(|| Registry {
-        servers: Mutex::new(HashMap::new()),
+        state: Mutex::new(State::default()),
     })
 }
 
 impl Registry {
+    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// `Stop`: idempotent, and an unknown id is a silent no-op with no error.
     ///
     /// Dropping the handle is what stops the listener, and it is done **inside**
     /// the lock: the drop only sends a oneshot, so there is nothing to await and
     /// nothing to deadlock on, and releasing first would leave a window in which
     /// the map says the server is gone while the port is still open.
+    ///
+    /// The generation bump is what makes a concurrent start notice. It happens
+    /// whether or not anything was removed, because a `DELETE` racing a `reload`
+    /// that has already stopped the old server is exactly the case with nothing
+    /// to remove.
     pub fn stop(&self, id: &str) {
-        let removed = self
-            .servers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(id);
+        let mut state = self.lock();
+        *state.generations.entry(id.to_string()).or_default() += 1;
+        let removed = state.servers.remove(id);
+        drop(state);
         if removed.is_some() {
             log::info!("integration MCP server stopped: id={id:?}");
         }
     }
 
-    fn put(&self, id: &str, server: InProcessMcpServer) {
-        self.servers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id.to_string(), server);
+    /// The generation to quote to [`Registry::put_if_current`] later. Read
+    /// **before** the row read that decides whether to start.
+    fn generation(&self, id: &str) -> u64 {
+        self.lock().generations.get(id).copied().unwrap_or_default()
+    }
+
+    /// The whole generation map, for a caller that does not know the ids yet —
+    /// `start_all`, which has to fix its reference point before it lists the
+    /// table or a delete landing between the list and the start would slip
+    /// through. An id absent from the snapshot is generation 0, which any later
+    /// `stop` moves off.
+    fn generations(&self) -> HashMap<String, u64> {
+        self.lock().generations.clone()
+    }
+
+    /// Record a started server, unless it has been stopped out from under us.
+    ///
+    /// Returns whether the handle was kept. A refused handle is dropped here,
+    /// which fires its shutdown oneshot — so the listener the caller started
+    /// goes away rather than outliving the row it was built from.
+    fn put_if_current(&self, id: &str, generation: u64, server: InProcessMcpServer) -> bool {
+        let mut state = self.lock();
+        if state.generations.get(id).copied().unwrap_or_default() != generation {
+            return false;
+        }
+        state.servers.insert(id.to_string(), server);
+        true
     }
 
     /// Whether an integration is hosted right now. Nothing on the wire reads
     /// this; it exists so the lifecycle can be asserted.
     pub fn is_hosted(&self, id: &str) -> bool {
-        self.servers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains_key(id)
+        self.lock().servers.contains_key(id)
     }
 }
 
@@ -166,12 +274,19 @@ impl Registry {
 /// read the list at all is an error, and even that is only logged by the one
 /// caller (boot), because there is nothing better to do with it there.
 pub async fn start_all(db_path: &Path) -> Result<(), String> {
+    // Fixed **before** the list read, because `start_all` is spawned rather
+    // than awaited at boot (`lib.rs`) and the proxy is already answering. A
+    // `DELETE` any time after this point moves the id's generation off what is
+    // recorded here, so the start that follows is refused instead of orphaning
+    // a listener for a row that has just gone.
+    let generations = registry().generations();
     let rows = list_for_hosting(db_path)?;
     for row in rows {
         if !row.is_startable() {
             continue;
         }
-        if let Err(e) = start_one(&row).await {
+        let generation = generations.get(&row.id).copied().unwrap_or_default();
+        if let Err(e) = start_one(&row, generation).await {
             log::warn!(
                 "failed to start integration server: id={:?} type={:?} error={e}",
                 row.id,
@@ -191,6 +306,11 @@ pub async fn start_all(db_path: &Path) -> Result<(), String> {
 /// rather than surfacing it.
 pub async fn reload(db_path: &Path, id: &str) -> Result<(), String> {
     registry().stop(id);
+    // After the stop, so this *is* the generation that stop just wrote. Any
+    // later `stop` — a concurrent `DELETE`, or a second `reload` — moves it,
+    // and the start below is then refused rather than resurrecting a row that
+    // has been deleted since it was read.
+    let generation = registry().generation(id);
 
     let Some(row) = get_for_hosting(db_path, id)? else {
         return Ok(()); // deleted — nothing to start
@@ -198,14 +318,27 @@ pub async fn reload(db_path: &Path, id: &str) -> Result<(), String> {
     if !row.is_startable() {
         return Ok(()); // disabled or not authenticated
     }
-    start_one(&row).await
+    start_one(&row, generation).await
 }
 
 /// `startOne`: resolve the type's starter, run it, record the handle.
-async fn start_one(row: &HostingRow) -> Result<(), String> {
+///
+/// `generation` is the value [`Registry::stop`] had written when the caller
+/// decided to start: a mismatch means the integration was stopped or deleted
+/// while the server was being built, and the handle is dropped rather than
+/// recorded — which stops the listener it just bound.
+async fn start_one(row: &HostingRow, generation: u64) -> Result<(), String> {
     let server = start_for_type(row).await?;
     let url = server.url().to_string();
-    registry().put(&row.id, server);
+    if !registry().put_if_current(&row.id, generation, server) {
+        log::info!(
+            "integration MCP server discarded before it was recorded, \
+             the integration was stopped while it started: id={:?} type={:?}",
+            row.id,
+            row.integration_type
+        );
+        return Ok(());
+    }
     log::info!(
         "integration MCP server started: id={:?} type={:?} url={url}",
         row.id,
@@ -217,10 +350,15 @@ async fn start_one(row: &HostingRow) -> Result<(), String> {
 /// The starter table. Go builds a `map[string]ServerStarter` at wiring time;
 /// there is one entry to look up here, so this is the lookup.
 ///
+/// Its arms must cover [`HOSTED_TYPES`] exactly — `a_hosted_type_always_has_a_
+/// starter` pins that, since the two are what the Go sidecar's own gate is
+/// derived from and a type claimed but not started would be hosted by nobody.
+///
 /// An unregistered type produces Go's own message, `%q`-quoted the way
-/// `fmt.Errorf` quotes it. It is logged and never surfaced, which is what makes
-/// five of the six types behave, from the user's side, exactly as they did
-/// before this module existed.
+/// `fmt.Errorf` quotes it. In this build nothing reaches it through the hosted
+/// path — the writes decline an unhosted type before they mutate — but it is
+/// still what a row whose type changed under a stale caller would produce, and
+/// it is the message `start_filtered_server` genuinely returns.
 async fn start_for_type(row: &HostingRow) -> Result<InProcessMcpServer, String> {
     match row.integration_type.as_str() {
         "github" => start_github(&row.id, &row.services(), &row.credentials).await,
@@ -353,9 +491,13 @@ pub async fn start_filtered_server(
 /// Separate from [`start_filtered_server`] because the caller has to decide
 /// *before* it starts anything: an agent that names a type Rust cannot host must
 /// forward the whole turn to Go rather than run with some of its tools missing.
+///
+/// [`hosts_type`] is the predicate; this only adds the row read. The two writes
+/// in `native/integrations.rs` have already read the row and so call
+/// [`hosts_type`] directly rather than reading it a second time through the
+/// credential-carrying projection.
 pub fn can_host(db_path: &Path, id: &str) -> Result<bool, String> {
-    Ok(get_for_hosting(db_path, id)?
-        .is_some_and(|row| matches!(row.integration_type.as_str(), "github")))
+    Ok(get_for_hosting(db_path, id)?.is_some_and(|row| hosts_type(&row.integration_type)))
 }
 
 /// `filterConfigTools`: keep only the requested tools, of only the enabled
@@ -497,6 +639,30 @@ where
 /// written, server dead" is its accepted outcome. Turning it into a
 /// `WriteError::Fallback` would be much worse than that: the seam forwards a
 /// fallback to Go, which would re-apply the write.
+/// The reload the seam owes a request Go answered: `POST
+/// /api/integrations/{id}/auth/validate`, whose Go-side `Reload` is a no-op for
+/// a type this process hosts.
+///
+/// Async and awaited by its caller's spawned task rather than blocking, because
+/// the proxy is already on the runtime there — [`reload_blocking`] exists for
+/// the *sync* handler path and would only tie up a worker here. A type this
+/// process does not host is skipped silently: Go's own `Reload` handled it, and
+/// running one here would log an unregistered-type error on every Slack
+/// credential save.
+pub async fn reload_after_auth(db_path: &Path, id: &str) {
+    match can_host(db_path, id) {
+        Ok(false) => return,
+        Ok(true) => {}
+        Err(e) => {
+            log::warn!("reloading integration {id:?} after auth: {e}");
+            return;
+        }
+    }
+    if let Err(e) = reload(db_path, id).await {
+        log::warn!("failed to reload integration server after auth: id={id:?} error={e}");
+    }
+}
+
 pub fn reload_blocking(db_path: &Path, id: &str) {
     let db_path = db_path.to_path_buf();
     let owned_id = id.to_string();
@@ -630,6 +796,102 @@ mod tests {
                 .expect("reload is not a failure");
             assert!(!registry().is_hosted(id), "{id} must not be hosted");
         }
+    }
+
+    /// The value the sidecar is started with is **derived** from the starter
+    /// table, which is the whole reason it travels in the environment rather
+    /// than being spelled out on both sides. Adding a type to `HOSTED_TYPES`
+    /// without a starter, or shipping a starter Go is never told about, are the
+    /// two ways to put a credential on two open ports at once.
+    #[test]
+    fn the_sidecar_is_told_exactly_what_this_process_hosts() {
+        assert_eq!(hosting_env_value(), "off:github");
+        assert_eq!(
+            hosting_env_value(),
+            format!("off:{}", HOSTED_TYPES.join(",")),
+            "the switch must be built from the starter table, never written out"
+        );
+        assert!(hosts_type("github"));
+        // The five types #313–#317 still owe. Go must keep hosting every one of
+        // them, and `whatsapp` is the reason this is a list at all: its starter
+        // opens a live whatsmeow connection that its status, reconnect and QR
+        // endpoints read out of a package global.
+        for unported in [
+            "slack",
+            "jira",
+            "telegram",
+            "confluence",
+            "google",
+            "whatsapp",
+        ] {
+            assert!(!hosts_type(unported), "{unported} is not hosted here");
+            assert!(
+                !hosting_env_value().contains(unported),
+                "{unported} must not be switched off in the sidecar — nobody would host it"
+            );
+        }
+    }
+
+    /// A type claimed by `HOSTED_TYPES` but missing from the starter dispatch
+    /// would be hosted by nobody: the sidecar is told to drop it and this
+    /// process cannot start it.
+    #[tokio::test]
+    async fn a_hosted_type_always_has_a_starter() {
+        let file = db();
+        for (i, integration_type) in HOSTED_TYPES.iter().enumerate() {
+            let id = format!("probe-{i}");
+            // Deliberately empty credentials: whatever a real starter does, it
+            // must be reached at all, and the unregistered-type message is the
+            // one answer that proves it was not.
+            insert(&file, &id, integration_type, true, Some("{}"), "", "{}");
+            let err = reload(file.path(), &id).await.err().unwrap_or_default();
+            assert!(
+                !err.contains("no starter registered"),
+                "{integration_type} is in HOSTED_TYPES with no starter: {err}"
+            );
+        }
+    }
+
+    /// The race `reload` opens by design, and the guard that closes it: a
+    /// `DELETE` between the row read and the handle being recorded must not
+    /// leave a bound port holding the credential of a row that is gone.
+    #[tokio::test]
+    async fn a_stop_between_the_read_and_the_put_discards_the_server() {
+        let file = db();
+        insert(
+            &file,
+            "gh-race",
+            "github",
+            true,
+            Some(r#"{"ok":true}"#),
+            &github_credentials(),
+            GITHUB_SERVICES,
+        );
+
+        // What `reload` observes before it reads the row.
+        let generation = registry().generation("gh-race");
+        // …and the concurrent `DELETE`, which lands while the server is being
+        // built. Nothing is hosted yet, so `stop` removes nothing — the bump
+        // happens anyway, which is what makes this case visible at all.
+        registry().stop("gh-race");
+
+        let server = start_filtered_server(file.path(), "gh-race", &[])
+            .await
+            .expect("a server to race with");
+        assert!(
+            !registry().put_if_current("gh-race", generation, server),
+            "a handle whose generation has moved must be refused"
+        );
+        assert!(!registry().is_hosted("gh-race"));
+
+        // …and the same handle is kept when nothing intervened.
+        let generation = registry().generation("gh-race");
+        let server = start_filtered_server(file.path(), "gh-race", &[])
+            .await
+            .expect("server");
+        assert!(registry().put_if_current("gh-race", generation, server));
+        assert!(registry().is_hosted("gh-race"));
+        registry().stop("gh-race");
     }
 
     /// A type with no starter is Go's unregistered-type path: an error that the
