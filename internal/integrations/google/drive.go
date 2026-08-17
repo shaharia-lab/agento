@@ -9,14 +9,13 @@ import (
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/api/drive/v3"
-	"google.golang.org/api/option"
 )
 
 // registerDriveTools adds Google Drive MCP tools to the server.
 // Only tools whose names are in the allowed set are registered.
 // If allowed is empty, all tools are registered.
 func registerDriveTools(server *mcp.Server, httpClient *http.Client, allowed map[string]bool) {
-	driveSvc, err := drive.NewService(context.Background(), option.WithHTTPClient(httpClient))
+	driveSvc, err := drive.NewService(context.Background(), clientOptions(httpClient)...)
 	if err != nil {
 		return
 	}
