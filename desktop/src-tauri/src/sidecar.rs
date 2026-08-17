@@ -80,7 +80,7 @@ pub async fn spawn(app: &AppHandle, port: u16) -> Result<Sidecar, String> {
         // feature: its starter opens a live whatsmeow WebSocket and registers
         // the client in a package global that the status, reconnect and QR
         // pairing endpoints read. Deriving the list from the starter table means
-        // #313–#317 each add one string in one place.
+        // #313–#316 each add one string in one place.
         //
         // It does **not** switch off `StartFilteredServer`, which is what an
         // agent run uses: that reads the integration row afresh per run and

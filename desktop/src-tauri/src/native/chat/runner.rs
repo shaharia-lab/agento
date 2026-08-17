@@ -23,12 +23,12 @@
 //!
 //! **#311 narrowed the `mcp` half rather than removing it.** An agent is served
 //! natively when *every* name in `capabilities.mcp` is an integration this build
-//! can host, which today means `github` (#312) and will mean the rest as
-//! #313–#317 land. Three things still forward, and [`mcp_plan`] is
-//! where each is decided:
+//! can host — `registry::HOSTED_TYPES`, which today means `github` (#312) and
+//! `confluence` (#317), and will mean the rest as #313–#316 land. Three things
+//! still forward, and [`mcp_plan`] is where each is decided:
 //!
-//! - **A name that is not a github integration.** A `slack` row has no Rust
-//!   starter; running the turn here would drop its tools.
+//! - **A name whose type is not hosted.** A `slack` row has no Rust starter;
+//!   running the turn here would drop its tools.
 //! - **A name with no integration row at all.** Go would still resolve it if
 //!   `mcps.yaml` names it, and this build reads no `mcps.yaml`.
 //! - **Any `mcp` capability at all when `<data dir>/mcps.yaml` exists.** That
@@ -388,7 +388,7 @@ fn mcp_plan(
         if !crate::native::integrations::registry::can_host(db_path, id)? {
             return Err(format!(
                 "agent uses MCP server {id:?}, which is not an integration this build \
-                 can host (#313–#317)"
+                 can host (#313–#316)"
             ));
         }
         servers.push(McpServerSpec {

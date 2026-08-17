@@ -114,6 +114,49 @@ pub fn escape_path(s: &str) -> String {
     escape_bytes(s.as_bytes(), Encoding::Path)
 }
 
+/// Go's `validEncoded(s, encodePath)` — whether `net/url` would send `s` as it
+/// stands rather than re-escaping it.
+///
+/// This is the half of `URL.EscapedPath()` that is easy to miss, and missing it
+/// makes a faithful-looking comparison wrong. `EscapedPath` does **not** simply
+/// return `escape(Path, encodePath)`: when the raw text differs from that and is
+/// *validly encoded*, the raw text wins. And `validEncoded`'s allowlist is wider
+/// than `should_escape`'s — it admits `! $ & ' ( ) * + , ; = : @ [ ] %`
+/// unconditionally, "not specified in RFC 3986 but left alone by modern
+/// browsers".
+///
+/// So `/a!b` is sent verbatim even though `escape` would render it `/a%21b`,
+/// and `/a%2Fb` is sent verbatim even though its decoded form re-escapes to
+/// `/a/b`. A caller comparing another parser's output against `escape` alone
+/// would call both of those a divergence when they are not one.
+///
+/// The one caller today is `native/integrations/confluence`, which uses it to
+/// decide whether a stored site URL is one this build can send where Go sends
+/// it; #316 needs the same question answered for Jira.
+pub fn valid_encoded_path(s: &str) -> bool {
+    s.bytes().all(|c| match c {
+        b'!' | b'$' | b'&' | b'\'' | b'(' | b')' | b'*' | b'+' | b',' | b';' | b'=' | b':'
+        | b'@' => true,
+        // "not specified in RFC 3986 but left alone by modern browsers"
+        b'[' | b']' => true,
+        // Percent-encoded, and `unescape` has the job of deciding whether it
+        // decodes at all.
+        b'%' => true,
+        _ => !should_escape(c, Encoding::Path),
+    })
+}
+
+/// [`escape_path`] over raw bytes.
+///
+/// A Go string is arbitrary bytes and `escape` is defined over them, so a
+/// caller that has just come out of [`unescape_path`] — which answers
+/// `Vec<u8>` for exactly that reason — must not have to demand UTF-8 first.
+/// `%FF` is a perfectly good path to Go, and `EscapedPath()` renders it back as
+/// `%FF`; requiring UTF-8 in between would refuse it.
+pub fn escape_path_bytes(bytes: &[u8]) -> String {
+    escape_bytes(bytes, Encoding::Path)
+}
+
 /// Go's `url.PathEscape` — `escape(s, encodePathSegment)`.
 ///
 /// One segment, so `/` is escaped: this is what every
@@ -274,6 +317,48 @@ pub fn route_path(raw: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// `validEncoded`'s allowlist is wider than `should_escape`'s, and the gap
+    /// is the whole reason this function exists rather than a caller comparing
+    /// against [`escape_path`]. Every byte here is one Go sends **verbatim**
+    /// while `escape` would rewrite it.
+    /// [`escape_path_bytes`] is [`escape_path`] without the UTF-8 demand, and
+    /// the bytes that show it are the ones a `String` cannot hold.
+    #[test]
+    fn escaping_bytes_does_not_require_utf8() {
+        assert_eq!(escape_path_bytes(b"/a/b"), "/a/b");
+        assert_eq!(escape_path_bytes("/café".as_bytes()), "/caf%C3%A9");
+        // Not valid UTF-8, and a path Go both accepts and renders back.
+        assert_eq!(escape_path_bytes(b"/a\xffb"), "/a%FFb");
+        assert_eq!(escape_path_bytes(b"/\xff\xfe"), "/%FF%FE");
+    }
+
+    #[test]
+    fn valid_encoded_admits_what_escape_would_rewrite() {
+        for raw in [
+            "/a!b",
+            "/a(b)c",
+            "/a[b]",
+            "/a'b",
+            "/a*b",
+            "/a%2Fb",
+            "/a/../b",
+            "/a:b@c",
+            "/a$b&c",
+            "/a+b,c;d=e",
+            "/plain",
+            "",
+        ] {
+            assert!(valid_encoded_path(raw), "{raw}");
+        }
+        // …and the bytes it refuses, which are the ones `EscapedPath` re-escapes.
+        for raw in [
+            "/a b", "/a\\b", "/a^b", "/a|b", "/a\"b", "/a<b>c", "/a`b", "/a{b}", "/a#b", "/a?b",
+            "/café",
+        ] {
+            assert!(!valid_encoded_path(raw), "{raw}");
+        }
+    }
+
     use super::*;
     use serde::Deserialize;
 

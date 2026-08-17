@@ -361,6 +361,16 @@ fn validate_whatsapp(credentials: Option<&RawValue>) -> Result<(), WriteError> {
 /// forwarded, because those are exactly the inputs `url.Parse` rejects with a
 /// message of its own — and a wrong *acceptance* here would store a URL Go
 /// would have refused.
+///
+/// **This is the second of two places that reason about `net/url`'s rules, and
+/// they answer different questions.** Here the question is *create*: may this
+/// row be stored, and is forwarding to Go an option (it always is). In
+/// `native/integrations/confluence`, `validate_site_url` asks *start*: may a
+/// stored row be hosted — where there is nobody to forward to, so it decides
+/// everything itself and reproduces `getScheme` and the authority split
+/// outright. They agree on every realistic input and are deliberately not
+/// merged; #316 adds a third caller of the same Go rules with a *different*
+/// answer again, since Jira does not require HTTPS.
 fn split_url(raw: &str) -> Result<(String, String), WriteError> {
     let forward = || {
         WriteError::Fallback(format!(
