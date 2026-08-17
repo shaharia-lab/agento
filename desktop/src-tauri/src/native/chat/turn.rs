@@ -189,6 +189,10 @@ pub async fn run(
         session.close();
         return Err(format!("sending first message: {e}"));
     }
+    // `chatService.BeginMessage`'s own line, after `agent.StartSession` returns
+    // as Go's is — the subprocess exists and the first message reached it. See
+    // `writes::service_log_convention`.
+    log::info!("agent session started session_id={chat_id:?}");
 
     registry().put(
         &chat_id,
@@ -202,7 +206,7 @@ pub async fn run(
     let is_first_message = row.title == "New Chat";
 
     tokio::spawn(async move {
-        let state = stream_events(&mut session, notify_rx, &body_tx, &answers).await;
+        let state = stream_events(&mut session, &chat_id, notify_rx, &body_tx, &answers).await;
 
         // Go's defer order: forget the live session — which also releases the
         // busy lock — then close the subprocess.
@@ -227,8 +231,16 @@ pub async fn run(
         // The commit is detached from the request on purpose, so a client that
         // disconnected mid-stream still has its turn persisted. Errors are
         // logged and never surfaced — the stream has already ended.
-        if let Err(e) = super::persist::commit(&db_path, &row, &content, &state, is_first_message) {
-            log::error!("commit message failed for chat {chat_id}: {e}");
+        match super::persist::commit(&db_path, &row, &content, &state, is_first_message) {
+            // `chatService.CommitMessage`'s line, after the session update as
+            // Go's is. The id is the turn's own rather than the resolved
+            // fallback, which is what Go's caller passes.
+            Ok(()) => log::info!(
+                "message committed session_id={:?} sdk_session_id={:?}",
+                chat_id,
+                state.sdk_session_id
+            ),
+            Err(e) => log::error!("commit message failed for chat {chat_id}: {e}"),
         }
     });
 
@@ -370,6 +382,7 @@ fn empty_object() -> Box<RawValue> {
 /// The event loop. Returns what the turn accumulated.
 async fn stream_events(
     session: &mut Session,
+    chat_id: &str,
     mut notify_rx: mpsc::Receiver<Notify>,
     out: &mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
     answers: &Arc<Answers>,
@@ -389,7 +402,7 @@ async fn stream_events(
                     // The client hung up; the commit still runs.
                     return state;
                 }
-                match handle_event(session, &event, &mut state, &mut pending_input, out, answers).await {
+                match handle_event(session, chat_id, &event, &mut state, &mut pending_input, out, answers).await {
                     Flow::Continue => {}
                     Flow::Stop => return state,
                 }
@@ -444,6 +457,7 @@ async fn forward_event(event: &Event, out: &mpsc::Sender<Result<Vec<u8>, std::io
 
 async fn handle_event(
     session: &Session,
+    chat_id: &str,
     event: &Event,
     state: &mut TurnState,
     pending_input: &mut Option<Box<RawValue>>,
@@ -456,6 +470,7 @@ async fn handle_event(
                 super::persist::append_assistant_blocks(&mut state.blocks, raw.get().as_bytes());
                 if let Some(input) = extract_ask_user_question(raw.get().as_bytes()) {
                     *pending_input = Some(input);
+                    log::info!("AskUserQuestion detected in stream session_id={chat_id:?}");
                 }
             }
             Flow::Continue
@@ -488,6 +503,12 @@ async fn handle_event(
             // ask, wait, and continue the **same** subprocess into another turn.
             // This is why one HTTP request can span several turns, and why the
             // loop must never treat `result` as terminal.
+            //
+            // `handlePendingUserInput`'s two lines bracket the wait, and only
+            // this path has them: the `Notify::Question` arm above is the
+            // *permission-handler* route to the same frame, which Go does not
+            // log either.
+            log::info!("sending user_input_required, waiting for answer session_id={chat_id:?}");
             match sse::json_frame("user_input_required", &UserInputRequired { input: &input }) {
                 Ok(bytes) => {
                     if out.send(Ok(bytes)).await.is_err() {
@@ -515,6 +536,7 @@ async fn handle_event(
             let Some(answer) = answer else {
                 return Flow::Stop;
             };
+            log::info!("received user answer, resuming session session_id={chat_id:?}");
             if let Err(e) = session.send(&answer).await {
                 log::error!("injecting the answer failed: {e}");
                 return Flow::Stop;
