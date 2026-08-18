@@ -825,8 +825,10 @@ func TestSessionInsights_OneIDUnderTwoProjectsKeepsBothRows(t *testing.T) {
 			"both key columns", rows)
 	}
 
-	// Get carries no project path, so it resolves the ambiguity the same way
-	// claimSession and the session detail read do: the first project path.
+	// Get carries no project path, so it resolves the ambiguity deterministically
+	// — the lowest one. Deliberately *not* claimed to agree with the detail
+	// page's transcript, which sorts directory names on disk rather than stored
+	// project paths; see the method's own comment.
 	got, err := store.Get(ctx, id)
 	if err != nil {
 		t.Fatalf("Get: %v", err)

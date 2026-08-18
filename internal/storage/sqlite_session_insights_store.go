@@ -212,10 +212,23 @@ ON CONFLICT(session_id, project_path) DO UPDATE SET
 // The route behind this — `GET /api/claude-sessions/{id}/insights` — carries no
 // project path, while the table is keyed on one since #362. A session id that
 // exists under two project paths therefore has two rows and this has to choose.
-// It takes the **first project path**, which is the same rule `claimSession`
-// applies when the scan decides which directory owns a duplicated id and the
-// same one the session detail read follows, so the insight shown belongs to the
-// transcript the rest of the UI is showing.
+// It takes the lowest `project_path`, which is **deterministic but not
+// necessarily the transcript the detail page is showing**, and the difference is
+// worth stating rather than glossing:
+//
+// the session detail read resolves a duplicated id by walking `projects/` and
+// taking the alphabetically first *directory name* (`os.ReadDir` sorts, which
+// is what `find_session_file` relies on). This orders the *stored*
+// `project_path`, and the two are not the same string — the scanner decodes a
+// project directory to a real path when the transcript lets it and leaves it in
+// the encoded form when it does not, so one row of the reference corpus's
+// duplicated pair reads `-home-u-Projects-a` and the other `/home/u/Projects/b`.
+// Sorting those cannot reproduce a sort of the directory names.
+//
+// Reproducing it would mean walking the config dirs from a storage method,
+// which this layer has no business doing. The effect is bounded to the insight
+// card of one session on a corpus that has such a session, and both rows are now
+// correct in themselves — which is the part #362 was actually about.
 func (s *SQLiteSessionInsightsStore) Get(ctx context.Context, sessionID string) (*InsightRecord, error) {
 	ctx, end := withStorageSpan(ctx, "get", "session_insights")
 	var err error
