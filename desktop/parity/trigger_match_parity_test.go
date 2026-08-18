@@ -156,7 +156,7 @@ func triggerMatchCases() []triggerMatchCase {
 		{
 			Name:         "prefix/nel-remainder-trims-away",
 			Note:         "U+0085 is unicode.IsSpace, so this remainder is empty",
-			FilterPrefix: "/ask", Text: "/ask", ChatID: "42",
+			FilterPrefix: "/ask", Text: "/ask\u0085", ChatID: "42",
 		},
 		{
 			Name:           "keywords/or-logic",
