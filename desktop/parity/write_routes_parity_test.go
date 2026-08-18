@@ -180,7 +180,7 @@ var dispositions = map[string]disposition{
 	// five writes a **type-specific** auth payload its MCP server reads
 	// (`{"validated":true,"bot_username":…}` for Telegram, not a shared flag),
 	// so this is five remote-call reproductions rather than one.
-	"POST /api/integrations/{id}/auth/validate": {statusDeferred, "-", "five per-type remote validations, each writing its own auth payload"},
+	"POST /api/integrations/{id}/auth/validate":             {statusDeferred, "-", "five per-type remote validations, each writing its own auth payload"},
 	"POST /api/integrations/{id}/webhook/register":          {statusDeferred, "-", "registers the webhook with Telegram"},
 	"DELETE /api/integrations/{id}/webhook/register":        {statusDeferred, "-", "deregisters the webhook with Telegram"},
 	"POST /api/integrations/{id}/webhook/regenerate-secret": {statusDeferred, "-", "rotates the secret and re-registers with Telegram"},
