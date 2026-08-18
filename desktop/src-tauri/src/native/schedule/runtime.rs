@@ -53,6 +53,12 @@ use crate::native::tasks::ScheduledTask;
 /// header — this is the whole of the suspend/clock-change divergence.
 const WAKE_INTERVAL: StdDuration = StdDuration::from_secs(60);
 
+/// How often the timers are checked against the stored rows. See
+/// [`Scheduler::reconcile`] for why a sweep exists at all; the interval is a
+/// compromise between "a fallen-back write should start firing soon" and "this
+/// is a `SELECT` on a laptop".
+const RECONCILE_INTERVAL: StdDuration = StdDuration::from_secs(60);
+
 /// `Config.MaxConcurrency`'s default. `initTaskScheduler` never sets one, so
 /// three is not a default in the "unless configured" sense — it is the number.
 const MAX_CONCURRENCY: usize = 3;
@@ -64,6 +70,24 @@ const MAX_CONCURRENCY: usize = 3;
 /// in `taskService`. A build with no database path never starts one.
 static RUNNING: OnceLock<Arc<Scheduler>> = OnceLock::new();
 
+/// One installed timer, and enough to tell whether it is still the right one.
+struct Job {
+    handle: AbortHandle,
+    /// What the timer was built from. **Only the fields that decide when a task
+    /// fires** — not `updated_at`, which every run bumps via
+    /// `updateTaskAfterRun`: fingerprinting on that would make the reconcile
+    /// replace a live timer after each run, and replacing a `DurationJob`'s
+    /// timer restarts its interval from now.
+    fingerprint: String,
+}
+
+/// What a task's timer is built from, for [`Scheduler::reconcile`].
+fn fingerprint(task: &ScheduledTask) -> String {
+    let config = crate::native::tasks::marshal_schedule_config(&task.schedule_config)
+        .unwrap_or_else(|e| format!("<unencodable: {e}>"));
+    format!("{}|{}", task.schedule_type, config)
+}
+
 /// `scheduler.Scheduler`.
 pub struct Scheduler {
     db_path: PathBuf,
@@ -72,9 +96,9 @@ pub struct Scheduler {
     /// transition *in it* — so this is part of the schedule rather than a
     /// formatting detail.
     loc: Tz,
-    /// `s.jobs`: task id → the timer task driving it. Aborting the handle is
+    /// `s.jobs`: task id → the timer driving it. Aborting the handle is
     /// `cron.RemoveJob`.
-    jobs: Mutex<HashMap<String, AbortHandle>>,
+    jobs: Mutex<HashMap<String, Job>>,
     /// `s.semaphore`, acquired around the *execution* rather than around the
     /// timer, exactly as Go's `executeTask` does — a job whose turn is waiting
     /// still advances its own schedule.
@@ -109,10 +133,16 @@ impl Scheduler {
         // reschedule cannot leave two timers on one task.
         let mut jobs = self.lock_jobs();
         if let Some(previous) = jobs.remove(&task.id) {
-            previous.abort();
+            previous.handle.abort();
         }
         let handle = self.spawn_job(task.id.clone(), sched, now);
-        jobs.insert(task.id.clone(), handle);
+        jobs.insert(
+            task.id.clone(),
+            Job {
+                handle,
+                fingerprint: fingerprint(task),
+            },
+        );
         drop(jobs);
 
         log::info!(
@@ -126,9 +156,77 @@ impl Scheduler {
 
     /// `UnscheduleTask`. Silent when the task has no timer, exactly as Go's is.
     pub fn unschedule_task(&self, task_id: &str) {
-        if let Some(handle) = self.lock_jobs().remove(task_id) {
-            handle.abort();
+        if let Some(job) = self.lock_jobs().remove(task_id) {
+            job.handle.abort();
             log::info!("task unscheduled task_id={task_id:?}");
+        }
+    }
+
+    /// Bring the installed timers back in line with the stored rows.
+    ///
+    /// **This exists because a native task write can fall back.** Every one of
+    /// them returns `WriteError::Fallback` on an unopenable database, a schema
+    /// newer than this build, a `SQLITE_BUSY` past the five-second timeout, or a
+    /// failed begin/commit — and the seam then forwards to a sidecar started
+    /// `AGENTO_SCHEDULER=off`, whose `taskService` applies the row change and
+    /// skips the registration. A created task would never fire, a resumed one
+    /// would have no timer, an edited one would keep its old schedule, and all
+    /// three would stay that way until the app restarted. That is the exact
+    /// split this port set out to close, on the error path.
+    ///
+    /// It is a sweep rather than a hook on the forward, so it also covers a row
+    /// changed by anything else — and so the seam needs no knowledge of tasks.
+    ///
+    /// **Idempotent by fingerprint**, which is what makes running it on a timer
+    /// safe: a task whose schedule has not changed keeps the timer it has.
+    /// Rescheduling unconditionally would restart every `DurationJob`'s interval
+    /// on every sweep, so a five-minute task swept every minute would never
+    /// fire at all.
+    pub fn reconcile(self: &Arc<Self>) {
+        let tasks = match crate::native::tasks::list_tasks(self.db_path()) {
+            Ok(tasks) => tasks,
+            Err(e) => {
+                log::warn!("task scheduler: reconcile could not read tasks: {e}");
+                return;
+            }
+        };
+
+        let mut active: HashMap<&str, &ScheduledTask> = HashMap::new();
+        for task in &tasks {
+            if task.status == "active" {
+                active.insert(task.id.as_str(), task);
+            }
+        }
+
+        // Timers whose task is gone, paused, or now on a different schedule.
+        let stale: Vec<String> = {
+            let jobs = self.lock_jobs();
+            jobs.iter()
+                .filter(|(id, job)| {
+                    active
+                        .get(id.as_str())
+                        .is_none_or(|task| fingerprint(task) != job.fingerprint)
+                })
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        for id in &stale {
+            self.unschedule_task(id);
+            log::info!("task scheduler: reconcile dropped a stale timer task_id={id:?}");
+        }
+
+        for (id, task) in &active {
+            if self.lock_jobs().contains_key(*id) {
+                continue;
+            }
+            match self.schedule_task(task) {
+                Ok(()) => {
+                    log::info!("task scheduler: reconcile installed a missing timer task_id={id:?}")
+                }
+                Err(e) => log::warn!(
+                    "task scheduler: reconcile could not schedule task_id={id:?} error={e}"
+                ),
+            }
         }
     }
 
@@ -200,7 +298,7 @@ impl Scheduler {
     /// Poisoning cannot happen — nothing panics while this lock is held — but a
     /// scheduler that stopped scheduling because of one would be silent, which
     /// is the failure mode this module exists to avoid.
-    fn lock_jobs(&self) -> std::sync::MutexGuard<'_, HashMap<String, AbortHandle>> {
+    fn lock_jobs(&self) -> std::sync::MutexGuard<'_, HashMap<String, Job>> {
         self.jobs.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
@@ -313,6 +411,17 @@ pub fn start(db_path: PathBuf) {
         }
     }
     log::info!("task scheduler started active_tasks={scheduled}");
+
+    // The sweep that catches a task write which fell back to the sidecar; see
+    // `reconcile`. Spawned rather than awaited — it runs for the life of the
+    // process.
+    let sweeper = Arc::clone(&scheduler);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(RECONCILE_INTERVAL).await;
+            sweeper.reconcile();
+        }
+    });
 }
 
 /// The running scheduler, or `None` when this process does not schedule.
@@ -348,6 +457,61 @@ pub fn unschedule_if_running(task_id: &str) {
 mod tests {
     use super::super::Fire;
     use super::*;
+
+    /// A task the fingerprint has not seen keeps its timer; one whose schedule
+    /// changed does not. This is what makes a 60-second sweep safe — a naive
+    /// reconcile would replace every `DurationJob`'s timer each pass and a
+    /// five-minute task would never fire.
+    #[test]
+    fn the_fingerprint_tracks_the_schedule_and_ignores_the_run_counters() {
+        let mut task = ScheduledTask {
+            id: "t1".to_string(),
+            name: "n".to_string(),
+            description: String::new(),
+            prompt: "p".to_string(),
+            agent_slug: String::new(),
+            working_directory: String::new(),
+            model: String::new(),
+            settings_profile_id: String::new(),
+            timeout_minutes: 30,
+            schedule_type: "interval".to_string(),
+            schedule_config: crate::native::tasks::ScheduleConfig {
+                every_minutes: 5,
+                ..Default::default()
+            },
+            stop_after_count: 0,
+            stop_after_time: None,
+            save_output: false,
+            status: "active".to_string(),
+            run_count: 0,
+            last_run_at: None,
+            last_run_status: String::new(),
+            next_run_at: None,
+            created_at: Default::default(),
+            updated_at: Default::default(),
+        };
+        let before = fingerprint(&task);
+
+        // `updateTaskAfterRun` bumps all three of these after every single run.
+        task.run_count = 9;
+        task.last_run_status = "success".to_string();
+        task.last_run_at = Some(crate::native::gotime::GoTime::from_utc(Utc::now()));
+        task.updated_at = crate::native::gotime::GoTime::from_utc(Utc::now());
+        assert_eq!(
+            fingerprint(&task),
+            before,
+            "a run must not look like a schedule change"
+        );
+
+        // A real edit does.
+        task.schedule_config.every_minutes = 7;
+        assert_ne!(fingerprint(&task), before);
+
+        task.schedule_config.every_minutes = 5;
+        assert_eq!(fingerprint(&task), before);
+        task.schedule_type = "cron".to_string();
+        assert_ne!(fingerprint(&task), before, "the type is part of it too");
+    }
 
     #[test]
     fn the_local_zone_resolves_or_falls_back_to_utc() {

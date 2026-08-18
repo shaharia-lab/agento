@@ -710,16 +710,16 @@ fn claude_executable() -> String {
 
 /// The two template variables Agento substitutes into a system prompt.
 ///
-/// The substitution itself is [`crate::native::template::interpolate`], shared
-/// with the scheduler (#275) so there is one implementation of it. **The error
-/// is swallowed here, and that is a known divergence rather than a decision:**
-/// Go's `resolveSystemPrompt` propagates `MissingVariableError` and fails the
-/// turn, while this has always passed an unknown `{{name}}` through untouched.
-/// Preserved as-is because a scheduler port is the wrong place to change how a
-/// chat answers; the scheduler's own caller does propagate it, which is what a
-/// recorded failed run needs.
+/// [`crate::native::template::interpolate_lenient`], shared with the scheduler
+/// (#275) so there is one substitution loop. **Lenient is this caller's
+/// behaviour, not an accident of it:** Go's `resolveSystemPrompt` fails a turn
+/// on an unknown `{{name}}`, while this path has always left it in place — and
+/// an agent whose prompt contains a literal `{{…}}` for some other reason would
+/// otherwise stop having its date substituted at all. The scheduler's own caller
+/// uses the strict form, because there a failure is a recorded job-history row
+/// rather than a broken chat.
 fn interpolate(prompt: &str) -> String {
-    crate::native::template::interpolate(prompt).unwrap_or_else(|_| prompt.to_string())
+    crate::native::template::interpolate_lenient(prompt)
 }
 
 /// The chat session row the turn runs against.

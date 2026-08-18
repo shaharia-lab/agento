@@ -2647,6 +2647,35 @@ caller is still holding a scheduler semaphore permit, and an unreachable mail
 host would otherwise throttle the scheduler to three runs per SMTP timeout while
 starving the proxy and every in-flight SSE stream.
 
+**A task write can still fall back, so the timers are swept.** Every native task
+write returns `WriteError::Fallback` on an unopenable database, a schema newer
+than this build, a `SQLITE_BUSY` past the five-second timeout, or a failed
+begin/commit — and the seam then forwards to a sidecar that was told to stand
+down, whose `taskService` applies the row change and skips the registration. So
+`Scheduler::reconcile` runs every 60 seconds and brings the installed timers back
+in line with the stored rows. It is a sweep rather than a hook on the forward, so
+it also catches a row changed by anything else and the seam needs no knowledge of
+tasks.
+
+It is idempotent **by fingerprint**, and the fingerprint is deliberately narrow:
+`schedule_type` plus the encoded `schedule_config`, and explicitly *not*
+`updated_at`, which `updateTaskAfterRun` bumps after every single run.
+Fingerprinting on `updated_at` would make each sweep replace a live timer, and
+replacing a `DurationJob`'s timer restarts its interval from now — a five-minute
+task swept every minute would never fire at all.
+
+**`agent.Interpolate` has two callers with two policies**, in
+`native/template.rs`. The scheduler uses the strict form, because Go's
+`resolveSystemPrompt` propagates `MissingVariableError` and a scheduled run must
+end in a recorded `job_history` row rather than shipping a raw `{{name}}` to the
+model — the executor checks the agent's system prompt itself, before
+`build_options`, since that function is shared with chat. The chat path uses the
+**lenient** form, which substitutes the built-ins and leaves an unknown
+placeholder in the text. That is not sloppiness inherited by accident: it is what
+that path has always done, and an agent whose prompt contains a literal `{{…}}`
+for some other reason (a JSON example, another tool's syntax) would otherwise
+lose date substitution entirely. One loop, two policies.
+
 **The run timeout is one deadline across three stages.** Go wraps the whole
 `agent.RunAgent` call; timing out only the event drain would let a subprocess
 that hangs before its first event leave the `job_history` row `running` forever

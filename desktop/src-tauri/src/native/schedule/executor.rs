@@ -209,10 +209,12 @@ async fn run_task(scheduler: &Arc<Scheduler>, mut task: ScheduledTask) {
 /// `createTaskSession`: the chat row a run's messages land in, titled after the
 /// task.
 ///
-/// Go creates the row and then updates it with the title, which is two writes
-/// and one visible intermediate state. This does it in one transaction with the
-/// title already set — the row Go leaves behind is identical, and the run is the
-/// only reader of it in between.
+/// Two writes, as Go has them, and the split is load-bearing on the failure
+/// path rather than the success one: `createTaskSession` creates the session and
+/// then updates its title, and a failed *title* update is logged at warn and the
+/// run continues on the session it already has. Doing both in one transaction
+/// would turn a cosmetic failure into `create session: …` — a run that never
+/// happened.
 fn create_task_session(db_path: &std::path::Path, task: &ScheduledTask) -> Result<String, String> {
     let mut conn = crate::native::db::open_read_write(db_path)?;
     let tx = conn
@@ -228,15 +230,16 @@ fn create_task_session(db_path: &std::path::Path, task: &ScheduledTask) -> Resul
     )
     .map_err(|e| e.message())?;
 
-    let title = format!("[Task] {}", task.name);
-    tx.execute(
-        "UPDATE chat_sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
-        rusqlite::params![title, crate::native::gotime::now_go_text(), session.id],
-    )
-    .map_err(|e| format!("updating session title: {e}"))?;
-
     tx.commit()
         .map_err(|e| format!("commit task session: {e}"))?;
+
+    let title = format!("[Task] {}", task.name);
+    if let Err(e) = conn.execute(
+        "UPDATE chat_sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
+        rusqlite::params![title, crate::native::gotime::now_go_text(), session.id],
+    ) {
+        log::warn!("failed to update session title: {e}");
+    }
     Ok(session.id)
 }
 
@@ -364,6 +367,16 @@ async fn run_agent(
         // id and `saveSessionResults` stores it afterwards.
         custom_session_id: String::new(),
     };
+
+    // `resolveSystemPrompt`, which Go calls **before** building any options and
+    // whose error it returns unwrapped — so an agent with an unresolvable
+    // `{{name}}` in its system prompt is a recorded failed run, not a run that
+    // quietly ships the raw placeholder to the model. `build_options` cannot do
+    // this check itself: the chat path deliberately interpolates leniently, and
+    // the strictness is the caller's (see `native::template`).
+    if let Some(agent) = spec.agent.as_ref() {
+        template::interpolate(&agent.system_prompt).map_err(|e| e.to_string())?;
+    }
 
     // The refusal this port has that Go does not — an agent whose tools cannot
     // be hosted here. A recorded failure, never silence. See the module header.
@@ -545,6 +558,17 @@ fn write_session_results(
 }
 
 /// `ChatStore.AppendMessage` for a plain text turn.
+///
+/// **`id` is not in the column list**, and that is not a style choice:
+/// `chat_messages.id` is `INTEGER PRIMARY KEY AUTOINCREMENT`, so supplying a
+/// UUID for it is a `datatype mismatch` rather than a stored value — and since
+/// the error propagates before the commit, it would take the session's own
+/// `UPDATE` down with it, leaving every finished run with an empty chat, no
+/// `sdk_session_id` and zeroed token totals. Go's `AppendMessage` and
+/// [`crate::native::chat::persist`] both omit it for the same reason.
+///
+/// `blocks` is `'[]'` rather than `''` because every reader JSON-decodes it;
+/// the column's own default says the same thing.
 fn append_message(
     tx: &rusqlite::Transaction,
     chat_session_id: &str,
@@ -553,15 +577,9 @@ fn append_message(
     timestamp: &str,
 ) -> Result<(), String> {
     tx.execute(
-        "INSERT INTO chat_messages (id, session_id, role, content, blocks, timestamp)
-         VALUES (?1, ?2, ?3, ?4, '', ?5)",
-        rusqlite::params![
-            uuid::Uuid::new_v4().to_string(),
-            chat_session_id,
-            role,
-            content,
-            timestamp,
-        ],
+        "INSERT INTO chat_messages (session_id, role, content, blocks, timestamp)
+         VALUES (?1, ?2, ?3, '[]', ?4)",
+        rusqlite::params![chat_session_id, role, content, timestamp],
     )
     .map_err(|e| format!("storing {role} message: {e}"))?;
     Ok(())
@@ -734,6 +752,172 @@ fn publish_task_failed(db_path: &std::path::Path, task: &ScheduledTask, error_me
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole of finding #1 on PR #365's second review: `chat_messages.id`
+    /// is `INTEGER PRIMARY KEY AUTOINCREMENT`, so a supplied UUID is a
+    /// `datatype mismatch` — and because the insert sits before the commit it
+    /// took the session's own `UPDATE` down with it. Every finished run left an
+    /// empty chat, no `sdk_session_id` and zero token totals, reported only as a
+    /// `log::warn!`.
+    ///
+    /// Exercising the real statements against a migrated database is the point;
+    /// nothing in the unit suite reached them before, which is exactly why this
+    /// shipped.
+    #[test]
+    fn a_finished_run_persists_its_session_row_and_both_messages() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        drop(conn);
+
+        let mut task = sample_task();
+        task.name = "Nightly".to_string();
+        let session_id = create_task_session(file.path(), &task).expect("create session");
+
+        let result = RunResult {
+            session_id: "sdk-session-9".to_string(),
+            answer: "the answer".to_string(),
+            input_tokens: 11,
+            output_tokens: 22,
+            cache_creation_tokens: 33,
+            cache_read_tokens: 44,
+        };
+        let started_at = Utc::now();
+        write_session_results(file.path(), &session_id, &result, "the prompt", started_at)
+            .expect("the session write must not fail");
+
+        let conn = rusqlite::Connection::open(file.path()).expect("reopen");
+        let (title, sdk, input, output, creation, read): (String, String, i64, i64, i64, i64) =
+            conn.query_row(
+                "SELECT title, sdk_session_id, total_input_tokens, total_output_tokens,
+                        total_cache_creation_tokens, total_cache_read_tokens
+                 FROM chat_sessions WHERE id = ?1",
+                [&session_id],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .expect("the session row");
+        assert_eq!(title, "[Task] Nightly");
+        assert_eq!(sdk, "sdk-session-9", "the run's transcript stays linked");
+        assert_eq!((input, output, creation, read), (11, 22, 33, 44));
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT role, content, blocks FROM chat_messages
+                 WHERE session_id = ?1 ORDER BY id",
+            )
+            .expect("prepare");
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([&session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        assert_eq!(rows.len(), 2, "the user turn and the assistant reply");
+        assert_eq!(rows[0], ("user".into(), "the prompt".into(), "[]".into()));
+        assert_eq!(
+            rows[1],
+            ("assistant".into(), "the answer".into(), "[]".into())
+        );
+    }
+
+    #[test]
+    fn a_run_that_produced_no_answer_updates_the_session_and_stores_no_messages() {
+        // Go's `if result.Answer != ""`. The row still carries the sdk session
+        // id, so the transcript is linked even when nothing was said.
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        drop(conn);
+
+        let session_id = create_task_session(file.path(), &sample_task()).expect("session");
+        let result = RunResult {
+            session_id: "sdk-session-empty".to_string(),
+            ..Default::default()
+        };
+        write_session_results(file.path(), &session_id, &result, "prompt", Utc::now())
+            .expect("write");
+
+        let conn = rusqlite::Connection::open(file.path()).expect("reopen");
+        let messages: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chat_messages WHERE session_id = ?1",
+                [&session_id],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(messages, 0);
+        let sdk: String = conn
+            .query_row(
+                "SELECT sdk_session_id FROM chat_sessions WHERE id = ?1",
+                [&session_id],
+                |r| r.get(0),
+            )
+            .expect("row");
+        assert_eq!(sdk, "sdk-session-empty");
+    }
+
+    #[test]
+    fn the_job_history_rows_a_run_writes_are_readable_back() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO scheduled_tasks (id, name, prompt, created_at, updated_at)
+             VALUES ('t1', 'T', 'p', '2026-01-01 00:00:00 +0000 UTC',
+                     '2026-01-01 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("seed task");
+        drop(conn);
+
+        let mut task = sample_task();
+        task.id = "t1".to_string();
+        let started_at = Utc::now();
+        let mut job =
+            create_initial_job_history(file.path(), &task, started_at, "chat-1", "the prompt");
+        assert_eq!(job.status, "running");
+
+        let stored = tasks::get_job_history(file.path(), &job.id)
+            .expect("read")
+            .expect("the running row");
+        assert_eq!(stored.status, "running");
+        assert_eq!(stored.chat_session_id, "chat-1");
+        assert!(stored.finished_at.is_none());
+
+        let result = RunResult {
+            input_tokens: 5,
+            output_tokens: 6,
+            ..Default::default()
+        };
+        finish_job_history(
+            file.path(),
+            &mut job,
+            started_at,
+            "success",
+            "",
+            Some(&result),
+            "saved output",
+        );
+
+        let done = tasks::get_job_history(file.path(), &job.id)
+            .expect("read")
+            .expect("the finished row");
+        assert_eq!(done.status, "success");
+        assert_eq!(done.total_input_tokens, 5);
+        assert_eq!(done.response_text, "saved output");
+        assert!(done.finished_at.is_some());
+        // The narrower UPDATE column list: the finish must not rewrite what the
+        // insert recorded.
+        assert_eq!(done.prompt_preview, "the prompt");
+    }
 
     #[test]
     fn the_prompt_preview_cuts_at_200_bytes_and_never_splits_a_character() {

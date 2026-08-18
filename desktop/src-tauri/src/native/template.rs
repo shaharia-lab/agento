@@ -27,6 +27,15 @@ impl std::fmt::Display for MissingVariable {
     }
 }
 
+/// What to do with a `{{name}}` that is neither built-in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnUnknown {
+    /// Go's answer: fail the whole interpolation.
+    Fail,
+    /// Leave the placeholder in the text and carry on past it.
+    Keep,
+}
+
 /// `agent.Interpolate(template, nil)`.
 ///
 /// Both callers pass no variables of their own, so only the two built-ins
@@ -42,6 +51,26 @@ impl std::fmt::Display for MissingVariable {
 /// Go reads the clock once, at entry, so `{{current_date}}{{current_time}}`
 /// cannot straddle midnight.
 pub fn interpolate(template: &str) -> Result<String, MissingVariable> {
+    substitute(template, OnUnknown::Fail)
+}
+
+/// [`interpolate`], but an unknown `{{name}}` is left in the text instead of
+/// failing.
+///
+/// This is what the chat path has always done, and it is preserved rather than
+/// tightened: an agent whose system prompt mixes a built-in with a literal
+/// `{{…}}` — a JSON example, another tool's template syntax — still gets its
+/// date and time substituted. Making that agent's every turn fail would be a
+/// regression dressed as fidelity.
+///
+/// The one behaviour this *does* move toward Go: the name is trimmed, so
+/// `{{ current_date }}` now resolves where two literal `String::replace` calls
+/// left it alone.
+pub fn interpolate_lenient(template: &str) -> String {
+    substitute(template, OnUnknown::Keep).unwrap_or_else(|_| template.to_string())
+}
+
+fn substitute(template: &str, on_unknown: OnUnknown) -> Result<String, MissingVariable> {
     // Go's `Format("2006-01-02")` / `Format("15:04:05")` on `time.Now()` —
     // local, not UTC.
     let now = chrono::Local::now();
@@ -61,7 +90,15 @@ pub fn interpolate(template: &str) -> Result<String, MissingVariable> {
         let value = match name {
             "current_date" => current_date.clone(),
             "current_time" => current_time.clone(),
-            other => return Err(MissingVariable(other.to_string())),
+            other => match on_unknown {
+                OnUnknown::Fail => return Err(MissingVariable(other.to_string())),
+                // Step past the closing braces so the scan continues rather
+                // than matching this same placeholder forever.
+                OnUnknown::Keep => {
+                    i = end + 2;
+                    continue;
+                }
+            },
         };
 
         result = format!("{}{}{}", &result[..start], value, &result[end + 2..]);
@@ -100,6 +137,24 @@ mod tests {
     fn the_name_is_trimmed() {
         let out = interpolate("{{  current_date  }}").expect("trimmed name resolves");
         assert_eq!(out.len(), 10, "a bare YYYY-MM-DD: {out}");
+    }
+
+    #[test]
+    fn the_lenient_form_keeps_an_unknown_placeholder_and_still_substitutes_around_it() {
+        // The regression PR #365's review found: the chat path used to do two
+        // literal replaces, so a prompt mixing a built-in with someone else's
+        // `{{…}}` still got its date. Failing the whole substitution would
+        // silently stop interpolating for every such agent.
+        let out = interpolate_lenient("Report for {{current_date}} in {{format}}");
+        assert!(out.starts_with("Report for 2"), "{out}");
+        assert!(out.ends_with(" in {{format}}"), "{out}");
+
+        // Several unknowns in a row must not loop or swallow each other.
+        assert_eq!(interpolate_lenient("{{a}}{{b}}{{c}}"), "{{a}}{{b}}{{c}}");
+        // …and one after a substitution is still reached.
+        let mixed = interpolate_lenient("{{current_time}} {{x}} {{current_date}}");
+        assert!(mixed.contains("{{x}}"), "{mixed}");
+        assert!(!mixed.contains("{{current_date}}"), "{mixed}");
     }
 
     #[test]

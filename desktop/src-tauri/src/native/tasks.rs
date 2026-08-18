@@ -1333,7 +1333,7 @@ mod tests {
 /// `skip_serializing_if` attributes are what make a `run_immediately` task store
 /// `{}` rather than a shape full of zeros, which is the value Go's `omitempty`
 /// produces and the one the round trip has to preserve.
-fn marshal_schedule_config(cfg: &ScheduleConfig) -> Result<String, String> {
+pub fn marshal_schedule_config(cfg: &ScheduleConfig) -> Result<String, String> {
     let bytes = super::gojson::to_vec_marshal(cfg)
         .map_err(|e| format!("marshaling schedule config: {e}"))?;
     String::from_utf8(bytes).map_err(|e| format!("marshaling schedule config: {e}"))
