@@ -338,14 +338,8 @@ async fn run_agent(
     agent: Agent,
     prompt: &str,
 ) -> Result<RunResult, String> {
-    // `resolveSystemPrompt`, which Go calls **before** building any options and
-    // whose error it returns unwrapped — so an agent with an unresolvable
-    // `{{name}}` in its system prompt is a recorded failed run, not a run that
-    // quietly ships the raw placeholder to the model. `build_options` cannot do
-    // this itself: the chat path deliberately interpolates leniently, and the
-    // strictness is the caller's (see `native::template`).
-    template::interpolate(&agent.system_prompt).map_err(|e| e.to_string())?;
-
+    // `resolveSystemPrompt`'s strictness lives in `run_headless`, so both
+    // headless callers get it — see that function.
     let spec = crate::native::agent_run::headless_spec(
         db_path,
         agent,

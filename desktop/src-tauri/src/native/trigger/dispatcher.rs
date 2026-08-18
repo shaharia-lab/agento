@@ -76,6 +76,24 @@ pub fn handle_update(
     });
 }
 
+/// Run a blocking database call off the runtime's workers.
+///
+/// `None` when the pool task itself failed, which the callers treat as "do not
+/// proceed" — the same answer a failed read gives.
+async fn blocking<T, F>(f: F) -> Option<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(value) => Some(value),
+        Err(e) => {
+            log::error!("telegram dispatch: a database task failed: {e}");
+            None
+        }
+    }
+}
+
 /// `processTelegramUpdate`.
 async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: TelegramUpdate) {
     // A non-message update, or one with no text, is not a trigger.
@@ -87,11 +105,33 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
     // Claimed before the rules are read, so a Telegram retry cannot run the
     // agent twice — see `receiver::claim_update` for why the claim is atomic
     // here where Go's is two statements.
-    if !super::receiver::claim_update(db_path, integration_id, update.update_id) {
+    // **Every database call here goes to the blocking pool.** `process` runs on
+    // an axum worker, and each of these opens a connection and may sit on
+    // `db.rs`'s five-second `busy_timeout` while the session scan batch-writes —
+    // ten of them at `MAX_CONCURRENT` is every worker on a four-core machine,
+    // stalling the SPA and any SSE stream. `proxy.rs` puts native handlers on the
+    // blocking pool for exactly this reason.
+    let claimed = {
+        let (db, id, update_id) = (
+            db_path.to_path_buf(),
+            integration_id.to_string(),
+            update.update_id,
+        );
+        blocking(move || super::receiver::claim_update(&db, &id, update_id)).await
+    };
+    if !claimed.unwrap_or(false) {
         return;
     }
 
-    let Some((rule, prompt)) = find_matching_rule(db_path, integration_id, &msg) else {
+    let matched = {
+        let (db, id, msg) = (
+            db_path.to_path_buf(),
+            integration_id.to_string(),
+            msg.clone(),
+        );
+        blocking(move || find_matching_rule(&db, &id, &msg)).await
+    };
+    let Some(Some((rule, prompt))) = matched else {
         return;
     };
 
@@ -195,7 +235,13 @@ async fn execute_and_reply(
     // discarded.
     super::telegram_api::send_chat_action(bot_token, msg.chat.id).await;
 
-    let agent = match resolve_agent(db_path, &rule.agent_slug) {
+    let resolved = {
+        let (db, slug) = (db_path.to_path_buf(), rule.agent_slug.clone());
+        blocking(move || resolve_agent(&db, &slug))
+            .await
+            .unwrap_or_else(|| Err("the agent lookup task failed".to_string()))
+    };
+    let agent = match resolved {
         Ok(agent) => agent,
         Err(e) => {
             log::error!(
@@ -209,7 +255,13 @@ async fn execute_and_reply(
 
     // Go creates the session with **no** working directory, model or settings
     // profile — a trigger run is not configurable the way a task is.
-    let chat_session_id = match create_trigger_session(db_path, rule) {
+    let created = {
+        let (db, rule) = (db_path.to_path_buf(), rule.clone());
+        blocking(move || create_trigger_session(&db, &rule))
+            .await
+            .unwrap_or_else(|| Err("the session task failed".to_string()))
+    };
+    let chat_session_id = match created {
         Ok(id) => id,
         Err(e) => {
             log::error!("failed to create chat session for trigger: {e}");
@@ -231,13 +283,30 @@ async fn execute_and_reply(
             send_error_reply(bot_token, msg).await;
             // The user turn is still stored, with no answer — so the chat shows
             // what was asked even when nothing came back.
-            save_messages(db_path, &chat_session_id, prompt, "");
+            let (db, session, prompt) = (
+                db_path.to_path_buf(),
+                chat_session_id.clone(),
+                prompt.to_string(),
+            );
+            blocking(move || save_messages(&db, &session, &prompt, "")).await;
             return;
         }
     };
 
-    save_messages(db_path, &chat_session_id, prompt, &result.answer);
-    update_session_usage(db_path, &chat_session_id, &result);
+    {
+        let (db, session, prompt, answer) = (
+            db_path.to_path_buf(),
+            chat_session_id.clone(),
+            prompt.to_string(),
+            result.answer.clone(),
+        );
+        let usage = result.clone();
+        blocking(move || {
+            save_messages(&db, &session, &prompt, &answer);
+            update_session_usage(&db, &session, &usage);
+        })
+        .await;
+    }
 
     // An empty answer still gets a reply — silence would be indistinguishable
     // from the bot being broken.

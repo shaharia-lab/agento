@@ -15,6 +15,11 @@
 //! 3. call Telegram;
 //! 4. store the outcome — and only log if that write fails.
 //!
+//! That rule is also why a **failed** `setWebhook` answers `WriteError::Internal`
+//! rather than `Fallback`: forwarding would call Telegram a second time, and a
+//! transport failure does not prove the first call did nothing — a lost response
+//! to a successful registration would be re-registered under Go's secret.
+//!
 //! Step 4 is where Go and this port part company in one respect worth stating:
 //! Go returns an error if `SetWebhookInfo` fails after a *successful*
 //! registration, which would forward and re-register. Here that write failure is
@@ -188,7 +193,15 @@ pub async fn register(db_path: &Path, id: &str) -> Result<(), WriteError> {
             if let Err(store_err) = store(db_path, id, &prepared.secret, "error", &message) {
                 log::warn!("recording webhook registration failure: {store_err}");
             }
-            Err(WriteError::Fallback(message))
+            // **Answered here, not forwarded.** `Fallback` would have Go re-run
+            // `RegisterWebhook` — a *second* `setWebhook` — and a client-side
+            // failure does not prove the first one did nothing: a lost response
+            // to a successful call would be re-registered under Go's own secret,
+            // which is the exact hazard this module's header claims to avoid.
+            // Go answers this with `httpErr`'s flat 500, so that is what goes on
+            // the wire, with the reason in the log and on the row.
+            log::error!("internal server error error=registering telegram webhook: {message}");
+            Err(WriteError::Internal("internal server error".to_string()))
         }
     }
 }
@@ -336,27 +349,54 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_failed_registration_records_why_and_leaves_the_secret() {
-        // No network here: the bot token is nonsense, so the call fails, which
-        // is the path under test — the row must carry the reason for
-        // `webhook/status` to show.
+    /// A failed `setWebhook` records why, keeps the secret, and is answered
+    /// **here** rather than forwarded.
+    ///
+    /// Pointed at a local fake rather than Telegram. The first version of this
+    /// test claimed "no network here" and was wrong: it issued a real HTTPS POST
+    /// to `api.telegram.org` from every `cargo test` run, and offline it passed
+    /// for the wrong reason — a transport failure instead of the `ok:false`
+    /// envelope it says it covers.
+    #[tokio::test]
+    async fn a_failed_registration_records_why_and_is_not_forwarded() {
+        use crate::native::integrations::telegram::client::{api_base_lock, set_api_base};
+
+        let _guard = api_base_lock().await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let app = axum::Router::new().fallback(|| async {
+                // What Telegram answers for a bad token: 200 with ok:false.
+                (
+                    axum::http::StatusCode::OK,
+                    r#"{"ok":false,"description":"Unauthorized"}"#,
+                )
+            });
+            let _ = axum::serve(listener, app).await;
+        });
+        set_api_base(Some(format!("http://{addr}")));
+
         let dir = tempfile::tempdir().expect("tempdir");
         let db = migrated(dir.path(), "telegram", "https://x.example");
         store(&db, "tg", "s3cret", "active", "").expect("store");
 
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let result = rt.block_on(register(&db, "tg"));
-        assert!(result.is_err(), "a failed setWebhook is an error");
+        let err = register(&db, "tg").await.unwrap_err();
+        set_api_base(None);
+
+        assert_eq!(
+            err.status(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "answered here — forwarding would call setWebhook a second time"
+        );
+        assert_eq!(err.message(), "internal server error", "Go's httpErr body");
 
         let status = webhook::status(&db, "tg").expect("status");
         assert_eq!(status.status, "error");
         assert!(
-            status.error.starts_with("registering webhook:"),
-            "the reason is stored: {:?}",
+            status.error.contains("Unauthorized"),
+            "the provider's own reason reaches the row: {:?}",
             status.error
         );
         assert!(status.has_secret, "the secret survives a failed attempt");

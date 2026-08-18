@@ -23,7 +23,7 @@ use crate::native::chat::runner::{self, RunSpec};
 /// What one run produced. `agent.AgentResult`, narrowed to the fields its two
 /// callers store — the thinking, cost and per-model breakdowns are collected
 /// by Go and then dropped by this caller.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct RunResult {
     pub session_id: String,
     pub answer: String,
