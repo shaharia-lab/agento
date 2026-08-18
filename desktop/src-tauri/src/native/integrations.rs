@@ -147,6 +147,7 @@ pub mod telegram;
 /// *this* module — the column is never selected here and `auth` is a boolean
 /// before it leaves SQLite — and it stays literally true with the secrets
 /// projection living next door, where nothing that builds a response can see it.
+pub mod oauth;
 pub mod registry;
 
 use std::collections::BTreeMap;
