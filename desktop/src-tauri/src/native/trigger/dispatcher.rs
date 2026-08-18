@@ -32,6 +32,7 @@ use super::match_rule::{match_rule, RuleFilters};
 use super::receiver::{TelegramMsg, TelegramUpdate};
 use crate::native::agent_run;
 use crate::native::agents::Agent;
+use crate::native::db;
 
 /// `maxConcurrentExecutions`, the buffer on `Dispatcher.sem`.
 ///
@@ -76,27 +77,6 @@ pub fn handle_update(
     });
 }
 
-/// Run a blocking database call off the runtime's workers.
-///
-/// `None` when the pool task itself failed — a panic inside the closure. Each
-/// caller folds that into the answer a failed *read* already gives it, which is
-/// not the same answer everywhere: `process` stops, `execute_and_reply` sends
-/// the error reply, and the two message writes are best-effort in Go too and so
-/// ignore it.
-async fn blocking<T, F>(f: F) -> Option<T>
-where
-    F: FnOnce() -> T + Send + 'static,
-    T: Send + 'static,
-{
-    match tokio::task::spawn_blocking(f).await {
-        Ok(value) => Some(value),
-        Err(e) => {
-            log::error!("telegram dispatch: a database task failed: {e}");
-            None
-        }
-    }
-}
-
 /// `processTelegramUpdate`.
 async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: TelegramUpdate) {
     // A non-message update, or one with no text, is not a trigger.
@@ -108,7 +88,7 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
     // Claimed before the rules are read, so a Telegram retry cannot run the
     // agent twice — see `receiver::claim_update` for why the claim is atomic
     // here where Go's is two statements.
-    // **Every database call this module makes goes to the blocking pool.**
+    // **Every database call this module makes goes through [`db::blocking`].**
     // (Not every call the *dispatch* makes: `run_headless` opens SQLite on the
     // worker while building its options, which chat and the scheduler share
     // verbatim.) `process` runs on an axum worker, and each of these opens a connection and may sit on
@@ -122,7 +102,10 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
             integration_id.to_string(),
             update.update_id,
         );
-        blocking(move || super::receiver::claim_update(&db, &id, update_id)).await
+        db::blocking("telegram dispatch", move || {
+            super::receiver::claim_update(&db, &id, update_id)
+        })
+        .await
     };
     if !claimed.unwrap_or(false) {
         return;
@@ -134,7 +117,10 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
             integration_id.to_string(),
             msg.clone(),
         );
-        blocking(move || find_matching_rule(&db, &id, &msg)).await
+        db::blocking("telegram dispatch", move || {
+            find_matching_rule(&db, &id, &msg)
+        })
+        .await
     };
     let Some(Some((rule, prompt))) = matched else {
         return;
@@ -242,7 +228,7 @@ async fn execute_and_reply(
 
     let resolved = {
         let (db, slug) = (db_path.to_path_buf(), rule.agent_slug.clone());
-        blocking(move || resolve_agent(&db, &slug))
+        db::blocking("telegram dispatch", move || resolve_agent(&db, &slug))
             .await
             .unwrap_or_else(|| Err("the agent lookup task failed".to_string()))
     };
@@ -262,9 +248,11 @@ async fn execute_and_reply(
     // profile — a trigger run is not configurable the way a task is.
     let created = {
         let (db, rule) = (db_path.to_path_buf(), rule.clone());
-        blocking(move || create_trigger_session(&db, &rule))
-            .await
-            .unwrap_or_else(|| Err("the session task failed".to_string()))
+        db::blocking("telegram dispatch", move || {
+            create_trigger_session(&db, &rule)
+        })
+        .await
+        .unwrap_or_else(|| Err("the session task failed".to_string()))
     };
     let chat_session_id = match created {
         Ok(id) => id,
@@ -293,7 +281,10 @@ async fn execute_and_reply(
                 chat_session_id.clone(),
                 prompt.to_string(),
             );
-            blocking(move || save_messages(&db, &session, &prompt, "")).await;
+            db::blocking("telegram dispatch", move || {
+                save_messages(&db, &session, &prompt, "")
+            })
+            .await;
             return;
         }
     };
@@ -305,7 +296,7 @@ async fn execute_and_reply(
             prompt.to_string(),
         );
         let usage = result.clone();
-        blocking(move || {
+        db::blocking("telegram dispatch", move || {
             save_messages(&db, &session, &prompt, &usage.answer);
             update_session_usage(&db, &session, &usage);
         })

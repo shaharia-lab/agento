@@ -386,3 +386,136 @@ async fn a_run_that_outlives_its_timeout_is_recorded_as_a_deadline() {
         "Go's `context.DeadlineExceeded` reaches the caller as this"
     );
 }
+
+/// A run whose database work is blocked must not stall the runtime (#366).
+///
+/// This is the only test here that measures *latency of something else* rather
+/// than what a run wrote, because that is what the defect was: `execute_task`
+/// did its rusqlite work inline on an axum worker, and `db::open_read_write`
+/// sets a five-second `busy_timeout`, so a run that met a contended write lock
+/// parked a worker for up to five seconds. Three at once — the scheduler's
+/// semaphore permits exactly that — is every worker on a four-core machine, and
+/// the SPA and every SSE stream sharing the runtime stop with them.
+///
+/// The shape is deliberate and each part is load-bearing:
+///
+/// - **one worker thread**, so a single parked worker is the whole runtime;
+/// - **`tokio::spawn`** rather than awaiting the run here, because
+///   `block_on` runs the test body on the calling thread, not on a worker —
+///   awaiting inline would block a thread the ticker never wanted;
+/// - **a plain OS thread** holds the lock, so the contention comes from outside
+///   the runtime exactly as the Go sidecar's writes and the session scanner's
+///   batch writer do.
+///
+/// Verified against the defect rather than assumed: with `prepare` called inline
+/// in place of the `db::blocking` hand-off, the longest gap goes from ~11 ms to
+/// 1,547 ms — the whole hold — and the ticker advances 5 times instead of ~150.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_contended_write_lock_does_not_stall_the_runtime() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with_task(&db, "cron", true);
+
+    let cli = fake_cli(
+        dir.path(),
+        r#"        raw('{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"s","usage":{"input_tokens":1,"output_tokens":1}}')"#,
+    );
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    /// How long the lock is held. Long enough that a parked worker is
+    /// unmistakable, short enough to stay well inside the 5s `busy_timeout` so
+    /// the run itself still succeeds.
+    const HOLD: Duration = Duration::from_millis(1_500);
+
+    // The file must already be WAL, which in production it always is — the Go
+    // server sets it, persistently, before anything else opens it. Left in the
+    // default rollback journal, `open_read_write`'s own `PRAGMA journal_mode=WAL`
+    // is a *mode change* needing an exclusive lock, and it fails outright
+    // ("database is locked") in about a millisecond instead of waiting on
+    // `busy_timeout` — which would make this test measure the wrong thing
+    // entirely.
+    agento_lib::native::db::open_read_write(&db).expect("convert the fixture to WAL");
+
+    // A writer outside the runtime, holding the lock the run needs.
+    let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+    let lock_db = db.clone();
+    let holder = std::thread::spawn(move || {
+        let mut conn = rusqlite::Connection::open(&lock_db).expect("open");
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("begin immediate");
+        holding_tx.send(()).expect("signal");
+        std::thread::sleep(HOLD);
+        tx.rollback().expect("rollback");
+    });
+    holding_rx.recv().expect("the writer took the lock");
+
+    // The thing that must keep running. It records the **longest** gap between
+    // its own ticks, which is what a parked worker shows up as.
+    //
+    // `last` is seeded out here, before the spawn, and that is not a detail: a
+    // starved ticker is never *polled*, so seeding it on the first poll would
+    // start the clock after the stall and measure nothing. The first version of
+    // this test did exactly that and passed against the unfixed executor.
+    let worst_gap_ms = Arc::new(AtomicU64::new(0));
+    let ticks = Arc::new(AtomicU64::new(0));
+    let ticker = {
+        let (worst_gap_ms, ticks, mut last) = (
+            Arc::clone(&worst_gap_ms),
+            Arc::clone(&ticks),
+            Instant::now(),
+        );
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let now = Instant::now();
+                let gap = u64::try_from(now.duration_since(last).as_millis()).unwrap_or(u64::MAX);
+                worst_gap_ms.fetch_max(gap, Ordering::Relaxed);
+                ticks.fetch_add(1, Ordering::Relaxed);
+                last = now;
+            }
+        })
+    };
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    let run = tokio::spawn(async move {
+        agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+    });
+
+    run.await.expect("the run finished");
+    ticker.abort();
+    holder.join().expect("the writer finished");
+
+    let worst = worst_gap_ms.load(Ordering::Relaxed);
+    assert!(
+        worst < 500,
+        "the runtime stalled for {worst} ms while the write lock was held \
+         (the hold is {} ms; anything near it means the run blocked a worker)",
+        HOLD.as_millis()
+    );
+    // The gap alone would also read as healthy if the ticker had simply been
+    // cancelled early, so assert it really ran throughout: the hold is 1.5 s of
+    // 10 ms ticks, and a third of them is a wide margin for a loaded CI box.
+    let ticks = ticks.load(Ordering::Relaxed);
+    assert!(
+        ticks > 50,
+        "the ticker only advanced {ticks} times across a {} ms hold",
+        HOLD.as_millis()
+    );
+
+    // …and the run itself still completed, so this is not passing because
+    // nothing happened.
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1, "the run still recorded a job: {jobs:?}");
+    assert_eq!(jobs[0].0, "success", "error was {:?}", jobs[0].1);
+}

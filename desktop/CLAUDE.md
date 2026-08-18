@@ -2648,6 +2648,28 @@ caller is still holding a scheduler semaphore permit, and an unreachable mail
 host would otherwise throttle the scheduler to three runs per SMTP timeout while
 starving the proxy and every in-flight SSE stream.
 
+**Nor may the rusqlite, and that needs saying separately** (#366). A database
+call reads as arithmetic and is not: `db::open_read_write` sets a five-second
+`busy_timeout`, so a call meeting a lock held by the Go sidecar or by the session
+scanner's batch writer parks its thread for up to that long. `proxy.rs` already
+puts every native *handler* on the blocking pool for this reason, which covers
+everything reached from a request — and covers nothing reached from a timer or a
+webhook. The two that are, the scheduler's executor and the trigger dispatcher,
+both run to their own concurrency limit (three and ten) against a tokio default
+of one worker per core. `db::blocking(what, f)` is the single hand-off both use,
+and it is greppable on purpose. The executor's shape follows from it: `prepare`
+and `finish` are whole synchronous sections either side of the one long `await`,
+rather than eight individually wrapped calls, because a run's database work is
+contiguous. `tests/scheduled_run.rs`'s
+`a_contended_write_lock_does_not_stall_the_runtime` is the regression — a
+one-worker runtime, an outside thread holding the write lock, and a ticker whose
+longest gap goes from ~11 ms to the full 1,500 ms hold if the hand-off is
+removed. Its `last` is seeded **before** the spawn deliberately: a starved task
+is never polled, so seeding on the first poll starts the clock after the stall
+and the test passes against the defect. What is still on the worker is
+`run_headless`'s own option-building, shared verbatim with chat and the
+scheduler — worth knowing, not fixed here.
+
 **A scheduled run uses `claude::client::query`, not `Session`.** That is Go's
 own choice — `RunAgent` calls `claude.Query` — and it is not interchangeable
 here: a `Session` sets `session_mode`, and `process.rs`'s reader then
