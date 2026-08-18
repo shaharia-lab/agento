@@ -47,8 +47,8 @@ use super::exchange::{self, TokenEndpoint};
 #[derive(Debug, Clone, Default)]
 struct FlowState {
     /// Set once the callback has been answered, either way. Go tracks it and
-    /// never reads it; kept for the same reason the field exists there.
-    #[allow(dead_code)]
+    /// never reads it; here it is what [`fail_flow_if_in_flight`] checks, so the
+    /// deadline cannot overwrite a finished flow.
     done: bool,
     authenticated: bool,
     /// Why the flow failed. `GetAuthStatus` turns this into a 500.
@@ -67,6 +67,21 @@ fn lock_flows() -> std::sync::MutexGuard<'static, HashMap<String, FlowState>> {
 
 /// How long a flow may stay open. `context.WithTimeout(…, 10*time.Minute)`.
 const FLOW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// `httpErr`'s default body. Go logs the real error and answers exactly this.
+const GO_INTERNAL_ERROR: &str = "internal server error";
+
+/// Log the real reason and answer what Go answers.
+///
+/// The detail reaches the log, never the wire — `httpErr`'s default arm does the
+/// same, and reproducing it here rather than forwarding is what stops the
+/// sidecar starting a second flow. See [`start`].
+fn internal<E: std::fmt::Display>(what: &'static str) -> impl Fn(E) -> WriteError {
+    move |e| {
+        log::error!("internal server error error={what}: {e}");
+        WriteError::Internal(GO_INTERNAL_ERROR.to_string())
+    }
+}
 
 /// `loadOAuthConfig`'s type check, with Go's exact wording.
 fn oauth_provider(integration_type: &str) -> Option<TokenEndpoint> {
@@ -98,8 +113,25 @@ struct ClientCredentials {
 /// `std::net::TcpListener` (which does not need a runtime) and only the serving
 /// half is spawned. Binding here rather than in the spawned task is what lets
 /// the port appear in the URL this returns.
+///
+/// # Nothing here may `Fallback`
+///
+/// Every other native write forwards on doubt and lets Go answer. This one must
+/// not: forwarding `auth/start` makes the **sidecar** run a real flow, with its
+/// own callback server on its own port. The shell would never see that token
+/// land — the inference that used to cover it (`Trigger::AuthStatusPolled`) is
+/// gone precisely because this route moved — and Go's own `registry.Reload` is
+/// switched off for the six hosted types by `AGENTO_INTEGRATIONS`. The result is
+/// an integration that authenticates and is hosted by nobody until the next app
+/// start.
+///
+/// So the failures Go answers with a flat 500 are answered here as
+/// [`WriteError::Internal`], with Go's own body: the same bytes on the wire, and
+/// one flow instead of two.
 pub fn start(db_path: &std::path::Path, id: &str) -> Result<String, WriteError> {
-    let Some(row) = registry::get_for_hosting(db_path, id).map_err(WriteError::Fallback)? else {
+    let Some(row) =
+        registry::get_for_hosting(db_path, id).map_err(internal("loading integration"))?
+    else {
         return Err(WriteError::NotFound {
             resource: "integration".to_string(),
             id: id.to_string(),
@@ -116,25 +148,24 @@ pub fn start(db_path: &std::path::Path, id: &str) -> Result<String, WriteError> 
         ));
     };
 
-    let creds: ClientCredentials = serde_json::from_str(&row.credentials).map_err(|e| {
-        // Go's `BuildAuthURL` wraps this as "parsing <type> credentials"; the
-        // handler turns any non-typed error into a 500, which the seam forwards.
-        WriteError::Fallback(format!("parsing {} credentials: {e}", row.integration_type))
-    })?;
+    // Go's `BuildAuthURL` wraps this as "parsing <type> credentials", and the
+    // handler turns any non-typed error into a flat 500.
+    let creds: ClientCredentials =
+        serde_json::from_str(&row.credentials).map_err(internal("parsing credentials"))?;
 
     // `integrations.FreePort()`. Bound now and handed to the server, rather than
     // probed and re-bound: the gap between the two is a race a second flow can
     // land in, and the port is already in the URL by then.
-    let listener = std::net::TcpListener::bind("127.0.0.1:0")
-        .map_err(|e| WriteError::Fallback(format!("finding free port: {e}")))?;
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").map_err(internal("finding free port"))?;
     let port = listener
         .local_addr()
-        .map_err(|e| WriteError::Fallback(format!("finding free port: {e}")))?
+        .map_err(internal("finding free port"))?
         .port();
 
     let auth_url = match row.integration_type.as_str() {
         "google" => {
-            let services = super::services_of(db_path, id).map_err(WriteError::Fallback)?;
+            let services = super::services_of(db_path, id).map_err(internal("reading services"))?;
             super::google_auth_url(&creds.client_id, port, &services)
         }
         _ => super::slack_auth_url(&creds.client_id, port),
@@ -153,6 +184,8 @@ pub fn start(db_path: &std::path::Path, id: &str) -> Result<String, WriteError> 
             client_id: creds.client_id,
             client_secret: creds.client_secret,
             redirect_uri: super::redirect_uri(port),
+            // Replaced inside `spawn_callback_server`, which owns the channel.
+            done: Mutex::new(None),
         },
     );
     if let Err(e) = spawned {
@@ -160,9 +193,8 @@ pub fn start(db_path: &std::path::Path, id: &str) -> Result<String, WriteError> 
         // flow behind; the map entry has to go with it or `status` would poll a
         // flow that is not running.
         lock_flows().remove(id);
-        return Err(WriteError::Fallback(format!(
-            "starting callback server: {e}"
-        )));
+        log::error!("internal server error error=starting callback server: {e}");
+        return Err(WriteError::Internal(GO_INTERNAL_ERROR.to_string()));
     }
 
     log::info!(
@@ -180,6 +212,28 @@ struct CallbackContext {
     client_id: String,
     client_secret: String,
     redirect_uri: String,
+    /// Fired once, when the callback has been answered either way, to shut the
+    /// server down.
+    ///
+    /// Go closes its server the moment it consumes the result
+    /// (`defer srv.Close()` in the goroutine reading `resultCh`), and both
+    /// halves of that matter. A server left running keeps an
+    /// **unauthenticated loopback listener** bound for the rest of the
+    /// ten-minute window, and it will answer a *second* `/callback` — which the
+    /// success page invites, since it only calls `window.close()` and browsers
+    /// often refuse. The second request re-exchanges a spent code, the provider
+    /// answers `invalid_grant`, and a flow that had just succeeded becomes an
+    /// error.
+    done: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl CallbackContext {
+    /// Stop the server. Idempotent: the second call finds the sender gone.
+    fn finish(&self) {
+        if let Some(tx) = self.done.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = tx.send(());
+        }
+    }
 }
 
 /// `oauthSuccessHTML`, byte for byte — it is what the user sees.
@@ -202,7 +256,11 @@ fn spawn_callback_server(
         .set_nonblocking(true)
         .map_err(|e| format!("setting the callback listener non-blocking: {e}"))?;
 
-    let ctx = Arc::new(ctx);
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+    let ctx = Arc::new(CallbackContext {
+        done: Mutex::new(Some(done_tx)),
+        ..ctx
+    });
     let app = axum::Router::new()
         .route(
             "/callback",
@@ -223,11 +281,24 @@ fn spawn_callback_server(
                 return;
             }
         };
-        // The deadline is the whole point: without it a flow the user abandons
-        // leaves a listener bound for the life of the process.
-        let served = tokio::time::timeout(FLOW_TIMEOUT, axum::serve(listener, app)).await;
-        if served.is_err() {
-            fail_flow(&ctx.id, "oauth flow timed out".to_string());
+
+        // **The shutdown signal is what makes the deadline mean "abandoned".**
+        // `axum::serve` never resolves on its own, so timing it out
+        // unconditionally would fire ten minutes after *every* flow, successful
+        // ones included — overwriting a stored-and-hosted integration's state
+        // with `oauth flow timed out` and leaving `auth/status` answering 500
+        // for the life of the process. Go cannot reach that: its `select` takes
+        // the result arm and the goroutine exits, so the deadline arm is
+        // unreachable once a callback has been answered.
+        let served = axum::serve(listener, app).with_graceful_shutdown(async move {
+            let _ = done_rx.await;
+        });
+
+        if tokio::time::timeout(FLOW_TIMEOUT, served).await.is_err() {
+            // Only reachable while the flow is still in flight — the callback
+            // signals the shutdown above — but checked anyway, because the one
+            // thing this must never do is turn a success into a failure.
+            fail_flow_if_in_flight(&ctx.id);
         }
     });
     Ok(())
@@ -251,6 +322,7 @@ async fn handle_callback(
             .unwrap_or("no code in callback");
         let message = format!("oauth callback error: {reason}");
         fail_flow(&ctx.id, message);
+        ctx.finish();
         return (
             axum::http::StatusCode::BAD_REQUEST,
             format!("Authentication failed: {reason}\n"),
@@ -272,6 +344,7 @@ async fn handle_callback(
         Ok(token) => token,
         Err(e) => {
             fail_flow(&ctx.id, e);
+            ctx.finish();
             return (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to exchange token\n",
@@ -282,6 +355,7 @@ async fn handle_callback(
 
     if let Err(e) = store_token(&ctx.db_path, &ctx.id, &token) {
         fail_flow(&ctx.id, e);
+        ctx.finish();
         return (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to exchange token\n",
@@ -316,6 +390,28 @@ async fn handle_callback(
         SUCCESS_HTML,
     )
         .into_response()
+}
+
+/// Fail the flow **only if it has not already finished**.
+///
+/// The deadline arm's guard: a flow that succeeded and was overwritten with a
+/// timeout would report 500 forever, having stored a working token.
+fn fail_flow_if_in_flight(id: &str) {
+    let mut flows = lock_flows();
+    match flows.get(id) {
+        Some(state) if state.done => {}
+        _ => {
+            log::warn!("OAuth flow timed out id={id:?}");
+            flows.insert(
+                id.to_string(),
+                FlowState {
+                    done: true,
+                    authenticated: false,
+                    err: Some("oauth flow timed out".to_string()),
+                },
+            );
+        }
+    }
 }
 
 /// `handleOAuthToken`'s error arm: remember why, so the poll can report it.
@@ -379,6 +475,9 @@ pub fn status(db_path: &std::path::Path, id: &str) -> Result<bool, WriteError> {
         return Ok(state.authenticated);
     }
 
+    // `Fallback` is safe *here*, unlike anywhere in `start`: a status read
+    // starts nothing, and Go answering it re-reads the same row to the same
+    // effect. Only reached when this process holds no flow for the id.
     match crate::native::integrations::get(db_path, id).map_err(WriteError::Fallback)? {
         Some(integration) => Ok(integration.authenticated),
         None => Err(WriteError::NotFound {
@@ -507,6 +606,70 @@ mod tests {
             err.status(),
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "a user who denied consent must not see 'still waiting' forever"
+        );
+    }
+
+    /// The high finding on PR #367: the deadline must not overwrite a flow that
+    /// already finished.
+    ///
+    /// `axum::serve` never resolves, so timing it out unconditionally fires ten
+    /// minutes after *every* flow — successful ones included. A user who
+    /// abandons one attempt, retries and succeeds would have the first attempt's
+    /// timer turn the second's success into a permanent 500, with the token
+    /// stored and the MCP server running.
+    #[test]
+    fn the_deadline_cannot_overwrite_a_flow_that_already_succeeded() {
+        reset_flows_for_test();
+        lock_flows().insert(
+            "settled".to_string(),
+            FlowState {
+                done: true,
+                authenticated: true,
+                err: None,
+            },
+        );
+
+        fail_flow_if_in_flight("settled");
+
+        let state = lock_flows().get("settled").cloned().expect("state");
+        assert!(state.authenticated, "the success survives its own deadline");
+        assert!(state.err.is_none());
+    }
+
+    #[test]
+    fn the_deadline_does_fail_a_flow_still_in_flight() {
+        reset_flows_for_test();
+        lock_flows().insert("waiting".to_string(), FlowState::default());
+
+        fail_flow_if_in_flight("waiting");
+
+        let state = lock_flows().get("waiting").cloned().expect("state");
+        assert!(state.done);
+        assert_eq!(state.err.as_deref(), Some("oauth flow timed out"));
+    }
+
+    #[test]
+    fn a_failed_flow_is_not_re_failed_by_the_deadline() {
+        // Also finished — the first reason is the useful one to keep.
+        reset_flows_for_test();
+        lock_flows().insert(
+            "denied-then-timed-out".to_string(),
+            FlowState {
+                done: true,
+                authenticated: false,
+                err: Some("oauth callback error: access_denied".to_string()),
+            },
+        );
+
+        fail_flow_if_in_flight("denied-then-timed-out");
+
+        assert_eq!(
+            lock_flows()
+                .get("denied-then-timed-out")
+                .and_then(|s| s.err.clone())
+                .as_deref(),
+            Some("oauth callback error: access_denied"),
+            "the original reason is what the user needs"
         );
     }
 

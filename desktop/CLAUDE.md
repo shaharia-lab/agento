@@ -1328,21 +1328,21 @@ because neither type was hosted here — true until #315. Now that `Reload` reac
 nothing, so a Slack integration authenticated by OAuth would first be served at
 the next boot.
 
-`reload_after_auth` cannot cover it: that hook hangs off a **forwarded request**,
-and an OAuth token does not arrive on one — the browser delivers it to a callback
-server the *sidecar* opens on its own port, which this process never sees. The
-one part of the flow that does come through the proxy is the UI polling
-`GET /api/integrations/{id}/auth/status` while it waits, so `reload_after_forward`
-now recognises two routes and returns a `Trigger` saying which:
+`reload_after_auth` could not cover it **while the sidecar owned the callback
+server**: that hook hangs off a forwarded request, and an OAuth token did not
+arrive on one — the browser delivered it to a port Go opened, which this process
+never saw. The only part of the flow that came through the proxy was the UI
+polling `GET /api/integrations/{id}/auth/status` while it waited, so
+`reload_after_forward` recognised that route too and drove a
+reload-only-if-the-fingerprint-moved.
 
-- `POST …/auth/validate` is an **event** — reload unconditionally, as Go does.
-- `GET …/auth/status` is a **poll** — `registry::reload_if_secrets_changed`
-  compares the row's current `credentials`+`auth` fingerprint against the one the
-  running server was started with, and does nothing when they match. That matters
-  because `reload` is unconditional by design: firing it per poll would rebind
-  the port and drop in-flight `tools/call`s once a second while the dialog is
-  open. The registry keeps the fingerprint (a hash, not the values) beside each
-  handle for exactly this question.
+**#318 removed all of that.** The shell binds the callback server now, writes the
+token and calls `reload_after_auth` directly, so the poll is no longer evidence
+of anything: `Trigger::AuthStatusPolled`, `registry::reload_if_secrets_changed`
+and the `secrets` fingerprint map it was the only reader of are gone.
+`reload_after_forward` recognises exactly one route again —
+`POST …/auth/validate`, an **event**, reloaded unconditionally as Go does — and
+it is still needed only because that route is still forwarded.
 
 It is **best-effort**: a user who closes the dialog before the flow completes is
 still served only at the next boot. #318 owns the OAuth flow itself and is where
@@ -1522,9 +1522,10 @@ ones — so it is test-only, and the Rust equivalent is behind `#[cfg(test)]`.
 **The flip landed as its own change**, after the port. That split was worth it
 for the reason it was made: the flip is where the risk in this series has lived —
 #315's hosting of Slack silently broke `completeOAuth`'s reload, and Google is the
-*other* provider `startProviderCallback` supports. With both hosted,
-`reload_if_secrets_changed` now covers **every** OAuth integration in the product,
-and there is no longer a case it does not have to catch.
+*other* provider `startProviderCallback` supports. With both hosted, the
+poll-driven net covered every OAuth integration in the product. **#318 then made
+the net unnecessary** by moving the flow itself, so the reload is an event again
+rather than an inference.
 
 `start_google` is the only starter needing **both** secret columns for different
 things: `credentials` carries the OAuth2 client pair, `auth` carries the token.

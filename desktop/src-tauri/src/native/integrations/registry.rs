@@ -104,13 +104,17 @@
 //! already been produced, so doing it on the forward path costs nothing but a
 //! restart of a server that was about to be restarted anyway.
 //!
-//! The fifth is `completeOAuth`, and it needed a **different** hook because its
-//! trigger never crosses the proxy: `startProviderCallback` supports `google`
-//! and `slack`, and since #315 the `slack` half concerns a hosted type, but the
-//! token is delivered by the browser to a callback server the *sidecar* opens on
-//! its own port. The only part of that flow this process sees is the UI polling
-//! `GET /api/integrations/{id}/auth/status`, which is a *poll* rather than an
-//! where [`reload_after_auth`] is not.
+//! The fifth is `completeOAuth`, and until #318 it needed a **different** hook
+//! because its trigger never crossed the proxy: the token was delivered by the
+//! browser to a callback server the *sidecar* opened on its own port, so the
+//! only part of the flow this process could see was the UI polling
+//! `GET /api/integrations/{id}/auth/status`. That poll drove a
+//! reload-only-if-changed, which was an inference standing in for an event.
+//!
+//! #318 moved the flow here: `oauth::flow` binds the callback server, writes the
+//! token and calls [`reload_after_auth`] directly, exactly as `handleOAuthToken`
+//! does. So the inference and the fingerprint it compared against are gone, and
+//! `completeOAuth` now uses the same hook as everything else.
 //!
 //! ## Secrets
 //!
