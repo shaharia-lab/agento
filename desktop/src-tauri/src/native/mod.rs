@@ -40,6 +40,7 @@ pub mod settings;
 pub mod tasks;
 pub mod template;
 pub mod tools;
+pub mod trigger;
 pub mod uploads;
 pub mod version;
 pub mod writes;

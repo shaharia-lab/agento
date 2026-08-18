@@ -1,0 +1,353 @@
+{
+  "cases": [
+    {
+      "name": "no-filters/everything-matches",
+      "note": "an unfiltered rule takes the message verbatim as the prompt",
+      "filter_prefix": "",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "hello there",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "hello there"
+    },
+    {
+      "name": "prefix/stripped-and-trimmed",
+      "note": "the prompt is what follows the prefix, space-trimmed",
+      "filter_prefix": "/ask",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "/ask   what is the time",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "what is the time"
+    },
+    {
+      "name": "prefix/case-insensitive",
+      "note": "EqualFold, so the stored prefix and the sent one may differ in case",
+      "filter_prefix": "/Ask",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "/aSK something",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "something"
+    },
+    {
+      "name": "prefix/ascii-prefix-slices-into-a-multibyte-first-character",
+      "note": "the sharpest case here. The prefix is one ASCII byte and the message starts with U+212A (three bytes), so text[:1] is a lone continuation byte — invalid UTF-8. Go decodes it as RuneError and does not match. A port slicing by *character* would compare U+212A against 'K' instead; one slicing by byte in Rust would panic.",
+      "filter_prefix": "K",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "Kelvin question",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "prefix/multibyte-prefix-against-ascii-text",
+      "note": "the mirror of the case above. A three-byte prefix against ASCII text takes text[:3] — three whole characters — and EqualFold compares three runes against one, so it cannot match however the single rune folds. The fold orbit is exercised by the sigma cases instead, whose forms are all two bytes.",
+      "filter_prefix": "K",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "kelvin question",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "prefix/fold-final-sigma",
+      "note": "EqualFold is simple folding, so final sigma folds to sigma",
+      "filter_prefix": "σ",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "ς lower sigma",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "lower sigma"
+    },
+    {
+      "name": "prefix/fold-capital-sigma",
+      "note": "…and the capital folds to both",
+      "filter_prefix": "Σ",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "σ sigma",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "sigma"
+    },
+    {
+      "name": "prefix/dotted-capital-i-does-not-fold-to-ascii-i",
+      "note": "U+0130 has no simple fold to ASCII 'i'. A port lower-casing instead of folding would disagree, because ToLower(U+0130) begins with one.",
+      "filter_prefix": "i",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "İstanbul",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "prefix/no-match",
+      "note": "a message that does not start with the prefix runs nothing",
+      "filter_prefix": "/ask",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "tell me a joke",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "prefix/empty-remainder-is-not-a-match",
+      "note": "a bare prefix with nothing after it is rejected, not run with an empty prompt",
+      "filter_prefix": "/ask",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "/ask",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "prefix/whitespace-only-remainder-is-not-a-match",
+      "note": "…and neither is one whose remainder trims away",
+      "filter_prefix": "/ask",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "/ask    ",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "prefix/shorter-than-the-prefix-in-bytes",
+      "note": "the length guard is bytes, and it is what stops the slice below from being out of range",
+      "filter_prefix": "/ask",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "/a",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "prefix/multibyte-text-with-ascii-prefix",
+      "note": "the byte slice cuts into a multi-byte character: Go compares the broken bytes and does not match, where a char-wise port would either panic or compare something else",
+      "filter_prefix": "ab",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "éxyz",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "prefix/multibyte-prefix-matches-itself",
+      "note": "the same slice is exact when the prefix really is the prefix",
+      "filter_prefix": "é",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "é accented question",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "accented question"
+    },
+    {
+      "name": "prefix/nbsp-remainder-trims-away",
+      "note": "unicode.IsSpace includes U+00A0, so a NBSP-only remainder is empty and the rule does not fire. Rust's char::is_whitespace agrees — both follow White_Space — but that is two standards agreeing, which is why it is pinned rather than assumed.",
+      "filter_prefix": "/ask",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "/ask ",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "prefix/nel-remainder-trims-away",
+      "note": "U+0085 is unicode.IsSpace, so this remainder is empty",
+      "filter_prefix": "/ask",
+      "filter_keywords": null,
+      "filter_chat_ids": null,
+      "text": "/ask",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "keywords/or-logic",
+      "note": "any keyword matching is enough",
+      "filter_prefix": "",
+      "filter_keywords": [
+        "deploy",
+        "release"
+      ],
+      "filter_chat_ids": null,
+      "text": "time to release",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "time to release"
+    },
+    {
+      "name": "keywords/case-insensitive-both-sides",
+      "note": "the text and the keyword are both lower-cased",
+      "filter_prefix": "",
+      "filter_keywords": [
+        "DePloY"
+      ],
+      "filter_chat_ids": null,
+      "text": "Please DEPLOY now",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "Please DEPLOY now"
+    },
+    {
+      "name": "keywords/substring-not-word",
+      "note": "Contains, so a keyword inside a longer word matches",
+      "filter_prefix": "",
+      "filter_keywords": [
+        "ploy"
+      ],
+      "filter_chat_ids": null,
+      "text": "redeployment",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "redeployment"
+    },
+    {
+      "name": "keywords/none-match",
+      "note": "",
+      "filter_prefix": "",
+      "filter_keywords": [
+        "deploy"
+      ],
+      "filter_chat_ids": null,
+      "text": "good morning",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "keywords/empty-list-matches-everything",
+      "note": "",
+      "filter_prefix": "",
+      "filter_keywords": [],
+      "filter_chat_ids": null,
+      "text": "anything at all",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "anything at all"
+    },
+    {
+      "name": "chat-ids/allowed",
+      "note": "",
+      "filter_prefix": "",
+      "filter_keywords": null,
+      "filter_chat_ids": [
+        "42",
+        "77"
+      ],
+      "text": "hi",
+      "chat_id": "77",
+      "matched": true,
+      "prompt": "hi"
+    },
+    {
+      "name": "chat-ids/not-allowed",
+      "note": "",
+      "filter_prefix": "",
+      "filter_keywords": null,
+      "filter_chat_ids": [
+        "42"
+      ],
+      "text": "hi",
+      "chat_id": "999",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "chat-ids/exact-string-compare",
+      "note": "the id is compared as text, so a leading zero is a different chat",
+      "filter_prefix": "",
+      "filter_keywords": null,
+      "filter_chat_ids": [
+        "042"
+      ],
+      "text": "hi",
+      "chat_id": "42",
+      "matched": false,
+      "prompt": ""
+    },
+    {
+      "name": "chat-ids/negative-group-id",
+      "note": "group chats have negative ids and are compared the same way",
+      "filter_prefix": "",
+      "filter_keywords": null,
+      "filter_chat_ids": [
+        "-1001234567890"
+      ],
+      "text": "hi",
+      "chat_id": "-1001234567890",
+      "matched": true,
+      "prompt": "hi"
+    },
+    {
+      "name": "all-three/prefix-strips-before-keywords-are-checked-against-the-FULL-text",
+      "note": "the keyword check runs against `text`, not the stripped prompt — so a keyword that appears only inside the prefix still matches",
+      "filter_prefix": "/deploy",
+      "filter_keywords": [
+        "deploy"
+      ],
+      "filter_chat_ids": null,
+      "text": "/deploy the thing",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "the thing"
+    },
+    {
+      "name": "all-three/keyword-only-in-prefix",
+      "note": "the sharp edge of the clause above: the prompt has no 'deploy' in it at all, and the rule still fires",
+      "filter_prefix": "/deploy",
+      "filter_keywords": [
+        "deploy"
+      ],
+      "filter_chat_ids": null,
+      "text": "/deploy now please",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "now please"
+    },
+    {
+      "name": "all-three/every-filter-satisfied",
+      "note": "",
+      "filter_prefix": "/ask",
+      "filter_keywords": [
+        "status"
+      ],
+      "filter_chat_ids": [
+        "42"
+      ],
+      "text": "/ask what is the status",
+      "chat_id": "42",
+      "matched": true,
+      "prompt": "what is the status"
+    },
+    {
+      "name": "all-three/chat-id-rejects-an-otherwise-matching-message",
+      "note": "",
+      "filter_prefix": "/ask",
+      "filter_keywords": [
+        "status"
+      ],
+      "filter_chat_ids": [
+        "42"
+      ],
+      "text": "/ask what is the status",
+      "chat_id": "43",
+      "matched": false,
+      "prompt": ""
+    }
+  ]
+}
