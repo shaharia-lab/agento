@@ -368,6 +368,25 @@ async fn run_agent(
         custom_session_id: String::new(),
     };
 
+    // **One deadline across every stage that can await, not a timeout on the
+    // drain alone.** Go wraps the whole `agent.RunAgent` call — its
+    // `resolveSystemPrompt` and `buildSDKOptions` included — and the difference
+    // is not theoretical: anything that hangs before the first event would
+    // leave the `job_history` row `running` forever *and* hold this run's
+    // scheduler permit for the life of the process; three of those and no
+    // scheduled task runs again. `build_options` belongs inside it because it
+    // is not arithmetic — it starts an in-process MCP server per integration
+    // the agent names.
+    //
+    // A shared `Instant` rather than one future wrapping everything, because
+    // `Session` has no `Drop`: cancelling a future that owns one abandons the
+    // subprocess instead of stopping it. Staged this way, `close()` stays
+    // reachable on every path where a session exists.
+    let deadline = tokio::time::Instant::now()
+        + std::time::Duration::from_secs(
+            u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60,
+        );
+
     // `resolveSystemPrompt`, which Go calls **before** building any options and
     // whose error it returns unwrapped — so an agent with an unresolvable
     // `{{name}}` in its system prompt is a recorded failed run, not a run that
@@ -380,26 +399,11 @@ async fn run_agent(
 
     // The refusal this port has that Go does not — an agent whose tools cannot
     // be hosted here. A recorded failure, never silence. See the module header.
-    let (options, tool_servers) = runner::build_options(&spec, None)
-        .await
-        .map_err(|e| format!("agent tools unavailable in this build: {e}"))?;
-
-    let timeout = std::time::Duration::from_secs(
-        u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60,
-    );
-
-    // **One deadline across all three stages, not a timeout on the drain
-    // alone.** Go wraps the whole `agent.RunAgent` call, and the difference is
-    // not theoretical: a subprocess that hangs before its first event would
-    // leave the `job_history` row `running` forever *and* hold this run's
-    // scheduler permit for the life of the process — three of those and no
-    // scheduled task runs again.
-    //
-    // A shared `Instant` rather than a future wrapping all three, because
-    // `Session` has no `Drop`: cancelling a future that owns one abandons the
-    // subprocess instead of stopping it. Staged this way, `close()` is
-    // reachable on every path where a session exists.
-    let deadline = tokio::time::Instant::now() + timeout;
+    let (options, tool_servers) =
+        tokio::time::timeout_at(deadline, runner::build_options(&spec, None))
+            .await
+            .map_err(|_| DEADLINE_EXCEEDED.to_string())?
+            .map_err(|e| format!("agent tools unavailable in this build: {e}"))?;
 
     let mut session = match tokio::time::timeout_at(
         deadline,
@@ -644,24 +648,29 @@ fn update_task_after_run(
         task.status = "paused".to_string();
     }
 
-    if let Err(e) = write_run_result(
-        scheduler,
-        &task.id,
-        ran_at,
-        status,
-        run_count,
-        one_shot || hit_limit,
-    ) {
-        log::error!(
+    let pause = one_shot || hit_limit;
+    match write_run_result(scheduler, &task.id, ran_at, status, run_count, pause) {
+        // A one-shot task is paused after its run so a restart does not re-run
+        // it — the timer is already exhausted, but the *row* is what `Start`
+        // reads.
+        //
+        // **Only when the row actually says so.** Dropping the timer after a
+        // failed write would leave the task `active`, timer-less *and*
+        // forgotten by the sweep — `unschedule_task` clears `swept` — so
+        // `reconcile` would reinstall it, a `run_immediately` task would fire
+        // two seconds later, the write would fail again: a full agent run every
+        // minute, unbounded. A read-only data dir or a full disk is enough to
+        // reach it. Leaving the timer alone is also what Go does when its
+        // `UpdateTask` fails.
+        Ok(()) => {
+            if pause {
+                scheduler.unschedule_task(&task.id);
+            }
+        }
+        Err(e) => log::error!(
             "failed to update task after run task_id={:?} error={e}",
             task.id
-        );
-    }
-
-    // A one-shot task is paused after its run so a restart does not re-run it —
-    // the timer is already exhausted, but the *row* is what `Start` reads.
-    if one_shot || hit_limit {
-        scheduler.unschedule_task(&task.id);
+        ),
     }
 }
 
@@ -1100,6 +1109,84 @@ mod tests {
         assert!(tasks::get_task(file.path(), "gone")
             .expect("read")
             .is_none());
+    }
+
+    /// Finding #1 of PR #365's fourth review: a failed write-back must not
+    /// leave a one-shot task timer-less, `active` **and** forgotten by the
+    /// sweep, or `reconcile` reinstalls the timer, `run_immediately` fires two
+    /// seconds later, the write fails again — a full agent run every minute,
+    /// unbounded. A read-only data dir reaches it.
+    ///
+    /// Asserted through the observable consequence: after a failed write the
+    /// task must still be known to the scheduler, so the sweep leaves it alone.
+    #[tokio::test]
+    async fn a_failed_write_back_does_not_hand_a_one_shot_task_to_the_sweep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("agento.db");
+        let mut conn = rusqlite::Connection::open(&db).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                (id, name, prompt, schedule_type, schedule_config, status,
+                 created_at, updated_at)
+             VALUES ('t1','T','p','run_immediately','{}','active',
+                     '2026-01-01 00:00:00 +0000 UTC','2026-01-01 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("seed");
+        drop(conn);
+
+        let scheduler = test_scheduler(&db);
+        let task = tasks::get_task(&db, "t1").expect("read").expect("row");
+        scheduler.schedule_task(&task).expect("schedule");
+        assert!(scheduler.knows_task("t1"), "the sweep has seen it");
+
+        // The write fails: the database is gone underneath the run.
+        std::fs::remove_file(&db).expect("remove");
+        let mut snapshot = task.clone();
+        update_task_after_run(&scheduler, &mut snapshot, Utc::now(), "success");
+
+        assert!(
+            scheduler.knows_task("t1"),
+            "a failed write must not forget the task; the sweep would reinstall \
+             its timer and it would run again every minute"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_successful_one_shot_write_back_does_release_the_task() {
+        // The other direction: when the row really is paused, the timer goes
+        // and the sweep may forget it — a later resume schedules it afresh.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("agento.db");
+        let mut conn = rusqlite::Connection::open(&db).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                (id, name, prompt, schedule_type, schedule_config, status,
+                 created_at, updated_at)
+             VALUES ('t1','T','p','run_immediately','{}','active',
+                     '2026-01-01 00:00:00 +0000 UTC','2026-01-01 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("seed");
+        drop(conn);
+
+        let scheduler = test_scheduler(&db);
+        let task = tasks::get_task(&db, "t1").expect("read").expect("row");
+        scheduler.schedule_task(&task).expect("schedule");
+
+        let mut snapshot = task.clone();
+        update_task_after_run(&scheduler, &mut snapshot, Utc::now(), "success");
+
+        assert_eq!(
+            tasks::get_task(&db, "t1")
+                .expect("read")
+                .expect("row")
+                .status,
+            "paused"
+        );
+        assert!(!scheduler.knows_task("t1"), "the timer is released");
     }
 
     #[test]

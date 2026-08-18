@@ -142,6 +142,16 @@ pub fn now_go_text() -> String {
 /// The zone abbreviation is `time.Time.String()`'s — `CEST`, not `+02:00` — and
 /// chrono's `%Z` over a `chrono_tz` zone is what produces it. A zone the
 /// database cannot name falls back to UTC, which is [`now_go_text`]'s answer.
+///
+/// **One part of Go's rendering is deliberately not reproduced**, so the claim
+/// above is "the same zone", not "the same bytes": `time.Time.String()` appends
+/// a monotonic reading — ` m=+0.007413217` — whenever the value carries one, and
+/// `time.Now()` does. A Go-written row therefore reads
+/// `2026-08-18 02:34:11.615509987 +0200 CEST m=+0.007413217` where this writes
+/// everything up to `CEST`. Inventing a monotonic reading this process does not
+/// have would be worse than omitting it, and nothing reads the suffix:
+/// [`GoTime::parse_go_string`] splits at the third space, modernc's own reader
+/// strips at `m=`, and `ORDER BY created_at DESC` sorts on the shared prefix.
 pub fn now_go_text_local() -> String {
     let Some(zone) = iana_time_zone::get_timezone()
         .ok()

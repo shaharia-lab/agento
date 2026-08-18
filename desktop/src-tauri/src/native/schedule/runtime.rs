@@ -107,9 +107,13 @@ pub struct Scheduler {
     /// pass — an active `one_off` whose `run_at` is in the past because the
     /// machine was off at the appointed time fails forever, at ~1440 warning
     /// lines a day into a 5 MiB log the user is asked to attach to bug reports,
-    /// where Go logged once at startup. It also bounds the pathological case
-    /// where a task's own auto-pause write fails: without this the sweep would
-    /// reinstall a `run_immediately` timer every minute, indefinitely.
+    /// where Go logged once at startup.
+    ///
+    /// It is **cleared by `unschedule_task`**, so a task that genuinely returns
+    /// to service is picked up again — which is why it is not what bounds the
+    /// failed-auto-pause loop. That is bounded at the source instead:
+    /// `update_task_after_run` drops the timer only when the write that paused
+    /// the row actually succeeded.
     swept: Mutex<HashMap<String, String>>,
     /// `s.semaphore`, acquired around the *execution* rather than around the
     /// timer, exactly as Go's `executeTask` does — a job whose turn is waiting
@@ -183,6 +187,16 @@ impl Scheduler {
             job.handle.abort();
             log::info!("task unscheduled task_id={task_id:?}");
         }
+    }
+
+    /// Whether the sweep already knows about this task at its current
+    /// schedule — i.e. whether [`Self::reconcile`] would leave it alone.
+    #[cfg(test)]
+    pub fn knows_task(&self, task_id: &str) -> bool {
+        self.swept
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(task_id)
     }
 
     /// Bring the installed timers back in line with the stored rows.
@@ -446,7 +460,19 @@ pub fn start(db_path: PathBuf) {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(RECONCILE_INTERVAL).await;
-            sweeper.reconcile();
+            // `reconcile` is synchronous SQLite, and `db::open_read_write` sets
+            // a five-second `busy_timeout` — so on the runtime's own worker it
+            // could park one for that long every minute while the scan or a Go
+            // write holds the lock, stalling an SSE chat stream that shares the
+            // runtime. `proxy.rs` puts every native handler on the blocking
+            // pool for exactly this reason.
+            let pass = Arc::clone(&sweeper);
+            if tokio::task::spawn_blocking(move || pass.reconcile())
+                .await
+                .is_err()
+            {
+                log::warn!("task scheduler: a reconcile pass panicked");
+            }
         }
     });
 

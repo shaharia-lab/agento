@@ -2664,6 +2664,16 @@ Fingerprinting on `updated_at` would make each sweep replace a live timer, and
 replacing a `DurationJob`'s timer restarts its interval from now — a five-minute
 task swept every minute would never fire at all.
 
+**The timer is dropped only when the write that paused the row succeeded.**
+`update_task_after_run` used to unschedule unconditionally, which for a
+`run_immediately` task whose write had just failed left it `active`, timer-less
+*and* forgotten by the sweep — so `reconcile` reinstalled the timer, the task
+fired two seconds later, the write failed again, and a full agent run happened
+every minute indefinitely. A read-only data dir is enough to reach it. Go leaves
+the timer alone on a failed `UpdateTask` too. Note `swept` is *not* what bounds
+this: it is cleared by `unschedule_task` precisely so a task returning to service
+is picked up, so the bound has to be at the source.
+
 **The run's write-back re-reads the row.** `updateTaskAfterRun` writes the whole
 `ScheduledTask` snapshot the timer loaded, so an edit made while the run was in
 flight is clobbered — a task paused mid-run (timeouts reach 240 minutes) comes
