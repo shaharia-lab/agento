@@ -217,8 +217,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 28, "expected 28 migrations");
-        assert_eq!(expected_version(), 28);
+        assert_eq!(all.len(), 29, "expected 29 migrations");
+        assert_eq!(expected_version(), 29);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -247,7 +247,7 @@ mod tests {
         assert!(all[23]
             .sql
             .contains("RENAME COLUMN thinking_time_ms TO claude_working_time_ms"));
-        // Only 9, 26, 27 and 28 use IF NOT EXISTS; migration 2 must not have
+        // Only 9, 26, 27, 28 and 29 use IF NOT EXISTS; migration 2 must not have
         // acquired one, or a half-applied database would look migrated.
         assert!(!all[1].sql.contains("IF NOT EXISTS"));
     }
@@ -264,7 +264,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 28);
+        assert_eq!(current_version(&conn).expect("version"), 29);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -303,7 +303,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 28);
+        assert_eq!(current_version(&conn).expect("version"), 29);
     }
 
     /// The property this whole function exists for, and the one sequential
@@ -352,7 +352,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 28);
+        assert_eq!(current_version(&conn).expect("version"), 29);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -361,7 +361,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 28);
+        assert_eq!(recorded, 29);
     }
 
     #[test]
