@@ -159,7 +159,9 @@ pub async fn run(
         working_dir: row.working_dir.clone(),
         settings_profile_id: row.settings_profile_id.clone(),
         resume_session_id: Some(row.sdk_session_id.clone()).filter(|s| !s.is_empty()),
-        chat_id: chat_id.clone(),
+        // A chat pins a new CLI session to its own id; a scheduled run does not
+        // (#275), which is why this is a field rather than an unconditional.
+        custom_session_id: chat_id.clone(),
     };
     // Refuses for an agent whose tools this port cannot supply — before any
     // subprocess exists, so forwarding is safe.
@@ -169,7 +171,7 @@ pub async fn run(
     // in its `capabilities.mcp` (#311) — and they are **not** an unused
     // binding: dropping one stops its listener, so the whole vector has to be
     // moved into the stream task and released only once the subprocess is gone.
-    let (options, tool_servers) = runner::build_options(&spec, handler).await?;
+    let (options, tool_servers) = runner::build_options(&spec, Some(handler)).await?;
 
     // The subprocess starts here, and these are the last two `Err`s. Both are
     // still safe to forward, but for different reasons and neither is obvious:

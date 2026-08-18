@@ -38,6 +38,7 @@ pub mod schedule;
 pub mod sessions;
 pub mod settings;
 pub mod tasks;
+pub mod template;
 pub mod tools;
 pub mod uploads;
 pub mod version;
@@ -478,20 +479,19 @@ mod tests {
         assert!(!claims(&Method::GET, "/api/chats/abc-123/stop"));
         assert!(!claims(&Method::GET, "/api/chats/"));
 
-        // Tasks and job history: the five reads. The two POST actions share the
+        // Tasks and job history: the five reads, plus every write since #275
+        // moved the scheduler here. The two POST actions share the
         // `/api/tasks/{id}` prefix and must not be swallowed by it.
         assert!(claims(&Method::GET, "/api/tasks"));
         assert!(claims(&Method::GET, "/api/tasks/abc-123"));
         assert!(claims(&Method::GET, "/api/tasks/abc-123/job-history"));
         assert!(claims(&Method::GET, "/api/job-history"));
         assert!(claims(&Method::GET, "/api/job-history/abc-123"));
-        // Task writes all touch the scheduler, so they are #275's; the two
-        // job-history deletes are pure row removals and moved in #274.
-        assert!(!claims(&Method::POST, "/api/tasks"));
-        assert!(!claims(&Method::PUT, "/api/tasks/abc-123"));
-        assert!(!claims(&Method::POST, "/api/tasks/abc-123/pause"));
-        assert!(!claims(&Method::POST, "/api/tasks/abc-123/resume"));
-        assert!(!claims(&Method::DELETE, "/api/tasks/abc-123"));
+        assert!(claims(&Method::POST, "/api/tasks"));
+        assert!(claims(&Method::PUT, "/api/tasks/abc-123"));
+        assert!(claims(&Method::POST, "/api/tasks/abc-123/pause"));
+        assert!(claims(&Method::POST, "/api/tasks/abc-123/resume"));
+        assert!(claims(&Method::DELETE, "/api/tasks/abc-123"));
         assert!(claims(&Method::DELETE, "/api/job-history"));
         assert!(claims(&Method::DELETE, "/api/job-history/abc-123"));
         assert!(!claims(&Method::GET, "/api/tasks/"));

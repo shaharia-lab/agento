@@ -244,6 +244,15 @@ pub fn run() {
                         }
                     });
 
+                    // The task scheduler is ours too (#275): the sidecar runs
+                    // with AGENTO_SCHEDULER=off, so this replaces the
+                    // `initTaskScheduler` the Go server used to run at boot.
+                    // Unlike the two above it is not spawned — `start` only
+                    // lists the active tasks and installs a timer per row, and
+                    // the timers are themselves tasks — but like them a failure
+                    // to read the list is logged rather than fatal.
+                    crate::native::schedule::runtime::start(db.clone());
+
                     crate::native::scan::ensure_scan(db);
                 }
 

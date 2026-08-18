@@ -859,3 +859,178 @@ mod tests {
         );
     }
 }
+
+// ─── The subscriber (#275) ────────────────────────────────────────────────────
+
+/// The two event types `internal/scheduler` publishes, spelled as it spells
+/// them — these strings reach `notification_log.event_type` and the UI renders
+/// them, so a paraphrase is a divergence.
+pub mod event {
+    pub const TASK_FINISHED: &str = "tasks_scheduler.task_execution.finished";
+    pub const TASK_FAILED: &str = "tasks_scheduler.task_execution.failed";
+}
+
+/// `humanSubject`. An unknown type falls back to the raw string.
+fn human_subject(event_type: &str) -> &str {
+    match event_type {
+        event::TASK_FINISHED => "Scheduled Task Completed Successfully",
+        event::TASK_FAILED => "Scheduled Task Execution Failed",
+        other => other,
+    }
+}
+
+/// `shouldSendForEvent`. A nil preference is enabled, which is what the
+/// `Option` carries; an event this switch does not know is always sent.
+fn should_send_for_event(event_type: &str, settings: &NotificationSettings) -> bool {
+    let prefs = &settings.preferences.scheduled_tasks;
+    match event_type {
+        event::TASK_FINISHED => prefs.on_finished.unwrap_or(true),
+        event::TASK_FAILED => prefs.on_failed.unwrap_or(true),
+        _ => true,
+    }
+}
+
+/// `NotificationHandler.Handle`: settings → message → send → log.
+///
+/// This is the subscriber this module's header said could not exist yet — the
+/// publisher was the Go scheduler, in a process this code is not in. #275 moved
+/// the scheduler here, so the call is direct rather than over an event bus:
+/// there is one publisher and one subscriber, and an in-process bus between two
+/// functions would only be a place for a subscription to be forgotten.
+///
+/// **Every failure is logged and swallowed**, as Go's is. A notification that
+/// cannot be sent must not fail the task run that produced it — the job history
+/// row is the record of the run, and the email is a courtesy on top of it.
+///
+/// `payload`'s order is this port's, not Go's: `Handle` ranges a `map[string]string`
+/// to build the body, so Go's line order is random per send. Insertion order is
+/// used here, which is strictly more readable and cannot be "wrong" against an
+/// order Go does not have.
+pub fn handle(db_path: &Path, event_type: &str, payload: &[(&str, String)]) {
+    let settings = match get_stored_settings(db_path) {
+        Ok(settings) => settings,
+        Err(e) => {
+            log::error!("notification: failed to load settings: {e}");
+            return;
+        }
+    };
+    if !settings.enabled || !should_send_for_event(event_type, &settings) {
+        return;
+    }
+
+    let subject = template::build_subject(human_subject(event_type));
+    let body = payload
+        .iter()
+        .map(|(k, v)| format!("{k}: {v}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let send_err = smtp::send(
+        &settings.provider,
+        &smtp::Mail {
+            subject: subject.clone(),
+            body,
+        },
+    )
+    .err();
+    if let Some(e) = &send_err {
+        log::error!("notification: failed to send event={event_type:?} error={e}");
+    }
+
+    if let Err(e) = log_notification(db_path, event_type, &subject, send_err.as_deref()) {
+        log::error!("notification: failed to log delivery event={event_type:?} error={e}");
+    }
+}
+
+/// The settings as `Handle` reads them — **unmasked**, unlike
+/// [`get_settings`], which is the API read and replaces the password with a
+/// sentinel. Sending with the sentinel would authenticate as `***`.
+fn get_stored_settings(db_path: &Path) -> Result<NotificationSettings, String> {
+    let conn = db::open_read_only(db_path)?;
+    decode_settings(&super::settings::load_stored(&conn).notification_settings)
+}
+
+/// `SQLiteNotificationStore.LogNotification`.
+///
+/// `created_at` is `time.Now()` **local**, which is Go's — see
+/// [`crate::native::gotime::now_go_text_local`] for why it is reproduced rather
+/// than corrected to UTC.
+fn log_notification(
+    db_path: &Path,
+    event_type: &str,
+    subject: &str,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+    conn.execute(
+        "INSERT INTO notification_log
+            (event_type, provider, subject, status, error_msg, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            event_type,
+            // `SMTPProvider.Name()`.
+            "smtp",
+            subject,
+            if error.is_some() { "failed" } else { "sent" },
+            error.unwrap_or(""),
+            super::gotime::now_go_text_local(),
+        ],
+    )
+    .map_err(|e| format!("inserting notification log: {e}"))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod subscriber_tests {
+    use super::*;
+
+    fn settings(
+        enabled: bool,
+        on_finished: Option<bool>,
+        on_failed: Option<bool>,
+    ) -> NotificationSettings {
+        let mut s = NotificationSettings {
+            enabled,
+            ..Default::default()
+        };
+        s.preferences.scheduled_tasks.on_finished = on_finished;
+        s.preferences.scheduled_tasks.on_failed = on_failed;
+        s
+    }
+
+    #[test]
+    fn an_unset_preference_is_enabled_and_an_explicit_false_is_not() {
+        let unset = settings(true, None, None);
+        assert!(should_send_for_event(event::TASK_FINISHED, &unset));
+        assert!(should_send_for_event(event::TASK_FAILED, &unset));
+
+        let opted_out = settings(true, Some(false), Some(false));
+        assert!(!should_send_for_event(event::TASK_FINISHED, &opted_out));
+        assert!(!should_send_for_event(event::TASK_FAILED, &opted_out));
+
+        // The two preferences are independent, which is the shape a single
+        // "scheduled tasks" flag would collapse.
+        let finished_only = settings(true, Some(true), Some(false));
+        assert!(should_send_for_event(event::TASK_FINISHED, &finished_only));
+        assert!(!should_send_for_event(event::TASK_FAILED, &finished_only));
+    }
+
+    #[test]
+    fn an_unknown_event_is_sent_and_keeps_its_raw_subject() {
+        let s = settings(true, Some(false), Some(false));
+        assert!(should_send_for_event("something.else", &s));
+        assert_eq!(human_subject("something.else"), "something.else");
+    }
+
+    #[test]
+    fn the_two_known_subjects_are_gos_wording() {
+        assert_eq!(
+            human_subject(event::TASK_FINISHED),
+            "Scheduled Task Completed Successfully"
+        );
+        assert_eq!(
+            human_subject(event::TASK_FAILED),
+            "Scheduled Task Execution Failed"
+        );
+    }
+}

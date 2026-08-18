@@ -2543,27 +2543,211 @@ database and does nothing for the Claude config dir, and this suite overwrites
 `settings.json`. Exporting it before `start` is also what puts both
 implementations in one directory — a diff across two would mean nothing.
 
-### The scheduler: the computation moved, the ownership did not (#275)
+### The scheduler, and the port's third ownership flip (#275)
 
-**Only one process may schedule**, and today that process is Go: `cmd/web.go`'s
-`initTaskScheduler` constructs and starts one on every boot. Two schedulers over
-one `scheduled_tasks` table means every task fires twice and the Telegram
-webhook is re-registered under whichever instance registered last, so taking the
-scheduler is a *flip* on the #289 model — sidecar off, shell on, one commit —
-not a route that can forward on doubt. **That flip is blocked; see below.**
+**Only one process may schedule.** Two schedulers over one `scheduled_tasks`
+table fire every task twice and re-register the Telegram webhook under whichever
+instance registered last, so this is a *flip* on the #289 model — sidecar off,
+shell on, one commit — not a route that can forward on doubt. The flip has
+happened: `sidecar.rs` starts the Go server with **`AGENTO_SCHEDULER=off`**, and
+`cmd/web.go`'s `initTaskScheduler` returns before constructing one. Same four
+off-values and the same unset-means-on rule as `AGENTO_SCANNER`; unlike
+`AGENTO_INTEGRATIONS` it carries **no list**, because a scheduler is owned whole
+or not at all.
 
-What is here is the half that is verifiable before the flip, and the half most
-likely to be subtly wrong: **when a task fires**. `native/schedule/` ports
-`buildJobDefinition` and the `next()` of each `gocron/v2` job type it can
-produce, pinned to `desktop/parity/scheduler_vectors.json` — 68 cases generated
-from a *real* `gocron.Scheduler` driven by a `clockwork` fake clock
-(`go test ./internal/scheduler/ -update-scheduler-vectors`), asserted against Go
-by `internal/scheduler/schedule_vectors_test.go` and against Rust by
-`include_str!`, exactly the shape `gopath_vectors.json` uses. A change to
-`buildJobDefinition`, to gocron or to `robfig/cron` fails **Go's** suite first.
+**But the variable is set conditionally, which `AGENTO_SCANNER` is not**, and the
+reason is the one thing that makes this flip different from #289's: the task
+*writes* are behind the seam, and a registration has to happen in the process
+that stored the row. `may_serve` forwards every non-`GET` in both `Mode::Off` and
+`Mode::Diff`, so in those modes Go is the only writer — and a Go that had been
+told to stand down would store a task neither process ever schedules until the
+app restarts, which is exactly the split this change closes, reappearing through
+the escape hatch. `runtime::shell_owns_scheduler` is therefore the single
+predicate behind **both** halves: whether the sidecar is told to stand down, and
+whether `start` installs any timers. `AGENTO_DESKTOP_NATIVE=off` consequently
+means what it is documented to mean — the app behaves exactly as it did before
+the port.
 
-The semantics are gocron's, not the cron string's, and three of them are silent
-when reproduced wrong:
+One detail in the Go half is not cosmetic: `initTaskScheduler` now returns
+`service.TaskScheduler`, the interface, rather than `*scheduler.Scheduler`.
+`taskService` checks `s.scheduler != nil`, and a typed nil pointer in an
+interface is not nil — returning the concrete type would make every task write
+call `ScheduleTask` on a nil receiver and panic on its mutex.
+
+**Three pieces, and they had to move together:**
+
+- `native/schedule/` already held the *computation* — `buildJobDefinition` and
+  the `next()` of each `gocron/v2` job type, pinned to
+  `desktop/parity/scheduler_vectors.json` (68 cases from a real
+  `gocron.Scheduler` on a `clockwork` fake clock). Untouched by this change; see
+  the semantics below, which are still the part most likely to be subtly wrong.
+- `native/schedule/runtime.rs` is `scheduler.go`: the `task id → timer` registry,
+  `ScheduleTask`/`UnscheduleTask`, the three-slot semaphore, and `Start`.
+- `native/schedule/executor.rs` is `executor.go`: one run, end to end.
+- The five task writes (`POST /api/tasks`, `PUT`/`DELETE /api/tasks/{id}`,
+  `pause`, `resume`) moved with them, because each also registers or unregisters
+  a cron entry — a task stored by one process and scheduled by the other is a
+  task that never fires. `write_routes.json` records them as `native` now.
+
+**The rule the executor is written around.** With no Go scheduler listening,
+*a fire this process declines is a fire nothing serves* — the seam's "return
+`Err` and let Go answer" is not available, because there is no request. So every
+path ends in a `job_history` row. That includes the one case Go has no
+equivalent for: `chat/runner.rs::build_options` can still refuse an agent whose
+tools this build cannot host (a name in `mcps.yaml`, or a `whatsapp` row), and
+where a chat forwards, a scheduled run records a **failed** row reading
+`agent tools unavailable in this build: …` and publishes the failed event.
+Silence is the one outcome that is not allowed, because a job history with no row
+is indistinguishable from a task that was not due.
+
+**What `build_options` had to grow, and why it is not a special case.** The chat
+turn always has an interactive permission handler; a scheduled run never does.
+Go models this as `if opts.PermissionHandler != nil` in *two* places, so the
+parameter is now `Option<PermissionHandler>` and both branches are reproduced:
+with a handler, `WithDefaultPermissions` overrides whatever the agent configured
+(which is why a `plan` agent still prompts in the UI); without one, the agent's
+own `permission_mode` applies — and an empty one means **bypass**, which is what
+an unattended run needs since nothing is there to answer a prompt. `chat_id`
+likewise became `custom_session_id`: a chat pins a new CLI session to its own id,
+while `buildRunOptions` sets neither session field, so the CLI generates one and
+`saveSessionResults` stores it back.
+
+`resolveAgentConfig`'s no-agent branch returns a **synthesized `Agent`**, not
+`None`, and that is load-bearing rather than tidy: Go builds a non-nil
+`config.AgentConfig` there, and `resolveToolsAndMCP` gives a non-nil config with
+empty capabilities **all twelve built-in tools** while a nil config gets none.
+`None` would run a no-agent task with no `--allowedTools` argument at all.
+
+**One deliberate divergence in the timer, and one rule that is not a divergence
+at all.** gocron parks for the whole interval; `sleep_until` wakes at most every
+60 seconds and re-reads the **wall clock**, because `tokio::time::sleep` is
+measured on `Instant`, which does not advance while the machine is suspended — on
+a laptop a single long park fires late by however long the lid was shut. The
+chunking rule is `next_chunk`, a pure function of the two clocks, because a test
+of the loop itself would wait the real duration: a paused tokio clock does not
+move `Utc::now()`.
+
+Waking up is only half of it. **After each fire the loop re-anchors against
+`Utc::now()` via `advance_past_now`, rather than adding one interval**, which is
+what gocron's `selectExecJobsOutForRescheduling` does under its own "the machine
+went to sleep, and woke up some time later" comment. Stepping one interval at a
+time and firing whenever the result is past *replays every missed window*: a
+seven-minute task and a lid shut for eight hours is ~68 back-to-back Claude runs,
+68 chat sessions, 68 `job_history` rows and a `stop_after_count` budget gone in
+seconds. An NTP jump forward does the same. Note the walk is `while next < now`,
+so a fire landing *exactly* on the wake instant is due rather than skipped —
+gocron's `for next.Before(s.now())` has the same strictness, and it is only
+observable when the interval divides the gap.
+
+**Nothing blocking may run on the run's critical path.** `notifications::handle`
+reaches lettre's *blocking* `SmtpTransport`, and Go never had this problem:
+`eventbus.Publish` is a channel send picked up by worker goroutines. So
+`executor::publish` hands it to `spawn_blocking` and **does not await it** — the
+caller is still holding a scheduler semaphore permit, and an unreachable mail
+host would otherwise throttle the scheduler to three runs per SMTP timeout while
+starving the proxy and every in-flight SSE stream.
+
+**A scheduled run uses `claude::client::query`, not `Session`.** That is Go's
+own choice — `RunAgent` calls `claude.Query` — and it is not interchangeable
+here: a `Session` sets `session_mode`, and `process.rs`'s reader then
+deliberately neither closes stdin nor stops at the `result` event, "so the
+subprocess survives for the next send". A scheduled run has no next send, so the
+event channel never closes, the drain blocks past the answer, and **every run
+sits until its timeout** — 30 minutes by default, up to 240 — then records
+`failed`, persists no chat, and holds one of the three semaphore permits
+throughout. The one-shot reader closes stdin and breaks after emitting the
+result, which is also what makes `collectRunResult`'s deliberate drain-past-the-
+result terminate instead of hang.
+
+`tests/scheduled_run.rs` is what catches this, and **its fake CLI must not exit
+after the result**. A fake that exits closes stdout, ends the stream for free and
+passes against a drain that never terminates on its own — the first version of
+that test did exactly that and went green against the hang. A real CLI in session
+mode stays alive; the fake has to as well.
+
+**A task write can still fall back, so the timers are swept.** Every native task
+write returns `WriteError::Fallback` on an unopenable database, a schema newer
+than this build, a `SQLITE_BUSY` past the five-second timeout, or a failed
+begin/commit — and the seam then forwards to a sidecar that was told to stand
+down, whose `taskService` applies the row change and skips the registration. So
+`Scheduler::reconcile` runs every 60 seconds and brings the installed timers back
+in line with the stored rows. It is a sweep rather than a hook on the forward, so
+it also catches a row changed by anything else and the seam needs no knowledge of
+tasks.
+
+It is idempotent **by fingerprint**, and the fingerprint is deliberately narrow:
+`schedule_type` plus the encoded `schedule_config`, and explicitly *not*
+`updated_at`, which `updateTaskAfterRun` bumps after every single run.
+Fingerprinting on `updated_at` would make each sweep replace a live timer, and
+replacing a `DurationJob`'s timer restarts its interval from now — a five-minute
+task swept every minute would never fire at all.
+
+**The timer is dropped only when the write that paused the row succeeded.**
+`update_task_after_run` used to unschedule unconditionally, which for a
+`run_immediately` task whose write had just failed left it `active`, timer-less
+*and* forgotten by the sweep — so `reconcile` reinstalled the timer, the task
+fired two seconds later, the write failed again, and a full agent run happened
+every minute indefinitely. A read-only data dir is enough to reach it. Go leaves
+the timer alone on a failed `UpdateTask` too. Note `swept` is *not* what bounds
+this: it is cleared by `unschedule_task` precisely so a task returning to service
+is picked up, so the bound has to be at the source.
+
+**The run's write-back re-reads the row.** `updateTaskAfterRun` writes the whole
+`ScheduledTask` snapshot the timer loaded, so an edit made while the run was in
+flight is clobbered — a task paused mid-run (timeouts reach 240 minutes) comes
+back `active`. Go got away with that because nothing re-registered the cron
+entry; with a reconcile sweep the timer returns within a minute and the "paused"
+task goes on firing. So the port re-reads inside the write's own transaction and
+applies only the fields the run owns. It never assigns `active`, so a concurrent
+pause simply survives.
+
+**The sweep is armed before the first read can fail.** A transient `SQLITE_BUSY`
+at boot used to return from `start` with `RUNNING` already set and the sidecar
+already told to stand down — no timers, no sweep, no way back until restart. The
+mechanism written to recover from missing timers has to survive the failure it is
+most likely to be needed for.
+
+**It also remembers what it acted on** (`swept`, cleared by `unschedule_task`),
+which is why an unschedulable task is not retried every minute: an active
+`one_off` whose `run_at` passed while the machine was off fails forever, and
+~1440 warning lines a day into a 5 MiB log is worse than the one line Go wrote at
+startup.
+
+**`agent.Interpolate` has two callers with two policies**, in
+`native/template.rs`. The scheduler uses the strict form, because Go's
+`resolveSystemPrompt` propagates `MissingVariableError` and a scheduled run must
+end in a recorded `job_history` row rather than shipping a raw `{{name}}` to the
+model — the executor checks the agent's system prompt itself, before
+`build_options`, since that function is shared with chat. The chat path uses the
+**lenient** form, which substitutes the built-ins and leaves an unknown
+placeholder in the text. That is not sloppiness inherited by accident: it is what
+that path has always done, and an agent whose prompt contains a literal `{{…}}`
+for some other reason (a JSON example, another tool's syntax) would otherwise
+lose date substitution entirely. One loop, two policies.
+
+**The run timeout is one deadline across three stages.** Go wraps the whole
+`agent.RunAgent` call; timing out only the event drain would let a subprocess
+that hangs before its first event leave the `job_history` row `running` forever
+*and* hold its permit for the life of the process. It is a shared
+`tokio::time::Instant` rather than one future wrapping all three, because
+`Session` has **no `Drop`**: cancelling a future that owns one abandons the
+subprocess instead of stopping it, so `close()` has to stay reachable.
+
+**Go's `scheduleTaskOnStartup` has no analogue.** It exists to `recover()` from
+`robfig/cron` panicking on an expression of exactly `CRON_TZ=UTC` (#330);
+`schedule::cron::parse` returns a `Result` for that input, so there is nothing to
+catch and the row is skipped with a warning either way.
+
+**The notification subscriber is wired at last.** `internal/notification`'s
+handler was ported in #307 with its header noting the subscriber "cannot exist
+yet" — the publisher was the Go scheduler, in another process. It is now a direct
+call: `notifications::handle(db_path, event, payload)`, one publisher and one
+subscriber, with an in-process event bus between two functions serving no
+purpose. Note `notification_log.created_at` is `time.Now()` **local**, not UTC —
+the one write in the codebase that is — and `gotime::now_go_text_local` exists to
+reproduce it, because `ListNotifications` orders on that column *as text*.
+
+The gocron semantics the vectors pin, three of them silent when reproduced wrong:
 
 - **`run_immediately` is a one-time job at `now + 2s`.** gocron discards
   one-time start times that are not strictly in the future and then refuses the
@@ -2591,58 +2775,14 @@ Two more the vectors pin, both invisible in UTC:
   Sunday when 02:00 happens twice. `*/30 * * * *` does repeat through that hour,
   because the guard only catches an identical wall clock.
 - **A one-off keeps `run_at`'s own offset**; every other job type renders in the
-  scheduler's location. That is why `Fire` carries an offset beside the instant.
+  scheduler's location, which is `time.Local` resolved through
+  `iana_time_zone::get_timezone`. That is why `Fire` carries an offset beside the
+  instant.
 
 `cron.rs` reuses `analytics/buckets.rs`'s `go_date`/`add_date` rather than
 `chrono`'s calendar arithmetic — robfig resets the lower fields with
 `time.Date`, which *normalizes* a wall clock a DST gap removed instead of
 failing, and that normalization is the answer on the spring-forward day.
-
-**The executor is deliberately not ported.** It is fifteen functions needing the
-agent runner, job-history writes, the event bus, chat-session creation and OTel
-spans, and — unlike `migrate::apply`, which is small with a crisp contract — an
-unwired executor has no testable contract at all. It would be several hundred
-lines nothing could check until the flip. It follows the flip; it does not
-precede it.
-
-**The blocker, verified.** The flip needs Rust to *run* a task, and
-`chat/runner.rs::build_options` still refuses an agent whose capabilities name
-an MCP server this build cannot host — one of the six providers (#313). For a chat that is safe — the three steering routes forward
-and Go answers, because Go holds the session. **For a scheduled task there is no
-second implementation behind it**: with the sidecar not scheduling, a task Rust
-cannot run does not fail, it *silently never runs*, and the job history has no
-row to show for it. That is the one property the whole port has relied on,
-absent.
-
-How much it strands: an agent is runnable natively only if its allowlist is
-built-ins plus local tools. Against 12 built-ins and `internal/tools`' one there
-are 61 integration tools across the six supported providers, plus anything in
-`mcps.yaml` — none of which Rust can supply, and the scheduled task that fetches
-a calendar or triages issues is the archetype rather than the edge. #310 moved
-one of the two agents Agento *ships* (`agents/hello-world.yaml`, which names
-`local: current_time`) off that list; the other side of the count is unchanged.
-(Neither `~/.agento` nor `~/.agento-desktop-dev` has an agent, task or
-integration on this machine, so that is the structural count, not a measured
-one.)
-
-There is also no escape hatch that keeps Go executing: the API has no
-"run this task now" route, so a Rust-owned timer has nothing to call. Adding one
-would put the scheduling decision in two processes again, which is the hazard
-the flip exists to remove.
-
-So `cmd/web.go` is **untouched** — no `AGENTO_SCHEDULER` gate was added, because
-a gate whose only correct setting is "on" is a switch for turning tasks off. The
-flip is one commit when `build_options` can supply every tool source: gate
-`initTaskScheduler` on `AGENTO_SCHEDULER` the way `Cache.EnsureScan` is gated on
-`AGENTO_SCANNER` and `IntegrationRegistry` on `AGENTO_INTEGRATIONS` (unset = on,
-unrecognized = on, so a plain `agento web` is
-unchanged and a typo cannot disable it — and note the integrations switch also
-carries a *list*, which a scheduler gate would not need), set it from
-`sidecar.rs`, port the
-executor, and move `POST/PUT/DELETE /api/tasks` and the pause/resume actions —
-which #274 left with Go precisely because each also calls
-`ScheduleTask`/`UnscheduleTask`, and a row written without a registration is a
-task that never fires.
 
 ### Do not port
 
