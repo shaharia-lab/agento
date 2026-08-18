@@ -1756,7 +1756,13 @@ timeout included) are fine; the parity suites use those.
   storage stays UTC. Always send `tz`; omitting it falls the dashboard back to
   UTC silently.
 - **Session pagination is keyset, not offset.** The cursor encodes the sort, so
-  changing `sort` invalidates it — reset the cursor or get a 400.
+  changing `sort` invalidates it — reset the cursor or get a 400. Its tiebreak
+  is the whole row key, `(session_id, project_path)`: `session_id` alone is not
+  unique, and on the id alone two rows sharing an id *and* a sort value are one
+  position, so the second is skipped by every page while `facets` still counts
+  it (#364). A cursor minted before the `p` field decodes with it empty and
+  pages exactly as it used to, which is Go's missing-field behaviour and why the
+  Rust field carries `#[serde(default)]`.
 - **Cache invalidation is multi-dimensional**: TTL (1h), `scanner_version`,
   pricing revision fingerprint, and idle-threshold drift each force a re-read.
 - **Chat SSE is a POST response**, so `EventSource` cannot be used. Events are

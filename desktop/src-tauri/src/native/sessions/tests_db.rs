@@ -283,7 +283,7 @@ fn metric_sql_matches_the_shared_cross_language_vectors() {
 
 #[test]
 fn keyset_pagination_visits_every_row_exactly_once() {
-    let sessions: Vec<TestSession> = (0..12)
+    let mut sessions: Vec<TestSession> = (0..12)
         .map(|i| TestSession {
             id: Box::leak(format!("s{i:02}").into_boxed_str()),
             // A deliberate tie in the sort column: without the session_id
@@ -293,29 +293,153 @@ fn keyset_pagination_visits_every_row_exactly_once() {
             ..Default::default()
         })
         .collect();
+    // And a tie in the *tiebreak* as well — one id under two project paths,
+    // which the table's key permits and which the id-only cursor cannot tell
+    // apart. Without this the suite ties only the sort column, and the one
+    // thing that can still break the order goes untested (#364).
+    for project in ["/home/u/a", "/home/u/b"] {
+        sessions.push(TestSession {
+            id: "s-dup",
+            project,
+            cost_usd: 10.0,
+            ..Default::default()
+        });
+    }
     let conn = fixture(&sessions);
 
-    let mut seen = Vec::new();
+    // Every page size, so the boundary is guaranteed to fall between the two
+    // rows sharing an id; a fixed size can put the whole pair inside one page.
+    for limit in 1..=5 {
+        let mut seen = Vec::new();
+        let mut cursor = String::new();
+        for _ in 0..sessions.len() + 1 {
+            let q = SessionQuery {
+                limit,
+                sort: Sort::Cost,
+                cursor: cursor.clone(),
+                ..Default::default()
+            };
+            let page = list_page(&conn, &no_settings(), &q).expect("page");
+            seen.extend(
+                page.items
+                    .iter()
+                    .map(|s| format!("{}@{}", s.session_id, s.project_path)),
+            );
+            cursor = page.next_cursor.clone();
+            if cursor.is_empty() {
+                break;
+            }
+        }
+
+        seen.sort();
+        let mut want: Vec<String> = sessions
+            .iter()
+            .map(|s| format!("{}@{}", s.id, s.project))
+            .collect();
+        want.sort();
+        assert_eq!(seen, want, "limit {limit}: every row exactly once");
+    }
+}
+
+#[test]
+fn a_duplicated_session_id_on_a_tied_sort_value_is_still_reachable() {
+    // The fixture from #364: `claude_session_cache` is keyed on
+    // `(session_id, project_path)`, so one id legitimately yields two rows.
+    // When those two also tie on the sort column, a cursor carrying only the
+    // id cannot tell them apart — the walk visits `dup@/a`, jumps straight to
+    // `other@/c`, and `dup@/b` is never returned by any page, while `facets`
+    // counts it with `COUNT(*)` and the toolbar says three.
+    let conn = fixture(&[
+        TestSession {
+            id: "dup",
+            project: "/a",
+            cost_usd: 5.0,
+            ..Default::default()
+        },
+        TestSession {
+            id: "dup",
+            project: "/b",
+            cost_usd: 5.0,
+            ..Default::default()
+        },
+        TestSession {
+            id: "other",
+            project: "/c",
+            cost_usd: 1.0,
+            ..Default::default()
+        },
+    ]);
+
+    let mut walk = Vec::new();
     let mut cursor = String::new();
-    for _ in 0..10 {
+    for _ in 0..5 {
         let q = SessionQuery {
-            limit: 5,
+            limit: 1,
             sort: Sort::Cost,
             cursor: cursor.clone(),
             ..Default::default()
         };
         let page = list_page(&conn, &no_settings(), &q).expect("page");
-        seen.extend(page.items.iter().map(|s| s.session_id.clone()));
+        walk.extend(
+            page.items
+                .iter()
+                .map(|s| format!("{}@{}", s.session_id, s.project_path)),
+        );
         cursor = page.next_cursor.clone();
         if cursor.is_empty() {
             break;
         }
     }
+    assert_eq!(walk, vec!["dup@/b", "dup@/a", "other@/c"]);
 
-    seen.sort();
-    let mut want: Vec<String> = sessions.iter().map(|s| s.id.to_string()).collect();
-    want.sort();
-    assert_eq!(seen, want, "every row exactly once");
+    let f = facets(
+        &conn,
+        &no_settings(),
+        &SessionQuery {
+            sort: Sort::Cost,
+            ..Default::default()
+        },
+    )
+    .expect("facets");
+    assert_eq!(
+        f.total,
+        walk.len() as i64,
+        "the toolbar must not count a row the scroll cannot reach"
+    );
+}
+
+#[test]
+fn a_cursor_minted_before_the_project_tiebreak_still_pages() {
+    let sessions: Vec<TestSession> = (0..5)
+        .map(|i| TestSession {
+            id: Box::leak(format!("s-{i}").into_boxed_str()),
+            cost_usd: f64::from(i),
+            ..Default::default()
+        })
+        .collect();
+    let conn = fixture(&sessions);
+
+    // A scroll in flight when the binary changed carries a cursor with no "p"
+    // at all — spelled out here rather than minted, because `Cursor` now always
+    // emits the key. It decodes with the field empty (Go leaves a missing field
+    // at its zero value, and `#[serde(default)]` is what matches that), and
+    // `c.project_path < ''` is never true, so the predicate degrades to the
+    // id-only one it was minted under rather than dropping the rest of the
+    // scroll.
+    let legacy = super::query::base64_url_nopad(br#"{"s":"cost","v":"3","id":"s-3"}"#);
+    let page = list_page(
+        &conn,
+        &no_settings(),
+        &SessionQuery {
+            limit: 10,
+            sort: Sort::Cost,
+            cursor: legacy,
+            ..Default::default()
+        },
+    )
+    .expect("paging a legacy cursor");
+    let ids: Vec<&str> = page.items.iter().map(|s| s.session_id.as_str()).collect();
+    assert_eq!(ids, vec!["s-2", "s-1", "s-0"]);
 }
 
 #[test]

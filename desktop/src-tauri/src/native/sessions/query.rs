@@ -473,8 +473,8 @@ fn sql_time_from_millis(ms: i64) -> String {
     crate::native::gotime::go_string_from_millis(ms)
 }
 
-/// A keyset position: the sort value of the last row returned, plus its session
-/// ID as the tiebreak.
+/// A keyset position: the sort value of the last row returned, plus the row's
+/// primary key as the tiebreak.
 ///
 /// Keyset rather than OFFSET, because OFFSET makes the database walk and
 /// discard every skipped row, and because a scan completing mid-scroll would
@@ -490,6 +490,19 @@ pub struct Cursor {
     #[serde(rename = "v")]
     pub value: String,
     pub id: String,
+    /// The second half of the tiebreak. `claude_session_cache` is keyed on
+    /// `(session_id, project_path)`, so a session id is not unique: one id
+    /// legitimately yields two rows when the same session was seen under two
+    /// project paths. On the id alone the pair is indistinguishable to the
+    /// keyset predicate and the second row is skipped by every page, while
+    /// `facets` still counts it.
+    ///
+    /// A cursor minted before this field existed carries no `p`, so it decodes
+    /// empty (`#[serde(default)]`) and `c.project_path < ''` is never true —
+    /// such a cursor pages exactly as it used to rather than losing a row
+    /// mid-scroll.
+    #[serde(rename = "p", default)]
+    pub project: String,
 }
 
 /// Returned when a cursor was minted under a different sort than the request
@@ -547,7 +560,7 @@ pub fn cursor_value(s: &super::summary::SessionSummary, sort: Sort) -> String {
 }
 
 /// base64 RawURLEncoding: URL alphabet, no padding.
-fn base64_url_nopad(bytes: &[u8]) -> String {
+pub(super) fn base64_url_nopad(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
@@ -625,6 +638,7 @@ mod tests {
             sort: "cost".into(),
             value: "36.3".into(),
             id: "s1".into(),
+            project: "/home/u/p".into(),
         };
         let encoded = c.encode();
         assert!(Cursor::decode(&encoded, Sort::Cost)
@@ -645,12 +659,27 @@ mod tests {
             sort: "recent".into(),
             value: "2026-08-13T10:00:00Z".into(),
             id: "s1".into(),
+            project: "/home/u/p".into(),
         };
         let decoded = base64_url_nopad_decode(&c.encode()).expect("decode");
         assert_eq!(
             String::from_utf8(decoded).expect("utf-8"),
-            r#"{"s":"recent","v":"2026-08-13T10:00:00Z","id":"s1"}"#
+            r#"{"s":"recent","v":"2026-08-13T10:00:00Z","id":"s1","p":"/home/u/p"}"#
         );
+    }
+
+    /// Go leaves a field absent from the JSON at its zero value and returns no
+    /// error, so a cursor minted before `p` existed must decode rather than be
+    /// refused — an over-reject here would break every scroll in flight across
+    /// an upgrade.
+    #[test]
+    fn a_cursor_without_the_project_field_decodes_with_it_empty() {
+        let raw = base64_url_nopad(br#"{"s":"cost","v":"36.3","id":"s1"}"#);
+        let c = Cursor::decode(&raw, Sort::Cost)
+            .expect("decode")
+            .expect("some");
+        assert_eq!(c.id, "s1");
+        assert_eq!(c.project, "");
     }
 
     #[test]
