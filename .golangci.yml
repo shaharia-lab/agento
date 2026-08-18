@@ -115,6 +115,17 @@ linters:
       - text: "Error return value of .*(Error|Errorf|Fatal|Fatalf|Log|Logf|Print|Printf|Skip|Skipf) is not checked"
         linters:
           - errcheck
+      # SA5011 is wrong about the `if x == nil { t.Fatal(...) }` guard these
+      # tests use everywhere: it calls the following dereference unguarded,
+      # which would only hold if `(*testing.T).Fatal` could return — it ends in
+      # runtime.Goexit. Excluded rather than suppressed at each site because
+      # the analyzer reports the pair as two diagnostics in two *different*
+      # files, so a `//nolint` on the dereference silences half of it and the
+      # other half resurfaces attributed to an unrelated test file.
+      - path: _test\.go
+        text: "SA5011"
+        linters:
+          - staticcheck
 
 formatters:
   enable:

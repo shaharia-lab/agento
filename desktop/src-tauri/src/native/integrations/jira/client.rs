@@ -59,7 +59,7 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 /// `build()` and reports an unusable store as a builder error. That has to reach
 /// the model as Go's own `request failed` rather than as a panic inside a handler
 /// `rmcp` spawned detached.
-fn http_client() -> Option<&'static reqwest::Client> {
+pub(super) fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -220,7 +220,7 @@ async fn send(
 /// there was anything to truncate. Lossy UTF-8 for `confluence::client`'s
 /// reason — a Go string holds arbitrary bytes and a Rust `String` cannot, and
 /// `rmcp` demands a `String` at the end of the pipe anyway.
-async fn read_capped(
+pub(super) async fn read_capped(
     ct: &CancellationToken,
     response: reqwest::Response,
 ) -> Result<String, String> {

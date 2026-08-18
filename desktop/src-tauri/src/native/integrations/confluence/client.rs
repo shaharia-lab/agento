@@ -59,7 +59,7 @@ const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 /// `calling confluence API: request failed` — a handshake that cannot complete
 /// is a transport failure there too — rather than as a panic inside a handler
 /// `rmcp` spawned detached.
-fn http_client() -> Option<&'static reqwest::Client> {
+pub(super) fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -202,9 +202,22 @@ async fn send(
 /// response this reaches is JSON, and the alternative — carrying `Vec<u8>`
 /// through to the `ContentBlock` — would only move the same conversion to the
 /// end of the pipe, where `rmcp` demands a `String` anyway.
-async fn read_capped(
+pub(super) async fn read_capped(
     ct: &CancellationToken,
     response: reqwest::Response,
+) -> Result<String, String> {
+    read_capped_at(ct, response, MAX_RESPONSE_BYTES).await
+}
+
+/// The same read with the cap as a parameter, because `validate.go` writes its
+/// own `io.LimitReader` at **1 MiB** rather than reusing `tools.go`'s 2 MiB —
+/// and the cap is observable: it is the body a non-200 status reports verbatim.
+/// Truncating a 2 MiB read afterwards would not be the same operation, since
+/// `from_utf8_lossy` has already turned each invalid byte into three.
+pub(super) async fn read_capped_at(
+    ct: &CancellationToken,
+    response: reqwest::Response,
+    max_bytes: usize,
 ) -> Result<String, String> {
     let mut body = Vec::new();
     let mut stream = Box::pin(response.bytes_stream());
@@ -217,8 +230,8 @@ async fn read_capped(
             None => break,
             Some(Ok(chunk)) => {
                 body.extend_from_slice(&chunk);
-                if body.len() >= MAX_RESPONSE_BYTES {
-                    body.truncate(MAX_RESPONSE_BYTES);
+                if body.len() >= max_bytes {
+                    body.truncate(max_bytes);
                     break;
                 }
             }

@@ -58,6 +58,7 @@
 
 pub mod client;
 pub mod messaging;
+pub mod validate;
 
 #[cfg(test)]
 mod tests_vectors;

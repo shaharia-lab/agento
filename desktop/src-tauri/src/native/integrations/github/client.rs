@@ -75,7 +75,7 @@ static API_BASE: RwLock<Option<String>> = RwLock::new(None);
 /// which server the next request reaches, and the caller is a test either way,
 /// so this panics rather than guessing.
 #[cfg(test)]
-fn api_base() -> String {
+pub(super) fn api_base() -> String {
     API_BASE
         .read()
         .expect("the github API base lock is poisoned")
@@ -86,7 +86,7 @@ fn api_base() -> String {
 /// Where requests go. There is one answer in a shipped binary, because nothing
 /// outside a test can move it — see [`API_BASE`].
 #[cfg(not(test))]
-fn api_base() -> String {
+pub(super) fn api_base() -> String {
     DEFAULT_API_BASE.to_string()
 }
 
@@ -96,7 +96,7 @@ fn api_base() -> String {
 /// per-integration configuration: GitHub Enterprise would need a per-row base,
 /// which the Go side does not have either.
 #[cfg(test)]
-pub(super) fn set_api_base(base: Option<String>) {
+pub(crate) fn set_api_base(base: Option<String>) {
     *API_BASE
         .write()
         .expect("the github API base lock is poisoned") = base;
@@ -113,7 +113,7 @@ pub(super) fn set_api_base(base: Option<String>) {
 /// while holding it, which is exactly what `clippy::await_holding_lock` exists
 /// to refuse.
 #[cfg(test)]
-pub(super) async fn api_base_lock() -> tokio::sync::MutexGuard<'static, ()> {
+pub(crate) async fn api_base_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     LOCK.lock().await
 }
@@ -129,7 +129,7 @@ pub(super) async fn api_base_lock() -> tokio::sync::MutexGuard<'static, ()> {
 /// `calling GitHub …: request failed` — a handshake that cannot complete is a
 /// transport failure there too — rather than as a panic inside a handler
 /// `rmcp` spawned detached.
-fn http_client() -> Option<&'static reqwest::Client> {
+pub(super) fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -402,7 +402,7 @@ async fn send(
 /// alternative — carrying `Vec<u8>` through to the `ContentBlock` — would only
 /// move the same conversion to the end of the pipe, where `rmcp` demands a
 /// `String` anyway.
-async fn read_capped(
+pub(super) async fn read_capped(
     ct: &CancellationToken,
     response: reqwest::Response,
     cap: usize,

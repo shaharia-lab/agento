@@ -147,6 +147,11 @@ pub mod telegram;
 /// projection living next door, where nothing that builds a response can see it.
 pub mod oauth;
 pub mod registry;
+/// `POST /api/integrations/{id}/auth/validate` — five remote validations, each
+/// writing its own `auth` payload. Beside `registry` for the same reason: it is
+/// the second place in the port that reads `integrations.credentials`, and this
+/// module's "Secrets" rule stays literally true with it living next door.
+pub mod token_validate;
 pub mod webhook;
 
 use std::collections::BTreeMap;
@@ -448,6 +453,9 @@ enum Route<'a> {
     AuthStart(&'a str),
     /// `{id}/auth/status` — polls the in-flight flow, or the stored token.
     AuthStatus(&'a str),
+    /// `{id}/auth/validate` — validates stored token credentials against the
+    /// provider and writes the type-specific `auth` payload (#318).
+    AuthValidate(&'a str),
     /// `{id}/webhook/status` — the stored Telegram webhook state (#319).
     WebhookStatus(&'a str),
     /// `{id}/webhook/register` — POST registers with Telegram, DELETE removes.
@@ -478,6 +486,9 @@ fn route_of(path: &str) -> Option<Route<'_>> {
     }
     if let Some(id) = rest.strip_suffix("/auth/status") {
         return segment(id).map(Route::AuthStatus);
+    }
+    if let Some(id) = rest.strip_suffix("/auth/validate") {
+        return segment(id).map(Route::AuthValidate);
     }
     if let Some(id) = rest.strip_suffix("/webhook/status") {
         return segment(id).map(Route::WebhookStatus);
@@ -564,11 +575,26 @@ fn segment(value: &str) -> Option<&str> {
 /// restarted. Go fires its own from a goroutine (`reloadIntegration`), so doing
 /// it off the response path is parity rather than a shortcut.
 ///
-/// # What is left
+/// # What is left, and why it is not dead code now that the route is native
 ///
 /// One route: `POST …/auth/validate`, an **event** — a credential was just
-/// written, so the reload is unconditional, exactly as Go's is. It stays here
-/// because that route is still forwarded; see `claims`.
+/// written, so the reload is unconditional, exactly as Go's is.
+///
+/// #318 made that route native, which looks like it should retire this hook the
+/// way #367 retired `AuthStatusPolled`. It does not, and the difference is the
+/// seam mode. `native::may_serve` refuses **every** write in `Mode::Off` and
+/// `Mode::Diff`, so in those two modes the request forwards and Go answers it —
+/// while `AGENTO_INTEGRATIONS` is set **unconditionally** in `sidecar.rs`,
+/// unlike `AGENTO_SCHEDULER`, so the shell is still the one hosting the servers.
+/// Go's `Reload` therefore still reaches nothing in exactly those modes, and
+/// without this hook an integration validated under `AGENTO_DESKTOP_NATIVE=off`
+/// would stay unhosted until the next boot's `start_all`.
+///
+/// So the two paths are complements, not duplicates: `token_validate::serve`
+/// reloads directly when it answers, and this fires when it did not get to.
+/// They cannot both run for one request — a request is either served or
+/// forwarded — so there is no double reload to worry about, and one would be
+/// harmless anyway.
 pub fn reload_after_forward<'a>(method: &Method, path: &'a str) -> Option<(&'a str, Trigger)> {
     let rest = path.strip_prefix("/api/integrations/")?;
     if method == Method::POST {
@@ -598,6 +624,12 @@ fn claims(method: &Method, path: &str) -> bool {
         Some(Route::Trigger(..)) => method == Method::PUT || method == Method::DELETE,
         Some(Route::AuthStart(_)) => method == Method::POST,
         Some(Route::AuthStatus(_)) => method == Method::GET,
+        // #318's remaining half. It calls out to the provider, so
+        // `token_validate`'s header states the order the registration routes
+        // established: everything fallible before the call, and the one write
+        // after it is answered natively because Go answers its failure with the
+        // same 400 body as a failed validation.
+        Some(Route::AuthValidate(_)) => method == Method::POST,
         // #319. The reason this stayed with Go — "asks Telegram, over the
         // network, with the bot token" — was simply wrong: `GetWebhookStatus`
         // reads three columns off the row and composes a URL from the public
@@ -628,6 +660,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
             }
             Some(Route::Trigger(id, rid)) => finish(delete_trigger_rule(db, id, rid)),
             Some(Route::AuthStart(id)) => finish(start_oauth(db, id)),
+            Some(Route::AuthValidate(id)) => finish(token_validate::serve(db, id)),
             Some(Route::WebhookRegister(id)) if req.method == Method::DELETE => {
                 finish(super::trigger::serve_delete(db, id))
             }
@@ -681,6 +714,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         // `claims` never admits a GET here — chi has no such route, so Go 405s
         // and forwarding is what reproduces that.
         Some(Route::AuthStart(_))
+        | Some(Route::AuthValidate(_))
         | Some(Route::WebhookRegister(_))
         | Some(Route::WebhookRegenerate(_))
         | Some(Route::Trigger(..))
@@ -1622,20 +1656,27 @@ mod tests {
         assert!(!claims(&Method::POST, "/api/integrations/abc/triggers/r1"));
         assert!(!claims(&Method::PUT, "/api/integrations/abc/triggers/r1/x"));
 
-        // #318: the OAuth flow is the shell's, so its two routes are claimed.
+        // #318: the whole auth surface is the shell's — the OAuth flow, and
+        // since this issue's second half the token validation too.
         assert!(claims(&Method::GET, "/api/integrations/abc/auth/status"));
         assert!(claims(&Method::POST, "/api/integrations/abc/auth/start"));
-        // …and only for their own methods.
+        assert!(claims(&Method::POST, "/api/integrations/abc/auth/validate"));
+        // …and only for their own methods. chi mounts no GET on `validate`, so
+        // forwarding is what reproduces Go's 405.
         assert!(!claims(&Method::POST, "/api/integrations/abc/auth/status"));
         assert!(!claims(&Method::GET, "/api/integrations/abc/auth/start"));
-        // An id is one segment on both.
+        assert!(!claims(&Method::GET, "/api/integrations/abc/auth/validate"));
+        assert!(!claims(
+            &Method::DELETE,
+            "/api/integrations/abc/auth/validate"
+        ));
+        // An id is one segment on all three.
         assert!(!claims(&Method::GET, "/api/integrations//auth/status"));
         assert!(!claims(&Method::POST, "/api/integrations/a/b/auth/start"));
-        // `validate` is still forwarded — five remote-call reproductions, and
-        // it never touched the flow map. See `claims`.
+        assert!(!claims(&Method::POST, "/api/integrations//auth/validate"));
         assert!(!claims(
             &Method::POST,
-            "/api/integrations/abc/auth/validate"
+            "/api/integrations/a/b/auth/validate"
         ));
 
         // Reads that stay with Go, each for its own reason — see the header.

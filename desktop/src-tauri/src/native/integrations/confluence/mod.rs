@@ -65,6 +65,7 @@
 
 pub mod client;
 pub mod content;
+pub mod validate;
 
 #[cfg(test)]
 mod tests_vectors;
