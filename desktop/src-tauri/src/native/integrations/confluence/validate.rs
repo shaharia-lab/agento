@@ -15,6 +15,20 @@
 //! already its port, `%q`-rendered scheme included, and it is what the MCP
 //! server's own `Start` calls.
 //!
+//! # Its refusals are not all reproducible, and now they are visible
+//!
+//! `super::validate_site_url` reproduces the *classification* of `url.Parse`'s
+//! own refusals but not their wording — that is `net/url`'s vocabulary over the
+//! caller's input, and its header records the trade. It could make that trade
+//! because the message was **a log line**: `Start`'s error is logged by the
+//! registry and reaches neither a response nor the model.
+//!
+//! #318 changes that. This function's error is interpolated into the 400 body
+//! `auth/validate` answers, so a port-worded refusal would be a visible
+//! divergence. Hence [`Refusal`]: the two rules Go states itself (HTTPS, and a
+//! hostname) are answered here, and the `url.Parse` refusals forward instead.
+//! Forwarding is free at this point — nothing has been called yet.
+//!
 //! The response is decoded into `confluenceSpacesResponse` and **thrown away**.
 //! That is not dead code to delete: a 200 carrying non-JSON is a failure, and
 //! dropping the decode would turn it into a success.
@@ -22,6 +36,16 @@
 use crate::claude::CancellationToken;
 
 use super::client::{http_client, read_capped_at};
+
+/// Why a validation failed, and whether this port can spell Go's sentence.
+pub enum Refusal {
+    /// A sentence Go produces verbatim, safe to put on the wire.
+    Reproducible(String),
+    /// `net/url`'s own wording, which this port does not reproduce. The caller
+    /// forwards, which is safe here because it can only arise before the
+    /// network call.
+    Forward(String),
+}
 
 /// `io.LimitReader(resp.Body, 1*1024*1024)` — validate.go's own cap.
 const MAX_VALIDATE_BYTES: usize = 1024 * 1024;
@@ -54,19 +78,27 @@ pub async fn validate_credentials(
     site_url: &str,
     email: &str,
     api_token: &str,
-) -> Result<(), String> {
+) -> Result<(), Refusal> {
     // Go returns `ValidateSiteURL`'s error unwrapped, so its sentence is the
-    // whole message.
-    let clean = super::validate_site_url(site_url)?;
+    // whole message — for the two rules it states itself. The rest is
+    // `url.Parse`'s wording; see the module header.
+    let clean = super::validate_site_url(site_url).map_err(|e| {
+        if e.starts_with("invalid site URL: ") {
+            Refusal::Forward(e)
+        } else {
+            Refusal::Reproducible(e)
+        }
+    })?;
 
     let failed = "calling confluence API: request failed".to_string();
     let url = reqwest::Url::parse(&format!("{clean}/wiki/api/v2/spaces?limit=1"))
         // `http.NewRequestWithContext` failing is `creating confluence request:
-        // %w`; the wording is `net/http`'s, so this carries reqwest's.
-        .map_err(|e| format!("creating confluence request: {e}"))?;
+        // %w`; the wording is `net/http`'s, so this forwards rather than
+        // inventing one — and nothing has been called yet.
+        .map_err(|e| Refusal::Forward(format!("creating confluence request: {e}")))?;
 
     let request = http_client()
-        .ok_or_else(|| failed.clone())?
+        .ok_or_else(|| Refusal::Reproducible(failed.clone()))?
         .get(url)
         // `req.SetBasicAuth(email, apiToken)`.
         .basic_auth(email, Some(api_token))
@@ -75,26 +107,30 @@ pub async fn validate_credentials(
     // Go discards `client.Do`'s error rather than wrapping it: the URL is the
     // customer's site and the header is a credential.
     let response = tokio::select! {
-        () = ct.cancelled() => return Err(failed.clone()),
-        result = request.send() => result.map_err(|_| failed)?,
+        () = ct.cancelled() => return Err(Refusal::Reproducible(failed.clone())),
+        result = request.send() => result.map_err(|_| Refusal::Reproducible(failed))?,
     };
 
     let status = response.status().as_u16();
     let body = read_capped_at(ct, response, MAX_VALIDATE_BYTES)
         .await
-        .map_err(|e| format!("reading confluence response: {e}"))?;
+        .map_err(|e| Refusal::Reproducible(format!("reading confluence response: {e}")))?;
 
     if status == 401 || status == 403 {
-        return Err("invalid credentials: check email and API token".to_string());
+        return Err(Refusal::Reproducible(
+            "invalid credentials: check email and API token".to_string(),
+        ));
     }
     if status != 200 {
-        return Err(format!("confluence API returned status {status}: {body}"));
+        return Err(Refusal::Reproducible(format!(
+            "confluence API returned status {status}: {body}"
+        )));
     }
 
     // `json.Unmarshal` into a struct: a bare `null` leaves it zeroed and
     // succeeds, and a JSON array is a type error to Go but decodes positionally
     // in serde — hence the `Option` and `GoStruct` this codebase uses for both.
     serde_json::from_str::<Option<crate::native::gojson::GoStruct<SpacesResponse>>>(&body)
-        .map_err(|e| format!("parsing confluence response: {e}"))?;
+        .map_err(|e| Refusal::Reproducible(format!("parsing confluence response: {e}")))?;
     Ok(())
 }

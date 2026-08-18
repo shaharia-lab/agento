@@ -154,7 +154,7 @@ fn validate_token_auth(db_path: &Path, row: &registry::HostingRow) -> Result<(),
     // `validateXxxCredentials(cfg)` — the same five functions the create path
     // runs, which is why they are shared rather than spelled twice. Jira's
     // returns the re-encoded credentials it normalized.
-    let credentials = raw_credentials(&row.credentials);
+    let credentials = raw_credentials(&row.credentials)?;
     let rewritten =
         super::super::integration_credentials::validate(integration_type, credentials.as_deref())?;
 
@@ -209,6 +209,7 @@ async fn call(
 ) -> Result<Stored, WriteError> {
     let auth = match integration_type {
         "confluence" => {
+            use super::confluence::validate::Refusal;
             super::confluence::validate::validate_credentials(
                 ct,
                 &creds.site_url,
@@ -216,9 +217,17 @@ async fn call(
                 &creds.api_token,
             )
             .await
-            .map_err(|e| WriteError::Validation {
-                field: "credentials".to_string(),
-                message: format!("invalid credentials: {e}"),
+            .map_err(|refusal| match refusal {
+                Refusal::Reproducible(message) => WriteError::Validation {
+                    field: "credentials".to_string(),
+                    message: format!("invalid credentials: {message}"),
+                },
+                // A `url.Parse` refusal, whose wording is `net/url`'s. It can
+                // only arise **before** the request, so forwarding is free —
+                // see `confluence::validate`'s header.
+                Refusal::Forward(why) => WriteError::Fallback(format!(
+                    "confluence site URL needs net/url's own message: {why}"
+                )),
             })?;
             r#"{"validated":true}"#.to_string()
         }
@@ -320,11 +329,24 @@ fn save(db_path: &Path, id: &str, stored: &Stored) -> Result<(), String> {
 
 /// `len(cfg.Credentials) == 0` is "absent" to Go; an empty column here is the
 /// same thing, and `integration_credentials::validate` reads it as such.
-fn raw_credentials(column: &str) -> Option<Box<serde_json::value::RawValue>> {
+///
+/// A column that is **present but not valid JSON** is a third case, and it is
+/// neither of the other two: Go reaches `ParseCredentials`, which fails with
+/// `encoding/json`'s own wording inside `invalid <type> credentials: …`. That
+/// sentence is not reproducible, so this forwards rather than reporting the
+/// blob as absent — which would answer "credentials are empty" where Go names
+/// the parse error. Only a hand-edited row can be in this state, since the
+/// create and update paths validate before storing.
+fn raw_credentials(column: &str) -> Result<Option<Box<serde_json::value::RawValue>>, WriteError> {
     if column.is_empty() {
-        return None;
+        return Ok(None);
     }
-    serde_json::value::RawValue::from_string(column.to_string()).ok()
+    match serde_json::value::RawValue::from_string(column.to_string()) {
+        Ok(raw) => Ok(Some(raw)),
+        Err(e) => Err(WriteError::Fallback(format!(
+            "stored credentials are not valid JSON; Go names the parse error: {e}"
+        ))),
+    }
 }
 
 /// The union of the four credential shapes the five validators read. One struct
@@ -620,6 +642,71 @@ mod tests {
         let (auth, _, updated) = row(&db, "ji");
         assert_eq!(auth, "");
         assert_eq!(updated, "2026-01-01 00:00:00 +0000 UTC");
+    }
+
+    /// A confluence site URL that `url.Parse` itself refuses forwards, because
+    /// Go's sentence there is `net/url`'s vocabulary quoted back at the caller
+    /// and this port does not spell it. Safe: nothing has been called.
+    ///
+    /// The two rules Go states itself — HTTPS, and a hostname — are answered
+    /// here instead, which is what the second half of this test checks.
+    #[tokio::test]
+    async fn a_confluence_site_url_forwards_only_when_go_would_use_net_urls_wording() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // A control character is `url.Parse`'s own refusal.
+        let db = migrated(
+            dir.path(),
+            "cf1",
+            "confluence",
+            "{\"site_url\":\"https://a\\u0001b\",\"email\":\"a@b.c\",\"api_token\":\"t\"}",
+        );
+        let db2 = db.clone();
+        let err = tokio::task::spawn_blocking(move || serve(&db2, "cf1"))
+            .await
+            .expect("join")
+            .expect_err("forwarded");
+        assert!(
+            matches!(err, WriteError::Fallback(_)),
+            "got {:?}, want a Fallback",
+            err.message()
+        );
+
+        // …while "must use HTTPS" is Go's own sentence and is answered.
+        let dir2 = tempfile::tempdir().expect("tempdir");
+        let db = migrated(
+            dir2.path(),
+            "cf2",
+            "confluence",
+            r#"{"site_url":"http://acme.atlassian.net","email":"a@b.c","api_token":"t"}"#,
+        );
+        let db2 = db.clone();
+        let answer = tokio::task::spawn_blocking(move || serve(&db2, "cf2"))
+            .await
+            .expect("join")
+            .expect("answered");
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
+        assert!(
+            body_of(&answer).contains(r#"site URL must use HTTPS (got \"http\")"#),
+            "got {}",
+            body_of(&answer)
+        );
+    }
+
+    /// A stored blob that is present but not JSON forwards rather than being
+    /// read as absent: Go reaches `ParseCredentials` and reports
+    /// `encoding/json`'s own message, where "credentials are empty" would name
+    /// the wrong problem. Only a hand-edited row can be in this state.
+    #[test]
+    fn credentials_that_are_not_json_forward_rather_than_reading_as_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path(), "tg", "telegram", "not json at all");
+        let err = serve(&db, "tg").expect_err("forwarded");
+        assert!(
+            matches!(err, WriteError::Fallback(_)),
+            "got {:?}, want a Fallback",
+            err.message()
+        );
     }
 
     /// The row is resolved through `httpErr`, so a missing one is the ordinary
