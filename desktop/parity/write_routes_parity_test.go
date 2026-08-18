@@ -154,12 +154,18 @@ var dispositions = map[string]disposition{
 	"POST /api/fs/mkdir":              {statusNative, "#296", "one effect: a directory on disk"},
 	"PATCH /api/claude-sessions/{id}": {statusNative, "#296", "two UPDATEs; Cache holds no session state and the scanner writes neither column"},
 
-	// ── Deferred: the scheduler (#275) ──────────────────────────────────────
-	"POST /api/tasks":             {statusDeferred, "#275", "registers a cron entry; a stored task that never fires is worse than none"},
-	"PUT /api/tasks/{id}":         {statusDeferred, "#275", "re-registers the cron entry"},
-	"DELETE /api/tasks/{id}":      {statusDeferred, "#275", "unregisters the cron entry"},
-	"POST /api/tasks/{id}/pause":  {statusDeferred, "#275", "unregisters the cron entry"},
-	"POST /api/tasks/{id}/resume": {statusDeferred, "#275", "re-registers the cron entry"},
+	// ── The scheduler, and the five writes that register with it (#275) ─────
+	//
+	// These were deferred for as long as the scheduler was Go's: each also
+	// registers or unregisters a cron entry, and a task stored by one process
+	// and scheduled by the other is a task that never fires. #275 moved the
+	// scheduler into the shell — AGENTO_SCHEDULER=off on the sidecar — so the
+	// row write and the registration are the same edit again.
+	"POST /api/tasks":             {statusNative, "#275", "registers a cron entry with the shell's own scheduler"},
+	"PUT /api/tasks/{id}":         {statusNative, "#275", "re-registers the cron entry"},
+	"DELETE /api/tasks/{id}":      {statusNative, "#275", "unregisters the cron entry"},
+	"POST /api/tasks/{id}/pause":  {statusNative, "#275", "unregisters the cron entry"},
+	"POST /api/tasks/{id}/resume": {statusNative, "#275", "re-registers the cron entry"},
 
 	// ── Deferred: it talks to somebody else's server ────────────────────────
 	"POST /api/integrations/{id}/auth/start":                {statusDeferred, "-", "mints an OAuth URL and holds the in-flight flow in memory"},

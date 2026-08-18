@@ -37,6 +37,12 @@ impl GoTime {
             .map_err(|e| format!("unparsable effective_from {text:?}: {e}"))
     }
 
+    /// A UTC instant as a `GoTime`, for the write paths that stamp
+    /// `time.Now().UTC()` and hand the value straight back to a caller.
+    pub fn from_utc(t: DateTime<Utc>) -> Self {
+        GoTime(t.fixed_offset())
+    }
+
     /// The instant, for ordering and for "is this rate in force yet".
     pub fn instant(&self) -> DateTime<Utc> {
         self.0.with_timezone(&Utc)
@@ -115,6 +121,54 @@ pub fn to_go_string_utc(t: GoTime) -> String {
 /// formatting at each call site.
 pub fn now_go_text() -> String {
     format_go_string(&Utc::now())
+}
+
+/// `time.Now()` — **local**, not UTC — in the rendering a DATETIME column
+/// stores.
+///
+/// Almost every Go write stamps UTC and [`now_go_text`] is the one to reach for.
+/// This exists for the handful that do not, and the only one so far is
+/// `NotificationHandler.Handle`, which sets `entry.CreatedAt = time.Now()`
+/// without the `.UTC()` every neighbouring write has.
+///
+/// It is reproduced rather than corrected because the column is read back
+/// **and ordered on as text**: `ListNotifications` is a bare
+/// `ORDER BY created_at DESC`, so rows carrying two different zone suffixes sort
+/// by their spelling rather than by their instant. Go is at least self-
+/// consistent; a second writer stamping UTC into the same table would not be.
+/// The rendering also reaches the wire, since `GET /api/notifications/log`
+/// serializes what it read.
+///
+/// The zone abbreviation is `time.Time.String()`'s — `CEST`, not `+02:00` — and
+/// chrono's `%Z` over a `chrono_tz` zone is what produces it. A zone the
+/// database cannot name falls back to UTC, which is [`now_go_text`]'s answer.
+///
+/// **One part of Go's rendering is deliberately not reproduced**, so the claim
+/// above is "the same zone", not "the same bytes": `time.Time.String()` appends
+/// a monotonic reading — ` m=+0.007413217` — whenever the value carries one, and
+/// `time.Now()` does. A Go-written row therefore reads
+/// `2026-08-18 02:34:11.615509987 +0200 CEST m=+0.007413217` where this writes
+/// everything up to `CEST`. Inventing a monotonic reading this process does not
+/// have would be worse than omitting it, and nothing reads the suffix:
+/// [`GoTime::parse_go_string`] splits at the third space, modernc's own reader
+/// strips at `m=`, and `ORDER BY created_at DESC` sorts on the shared prefix.
+pub fn now_go_text_local() -> String {
+    let Some(zone) = iana_time_zone::get_timezone()
+        .ok()
+        .and_then(|name| name.parse::<chrono_tz::Tz>().ok())
+    else {
+        return now_go_text();
+    };
+    let t = Utc::now().with_timezone(&zone);
+    let mut out = t.format("%Y-%m-%d %H:%M:%S").to_string();
+    let nanos = t.timestamp_subsec_nanos();
+    if nanos > 0 {
+        let fraction = format!("{nanos:09}");
+        out.push('.');
+        out.push_str(fraction.trim_end_matches('0'));
+    }
+    out.push_str(&t.format(" %z %Z").to_string());
+    out
 }
 
 /// The same rendering for an epoch-milliseconds value, which is how the

@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -528,10 +529,30 @@ func loadNotificationSettingsFromJSON(raw string) (*notification.NotificationSet
 	return &ns, nil
 }
 
+// initTaskScheduler builds and starts the task scheduler, unless this process
+// has been told that another one owns it.
+//
+// The return type is the service's interface rather than *scheduler.Scheduler,
+// and that is load-bearing: taskService checks `s.scheduler != nil`, and a typed
+// nil pointer stored in an interface is **not** nil. Returning the concrete type
+// would make every task write call ScheduleTask on a nil receiver and panic on
+// its mutex, which is a far worse failure than the one the gate exists to
+// prevent.
 func initTaskScheduler(
 	ctx context.Context, deps appDeps, taskStore storage.TaskStore,
 	eventPublisher scheduler.EventPublisher,
-) (*scheduler.Scheduler, error) {
+) (service.TaskScheduler, error) {
+	// Only one process may schedule: two schedulers over one scheduled_tasks
+	// table fire every task twice and re-register the Telegram webhook under
+	// whichever instance registered last. The desktop shell owns the scheduler
+	// (#275) and starts this process with AGENTO_SCHEDULER=off; a plain
+	// `agento web` leaves it unset and keeps scheduling. Unrecognized is also
+	// on, so a typo cannot silently stop every task.
+	if schedulerDisabled() {
+		deps.logger.Info("task scheduler disabled by AGENTO_SCHEDULER; another process owns it")
+		return nil, nil
+	}
+
 	taskScheduler, err := scheduler.New(scheduler.Config{
 		TaskStore:           taskStore,
 		ChatStore:           deps.chatStore,
@@ -550,6 +571,25 @@ func initTaskScheduler(
 		deps.logger.Warn("failed to start task scheduler", "error", startErr)
 	}
 	return taskScheduler, nil
+}
+
+// schedulerDisabled reports whether AGENTO_SCHEDULER tells this process that
+// another one owns the scheduler.
+//
+// The same four off-values and the same unset-means-on rule as AGENTO_SCANNER
+// (internal/claudesessions) and AGENTO_INTEGRATIONS (internal/integrations).
+// Unlike the latter it carries no list: a scheduler is owned whole or not at
+// all, because the hazard is one table rather than one integration type.
+//
+// Read at startup only. It is a deployment fact, not a setting, and it decides
+// something that happens exactly once.
+func schedulerDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("AGENTO_SCHEDULER"))) {
+	case "off", "0", "false", "disabled":
+		return true
+	default:
+		return false
+	}
 }
 
 // printBanner writes the startup banner to stdout. It is the only output

@@ -32,7 +32,7 @@
 
 use std::path::Path;
 
-use axum::http::Method;
+use axum::http::{Method, StatusCode};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 
@@ -46,19 +46,47 @@ use super::writes::{decode_body, finish, WriteError};
 /// uses are stored — so this serializes to `{}` for a `run_immediately` task
 /// rather than to a shape full of zeros. It is a value struct on the Go side,
 /// never a pointer, so the key is always present.
+/// Since #275 this is decoded from a **request body** as well as from the
+/// stored column, which is what the `null_is_zero_value` on every field is for:
+/// `{"schedule_config":{"run_at":null}}` is a no-op to `encoding/json` and a
+/// type error to serde, and it reaches this struct straight off the wire.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScheduleConfig {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "super::gojson::null_is_zero_value"
+    )]
     pub run_at: String,
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero",
+        deserialize_with = "super::gojson::null_is_zero_value"
+    )]
     pub every_minutes: i64,
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero",
+        deserialize_with = "super::gojson::null_is_zero_value"
+    )]
     pub every_hours: i64,
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(
+        default,
+        skip_serializing_if = "is_zero",
+        deserialize_with = "super::gojson::null_is_zero_value"
+    )]
     pub every_days: i64,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "super::gojson::null_is_zero_value"
+    )]
     pub at_time: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "String::is_empty",
+        deserialize_with = "super::gojson::null_is_zero_value"
+    )]
     pub expression: String,
 }
 
@@ -367,10 +395,12 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
     serve,
 };
 
-/// Which of the five reads a path is, if any.
+/// Every path this module answers.
 enum Route<'a> {
     TaskList,
     Task(&'a str),
+    TaskPause(&'a str),
+    TaskResume(&'a str),
     TaskJobHistory(&'a str),
     JobHistoryList,
     JobHistory(&'a str),
@@ -378,24 +408,38 @@ enum Route<'a> {
 
 fn claims(method: &Method, path: &str) -> bool {
     match *method {
-        Method::GET => route_of(path).is_some(),
-        // The two job-history deletes (#274). Task writes stay with Go: every
-        // one of them also registers or unregisters a cron entry in the
-        // scheduler, which is #275's to move — a task created here would be
-        // stored and then never fire.
+        Method::GET => matches!(
+            route_of(path),
+            Some(Route::TaskList)
+                | Some(Route::Task(_))
+                | Some(Route::TaskJobHistory(_))
+                | Some(Route::JobHistoryList)
+                | Some(Route::JobHistory(_))
+        ),
+        // #275 completed the set. The task writes were Go's because each also
+        // registers or unregisters a cron entry, and until the scheduler moved
+        // here a task created natively would have been stored and then never
+        // fired. It is here now, so the write and the registration are once
+        // again the same edit.
+        Method::POST => matches!(
+            route_of(path),
+            Some(Route::TaskList) | Some(Route::TaskPause(_)) | Some(Route::TaskResume(_))
+        ),
+        Method::PUT => matches!(route_of(path), Some(Route::Task(_))),
         Method::DELETE => matches!(
             route_of(path),
-            Some(Route::JobHistoryList) | Some(Route::JobHistory(_))
+            Some(Route::Task(_)) | Some(Route::JobHistoryList) | Some(Route::JobHistory(_))
         ),
         _ => false,
     }
 }
 
-/// Match the five read paths and nothing else.
+/// Match this module's paths and nothing else.
 ///
-/// The ids are single segments, so `/api/tasks/{id}/pause` and `/resume` — both
-/// POSTs — cannot be swallowed by the `/api/tasks/{id}` arm, and an empty id is
-/// not a match because chi routes `/api/tasks/` to nothing.
+/// The ids are single segments, so `/api/tasks/{id}/pause` and `/resume` cannot
+/// be swallowed by the `/api/tasks/{id}` arm, and an empty id is not a match
+/// because chi routes `/api/tasks/` to nothing. The three suffixed forms are
+/// checked before the bare one for the same reason.
 fn route_of(path: &str) -> Option<Route<'_>> {
     if path == "/api/tasks" {
         return Some(Route::TaskList);
@@ -407,10 +451,16 @@ fn route_of(path: &str) -> Option<Route<'_>> {
         return segment(rest).map(Route::JobHistory);
     }
     if let Some(rest) = path.strip_prefix("/api/tasks/") {
-        return match rest.strip_suffix("/job-history") {
-            Some(id) => segment(id).map(Route::TaskJobHistory),
-            None => segment(rest).map(Route::Task),
-        };
+        if let Some(id) = rest.strip_suffix("/job-history") {
+            return segment(id).map(Route::TaskJobHistory);
+        }
+        if let Some(id) = rest.strip_suffix("/pause") {
+            return segment(id).map(Route::TaskPause);
+        }
+        if let Some(id) = rest.strip_suffix("/resume") {
+            return segment(id).map(Route::TaskResume);
+        }
+        return segment(rest).map(Route::Task);
     }
     None
 }
@@ -423,14 +473,20 @@ fn segment(value: &str) -> Option<&str> {
 }
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
-    if *req.method == Method::DELETE {
-        return match route_of(req.path) {
-            Some(Route::JobHistory(id)) => finish(delete_job_history(&ctx.db_path, id)),
-            Some(Route::JobHistoryList) => finish(bulk_delete_job_history(&ctx.db_path, req.body)),
-            _ => Err(format!("DELETE {} is not ported", req.path)),
-        };
+    let db = &ctx.db_path;
+    match (req.method.clone(), route_of(req.path)) {
+        (Method::DELETE, Some(Route::JobHistory(id))) => finish(delete_job_history(db, id)),
+        (Method::DELETE, Some(Route::JobHistoryList)) => {
+            finish(bulk_delete_job_history(db, req.body))
+        }
+        (Method::DELETE, Some(Route::Task(id))) => finish(delete_task(db, id)),
+        (Method::POST, Some(Route::TaskList)) => finish(create_task(db, req.body)),
+        (Method::POST, Some(Route::TaskPause(id))) => finish(pause_task(db, id)),
+        (Method::POST, Some(Route::TaskResume(id))) => finish(resume_task(db, id)),
+        (Method::PUT, Some(Route::Task(id))) => finish(update_task(db, id, req.body)),
+        (Method::GET, _) => serve_read(ctx, req),
+        _ => Err(format!("{} {} is not ported", req.method, req.path)),
     }
-    serve_read(ctx, req)
 }
 
 fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
@@ -468,7 +524,12 @@ fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, S
             None => return Err(format!("job history {id:?} not found")),
         },
 
-        None => return Err(format!("{} is not a task read", req.path)),
+        // The two POST-only paths reach `serve_read` from nowhere — `serve`
+        // routes them by method first — so this arm is the same "not a read"
+        // answer the `None` arm gives.
+        Some(Route::TaskPause(_)) | Some(Route::TaskResume(_)) | None => {
+            return Err(format!("{} is not a task read", req.path))
+        }
     };
     Ok(super::Answer::json(body))
 }
@@ -815,7 +876,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_five_reads_are_routed() {
+    fn every_task_and_job_history_path_is_routed_and_nothing_else_is() {
         let claimed = |p: &str| route_of(p).is_some();
 
         assert!(claimed("/api/tasks"));
@@ -824,25 +885,317 @@ mod tests {
         assert!(claimed("/api/job-history"));
         assert!(claimed("/api/job-history/abc-123"));
 
-        // The POST actions share the `/api/tasks/{id}` prefix and must not be
-        // swallowed by it.
-        assert!(!claimed("/api/tasks/abc-123/pause"));
-        assert!(!claimed("/api/tasks/abc-123/resume"));
-        // chi routes neither trailing-slash form.
+        // The two POST actions share the `/api/tasks/{id}` prefix, and the
+        // suffixed arms are matched first so the bare one cannot swallow them.
+        assert!(matches!(
+            route_of("/api/tasks/abc-123/pause"),
+            Some(Route::TaskPause("abc-123"))
+        ));
+        assert!(matches!(
+            route_of("/api/tasks/abc-123/resume"),
+            Some(Route::TaskResume("abc-123"))
+        ));
+        assert!(matches!(
+            route_of("/api/tasks/abc-123"),
+            Some(Route::Task("abc-123"))
+        ));
+
+        // chi routes neither trailing-slash form, and an empty id is not a
+        // segment — including the empty id in front of a suffix.
         assert!(!claimed("/api/tasks/"));
         assert!(!claimed("/api/job-history/"));
         assert!(!claimed("/api/tasks//job-history"));
+        assert!(!claimed("/api/tasks//pause"));
+        assert!(!claimed("/api/tasks//resume"));
         assert!(!claimed("/api/tasks/a/b/job-history"));
+        assert!(!claimed("/api/tasks/a/b/pause"));
         assert!(!claimed("/api/task"));
         assert!(!claimed("/api/job-historyx"));
-
-        // Task writes still forward — see `only_the_job_history_deletes_are_claimed`.
-        assert!(!claims(&Method::POST, "/api/tasks"));
-        assert!(!claims(&Method::PUT, "/api/tasks/abc-123"));
-        assert!(claims(&Method::GET, "/api/tasks"));
     }
 
     // ─── Writes ───────────────────────────────────────────────────────────────
+
+    // ─── Task writes (#275) ───────────────────────────────────────────────────
+
+    fn migrated() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        file
+    }
+
+    fn created(file: &tempfile::NamedTempFile, body: &str) -> ScheduledTask {
+        let answer = create_task(file.path(), body.as_bytes()).expect("create");
+        assert_eq!(answer.status, StatusCode::CREATED);
+        let id = list_tasks(file.path()).expect("list")[0].id.clone();
+        get_task(file.path(), &id).expect("get").expect("task")
+    }
+
+    #[test]
+    fn creating_a_task_answers_201_and_fills_in_gos_two_defaults() {
+        let file = migrated();
+        let task = created(
+            &file,
+            r#"{"name":"Nightly","prompt":"go","schedule_type":"cron",
+                "schedule_config":{"expression":"0 2 * * *"}}"#,
+        );
+
+        assert_eq!(task.name, "Nightly");
+        assert_eq!(task.status, "active", "an empty status defaults to active");
+        assert_eq!(task.timeout_minutes, 30, "an unset timeout defaults to 30");
+        assert_eq!(task.schedule_config.expression, "0 2 * * *");
+        assert!(!task.id.is_empty(), "a v4 uuid is minted");
+        assert_eq!(task.run_count, 0);
+        assert!(task.last_run_at.is_none());
+    }
+
+    #[test]
+    fn an_empty_schedule_type_becomes_run_immediately_rather_than_a_422() {
+        let file = migrated();
+        let task = created(&file, r#"{"name":"Now","prompt":"go"}"#);
+        assert_eq!(task.schedule_type, "run_immediately");
+        // …and the stored config is `{}`, not a shape full of zeros.
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let stored: String = conn
+            .query_row("SELECT schedule_config FROM scheduled_tasks", [], |r| {
+                r.get(0)
+            })
+            .expect("read");
+        assert_eq!(stored, "{}");
+    }
+
+    #[test]
+    fn the_five_columns_the_request_cannot_reach_are_stored_at_their_zero_values() {
+        // Go's handler copies nine fields out of the request and leaves the
+        // rest zero, so a body naming them changes nothing. Reproduced rather
+        // than "fixed" — accepting them here would store what Go discards.
+        let file = migrated();
+        let task = created(
+            &file,
+            r#"{"name":"N","prompt":"p","working_directory":"/tmp","model":"opus",
+                "settings_profile_id":"prof","stop_after_count":9}"#,
+        );
+        assert!(task.working_directory.is_empty());
+        assert!(task.model.is_empty());
+        assert!(task.settings_profile_id.is_empty());
+        assert_eq!(task.stop_after_count, 0);
+        assert!(task.stop_after_time.is_none());
+    }
+
+    #[test]
+    fn validation_failures_are_422_with_gos_wording() {
+        let file = migrated();
+        let cases = [
+            (
+                r#"{"prompt":"p"}"#,
+                r#"validation error for "name": name is required"#,
+            ),
+            (
+                r#"{"name":"n"}"#,
+                r#"validation error for "prompt": prompt is required"#,
+            ),
+            (
+                r#"{"name":"n","prompt":"p","timeout_minutes":241}"#,
+                r#"validation error for "timeout_minutes": timeout must be between 1 and 240 minutes"#,
+            ),
+            (
+                r#"{"name":"n","prompt":"p","schedule_type":"weekly"}"#,
+                r#"validation error for "schedule_type": must be run_immediately, one_off, interval, or cron"#,
+            ),
+            (
+                r#"{"name":"n","prompt":"p","schedule_type":"one_off"}"#,
+                r#"validation error for "schedule_config.run_at": run_at is required for one_off schedules"#,
+            ),
+            (
+                r#"{"name":"n","prompt":"p","schedule_type":"interval"}"#,
+                r#"validation error for "schedule_config": at least one of every_minutes, every_hours, or every_days is required for interval schedules"#,
+            ),
+            (
+                r#"{"name":"n","prompt":"p","schedule_type":"cron"}"#,
+                r#"validation error for "schedule_config.expression": expression is required for cron schedules"#,
+            ),
+        ];
+        for (body, want) in cases {
+            let err = create_task(file.path(), body.as_bytes()).unwrap_err();
+            assert_eq!(err.message(), want, "for {body}");
+            assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY, "for {body}");
+        }
+        assert!(
+            list_tasks(file.path()).expect("list").is_empty(),
+            "a rejected create stores nothing"
+        );
+    }
+
+    #[test]
+    fn a_negative_timeout_is_rejected_but_zero_is_defaulted() {
+        // The message says "between 1 and 240" while the check admits 0 — Go's
+        // wording against Go's check. Zero survives validation and is then
+        // replaced by 30, so no row ever stores it.
+        let file = migrated();
+        let err = create_task(
+            file.path(),
+            br#"{"name":"n","prompt":"p","timeout_minutes":-1}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let task = created(&file, r#"{"name":"n","prompt":"p","timeout_minutes":0}"#);
+        assert_eq!(task.timeout_minutes, 30);
+    }
+
+    #[test]
+    fn a_malformed_body_is_400_and_an_array_is_not_a_struct() {
+        let file = migrated();
+        for body in [&b"not json"[..], b"[]", b"[\"name\"]", b""] {
+            let err = create_task(file.path(), body).unwrap_err();
+            assert_eq!(err.message(), "invalid JSON body", "for {body:?}");
+            assert_eq!(err.status(), StatusCode::BAD_REQUEST, "for {body:?}");
+        }
+        // #337: `schedule_config` is a nested struct, so an array there is the
+        // same refusal one level down.
+        let err = create_task(
+            file.path(),
+            br#"{"name":"n","prompt":"p","schedule_config":[]}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn a_null_field_is_the_zero_value_rather_than_a_decode_failure() {
+        // `encoding/json` treats every one of these as a no-op; serde would
+        // reject them without `null_is_zero_value` — including the nested
+        // struct and the fields *inside* it.
+        let file = migrated();
+        let task = created(
+            &file,
+            r#"{"name":"n","prompt":"p","description":null,"agent_slug":null,
+                "status":null,"timeout_minutes":null,"save_output":null,
+                "schedule_type":null,"schedule_config":null}"#,
+        );
+        assert_eq!(task.schedule_type, "run_immediately");
+        assert!(!task.save_output);
+
+        let file = migrated();
+        let task = created(
+            &file,
+            r#"{"name":"n","prompt":"p","schedule_type":"cron",
+                "schedule_config":{"expression":"@daily","run_at":null,"every_days":null}}"#,
+        );
+        assert_eq!(task.schedule_config.expression, "@daily");
+    }
+
+    #[test]
+    fn updating_carries_the_run_history_over_and_clears_everything_else() {
+        let file = migrated();
+        {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            conn.execute(
+                "INSERT INTO scheduled_tasks
+                    (id, name, prompt, schedule_type, schedule_config, run_count,
+                     last_run_at, last_run_status, created_at, updated_at)
+                 VALUES ('t1','Old','p','cron','{\"expression\":\"@daily\"}',4,
+                         '2026-01-01 00:00:00 +0000 UTC','success',
+                         '2025-01-01 00:00:00 +0000 UTC','2025-01-01 00:00:00 +0000 UTC')",
+                [],
+            )
+            .expect("seed");
+        }
+
+        update_task(
+            file.path(),
+            "t1",
+            br#"{"name":"New","prompt":"q","schedule_type":"cron",
+                 "schedule_config":{"expression":"@hourly"},"status":"paused"}"#,
+        )
+        .expect("update");
+
+        let task = get_task(file.path(), "t1").expect("get").expect("task");
+        assert_eq!(task.name, "New");
+        assert_eq!(task.status, "paused");
+        // Carried over from the stored row, not taken from the body.
+        assert_eq!(task.run_count, 4);
+        assert_eq!(task.last_run_status, "success");
+        assert!(task.last_run_at.is_some());
+        assert_eq!(
+            task.created_at.to_rfc3339_nano(),
+            "2025-01-01T00:00:00Z",
+            "created_at is preserved"
+        );
+        assert!(
+            task.updated_at.to_rfc3339_nano() != "2025-01-01T00:00:00Z",
+            "updated_at is restamped"
+        );
+    }
+
+    #[test]
+    fn the_three_id_routes_are_404_for_an_unknown_task() {
+        let file = migrated();
+        for err in [
+            update_task(file.path(), "nope", br#"{"name":"n","prompt":"p"}"#).unwrap_err(),
+            delete_task(file.path(), "nope").unwrap_err(),
+            pause_task(file.path(), "nope").unwrap_err(),
+            resume_task(file.path(), "nope").unwrap_err(),
+        ] {
+            assert_eq!(err.status(), StatusCode::NOT_FOUND);
+            assert_eq!(err.message(), r#"task "nope" not found"#);
+        }
+    }
+
+    #[test]
+    fn an_unknown_task_is_404_before_the_body_is_even_read() {
+        // The lookup precedes the decode in Go's service too, so a malformed
+        // body against a missing task is a 404 rather than a 400 — except that
+        // the *handler* decodes first, which makes it a 400. Pinning the order
+        // this port actually has.
+        let file = migrated();
+        let err = update_task(file.path(), "nope", b"not json").unwrap_err();
+        assert_eq!(
+            err.status(),
+            StatusCode::BAD_REQUEST,
+            "the handler decodes before the service looks the task up"
+        );
+    }
+
+    #[test]
+    fn pause_parks_the_task_and_resume_also_resets_its_run_history() {
+        let file = migrated();
+        let task = created(&file, r#"{"name":"n","prompt":"p"}"#);
+        {
+            let conn = rusqlite::Connection::open(file.path()).expect("open");
+            conn.execute(
+                "UPDATE scheduled_tasks SET run_count = 7, last_run_status = 'failed',
+                    last_run_at = '2026-01-01 00:00:00 +0000 UTC' WHERE id = ?1",
+                [&task.id],
+            )
+            .expect("seed history");
+        }
+
+        pause_task(file.path(), &task.id).expect("pause");
+        let paused = get_task(file.path(), &task.id).expect("get").expect("task");
+        assert_eq!(paused.status, "paused");
+        assert_eq!(paused.run_count, 7, "pause leaves the history alone");
+
+        resume_task(file.path(), &task.id).expect("resume");
+        let resumed = get_task(file.path(), &task.id).expect("get").expect("task");
+        assert_eq!(resumed.status, "active");
+        // Without this a `stop_after_count` task would auto-pause on its first
+        // fire after being resumed.
+        assert_eq!(resumed.run_count, 0);
+        assert!(resumed.last_run_at.is_none());
+        assert!(resumed.last_run_status.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_task_answers_204_and_cascades_to_its_job_history() {
+        let file = migrated_with_history();
+        let answer = delete_task(file.path(), "t1").expect("delete");
+        assert_eq!(answer.status, StatusCode::NO_CONTENT);
+        assert!(get_task(file.path(), "t1").expect("get").is_none());
+        // Via `ON DELETE CASCADE`, which needs the per-connection
+        // `foreign_keys=ON` — this assertion is what would catch its loss.
+        assert!(history_ids(&file).is_empty());
+    }
 
     fn migrated_with_history() -> tempfile::NamedTempFile {
         let file = tempfile::NamedTempFile::new().expect("temp file");
@@ -932,19 +1285,28 @@ mod tests {
         );
     }
 
-    /// Task writes are #275's: every one of them also touches the scheduler, so
-    /// a task created here would be stored and then never run.
+    /// #275 moved the task writes here, which is only correct because the
+    /// scheduler moved with them — each of these also registers or unregisters
+    /// a timer, and a task stored without one would never fire.
     #[test]
-    fn only_the_job_history_deletes_are_claimed() {
+    fn every_method_is_claimed_on_exactly_the_paths_go_mounts_it_on() {
         assert!(claims(&Method::DELETE, "/api/job-history"));
         assert!(claims(&Method::DELETE, "/api/job-history/j1"));
 
-        assert!(!claims(&Method::POST, "/api/tasks"));
-        assert!(!claims(&Method::PUT, "/api/tasks/t1"));
-        assert!(!claims(&Method::DELETE, "/api/tasks/t1"));
-        assert!(!claims(&Method::POST, "/api/tasks/t1/pause"));
-        assert!(!claims(&Method::POST, "/api/tasks/t1/resume"));
+        assert!(claims(&Method::POST, "/api/tasks"));
+        assert!(claims(&Method::PUT, "/api/tasks/t1"));
+        assert!(claims(&Method::DELETE, "/api/tasks/t1"));
+        assert!(claims(&Method::POST, "/api/tasks/t1/pause"));
+        assert!(claims(&Method::POST, "/api/tasks/t1/resume"));
+
+        // Mounted paths this module must *not* answer for the wrong method —
+        // chi would 405, and claiming one would turn that into a native error.
         assert!(!claims(&Method::DELETE, "/api/tasks/t1/job-history"));
+        assert!(!claims(&Method::PUT, "/api/tasks"));
+        assert!(!claims(&Method::POST, "/api/tasks/t1"));
+        assert!(!claims(&Method::POST, "/api/job-history"));
+        assert!(!claims(&Method::PUT, "/api/tasks/t1/pause"));
+        assert!(!claims(&Method::PATCH, "/api/tasks/t1"));
     }
 
     /// #335: the two job-history deletes, which are all this module claims.
@@ -959,4 +1321,547 @@ mod tests {
         bulk_delete_job_history(file.path(), br#"{"ids":["j2","j3"]}"#).expect("bulk");
         crate::native::writes::testlog::assert_info_present("job history bulk deleted count=2");
     }
+}
+
+// ─── Row writes shared with the scheduler (#275) ───────────────────────────────
+
+/// `ScheduledTask.MarshalScheduleConfig` — the JSON stored in the
+/// `schedule_config` column.
+///
+/// `to_vec_marshal`, not `to_vec`: this is `json.Marshal` into a column, not the
+/// HTTP encoder, so there is no trailing newline. The struct's
+/// `skip_serializing_if` attributes are what make a `run_immediately` task store
+/// `{}` rather than a shape full of zeros, which is the value Go's `omitempty`
+/// produces and the one the round trip has to preserve.
+pub fn marshal_schedule_config(cfg: &ScheduleConfig) -> Result<String, String> {
+    let bytes = super::gojson::to_vec_marshal(cfg)
+        .map_err(|e| format!("marshaling schedule config: {e}"))?;
+    String::from_utf8(bytes).map_err(|e| format!("marshaling schedule config: {e}"))
+}
+
+/// A nullable DATETIME as the driver writes one: the Go string rendering, or
+/// SQL `NULL` for a nil `*time.Time`.
+fn nullable_time(value: Option<&GoTime>) -> Option<String> {
+    value.map(|t| super::gotime::to_go_string_utc(*t))
+}
+
+/// `SQLiteTaskStore.UpdateTask`.
+///
+/// Stamps `updated_at` on the row **and on the struct**, because the handler
+/// answers with the task it just wrote rather than re-reading it — so a caller
+/// that returned the pre-write value would report a stale timestamp.
+///
+/// Shared by the five task writes and by the scheduler's own
+/// `updateTaskAfterRun`/`autoPause`, so the column list exists once.
+pub fn update_task_row(db_path: &Path, task: &mut ScheduledTask) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+    update_task_in(&conn, task)
+}
+
+/// [`update_task_row`] against a connection the caller already holds — which is
+/// what lets a handler read, check and write inside one transaction.
+pub fn update_task_in(conn: &rusqlite::Connection, task: &mut ScheduledTask) -> Result<(), String> {
+    let now = super::gotime::now_go_text();
+    let config = marshal_schedule_config(&task.schedule_config)?;
+    let affected = conn
+        .execute(
+            "UPDATE scheduled_tasks SET
+                name = ?1, description = ?2, prompt = ?3, agent_slug = ?4,
+                working_directory = ?5, model = ?6, settings_profile_id = ?7,
+                timeout_minutes = ?8, schedule_type = ?9, schedule_config = ?10,
+                stop_after_count = ?11, stop_after_time = ?12, save_output = ?13, status = ?14,
+                run_count = ?15, last_run_at = ?16, last_run_status = ?17,
+                next_run_at = ?18, updated_at = ?19
+             WHERE id = ?20",
+            rusqlite::params![
+                task.name,
+                task.description,
+                task.prompt,
+                task.agent_slug,
+                task.working_directory,
+                task.model,
+                task.settings_profile_id,
+                task.timeout_minutes,
+                task.schedule_type,
+                config,
+                task.stop_after_count,
+                nullable_time(task.stop_after_time.as_ref()),
+                task.save_output,
+                task.status,
+                task.run_count,
+                nullable_time(task.last_run_at.as_ref()),
+                task.last_run_status,
+                nullable_time(task.next_run_at.as_ref()),
+                now,
+                task.id,
+            ],
+        )
+        .map_err(|e| format!("updating task {:?}: {e}", task.id))?;
+    if affected == 0 {
+        // Go's store returns this and every caller has already checked the row
+        // exists, so it is unreachable through the API — but the scheduler
+        // writes without that check, and a silently dropped write there would
+        // lose a run counter.
+        return Err(format!("task {:?} not found", task.id));
+    }
+    task.updated_at = super::gotime::from_sql_text(&now, 0)
+        .map_err(|e| format!("re-reading the write timestamp: {e}"))?;
+    Ok(())
+}
+
+/// `SQLiteTaskStore.CreateTask`, for a row whose id and timestamps the caller
+/// has already stamped.
+pub fn insert_task_in(conn: &rusqlite::Connection, task: &ScheduledTask) -> Result<(), String> {
+    let config = marshal_schedule_config(&task.schedule_config)?;
+    conn.execute(
+        "INSERT INTO scheduled_tasks
+            (id, name, description, prompt, agent_slug, working_directory, model,
+             settings_profile_id, timeout_minutes, schedule_type, schedule_config,
+             stop_after_count, stop_after_time, save_output, status, run_count, last_run_at,
+             last_run_status, next_run_at, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                 ?18, ?19, ?20, ?21)",
+        rusqlite::params![
+            task.id,
+            task.name,
+            task.description,
+            task.prompt,
+            task.agent_slug,
+            task.working_directory,
+            task.model,
+            task.settings_profile_id,
+            task.timeout_minutes,
+            task.schedule_type,
+            config,
+            task.stop_after_count,
+            nullable_time(task.stop_after_time.as_ref()),
+            task.save_output,
+            task.status,
+            task.run_count,
+            nullable_time(task.last_run_at.as_ref()),
+            task.last_run_status,
+            nullable_time(task.next_run_at.as_ref()),
+            super::gotime::to_go_string_utc(task.created_at),
+            super::gotime::to_go_string_utc(task.updated_at),
+        ],
+    )
+    .map_err(|e| format!("creating task: {e}"))?;
+    Ok(())
+}
+
+/// `SQLiteTaskStore.CreateJobHistory`.
+pub fn insert_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+    conn.execute(
+        "INSERT INTO job_history
+            (id, task_id, task_name, agent_slug, status, started_at, finished_at,
+             duration_ms, chat_session_id, model, prompt_preview, error_message,
+             total_input_tokens, total_output_tokens,
+             total_cache_creation_tokens, total_cache_read_tokens, response_text)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        rusqlite::params![
+            job.id,
+            job.task_id,
+            job.task_name,
+            job.agent_slug,
+            job.status,
+            super::gotime::to_go_string_utc(job.started_at),
+            nullable_time(job.finished_at.as_ref()),
+            job.duration_ms,
+            job.chat_session_id,
+            job.model,
+            job.prompt_preview,
+            job.error_message,
+            job.total_input_tokens,
+            job.total_output_tokens,
+            job.total_cache_creation_tokens,
+            job.total_cache_read_tokens,
+            job.response_text,
+        ],
+    )
+    .map_err(|e| format!("creating job history: {e}"))?;
+    Ok(())
+}
+
+/// `SQLiteTaskStore.UpdateJobHistory`.
+///
+/// The column list is Go's, which is **narrower than the row**: `started_at`,
+/// `model` and `prompt_preview` are not updated, so a finish cannot rewrite what
+/// the initial insert recorded.
+///
+/// A zero-row update is not an error here, matching Go — `createInitialJobHistory`
+/// logs an insert failure and returns the row anyway, so the run finishing
+/// against a row that was never written is a reachable state and not one worth
+/// failing a completed run over.
+pub fn update_job_history(db_path: &Path, job: &JobHistory) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+    conn.execute(
+        "UPDATE job_history SET
+            status = ?1, finished_at = ?2, duration_ms = ?3, chat_session_id = ?4,
+            error_message = ?5, total_input_tokens = ?6, total_output_tokens = ?7,
+            total_cache_creation_tokens = ?8, total_cache_read_tokens = ?9,
+            response_text = ?10
+         WHERE id = ?11",
+        rusqlite::params![
+            job.status,
+            nullable_time(job.finished_at.as_ref()),
+            job.duration_ms,
+            job.chat_session_id,
+            job.error_message,
+            job.total_input_tokens,
+            job.total_output_tokens,
+            job.total_cache_creation_tokens,
+            job.total_cache_read_tokens,
+            job.response_text,
+            job.id,
+        ],
+    )
+    .map_err(|e| format!("updating job history {:?}: {e}", job.id))?;
+    Ok(())
+}
+
+// ─── The task writes (#275) ───────────────────────────────────────────────────
+
+/// `CreateTaskRequest` and `UpdateTaskRequest` (`internal/api/types.go`).
+///
+/// One struct for both, because the two Go types are field-for-field identical
+/// — they are kept separate there for a divergence that has not happened yet,
+/// and two identical structs here would only be two places to forget an
+/// attribute.
+///
+/// **Note what is absent**: `working_directory`, `model`, `settings_profile_id`,
+/// `stop_after_count` and `stop_after_time` are columns the table has and the
+/// request body does not, so both handlers build a `ScheduledTask` with those at
+/// their zero values. Reproduced rather than "fixed": a create that accepted a
+/// working directory here would store one Go's create discards, and an update
+/// that preserved the existing one would keep a value Go's update clears.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct TaskRequest {
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    name: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    description: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    agent_slug: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    prompt: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    schedule_type: String,
+    /// [`GoStruct`] for #337: every field of `ScheduleConfig` has a default, so
+    /// the derive's `visit_seq` arm would accept a JSON **array** of zero or
+    /// more elements where Go answers `cannot unmarshal array`.
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    schedule_config: super::gojson::GoStruct<ScheduleConfig>,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    status: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    timeout_minutes: i64,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    save_output: bool,
+}
+
+impl TaskRequest {
+    /// The `storage.ScheduledTask` both handlers build from the request — the
+    /// nine fields they copy, and nothing else.
+    fn into_task(self) -> ScheduledTask {
+        ScheduledTask {
+            id: String::new(),
+            name: self.name,
+            description: self.description,
+            prompt: self.prompt,
+            agent_slug: self.agent_slug,
+            working_directory: String::new(),
+            model: String::new(),
+            settings_profile_id: String::new(),
+            timeout_minutes: self.timeout_minutes,
+            schedule_type: self.schedule_type,
+            schedule_config: self.schedule_config.0,
+            stop_after_count: 0,
+            stop_after_time: None,
+            save_output: self.save_output,
+            status: self.status,
+            run_count: 0,
+            last_run_at: None,
+            last_run_status: String::new(),
+            next_run_at: None,
+            created_at: GoTime::default(),
+            updated_at: GoTime::default(),
+        }
+    }
+}
+
+/// `validateTask` + `validateScheduleConfig`.
+///
+/// **It mutates**, which is not decoration: an empty `schedule_type` is
+/// *defaulted* to `run_immediately` rather than rejected, and the defaulted
+/// value is what gets stored and scheduled.
+///
+/// The `timeout_minutes` message says "between 1 and 240" while the check admits
+/// 0 — Go's wording, kept, because a paraphrase would be a different string on
+/// the wire. Zero is then replaced by 30 in the caller.
+fn validate_task(task: &mut ScheduledTask) -> Result<(), WriteError> {
+    if task.name.is_empty() {
+        return Err(WriteError::validation("name", "name is required"));
+    }
+    if task.prompt.is_empty() {
+        return Err(WriteError::validation("prompt", "prompt is required"));
+    }
+    if task.timeout_minutes < 0 || task.timeout_minutes > 240 {
+        return Err(WriteError::validation(
+            "timeout_minutes",
+            "timeout must be between 1 and 240 minutes",
+        ));
+    }
+
+    match task.schedule_type.as_str() {
+        "run_immediately" | "one_off" | "interval" | "cron" => {}
+        "" => task.schedule_type = "run_immediately".to_string(),
+        _ => {
+            return Err(WriteError::validation(
+                "schedule_type",
+                "must be run_immediately, one_off, interval, or cron",
+            ))
+        }
+    }
+
+    let cfg = &task.schedule_config;
+    match task.schedule_type.as_str() {
+        // No config at all: the task runs once, on creation.
+        "run_immediately" => {}
+        "one_off" if cfg.run_at.is_empty() => {
+            return Err(WriteError::validation(
+                "schedule_config.run_at",
+                "run_at is required for one_off schedules",
+            ))
+        }
+        "interval"
+            if cfg.every_minutes == 0 && cfg.every_hours == 0 && cfg.every_days == 0 =>
+        {
+            return Err(WriteError::validation(
+                "schedule_config",
+                "at least one of every_minutes, every_hours, or every_days is required for interval schedules",
+            ))
+        }
+        "cron" if cfg.expression.is_empty() => {
+            return Err(WriteError::validation(
+                "schedule_config.expression",
+                "expression is required for cron schedules",
+            ))
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Go's `TimeoutMinutes == 0 → 30`, applied by both create and update *after*
+/// validation — which is why a stored 0 is impossible while the validator still
+/// admits one.
+const DEFAULT_TIMEOUT_MINUTES: i64 = 30;
+
+/// `taskService.CreateTask`.
+fn create_task(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<TaskRequest>(body)?;
+    let mut task = req.into_task();
+    validate_task(&mut task)?;
+
+    if task.status.is_empty() {
+        task.status = "active".to_string();
+    }
+    if task.timeout_minutes == 0 {
+        task.timeout_minutes = DEFAULT_TIMEOUT_MINUTES;
+    }
+
+    task.id = uuid::Uuid::new_v4().to_string();
+    let now = super::gotime::now_go_text();
+    let stamped = super::gotime::from_sql_text(&now, 0)
+        .map_err(|e| WriteError::Fallback(format!("re-reading the write timestamp: {e}")))?;
+    task.created_at = stamped;
+    task.updated_at = stamped;
+
+    let mut conn = open_for_write(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin task create: {e}")))?;
+    insert_task_in(&tx, &task).map_err(WriteError::Fallback)?;
+
+    // Everything fallible before the commit: an `Err` after it would forward
+    // and Go would insert a second task under a fresh id.
+    let encoded = super::gojson::to_vec(&task)
+        .map_err(|e| WriteError::Fallback(format!("encoding task: {e}")))?;
+
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit task create: {e}")))?;
+    log::info!("task created id={:?} name={:?}", task.id, task.name);
+
+    // After the commit, exactly as Go schedules after the store returns — so a
+    // task that fails to schedule is still stored, and the log line is the only
+    // evidence. Nothing here can fail the request.
+    if task.status == "active" {
+        super::schedule::runtime::schedule_if_running(&task, "newly created");
+    }
+    Ok(super::Answer::json_status(StatusCode::CREATED, encoded))
+}
+
+/// `taskService.UpdateTask`.
+///
+/// Four fields are carried over from the stored row rather than taken from the
+/// body — `run_count`, `last_run_at`, `last_run_status` and `created_at` — and
+/// that is what stops an edit from resetting a task's history. `next_run_at` is
+/// **not** among them, so an update clears it; nothing writes it, so this is
+/// only observable on a row some other tool wrote.
+fn update_task(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteError> {
+    let req = decode_body::<TaskRequest>(body)?;
+    let mut conn = open_for_write(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin task update: {e}")))?;
+
+    let Some(existing) = get_task_in(&tx, id)? else {
+        return Err(WriteError::NotFound {
+            resource: "task".to_string(),
+            id: id.to_string(),
+        });
+    };
+
+    let mut task = req.into_task();
+    task.id = id.to_string();
+    task.run_count = existing.run_count;
+    task.last_run_at = existing.last_run_at;
+    task.last_run_status = existing.last_run_status;
+    task.created_at = existing.created_at;
+
+    validate_task(&mut task)?;
+    if task.timeout_minutes == 0 {
+        task.timeout_minutes = DEFAULT_TIMEOUT_MINUTES;
+    }
+
+    update_task_in(&tx, &mut task).map_err(WriteError::Fallback)?;
+    let encoded = super::gojson::to_vec(&task)
+        .map_err(|e| WriteError::Fallback(format!("encoding task: {e}")))?;
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit task update: {e}")))?;
+    log::info!("task updated id={id:?} name={:?}", task.name);
+
+    // **Always unschedule, then reschedule only if still active** — Go's order,
+    // and the reason a task switched to `paused` by an edit stops firing.
+    super::schedule::runtime::unschedule_if_running(id);
+    if task.status == "active" {
+        super::schedule::runtime::schedule_if_running(&task, "updated");
+    }
+    Ok(super::Answer::json(encoded))
+}
+
+/// `taskService.DeleteTask`.
+///
+/// The statement is a single `DELETE FROM scheduled_tasks`, but the task's job
+/// history goes with it: `job_history.task_id` is
+/// `REFERENCES scheduled_tasks(id) ON DELETE CASCADE`. **That only happens
+/// because `foreign_keys=ON` is set per connection** (`db.rs`) — SQLite defaults
+/// it off, and without it this would silently orphan every row instead, which is
+/// a data difference no status code would reveal.
+fn delete_task(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
+    let mut conn = open_for_write(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin task delete: {e}")))?;
+
+    // Existence only, deliberately not the decoded row: the delete needs no
+    // field, and decoding one would make a task whose `created_at` this port
+    // cannot parse — a row some other tool wrote — forward instead of being
+    // deleted. The three routes below genuinely need the row and do decode it.
+    let exists: bool = tx
+        .query_row("SELECT 1 FROM scheduled_tasks WHERE id = ?1", [id], |_| {
+            Ok(true)
+        })
+        .optional()
+        .map_err(|e| WriteError::Fallback(format!("looking up task {id:?}: {e}")))?
+        .unwrap_or(false);
+    if !exists {
+        return Err(WriteError::NotFound {
+            resource: "task".to_string(),
+            id: id.to_string(),
+        });
+    }
+
+    // Go unschedules *before* deleting. Kept, even though the row is gone
+    // either way: a timer that fired in between would find no task and return.
+    super::schedule::runtime::unschedule_if_running(id);
+
+    tx.execute("DELETE FROM scheduled_tasks WHERE id = ?1", [id])
+        .map_err(|e| WriteError::Fallback(format!("deleting task {id:?}: {e}")))?;
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit task delete: {e}")))?;
+    log::info!("task deleted id={id:?}");
+    Ok(super::Answer::no_content())
+}
+
+/// `taskService.PauseTask`: park the task and drop its timer.
+fn pause_task(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
+    let task = set_task_status(db_path, id, |task| {
+        task.status = "paused".to_string();
+    })?;
+    log::info!("task paused id={id:?}");
+    super::schedule::runtime::unschedule_if_running(id);
+    encode_task(&task)
+}
+
+/// `taskService.ResumeTask`.
+///
+/// Resuming **resets the run history counters** — `run_count` to 0,
+/// `last_run_at` to nil, `last_run_status` to empty — which pause does not. That
+/// asymmetry is what makes a `stop_after_count` task runnable again: without it
+/// a resumed task would auto-pause on its first fire.
+fn resume_task(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
+    let task = set_task_status(db_path, id, |task| {
+        task.status = "active".to_string();
+        task.run_count = 0;
+        task.last_run_at = None;
+        task.last_run_status = String::new();
+    })?;
+    log::info!("task resumed id={id:?}");
+    super::schedule::runtime::schedule_if_running(&task, "resumed");
+    encode_task(&task)
+}
+
+/// The read-modify-write both status actions share, in one transaction.
+fn set_task_status(
+    db_path: &Path,
+    id: &str,
+    apply: impl FnOnce(&mut ScheduledTask),
+) -> Result<ScheduledTask, WriteError> {
+    let mut conn = open_for_write(db_path)?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| WriteError::Fallback(format!("begin task status change: {e}")))?;
+
+    let Some(mut task) = get_task_in(&tx, id)? else {
+        return Err(WriteError::NotFound {
+            resource: "task".to_string(),
+            id: id.to_string(),
+        });
+    };
+    apply(&mut task);
+    update_task_in(&tx, &mut task).map_err(WriteError::Fallback)?;
+    tx.commit()
+        .map_err(|e| WriteError::Fallback(format!("commit task status change: {e}")))?;
+    Ok(task)
+}
+
+fn encode_task(task: &ScheduledTask) -> Result<super::Answer, WriteError> {
+    let encoded = super::gojson::to_vec(task)
+        .map_err(|e| WriteError::Fallback(format!("encoding task: {e}")))?;
+    Ok(super::Answer::json(encoded))
+}
+
+/// [`get_task`] against a connection the caller already holds, so the existence
+/// check and the write share one transaction.
+pub fn get_task_in(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<ScheduledTask>, WriteError> {
+    let sql = format!("{TASK_COLUMNS} WHERE id = ?");
+    conn.query_row(&sql, [id], scan_task)
+        .optional()
+        .map_err(|e| WriteError::Fallback(format!("getting task {id:?}: {e}")))
 }

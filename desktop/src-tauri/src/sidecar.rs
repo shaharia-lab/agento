@@ -43,8 +43,8 @@ pub fn free_port() -> u16 {
 
 /// Spawn the Go server and block until it answers /health.
 pub async fn spawn(app: &AppHandle, port: u16) -> Result<Sidecar, String> {
-    // Only the debug build reassigns this, to point at the dev data directory.
-    #[cfg_attr(not(debug_assertions), allow(unused_mut))]
+    // Reassigned below: unconditionally for the scheduler gate, and in debug
+    // builds to point at the dev data directory.
     let mut sidecar = app
         .shell()
         .sidecar("agento-server")
@@ -91,6 +91,27 @@ pub async fn spawn(app: &AppHandle, port: u16) -> Result<Sidecar, String> {
             crate::native::integrations::registry::hosting_env_value(),
         )
         .env("PORT", port.to_string());
+
+    // The shell owns the task scheduler (#275) — but **only when the seam is
+    // fully on**, which is why this is conditional where `AGENTO_SCANNER` and
+    // `AGENTO_INTEGRATIONS` are not. This is the scan's model rather than the
+    // integrations' — whole, not a list — because the hazard is one table: two
+    // schedulers over `scheduled_tasks` fire every task twice, and one of the
+    // things a task can do is re-register the Telegram webhook, which then
+    // points at whichever instance registered last.
+    //
+    // Unlike the scan, there is **no second implementation behind a declined
+    // fire**: with this set, a task the shell does not run is a task nothing
+    // runs. That is why `native/schedule/executor.rs` records a failed
+    // `job_history` row for every case it cannot serve instead of returning
+    // early, and why the five task writes moved natively in the same change — a
+    // task stored by one process and scheduled by the other is the split this
+    // closes. `AGENTO_DESKTOP_NATIVE=off` and `=diff` both forward those
+    // writes to Go, so in those modes Go must keep its scheduler or the split
+    // comes straight back through the escape hatch.
+    if crate::native::schedule::runtime::shell_owns_scheduler() {
+        sidecar = sidecar.env("AGENTO_SCHEDULER", "off");
+    }
 
     // Development runs against its own data directory.
     //
