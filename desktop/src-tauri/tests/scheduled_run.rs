@@ -110,6 +110,41 @@ fn migrated_with_task(path: &Path, schedule_type: &str, save_output: bool) -> St
     "task-1".to_string()
 }
 
+/// A database with one active task, ready to fire, plus optional overrides.
+fn migrated_with(
+    path: &Path,
+    prompt: &str,
+    agent_slug: &str,
+    timeout_minutes: i64,
+    agent_capabilities: Option<&str>,
+) -> String {
+    let mut conn = rusqlite::Connection::open(path).expect("open");
+    agento_lib::native::migrate::apply(&mut conn).expect("migrate");
+    if let Some(caps) = agent_capabilities {
+        conn.execute(
+            "INSERT INTO agents (slug, name, capabilities) VALUES (?1, 'A', ?2)",
+            rusqlite::params![agent_slug, caps],
+        )
+        .expect("seed agent");
+    }
+    conn.execute(
+        "INSERT INTO scheduled_tasks
+            (id, name, description, prompt, agent_slug, schedule_type, schedule_config,
+             status, timeout_minutes, save_output, created_at, updated_at)
+         VALUES ('task-1', 'Nightly', 'd', ?1, ?2, 'cron', '{}', 'active', ?3, 1,
+                 '2026-01-01 00:00:00 +0000 UTC', '2026-01-01 00:00:00 +0000 UTC')",
+        rusqlite::params![prompt, agent_slug, timeout_minutes],
+    )
+    .expect("seed task");
+    "task-1".to_string()
+}
+
+fn session_count(path: &Path) -> i64 {
+    let conn = rusqlite::Connection::open(path).expect("open");
+    conn.query_row("SELECT COUNT(*) FROM chat_sessions", [], |r| r.get(0))
+        .expect("count")
+}
+
 fn job_rows(path: &Path) -> Vec<(String, String, String, i64, i64)> {
     let conn = rusqlite::Connection::open(path).expect("open");
     let mut stmt = conn
@@ -231,4 +266,105 @@ async fn an_error_result_is_a_failed_job_with_gos_wording() {
     assert_eq!(task.status, "paused");
     assert_eq!(task.run_count, 1);
     assert_eq!(task.last_run_status, "failed");
+}
+
+/// The rule the whole executor is written around: a run this build **cannot**
+/// serve is a recorded failure, never silence.
+///
+/// With the sidecar started `AGENTO_SCHEDULER=off` there is no second
+/// implementation behind a fire, so a job history with no row would be
+/// indistinguishable from a task that was not due. `build_options` still
+/// refuses an agent naming an MCP server this build cannot host — here one with
+/// no integration row at all, which Go would still resolve from `mcps.yaml`.
+#[tokio::test]
+async fn an_agent_whose_tools_this_build_cannot_host_is_a_recorded_failure() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with(
+        &db,
+        "go",
+        "needs-mcp",
+        30,
+        Some(r#"{"mcp":{"no-such-integration":{"tools":["x"]}}}"#),
+    );
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1, "the refusal is recorded, not silent");
+    let (status, error, ..) = &jobs[0];
+    assert_eq!(status, "failed");
+    assert!(
+        error.starts_with("agent tools unavailable in this build:"),
+        "the reason has to name itself: {error:?}"
+    );
+
+    // The chat row was created before the refusal, exactly as Go creates it
+    // before resolving the agent — and the task still counts the attempt.
+    assert_eq!(session_count(&db), 1);
+    let task = agento_lib::native::tasks::get_task(&db, &task_id)
+        .expect("read")
+        .expect("row");
+    assert_eq!(task.run_count, 1);
+    assert_eq!(task.last_run_status, "failed");
+}
+
+/// An unresolvable `{{name}}` in the *task's* prompt fails the run before
+/// anything is created — `prepareTaskRun`'s first step.
+#[tokio::test]
+async fn an_unresolvable_prompt_variable_fails_the_run_before_it_starts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with(&db, "report for {{quarter}}", "", 30, None);
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1);
+    let (status, error, ..) = &jobs[0];
+    assert_eq!(status, "failed");
+    assert_eq!(
+        error,
+        r#"prompt interpolation: missing required template variable: "quarter""#
+    );
+    // Nothing was started, so no chat exists — `recordFailedRun` carries an
+    // empty `chat_session_id`.
+    assert_eq!(session_count(&db), 0);
+}
+
+/// The deadline covers the whole run, not just the event drain.
+///
+/// A zero timeout expires before the subprocess can produce anything, so this
+/// reaches the deadline through whichever stage happens to be running —
+/// `build_options`, the spawn, or the drain. All three are inside it, which is
+/// the property under test; the recorded error is the same either way.
+#[tokio::test]
+async fn a_run_that_outlives_its_timeout_is_recorded_as_a_deadline() {
+    if python3().is_none() {
+        eprintln!("skipping: no python3 to script the fake CLI");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("agento.db");
+    let task_id = migrated_with(&db, "go", "", 0, None);
+
+    // Emits nothing at all and stays alive: the drain would wait forever.
+    let cli = fake_cli(dir.path(), "        pass");
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+
+    let scheduler = agento_lib::native::schedule::runtime::detached(&db);
+    agento_lib::native::schedule::executor::execute_task(&scheduler, &task_id).await;
+
+    let jobs = job_rows(&db);
+    assert_eq!(jobs.len(), 1);
+    let (status, error, ..) = &jobs[0];
+    assert_eq!(status, "failed");
+    assert_eq!(
+        error, "context deadline exceeded",
+        "Go's `context.DeadlineExceeded` reaches the caller as this"
+    );
 }
