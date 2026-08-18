@@ -659,6 +659,27 @@ ALTER TABLE user_settings ADD COLUMN claude_config_dirs TEXT NOT NULL DEFAULT '[
 ALTER TABLE agents ADD COLUMN claude_config_dir TEXT NOT NULL DEFAULT '';
 `,
 	},
+	{
+		version: 28,
+		sql: `
+-- The sessions list's keyset tiebreak runs to (session_id, project_path), not
+-- session_id alone: this table is keyed on both, so one session id legitimately
+-- yields two rows, and on the id alone a pair that also ties on the sort column
+-- is one position to the cursor — the second row is skipped by every page while
+-- the toolbar's COUNT(*) still counts it (#364).
+--
+-- The index has to follow the order for the same reason migration 26 put the
+-- tiebreak in it: with only (last_activity, session_id) SQLite satisfies the
+-- first two terms from the traversal and block-sorts the third
+-- ("USE TEMP B-TREE FOR LAST TERM OF ORDER BY"), which is exactly the re-sort
+-- that index exists to avoid. Dropped and recreated rather than added
+-- alongside, because a second index on the same leading columns would be
+-- chosen arbitrarily and one of the two would always be dead weight.
+DROP INDEX IF EXISTS idx_claude_session_cache_activity;
+CREATE INDEX IF NOT EXISTS idx_claude_session_cache_activity
+	ON claude_session_cache(last_activity DESC, session_id DESC, project_path DESC);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

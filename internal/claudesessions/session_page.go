@@ -163,6 +163,20 @@ func cursorValue(s ClaudeSessionSummary, sort SessionSort) string {
 	}
 }
 
+// sessionPageOrderBy is the total order a page is returned in, and the order
+// the keyset predicate above steps through term by term. The two have to be
+// spelled the same or the cursor pages through one ordering using another's
+// position, so they are written once here.
+//
+// It is also what idx_claude_session_cache_activity is built to satisfy from a
+// single traversal for the default (recency) sort — migration 26 put the
+// tiebreak in the index for exactly that reason, and migration 28 extended it
+// when the tiebreak grew a third term. A fourth term added here without the
+// matching index change puts a re-sort back under every page.
+func sessionPageOrderBy(expr string) string {
+	return fmt.Sprintf("\nORDER BY %s DESC, c.session_id DESC, c.project_path DESC", expr)
+}
+
 // ListPage returns one page of sessions matching q.
 //
 // Unlike List it never loads the corpus: the filter, the sort and the page
@@ -226,7 +240,7 @@ func listSessionPage(db *sql.DB, logger *slog.Logger, q SessionQuery) (SessionPa
 	// One extra row, so "is there a next page" is answered without a second
 	// COUNT over the same predicate.
 	query := sessionSummaryColumns + sessionSummarySource + filter.where() +
-		fmt.Sprintf("\nORDER BY %s DESC, c.session_id DESC, c.project_path DESC\nLIMIT %d", expr, limit+1)
+		sessionPageOrderBy(expr) + fmt.Sprintf("\nLIMIT %d", limit+1)
 
 	rows, err := db.QueryContext(context.Background(), query, filter.args...)
 	if err != nil {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -312,6 +313,50 @@ func TestListPage_ADuplicatedSessionIDOnATiedSortValueIsStillReachable(t *testin
 // rowKeyOf spells a row's primary key, which is what a duplicated session id
 // makes these tests count on rather than the id alone.
 func rowKeyOf(s ClaudeSessionSummary) string { return s.SessionID + "@" + s.ProjectPath }
+
+func TestListPage_TheRecencyOrderIsSatisfiedByTheIndexWithoutASort(t *testing.T) {
+	c := newPageCache(t)
+	for i := range 20 {
+		insertTestSession(t, c.db, testSession{id: fmt.Sprintf("s-%02d", i)})
+	}
+
+	// idx_claude_session_cache_activity exists so a page is an indexed range
+	// scan rather than a re-sort of the whole table, and migrations 26 and 28
+	// put the tiebreak columns in it because they are part of the order. A term
+	// in the ORDER BY that the index does not carry brings the re-sort back —
+	// SQLite reports it as "USE TEMP B-TREE FOR LAST TERM OF ORDER BY", which
+	// is invisible in every functional test here because the answers stay
+	// correct.
+	query := fmt.Sprintf("EXPLAIN QUERY PLAN %s%s%s\nLIMIT 51",
+		sessionSummaryColumns, sessionSummarySource, sessionPageOrderBy("c.last_activity"))
+	rows, err := c.db.QueryContext(context.Background(), query)
+	if err != nil {
+		t.Fatalf("explaining the page query: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scanning plan: %v", err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading plan: %v", err)
+	}
+
+	joined := strings.Join(plan, "\n")
+	if !strings.Contains(joined, "idx_claude_session_cache_activity") {
+		t.Errorf("the page query no longer uses the ordering index:\n%s", joined)
+	}
+	if strings.Contains(joined, "TEMP B-TREE") {
+		t.Errorf("the page query re-sorts instead of reading the order from the index; "+
+			"extend idx_claude_session_cache_activity to cover every ORDER BY term:\n%s", joined)
+	}
+}
 
 func TestListPage_ACursorMintedBeforeTheProjectTiebreakStillPages(t *testing.T) {
 	c := newPageCache(t)
