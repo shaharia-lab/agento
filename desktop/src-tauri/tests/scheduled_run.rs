@@ -295,17 +295,27 @@ async fn an_agent_whose_tools_this_build_cannot_host_is_a_recorded_failure() {
     assert_eq!(jobs.len(), 1, "the refusal is recorded, not silent");
     let (status, error, ..) = &jobs[0];
     assert_eq!(status, "failed");
-    // The message is `build_options`'s own, passed through: it names the
-    // integration it could not host. Rewriting every failure from that function
-    // as "cannot host your tools" would misattribute a port-bind or SQLite
-    // error, and this row is the only evidence the run leaves.
+    // The message is `build_options`'s own, passed through under a neutral
+    // prefix — rewriting every failure from that function as "cannot host your
+    // tools" would misattribute a port-bind or SQLite error, and this row is the
+    // only evidence the run leaves.
+    //
+    // **Only the prefix is asserted, deliberately.** `mcp_plan` resolves an
+    // agent's MCP names against `paths::database_path()` — the *process-wide*
+    // database, not this run's — and in a debug build that path is hardcoded to
+    // `~/.agento-desktop-dev`. So which failure this reaches depends on whether
+    // the developer has a dev install: locally it is "no integration row named
+    // no-such-integration", on a CI runner it is "unable to open database
+    // file". Pinning either would make the test a property of the machine. The
+    // rule under test holds for both, and it is the rule that matters: a run
+    // this build cannot set up leaves a recorded failure, never silence.
+    //
+    // (The two paths are the same file in production — `lib.rs` starts the
+    // scheduler with `paths::database_path()` — so this is a testing artefact
+    // rather than a live divergence.)
     assert!(
         error.starts_with("agent setup: "),
         "the failure has to name itself: {error:?}"
-    );
-    assert!(
-        error.contains("no-such-integration"),
-        "…and say which tool source: {error:?}"
     );
 
     // The chat row was created before the refusal, exactly as Go creates it
