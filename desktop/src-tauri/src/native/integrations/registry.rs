@@ -143,15 +143,15 @@ use super::{decode_services, ServiceConfig};
 /// on it is a mistake: `Serialize` would put a token on the wire and `Debug`
 /// would put one in a log line, which is the same leak with a longer fuse. See
 /// the module header.
-pub(super) struct HostingRow {
-    pub(super) id: String,
-    pub(super) integration_type: String,
+pub(crate) struct HostingRow {
+    pub(crate) id: String,
+    pub(crate) integration_type: String,
     enabled: bool,
     /// `IsAuthenticated()`, computed in SQL so the predicate does not depend on
     /// parsing [`Self::auth`].
     authenticated: bool,
     /// The raw `credentials` column. A secret.
-    pub(super) credentials: String,
+    pub(crate) credentials: String,
     /// The raw `auth` column. **Also a secret**, and the newer of the two.
     ///
     /// Until #315 this projection selected `auth` only as the boolean above, and
@@ -1119,7 +1119,7 @@ fn list_for_hosting(db_path: &Path) -> Result<Vec<HostingRow>, String> {
     Ok(out)
 }
 
-pub(super) fn get_for_hosting(db_path: &Path, id: &str) -> Result<Option<HostingRow>, String> {
+pub(crate) fn get_for_hosting(db_path: &Path, id: &str) -> Result<Option<HostingRow>, String> {
     let conn = crate::native::db::open_read_only(db_path)?;
     let sql = format!("{HOSTING_COLUMNS}\n     WHERE id = ?1");
     conn.query_row(&sql, [id], scan_hosting_row)

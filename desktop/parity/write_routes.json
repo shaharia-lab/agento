@@ -54,9 +54,9 @@
     {
       "method": "DELETE",
       "route": "/api/integrations/{id}/webhook/register",
-      "status": "deferred",
-      "owner": "-",
-      "reason": "deregisters the webhook with Telegram"
+      "status": "native",
+      "owner": "#319",
+      "reason": "a failed deleteWebhook is a warning; the row is cleared either way"
     },
     {
       "method": "DELETE",
@@ -208,16 +208,16 @@
     {
       "method": "POST",
       "route": "/api/integrations/{id}/webhook/regenerate-secret",
-      "status": "deferred",
-      "owner": "-",
-      "reason": "rotates the secret and re-registers with Telegram"
+      "status": "native",
+      "owner": "#319",
+      "reason": "delete, clear, register — the delete's failure is swallowed as Go swallows it"
     },
     {
       "method": "POST",
       "route": "/api/integrations/{id}/webhook/register",
-      "status": "deferred",
-      "owner": "-",
-      "reason": "registers the webhook with Telegram"
+      "status": "native",
+      "owner": "#319",
+      "reason": "fails before the Telegram call, never after"
     },
     {
       "method": "POST",
@@ -285,9 +285,9 @@
     {
       "method": "POST",
       "route": "/webhooks/telegram/{id}",
-      "status": "deferred",
-      "owner": "#275",
-      "reason": "dispatches an agent run; the executor is still Go's"
+      "status": "native",
+      "owner": "#319",
+      "reason": "the shell receives the update and dispatches the run"
     },
     {
       "method": "PUT",

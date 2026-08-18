@@ -47,7 +47,9 @@ pub const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 /// **Test-only, where Go's is not** — `github::client::API_BASE`'s reasoning, and
 /// sharper here: the seam points every request, *token in the path*, at an
 /// arbitrary host. Go had to export `SetAPIBase` (`telegram/parity.go`) because
-/// `desktop/parity` is a different package; both callers here are in-crate.
+/// `desktop/parity` is a different package; every caller here is in-crate —
+/// `native::trigger::registration` is one, which is why these are `pub(crate)`
+/// rather than `pub(super)`.
 #[cfg(test)]
 static API_BASE: RwLock<Option<String>> = RwLock::new(None);
 
@@ -67,7 +69,7 @@ fn api_base() -> String {
 
 /// Points every subsequent request at `base`; `None` restores the default.
 #[cfg(test)]
-pub(super) fn set_api_base(base: Option<String>) {
+pub(crate) fn set_api_base(base: Option<String>) {
     *API_BASE
         .write()
         .expect("the telegram API base lock is poisoned") = base;
@@ -75,7 +77,7 @@ pub(super) fn set_api_base(base: Option<String>) {
 
 /// Serializes the tests that redirect [`API_BASE`].
 #[cfg(test)]
-pub(super) async fn api_base_lock() -> tokio::sync::MutexGuard<'static, ()> {
+pub(crate) async fn api_base_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     LOCK.lock().await
 }

@@ -180,10 +180,14 @@ var dispositions = map[string]disposition{
 	// five writes a **type-specific** auth payload its MCP server reads
 	// (`{"validated":true,"bot_username":…}` for Telegram, not a shared flag),
 	// so this is five remote-call reproductions rather than one.
-	"POST /api/integrations/{id}/auth/validate":             {statusDeferred, "-", "five per-type remote validations, each writing its own auth payload"},
-	"POST /api/integrations/{id}/webhook/register":          {statusDeferred, "-", "registers the webhook with Telegram"},
-	"DELETE /api/integrations/{id}/webhook/register":        {statusDeferred, "-", "deregisters the webhook with Telegram"},
-	"POST /api/integrations/{id}/webhook/regenerate-secret": {statusDeferred, "-", "rotates the secret and re-registers with Telegram"},
+	"POST /api/integrations/{id}/auth/validate": {statusDeferred, "-", "five per-type remote validations, each writing its own auth payload"},
+	// The three that call Telegram (#319). They are native because the order is
+	// the design: every fallible step happens before setWebhook, and nothing
+	// after it may fail — an Err after a successful call forwards, and Go
+	// registers the webhook again under its own secret.
+	"POST /api/integrations/{id}/webhook/register":          {statusNative, "#319", "fails before the Telegram call, never after"},
+	"DELETE /api/integrations/{id}/webhook/register":        {statusNative, "#319", "a failed deleteWebhook is a warning; the row is cleared either way"},
+	"POST /api/integrations/{id}/webhook/regenerate-secret": {statusNative, "#319", "delete, clear, register — the delete's failure is swallowed as Go swallows it"},
 
 	// ── Deferred: the sidecar's boot-time snapshot (#305) ───────────────────
 	"PUT /api/settings": {statusDeferred, "#305", "the sidecar holds a snapshot these preferences resolve through; no AGENTO_SCANNER=off equivalent exists"},
@@ -195,7 +199,12 @@ var dispositions = map[string]disposition{
 	// with a foreign `Host` — and its effect is a trigger-rule match plus an
 	// agent run through the dispatcher, which is the scheduler's executor by
 	// another name.
-	"POST /webhooks/telegram/{id}": {statusDeferred, "#275", "dispatches an agent run; the executor is still Go's"},
+	// #275 moved the executor, which was the reason recorded here, and #319
+	// moved the dispatcher that uses it. The route is mounted at the root, so it
+	// is the one claimed path outside `/api` and outside both guards — it
+	// arrives from Telegram with a foreign Host and authenticates on its own
+	// secret token.
+	"POST /webhooks/telegram/{id}": {statusNative, "#319", "the shell receives the update and dispatches the run"},
 
 	// ── Not deferred: dropped (#273) ────────────────────────────────────────
 	"POST /api/integrations/{id}/whatsapp/pair":      {statusDropped, "#273", "WhatsApp is dropped, not deferred; dies with the sidecar"},

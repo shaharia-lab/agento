@@ -550,6 +550,7 @@ mod tests {
                     path,
                     query: "",
                     content_type: "application/json",
+                    secret_token: "",
                     body: br#"{"enabled":true,"otlp_endpoint":"localhost:4317"}"#,
                 },
             )
@@ -579,6 +580,7 @@ mod tests {
                 path: "/api/monitoring",
                 query: "",
                 content_type: "",
+                secret_token: "",
                 body: &[],
             },
         )
