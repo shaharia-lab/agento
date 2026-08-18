@@ -12,6 +12,7 @@
 //! the behaviour the app had before the port instead of a 500.
 
 pub mod active_time;
+pub mod agent_run;
 pub mod agents;
 pub mod analytics;
 pub mod chat;
