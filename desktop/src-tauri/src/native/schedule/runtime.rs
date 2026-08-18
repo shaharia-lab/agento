@@ -191,7 +191,6 @@ impl Scheduler {
 
     /// Whether the sweep already knows about this task at its current
     /// schedule — i.e. whether [`Self::reconcile`] would leave it alone.
-    #[cfg(test)]
     pub fn knows_task(&self, task_id: &str) -> bool {
         self.swept
             .lock()
@@ -507,10 +506,11 @@ pub fn start(db_path: PathBuf) {
 
 /// A scheduler over `db_path` that is **not** installed as the process-wide one.
 ///
-/// For tests that need to drive `Scheduler`'s own methods — the run write-back,
-/// the reconcile — without the `OnceLock` that makes [`start`] single-shot.
-#[cfg(test)]
-pub fn for_test(db_path: impl Into<PathBuf>) -> Arc<Scheduler> {
+/// For tests that drive `Scheduler`'s own methods — the run write-back, the
+/// reconcile, a whole scheduled run against a scripted CLI — without the
+/// `OnceLock` that makes [`start`] single-shot. Not `#[cfg(test)]`, because
+/// `tests/scheduled_run.rs` is a separate crate and could not see it.
+pub fn detached(db_path: impl Into<PathBuf>) -> Arc<Scheduler> {
     Arc::new(Scheduler {
         db_path: db_path.into(),
         loc: local_tz(),

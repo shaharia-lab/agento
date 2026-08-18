@@ -2647,6 +2647,24 @@ caller is still holding a scheduler semaphore permit, and an unreachable mail
 host would otherwise throttle the scheduler to three runs per SMTP timeout while
 starving the proxy and every in-flight SSE stream.
 
+**A scheduled run uses `claude::client::query`, not `Session`.** That is Go's
+own choice — `RunAgent` calls `claude.Query` — and it is not interchangeable
+here: a `Session` sets `session_mode`, and `process.rs`'s reader then
+deliberately neither closes stdin nor stops at the `result` event, "so the
+subprocess survives for the next send". A scheduled run has no next send, so the
+event channel never closes, the drain blocks past the answer, and **every run
+sits until its timeout** — 30 minutes by default, up to 240 — then records
+`failed`, persists no chat, and holds one of the three semaphore permits
+throughout. The one-shot reader closes stdin and breaks after emitting the
+result, which is also what makes `collectRunResult`'s deliberate drain-past-the-
+result terminate instead of hang.
+
+`tests/scheduled_run.rs` is what catches this, and **its fake CLI must not exit
+after the result**. A fake that exits closes stdout, ends the stream for free and
+passes against a drain that never terminates on its own — the first version of
+that test did exactly that and went green against the hang. A real CLI in session
+mode stays alive; the fake has to as well.
+
 **A task write can still fall back, so the timers are swept.** Every native task
 write returns `WriteError::Fallback` on an unopenable database, a schema newer
 than this build, a `SQLITE_BUSY` past the five-second timeout, or a failed

@@ -405,13 +405,26 @@ async fn run_agent(
             .map_err(|_| DEADLINE_EXCEEDED.to_string())?
             .map_err(|e| format!("agent tools unavailable in this build: {e}"))?;
 
-    let mut session = match tokio::time::timeout_at(
+    // **`query`, not `Session`** — the one-shot, which is what Go's `RunAgent`
+    // uses (`claude.Query`). The difference is the whole run: a `Session` sets
+    // `session_mode`, and `process.rs`'s reader then deliberately does *not*
+    // close stdin or stop at the `result` event, "so the subprocess survives
+    // for the next send". There is no next send here, so the event channel
+    // never closes, `collect_run_result` blocks past the answer, and every
+    // scheduled run would sit until its timeout — 30 minutes by default, up to
+    // 240 — then record `failed`, persist no chat, and hold one of the three
+    // semaphore permits the entire time.
+    //
+    // The one-shot reader closes stdin and breaks *after* emitting the result,
+    // which is also what makes `collect_run_result`'s drain-past-the-result
+    // rule terminate rather than hang.
+    let mut stream = match tokio::time::timeout_at(
         deadline,
-        crate::claude::session::Session::new(options),
+        crate::claude::client::query(prompt, options),
     )
     .await
     {
-        Ok(Ok(session)) => session,
+        Ok(Ok(stream)) => stream,
         Ok(Err(e)) => {
             drop(tool_servers);
             return Err(format!("starting agent: {e}"));
@@ -422,16 +435,11 @@ async fn run_agent(
         }
     };
 
-    let sent = tokio::time::timeout_at(deadline, session.send(prompt)).await;
-    let collected = match sent {
-        Ok(Ok(())) => tokio::time::timeout_at(deadline, collect_run_result(&mut session))
-            .await
-            .unwrap_or_else(|_| Err(DEADLINE_EXCEEDED.to_string())),
-        Ok(Err(e)) => Err(format!("starting agent: sending prompt: {e}")),
-        Err(_) => Err(DEADLINE_EXCEEDED.to_string()),
-    };
+    let collected = tokio::time::timeout_at(deadline, collect_run_result(&mut stream))
+        .await
+        .unwrap_or_else(|_| Err(DEADLINE_EXCEEDED.to_string()));
 
-    session.close();
+    stream.close();
     // The in-process tool listeners outlive the subprocess and stop when
     // dropped, so this is after `close` rather than before it.
     drop(tool_servers);
@@ -448,12 +456,12 @@ const DEADLINE_EXCEEDED: &str = "context deadline exceeded";
 /// rather than an accident: the subprocess still has its transcript to write,
 /// and returning early would race the scanner against a half-written file.
 async fn collect_run_result(
-    session: &mut crate::claude::session::Session,
+    stream: &mut crate::claude::client::Stream,
 ) -> Result<RunResult, String> {
     let mut result: Option<RunResult> = None;
     let mut result_err: Option<String> = None;
 
-    while let Some(event) = session.next_event().await {
+    while let Some(event) = stream.next_event().await {
         let Some(r) = event.result.as_ref() else {
             continue;
         };
@@ -514,12 +522,16 @@ fn write_session_results(
     prompt: &str,
     started_at: chrono::DateTime<Utc>,
 ) -> Result<(), String> {
-    let mut conn = crate::native::db::open_read_write(db_path)?;
-    let tx = conn
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .map_err(|e| format!("begin session results: {e}"))?;
+    let conn = crate::native::db::open_read_write(db_path)?;
 
-    tx.execute(
+    // **Three independent writes, not one transaction.** Go calls
+    // `UpdateSession` and then `AppendMessage` twice, logging each failure on
+    // its own — so a message that fails to store still leaves the session row
+    // carrying `sdk_session_id` and the token totals. Wrapping them together
+    // would roll the session update back too, losing the link to the run's
+    // transcript over a failed message insert: a wider blast radius than the
+    // code being ported has.
+    conn.execute(
         "UPDATE chat_sessions SET
             sdk_session_id = ?1, total_input_tokens = ?2, total_output_tokens = ?3,
             total_cache_creation_tokens = ?4, total_cache_read_tokens = ?5, updated_at = ?6
@@ -539,26 +551,28 @@ fn write_session_results(
     if !result.answer.is_empty() {
         // The user turn carries `startedAt`, the assistant turn `time.Now()` —
         // so the pair brackets the run rather than sharing one instant.
-        append_message(
-            &tx,
+        if let Err(e) = append_message(
+            &conn,
             chat_session_id,
             "user",
             prompt,
             &crate::native::gotime::to_go_string_utc(crate::native::gotime::GoTime::from_utc(
                 started_at,
             )),
-        )?;
-        append_message(
-            &tx,
+        ) {
+            log::warn!("failed to store user message: {e}");
+        }
+        if let Err(e) = append_message(
+            &conn,
             chat_session_id,
             "assistant",
             &result.answer,
             &crate::native::gotime::now_go_text(),
-        )?;
+        ) {
+            log::warn!("failed to store assistant message: {e}");
+        }
     }
-
-    tx.commit()
-        .map_err(|e| format!("commit session results: {e}"))
+    Ok(())
 }
 
 /// `ChatStore.AppendMessage` for a plain text turn.
@@ -574,13 +588,13 @@ fn write_session_results(
 /// `blocks` is `'[]'` rather than `''` because every reader JSON-decodes it;
 /// the column's own default says the same thing.
 fn append_message(
-    tx: &rusqlite::Transaction,
+    conn: &rusqlite::Connection,
     chat_session_id: &str,
     role: &str,
     content: &str,
     timestamp: &str,
 ) -> Result<(), String> {
-    tx.execute(
+    conn.execute(
         "INSERT INTO chat_messages (session_id, role, content, blocks, timestamp)
          VALUES (?1, ?2, ?3, '[]', ?4)",
         rusqlite::params![chat_session_id, role, content, timestamp],
@@ -634,22 +648,12 @@ fn update_task_after_run(
     ran_at: chrono::DateTime<Utc>,
     status: &str,
 ) {
-    // Decided before the write, because both also drop the timer.
+    // Only the schedule type is read off the snapshot; everything the write
+    // decides is derived from the row it re-reads. See [`write_run_result`].
     let one_shot = task.schedule_type == "one_off" || task.schedule_type == "run_immediately";
-    let run_count = task.run_count + 1;
-    let hit_limit = task.stop_after_count > 0 && run_count >= task.stop_after_count;
 
-    // Keep the caller's copy in step: `publishTaskFinished` reads `run_count`
-    // off it after this returns.
-    task.run_count = run_count;
-    task.last_run_at = Some(crate::native::gotime::GoTime::from_utc(ran_at));
-    task.last_run_status = status.to_string();
-    if one_shot || hit_limit {
-        task.status = "paused".to_string();
-    }
-
-    let pause = one_shot || hit_limit;
-    match write_run_result(scheduler, &task.id, ran_at, status, run_count, pause) {
+    let task_id = task.id.clone();
+    match write_run_result(scheduler, &task_id, ran_at, status, one_shot, task) {
         // A one-shot task is paused after its run so a restart does not re-run
         // it — the timer is already exhausted, but the *row* is what `Start`
         // reads.
@@ -662,27 +666,34 @@ fn update_task_after_run(
         // minute, unbounded. A read-only data dir or a full disk is enough to
         // reach it. Leaving the timer alone is also what Go does when its
         // `UpdateTask` fails.
-        Ok(()) => {
-            if pause {
-                scheduler.unschedule_task(&task.id);
+        Ok(paused) => {
+            if paused {
+                scheduler.unschedule_task(&task_id);
             }
         }
-        Err(e) => log::error!(
-            "failed to update task after run task_id={:?} error={e}",
-            task.id
-        ),
+        Err(e) => log::error!("failed to update task after run task_id={task_id:?} error={e}"),
     }
 }
 
-/// The read-modify-write behind [`update_task_after_run`].
+/// The read-modify-write behind [`update_task_after_run`]. Answers whether the
+/// row ended up paused, which is what decides the timer.
+///
+/// **Every field it writes is derived from the row it just read**, not from the
+/// snapshot the timer loaded — that is the whole point. `status` is the case
+/// that motivated it (a pause landing mid-run), but `run_count` is the same
+/// hazard pointing the other way: `resume_task` resets it to 0 precisely so a
+/// `stop_after_count` task becomes runnable again, and writing back
+/// `snapshot + 1` would restore the old count and auto-pause the task on its
+/// very next fire. Runs are long — up to 240 minutes — so both edits are
+/// reachable.
 fn write_run_result(
     scheduler: &Arc<Scheduler>,
     task_id: &str,
     ran_at: chrono::DateTime<Utc>,
     status: &str,
-    run_count: i64,
-    pause: bool,
-) -> Result<(), String> {
+    one_shot: bool,
+    caller_copy: &mut ScheduledTask,
+) -> Result<bool, String> {
     let mut conn = crate::native::db::open_read_write(scheduler.db_path())?;
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -691,19 +702,32 @@ fn write_run_result(
     let Some(mut fresh) = tasks::get_task_in(&tx, task_id).map_err(|e| e.message())? else {
         // Deleted while the run was in flight. Go's UPDATE would match no row
         // and its store would report "not found"; there is nothing to write.
-        return Ok(());
+        return Ok(false);
     };
 
-    fresh.run_count = run_count;
+    fresh.run_count += 1;
     fresh.last_run_at = Some(crate::native::gotime::GoTime::from_utc(ran_at));
     fresh.last_run_status = status.to_string();
+
+    // A one-shot task is parked after its run so a restart does not re-run it,
+    // and any task is parked once it reaches its stop count.
+    let pause =
+        one_shot || (fresh.stop_after_count > 0 && fresh.run_count >= fresh.stop_after_count);
     if pause {
         fresh.status = "paused".to_string();
     }
 
     tasks::update_task_in(&tx, &mut fresh)?;
     tx.commit()
-        .map_err(|e| format!("commit task update after run: {e}"))
+        .map_err(|e| format!("commit task update after run: {e}"))?;
+
+    // `publishTaskFinished` reads these off the caller's copy after this
+    // returns, so it reports what was stored rather than what was assumed.
+    caller_copy.run_count = fresh.run_count;
+    caller_copy.last_run_at = fresh.last_run_at;
+    caller_copy.last_run_status = fresh.last_run_status;
+    caller_copy.status = fresh.status;
+    Ok(pause)
 }
 
 /// `recordFailedRun`: a job row that is created already finished, for a failure
@@ -1278,7 +1302,7 @@ mod tests {
     }
 
     fn test_scheduler(db_path: &std::path::Path) -> Arc<Scheduler> {
-        super::super::runtime::for_test(db_path)
+        super::super::runtime::detached(db_path)
     }
 
     fn sample_task() -> ScheduledTask {
