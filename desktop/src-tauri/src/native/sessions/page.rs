@@ -67,12 +67,23 @@ pub fn list_page(
     if let Some(cur) = Cursor::decode(&q.cursor, q.sort)? {
         let bound = cur.bind(is_time)?;
         // Strictly after the cursor in the same total order the ORDER BY
-        // imposes. The tiebreak on session_id is what makes that order total:
-        // without it two sessions sharing a cost or a timestamp would page
-        // against each other, one repeating and one disappearing.
+        // imposes. The tiebreak is what makes that order total: without it two
+        // sessions sharing a cost or a timestamp would page against each other,
+        // one repeating and one disappearing. It runs to (session_id,
+        // project_path) — the table's whole primary key — because session_id
+        // alone is not unique.
         filter.add(
-            format!("({expr} < ? OR ({expr} = ? AND c.session_id < ?))"),
-            vec![bound.clone(), bound, Value::Text(cur.id)],
+            format!(
+                "({expr} < ? OR ({expr} = ? AND \
+                 (c.session_id < ? OR (c.session_id = ? AND c.project_path < ?))))"
+            ),
+            vec![
+                bound.clone(),
+                bound,
+                Value::Text(cur.id.clone()),
+                Value::Text(cur.id),
+                Value::Text(cur.project),
+            ],
         );
     }
 
@@ -80,7 +91,8 @@ pub fn list_page(
     // One extra row, so "is there a next page" is answered without a second
     // COUNT over the same predicate.
     let sql = format!(
-        "{SUMMARY_COLUMNS}{SUMMARY_SOURCE}{}\nORDER BY {expr} DESC, c.session_id DESC\nLIMIT {}",
+        "{SUMMARY_COLUMNS}{SUMMARY_SOURCE}{}\
+         \nORDER BY {expr} DESC, c.session_id DESC, c.project_path DESC\nLIMIT {}",
         filter.where_clause(),
         limit + 1
     );
@@ -111,6 +123,7 @@ pub fn list_page(
                 sort: q.sort.as_str().to_string(),
                 value: cursor_value(last, q.sort),
                 id: last.session_id.clone(),
+                project: last.project_path.clone(),
             }
             .encode();
             page.has_more = !page.next_cursor.is_empty();

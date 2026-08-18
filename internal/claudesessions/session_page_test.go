@@ -3,11 +3,13 @@ package claudesessions
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -210,7 +212,7 @@ func TestListPage_KeysetPaginationVisitsEveryRowExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestListPage_TiesArePagedByTheSessionIDTiebreak(t *testing.T) {
+func TestListPage_TiesArePagedByTheFullRowKeyTiebreak(t *testing.T) {
 	c := newPageCache(t)
 	// Every session shares a cost, so only the tiebreak makes the order total.
 	// Without it a page boundary in the middle of the tie repeats one row and
@@ -221,29 +223,114 @@ func TestListPage_TiesArePagedByTheSessionIDTiebreak(t *testing.T) {
 			id: fmt.Sprintf("tie-%d", i), last: at, costUSD: 5,
 		})
 	}
+	// …and one id under two project paths, tied with the rest. The tiebreak
+	// has to run to the whole primary key: on session_id alone this pair is
+	// one position, and whichever row loses is skipped by every page.
+	for _, project := range []string{"/home/dev/a", "/home/dev/b"} {
+		insertTestSession(t, c.db, testSession{
+			id: "tie-dup", project: project, last: at, costUSD: 5,
+		})
+	}
 
-	seen := map[string]int{}
+	// Every page size, so the boundary is guaranteed to fall between the two
+	// rows sharing an id as well as between two rows sharing a cost — a fixed
+	// size can put the whole pair inside one page and see nothing.
+	for limit := 1; limit <= 5; limit++ {
+		seen := map[string]int{}
+		cursor := ""
+		for {
+			page, err := c.ListPage(SessionQuery{Sort: SortCost, Limit: limit, Cursor: cursor})
+			if err != nil {
+				t.Fatalf("limit %d: paging: %v", limit, err)
+			}
+			for _, s := range page.Items {
+				seen[rowKeyOf(s)]++
+			}
+			if !page.HasMore {
+				break
+			}
+			cursor = page.NextCursor
+		}
+		if len(seen) != 11 {
+			t.Errorf("limit %d: saw %d of 11 tied rows", limit, len(seen))
+		}
+		for key, n := range seen {
+			if n != 1 {
+				t.Errorf("limit %d: tied row %s returned %d times", limit, key, n)
+			}
+		}
+	}
+}
+
+func TestListPage_ADuplicatedSessionIDOnATiedSortValueIsStillReachable(t *testing.T) {
+	c := newPageCache(t)
+	// The fixture from #364: claude_session_cache is keyed on
+	// (session_id, project_path), so one id legitimately yields two rows. When
+	// those two also tie on the sort column, a cursor that carries only the id
+	// cannot tell them apart — the walk visits dup@/a then jumps straight to
+	// other@/c, and dup@/b is never returned by any page.
+	insertTestSession(t, c.db, testSession{id: "dup", project: "/a", costUSD: 5})
+	insertTestSession(t, c.db, testSession{id: "dup", project: "/b", costUSD: 5})
+	insertTestSession(t, c.db, testSession{id: "other", project: "/c", costUSD: 1})
+
+	var walk []string
 	cursor := ""
-	for {
-		page, err := c.ListPage(SessionQuery{Sort: SortCost, Limit: 4, Cursor: cursor})
+	for pages := 0; ; pages++ {
+		if pages > 5 {
+			t.Fatal("pagination did not terminate")
+		}
+		page, err := c.ListPage(SessionQuery{Sort: SortCost, Limit: 1, Cursor: cursor})
 		if err != nil {
 			t.Fatalf("paging: %v", err)
 		}
-		for _, id := range ids(page) {
-			seen[id]++
+		for _, s := range page.Items {
+			walk = append(walk, rowKeyOf(s))
 		}
 		if !page.HasMore {
 			break
 		}
 		cursor = page.NextCursor
 	}
-	if len(seen) != 9 {
-		t.Errorf("saw %d of 9 tied sessions", len(seen))
+
+	want := []string{"dup@/b", "dup@/a", "other@/c"}
+	if !slices.Equal(walk, want) {
+		t.Errorf("walk = %v, want %v", walk, want)
 	}
-	for id, n := range seen {
-		if n != 1 {
-			t.Errorf("tied session %s returned %d times", id, n)
-		}
+
+	// And the toolbar must not contradict the scroll: facets counts with
+	// COUNT(*) over the same predicate, so a row the walk cannot reach shows
+	// up as "3 sessions" above a list that stops at 2.
+	f, err := c.Facets(SessionQuery{Sort: SortCost})
+	if err != nil {
+		t.Fatalf("facets: %v", err)
+	}
+	if f.Total != len(walk) {
+		t.Errorf("facets total %d but the walk delivered %d rows", f.Total, len(walk))
+	}
+}
+
+// rowKeyOf spells a row's primary key, which is what a duplicated session id
+// makes these tests count on rather than the id alone.
+func rowKeyOf(s ClaudeSessionSummary) string { return s.SessionID + "@" + s.ProjectPath }
+
+func TestListPage_ACursorMintedBeforeTheProjectTiebreakStillPages(t *testing.T) {
+	c := newPageCache(t)
+	for i := range 5 {
+		insertTestSession(t, c.db, testSession{id: fmt.Sprintf("s-%d", i), costUSD: float64(i)})
+	}
+	// A scroll in flight when the binary changed carries a cursor with no "p"
+	// at all — spelled out here rather than minted, because the struct now
+	// always emits the key. It decodes with Project empty, and
+	// `c.project_path < ''` is never true, so the predicate degrades to the
+	// id-only one it was minted under rather than dropping the rest of the
+	// scroll.
+	legacy := base64.RawURLEncoding.EncodeToString([]byte(`{"s":"cost","v":"3","id":"s-3"}`))
+	page, err := c.ListPage(SessionQuery{Sort: SortCost, Limit: 10, Cursor: legacy})
+	if err != nil {
+		t.Fatalf("paging a legacy cursor: %v", err)
+	}
+	if got := ids(page); !slices.Equal(got, []string{"s-2", "s-1", "s-0"}) {
+		t.Errorf("legacy cursor continued at %v, want [s-2 s-1 s-0]", got)
 	}
 }
 

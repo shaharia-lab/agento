@@ -67,7 +67,7 @@ type SessionFacets struct {
 var ErrCursorMismatch = errors.New("claudesessions: cursor does not match the requested sort")
 
 // cursor is a keyset position: the sort value of the last row returned, plus
-// its session ID as the tiebreak.
+// the row's primary key as the tiebreak.
 //
 // Keyset rather than OFFSET because OFFSET makes the database walk and discard
 // every skipped row — page 50 costs fifty times page 1 — and because a scan
@@ -80,6 +80,18 @@ type cursor struct {
 	// both without a discriminator.
 	Value string `json:"v"`
 	ID    string `json:"id"`
+	// Project is the second half of the tiebreak. claude_session_cache is keyed
+	// on (session_id, project_path), so a session id is not unique: one id
+	// legitimately yields two rows when the same session was seen under two
+	// project paths. On the ID alone the pair is indistinguishable to the
+	// predicate below and the second row is skipped by every page — while
+	// Facets counts it, so the toolbar says "3 sessions" and the scroll
+	// delivers 2.
+	//
+	// A cursor minted before this field existed decodes with it empty, and
+	// `c.project_path < ''` is never true, so such a cursor pages exactly as it
+	// used to rather than losing a row mid-scroll.
+	Project string `json:"p"`
 }
 
 func (c cursor) encode() string {
@@ -199,18 +211,22 @@ func listSessionPage(db *sql.DB, logger *slog.Logger, q SessionQuery) (SessionPa
 			return SessionPage{}, bindErr
 		}
 		// Strictly after the cursor in the same total order the ORDER BY below
-		// imposes. The tiebreak on session_id is what makes the order total:
-		// without it, two sessions sharing a cost or a timestamp would page
-		// against each other, one repeating and one disappearing.
-		filter.add(fmt.Sprintf("(%s < ? OR (%s = ? AND c.session_id < ?))", expr, expr),
-			bound, bound, cur.ID)
+		// imposes. The tiebreak is what makes the order total: without it, two
+		// sessions sharing a cost or a timestamp would page against each other,
+		// one repeating and one disappearing. It runs to (session_id,
+		// project_path) — the table's whole primary key — because session_id
+		// alone is not unique.
+		filter.add(fmt.Sprintf(
+			"(%s < ? OR (%s = ? AND (c.session_id < ? OR (c.session_id = ? AND c.project_path < ?))))",
+			expr, expr),
+			bound, bound, cur.ID, cur.ID, cur.Project)
 	}
 
 	limit := q.limit()
 	// One extra row, so "is there a next page" is answered without a second
 	// COUNT over the same predicate.
 	query := sessionSummaryColumns + sessionSummarySource + filter.where() +
-		fmt.Sprintf("\nORDER BY %s DESC, c.session_id DESC\nLIMIT %d", expr, limit+1)
+		fmt.Sprintf("\nORDER BY %s DESC, c.session_id DESC, c.project_path DESC\nLIMIT %d", expr, limit+1)
 
 	rows, err := db.QueryContext(context.Background(), query, filter.args...)
 	if err != nil {
@@ -234,7 +250,12 @@ func listSessionPage(db *sql.DB, logger *slog.Logger, q SessionQuery) (SessionPa
 	if len(items) > limit {
 		items = items[:limit]
 		last := items[len(items)-1]
-		page.NextCursor = cursor{Sort: sort, Value: cursorValue(last, sort), ID: last.SessionID}.encode()
+		page.NextCursor = cursor{
+			Sort:    sort,
+			Value:   cursorValue(last, sort),
+			ID:      last.SessionID,
+			Project: last.ProjectPath,
+		}.encode()
 		page.HasMore = page.NextCursor != ""
 	}
 	attachPRsFor(db, logger, items)
