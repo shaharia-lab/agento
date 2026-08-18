@@ -187,16 +187,16 @@
     {
       "method": "POST",
       "route": "/api/integrations/{id}/auth/start",
-      "status": "deferred",
-      "owner": "-",
-      "reason": "mints an OAuth URL and holds the in-flight flow in memory"
+      "status": "native",
+      "owner": "#318",
+      "reason": "the shell owns the callback server and the in-flight flow"
     },
     {
       "method": "POST",
       "route": "/api/integrations/{id}/auth/validate",
       "status": "deferred",
       "owner": "-",
-      "reason": "dials the remote service; the error text is not reproducible"
+      "reason": "five per-type remote validations, each writing its own auth payload"
     },
     {
       "method": "POST",
