@@ -4,3 +4,4 @@
 //! Mirrors `internal/trigger`.
 
 pub mod match_rule;
+pub mod receiver;
