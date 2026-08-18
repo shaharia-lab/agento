@@ -1255,12 +1255,13 @@ mod tests {
             "{\"exists\":true,\"settings\":{\"trailing\":true}}\n"
         );
 
-        // Not UTF-8: Go writes the file with U+FFFD substituted and answers
-        // 200. This port cannot reproduce that, so it forwards rather than
-        // answering the 400 it used to.
+        // Not UTF-8: Go wrote the file with U+FFFD substituted and answered
+        // 200. Until #278 this forwarded so Go could do that; with the sidecar
+        // gone a request body this build cannot carry is a 400, and the app's
+        // own requests are always UTF-8.
         assert!(matches!(
             put_settings(&dir, b"{\"a\":\"\xff\"}").unwrap_err(),
-            WriteError::Fallback(_)
+            WriteError::InvalidBody
         ));
 
         // Deeper than the scanner's 10000 levels: `Decode` fails, so this is

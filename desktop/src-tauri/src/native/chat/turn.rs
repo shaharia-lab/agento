@@ -100,10 +100,11 @@ pub struct TurnState {
 /// Run a turn and stream it.
 ///
 /// Everything that can fail does so *before* the subprocess exists, and is
-/// answered as a clean JSON error — a 404 for a missing chat, a 500 for
-/// everything else, each carrying its reason. There is nothing to forward to
-/// since #278: this runtime is the only implementation, so `Err` from here
-/// would only become a less specific 500 in the proxy. Once the stream has
+/// answered as a clean JSON error — a 404 for a missing chat, Go's fixed
+/// `500 "failed to start message"` for machinery failures (reason in the log,
+/// as Go logged it), and a 500 carrying the refusal reason for the cases that
+/// have no Go counterpart (`whatsapp` tools are dropped, `mcps.yaml` is not
+/// read). There is nothing to forward to since #278. Once the stream has
 /// begun, a failure ends the stream rather than changing the status — the 200
 /// is already committed.
 pub async fn run(
@@ -135,8 +136,13 @@ pub async fn run(
             ))
         }
         Err(e) => {
+            // Go's `handleSendMessage` answers its fixed 500 and logs the
+            // reason; the reason stays off the wire here too.
             log::warn!("chat {chat_id:?}: loading chat and agent failed: {e}");
-            return Ok(error_json(StatusCode::INTERNAL_SERVER_ERROR, &e));
+            return Ok(error_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to start message",
+            ));
         }
     };
     let (row, agent) = loaded;
@@ -204,10 +210,12 @@ pub async fn run(
     let mut session = match Session::new(options).await {
         Ok(session) => session,
         Err(e) => {
+            // `handleSendMessage`'s own 500 body; the reason goes to the log,
+            // where Go put it too.
             log::warn!("chat {chat_id:?}: starting agent session failed: {e}");
             return Ok(error_json(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("starting agent session: {e}"),
+                "failed to start message",
             ));
         }
     };
@@ -216,7 +224,7 @@ pub async fn run(
         log::warn!("chat {chat_id:?}: sending first message failed: {e}");
         return Ok(error_json(
             StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("sending first message: {e}"),
+            "failed to start message",
         ));
     }
     // `chatService.BeginMessage`'s own line, after `agent.StartSession` returns

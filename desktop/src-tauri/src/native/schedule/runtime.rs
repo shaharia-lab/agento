@@ -4,9 +4,10 @@
 //! # This is an ownership flip, not a route
 //!
 //! **Only one process may schedule.** Two schedulers over one `scheduled_tasks`
-//! table means every task fires twice, so this cannot be a claimed route that
-//! forwards on doubt — the sidecar is started with `AGENTO_SCHEDULER=off` and
-//! nothing else will fire a task. That is the #289 model, and it is why the
+//! table means every task fires twice, so this could never be a claimed route
+//! that forwards on doubt — the sidecar was started with `AGENTO_SCHEDULER=off`
+//! (until #278 removed it entirely), and nothing else will fire a task. That is
+//! the #289 model, and it is why the
 //! failure mode to design against is *silence*: a task Rust declines to run does
 //! not fall back to Go, it simply never runs, and a job history with no row is
 //! indistinguishable from a task that was not due.
@@ -424,11 +425,10 @@ fn local_tz() -> Tz {
 /// exactly the split this port set out to close, reappearing through the
 /// escape hatch.
 ///
-/// So ownership follows the seam, in **both** directions: this decides whether
-/// `sidecar.rs` sets `AGENTO_SCHEDULER=off` *and* whether [`start`] installs any
-/// timers. `AGENTO_DESKTOP_NATIVE=off` therefore means what it is documented to
-/// mean — the app behaves exactly as it did before the port, with Go scheduling
-/// and Go writing.
+/// While the sidecar existed this decided ownership in **both** directions:
+/// whether `sidecar.rs` set `AGENTO_SCHEDULER=off` *and* whether [`start`]
+/// installed any timers. #278 removed the sidecar and the seam modes with it,
+/// so only the second direction remains.
 pub fn shell_owns_scheduler() -> bool {
     // The database path is the whole answer since #278: with no database this
     // process cannot schedule at all. (The seam-mode half of this check died

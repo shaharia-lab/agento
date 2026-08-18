@@ -115,7 +115,19 @@ pub fn open_read_write(path: &Path) -> Result<Connection, String> {
 /// does not exist yet, which was likewise Go's job.
 pub fn ensure_database(path: &Path) -> Result<Connection, String> {
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)
+        // 0750, matching Go's `os.MkdirAll(filepath.Dir(dbPath), 0750)`
+        // (`internal/storage/sqlite.go`): the database this directory holds
+        // stores integration credentials, and `create_dir_all`'s default mode
+        // would leave it world-traversable.
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o750);
+        }
+        builder
+            .create(dir)
             .map_err(|e| format!("creating data dir {}: {e}", dir.display()))?;
     }
     let conn = Connection::open_with_flags(
@@ -182,6 +194,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one open allowed to create (#278): startup. It builds the data dir
+    /// with Go's 0750 — the database stores integration credentials, and the
+    /// default mode would leave the directory world-traversable — creates the
+    /// file, and comes back in WAL mode ready for `migrate::apply`.
+    #[test]
+    fn ensure_database_creates_dir_and_file_with_gos_modes() {
+        let dir = std::env::temp_dir()
+            .join("agento-native-db-test")
+            .join(format!("ensure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("data").join("agento.db");
+
+        let conn = ensure_database(&path).expect("startup open creates");
+        assert!(path.exists(), "the database file must exist");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal_mode");
+        assert!(mode.eq_ignore_ascii_case("wal"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(path.parent().expect("parent"))
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o750, "Go creates the data dir 0750");
+        }
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_missing_database_is_an_error_not_a_new_file() {
