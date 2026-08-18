@@ -10,9 +10,9 @@ export default defineConfig({
     strictPort: true,
     watch: { ignored: ["**/src-tauri/**"] },
     // In development the page is served by Vite, so /api would resolve to Vite
-    // itself. Forward it to the Rust proxy (fixed port in debug builds), which
-    // fronts the Go sidecar. Proxying server-side also keeps the browser out of
-    // CORS entirely and leaves SSE intact.
+    // itself. Forward it to the Rust API server (fixed port in debug builds).
+    // Proxying server-side also keeps the browser out of CORS entirely and
+    // leaves SSE intact.
     proxy: {
       "/api": {
         target: "http://127.0.0.1:8991",

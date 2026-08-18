@@ -313,15 +313,23 @@ fn claims(method: &Method, path: &str) -> bool {
     match path {
         "/api/monitoring" => method == Method::GET || method == Method::PUT,
         "/api/monitoring/test" => method == Method::POST,
+        // `/metrics` is the read half of the same declined feature (#278). It
+        // is mounted at the root, outside `/api`, and the write-routes audit is
+        // writes-only by design — so nothing had decided it until the cut-over
+        // forced the question. Dropping it *deliberately* rather than letting
+        // it 404: a 404 reads as a version mismatch, where the truth is that
+        // this build exports no telemetry — the same reasoning as the two
+        // 501'd writes above, so it lives with them.
+        "/metrics" => method == Method::GET,
         _ => false,
     }
 }
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
-    if req.method != Method::GET {
-        // Claimed so it is answered here rather than by a sidecar that is going
-        // away. `finish` renders it as `{"error": …}`, the shape every other
-        // failure in the API uses, so the settings page needs no special case.
+    if req.method != Method::GET || req.path == "/metrics" {
+        // Claimed so the decline is answered deliberately. `finish` renders it
+        // as `{"error": …}`, the shape every other failure in the API uses, so
+        // the settings page needs no special case.
         return super::writes::finish(Err(super::writes::WriteError::NotImplemented(
             DECLINED.to_string(),
         )));

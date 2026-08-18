@@ -539,80 +539,6 @@ fn segment(value: &str) -> Option<&str> {
 /// The trigger-rule writes are safe for a different reason again: the dispatcher
 /// calls `ListRules` **per inbound message** (`internal/trigger/dispatcher.go`),
 /// so there is no cached rule set for a native write to leave stale.
-/// A **forwarded** request whose Go handler rewrites `auth` and then fires
-/// `registry.Reload` — which, for a type this shell hosts, now reaches nothing
-/// on the Go side. Returns the integration id the shell owes a reload for.
-///
-/// `Reload` has seven callers in Go. Two are ported (`Update`, and `Delete` via
-/// `Stop`). Of the five that run inside the sidecar, **none is covered by the
-/// per-type gate any more**: as of #314 five of the six types are hosted here, so
-/// a `Reload` for one reaches nothing in that process.
-///
-/// Four are the token validators — `validateGitHubPATAuth` and, since #314–#317,
-/// `validateTelegramTokenAuth`, `validateSlackTokenAuth`, `validateJiraTokenAuth`
-/// and `validateConfluenceAuth` — all behind
-/// `POST /api/integrations/{id}/auth/validate`, which is the route this hook
-/// answers. Without it such an integration is never hosted in the session it is
-/// set up in: create, `PUT` and `auth/validate` all leave it unauthenticated or
-/// unheard, and it appears only at the next boot's `start_all`.
-///
-/// The fifth is `completeOAuth`, whose token used to reach neither this proxy
-/// nor this process: the browser delivered it to a callback server the
-/// **sidecar** opened. #318 moved that server here, so the shell now writes the
-/// token itself and reloads directly from `oauth::flow` — which is why the
-/// `AuthStatusPolled` trigger this function used to return is **gone** rather
-/// than kept beside the real thing. Watching the UI poll `auth/status` and
-/// reloading when the row stopped matching what was running was an inference
-/// standing in for an event the shell could not see; it can see it now.
-///
-/// The route predicate below is deliberately **type-blind**: it answers with the
-/// id for every integration, and `registry::reload_after_auth` reads the row's
-/// type through `can_host` before it does anything. So #313 need not touch
-/// this — adding a string to `registry::HOSTED_TYPES` is what widens it.
-///
-/// The reload runs **after** Go's answer, so the row is already written, and it
-/// is idempotent — the worst case is restarting a server that was about to be
-/// restarted. Go fires its own from a goroutine (`reloadIntegration`), so doing
-/// it off the response path is parity rather than a shortcut.
-///
-/// # What is left, and why it is not dead code now that the route is native
-///
-/// One route: `POST …/auth/validate`, an **event** — a credential was just
-/// written, so the reload is unconditional, exactly as Go's is.
-///
-/// #318 made that route native, which looks like it should retire this hook the
-/// way #367 retired `AuthStatusPolled`. It does not, and the difference is the
-/// seam mode. `native::may_serve` refuses **every** write in `Mode::Off` and
-/// `Mode::Diff`, so in those two modes the request forwards and Go answers it —
-/// while `AGENTO_INTEGRATIONS` is set **unconditionally** in `sidecar.rs`,
-/// unlike `AGENTO_SCHEDULER`, so the shell is still the one hosting the servers.
-/// Go's `Reload` therefore still reaches nothing in exactly those modes, and
-/// without this hook an integration validated under `AGENTO_DESKTOP_NATIVE=off`
-/// would stay unhosted until the next boot's `start_all`.
-///
-/// So the two paths are complements, not duplicates: `token_validate::serve`
-/// reloads directly when it answers, and this fires when it did not get to.
-/// They cannot both run for one request — a request is either served or
-/// forwarded — so there is no double reload to worry about, and one would be
-/// harmless anyway.
-pub fn reload_after_forward<'a>(method: &Method, path: &'a str) -> Option<(&'a str, Trigger)> {
-    let rest = path.strip_prefix("/api/integrations/")?;
-    if method == Method::POST {
-        if let Some(id) = rest.strip_suffix("/auth/validate") {
-            return segment(id).map(|id| (id, Trigger::CredentialWritten));
-        }
-    }
-    None
-}
-
-/// Why the shell is being asked to look at an integration again.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Trigger {
-    /// A credential was written by a forwarded request. Reload unconditionally,
-    /// as Go does.
-    CredentialWritten,
-}
-
 fn claims(method: &Method, path: &str) -> bool {
     match route_of(path) {
         Some(Route::List) => method == Method::GET || method == Method::POST,
@@ -680,12 +606,18 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         Some(Route::AvailableTools) => super::gojson::to_vec(&available_tools(db)?)
             .map_err(|e| format!("encoding available tools: {e}"))?,
 
-        // Falling back lets Go answer its own 404, body and status included.
+        // `handleGetIntegration` → `httpErr` → `NotFoundError`'s own wording,
+        // answered here since #278.
         Some(Route::Get(id)) => match get(db, id)? {
             Some(cfg) => {
                 super::gojson::to_vec(&cfg).map_err(|e| format!("encoding integration: {e}"))?
             }
-            None => return Err(format!("integration {id:?} not found")),
+            None => {
+                return super::Answer::error(
+                    axum::http::StatusCode::NOT_FOUND,
+                    &format!("integration {id:?} not found"),
+                )
+            }
         },
 
         Some(Route::Triggers(id)) => super::gojson::to_vec(&list_trigger_rules(db, id)?)
@@ -2235,40 +2167,6 @@ mod tests {
             "2026-01-02 00:00:00 +0000 UTC",
             "the row must be untouched: Go re-runs the whole PUT"
         );
-    }
-
-    /// The one route the seam still owes something after Go has answered it.
-    ///
-    /// It was two until #318: `GET …/auth/status` used to trigger a
-    /// reload-if-changed, because the shell could not see an OAuth token land
-    /// in a callback server the sidecar owned. It owns that server now, so the
-    /// poll is no longer evidence of anything and the trigger is gone.
-    #[test]
-    fn only_the_validate_route_asks_the_shell_to_look_again() {
-        assert_eq!(
-            reload_after_forward(&Method::POST, "/api/integrations/int-1/auth/validate"),
-            Some(("int-1", Trigger::CredentialWritten))
-        );
-        assert_eq!(
-            reload_after_forward(&Method::GET, "/api/integrations/int-1/auth/status"),
-            None,
-            "the shell answers this route itself now"
-        );
-        // The method matters on both, and neither admits an empty or
-        // multi-segment id.
-        for (method, path) in [
-            (Method::GET, "/api/integrations/int-1/auth/validate"),
-            (Method::POST, "/api/integrations/int-1/auth/status"),
-            (Method::POST, "/api/integrations/int-1/auth/start"),
-            (Method::POST, "/api/integrations/int-1"),
-            (Method::POST, "/api/integrations//auth/validate"),
-            (Method::GET, "/api/integrations//auth/status"),
-            (Method::POST, "/api/integrations/a/b/auth/validate"),
-            (Method::GET, "/api/integrations/a/b/auth/status"),
-            (Method::POST, "/api/agents"),
-        ] {
-            assert_eq!(reload_after_forward(&method, path), None, "{method} {path}");
-        }
     }
 
     fn seed_integration(file: &tempfile::NamedTempFile, id: &str) {

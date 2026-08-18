@@ -359,16 +359,17 @@ fn detail_body(profile: &Profile, dir: &str) -> Result<Vec<u8>, WriteError> {
     let mut settings = None;
     let mut exists = false;
     if let Ok(data) = std::fs::read(&profile.file_path) {
-        // Go's `json.Valid` accepts bytes that are not UTF-8 and its encoder
-        // then ships them verbatim. serde cannot build a `RawValue` from them,
-        // so this would have answered `exists: true` with `settings: null`
-        // where Go sends the document. Forward instead.
-        if !super::is_utf8(&data) {
-            return Err(WriteError::Fallback(format!(
-                "{} is not UTF-8; Go serves those bytes verbatim",
-                profile.file_path
-            )));
-        }
+        // Go's `json.Valid` accepted bytes that are not UTF-8 and its encoder
+        // shipped the document with U+FFFD substituted — serde cannot carry
+        // them, so until #278 this forwarded and Go answered. The lossy
+        // conversion *is* that substitution, the same answer `get_settings`
+        // gives the unnamed file; only a hand-corrupted file ever takes this
+        // branch, since the app writes UTF-8.
+        let data = if super::is_utf8(&data) {
+            data
+        } else {
+            String::from_utf8_lossy(&data).into_owned().into_bytes()
+        };
         // `json.Valid` only. An unparseable file is `exists: false` with a
         // `null` payload — an answer, not an error.
         if go_json_valid(&data) {
@@ -1041,16 +1042,15 @@ mod tests {
             "{body}"
         );
 
-        // A file that is valid JSON to Go but not UTF-8 is neither of those
-        // answers: `json.Valid` passes and Go ships the bytes verbatim, so a
-        // `settings: null, exists: false` here would be a wrong answer. Forward.
+        // A file that is valid JSON to Go but not UTF-8 is served lossily
+        // since #278: the U+FFFD substitution is Go's own answer, and there is
+        // no sidecar left to forward the raw bytes to.
         std::fs::write(&profile.file_path, b"{\"a\":\"\xff\"}").expect("write");
+        let body =
+            String::from_utf8(detail_body(&profile, &d).expect("lossy detail")).expect("utf8");
         assert!(
-            matches!(
-                detail_body(&profile, &d).unwrap_err(),
-                WriteError::Fallback(_)
-            ),
-            "non-UTF-8 profile settings must forward"
+            body.contains("\u{fffd}") && body.contains("\"exists\":true"),
+            "non-UTF-8 profile settings are served with U+FFFD substituted: {body}"
         );
     }
 
@@ -1326,22 +1326,24 @@ mod tests {
         );
     }
 
-    /// A body that is not UTF-8 forwards from every write on this surface: Go
-    /// substitutes U+FFFD into the decoded string and carries on, and where it
-    /// puts the replacement character is not something this port reproduces.
+    /// A body that is not UTF-8 is a 400 from every write on this surface
+    /// since #278: Go substituted U+FFFD and carried on, but the app's own
+    /// requests are always UTF-8 and there is no sidecar left to defer to.
     #[test]
-    fn a_non_utf8_body_forwards_from_create_and_update() {
+    fn a_non_utf8_body_is_a_400_from_create_and_update() {
         let root = dir();
         let d = path_of(&root);
         list(&d).expect("seed");
 
+        // `create` folds a decode failure into its own 400, exactly as it
+        // does for any malformed body.
         assert!(matches!(
             create(&d, b"{\"name\":\"x\xffy\"}").unwrap_err(),
-            WriteError::Fallback(_)
+            WriteError::BadRequest(ref m) if m == "name is required"
         ));
         assert!(matches!(
             update(&d, "default", b"{\"settings\":{\"a\":\"\xff\"}}").unwrap_err(),
-            WriteError::Fallback(_)
+            WriteError::InvalidBody
         ));
         // Neither may have written anything.
         assert!(!std::path::Path::new(&format!("{d}/settings_xy.json")).exists());

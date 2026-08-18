@@ -644,14 +644,16 @@ mod tests {
         assert_eq!(updated, "2026-01-01 00:00:00 +0000 UTC");
     }
 
-    /// A confluence site URL that `url.Parse` itself refuses forwards, because
-    /// Go's sentence there is `net/url`'s vocabulary quoted back at the caller
-    /// and this port does not spell it. Safe: nothing has been called.
+    /// A confluence site URL that `url.Parse` itself refuses used to forward,
+    /// because Go's sentence there was `net/url`'s vocabulary quoted back at
+    /// the caller. With the sidecar gone (#278) it is answered as the same 400
+    /// class with this build's own wording — safely, since nothing has been
+    /// called.
     ///
-    /// The two rules Go states itself — HTTPS, and a hostname — are answered
-    /// here instead, which is what the second half of this test checks.
+    /// The two rules Go states itself — HTTPS, and a hostname — keep their
+    /// verbatim sentences, which is what the second half of this test checks.
     #[tokio::test]
-    async fn a_confluence_site_url_forwards_only_when_go_would_use_net_urls_wording() {
+    async fn a_confluence_site_url_url_parse_would_refuse_is_answered_400() {
         let dir = tempfile::tempdir().expect("tempdir");
 
         // A control character is `url.Parse`'s own refusal.
@@ -662,14 +664,15 @@ mod tests {
             "{\"site_url\":\"https://a\\u0001b\",\"email\":\"a@b.c\",\"api_token\":\"t\"}",
         );
         let db2 = db.clone();
-        let err = tokio::task::spawn_blocking(move || serve(&db2, "cf1"))
+        let answer = tokio::task::spawn_blocking(move || serve(&db2, "cf1"))
             .await
             .expect("join")
-            .expect_err("forwarded");
+            .expect("answered");
+        assert_eq!(answer.status, StatusCode::BAD_REQUEST);
         assert!(
-            matches!(err, WriteError::Fallback(_)),
-            "got {:?}, want a Fallback",
-            err.message()
+            body_of(&answer).contains("invalid site URL"),
+            "the refusal must name the site URL: {}",
+            body_of(&answer)
         );
 
         // …while "must use HTTPS" is Go's own sentence and is answered.

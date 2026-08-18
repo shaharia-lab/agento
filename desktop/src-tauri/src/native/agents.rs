@@ -218,9 +218,12 @@ fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, S
             Some(agent) => {
                 super::gojson::to_vec(&agent).map_err(|e| format!("encoding agent: {e}"))?
             }
-            // Falling back lets Go answer the 404, rather than this having to
-            // reproduce its body and status.
-            None => return Err(format!("agent {slug:?} not found")),
+            // `handleGetAgent`'s own 404, body verbatim. This used to forward
+            // so Go could answer it; with the sidecar gone (#278) it is
+            // answered here.
+            None => {
+                return super::Answer::error(axum::http::StatusCode::NOT_FOUND, "agent not found")
+            }
         },
     };
     Ok(super::Answer::json(body))

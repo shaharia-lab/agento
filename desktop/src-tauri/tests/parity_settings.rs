@@ -126,19 +126,11 @@ async fn the_version_reads_match_the_live_go_response() {
     let native = gojson::to_vec(&version::version()).expect("encode");
     assert_identical("version", &go, &native);
 
-    // The update check is only ported for a build that names no published
-    // release; anything else falls back to Go and there is nothing to diff.
+    // Every build answers the short-circuit since #278; the live comparison
+    // only holds for an unstamped binary, because a *stamped* Go server would
+    // take the release-lookup branch this build deliberately does not have.
     // `parity-instance.sh` builds with no `-ldflags`, so this is the live case.
-    match version::update_check() {
-        Some(answer) => {
-            let go = fetch("/api/version/update-check").await;
-            let native = gojson::to_vec(&answer).expect("encode");
-            assert_identical("version/update-check", &go, &native);
-        }
-        None => panic!(
-            "this binary is stamped as {:?}, so the update check falls back to Go \
-             and cannot be diffed. Build the test without AGENTO_BUILD_VERSION.",
-            version::VERSION
-        ),
-    }
+    let go = fetch("/api/version/update-check").await;
+    let native = gojson::to_vec(&version::update_check()).expect("encode");
+    assert_identical("version/update-check", &go, &native);
 }

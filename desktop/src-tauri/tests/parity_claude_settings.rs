@@ -698,10 +698,10 @@ async fn the_profile_write_answers_match_go() {
 /// Rust forwards for each of the same inputs.
 #[tokio::test]
 #[ignore = "needs a running parity instance and a scratch CLAUDE_CONFIG_DIR; it writes"]
-async fn bytes_that_are_not_utf8_are_gos_to_answer() {
+async fn bytes_that_are_not_utf8_get_the_cutover_answers() {
     let (_serial, dir) = enter().await;
 
-    // ── the read of a file Go accepts and Rust cannot re-emit ──
+    // ── the read of a file Go accepted verbatim: lossy since #278 ──
     let raw: &[u8] = b"{\"model\":\"opus\",\"tag\":\"x\xffy\"}";
     std::fs::write(format!("{dir}/settings.json"), raw).expect("write");
 
@@ -711,17 +711,17 @@ async fn bytes_that_are_not_utf8_are_gos_to_answer() {
         "Go is expected to ship the stored bytes through its encoder; it sent {}",
         String::from_utf8_lossy(&go)
     );
+    // Until #278 the native read forwarded so Go could ship the raw bytes.
+    // Now it answers Go's own substitution: U+FFFD, `exists: true`, the
+    // document intact.
+    let native = claude_settings::get_settings(&dir).expect("lossy native read");
+    let native = String::from_utf8(native.body.expect("body")).expect("utf8");
     assert!(
-        String::from_utf8_lossy(&go).contains(r#""exists":true"#),
-        "Go answers 200 with the document, so a Rust `{{\"exists\":true}}` \
-         would be a wrong answer rather than a missing one"
-    );
-    assert!(
-        claude_settings::get_settings(&dir).is_err(),
-        "the native read must forward, not drop the `settings` key"
+        native.contains("\u{fffd}") && native.contains(r#""exists":true"#),
+        "{native}"
     );
 
-    // ── the write Go performs and Rust cannot reproduce ──
+    // ── the write Go performed and Rust refuses as a 400 since #278 ──
     let (status, answer) = send_raw(
         Method::PUT,
         "/api/claude-settings",
@@ -737,10 +737,10 @@ async fn bytes_that_are_not_utf8_are_gos_to_answer() {
     );
     assert!(matches!(
         claude_settings::put_settings(&dir, b"{\"tag\":\"x\xffy\"}"),
-        Err(agento_lib::native::writes::WriteError::Fallback(_))
+        Err(agento_lib::native::writes::WriteError::InvalidBody)
     ));
 
-    // ── the same on a profile's own file ──
+    // ── the same on a profile's own file: lossy, like the unnamed one ──
     let id = create_profile("Parity Not Utf8").await;
     std::fs::write(format!("{dir}/settings_{id}.json"), raw).expect("write");
     let go = fetch(&format!("/api/claude-settings/profiles/{id}")).await;
@@ -749,9 +749,11 @@ async fn bytes_that_are_not_utf8_are_gos_to_answer() {
         "Go's `json.Valid` accepts these bytes, so the detail is `exists: true` \
          with the document — not `settings: null`"
     );
+    let native = finish(profiles::get(&dir, &id)).expect("lossy native detail");
+    let native = String::from_utf8(native.body.expect("body")).expect("utf8");
     assert!(
-        finish(profiles::get(&dir, &id)).is_err(),
-        "the native detail must forward"
+        native.contains("\u{fffd}") && native.contains(r#""exists":true"#),
+        "{native}"
     );
     delete_profile(&id).await;
 

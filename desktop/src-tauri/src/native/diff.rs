@@ -1,14 +1,14 @@
 //! Proving a ported route answers what Go answers.
 //!
 //! The bar for a port is a byte-identical response, and the only way to know is
-//! to ask both. `AGENTO_DESKTOP_NATIVE=diff` puts a claimed route into shadow
-//! mode: the Go sidecar's answer is still what the UI receives, while the Rust
-//! answer is computed alongside and compared. A mismatch is logged with the
-//! offset and the surrounding bytes, which is what turns "the numbers look
-//! slightly off" into "byte 4,181, `0.30000000000000004` vs `0.3`".
-//!
-//! Shadow mode is opt-in because it costs a second computation per request and
-//! is a development tool, not a safety net.
+//! to ask both. [`compare`] describes the first difference with the offset and
+//! the surrounding bytes, which is what turns "the numbers look slightly off"
+//! into "byte 4,181, `0.30000000000000004` vs `0.3`". Its caller is the live
+//! parity harness (`tests/parity_common/`), which replays each request against
+//! a Go server built from this checkout by `scripts/parity-instance.sh` and
+//! against the native handler, and diffs the two. (Until #278 the proxy's
+//! shadow-diff mode — `AGENTO_DESKTOP_NATIVE=diff` — was the second caller,
+//! comparing live traffic against the sidecar; it died with the sidecar.)
 
 /// The outcome of comparing two responses for the same request.
 #[derive(Debug, PartialEq, Eq)]
@@ -51,15 +51,6 @@ fn window(body: &[u8], at: usize) -> String {
         .escape_debug()
         .to_string()
 }
-
-/// Log the result of a shadow comparison.
-pub fn report(path: &str, outcome: &Outcome) {
-    match outcome {
-        Outcome::Identical => log::info!("native diff {path}: identical"),
-        Outcome::Differs(detail) => log::error!("native diff {path}: MISMATCH {detail}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

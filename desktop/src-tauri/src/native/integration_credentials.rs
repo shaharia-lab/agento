@@ -10,10 +10,10 @@
 //! own required fields and its own **exact** error strings, all of which ship to
 //! the client as a 422 body.
 //!
-//! # Where the port deliberately gives up
+//! # Where the wording is this build's own
 //!
 //! Two of Go's failure paths embed an error string this port cannot reproduce,
-//! and both **forward** rather than guess:
+//! and until #278 both forwarded so the sidecar could answer them exactly:
 //!
 //! - A credentials blob that is present but does not unmarshal. Go ships
 //!   `invalid google credentials: ` plus `encoding/json`'s own message, which
@@ -23,8 +23,9 @@
 //! - A `site_url` that `net/url` rejects outright, whose message comes from
 //!   `url.Parse`.
 //!
-//! Both are `Fallback`, so Go answers them exactly. Everything else — the far
-//! commoner "you left a field blank" — is reproduced here.
+//! With the sidecar gone both are answered here as the **same 422 class** with
+//! this build's own wording. Everything else — the far commoner "you left a
+//! field blank" — is Go's text verbatim.
 //!
 //! # The three traps
 //!
@@ -121,18 +122,24 @@ where
     serde_json::from_str::<Option<super::gojson::GoStruct<T>>>(raw.get())
         .map(|wrapped| wrapped.map_or_else(T::default, |wrapped| wrapped.0))
         .map_err(|e| {
-            // **The error is deliberately not included.** serde_json quotes the
-            // offending value, so a caller who sends
+            // **The serde error text is deliberately not included.** serde_json
+            // quotes the offending value, so a caller who sends
             // `"credentials": "ghp_realtoken"` would have that token echoed into
-            // the message — which the seam logs on every forward. Go's own error
-            // names the type and never the value. The position is enough to
-            // debug with and carries nothing secret.
-            WriteError::Fallback(format!(
-                "{kind} credentials do not decode at line {} column {}; \
-                 Go's json error text is not reproducible here, so this forwards",
-                e.line(),
-                e.column()
-            ))
+            // the message. Go's own error names the type and never the value.
+            //
+            // Go answered 422 with `encoding/json`'s wording here; that text is
+            // not reproducible and the sidecar that used to supply it is gone
+            // (#278), so this is the same 422 class with this build's own
+            // wording. The position is enough to debug with and carries nothing
+            // secret.
+            WriteError::validation(
+                FIELD_CREDENTIALS,
+                format!(
+                    "invalid {kind} credentials: malformed JSON at line {} column {}",
+                    e.line(),
+                    e.column()
+                ),
+            )
         })
 }
 
@@ -363,14 +370,15 @@ fn validate_whatsapp(credentials: Option<&RawValue>) -> Result<(), WriteError> {
     Ok(())
 }
 
-/// Scheme and host as `net/url` would report them, or `Fallback` when this port
-/// is not confident it agrees with Go.
+/// Scheme and host as `net/url` would report them, or a 422 when the shape is
+/// one only `url.Parse`'s own wording could describe.
 ///
 /// Only the shapes an Atlassian site URL actually takes are decided here.
 /// Anything carrying a space, a control character or a malformed `%` escape is
-/// forwarded, because those are exactly the inputs `url.Parse` rejects with a
-/// message of its own — and a wrong *acceptance* here would store a URL Go
-/// would have refused.
+/// refused with this build's own wording — until #278 those forwarded so Go
+/// could answer with `url.Parse`'s message, and the *class* (a 422 on
+/// `credentials.site_url`, per `ValidationError`) is preserved even though the
+/// text cannot be.
 ///
 /// **This is the second of two places that reason about `net/url`'s rules, and
 /// they answer different questions.** Here the question is *create*: may this
@@ -382,11 +390,8 @@ fn validate_whatsapp(credentials: Option<&RawValue>) -> Result<(), WriteError> {
 /// merged; #316 adds a third caller of the same Go rules with a *different*
 /// answer again, since Jira does not require HTTPS.
 fn split_url(raw: &str) -> Result<(String, String), WriteError> {
-    let forward = || {
-        WriteError::Fallback(format!(
-            "site_url {raw:?} needs net/url's own parse result; forwarding"
-        ))
-    };
+    let forward =
+        || WriteError::validation("credentials.site_url", format!("invalid site URL {raw:?}"));
     if raw.chars().any(|c| c.is_control() || c == ' ') {
         return Err(forward());
     }
@@ -505,7 +510,7 @@ mod tests {
     /// serde fills a struct from a sequence positionally when every field has a
     /// default, so this decoded to a populated struct, passed the non-empty check
     /// and created the row — where Go answers 422 `cannot unmarshal array`. It
-    /// forwards now, which is how Go's own message reaches the caller verbatim.
+    /// is a 422 here too since #278; only the wording is this build's own.
     ///
     /// The same rule `services` has carried since #337, one field along in the
     /// same request struct.
@@ -519,7 +524,7 @@ mod tests {
             let raw = serde_json::value::RawValue::from_string(blob.to_string()).expect("raw");
             let err = validate(kind, Some(&raw)).expect_err("an array must not be accepted");
             assert!(
-                matches!(err, WriteError::Fallback(_)),
+                matches!(err, WriteError::Validation { .. }),
                 "{kind} {blob}: {err:?}"
             );
         }
@@ -664,22 +669,23 @@ mod tests {
         assert!(validate("whatsapp", Some(&raw(r#"{"phone":"+1"}"#))).is_ok());
     }
 
-    /// A blob that does not decode forwards rather than inventing Go's message.
+    /// A blob that does not decode is a 422 in this build's own words —
+    /// Go's `encoding/json` wording is not reproducible, and since #278 there
+    /// is no sidecar to supply it.
     #[test]
-    fn an_undecodable_blob_forwards() {
+    fn an_undecodable_blob_is_a_422() {
         let e = err("google", r#"{"client_id":123}"#);
         assert!(
-            matches!(e, WriteError::Fallback(_)),
-            "a type mismatch must forward, since Go's json error text names Go types"
+            matches!(e, WriteError::Validation { .. }),
+            "a type mismatch must be a validation failure: {e:?}"
         );
     }
 
-    /// Accepting a URL Go would refuse is worse than forwarding one it would
-    /// accept: the row is created natively, so Go never sees the request and
-    /// never gets to say no — leaving a stored `site_url` its own parser cannot
-    /// read.
+    /// Accepting a URL `url.Parse` would refuse would store a `site_url` the
+    /// hosting code cannot read; each of these is refused as a 422 (Go's own
+    /// class for site-url failures), with this build's wording since #278.
     #[test]
-    fn every_url_shape_this_port_is_unsure_of_forwards_rather_than_accepting() {
+    fn every_url_shape_url_parse_would_refuse_is_refused_here() {
         // Each of these is an error from `url.Parse`, not a validation failure.
         for url in [
             "https://x.net:abc",   // invalid port
@@ -700,8 +706,8 @@ mod tests {
             for kind in ["confluence", "jira"] {
                 let e = validate(kind, Some(&raw(&creds))).expect_err("must not be accepted");
                 assert!(
-                    matches!(e, WriteError::Fallback(_)),
-                    "{kind} {url:?} answered {:?} instead of forwarding",
+                    matches!(e, WriteError::Validation { .. }),
+                    "{kind} {url:?} answered {:?} instead of a 422",
                     e.message()
                 );
             }
@@ -792,13 +798,13 @@ mod tests {
         assert_eq!(json_string("a\nb\tc\rd"), r#""a\nb\tc\rd""#);
     }
 
-    /// The forward reason is logged by the seam, so it must not carry the
+    /// The refusal reaches the wire and the log, so it must not carry the
     /// caller's bytes — serde_json's own message quotes the offending value.
     #[test]
     fn a_bad_credentials_blob_never_puts_the_secret_in_the_error() {
         let e = validate("google", Some(&raw(r#""ghp_SUPERSECRETVALUE""#)))
             .expect_err("a string is not a credentials object");
-        assert!(matches!(e, WriteError::Fallback(_)));
+        assert!(matches!(e, WriteError::Validation { .. }));
         assert!(
             !e.message().contains("ghp_SUPERSECRETVALUE"),
             "the credential must not reach the log: {}",

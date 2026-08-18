@@ -189,8 +189,13 @@ var dispositions = map[string]disposition{
 	"DELETE /api/integrations/{id}/webhook/register":        {statusNative, "#319", "a failed deleteWebhook is a warning; the row is cleared either way"},
 	"POST /api/integrations/{id}/webhook/regenerate-secret": {statusNative, "#319", "delete, clear, register — the delete's failure is swallowed as Go swallows it"},
 
-	// ── Deferred: the sidecar's boot-time snapshot (#305) ───────────────────
-	"PUT /api/settings": {statusDeferred, "#305", "the sidecar holds a snapshot these preferences resolve through; no AGENTO_SCANNER=off equivalent exists"},
+	// ── Native since the cut-over (#278) ────────────────────────────────────
+	//
+	// Written and unit-tested under #305, deliberately unclaimed while the
+	// sidecar held a boot-time snapshot these preferences resolve through —
+	// one unrelated PUT /api/notifications/settings would silently revert a
+	// native settings write. That blocker died with the sidecar.
+	"PUT /api/settings": {statusNative, "#278", "the snapshot blocker (#305) died with the sidecar; the written handler is claimed"},
 
 	// ── Deferred: it arrives from outside and dispatches an agent run ───────
 	//
