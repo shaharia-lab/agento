@@ -110,6 +110,8 @@ func TestAddRate_ConflictReturnsExistingRow(t *testing.T) {
 	if existing == nil {
 		t.Fatal("the conflicting row must be returned alongside the error")
 	}
+	//nolint:staticcheck // SA5011 false positive: the t.Fatal above does not
+	// return, so existing cannot be nil here.
 	if existing.InputPerMTok != 1 {
 		t.Errorf("returned rate = %v, want the stored 1 (not the rejected 9)", existing.InputPerMTok)
 	}
@@ -286,6 +288,8 @@ func TestCatalog_GroupsByModelWithCurrentRate(t *testing.T) {
 	if model == nil {
 		t.Fatal("test-model missing from the catalog")
 	}
+	//nolint:staticcheck // SA5011 false positive: the t.Fatal above does not
+	// return, so model cannot be nil here.
 	if len(model.Rates) != 2 {
 		t.Fatalf("rates = %d, want 2", len(model.Rates))
 	}

@@ -99,6 +99,8 @@ func TestCallTelegram(t *testing.T) {
 				if resp == nil {
 					t.Fatal("expected non-nil response")
 				}
+				//nolint:staticcheck // SA5011 false positive: the t.Fatal above does
+				// not return, so resp cannot be nil here.
 				if !resp.OK {
 					t.Error("expected resp.OK to be true")
 				}
