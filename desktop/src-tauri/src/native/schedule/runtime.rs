@@ -267,6 +267,23 @@ impl Scheduler {
             if already {
                 continue;
             }
+            // Re-read before installing. The task list was read at the top of
+            // the pass, and a `pause_task` or `delete_task` committing since
+            // then has already called `unschedule_if_running` — which clears
+            // `swept`, so the stale `active` snapshot would look like a task
+            // needing a timer and the sweep would undo a write that already
+            // landed. `execute_task` re-reads too and would return early, so
+            // this only ever cost an orphan timer for a minute; but a sweep
+            // that can undo a commit is the wrong shape to leave in place.
+            match crate::native::tasks::get_task(self.db_path(), id) {
+                Ok(Some(fresh)) if fresh.status == "active" => {}
+                Ok(_) => continue,
+                Err(e) => {
+                    log::warn!("task scheduler: reconcile could not re-read task_id={id:?}: {e}");
+                    continue;
+                }
+            }
+
             self.swept
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

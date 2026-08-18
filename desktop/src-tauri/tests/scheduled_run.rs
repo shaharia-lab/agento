@@ -295,9 +295,17 @@ async fn an_agent_whose_tools_this_build_cannot_host_is_a_recorded_failure() {
     assert_eq!(jobs.len(), 1, "the refusal is recorded, not silent");
     let (status, error, ..) = &jobs[0];
     assert_eq!(status, "failed");
+    // The message is `build_options`'s own, passed through: it names the
+    // integration it could not host. Rewriting every failure from that function
+    // as "cannot host your tools" would misattribute a port-bind or SQLite
+    // error, and this row is the only evidence the run leaves.
     assert!(
-        error.starts_with("agent tools unavailable in this build:"),
-        "the reason has to name itself: {error:?}"
+        error.starts_with("agent setup: "),
+        "the failure has to name itself: {error:?}"
+    );
+    assert!(
+        error.contains("no-such-integration"),
+        "…and say which tool source: {error:?}"
     );
 
     // The chat row was created before the refusal, exactly as Go creates it

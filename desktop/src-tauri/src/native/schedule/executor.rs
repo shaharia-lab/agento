@@ -399,11 +399,19 @@ async fn run_agent(
 
     // The refusal this port has that Go does not — an agent whose tools cannot
     // be hosted here. A recorded failure, never silence. See the module header.
+    //
+    // **The message is passed through, not rewritten.** `build_options` fails
+    // for more than a refusal: `start_local_tools` and `start_integration_servers`
+    // bind loopback listeners and read integration rows, so a port-bind failure
+    // or a SQLite error arrives here too. Since this row is the *only* evidence
+    // a scheduled run leaves, labelling all of them "this build cannot host your
+    // agent's tools" would send a user to the wrong fix. Every one of those
+    // messages already describes itself.
     let (options, tool_servers) =
         tokio::time::timeout_at(deadline, runner::build_options(&spec, None))
             .await
             .map_err(|_| DEADLINE_EXCEEDED.to_string())?
-            .map_err(|e| format!("agent tools unavailable in this build: {e}"))?;
+            .map_err(|e| format!("agent setup: {e}"))?;
 
     // **`query`, not `Session`** — the one-shot, which is what Go's `RunAgent`
     // uses (`claude.Query`). The difference is the whole run: a `Session` sets
