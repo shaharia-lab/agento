@@ -79,7 +79,14 @@ fn serve(
 /// `spawn_blocking` thread is not a runtime worker, so blocking it parks a
 /// thread from the blocking pool rather than stalling the executor. That is
 /// exactly what the pool is for.
-fn block_on_result<F, T>(what: &str, future: F) -> Result<T, crate::native::writes::WriteError>
+///
+/// `pub(crate)` for `integrations::token_validate`, which is the same situation
+/// one route over: a sync `serve` that has to make a network call and needs its
+/// answer (#318).
+pub(crate) fn block_on_result<F, T>(
+    what: &str,
+    future: F,
+) -> Result<T, crate::native::writes::WriteError>
 where
     F: std::future::Future<Output = Result<T, crate::native::writes::WriteError>>,
 {

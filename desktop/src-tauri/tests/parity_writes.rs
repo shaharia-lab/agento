@@ -1434,3 +1434,136 @@ async fn the_monitoring_writes_are_what_the_desktop_build_declines() {
     .await;
     assert_eq!(restored.0, 200);
 }
+
+// ─── Token validation (#318) ─────────────────────────────────────────────────
+
+/// `POST /api/integrations/{id}/auth/validate` — the answer shapes, pinned from
+/// the real Go server.
+///
+/// Every case here is chosen to reach **no external network**, so the suite
+/// stays as offline as the rest of it while still covering a real remote-call
+/// path: Jira and Confluence take their host from the row's own credentials, so
+/// pointing one at a closed port exercises the transport-failure sentence
+/// against a socket that is guaranteed to refuse.
+///
+/// The matching Rust assertions are in `native/integrations/token_validate.rs`,
+/// which asserts these same literals — see this file's header for why the
+/// comparison is split across two suites for a write.
+#[tokio::test]
+#[ignore = "needs a running Agento instance and its database, and it writes"]
+async fn the_auth_validate_answers_match_go() {
+    require_scratch_instance();
+
+    // An id that does not exist goes through `httpErr`, so it is the ordinary
+    // 404 with one key — **not** the three-key body the route's own failures
+    // use. Getting this wrong is the easiest mistake available here.
+    let missing = go_answer(
+        Method::POST,
+        "/api/integrations/parity-writes-nope/auth/validate",
+        None,
+    )
+    .await;
+    assert_eq!(missing.0, 404);
+    assert_eq!(
+        String::from_utf8_lossy(&missing.1).trim_end(),
+        r#"{"error":"integration \"parity-writes-nope\" not found"}"#
+    );
+
+    // A type `ValidateTokenAuth`'s switch does not name returns nil: no call,
+    // no write, and a 200 that says it was not validated.
+    let google = go_answer(
+        Method::POST,
+        "/api/integrations",
+        Some(r#"{"name":"Parity Validate Google","type":"google","credentials":{"client_id":"i","client_secret":"s"}}"#),
+    )
+    .await;
+    assert_eq!(google.0, 201, "create must be 201, got {}", google.0);
+    let google_id = serde_json::from_slice::<serde_json::Value>(&google.1).expect("json")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    let unhandled = go_answer(
+        Method::POST,
+        &format!("/api/integrations/{google_id}/auth/validate"),
+        None,
+    )
+    .await;
+    assert_eq!(unhandled.0, 200);
+    assert_eq!(
+        String::from_utf8_lossy(&unhandled.1).trim_end(),
+        r#"{"valid":true,"validated":false}"#
+    );
+
+    // A required field the validator checks **before** the network call. Note
+    // the status: a `ValidationError` that every other route renders as a 422
+    // is a 400 here, because `handleValidateAuth` writes its own map instead of
+    // calling `httpErr`. And the map's keys arrive sorted.
+    let telegram = go_answer(
+        Method::POST,
+        "/api/integrations",
+        Some(r#"{"name":"Parity Validate TG","type":"telegram","credentials":{"bot_token":"t"}}"#),
+    )
+    .await;
+    assert_eq!(telegram.0, 201);
+    let tg_id = serde_json::from_slice::<serde_json::Value>(&telegram.1).expect("json")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    // Blank the token through the update route, so the row reaches the state
+    // the field check refuses.
+    let blanked = go_answer(
+        Method::PUT,
+        &format!("/api/integrations/{tg_id}"),
+        Some(r#"{"name":"Parity Validate TG","type":"telegram","credentials":{"bot_token":""}}"#),
+    )
+    .await;
+    assert_eq!(blanked.0, 200, "update must be 200, got {}", blanked.0);
+    let blank_token = go_answer(
+        Method::POST,
+        &format!("/api/integrations/{tg_id}/auth/validate"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        blank_token.0, 400,
+        "a ValidationError here is a 400, not 422"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&blank_token.1).trim_end(),
+        r#"{"error":"validation error for \"credentials.bot_token\": bot_token is required","valid":false,"validated":true}"#
+    );
+
+    // A real remote call, against a port nothing is listening on: this pins the
+    // transport-failure sentence, which is fixed precisely because Go discards
+    // `client.Do`'s error rather than wrapping it — the URL is the customer's
+    // site.
+    let jira = go_answer(
+        Method::POST,
+        "/api/integrations",
+        Some(
+            r#"{"name":"Parity Validate Jira","type":"jira",
+                 "credentials":{"site_url":"http://127.0.0.1:1","email":"a@b.c","api_token":"t"}}"#,
+        ),
+    )
+    .await;
+    assert_eq!(jira.0, 201);
+    let jira_id = serde_json::from_slice::<serde_json::Value>(&jira.1).expect("json")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    let unreachable = go_answer(
+        Method::POST,
+        &format!("/api/integrations/{jira_id}/auth/validate"),
+        None,
+    )
+    .await;
+    assert_eq!(unreachable.0, 400);
+    assert_eq!(
+        String::from_utf8_lossy(&unreachable.1).trim_end(),
+        r#"{"error":"validation error for \"credentials\": invalid jira credentials: calling Jira /myself: request failed","valid":false,"validated":true}"#
+    );
+
+    for id in [&google_id, &tg_id, &jira_id] {
+        let _ = go_answer(Method::DELETE, &format!("/api/integrations/{id}"), None).await;
+    }
+}

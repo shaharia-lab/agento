@@ -54,7 +54,7 @@ pub const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 static API_BASE: RwLock<Option<String>> = RwLock::new(None);
 
 #[cfg(test)]
-fn api_base() -> String {
+pub(super) fn api_base() -> String {
     API_BASE
         .read()
         .expect("the telegram API base lock is poisoned")
@@ -63,7 +63,7 @@ fn api_base() -> String {
 }
 
 #[cfg(not(test))]
-fn api_base() -> String {
+pub(super) fn api_base() -> String {
     DEFAULT_API_BASE.to_string()
 }
 
@@ -86,7 +86,7 @@ pub(crate) async fn api_base_lock() -> tokio::sync::MutexGuard<'static, ()> {
 const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 
 /// `telegramHTTPClient` — 60 seconds.
-fn http_client() -> Option<&'static reqwest::Client> {
+pub(super) fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -232,7 +232,7 @@ async fn read_response(
 }
 
 /// `io.ReadAll(io.LimitReader(resp.Body, 10 MiB))`.
-async fn read_capped(
+pub(super) async fn read_capped(
     ct: &CancellationToken,
     response: reqwest::Response,
 ) -> Result<String, String> {

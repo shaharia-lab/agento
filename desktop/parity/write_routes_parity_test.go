@@ -173,14 +173,14 @@ var dispositions = map[string]disposition{
 	// its own. `auth/status` reads that same map, which is why the two could
 	// never be split.
 	"POST /api/integrations/{id}/auth/start": {statusNative, "#318", "the shell owns the callback server and the in-flight flow"},
-	// Still deferred, but not for the reason recorded until #318. The error
-	// text *is* largely reproducible — every validator's transport failure is a
-	// fixed string, as the ported clients' are, and the rest interpolates the
-	// provider's own response. What actually holds it back is that each of the
-	// five writes a **type-specific** auth payload its MCP server reads
-	// (`{"validated":true,"bot_username":…}` for Telegram, not a shared flag),
-	// so this is five remote-call reproductions rather than one.
-	"POST /api/integrations/{id}/auth/validate": {statusDeferred, "-", "five per-type remote validations, each writing its own auth payload"},
+	// The last of #318, and the five remote-call reproductions its reason
+	// named: each validator writes a **type-specific** auth payload its own MCP
+	// server reads (`{"validated":true,"bot_username":…}` for Telegram, not a
+	// shared flag). The payloads are built with `fmt.Sprintf("%q")` rather than
+	// a marshaller, so the port needed `strconv.Quote` and the `strconv.IsPrint`
+	// table under it — `goquote_vectors.json`, generated from Go for the same
+	// reason the migrations are.
+	"POST /api/integrations/{id}/auth/validate": {statusNative, "#318", "five per-type remote validations; every fallible step precedes the call"},
 	// The three that call Telegram (#319). They are native because the order is
 	// the design: every fallible step happens before setWebhook, and nothing
 	// after it may fail — an Err after a successful call forwards, and Go
