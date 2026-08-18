@@ -450,6 +450,10 @@ enum Route<'a> {
     AuthStatus(&'a str),
     /// `{id}/webhook/status` — the stored Telegram webhook state (#319).
     WebhookStatus(&'a str),
+    /// `{id}/webhook/register` — POST registers with Telegram, DELETE removes.
+    WebhookRegister(&'a str),
+    /// `{id}/webhook/regenerate-secret` — rotate and re-register.
+    WebhookRegenerate(&'a str),
 }
 
 /// Match the reads, plus the write routes that share their paths.
@@ -477,6 +481,12 @@ fn route_of(path: &str) -> Option<Route<'_>> {
     }
     if let Some(id) = rest.strip_suffix("/webhook/status") {
         return segment(id).map(Route::WebhookStatus);
+    }
+    if let Some(id) = rest.strip_suffix("/webhook/register") {
+        return segment(id).map(Route::WebhookRegister);
+    }
+    if let Some(id) = rest.strip_suffix("/webhook/regenerate-secret") {
+        return segment(id).map(Route::WebhookRegenerate);
     }
     if let Some((id, tail)) = rest.split_once("/triggers/") {
         return match (segment(id), segment(tail)) {
@@ -595,6 +605,12 @@ fn claims(method: &Method, path: &str) -> bool {
         // The network belongs to *registration*, which is a different route and
         // still forwards.
         Some(Route::WebhookStatus(_)) => method == Method::GET,
+        // The three that call Telegram. Every fallible step happens *before*
+        // the call — an `Err` after a successful `setWebhook` forwards, and Go
+        // would register the webhook a second time under its own secret. See
+        // `trigger::registration`.
+        Some(Route::WebhookRegister(_)) => method == Method::POST || method == Method::DELETE,
+        Some(Route::WebhookRegenerate(_)) => method == Method::POST,
         None => false,
     }
 }
@@ -612,6 +628,11 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
             }
             Some(Route::Trigger(id, rid)) => finish(delete_trigger_rule(db, id, rid)),
             Some(Route::AuthStart(id)) => finish(start_oauth(db, id)),
+            Some(Route::WebhookRegister(id)) if req.method == Method::DELETE => {
+                finish(super::trigger::serve_delete(db, id))
+            }
+            Some(Route::WebhookRegister(id)) => finish(super::trigger::serve_register(db, id)),
+            Some(Route::WebhookRegenerate(id)) => finish(super::trigger::serve_regenerate(db, id)),
             _ => Err(format!(
                 "{} {} is not an integration write",
                 req.method, req.path
@@ -659,9 +680,11 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
 
         // `claims` never admits a GET here — chi has no such route, so Go 405s
         // and forwarding is what reproduces that.
-        Some(Route::AuthStart(_)) | Some(Route::Trigger(..)) | None => {
-            return Err(format!("{} is not an integration read", req.path))
-        }
+        Some(Route::AuthStart(_))
+        | Some(Route::WebhookRegister(_))
+        | Some(Route::WebhookRegenerate(_))
+        | Some(Route::Trigger(..))
+        | None => return Err(format!("{} is not an integration read", req.path)),
     };
     Ok(super::Answer::json(body))
 }
@@ -1622,17 +1645,26 @@ mod tests {
             &Method::POST,
             "/api/integrations/abc/webhook/status"
         ));
-        // The registration routes still forward — they call Telegram.
-        assert!(!claims(
+        // The three that call Telegram (#319).
+        assert!(claims(
             &Method::POST,
+            "/api/integrations/abc/webhook/register"
+        ));
+        assert!(claims(
+            &Method::DELETE,
+            "/api/integrations/abc/webhook/register"
+        ));
+        assert!(claims(
+            &Method::POST,
+            "/api/integrations/abc/webhook/regenerate-secret"
+        ));
+        // …each only for the methods chi mounts.
+        assert!(!claims(
+            &Method::GET,
             "/api/integrations/abc/webhook/register"
         ));
         assert!(!claims(
             &Method::DELETE,
-            "/api/integrations/abc/webhook/register"
-        ));
-        assert!(!claims(
-            &Method::POST,
             "/api/integrations/abc/webhook/regenerate-secret"
         ));
         assert!(!claims(&Method::GET, "/api/integrations/abc/whatsapp/qr"));

@@ -180,10 +180,14 @@ var dispositions = map[string]disposition{
 	// five writes a **type-specific** auth payload its MCP server reads
 	// (`{"validated":true,"bot_username":…}` for Telegram, not a shared flag),
 	// so this is five remote-call reproductions rather than one.
-	"POST /api/integrations/{id}/auth/validate":             {statusDeferred, "-", "five per-type remote validations, each writing its own auth payload"},
-	"POST /api/integrations/{id}/webhook/register":          {statusDeferred, "-", "registers the webhook with Telegram"},
-	"DELETE /api/integrations/{id}/webhook/register":        {statusDeferred, "-", "deregisters the webhook with Telegram"},
-	"POST /api/integrations/{id}/webhook/regenerate-secret": {statusDeferred, "-", "rotates the secret and re-registers with Telegram"},
+	"POST /api/integrations/{id}/auth/validate": {statusDeferred, "-", "five per-type remote validations, each writing its own auth payload"},
+	// The three that call Telegram (#319). They are native because the order is
+	// the design: every fallible step happens before setWebhook, and nothing
+	// after it may fail — an Err after a successful call forwards, and Go
+	// registers the webhook again under its own secret.
+	"POST /api/integrations/{id}/webhook/register":          {statusNative, "#319", "fails before the Telegram call, never after"},
+	"DELETE /api/integrations/{id}/webhook/register":        {statusNative, "#319", "a failed deleteWebhook is a warning; the row is cleared either way"},
+	"POST /api/integrations/{id}/webhook/regenerate-secret": {statusNative, "#319", "delete, clear, register — the delete's failure is swallowed as Go swallows it"},
 
 	// ── Deferred: the sidecar's boot-time snapshot (#305) ───────────────────
 	"PUT /api/settings": {statusDeferred, "#305", "the sidecar holds a snapshot these preferences resolve through; no AGENTO_SCANNER=off equivalent exists"},
