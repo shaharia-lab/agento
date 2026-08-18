@@ -48,6 +48,20 @@ pub async fn run_headless(
     prompt: &str,
     timeout: std::time::Duration,
 ) -> Result<RunResult, String> {
+    // `resolveSystemPrompt`, which Go calls inside `RunAgent` — so it applies to
+    // **every** caller, and returning its error unwrapped is what makes an agent
+    // with an unresolvable `{{name}}` a recorded failure rather than a run that
+    // ships the raw placeholder to the model.
+    //
+    // It lives here rather than in each caller for the reason the one-shot does:
+    // the scheduler had it and the dispatcher did not, which is exactly the
+    // divergence a shared function exists to prevent. `build_options` cannot do
+    // it — the chat path deliberately interpolates leniently, so the strictness
+    // is the headless caller's.
+    if let Some(agent) = spec.agent.as_ref() {
+        crate::native::template::interpolate(&agent.system_prompt).map_err(|e| e.to_string())?;
+    }
+
     let deadline = tokio::time::Instant::now() + timeout;
 
     // The refusal this port has that Go does not — an agent whose tools cannot

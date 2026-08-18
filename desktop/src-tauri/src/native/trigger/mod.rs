@@ -6,6 +6,7 @@
 pub mod dispatcher;
 pub mod match_rule;
 pub mod receiver;
+pub mod registration;
 pub mod telegram_api;
 
 use axum::http::Method;

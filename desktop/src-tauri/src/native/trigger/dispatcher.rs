@@ -21,7 +21,7 @@
 //!   messages on a `[Telegram] <rule>` session.
 //! - **The timeout is a flat five minutes**, not the task's own — triggers have
 //!   no configurable timeout.
-//! - **Concurrency is bounded to 5**, not the scheduler's 3, and the bound is
+//! - **Concurrency is bounded to 10**, not the scheduler's 3, and the bound is
 //!   Go's `sem` on the dispatcher rather than a per-run permit.
 
 use std::path::Path;
@@ -33,8 +33,12 @@ use super::receiver::{TelegramMsg, TelegramUpdate};
 use crate::native::agent_run;
 use crate::native::agents::Agent;
 
-/// `Dispatcher.sem`: `maxConcurrent` in `NewDispatcher`.
-const MAX_CONCURRENT: usize = 5;
+/// `maxConcurrentExecutions`, the buffer on `Dispatcher.sem`.
+///
+/// **Ten, not the scheduler's three.** A busy group chat can fire several rules
+/// at once, and with the flat five-minute run timeout a limit set too low makes
+/// the sixth message wait up to five minutes before its "typing…" even appears.
+const MAX_CONCURRENT: usize = 10;
 
 /// `context.WithTimeout(ctx, 5*time.Minute)` in `executeAndReply`.
 const RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
@@ -75,7 +79,8 @@ pub fn handle_update(
 /// `processTelegramUpdate`.
 async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: TelegramUpdate) {
     // A non-message update, or one with no text, is not a trigger.
-    let Some(msg) = update.message.filter(|m| !m.text.is_empty()) else {
+    // `GoStruct` is a decode-shape wrapper; the message itself is inside it.
+    let Some(msg) = update.message.map(|m| m.0).filter(|m| !m.text.is_empty()) else {
         return;
     };
 
@@ -320,16 +325,24 @@ fn create_trigger_session(db_path: &Path, rule: &Rule) -> Result<String, String>
 /// shape, and it is what makes a failed trigger visible in the chat rather than
 /// leaving an empty session.
 fn save_messages(db_path: &Path, chat_session_id: &str, prompt: &str, answer: &str) {
-    let write = || -> Result<(), String> {
-        let conn = crate::native::db::open_read_write(db_path)?;
-        append_message(&conn, chat_session_id, "user", prompt)?;
-        if !answer.is_empty() {
-            append_message(&conn, chat_session_id, "assistant", answer)?;
+    let conn = match crate::native::db::open_read_write(db_path) {
+        Ok(conn) => conn,
+        Err(e) => {
+            log::warn!("failed to store user message: {e}");
+            return;
         }
-        Ok(())
     };
-    if let Err(e) = write() {
-        log::warn!("failed to store trigger messages: {e}");
+    // **Each insert is logged on its own**, as `saveSessionMessages` does. A
+    // shared `?` would let a failed user turn skip the assistant one, leaving
+    // the session with neither where Go leaves it with the answer — and the
+    // reply has already gone to Telegram either way.
+    if let Err(e) = append_message(&conn, chat_session_id, "user", prompt) {
+        log::warn!("failed to store user message: {e}");
+    }
+    if !answer.is_empty() {
+        if let Err(e) = append_message(&conn, chat_session_id, "assistant", answer) {
+            log::warn!("failed to store assistant message: {e}");
+        }
     }
 }
 
@@ -435,7 +448,9 @@ mod tests {
     fn msg(text: &str, chat_id: i64) -> TelegramMsg {
         TelegramMsg {
             message_id: 1,
-            chat: super::super::receiver::TelegramChat { id: chat_id },
+            chat: crate::native::gojson::GoStruct(crate::native::trigger::receiver::TelegramChat {
+                id: chat_id,
+            }),
             text: text.to_string(),
         }
     }

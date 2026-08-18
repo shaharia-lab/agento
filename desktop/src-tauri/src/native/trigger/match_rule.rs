@@ -146,6 +146,15 @@ fn simple_fold_eq(a: char, b: char) -> bool {
     if a.is_ascii() && b.is_ascii() {
         return a.eq_ignore_ascii_case(&b);
     }
+    // **The Turkish pair are self-orbits, in both directions.**
+    // `unicode.SimpleFold` maps U+0130 and U+0131 to themselves, so
+    // `EqualFold("ı", "i")` and `EqualFold("İ", "i")` are both false — verified
+    // against Go. The case mappings below would say otherwise: `ı`
+    // upper-cases to ASCII `I`, and `İ` lower-cases to a string starting with
+    // ASCII `i`. Neither is a fold.
+    if matches!(a, '\u{0130}' | '\u{0131}') || matches!(b, '\u{0130}' | '\u{0131}') {
+        return false;
+    }
     // `U+0130` lower-cases to "i̇" (two chars) and `U+0131` upper-cases to "I",
     // but neither shares an orbit with ASCII `i`. Comparing single-char
     // case mappings keeps them apart, where a string-wise `to_lowercase`
@@ -248,6 +257,25 @@ mod tests {
         };
         assert!(match_rule(&filters, "\u{212A}elvin", "1").is_none());
         assert!(match_rule(&filters, "\u{00E9}xyz", "1").is_none());
+    }
+
+    #[test]
+    fn the_turkish_pair_fold_with_nothing_but_themselves() {
+        // Verified against Go: `unicode.SimpleFold` maps both U+0130 and U+0131
+        // to themselves, so `EqualFold("ı","i")` and `EqualFold("İ","i")` are
+        // false. The case mappings say otherwise in both directions — `ı`
+        // upper-cases to ASCII `I`, `İ` lower-cases to a string starting with
+        // ASCII `i` — so this is the one place folding and casing disagree
+        // enough to need naming.
+        assert!(!simple_fold_eq('\u{0131}', 'i'));
+        assert!(!simple_fold_eq('\u{0131}', 'I'));
+        assert!(!simple_fold_eq('\u{0130}', 'i'));
+        assert!(!simple_fold_eq('\u{0130}', 'I'));
+        // …and each still equals itself, through the `ar == br` fast path.
+        assert!(equal_fold("\u{0131}".as_bytes(), "\u{0131}".as_bytes()));
+        assert!(equal_fold("\u{0130}".as_bytes(), "\u{0130}".as_bytes()));
+        // The sigma orbit is unaffected by the guard.
+        assert!(simple_fold_eq('\u{03C2}', '\u{03C3}'));
     }
 
     #[test]

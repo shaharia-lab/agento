@@ -29,7 +29,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::native::db;
-use crate::native::gojson::null_is_zero_value;
+use crate::native::gojson::{null_is_zero_value, GoStruct};
 
 /// `trigger.TelegramUpdate`.
 ///
@@ -41,7 +41,13 @@ use crate::native::gojson::null_is_zero_value;
 pub struct TelegramUpdate {
     #[serde(deserialize_with = "null_is_zero_value")]
     pub update_id: i64,
-    pub message: Option<TelegramMsg>,
+    /// [`GoStruct`] for #337: every field of `TelegramMsg` has a default, so
+    /// serde's derived `visit_seq` would build one from a JSON **array** of any
+    /// length — `[7,{…}]` would decode to a full update and dispatch an agent
+    /// run where Go's `json.Unmarshal` errors and answers a silent 200. The
+    /// wrapper refuses the array shape. `Option` because a `null` message is a
+    /// nil pointer to Go, which is not an error either.
+    pub message: Option<GoStruct<TelegramMsg>>,
 }
 
 /// `trigger.TelegramMsg`.
@@ -50,8 +56,10 @@ pub struct TelegramUpdate {
 pub struct TelegramMsg {
     #[serde(deserialize_with = "null_is_zero_value")]
     pub message_id: i64,
+    /// `GoStruct` for the same reason as `message` above; `null_is_zero_value`
+    /// because a `null` chat is the zero struct to `encoding/json`.
     #[serde(deserialize_with = "null_is_zero_value")]
-    pub chat: TelegramChat,
+    pub chat: GoStruct<TelegramChat>,
     #[serde(deserialize_with = "null_is_zero_value")]
     pub text: String,
 }
@@ -148,7 +156,11 @@ pub fn receive(db_path: &Path, id: &str, header_secret: &str, body: &[u8]) -> In
 
     // An undecodable payload is logged at debug and answered 200 — Telegram
     // would retry a 4xx forever for a body it will keep sending.
-    let Ok(update) = serde_json::from_slice::<TelegramUpdate>(body) else {
+    // `GoStruct` around the **whole** decode, not only the nested fields —
+    // #337's rule 2. Wrapping `message` and `chat` alone still leaves the outer
+    // update buildable from a positional array, and `[7,{…}]` would dispatch a
+    // real agent run where Go's `json.Unmarshal` errors into a silent 200.
+    let Ok(GoStruct(update)) = serde_json::from_slice::<GoStruct<TelegramUpdate>>(body) else {
         log::debug!("failed to decode telegram webhook payload integration_id={id:?}");
         return Inbound::Ignore;
     };
@@ -318,6 +330,30 @@ mod tests {
                 assert_eq!(update.message.expect("message").text, "");
             }
             other => panic!("expected dispatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_positional_array_is_refused_where_go_refuses_it() {
+        // #337's over-accept. Every field has a default, so serde's derived
+        // `visit_seq` would build the struct from a JSON **array** — and an
+        // update that decoded from `[7,{…}]` would dispatch a real agent run
+        // where Go's `json.Unmarshal` errors and answers a silent 200. The
+        // seam's `Err`-means-forward cannot catch an over-accept, so the
+        // `GoStruct` wrapper is the only guard.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = migrated(dir.path(), true, "s3cret", "active");
+        for body in [
+            &br#"[7,{"message_id":1,"chat":{"id":5},"text":"do something"}]"#[..],
+            br#"{"update_id":7,"message":[1,{"id":5},"do something"]}"#,
+            br#"{"update_id":7,"message":{"message_id":1,"chat":[5],"text":"x"}}"#,
+        ] {
+            assert_eq!(
+                receive(&db, "tg", "s3cret", body),
+                Inbound::Ignore,
+                "an array shape must not decode: {}",
+                String::from_utf8_lossy(body)
+            );
         }
     }
 
