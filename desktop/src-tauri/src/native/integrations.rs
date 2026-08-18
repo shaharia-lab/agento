@@ -84,8 +84,6 @@
 //!   token only when no flow is running, so a native reader would report the
 //!   pre-flow answer in exactly the window the endpoint exists for — while the
 //!   user is completing a consent screen.
-//! - **`GET /{id}/webhook/status`** asks Telegram, over the network, with the
-//!   bot token.
 //! - **`GET /{id}/whatsapp/*`** is not ported at all: WhatsApp is dropped from
 //!   the desktop app by decision (`whatsmeow` has no Rust equivalent), so these
 //!   routes must keep answering exactly as the sidecar answers them. As of
@@ -149,6 +147,7 @@ pub mod telegram;
 /// projection living next door, where nothing that builds a response can see it.
 pub mod oauth;
 pub mod registry;
+pub mod webhook;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -449,6 +448,8 @@ enum Route<'a> {
     AuthStart(&'a str),
     /// `{id}/auth/status` — polls the in-flight flow, or the stored token.
     AuthStatus(&'a str),
+    /// `{id}/webhook/status` — the stored Telegram webhook state (#319).
+    WebhookStatus(&'a str),
 }
 
 /// Match the reads, plus the write routes that share their paths.
@@ -473,6 +474,9 @@ fn route_of(path: &str) -> Option<Route<'_>> {
     }
     if let Some(id) = rest.strip_suffix("/auth/status") {
         return segment(id).map(Route::AuthStatus);
+    }
+    if let Some(id) = rest.strip_suffix("/webhook/status") {
+        return segment(id).map(Route::WebhookStatus);
     }
     if let Some((id, tail)) = rest.split_once("/triggers/") {
         return match (segment(id), segment(tail)) {
@@ -582,23 +586,15 @@ fn claims(method: &Method, path: &str) -> bool {
         }
         Some(Route::Triggers(_)) => method == Method::GET || method == Method::POST,
         Some(Route::Trigger(..)) => method == Method::PUT || method == Method::DELETE,
-        // #318 moved the OAuth **flow**: `start` and `status` share the
-        // in-flight map, so splitting them across two processes leaves `status`
-        // polling a map that is never populated. That pair is the part #300
-        // could not split and the reason it deferred all three.
-        //
-        // `POST …/auth/validate` is **deliberately still forwarded**. It was
-        // grouped with them for a second reason that has since expired — the
-        // credentials it writes were read by *Go's* MCP servers, and #311–#313
-        // moved all six here — and it never touches `oauthFlows` at all. What
-        // it does do is dial five different services and write a
-        // **type-specific** auth payload each one's MCP server reads
-        // (`{"validated":true,"bot_username":…}` for Telegram, not a shared
-        // flag). Five remote-call reproductions belong in their own change.
-        // `reload_after_forward`'s `CredentialWritten` trigger keeps covering
-        // its reload meanwhile.
         Some(Route::AuthStart(_)) => method == Method::POST,
         Some(Route::AuthStatus(_)) => method == Method::GET,
+        // #319. The reason this stayed with Go — "asks Telegram, over the
+        // network, with the bot token" — was simply wrong: `GetWebhookStatus`
+        // reads three columns off the row and composes a URL from the public
+        // URL, and `internal/integrations/telegram` has no status call at all.
+        // The network belongs to *registration*, which is a different route and
+        // still forwards.
+        Some(Route::WebhookStatus(_)) => method == Method::GET,
         None => false,
     }
 }
@@ -657,6 +653,9 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
             super::gojson::to_vec(&AuthStatusResponse { authenticated })
                 .map_err(|e| format!("encoding auth status: {e}"))?
         }
+
+        Some(Route::WebhookStatus(id)) => super::gojson::to_vec(&webhook::status(db, id)?)
+            .map_err(|e| format!("encoding webhook status: {e}"))?,
 
         // `claims` never admits a GET here — chi has no such route, so Go 405s
         // and forwarding is what reproduces that.
@@ -1617,9 +1616,24 @@ mod tests {
         ));
 
         // Reads that stay with Go, each for its own reason — see the header.
+        // #319: a plain read of three columns; see `claims`.
+        assert!(claims(&Method::GET, "/api/integrations/abc/webhook/status"));
         assert!(!claims(
-            &Method::GET,
+            &Method::POST,
             "/api/integrations/abc/webhook/status"
+        ));
+        // The registration routes still forward — they call Telegram.
+        assert!(!claims(
+            &Method::POST,
+            "/api/integrations/abc/webhook/register"
+        ));
+        assert!(!claims(
+            &Method::DELETE,
+            "/api/integrations/abc/webhook/register"
+        ));
+        assert!(!claims(
+            &Method::POST,
+            "/api/integrations/abc/webhook/regenerate-secret"
         ));
         assert!(!claims(&Method::GET, "/api/integrations/abc/whatsapp/qr"));
         assert!(!claims(

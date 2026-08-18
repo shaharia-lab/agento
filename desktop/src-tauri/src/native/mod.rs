@@ -608,10 +608,8 @@ mod tests {
         // #318: the OAuth flow moved, so its two routes are the shell's.
         assert!(claims(&Method::GET, "/api/integrations/abc/auth/status"));
         assert!(claims(&Method::POST, "/api/integrations/abc/auth/start"));
-        assert!(!claims(
-            &Method::GET,
-            "/api/integrations/abc/webhook/status"
-        ));
+        // #319: the webhook status is a plain read of three columns.
+        assert!(claims(&Method::GET, "/api/integrations/abc/webhook/status"));
         assert!(!claims(&Method::GET, "/api/integrations/abc/whatsapp/qr"));
     }
 
