@@ -3,10 +3,10 @@
 A native desktop client for [Agento](https://github.com/shaharia-lab/agento),
 built with **Tauri 2 + Rust + React**.
 
-The app bundles the Agento Go server as a sidecar and talks to it through a
-Rust reverse proxy, so behaviour matches the web app exactly — it is the same
-backend code. The Go backend is being ported to Rust subsystem by subsystem;
-see [CLAUDE.md](CLAUDE.md) for the plan and the current phase.
+The backend is native Rust (`src-tauri/src/native/`), a subsystem-by-subsystem
+port of the Agento Go server completed with #278 — the bundled Go sidecar is
+gone. Behaviour is pinned to the Go implementation by the byte-level parity
+corpus in `parity/`; see [CLAUDE.md](CLAUDE.md) for how that works.
 
 ---
 
@@ -17,16 +17,9 @@ npm install
 npm run app        # Tauri dev window, hot reload on save
 ```
 
-The Go sidecar binary must exist first:
-
-```bash
-cd ../agento && go build -o \
-  ../agento-ui/src-tauri/binaries/agento-server-$(rustc -vV | sed -n 's/^host: //p') .
-```
-
-Development runs the sidecar against `~/.agento-desktop-dev`, not your real
-`~/.agento` — two Agento processes sharing a data directory share a scheduler,
-which would double-fire scheduled tasks. Release builds use the real one.
+Development runs against `~/.agento-desktop-dev`, not your real `~/.agento` —
+two Agento processes sharing a data directory share a scheduler, which would
+double-fire scheduled tasks. Release builds use the real one.
 
 Other scripts:
 
@@ -137,12 +130,12 @@ src/
   views/           one file per section
 
 src-tauri/
-  src/lib.rs       app setup: ports, sidecar, proxy, window, menu
-  src/sidecar.rs   spawns the Go server, waits for /health, kills it on close
-  src/proxy.rs     axum reverse proxy — the Go→Rust migration seam
+  src/lib.rs       app setup: database, migrations, api server, window, menu
+  src/proxy.rs     axum server: routes every request to src/native/
+  src/native/      the ported backend — one module per API area
+  src/claude/      the Claude Agent SDK, ported from Go
   src/menu.rs      native menu; emits `menu://action` to the webview
   tauri.conf.json  undecorated 1280×820 window, CSP, bundle targets
-  binaries/        the bundled Go server (not committed)
   capabilities/    the window permissions the custom chrome needs
 ```
 

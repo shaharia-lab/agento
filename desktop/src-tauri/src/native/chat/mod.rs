@@ -10,21 +10,14 @@
 //! would leave `/stop` searching a registry that never saw the session — the
 //! button would silently do nothing.
 //!
-//! But not every chat *can* run here: an agent whose tools come from an
-//! integration needs one MCP server per provider, and `whatsapp` has no Rust
-//! starter (it is dropped, not deferred), so `runner::build_options` refuses
-//! those and they keep running on the sidecar. Parts of that refusal have gone — the
-//! **local** in-process server (#310), then any agent whose `capabilities.mcp`
-//! names only hosted integrations (**github** since #311, **confluence** since
-//! #317, **jira** since #316, **slack** since #315, **telegram** since #314) — but each only shrinks the set of chats Go still holds; it does not
-//! empty it, and the argument here turns on the set being non-empty.
-//! So the three steering routes are answered natively **only when Rust holds a
-//! live session for that chat**, and forward otherwise. Go then answers —
-//! correctly, because it is the side that has the session — and a chat with no
-//! live session anywhere gets Go's own 409 rather than a second copy of it.
-//!
-//! That is what lets the four move together without requiring *every* chat to
-//! move at once.
+//! Since #278 removed the Go sidecar, this registry is the **only** place a
+//! live session can exist, so "no live session here" is no longer a reason to
+//! forward — it is the answer. The three steering routes answer Go's own 409s
+//! (`handleProvideInput`, `handlePermissionResponse`, `handleStopSession` each
+//! had a distinct string; they are reproduced verbatim), and a chat this
+//! runtime cannot execute — `whatsapp` tools are dropped (#273), `mcps.yaml`
+//! is not read — is a 500 carrying the reason, produced *before* the
+//! subprocess is spawned. See `runner::build_options`.
 
 pub mod live;
 pub mod persist;
@@ -83,34 +76,12 @@ fn serve(req: StreamRequest) -> BoxFuture<'static, Result<Response<Body>, String
                 };
                 turn::run(req.db_path.clone(), id.to_string(), content).await
             }
-            // `Forward` becomes the seam's `Err`, which is what makes Go answer.
-            // The reason travels with it so the log says which chat and why.
-            Some(Route::Input(id)) => steer(provide_input(id, &req.body), id),
-            Some(Route::Permission(id)) => steer(permission_response(id, &req.body), id),
-            Some(Route::Stop(id)) => steer(stop(id).await, id),
+            Some(Route::Input(id)) => Ok(provide_input(id, &req.body)),
+            Some(Route::Permission(id)) => Ok(permission_response(id, &req.body)),
+            Some(Route::Stop(id)) => Ok(stop(id).await),
             None => Err(format!("{} is not a chat action", req.path)),
         }
     })
-}
-
-/// What one of the three steering routes decided.
-///
-/// A distinct type rather than a sentinel status: "forward" and "answered with
-/// a status" are different kinds of outcome, and encoding the first as a
-/// reserved status code would mean a real upstream response could impersonate
-/// it. There is no number here to collide with.
-enum Steer {
-    Answered(Response<Body>),
-    Forward,
-}
-
-fn steer(outcome: Steer, id: &str) -> Result<Response<Body>, String> {
-    match outcome {
-        Steer::Answered(response) => Ok(response),
-        Steer::Forward => Err(format!(
-            "chat {id:?} has no live session here; the sidecar may have one"
-        )),
-    }
 }
 
 #[derive(Default, Deserialize)]
@@ -157,58 +128,61 @@ fn decode_content(body: &[u8]) -> Result<String, Box<Response<Body>>> {
 
 /// `handleProvideInput`. The answer reaches whichever half of the turn is
 /// waiting — the permission handler or the post-result continuation.
-fn provide_input(id: &str, body: &[u8]) -> Steer {
+fn provide_input(id: &str, body: &[u8]) -> Response<Body> {
     let req: ProvideInputRequest = match crate::native::writes::decode_body(body) {
         Ok(req) => req,
-        Err(_) => return Steer::Answered(error_json(StatusCode::BAD_REQUEST, "invalid JSON body")),
+        Err(_) => return error_json(StatusCode::BAD_REQUEST, "invalid JSON body"),
     };
     if req.answer.is_empty() {
-        return Steer::Answered(error_json(StatusCode::BAD_REQUEST, "answer is required"));
+        return error_json(StatusCode::BAD_REQUEST, "answer is required");
     }
     let Some((_, input_tx, _)) = live::registry().get(id) else {
-        // Not ours: Go may still have this session, and its 409 is the right
-        // answer if neither does.
-        return Steer::Forward;
+        // This registry is the only holder of live sessions since #278, so
+        // Go's own 409 — its exact string — is the answer, not a forward.
+        return error_json(
+            StatusCode::CONFLICT,
+            "no active session awaiting input for this chat",
+        );
     };
     // Capacity 1, so a successful send is the approximation of "awaiting
     // input" — the same one Go makes.
     match input_tx.try_send(req.answer) {
-        Ok(()) => Steer::Answered(no_content()),
-        Err(_) => Steer::Answered(error_json(
+        Ok(()) => no_content(),
+        Err(_) => error_json(
             StatusCode::CONFLICT,
             "session is not currently awaiting input",
-        )),
+        ),
     }
 }
 
 /// `handlePermissionResponse`.
-fn permission_response(id: &str, body: &[u8]) -> Steer {
+fn permission_response(id: &str, body: &[u8]) -> Response<Body> {
     let req: PermissionRequestBody = match crate::native::writes::decode_body(body) {
         Ok(req) => req,
-        Err(_) => return Steer::Answered(error_json(StatusCode::BAD_REQUEST, "invalid JSON body")),
+        Err(_) => return error_json(StatusCode::BAD_REQUEST, "invalid JSON body"),
     };
     let Some((_, _, perm_tx)) = live::registry().get(id) else {
-        return Steer::Forward;
+        return error_json(StatusCode::CONFLICT, "no active session for this chat");
     };
     match perm_tx.try_send(req.allow) {
-        Ok(()) => Steer::Answered(no_content()),
-        Err(_) => Steer::Answered(error_json(
+        Ok(()) => no_content(),
+        Err(_) => error_json(
             StatusCode::CONFLICT,
             "session is not currently awaiting a permission response",
-        )),
+        ),
     }
 }
 
 /// `handleStopSession`. Returns **204 even when the interrupt fails** — Go only
 /// logs it — and never closes the session; the stream's own teardown owns that.
-async fn stop(id: &str) -> Steer {
+async fn stop(id: &str) -> Response<Body> {
     let Some((control, _, _)) = live::registry().get(id) else {
-        return Steer::Forward;
+        return error_json(StatusCode::CONFLICT, "no active session for this chat");
     };
     if let Err(e) = control.interrupt().await {
         log::warn!("interrupt session failed for chat {id}: {e}");
     }
-    Steer::Answered(no_content())
+    no_content()
 }
 
 fn no_content() -> Response<Body> {
@@ -255,32 +229,44 @@ mod tests {
     }
 
     /// The registry is empty in a unit test, so every steering route takes the
-    /// "not ours" path — which is the behaviour that keeps a chat running on Go
-    /// working.
-    #[test]
-    fn a_chat_with_no_live_session_here_forwards_rather_than_409ing() {
-        assert!(matches!(
-            provide_input("no-such-chat", br#"{"answer":"yes"}"#),
-            Steer::Forward
-        ));
-        assert!(matches!(
-            permission_response("no-such-chat", br#"{"allow":true}"#),
-            Steer::Forward
-        ));
+    /// "no live session" path. With the sidecar gone (#278) this registry is
+    /// the only holder, so the answer is Go's own 409 — each handler had its
+    /// own string, reproduced verbatim.
+    #[tokio::test]
+    async fn a_chat_with_no_live_session_answers_gos_own_409() {
+        let cases: [(Response<Body>, &str); 3] = [
+            (
+                provide_input("no-such-chat", br#"{"answer":"yes"}"#),
+                "no active session awaiting input for this chat",
+            ),
+            (
+                permission_response("no-such-chat", br#"{"allow":true}"#),
+                "no active session for this chat",
+            ),
+            (
+                stop("no-such-chat").await,
+                "no active session for this chat",
+            ),
+        ];
+        for (response, want) in cases {
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            assert_eq!(
+                String::from_utf8_lossy(&body),
+                format!("{{\"error\":\"{want}\"}}\n"),
+            );
+        }
     }
 
-    /// Body validation happens *before* the registry lookup, so a malformed
-    /// request is rejected here rather than being forwarded for Go to reject
-    /// identically.
+    /// Body validation happens *before* the registry lookup, exactly as Go's
+    /// handlers decode before they look up the session.
     #[test]
     fn the_body_is_validated_before_the_session_is_looked_up() {
         for body in [&b"{}"[..], b"not json"] {
-            match provide_input("any", body) {
-                Steer::Answered(response) => {
-                    assert_eq!(response.status(), StatusCode::BAD_REQUEST)
-                }
-                Steer::Forward => panic!("a malformed body must be rejected, not forwarded"),
-            }
+            let response = provide_input("any", body);
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         }
     }
 
@@ -289,10 +275,9 @@ mod tests {
     /// is a deny.
     #[test]
     fn an_absent_allow_is_a_deny_not_an_error() {
-        // Reaching the registry lookup at all proves the body parsed.
-        assert!(matches!(
-            permission_response("no-such-chat", b"{}"),
-            Steer::Forward
-        ));
+        // A 409 rather than a 400 proves the body parsed and the registry was
+        // consulted.
+        let response = permission_response("no-such-chat", b"{}");
+        assert_eq!(response.status(), StatusCode::CONFLICT);
     }
 }

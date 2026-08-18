@@ -36,7 +36,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/agento-server"],
     "publisher": "Shaharia Lab",
     "homepage": "https://github.com/shaharia-lab/agento",
     "license": "MIT",

@@ -25,7 +25,6 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
 tauri-plugin-log = "2"
 serde = { version = "1", features = ["derive"] }
 # `float_roundtrip` is not optional here. Without it serde_json's float parser
@@ -51,10 +50,9 @@ axum = "0.8"
 # the `Stream` `Body::from_stream` wants. Added with #276.
 tokio-stream = "0.1"
 # `process` and `io-util` are for the Claude Agent SDK port (`src/claude/`),
-# which spawns the `claude` CLI and reads its stdout line by line. The sidecar
-# goes through tauri-plugin-shell instead, but that only launches binaries
-# declared as Tauri sidecars — the agent CLI is an arbitrary executable resolved
-# on PATH, so it needs a real process API.
+# which spawns the `claude` CLI — an arbitrary executable resolved on PATH, so
+# it needs a real process API rather than Tauri's sidecar mechanism (which only
+# launched binaries declared as sidecars, and left with the Go server in #278).
 tokio = { version = "1", features = [
     "rt-multi-thread",
     "macros",

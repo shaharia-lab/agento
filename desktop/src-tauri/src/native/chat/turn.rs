@@ -99,8 +99,13 @@ pub struct TurnState {
 
 /// Run a turn and stream it.
 ///
-/// Everything that can fail *before* the subprocess exists does so, so an `Err`
-/// here means nothing happened and the proxy may safely forward to Go.
+/// Everything that can fail does so *before* the subprocess exists, and is
+/// answered as a clean JSON error — a 404 for a missing chat, a 500 for
+/// everything else, each carrying its reason. There is nothing to forward to
+/// since #278: this runtime is the only implementation, so `Err` from here
+/// would only become a less specific 500 in the proxy. Once the stream has
+/// begun, a failure ends the stream rather than changing the status — the 200
+/// is already committed.
 pub async fn run(
     db_path: std::path::PathBuf,
     chat_id: String,
@@ -129,7 +134,10 @@ pub async fn run(
                 &format!("chat {chat_id:?} not found"),
             ))
         }
-        Err(e) => return Err(e),
+        Err(e) => {
+            log::warn!("chat {chat_id:?}: loading chat and agent failed: {e}");
+            return Ok(error_json(StatusCode::INTERNAL_SERVER_ERROR, &e));
+        }
     };
     let (row, agent) = loaded;
 
@@ -163,33 +171,53 @@ pub async fn run(
         // (#275), which is why this is a field rather than an unconditional.
         custom_session_id: chat_id.clone(),
     };
-    // Refuses for an agent whose tools this port cannot supply — before any
-    // subprocess exists, so forwarding is safe.
+    // Refuses for an agent whose tools this runtime cannot supply — `whatsapp`
+    // is dropped (#273), `mcps.yaml` is not read — before any subprocess
+    // exists. The refusal reason is the response body: since #278 there is no
+    // other implementation to hand the chat to, so an honest 500 naming what
+    // is unsupported is the best available answer.
     //
     // `tool_servers` are the in-process MCP listeners the CLI will dial — the
     // local tools server for an agent that named one, plus one per integration
     // in its `capabilities.mcp` (#311) — and they are **not** an unused
     // binding: dropping one stops its listener, so the whole vector has to be
     // moved into the stream task and released only once the subprocess is gone.
-    let (options, tool_servers) = runner::build_options(&spec, Some(handler)).await?;
+    let (options, tool_servers) = match runner::build_options(&spec, Some(handler)).await {
+        Ok(built) => built,
+        Err(e) => {
+            log::warn!("chat {chat_id:?}: cannot run this chat: {e}");
+            return Ok(error_json(StatusCode::INTERNAL_SERVER_ERROR, &e));
+        }
+    };
 
-    // The subprocess starts here, and these are the last two `Err`s. Both are
-    // still safe to forward, but for different reasons and neither is obvious:
+    // The subprocess starts here, and these are the last two pre-stream
+    // failures. Both are answered rather than streamed, and both leave nothing
+    // behind:
     //
     // - A failed spawn produced no process at all.
     // - A failed `send` produced one, but `close` terminates it and the user
-    //   message never reached the CLI — so nothing was transmitted, nothing was
-    //   written to its transcript, and Go starting a fresh subprocess is the
-    //   right answer rather than a duplicate.
+    //   message never reached the CLI — so nothing was transmitted and nothing
+    //   was written to its transcript.
     //
     // Everything after this point streams, and a failure there ends the stream
-    // rather than forwarding: the 200 is already committed.
-    let mut session = Session::new(options)
-        .await
-        .map_err(|e| format!("starting agent session: {e}"))?;
+    // rather than changing the status: the 200 is already committed.
+    let mut session = match Session::new(options).await {
+        Ok(session) => session,
+        Err(e) => {
+            log::warn!("chat {chat_id:?}: starting agent session failed: {e}");
+            return Ok(error_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("starting agent session: {e}"),
+            ));
+        }
+    };
     if let Err(e) = session.send(&content).await {
         session.close();
-        return Err(format!("sending first message: {e}"));
+        log::warn!("chat {chat_id:?}: sending first message failed: {e}");
+        return Ok(error_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("sending first message: {e}"),
+        ));
     }
     // `chatService.BeginMessage`'s own line, after `agent.StartSession` returns
     // as Go's is — the subprocess exists and the first message reached it. See

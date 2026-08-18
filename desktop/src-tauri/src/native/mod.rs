@@ -1,15 +1,21 @@
-//! Endpoints answered by ported Rust code instead of the Go sidecar.
+//! The endpoints of the desktop app's API — every one of them, since #278.
 //!
-//! This is the far side of the migration seam described in `proxy.rs`. A route
-//! listed in [`claims`] is served from here; everything else forwards. Both
-//! implementations stay runnable at once, which is what makes a port
-//! *verifiable* rather than merely finished — see [`diff`].
+//! This began as the far side of a migration seam (`proxy.rs`): a route listed
+//! in [`claims`] was served from here, everything else forwarded to the Go
+//! sidecar, and both implementations stayed runnable at once so a port was
+//! *verifiable* rather than merely finished. The sidecar is gone now. What
+//! remains of the seam is its registry shape — one module per area, claiming
+//! and serving in the same file — and the parity corpus (`desktop/parity/`,
+//! `tests/parity_*.rs`), which still diffs these handlers against a Go server
+//! built from the checkout by `scripts/parity-instance.sh`.
 //!
-//! **Failure means fall back.** Every native handler returns a `Result`, and an
-//! `Err` is not turned into an HTTP error: the proxy logs it and forwards the
-//! request to Go. A ported route can therefore only ever be as broken as the
-//! unported one, and a schema change that outruns the Rust reader degrades to
-//! the behaviour the app had before the port instead of a 500.
+//! **Failure means a 500 now, not a fallback.** Every native handler returns a
+//! `Result`, and the proxy answers an `Err` with
+//! `500 {"error":"internal server error"}` — `httpErr`'s own default — logging
+//! the reason. The handlers answer their deliberate 4xx cases themselves (see
+//! [`Answer::error`] and `writes::finish`); an `Err` that reaches the proxy is
+//! a machinery failure. A request no module claims is answered with chi's own
+//! 404, exactly as Go's router answered a route it did not know.
 
 pub mod active_time;
 pub mod agent_run;
@@ -26,6 +32,7 @@ pub mod gopath;
 pub mod goquote;
 pub mod gotime;
 pub mod gourl;
+pub mod health;
 pub mod insights;
 pub mod integration_credentials;
 pub mod integrations;
@@ -33,6 +40,7 @@ pub mod migrate;
 pub mod monitoring;
 pub mod notifications;
 pub mod pricing;
+pub mod pricing_seed;
 pub mod query;
 pub mod scan;
 pub mod scanner;
@@ -51,39 +59,6 @@ use axum::body::Body;
 use axum::http::{header, Method, Response, StatusCode};
 
 use crate::paths;
-
-/// How much of the seam is live.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    /// Claimed routes are answered by Rust. The default.
-    On,
-    /// Nothing is claimed; every request forwards. The escape hatch if a port
-    /// turns out to be wrong in the field.
-    Off,
-    /// Go answers, Rust computes alongside and the two are compared. The mode a
-    /// port is validated in before it is trusted.
-    Diff,
-}
-
-/// Read `AGENTO_DESKTOP_NATIVE` once. An unrecognized value is `On` rather than
-/// an error: a typo in a developer's shell must not silently disable the code
-/// paths the app now ships.
-pub fn mode() -> Mode {
-    use std::sync::OnceLock;
-    static MODE: OnceLock<Mode> = OnceLock::new();
-
-    *MODE.get_or_init(|| {
-        match std::env::var("AGENTO_DESKTOP_NATIVE")
-            .unwrap_or_default()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "off" | "0" | "false" => Mode::Off,
-            "diff" | "shadow" => Mode::Diff,
-            _ => Mode::On,
-        }
-    })
-}
 
 /// A claimed request: the parts a native handler needs.
 pub struct Request<'a> {
@@ -191,6 +166,17 @@ impl Answer {
             text: false,
         }
     }
+
+    /// Go's `writeError`: `{"error": message}` under the given status.
+    ///
+    /// The read modules' way to answer a 4xx/5xx directly. Until #278 a read
+    /// handler returned `Err` for these and the sidecar answered; with it gone
+    /// each handler answers the status and body Go's own handler wrote.
+    pub fn error(status: StatusCode, message: &str) -> Result<Self, String> {
+        let body = gojson::to_vec(&writes::error_body(message))
+            .map_err(|e| format!("encoding error body: {e}"))?;
+        Ok(Self::json_status(status, body))
+    }
 }
 
 /// What every handler needs to reach the data the Go server owns.
@@ -257,10 +243,11 @@ pub fn claims_stream(method: &Method, path: &str) -> bool {
     STREAM_ENDPOINTS.iter().any(|e| (e.claims)(method, path))
 }
 
-/// Answer a claimed streaming request. `Err` forwards, exactly as for a
-/// buffered one — and the same rule applies: a handler must fail *before* it
-/// has any effect, because the forward re-runs it. For a chat turn that means
-/// every check happens before the subprocess is spawned.
+/// Answer a claimed streaming request. An `Err` is a machinery failure the
+/// proxy renders as a JSON 500; a streaming handler answers its own error
+/// cases before the stream begins, because after the first byte the 200 is
+/// committed. For a chat turn every check happens before the subprocess is
+/// spawned.
 pub async fn serve_stream(req: StreamRequest) -> Result<Response<Body>, String> {
     for endpoint in STREAM_ENDPOINTS {
         if (endpoint.claims)(&req.method, &req.path) {
@@ -300,110 +287,23 @@ const ENDPOINTS: &[Endpoint] = &[
     integrations::ENDPOINT,
     scan::ENDPOINT,
     uploads::ENDPOINT,
-    // The one entry that is not under `/api`; see its `claims`.
+    // The two entries that are not under `/api`; see their `claims`.
     trigger::ENDPOINT,
+    health::ENDPOINT,
 ];
 
-/// Whether this request is answered by ported Rust code.
+/// Whether this request is answered by a buffered or streaming handler.
 ///
-/// Each module matches on the exact path, so an unported sibling — or a
-/// trailing slash, which chi treats as a different route — falls through to Go
-/// and keeps whatever answer Go gives it.
+/// Each module matches on the exact path, so a route nothing implements — or a
+/// trailing slash, which chi treated as a different route — is unclaimed, and
+/// the proxy answers it with chi's own 404.
 pub fn claims(method: &Method, path: &str) -> bool {
     ENDPOINTS.iter().any(|e| (e.claims)(method, path)) || claims_stream(method, path)
 }
 
-/// Whether a request may be *executed* natively in the seam's current mode.
-///
-/// This exists for exactly one reason, and it is the sharpest hazard #274
-/// introduced. `Mode::Diff` runs **both** implementations and compares them:
-/// Go answers, Rust computes alongside. For a read that is the whole point.
-/// For a write it means the mutation is applied twice — two agents created, a
-/// row deleted and then deleted again, a counter advanced by two. There is no
-/// diff worth that, and the failure would look like a user double-clicking.
-///
-/// So in `Diff` mode a non-`GET` is not run natively at all; it simply
-/// forwards, and Go remains the only writer. Ported writes are verified the
-/// ordinary way — unit tests over a temp database, and a live parity run
-/// against a scratch instance — not by shadowing production traffic.
-///
-/// The rule is blanket rather than per-endpoint on purpose: a flag on
-/// [`Endpoint`] saying "this one mutates" is a flag someone forgets on the one
-/// that does.
-pub fn may_serve(mode: Mode, method: &Method) -> bool {
-    match mode {
-        Mode::Off => false,
-        Mode::On => true,
-        Mode::Diff => method == Method::GET,
-    }
-}
-
-/// Routes whose diff is **expected** to differ, and why.
-///
-/// Diff mode compares Rust's answer against Go's. That only means anything when
-/// both are answering the same question, and since #289 one route is not:
-/// `/api/claude-sessions/status` reports the state of a scan, the sidecar is
-/// started with `AGENTO_SCANNER=off`, and so Go always says `false`/`0`/`0`
-/// while Rust says whatever is actually happening. Comparing them would report a
-/// permanent false difference and train the reader to ignore the diff output —
-/// which is worse than not comparing, because it hides the real ones.
-///
-/// This is deliberately a **short, named list** rather than a flag on the
-/// endpoint: an entry here is a claim that the two implementations cannot agree
-/// by construction, which should stay rare enough to enumerate.
-pub fn diff_exempt(path: &str) -> bool {
-    path == "/api/claude-sessions/status"
-}
-
-/// Work the shell owes a request the **sidecar** answered.
-///
-/// The seam's usual direction is "Rust answers, Go is the fallback". This is the
-/// other one: a forwarded request can have an effect inside the shell, because
-/// `AGENTO_INTEGRATIONS` tells the sidecar not to host the integration types
-/// this process hosts — so Go's own `registry.Reload` after a successful
-/// `POST /api/integrations/{id}/auth/validate` reaches nothing, and the shell
-/// has to fire its own (#311).
-///
-/// #318 made that route native, and this **still runs**: [`may_serve`] refuses
-/// every write in `Mode::Off` and `Mode::Diff`, so in those modes the request
-/// forwards while the shell is still hosting the servers — `AGENTO_INTEGRATIONS`
-/// is unconditional in `sidecar.rs`, unlike `AGENTO_SCHEDULER`. See
-/// `integrations::reload_after_forward` for the full argument and for why that
-/// is the only route on this list.
-///
-/// Called from the proxy after Go's response is in hand, and only for a 2xx.
-/// Spawned rather than awaited, which is what Go's own `reloadIntegration` does
-/// with it: the answer has already been produced and a restart is not something
-/// the client waits on.
-pub fn after_forward(method: &Method, path: &str, status: StatusCode) {
-    if !status.is_success() {
-        return;
-    }
-    let Some((id, trigger)) = integrations::reload_after_forward(method, path) else {
-        return;
-    };
-    let id = id.to_string();
-    let Some(db_path) = paths::database_path() else {
-        log::warn!("no data dir; not reloading integration {id:?} after {path}");
-        return;
-    };
-    tokio::spawn(async move {
-        match trigger {
-            // A credential was just written: reload, as Go does.
-            //
-            // The only trigger since #318. `AuthStatusPolled` used to sit
-            // beside it, reloading when a polled row stopped matching what was
-            // running — an inference standing in for an OAuth token the shell
-            // could not see land, because the sidecar owned the callback
-            // server. The shell owns it now and reloads directly.
-            integrations::Trigger::CredentialWritten => {
-                integrations::registry::reload_after_auth(&db_path, &id).await;
-            }
-        }
-    });
-}
-
-/// Answer a claimed request. `Err` means "fall back to the Go sidecar".
+/// Answer a claimed request. An `Err` is a machinery failure the proxy renders
+/// as `httpErr`'s default 500; handlers answer their deliberate 4xx cases
+/// themselves.
 pub fn serve(req: &Request) -> Result<Answer, String> {
     let ctx = Ctx {
         db_path: paths::database_path().ok_or("no home directory to resolve the data dir")?,
@@ -548,13 +448,13 @@ mod tests {
         assert!(!claims(&Method::GET, "/api/tasks/"));
         assert!(!claims(&Method::GET, "/api/job-history/"));
 
-        // Settings: the row read and, since #305, the config-dir probe. The
-        // write is implemented in `settings::update` but stays unclaimed: the
-        // sidecar holds its own copy of these preferences in memory and is
-        // still serving routes that read it — see that module's `claims`.
+        // Settings: the row read, the config-dir probe (#305), and — since the
+        // cut-over (#278) — the write, whose blocker was the sidecar's own
+        // in-memory snapshot and died with it.
         assert!(claims(&Method::GET, "/api/settings"));
         assert!(claims(&Method::GET, "/api/settings/claude-config-dirs"));
-        assert!(!claims(&Method::PUT, "/api/settings"));
+        assert!(claims(&Method::PUT, "/api/settings"));
+        assert!(!claims(&Method::PUT, "/api/settings/claude-config-dirs"));
         // Claude Code's own settings.json and the profiles beside it: a
         // different tree entirely, and since #304 all nine routes are ours —
         // reads included, because `GET .../profiles` seeds the index and so is
@@ -820,8 +720,81 @@ mod tests {
         }
     }
 
+    /// The read surface, asserted route by route against
+    /// `desktop/parity/read_routes.json` — the write audit's twin, added at
+    /// the cut-over (#278). The write file was writes-only by design, which
+    /// left the GET routes with no recorded decision; while the sidecar
+    /// answered whatever Rust did not claim that was survivable, and with it
+    /// gone an unclaimed read is a 404 that needs to be deliberate.
     #[test]
-    fn an_unhandled_claim_is_an_error_so_the_proxy_falls_back() {
+    fn every_read_route_matches_its_recorded_disposition() {
+        use serde::Deserialize;
+
+        #[derive(Deserialize)]
+        struct Row {
+            method: String,
+            route: String,
+            status: String,
+            owner: String,
+            reason: String,
+        }
+
+        #[derive(Deserialize)]
+        struct Table {
+            routes: Vec<Row>,
+        }
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../parity/read_routes.json");
+        let raw = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("reading {path}: {e} — regenerate it from Go"));
+        let table: Table = serde_json::from_str(&raw).expect("parsing read routes");
+
+        assert!(!table.routes.is_empty(), "no read routes in {path}");
+
+        for row in table.routes {
+            let method = Method::from_bytes(row.method.as_bytes())
+                .unwrap_or_else(|_| panic!("bad method {:?}", row.method));
+            let concrete = row
+                .route
+                .split('/')
+                .map(|segment| {
+                    if segment.starts_with('{') && segment.ends_with('}') {
+                        "sample"
+                    } else {
+                        segment
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+
+            // Membership first, exactly as the write half does: a typo on a
+            // dropped row would compare false-to-false and assert nothing.
+            assert!(
+                matches!(row.status.as_str(), "native" | "dropped"),
+                "{} {} has status {:?}; want native or dropped",
+                row.method,
+                row.route,
+                row.status,
+            );
+
+            assert_eq!(
+                claims(&method, &concrete),
+                row.status == "native",
+                "{} {} — the table says status={:?} ({}, {}). Either the claim moved \
+                 and the table is stale, or a route was claimed or dropped without \
+                 deciding about it. Regenerate with: go test ./desktop/parity/ -run \
+                 TestReadRoutes -update-read-routes",
+                row.method,
+                row.route,
+                row.status,
+                row.owner,
+                row.reason,
+            );
+        }
+    }
+
+    #[test]
+    fn an_unclaimed_request_is_an_error_the_proxy_renders_as_a_500() {
         assert!(serve(&Request {
             method: &Method::GET,
             path: "/api/nothing-here",
@@ -831,31 +804,6 @@ mod tests {
             body: &[],
         })
         .is_err());
-    }
-
-    /// The single most dangerous thing #274 could get wrong.
-    ///
-    /// `Diff` mode runs Go *and* Rust and compares them. For a read that is the
-    /// whole point; for a write it applies the mutation twice. If this test
-    /// ever goes green with `Diff` allowing a POST, turning on shadow mode
-    /// silently doubles every create the user makes.
-    #[test]
-    fn shadow_mode_never_executes_a_write() {
-        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
-            assert!(
-                !may_serve(Mode::Diff, &method),
-                "{method} must not run natively in diff mode — it would apply twice"
-            );
-            // …but it is perfectly fine in the normal mode, which is the whole
-            // point of the port.
-            assert!(may_serve(Mode::On, &method));
-            assert!(!may_serve(Mode::Off, &method));
-        }
-
-        // Reads are unaffected in every mode but Off.
-        assert!(may_serve(Mode::Diff, &Method::GET));
-        assert!(may_serve(Mode::On, &Method::GET));
-        assert!(!may_serve(Mode::Off, &Method::GET));
     }
 
     /// Go's deletes call `w.WriteHeader(204)` directly rather than going
@@ -971,8 +919,10 @@ mod tests {
         let writes = [
             (Method::POST, "/api/uploads"),
             (Method::POST, "/api/claude-sessions/abc/continue"),
-            // The one claimed route outside `/api` (#319).
+            // The claimed routes outside `/api`: the Telegram webhook (#319)
+            // and the liveness probe (#278).
             (Method::POST, "/webhooks/telegram/abc"),
+            (Method::GET, "/health"),
         ];
         for endpoint in ENDPOINTS {
             let reachable = probes.iter().any(|p| (endpoint.claims)(&Method::GET, p))

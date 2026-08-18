@@ -101,6 +101,46 @@ pub fn open_read_write(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// Create-if-missing open, for exactly one caller: startup (#278).
+///
+/// Go's `NewSQLiteDB` created the file, ran the migrations and seeded the
+/// pricing catalog before the server listened; with the sidecar gone the shell
+/// does the same, once, in `lib.rs`'s setup. Every other open in this module
+/// deliberately does **not** create — `open_read_write` on a missing file is
+/// an error, pinned by `a_missing_database_is_an_error_not_a_new_file`,
+/// because outside startup a missing database means a misresolved path, and
+/// writing a fresh schema at a wrong location would hide that.
+///
+/// The parent directory is created too: on a fresh install `~/.agento` itself
+/// does not exist yet, which was likewise Go's job.
+pub fn ensure_database(path: &Path) -> Result<Connection, String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("creating data dir {}: {e}", dir.display()))?;
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("opening {} for startup: {e}", path.display()))?;
+
+    conn.busy_timeout(BUSY_TIMEOUT)
+        .map_err(|e| format!("setting busy_timeout: {e}"))?;
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .map_err(|e| format!("setting journal_mode: {e}"))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(format!("expected WAL journal mode, got {mode}"));
+    }
+    for pragma in ["PRAGMA foreign_keys=ON", "PRAGMA synchronous=NORMAL"] {
+        conn.execute_batch(pragma)
+            .map_err(|e| format!("setting {pragma}: {e}"))?;
+    }
+    Ok(conn)
+}
+
 /// Run a synchronous database section on the blocking pool.
 ///
 /// **Everything in this module blocks a thread, and `BUSY_TIMEOUT` says for how

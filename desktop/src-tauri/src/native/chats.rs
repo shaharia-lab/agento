@@ -5,9 +5,9 @@
 //! which only wrap the store in a span — and `handleListChats`/`handleGetChat`
 //! in `internal/api/chats.go`.
 //!
-//! Reads only. Create, update, delete and the streaming turn stay with Go until
-//! the storage layer moves: this is the same database file, and a second writer
-//! would race the migrations and seeding the Go server performs on startup.
+//! Plus, since #274, the CRUD writes — create, patch, the two deletes — while
+//! the streaming turn lives in `chat/`. (This header predates #274's storage
+//! move; the "reads only" era ended there.)
 //!
 //! Three Go-isms decide the bytes here, and none of them is visible in the Go
 //! structs:
@@ -331,9 +331,10 @@ fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, S
             Some(detail) => {
                 super::gojson::to_vec(&detail).map_err(|e| format!("encoding chat: {e}"))?
             }
-            // Falling back lets Go answer the 404, rather than this having to
-            // reproduce its body and status.
-            None => return Err(format!("chat {id:?} not found")),
+            // `handleGetChat`'s own 404, answered here since #278.
+            None => {
+                return super::Answer::error(axum::http::StatusCode::NOT_FOUND, "chat not found")
+            }
         },
     };
     Ok(super::Answer::json(body))
@@ -590,14 +591,19 @@ fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteEr
 }
 
 /// `handleDeleteChat`. A missing chat is a 500 in Go — the store returns a
-/// plain error, so the `NotFoundError` branch never fires — so it forwards.
+/// plain error, so the `NotFoundError` branch never fires and the handler
+/// writes its own fixed 500 body, reproduced here since #278.
 fn delete_one(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
     let conn = open_for_write(db_path)?;
     let affected = conn
         .execute("DELETE FROM chat_sessions WHERE id = ?1", [id])
-        .map_err(|e| WriteError::Fallback(format!("deleting session {id:?}: {e}")))?;
+        .map_err(|e| {
+            log::warn!("deleting session {id:?}: {e}");
+            WriteError::Internal("failed to delete chat".to_string())
+        })?;
     if affected == 0 {
-        return Err(WriteError::Fallback(format!("session {id:?} not found")));
+        log::warn!("deleting session {id:?}: not found");
+        return Err(WriteError::Internal("failed to delete chat".to_string()));
     }
     log::info!("chat session deleted session_id={id:?}");
     Ok(super::Answer::no_content())
@@ -1117,10 +1123,15 @@ mod tests {
     }
 
     #[test]
-    fn deleting_a_missing_chat_forwards() {
+    fn deleting_a_missing_chat_answers_gos_own_500() {
         let file = migrated();
         let err = delete_one(file.path(), "ghost").unwrap_err();
-        assert!(matches!(err, WriteError::Fallback(_)), "{err:?}");
+        // Go's store returns a plain error for a missing row, so the handler
+        // writes its fixed 500 body — reproduced here since #278.
+        assert!(
+            matches!(err, WriteError::Internal(ref m) if m == "failed to delete chat"),
+            "{err:?}"
+        );
     }
 
     #[test]

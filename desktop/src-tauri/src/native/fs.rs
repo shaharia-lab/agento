@@ -244,12 +244,16 @@ fn claims(method: &Method, path: &str) -> bool {
 const PATH_MKDIR: &str = "/api/fs/mkdir";
 
 fn serve(_ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
-    // Windows `filepath` is a different algorithm and unverified here, so the
-    // request forwards. This is the seam's own mechanism for "cannot answer",
-    // and it keeps the platform decision in one readable place rather than
-    // making the route vanish from the registry.
+    // Windows `filepath` is a different algorithm and unverified here. Until
+    // #278 this forwarded and the sidecar answered; with it gone the honest
+    // answer is a 501 naming the gap, not a listing built with Unix path
+    // arithmetic — `gopath::dir` on `C:\Users\u` finds no `/` and answers
+    // `"."`, so the picker would silently browse the wrong directory.
     if !cfg!(unix) {
-        return Err("the fs routes are not ported for Windows path semantics".to_string());
+        return super::Answer::error(
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            "the filesystem browser is not supported on Windows in this build",
+        );
     }
     if req.path == PATH_MKDIR {
         return finish(mkdir(req.body));

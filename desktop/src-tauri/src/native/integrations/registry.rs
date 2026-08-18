@@ -43,14 +43,12 @@
 //! `Start` and `Reload` per row; `Stop` is ungated there, because stopping can
 //! only ever remove a server that process started.
 //!
-//! **The list is built here, by [`hosting_env_value`], from the same
-//! [`HOSTED_TYPES`] that [`hosts_type`] and the starter dispatch read.** That is
-//! the point of carrying it in the environment rather than hardcoding it on both
-//! sides: the shell is the process that knows what it hosts, so #313 adds the
-//! last string to one list and the two halves cannot drift. The failure mode
-//! being designed against is a Rust slack starter landing while Go is never told
-//! to stop hosting slack — two processes on one integration — and its mirror is
-//! the WhatsApp bug above.
+//! **The list was carried to the sidecar by `hosting_env_value`, from the same
+//! [`HOSTED_TYPES`] that [`hosts_type`] and the starter dispatch read** — one
+//! list, so the two halves could not drift. #278 removed the sidecar, and with
+//! it the environment plumbing; [`HOSTED_TYPES`] remains the single list the
+//! two in-process consumers read, and `AGENTO_INTEGRATIONS` remains meaningful
+//! only for a standalone `agento web` (see the root CLAUDE.md).
 //!
 //! ## What happens to a type neither side hosts
 //!
@@ -183,10 +181,10 @@ impl HostingRow {
 
 /// The integration types **this** process hosts.
 ///
-/// One list, read by three things that must agree: [`hosts_type`] (which the
-/// native `PUT`/`DELETE` consult before they touch a row), the starter dispatch
-/// in [`start_for_type`], and [`hosting_env_value`], which tells the Go sidecar
-/// which types to stop hosting. #313 adds the last string here.
+/// One list, read by the two things that must agree: [`hosts_type`] (which the
+/// native `PUT`/`DELETE` consult before they touch a row) and the starter
+/// dispatch in [`start_for_type`]. (Until #278 it also fed the sidecar's
+/// `AGENTO_INTEGRATIONS` switch; that plumbing died with the sidecar.)
 pub const HOSTED_TYPES: &[&str] = &[
     "github",
     "confluence",
@@ -199,17 +197,6 @@ pub const HOSTED_TYPES: &[&str] = &[
 /// Whether this process hosts an integration of the given type.
 pub fn hosts_type(integration_type: &str) -> bool {
     HOSTED_TYPES.contains(&integration_type)
-}
-
-/// The value `sidecar.rs` puts in `AGENTO_INTEGRATIONS`.
-///
-/// Derived from [`HOSTED_TYPES`] rather than written out, so the sidecar cannot
-/// be told to stop hosting a type this build does not start. An empty list would
-/// render as `off:`, which the Go parser reads as "host everything" — the safe
-/// direction, and the reason the list is joined rather than the switch being a
-/// bare `off`.
-pub fn hosting_env_value() -> String {
-    format!("off:{}", HOSTED_TYPES.join(","))
 }
 
 /// The hosted servers, keyed by integration id — `IntegrationRegistry.servers`
@@ -1398,38 +1385,26 @@ mod tests {
         }
     }
 
-    /// The value the sidecar is started with is **derived** from the starter
-    /// table, which is the whole reason it travels in the environment rather
-    /// than being spelled out on both sides. Adding a type to `HOSTED_TYPES`
-    /// without a starter, or shipping a starter Go is never told about, are the
-    /// two ways to put a credential on two open ports at once.
+    /// The six ported types, and only them: `whatsapp` was dropped with #273
+    /// and has no starter here — since #278 there is no other process hosting
+    /// it either, so its endpoints are gone rather than delegated.
     #[test]
-    fn the_sidecar_is_told_exactly_what_this_process_hosts() {
+    fn the_hosted_types_are_the_six_ported_integrations() {
         assert_eq!(
-            hosting_env_value(),
-            "off:github,confluence,jira,slack,telegram,google"
+            HOSTED_TYPES,
+            &[
+                "github",
+                "confluence",
+                "jira",
+                "slack",
+                "telegram",
+                "google"
+            ]
         );
-        assert_eq!(
-            hosting_env_value(),
-            format!("off:{}", HOSTED_TYPES.join(",")),
-            "the switch must be built from the starter table, never written out"
-        );
-        assert!(hosts_type("github"));
-        assert!(hosts_type("confluence"));
-        assert!(hosts_type("jira"));
-        assert!(hosts_type("slack"));
-        assert!(hosts_type("telegram"));
-        assert!(hosts_type("google"));
-        // Go must keep hosting every type not on the list — and with #313 landed,
-        // `whatsapp` is the only one left, which is also the reason this is a
-        // list rather than a flag: its starter opens a live whatsmeow connection
-        // that its status, reconnect and QR endpoints read out of a package
-        // global, so switching it off costs the feature rather than a spare port.
-        assert!(!hosts_type("whatsapp"), "whatsapp is not hosted here");
-        assert!(
-            !hosting_env_value().contains("whatsapp"),
-            "whatsapp must not be switched off in the sidecar — nobody would host it"
-        );
+        for t in HOSTED_TYPES {
+            assert!(hosts_type(t));
+        }
+        assert!(!hosts_type("whatsapp"), "whatsapp is dropped, not hosted");
     }
 
     /// A type claimed by `HOSTED_TYPES` but missing from the starter dispatch

@@ -430,12 +430,10 @@ fn local_tz() -> Tz {
 /// mean — the app behaves exactly as it did before the port, with Go scheduling
 /// and Go writing.
 pub fn shell_owns_scheduler() -> bool {
-    // The database path is part of the answer, not a detail of `start`. With no
-    // database this process cannot schedule at all, and telling the sidecar to
-    // stand down anyway would leave *nobody* firing a task, silently — the same
-    // two-halves-in-step rule `registry::hosting_env_value` follows for
-    // integrations.
-    crate::native::mode() == crate::native::Mode::On && crate::paths::database_path().is_some()
+    // The database path is the whole answer since #278: with no database this
+    // process cannot schedule at all. (The seam-mode half of this check died
+    // with the sidecar — there is no other process to leave the scheduler to.)
+    crate::paths::database_path().is_some()
 }
 
 /// `initTaskScheduler` + `Scheduler.Start`: load the active tasks, schedule
@@ -445,12 +443,7 @@ pub fn shell_owns_scheduler() -> bool {
 /// second call is a no-op rather than a second scheduler.
 pub fn start(db_path: PathBuf) {
     if !shell_owns_scheduler() {
-        // The sidecar was not told to stop scheduling either, so Go owns it and
-        // installing timers here would be the two-scheduler hazard.
-        log::info!(
-            "task scheduler left with the sidecar: the native seam is not fully on, \
-             or there is no database to read"
-        );
+        log::warn!("task scheduler not started: there is no database to read tasks from");
         return;
     }
 
