@@ -456,6 +456,15 @@ async fn dispatch(
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default()
             .to_string();
+        // Likewise carried for one route: the Telegram webhook authenticates on
+        // this header alone, being mounted outside `/api` and so outside both
+        // guards. See `native::Request::secret_token`.
+        let secret_token = req
+            .headers()
+            .get("x-telegram-bot-api-secret-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
         let native_answer = {
             let path = path.clone();
             tokio::task::spawn_blocking(move || {
@@ -464,6 +473,7 @@ async fn dispatch(
                     path: &path,
                     query: &query,
                     content_type: &content_type,
+                    secret_token: &secret_token,
                     body: &body_bytes,
                 })
             })

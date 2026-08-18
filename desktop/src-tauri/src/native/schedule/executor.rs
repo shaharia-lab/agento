@@ -31,24 +31,12 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use super::runtime::Scheduler;
+use crate::native::agent_run::RunResult;
 use crate::native::agents::{self, Agent};
-use crate::native::chat::runner::{self, RunSpec, TurnSettings};
+use crate::native::chat::runner::TurnSettings;
 use crate::native::notifications;
 use crate::native::tasks::{self, JobHistory, ScheduledTask};
 use crate::native::template;
-
-/// What one run produced. `agent.AgentResult`, narrowed to the fields the
-/// scheduler stores — the thinking, cost and per-model breakdowns are collected
-/// by Go and then dropped by this caller.
-#[derive(Debug, Default)]
-struct RunResult {
-    session_id: String,
-    answer: String,
-    input_tokens: i64,
-    output_tokens: i64,
-    cache_creation_tokens: i64,
-    cache_read_tokens: i64,
-}
 
 /// `executeTask`. The semaphore is the caller's; this is everything inside it.
 pub async fn execute_task(scheduler: &Arc<Scheduler>, task_id: &str) {
@@ -339,170 +327,29 @@ fn resolve_agent(db_path: &std::path::Path, task: &ScheduledTask) -> Result<Agen
     })
 }
 
-/// `agent.RunAgent` + `collectRunResult`, for a run with no interactive
-/// permission handler and no SSE.
+/// The scheduler's half of `agent.RunAgent`: resolve the system prompt, then
+/// hand the run to [`crate::native::agent_run`].
 ///
-/// The timeout is `context.WithTimeout(parentCtx, task.TimeoutMinutes)`. It
-/// wraps the *whole* drain, so a subprocess that stops producing events is
-/// abandoned rather than waited on forever, and the session is closed on the way
-/// out either way.
+/// The run itself is shared with the trigger dispatcher (#319) — see that
+/// module for why the one-shot `query` rather than a `Session` is not a detail.
 async fn run_agent(
     db_path: &std::path::Path,
     task: &ScheduledTask,
     agent: Agent,
     prompt: &str,
 ) -> Result<RunResult, String> {
-    let settings = Arc::new(TurnSettings::from_db(db_path));
-    let spec = RunSpec {
-        agent: Some(agent),
-        // Never called: `resolve_agent` always yields an agent, because Go's
-        // scheduler always has a non-nil config. Present because `RunSpec`
-        // models the chat's branch too.
-        no_agent_model: Box::new(String::new),
-        settings,
-        working_dir: task.working_directory.clone(),
-        settings_profile_id: task.settings_profile_id.clone(),
-        resume_session_id: None,
-        // `buildRunOptions` sets neither session field, so the CLI picks its own
-        // id and `saveSessionResults` stores it afterwards.
-        custom_session_id: String::new(),
-    };
-
-    // **One deadline across every stage that can await, not a timeout on the
-    // drain alone.** Go wraps the whole `agent.RunAgent` call — its
-    // `resolveSystemPrompt` and `buildSDKOptions` included — and the difference
-    // is not theoretical: anything that hangs before the first event would
-    // leave the `job_history` row `running` forever *and* hold this run's
-    // scheduler permit for the life of the process; three of those and no
-    // scheduled task runs again. `build_options` belongs inside it because it
-    // is not arithmetic — it starts an in-process MCP server per integration
-    // the agent names.
-    //
-    // A shared `Instant` rather than one future wrapping everything, because
-    // `Session` has no `Drop`: cancelling a future that owns one abandons the
-    // subprocess instead of stopping it. Staged this way, `close()` stays
-    // reachable on every path where a session exists.
-    let deadline = tokio::time::Instant::now()
-        + std::time::Duration::from_secs(
-            u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60,
-        );
-
-    // `resolveSystemPrompt`, which Go calls **before** building any options and
-    // whose error it returns unwrapped — so an agent with an unresolvable
-    // `{{name}}` in its system prompt is a recorded failed run, not a run that
-    // quietly ships the raw placeholder to the model. `build_options` cannot do
-    // this check itself: the chat path deliberately interpolates leniently, and
-    // the strictness is the caller's (see `native::template`).
-    if let Some(agent) = spec.agent.as_ref() {
-        template::interpolate(&agent.system_prompt).map_err(|e| e.to_string())?;
-    }
-
-    // The refusal this port has that Go does not — an agent whose tools cannot
-    // be hosted here. A recorded failure, never silence. See the module header.
-    //
-    // **The message is passed through, not rewritten.** `build_options` fails
-    // for more than a refusal: `start_local_tools` and `start_integration_servers`
-    // bind loopback listeners and read integration rows, so a port-bind failure
-    // or a SQLite error arrives here too. Since this row is the *only* evidence
-    // a scheduled run leaves, labelling all of them "this build cannot host your
-    // agent's tools" would send a user to the wrong fix. Every one of those
-    // messages already describes itself.
-    let (options, tool_servers) =
-        tokio::time::timeout_at(deadline, runner::build_options(&spec, None))
-            .await
-            .map_err(|_| DEADLINE_EXCEEDED.to_string())?
-            .map_err(|e| format!("agent setup: {e}"))?;
-
-    // **`query`, not `Session`** — the one-shot, which is what Go's `RunAgent`
-    // uses (`claude.Query`). The difference is the whole run: a `Session` sets
-    // `session_mode`, and `process.rs`'s reader then deliberately does *not*
-    // close stdin or stop at the `result` event, "so the subprocess survives
-    // for the next send". There is no next send here, so the event channel
-    // never closes, `collect_run_result` blocks past the answer, and every
-    // scheduled run would sit until its timeout — 30 minutes by default, up to
-    // 240 — then record `failed`, persist no chat, and hold one of the three
-    // semaphore permits the entire time.
-    //
-    // The one-shot reader closes stdin and breaks *after* emitting the result,
-    // which is also what makes `collect_run_result`'s drain-past-the-result
-    // rule terminate rather than hang.
-    let mut stream = match tokio::time::timeout_at(
-        deadline,
-        crate::claude::client::query(prompt, options),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(e)) => {
-            drop(tool_servers);
-            return Err(format!("starting agent: {e}"));
-        }
-        Err(_) => {
-            drop(tool_servers);
-            return Err(DEADLINE_EXCEEDED.to_string());
-        }
-    };
-
-    let collected = tokio::time::timeout_at(deadline, collect_run_result(&mut stream))
-        .await
-        .unwrap_or_else(|_| Err(DEADLINE_EXCEEDED.to_string()));
-
-    stream.close();
-    // The in-process tool listeners outlive the subprocess and stop when
-    // dropped, so this is after `close` rather than before it.
-    drop(tool_servers);
-    collected
-}
-
-/// What `context.DeadlineExceeded` reaches Go's caller as, and therefore what
-/// lands in `job_history.error_message` for a run that ran out of time.
-const DEADLINE_EXCEEDED: &str = "context deadline exceeded";
-
-/// `collectRunResult`: drain every event, keep the last result.
-///
-/// The drain does **not** stop at the result event, and that is Go's comment
-/// rather than an accident: the subprocess still has its transcript to write,
-/// and returning early would race the scanner against a half-written file.
-async fn collect_run_result(
-    stream: &mut crate::claude::client::Stream,
-) -> Result<RunResult, String> {
-    let mut result: Option<RunResult> = None;
-    let mut result_err: Option<String> = None;
-
-    while let Some(event) = stream.next_event().await {
-        let Some(r) = event.result.as_ref() else {
-            continue;
-        };
-        if r.is_error {
-            result_err = Some(build_result_error(r));
-        } else {
-            result = Some(RunResult {
-                session_id: r.session_id.clone(),
-                answer: r.result.clone(),
-                input_tokens: r.usage.input_tokens,
-                output_tokens: r.usage.output_tokens,
-                cache_creation_tokens: r.usage.cache_creation_input_tokens,
-                cache_read_tokens: r.usage.cache_read_input_tokens,
-            });
-        }
-    }
-
-    if let Some(err) = result_err {
-        return Err(err);
-    }
-    result.ok_or_else(|| "agent finished without returning a result".to_string())
-}
-
-/// `buildResultError`, message for message.
-fn build_result_error(r: &crate::claude::messages::Result) -> String {
-    let mut msg = r.result.clone();
-    if msg.is_empty() && !r.errors.is_empty() {
-        msg = r.errors.join("; ");
-    }
-    if msg.is_empty() {
-        msg = format!("subtype={}", r.subtype);
-    }
-    format!("agent error: {msg}")
+    // `resolveSystemPrompt`'s strictness lives in `run_headless`, so both
+    // headless callers get it — see that function.
+    let spec = crate::native::agent_run::headless_spec(
+        db_path,
+        agent,
+        task.working_directory.clone(),
+        task.settings_profile_id.clone(),
+    );
+    let timeout = std::time::Duration::from_secs(
+        u64::try_from(task.timeout_minutes.max(0)).unwrap_or(0) * 60,
+    );
+    crate::native::agent_run::run_headless(&spec, prompt, timeout).await
 }
 
 /// `saveSessionResults`: the run's totals onto the chat row, then the two
@@ -1245,24 +1092,6 @@ mod tests {
             199,
             "cut back to the boundary rather than through the character"
         );
-    }
-
-    #[test]
-    fn a_result_error_prefers_the_message_then_the_errors_then_the_subtype() {
-        let mut r = crate::claude::messages::Result {
-            subtype: "error_max_turns".to_string(),
-            ..Default::default()
-        };
-        assert_eq!(
-            build_result_error(&r),
-            "agent error: subtype=error_max_turns"
-        );
-
-        r.errors = vec!["one".to_string(), "two".to_string()];
-        assert_eq!(build_result_error(&r), "agent error: one; two");
-
-        r.result = "the message".to_string();
-        assert_eq!(build_result_error(&r), "agent error: the message");
     }
 
     #[test]
