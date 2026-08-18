@@ -233,14 +233,37 @@ pub async fn run(
         // The commit is detached from the request on purpose, so a client that
         // disconnected mid-stream still has its turn persisted. Errors are
         // logged and never surfaced — the stream has already ended.
-        match super::persist::commit(&db_path, &row, &content, &state, is_first_message) {
+        //
+        // What a `None` from the hand-off would leave behind, which
+        // [`crate::native::db::blocking`] asks each caller to state: `commit` is
+        // up to two inserts and an update with **no surrounding transaction**,
+        // so a panic between them can store the reply while `sdk_session_id` and
+        // the token counters stay stale — and the next turn would then resume
+        // the wrong CLI session. Nothing here can repair that; it is recorded
+        // because the shape is worth knowing before anyone adds a fourth write.
+        // On the blocking pool, not this task's worker. This is the one
+        // *request*-driven write that `proxy.rs` does not already cover:
+        // `STREAM_ENDPOINTS` sends the chat turn down `serve_stream`, which
+        // awaits on an axum worker, and `commit` is `open_read_write` plus three
+        // writes — up to a five-second `busy_timeout` each, once per turn, while
+        // the scan's batch writer or the Go sidecar holds the lock. See
+        // [`crate::native::db::blocking`].
+        //
+        // The id for the log line is taken first, because `state` moves into the
+        // closure.
+        let sdk_session_id = state.sdk_session_id.clone();
+        let committed = crate::native::db::blocking("chat commit", move || {
+            super::persist::commit(&db_path, &row, &content, &state, is_first_message)
+        })
+        .await;
+        match committed.unwrap_or_else(|| Err("the commit task failed".to_string())) {
             // `chatService.CommitMessage`'s line, after the session update as
             // Go's is. The id is the turn's own rather than the resolved
             // fallback, which is what Go's caller passes.
             Ok(()) => log::info!(
                 "message committed session_id={:?} sdk_session_id={:?}",
                 chat_id,
-                state.sdk_session_id
+                sdk_session_id
             ),
             Err(e) => log::error!("commit message failed for chat {chat_id}: {e}"),
         }

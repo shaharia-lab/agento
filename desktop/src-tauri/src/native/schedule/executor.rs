@@ -34,26 +34,54 @@ use super::runtime::Scheduler;
 use crate::native::agent_run::RunResult;
 use crate::native::agents::{self, Agent};
 use crate::native::chat::runner::TurnSettings;
+use crate::native::db;
 use crate::native::notifications;
 use crate::native::tasks::{self, JobHistory, ScheduledTask};
 use crate::native::template;
 
 /// `executeTask`. The semaphore is the caller's; this is everything inside it.
 pub async fn execute_task(scheduler: &Arc<Scheduler>, task_id: &str) {
-    let db_path = scheduler.db_path().to_path_buf();
+    let due = {
+        let (scheduler, task_id) = (Arc::clone(scheduler), task_id.to_string());
+        db::blocking("scheduled run", move || due_task(&scheduler, &task_id)).await
+    };
+    // Two shapes of `None` collapse here: not due, and a panic in the section
+    // itself, which `db::blocking` logs. Neither owes a job row — no run was
+    // started, and this is the one place in the file where returning without one
+    // is right.
+    //
+    // "Not due" is not the same as "wrote nothing", though: the auto-pause
+    // branch parks the row and drops the timer. A panic between those two leaves
+    // a `paused` row with a live gocron entry — which `reconcile` corrects
+    // within the minute, since it reads the row.
+    let Some(Some(task)) = due else {
+        return;
+    };
 
-    let task = match tasks::get_task(&db_path, task_id) {
+    log::info!(
+        "executing task task_id={:?} task_name={:?} run_count={}",
+        task.id,
+        task.name,
+        task.run_count + 1
+    );
+    run_task(scheduler, task).await;
+}
+
+/// The load-and-check half of `executeTask`: the row, its status, and the
+/// auto-pause rules. Synchronous, and called through [`db::blocking`].
+fn due_task(scheduler: &Arc<Scheduler>, task_id: &str) -> Option<ScheduledTask> {
+    let task = match tasks::get_task(scheduler.db_path(), task_id) {
         Ok(Some(task)) => task,
         // A task that vanished between the fire and the read. Go returns
         // silently; so does this — there is no row to attach a failure to.
-        Ok(None) => return,
+        Ok(None) => return None,
         Err(e) => {
             log::error!("failed to load task for execution task_id={task_id:?} error={e}");
-            return;
+            return None;
         }
     };
     if task.status != "active" {
-        return;
+        return None;
     }
 
     if should_auto_pause(&task) {
@@ -63,16 +91,9 @@ pub async fn execute_task(scheduler: &Arc<Scheduler>, task_id: &str) {
             "stop_after_time reached"
         };
         auto_pause(scheduler, task, reason);
-        return;
+        return None;
     }
-
-    log::info!(
-        "executing task task_id={:?} task_name={:?} run_count={}",
-        task.id,
-        task.name,
-        task.run_count + 1
-    );
-    run_task(scheduler, task).await;
+    Some(task)
 }
 
 /// `shouldAutoPause`. Both conditions are checked before the run, so a task that
@@ -98,9 +119,124 @@ fn auto_pause(scheduler: &Arc<Scheduler>, mut task: ScheduledTask, reason: &str)
 }
 
 /// `runTask`: interpolate, create the session and the job row, run, record.
-async fn run_task(scheduler: &Arc<Scheduler>, mut task: ScheduledTask) {
+///
+/// # Three sections, and the two on the ends are blocking
+///
+/// The shape is not arbitrary. Everything before the agent run and everything
+/// after it is synchronous rusqlite, and the run itself is the only part that
+/// awaits — often for hours. Written inline the two ends would park an axum
+/// worker on `busy_timeout` (see [`db::blocking`]), three at a time because that
+/// is what the scheduler's semaphore permits. Tokio runs one worker per core, so
+/// on a four-core machine that is three of the four — the SPA and every SSE
+/// stream sharing the runtime are left with one. So [`prepare`] and [`finish`]
+/// are whole synchronous sections handed to the pool, rather than eight
+/// individually wrapped calls: the database work in one run is contiguous, and
+/// splitting it any finer would only add hand-offs.
+///
+/// The notifications stay out here because [`publish`] already spawns and
+/// deliberately does not wait — see its own note.
+async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask) {
     let db_path = scheduler.db_path().to_path_buf();
     let started_at = Utc::now();
+
+    let prepared = {
+        let scheduler = Arc::clone(scheduler);
+        db::blocking("scheduled run preparation", move || {
+            prepare(&scheduler, task, started_at)
+        })
+        .await
+    };
+    // `None` is a panic in the section above. Every *handled* failure inside it
+    // has already recorded its job row, which is what the module header's "never
+    // silence" rule is about; a panic is a bug rather than an outcome, and it is
+    // logged by `db::blocking`.
+    let ready = match prepared {
+        Some(Ok(ready)) => ready,
+        Some(Err(failed)) => {
+            publish_task_failed(&db_path, &failed.task, &failed.message);
+            return;
+        }
+        None => return,
+    };
+    let Ready {
+        task,
+        job,
+        chat_session_id,
+        prompt,
+        agent,
+    } = ready;
+
+    let result = run_agent(&db_path, &task, agent, &prompt).await;
+
+    let recorded = {
+        let (scheduler, session) = (Arc::clone(scheduler), chat_session_id.clone());
+        db::blocking("scheduled run results", move || {
+            finish(&scheduler, task, job, &session, &prompt, started_at, result)
+        })
+        .await
+    };
+    // A panic in `finish` is the one case that can leave evidence behind: it may
+    // have written the session results and not the job row, so `job_history`
+    // keeps a `running` row that nothing will ever finish. There is nothing
+    // useful to do about it from here — the state is unknown, and a second
+    // write attempt from a path that just panicked is not an improvement — but
+    // it is the reason the module header's rule is "every path ends in a job
+    // history row" rather than "every path ends correctly".
+    let Some(recorded) = recorded else {
+        return;
+    };
+
+    if let Some(message) = &recorded.failure {
+        publish_task_failed(&db_path, &recorded.task, message);
+        return;
+    }
+    publish_task_finished(&db_path, &recorded.task, &recorded.job, &chat_session_id);
+
+    log::info!(
+        "task execution completed task_id={:?} task_name={:?} session_id={:?} run_count={}",
+        recorded.task.id,
+        recorded.task.name,
+        chat_session_id,
+        recorded.task.run_count
+    );
+}
+
+/// What a run needs once everything that can fail before it has not.
+struct Ready {
+    task: ScheduledTask,
+    job: JobHistory,
+    chat_session_id: String,
+    prompt: String,
+    agent: Agent,
+}
+
+/// A failure that has already been recorded, carrying what the caller needs to
+/// publish it. The task travels back because `update_task_after_run` re-reads
+/// the row and writes the fresh counters onto it.
+///
+/// Boxed to satisfy `clippy::result_large_err`, whose threshold is 128 bytes and
+/// which a bare `ScheduledTask` (472 bytes, measured) clears on its own. It does **not** shrink
+/// the `Result`: `Ready` carries a task, a job and an agent, so the enum is that
+/// size either way. The lint is about the cost of moving an error along a `?`
+/// chain, which is why boxing the rarer half is the answer it wants.
+struct Failed {
+    task: ScheduledTask,
+    message: String,
+}
+
+/// `prepareTaskRun` plus `resolveAgentConfig`: everything `runTask` does before
+/// the agent run, as one synchronous section.
+///
+/// Every `Err` here is *already recorded* — the two early failures write a
+/// complete failed job row and the third finishes the running one — so the
+/// caller's only remaining job is the notification, which must not happen on
+/// this thread.
+fn prepare(
+    scheduler: &Arc<Scheduler>,
+    mut task: ScheduledTask,
+    started_at: chrono::DateTime<Utc>,
+) -> Result<Ready, Box<Failed>> {
+    let db_path = scheduler.db_path().to_path_buf();
 
     // `prepareTaskRun`. Both failures record a *complete* failed job row and
     // return — the run never reaches `createInitialJobHistory`, so there is no
@@ -108,28 +244,26 @@ async fn run_task(scheduler: &Arc<Scheduler>, mut task: ScheduledTask) {
     let prompt = match template::interpolate(&task.prompt) {
         Ok(prompt) => prompt,
         Err(e) => {
-            let msg = format!("prompt interpolation: {e}");
+            let message = format!("prompt interpolation: {e}");
             log::error!(
                 "failed to interpolate prompt task_id={:?} error={e}",
                 task.id
             );
-            record_failed_run(scheduler, &mut task, started_at, "", &msg);
-            publish_task_failed(&db_path, &task, &msg);
-            return;
+            record_failed_run(scheduler, &mut task, started_at, "", &message);
+            return Err(Box::new(Failed { task, message }));
         }
     };
 
     let chat_session_id = match create_task_session(&db_path, &task) {
         Ok(id) => id,
         Err(e) => {
-            let msg = format!("create session: {e}");
+            let message = format!("create session: {e}");
             log::error!(
                 "failed to create chat session task_id={:?} error={e}",
                 task.id
             );
-            record_failed_run(scheduler, &mut task, started_at, "", &msg);
-            publish_task_failed(&db_path, &task, &msg);
-            return;
+            record_failed_run(scheduler, &mut task, started_at, "", &message);
+            return Err(Box::new(Failed { task, message }));
         }
     };
 
@@ -141,31 +275,62 @@ async fn run_task(scheduler: &Arc<Scheduler>, mut task: ScheduledTask) {
     let agent = match resolve_agent(&db_path, &task) {
         Ok(agent) => agent,
         Err(e) => {
-            let msg = format!("resolve agent: {e}");
+            let message = format!("resolve agent: {e}");
             log::error!(
                 "failed to resolve agent config task_id={:?} error={e}",
                 task.id
             );
-            finish_job_history(&db_path, &mut job, started_at, "failed", &msg, None, "");
+            finish_job_history(&db_path, &mut job, started_at, "failed", &message, None, "");
             update_task_after_run(scheduler, &mut task, started_at, "failed");
-            publish_task_failed(&db_path, &task, &msg);
-            return;
+            return Err(Box::new(Failed { task, message }));
         }
     };
 
-    let result = run_agent(&db_path, &task, agent, &prompt).await;
+    Ok(Ready {
+        task,
+        job,
+        chat_session_id,
+        prompt,
+        agent,
+    })
+}
+
+/// What [`finish`] wrote, for the caller to publish. `failure` carries the
+/// message when the run itself failed.
+struct Recorded {
+    task: ScheduledTask,
+    job: JobHistory,
+    failure: Option<String>,
+}
+
+/// Everything `runTask` does after the agent run, as one synchronous section:
+/// the session results, the job row, and the task's own counters.
+fn finish(
+    scheduler: &Arc<Scheduler>,
+    mut task: ScheduledTask,
+    mut job: JobHistory,
+    chat_session_id: &str,
+    prompt: &str,
+    started_at: chrono::DateTime<Utc>,
+    result: Result<RunResult, String>,
+) -> Recorded {
+    let db_path = scheduler.db_path().to_path_buf();
+
     let result = match result {
         Ok(result) => result,
         Err(e) => {
             log::error!("task execution failed task_id={:?} error={e}", task.id);
             finish_job_history(&db_path, &mut job, started_at, "failed", &e, None, "");
             update_task_after_run(scheduler, &mut task, started_at, "failed");
-            publish_task_failed(&db_path, &task, &e);
-            return;
+            return Recorded {
+                task,
+                job,
+                failure: Some(e),
+            };
         }
     };
 
-    save_session_results(&db_path, &chat_session_id, &result, &prompt, started_at);
+    save_session_results(&db_path, chat_session_id, &result, prompt, started_at);
     // `task.SaveOutput` decides whether the answer is *stored*, not whether it
     // was produced — an unsaved run still has its tokens and duration recorded.
     let response_text = if task.save_output {
@@ -183,15 +348,12 @@ async fn run_task(scheduler: &Arc<Scheduler>, mut task: ScheduledTask) {
         response_text,
     );
     update_task_after_run(scheduler, &mut task, started_at, "success");
-    publish_task_finished(&db_path, &task, &job, &chat_session_id);
 
-    log::info!(
-        "task execution completed task_id={:?} task_name={:?} session_id={:?} run_count={}",
-        task.id,
-        task.name,
-        chat_session_id,
-        task.run_count
-    );
+    Recorded {
+        task,
+        job,
+        failure: None,
+    }
 }
 
 /// `createTaskSession`: the chat row a run's messages land in, titled after the

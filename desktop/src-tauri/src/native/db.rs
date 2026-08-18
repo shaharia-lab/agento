@@ -101,6 +101,44 @@ pub fn open_read_write(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// Run a synchronous database section on the blocking pool.
+///
+/// **Everything in this module blocks a thread, and `BUSY_TIMEOUT` says for how
+/// long.** A lock held by the Go sidecar or by the session scanner's batch
+/// writer parks the caller for up to five seconds. On an async worker that is
+/// not a slow call, it is a *stalled runtime*: `proxy.rs` puts its native
+/// handlers on the blocking pool for exactly this reason — "one slow read cannot
+/// stall an SSE stream sharing the runtime" — and the tokio default is one
+/// worker per core, so a four-core machine has four to lose.
+///
+/// **The proxy's cover is narrower than it looks**, which is why this exists.
+/// `serve` — the buffered path, every entry in `native::ENDPOINTS` — is on the
+/// pool. `serve_stream` is not: it awaits on the worker, and `STREAM_ENDPOINTS`
+/// is the chat turn. So the callers here are the streaming turn's own commit
+/// plus everything reached from a timer or a webhook rather than a request: the
+/// scheduler's executor (#366), which runs three at once, and the trigger
+/// dispatcher (#319), which runs ten — against a tokio default of one worker per
+/// core.
+///
+/// `None` means the pool task itself failed, which is a panic inside `f` and
+/// nothing else. It is logged here so a panic is never silent, but **what it
+/// leaves behind is the caller's problem, not this function's**: a closure
+/// holding several writes can panic between them, and only the caller knows what
+/// a half-finished section left in the database.
+pub async fn blocking<T, F>(what: &'static str, f: F) -> Option<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::task::spawn_blocking(f).await {
+        Ok(value) => Some(value),
+        Err(e) => {
+            log::error!("{what}: a blocking database task failed: {e}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
