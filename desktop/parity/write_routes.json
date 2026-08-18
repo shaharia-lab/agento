@@ -194,9 +194,9 @@
     {
       "method": "POST",
       "route": "/api/integrations/{id}/auth/validate",
-      "status": "deferred",
-      "owner": "-",
-      "reason": "five per-type remote validations, each writing its own auth payload"
+      "status": "native",
+      "owner": "#318",
+      "reason": "five per-type remote validations; every fallible step precedes the call"
     },
     {
       "method": "POST",

@@ -57,6 +57,7 @@ pub mod issues;
 pub mod pulls;
 pub mod releases;
 pub mod repos;
+pub mod validate;
 
 #[cfg(test)]
 mod tests_vectors;

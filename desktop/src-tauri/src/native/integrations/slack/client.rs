@@ -64,7 +64,7 @@ pub const DEFAULT_API_BASE: &str = "https://slack.com/api";
 static API_BASE: RwLock<Option<String>> = RwLock::new(None);
 
 #[cfg(test)]
-fn api_base() -> String {
+pub(super) fn api_base() -> String {
     API_BASE
         .read()
         .expect("the slack API base lock is poisoned")
@@ -73,13 +73,13 @@ fn api_base() -> String {
 }
 
 #[cfg(not(test))]
-fn api_base() -> String {
+pub(super) fn api_base() -> String {
     DEFAULT_API_BASE.to_string()
 }
 
 /// Points every subsequent request at `base`; `None` restores the default.
 #[cfg(test)]
-pub(super) fn set_api_base(base: Option<String>) {
+pub(crate) fn set_api_base(base: Option<String>) {
     *API_BASE
         .write()
         .expect("the slack API base lock is poisoned") = base;
@@ -91,7 +91,7 @@ pub(super) fn set_api_base(base: Option<String>) {
 /// it at different fakes would race — and `cargo test` runs tests in parallel
 /// where `go test` runs a package's in sequence.
 #[cfg(test)]
-pub(super) async fn api_base_lock() -> tokio::sync::MutexGuard<'static, ()> {
+pub(crate) async fn api_base_lock() -> tokio::sync::MutexGuard<'static, ()> {
     static LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     LOCK.lock().await
 }
@@ -100,7 +100,7 @@ pub(super) async fn api_base_lock() -> tokio::sync::MutexGuard<'static, ()> {
 const MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
 /// `slackHTTPClient` — 60 seconds, the longest of the six.
-fn http_client() -> Option<&'static reqwest::Client> {
+pub(super) fn http_client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
         .get_or_init(|| {
@@ -277,7 +277,7 @@ async fn read_slack_response(
 }
 
 /// `io.ReadAll(io.LimitReader(resp.Body, 5 MiB))`.
-async fn read_capped(
+pub(super) async fn read_capped(
     ct: &CancellationToken,
     response: reqwest::Response,
 ) -> Result<String, String> {

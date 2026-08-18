@@ -72,6 +72,7 @@
 
 pub mod client;
 pub mod project_management;
+pub mod validate;
 
 #[cfg(test)]
 mod tests_vectors;

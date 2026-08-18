@@ -23,6 +23,7 @@ pub mod diff;
 pub mod fs;
 pub mod gojson;
 pub mod gopath;
+pub mod goquote;
 pub mod gotime;
 pub mod gourl;
 pub mod insights;
@@ -361,8 +362,14 @@ pub fn diff_exempt(path: &str) -> bool {
 /// `AGENTO_INTEGRATIONS` tells the sidecar not to host the integration types
 /// this process hosts — so Go's own `registry.Reload` after a successful
 /// `POST /api/integrations/{id}/auth/validate` reaches nothing, and the shell
-/// has to fire its own (#311). See `integrations::reload_after_forward` for why
-/// that is the only route on this list.
+/// has to fire its own (#311).
+///
+/// #318 made that route native, and this **still runs**: [`may_serve`] refuses
+/// every write in `Mode::Off` and `Mode::Diff`, so in those modes the request
+/// forwards while the shell is still hosting the servers — `AGENTO_INTEGRATIONS`
+/// is unconditional in `sidecar.rs`, unlike `AGENTO_SCHEDULER`. See
+/// `integrations::reload_after_forward` for the full argument and for why that
+/// is the only route on this list.
 ///
 /// Called from the proxy after Go's response is in hand, and only for a 2xx.
 /// Spawned rather than awaited, which is what Go's own `reloadIntegration` does
