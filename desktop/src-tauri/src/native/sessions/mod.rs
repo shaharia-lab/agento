@@ -128,9 +128,8 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
 
     if let Some(Route::Detail(id)) = route_of(req.path) {
         return match detail::get(&ctx.db_path, id)? {
-            // Falling back lets Go answer its own 404 rather than this having
-            // to reproduce the body and the status.
-            None => Err(format!("claude session {id:?} not found")),
+            // `handleGetClaudeSession`'s own 404, answered here since #278.
+            None => Answer::error(axum::http::StatusCode::NOT_FOUND, "session not found"),
             Some(d) => Ok(Answer::json(
                 gojson::to_vec(&d).map_err(|e| format!("encoding session detail: {e}"))?,
             )),
@@ -144,16 +143,45 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
         ));
     }
 
-    let q = query::SessionQuery::parse(req.query)?;
+    // `sessionQueryFromRequest`: a bad parameter is a 400 carrying the error's
+    // own text, from both the list and the facets handler.
+    let q = match query::SessionQuery::parse(req.query) {
+        Ok(q) => q,
+        Err(e) => return Answer::error(axum::http::StatusCode::BAD_REQUEST, &e),
+    };
     let conn = db::open_read_only(&ctx.db_path)?;
     let data_settings = settings::load(&conn);
 
     let body = if req.path == "/api/claude-sessions" {
-        let page = page::list_page(&conn, &data_settings, &q)?;
-        gojson::to_vec(&page).map_err(|e| format!("encoding session page: {e}"))?
+        // `handleListClaudeSessions`: `ErrCursorMismatch` is the one `ListPage`
+        // error answered 400 with its own text; everything else is the
+        // handler's generic 500. Both were forwards until #278.
+        match page::list_page(&conn, &data_settings, &q) {
+            Ok(page) => gojson::to_vec(&page).map_err(|e| format!("encoding session page: {e}"))?,
+            Err(e) if e == query::ERR_CURSOR_MISMATCH => {
+                return Answer::error(axum::http::StatusCode::BAD_REQUEST, &e)
+            }
+            Err(e) => {
+                log::warn!("list claude sessions failed: {e}");
+                return Answer::error(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to list sessions",
+                );
+            }
+        }
     } else {
-        let facets = page::facets(&conn, &data_settings, &q)?;
-        gojson::to_vec(&facets).map_err(|e| format!("encoding session facets: {e}"))?
+        match page::facets(&conn, &data_settings, &q) {
+            Ok(facets) => {
+                gojson::to_vec(&facets).map_err(|e| format!("encoding session facets: {e}"))?
+            }
+            Err(e) => {
+                log::warn!("compute session facets failed: {e}");
+                return Answer::error(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to compute facets",
+                );
+            }
+        }
     };
     // Go's handler reaches the corpus through `Cache.List`, which calls
     // `ensureFresh` on the way past — so answering natively used to remove the

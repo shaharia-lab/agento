@@ -17,20 +17,24 @@
 //! decline a server feature outright — see `native/monitoring.rs` — and because
 //! the alternative for a declined route is an answer that looks like success.
 //!
-//! # `Fallback` is the important variant
+//! # `Fallback` no longer forwards (#278)
 //!
-//! Anything Go answers with a 500 — and anything this port is not certain it
-//! reproduces — becomes [`WriteError::Fallback`], which the seam turns into an
-//! `Err` and forwards to the sidecar. Go then produces its own answer, whatever
-//! it is. That is strictly better than guessing at a 500 body, and it is what
-//! keeps "a ported route can only be as broken as an unported one" true for
-//! writes as well as reads.
+//! While the Go sidecar existed, anything Go answered with a 500 — and anything
+//! this port was not certain it reproduced — became [`WriteError::Fallback`],
+//! which the seam turned into an `Err` and forwarded, and Go produced its own
+//! answer. The sidecar is gone, so there is nothing to forward to: `Fallback`
+//! is now answered here as **500 `{"error":"internal server error"}`** —
+//! `httpErr`'s own default body — with the specific reason going to the log,
+//! where Go put it too (`s.logger.Error("internal server error", …)`). The
+//! variant keeps its name across ~200 call sites because what it *classifies*
+//! is unchanged: a failure of the machinery rather than of the request, whose
+//! exact Go wording this build cannot reproduce.
 //!
-//! **The invariant that makes forwarding safe is in the handlers, not here:** a
-//! write must fail *before* it mutates, or the forward re-applies what already
-//! happened. Every handler validates, checks the schema version and does the
-//! whole mutation in a single transaction, so an `Err` means nothing was
-//! written.
+//! **The fail-before-mutate invariant still holds and still matters:** a write
+//! must fail *before* it mutates — every handler validates, checks the schema
+//! version and does the whole mutation in a single transaction. The seam's
+//! forward no longer re-applies anything, but a half-applied write behind a
+//! 500 would be exactly as corrupting as it always was.
 
 use axum::http::StatusCode;
 use serde::Serialize;
@@ -83,7 +87,10 @@ pub enum WriteError {
     /// plausible-looking lie — where Go itself would have answered 500. So the
     /// 500 is produced here, with `httpErr`'s default body verbatim.
     Internal(String),
-    /// Not reproducible here: let the sidecar answer.
+    /// A failure of the machinery — driver errors, `os` errors — whose exact Go
+    /// wording is not reproducible here. Answered as `httpErr`'s default:
+    /// 500 `{"error":"internal server error"}`, with the carried reason logged.
+    /// (Until #278 this forwarded to the sidecar; see the module header.)
     Fallback(String),
 }
 
@@ -145,13 +152,6 @@ pub struct ErrorBody<'a> {
     pub error: &'a str,
 }
 
-/// Turn a handler result into what the seam expects.
-///
-/// `Fallback` becomes `Err`, which the proxy forwards. Everything else becomes
-/// a real response with Go's status and Go's body — because a 422 telling the
-/// user which field is wrong is an *answer*, not a failure to answer, and
-/// forwarding it would make the sidecar redo the work to reach the same
-/// conclusion.
 /// `writeError`'s body, for a handler that answers a typed error outside the
 /// write path — `GET …/auth/status`, whose 404 and 500 are the *read* seam's
 /// shape but Go's own `httpErr` mapping.
@@ -159,10 +159,27 @@ pub fn error_body(message: &str) -> ErrorBody<'_> {
     ErrorBody { error: message }
 }
 
+/// Turn a handler result into what the seam expects.
+///
+/// Every error becomes a real response with Go's status and Go's body. For
+/// `Fallback` — a machinery failure whose Go wording this build cannot
+/// reproduce — that is `httpErr`'s default 500, and the carried reason goes to
+/// the log instead of the wire, which is where Go put it too. (Until #278
+/// `Fallback` became `Err` and the proxy forwarded it to the sidecar.)
 pub fn finish(result: Result<super::Answer, WriteError>) -> Result<super::Answer, String> {
     match result {
         Ok(answer) => Ok(answer),
-        Err(WriteError::Fallback(reason)) => Err(reason),
+        Err(WriteError::Fallback(reason)) => {
+            log::warn!("internal server error: {reason}");
+            let body = gojson::to_vec(&ErrorBody {
+                error: "internal server error",
+            })
+            .map_err(|enc| format!("encoding error body: {enc}"))?;
+            Ok(super::Answer::json_status(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                body,
+            ))
+        }
         Err(e) => {
             let message = e.message();
             let body = gojson::to_vec(&ErrorBody { error: &message })
@@ -263,28 +280,17 @@ pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Wri
         // `integrations.credentials` is stored verbatim by Go, so the two
         // databases would diverge on every blob with more than one key.
         serde_json::Value::Object(_) => serde_json::from_slice(body).map_err(|_| {
-            // The strict path refuses one shape Go accepts — **duplicate keys**.
-            // serde's derived impl errors with `duplicate field`;
-            // `encoding/json` takes the last occurrence.
-            //
-            // The tempting repair is to decode the already-collapsed `Value`,
-            // but that is a *superset* of Go rather than a match: Go validates
-            // **every** occurrence, while the `Value` retained only the last. So
-            // `{"count":"notanumber","count":1}` is a 400 to Go and would decode
-            // cleanly here — an over-accept, which on `POST /api/integrations`
-            // means creating a row Go would have refused. It would also lose
-            // byte-verbatim raw capture, since the value came from the `Value`.
-            //
-            // Forwarding is exact in both directions and costs nothing: Go
-            // answers the well-typed duplicates and 400s the ill-typed ones. Safe
-            // because `decode_body` runs before any mutation in every caller.
-            if serde_json::from_value::<T>(value).is_ok() {
-                WriteError::Fallback(
-                    "duplicate keys: Go validates every occurrence, so only it can answer".into(),
-                )
-            } else {
-                WriteError::InvalidBody
-            }
+            // The strict path refuses one shape Go accepted — **duplicate
+            // keys**: serde's derived impl errors with `duplicate field` where
+            // `encoding/json` took the last occurrence. While the sidecar
+            // existed, the well-typed duplicates forwarded so Go could keep
+            // accepting them; with it gone (#278) they are a 400 like every
+            // other body this decoder refuses. Decoding the already-collapsed
+            // `Value` instead would lose byte-verbatim raw capture — a
+            // `Box<RawValue>` field would store re-serialized bytes, and
+            // `integrations.credentials` is stored verbatim — for a shape no
+            // real client sends.
+            WriteError::InvalidBody
         }),
         // Go's no-op: the zero value, and the handler validates it.
         serde_json::Value::Null => {
@@ -340,15 +346,10 @@ pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, Wri
 ///    it. Nothing here logs a credential, a prompt or a message body, and a line
 ///    that wanted to would need to be argued here first.
 ///
-/// What is **not** here, and why, so the gap is not read as an omission: the
-/// scheduler's job-start/complete lines (#275), the trigger dispatcher's
-/// match/run lines and the notification handler's are produced by background
-/// work with no request behind them, in a subsystem the sidecar still owns. The
-/// five `… validated` lines in `integration_service.go` belong to
-/// `ValidateTokenAuth`, which is the deferred `auth/*` route. `PUT /api/settings`
-/// is deferred too (#305). None of them can be written until their subsystem
-/// moves; #278 is when this stops being optional, because until then the sidecar
-/// still emits its own lines for what it still serves.
+/// The list of exceptions this paragraph used to carry — the scheduler's lines
+/// (#275), `ValidateTokenAuth`'s (#318), `PUT /api/settings`' (#305/#278) — is
+/// empty now: every subsystem has moved and the sidecar that emitted its own
+/// lines is gone, so a write with no line here has simply lost its record.
 pub mod service_log_convention {}
 
 /// A `log` sink the write tests assert against.
@@ -477,7 +478,7 @@ mod tests {
     /// judged — so neither local path can reproduce the answer. Handing it over
     /// is exact in both directions.
     #[test]
-    fn duplicate_keys_forward_rather_than_being_guessed_at() {
+    fn duplicate_keys_are_a_400_now_that_nothing_can_forward() {
         #[derive(Debug, serde::Deserialize)]
         struct Body {
             #[serde(default)]
@@ -487,16 +488,15 @@ mod tests {
             #[allow(dead_code)]
             n: u8,
         }
-        // Go would accept this one…
+        // Go took the last occurrence and would have accepted this one; with
+        // the sidecar gone (#278) the strict decode's refusal is the answer.
         assert!(matches!(
             decode_body::<Body>(br#"{"s":"first","s":"last-wins"}"#).unwrap_err(),
-            WriteError::Fallback(_)
+            WriteError::InvalidBody
         ));
-        // …and 400 this one, because the *first* occurrence does not fit `u8`.
-        // Both forward, so Go makes that distinction rather than this helper.
         assert!(matches!(
             decode_body::<Body>(br#"{"n":999,"n":7}"#).unwrap_err(),
-            WriteError::Fallback(_)
+            WriteError::InvalidBody
         ));
     }
 
@@ -604,10 +604,17 @@ mod tests {
         assert_eq!(missing.message(), "chat not found");
     }
 
+    /// With no sidecar to forward to (#278), a machinery failure answers
+    /// `httpErr`'s default 500 — and the carried reason stays off the wire.
     #[test]
-    fn a_fallback_becomes_an_err_so_the_proxy_forwards() {
-        let out = finish(Err(WriteError::Fallback("nope".into())));
-        assert_eq!(out.err().as_deref(), Some("nope"));
+    fn a_fallback_is_answered_as_the_default_500() {
+        let answer =
+            finish(Err(WriteError::Fallback("nope".into()))).expect("answered, not forwarded");
+        assert_eq!(answer.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(
+            String::from_utf8(answer.body.expect("body")).unwrap(),
+            "{\"error\":\"internal server error\"}\n"
+        );
     }
 
     /// A 422 is an answer, not a failure to answer: it must not forward, or the

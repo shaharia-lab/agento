@@ -10,22 +10,21 @@ mod menu;
 pub mod native;
 pub mod paths;
 mod proxy;
-mod sidecar;
 
-// The seam's two fallbacks are destructors and caught panics: `proxy.rs` turns a
-// panicking native handler into an `Err` that forwards to the Go sidecar, and
-// `native/scan.rs` clears its in-progress flag from a `Drop` guard. `panic =
-// "abort"` runs neither, so setting it would silently delete both — and no test
-// could catch it, because the test profile always unwinds. Fail the build
-// instead. See `[profile.release]` in Cargo.toml.
+// Two recovery paths are destructors and caught panics: `proxy.rs` turns a
+// panicking native handler into a clean JSON 500 (via `spawn_blocking`'s join
+// error), and `native/scan.rs` clears its in-progress flag from a `Drop`
+// guard. `panic = "abort"` runs neither, so setting it would silently delete
+// both — and no test could catch it, because the test profile always unwinds.
+// Fail the build instead. See `[profile.release]` in Cargo.toml.
 #[cfg(panic = "abort")]
 compile_error!(
     "agento's desktop shell requires panic=\"unwind\": aborting disables the \
-     native-handler fallback in proxy.rs and the scan guard in native/scan.rs"
+     panicking-handler 500 in proxy.rs and the scan guard in native/scan.rs"
 );
 
 use serde::Serialize;
-use tauri::{Manager, WindowEvent};
+use tauri::Manager;
 
 /// Fixed proxy port in development so `vite.config.ts` can target it without a
 /// handshake. Release builds take a free port instead, so two installs (or a
@@ -101,10 +100,10 @@ fn install_kind() -> &'static str {
 
 /// Locate the `claude` binary the way the backend will.
 ///
-/// Everything the app ships is self-contained except this: the Go server runs
-/// agents by spawning the Claude Code CLI as a subprocess, and that CLI is a
-/// separate ~280 MB install we do not redistribute. Detecting it up front turns
-/// "every chat fails with exec: not found" into one honest message.
+/// Everything the app ships is self-contained except this: agents run by
+/// spawning the Claude Code CLI as a subprocess (`src/claude/`), and that CLI
+/// is a separate ~280 MB install we do not redistribute. Detecting it up front
+/// turns "every chat fails with exec: not found" into one honest message.
 pub(crate) fn find_claude_cli() -> Option<String> {
     let name = if cfg!(windows) {
         "claude.exe"
@@ -145,13 +144,11 @@ pub(crate) fn find_claude_cli() -> Option<String> {
 /// Ports resolved at startup, exposed to the frontend and to diagnostics.
 pub struct AppPorts {
     pub proxy: u16,
-    pub upstream: u16,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         // OAuth consent must open in the user's real browser: inside the app's
         // own webview there is no address bar to check who is asking, and the
         // provider's session would live in a container we throw away.
@@ -199,39 +196,60 @@ pub fn run() {
             app.set_menu(menu)?;
 
             // Bring up the backend before showing the window. Everything the UI
-            // renders comes from the Go server, so a window that appears first
-            // would just be an empty shell throwing fetch errors.
+            // renders comes from this process now (#278), so the database has
+            // to exist and be migrated before the first request arrives.
             tauri::async_runtime::block_on(async {
-                let upstream = sidecar::free_port();
-
-                let sc = sidecar::spawn(&handle, upstream)
-                    .await
-                    .map_err(|e| format!("starting backend: {e}"))?;
+                // What Go's `NewSQLiteDB` did at every startup, in the same
+                // order: create the data dir and the database, apply the
+                // migrations, seed the pricing catalog. Blocking is right —
+                // a window shown before the schema exists would just be an
+                // empty shell throwing fetch errors — and on anything but a
+                // first run all three are no-ops measured in milliseconds.
+                //
+                // Failures here are fatal on purpose. A missing HOME or an
+                // unappliable migration is not something any later request can
+                // recover from, and Go's server refused to start on exactly
+                // the same conditions. The one exception is the pricing seed:
+                // Go logged and carried on with cost computation degraded, so
+                // this does too.
+                let db = crate::paths::database_path()
+                    .ok_or_else(|| "no home directory to resolve the data dir".to_string())?;
+                {
+                    let mut conn = crate::native::db::ensure_database(&db)
+                        .map_err(|e| format!("opening database: {e}"))?;
+                    crate::native::migrate::apply(&mut conn)
+                        .map_err(|e| format!("migrating database: {e}"))?;
+                    match crate::native::pricing_seed::seed(&conn) {
+                        Ok(written) if written > 0 => {
+                            log::info!("pricing catalog seeded rows_written={written}");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            log::warn!("pricing seed failed; cost computation degraded: {e}");
+                        }
+                    }
+                }
 
                 #[cfg(debug_assertions)]
                 let proxy_port = DEV_PROXY_PORT;
                 #[cfg(not(debug_assertions))]
                 let proxy_port = 0; // let the OS choose
 
-                let proxy = proxy::serve(upstream, proxy_port)
+                let proxy = proxy::serve(proxy_port)
                     .await
-                    .map_err(|e| format!("starting proxy: {e}"))?;
+                    .map_err(|e| format!("starting api server: {e}"))?;
 
-                handle.manage(sc);
-                handle.manage(AppPorts { proxy, upstream });
+                handle.manage(AppPorts { proxy });
 
-                // The scan is ours now (#289): the sidecar is started with
-                // AGENTO_SCANNER=off, so nothing else will do this. Replaces the
-                // `sessionCache.StartBackgroundScan()` the Go server used to run
-                // on boot, and like it, it does not block startup — the window
-                // opens while the corpus is still being read, and the sessions
-                // list reports progress from `GET /api/claude-sessions/status`.
-                if let Some(db) = crate::paths::database_path() {
-                    // The integration MCP servers are ours too (#311): the
-                    // sidecar runs with AGENTO_INTEGRATIONS=off, so this
-                    // replaces the `reg.Start(ctx)` that `buildIntegrationRegistry`
-                    // used to run at boot. Spawned rather than awaited, for the
-                    // reason the scan is not blocking either — a GitHub row
+                // The scan (#289): replaces the `sessionCache.StartBackgroundScan()`
+                // the Go server used to run on boot, and like it, it does not
+                // block startup — the window opens while the corpus is still
+                // being read, and the sessions list reports progress from
+                // `GET /api/claude-sessions/status`.
+                {
+                    // The integration MCP servers (#311): replaces the
+                    // `reg.Start(ctx)` that `buildIntegrationRegistry` used to
+                    // run at boot. Spawned rather than awaited — a GitHub row
                     // binds a loopback listener and the window should not wait
                     // on it — and a failure to read the list is logged, since
                     // there is nothing better to do with it here.
@@ -244,8 +262,7 @@ pub fn run() {
                         }
                     });
 
-                    // The task scheduler is ours too (#275): the sidecar runs
-                    // with AGENTO_SCHEDULER=off, so this replaces the
+                    // The task scheduler (#275): replaces the
                     // `initTaskScheduler` the Go server used to run at boot.
                     // Unlike the two above it is not spawned — `start` only
                     // lists the active tasks and installs a timer per row, and
@@ -278,14 +295,6 @@ pub fn run() {
             }
 
             Ok(())
-        })
-        .on_window_event(|window, event| {
-            // Kill the Go server explicitly. Tauri reaps sidecars on a clean
-            // exit but not on a force-quit, and a survivor holds the SQLite
-            // lock against the next launch.
-            if matches!(event, WindowEvent::Destroyed) {
-                sidecar::shutdown(window.app_handle());
-            }
         })
         .on_menu_event(menu::on_event)
         .run(tauri::generate_context!())

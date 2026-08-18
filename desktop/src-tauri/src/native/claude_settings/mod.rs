@@ -49,10 +49,12 @@
 //!
 //! `encoding/json` never rejects a document for its bytes and serde_json does,
 //! which is not a boundary disagreement but a different answer to "is this
-//! JSON". Every path that parses or re-emits bytes here guards with
-//! [`is_utf8`] and **forwards**, because Go's answer — U+FFFD substituted at
-//! whatever offsets `encoding/json` chooses — is not something this port can
-//! reproduce, only defer to.
+//! JSON". Until #278 every path that parses or re-emits bytes here guarded
+//! with [`is_utf8`] and **forwarded**, deferring to Go's answer. With the
+//! sidecar gone the split is: a *file* that is not UTF-8 is decoded lossily —
+//! the U+FFFD substitution is Go's own answer, so a hand-corrupted
+//! settings.json still renders — while a request *body* that is not UTF-8 is
+//! a 400, because the app's own requests are always UTF-8.
 //!
 //! # The cache question
 //!
@@ -362,15 +364,20 @@ where
         return Err(WriteError::InvalidBody);
     }
     if !is_utf8(body) {
-        return Err(WriteError::Fallback(not_utf8_reason("the request body")));
+        // Go substituted U+FFFD and carried on; with nothing to forward to
+        // (#278) the strict decode's refusal is the answer, and the app's own
+        // requests are always UTF-8.
+        return Err(WriteError::InvalidBody);
     }
     match first_token(body) {
         Some(b'{') => {
             let mut de = serde_json::Deserializer::from_slice(body);
             match T::deserialize(&mut de) {
                 Ok(req) => Ok(req),
+                // Go took the last occurrence; a 400 since #278, exactly as
+                // `writes::decode_body` now answers duplicates.
                 Err(e) if e.to_string().starts_with("duplicate field") => {
-                    Err(WriteError::Fallback(e.to_string()))
+                    Err(WriteError::InvalidBody)
                 }
                 Err(_) => Err(WriteError::InvalidBody),
             }
@@ -567,12 +574,15 @@ pub fn get_settings(dir: &str) -> Result<super::Answer, String> {
         Err(e) => return Err(format!("reading {path}: {e}")),
     };
 
-    // Go serves these bytes verbatim through its encoder; serde cannot build a
-    // `RawValue` from them. Forwarding is the only right answer — dropping the
-    // key would have been `{"exists":true}` where Go sends the whole document.
-    if !is_utf8(&data) {
-        return Err(not_utf8_reason(&path));
-    }
+    // Go's encoder substitutes U+FFFD for bytes that are not UTF-8 and ships
+    // the document; serde cannot carry them at all. Until #278 this forwarded
+    // so Go could answer; now the lossy conversion *is* Go's substitution —
+    // same shape, same page kept alive for a hand-corrupted file.
+    let data = if is_utf8(&data) {
+        data
+    } else {
+        String::from_utf8_lossy(&data).into_owned().into_bytes()
+    };
 
     if !go_json_valid(&data) {
         // Also a 500 in Go ("Claude settings file contains invalid JSON").
@@ -600,9 +610,14 @@ pub fn get_settings(dir: &str) -> Result<super::Answer, String> {
 pub fn put_settings(dir: &str, body: &[u8]) -> Result<super::Answer, WriteError> {
     // 1. `json.NewDecoder(r.Body).Decode(&incoming)` — `errInvalidJSONBody`.
     // `incoming` is the first value only, and step 4 parses *that*, not `body`.
-    let incoming = decode_stream_head(body).map_err(|reason| match reason {
-        Some(reason) => WriteError::Fallback(reason),
-        None => WriteError::InvalidBody,
+    // Both arms are 400s since #278: `Some(reason)` marked the shapes whose Go
+    // wording only the sidecar could supply (non-UTF-8 bytes, the exact
+    // depth-limit message), and with it gone the class is what remains.
+    let incoming = decode_stream_head(body).map_err(|reason| {
+        if let Some(reason) = reason {
+            log::debug!("claude settings body refused: {reason}");
+        }
+        WriteError::InvalidBody
     })?;
 
     // 2. `config.ClaudeSettingsJSONPath()`, and 3. `os.MkdirAll(dir, 0700)`.
@@ -709,9 +724,13 @@ fn claims(method: &Method, path: &str) -> bool {
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
     // Go's modes and Go's `filepath` are what this module writes with, and
-    // neither is verified on Windows — the same call `super::fs` makes.
+    // neither is verified on Windows — the same decision `super::fs` makes,
+    // answered as a 501 since #278 removed the sidecar that used to take it.
     if !cfg!(unix) {
-        return Err("the Claude settings surface is not ported for Windows".to_string());
+        return super::Answer::error(
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            "the Claude settings surface is not supported on Windows in this build",
+        );
     }
     // Resolved once, here: every handler below works inside one directory, and
     // a failure to resolve it forwards before anything is written.
@@ -965,7 +984,7 @@ mod tests {
         }
         assert!(matches!(
             decode_request::<Probe>(src).unwrap_err(),
-            WriteError::Fallback(_)
+            WriteError::InvalidBody
         ));
 
         // And the wire re-emission, which used to drop the key silently.
@@ -1189,15 +1208,15 @@ mod tests {
         write_file(&settings_json_path(&dir), b"not json").expect("write");
         assert!(get_settings(&dir).is_err());
 
-        // A file that is valid JSON to Go but not UTF-8. Go's `json.Valid`
-        // passes and its encoder ships the bytes verbatim, so the answer is
-        // `{"exists":true,"settings":{…}}`. serde cannot build that, and the
-        // old code dropped the key and answered `{"exists":true}` — a wrong
-        // answer where a forward was available.
+        // A file that is valid JSON to Go but not UTF-8 is served lossily
+        // since #278 — the U+FFFD substitution is Go's own answer, so a
+        // hand-corrupted file still renders instead of erroring the page.
         write_file(&settings_json_path(&dir), b"{\"a\":\"\xff\"}").expect("write");
+        let answer = get_settings(&dir).expect("lossy settings read");
+        let body = String::from_utf8(answer.body.expect("body")).expect("utf8");
         assert!(
-            get_settings(&dir).is_err(),
-            "non-UTF-8 settings must forward, not lose the `settings` key"
+            body.contains("\u{fffd}") && body.contains("\"exists\":true"),
+            "{body}"
         );
     }
 
@@ -1236,12 +1255,13 @@ mod tests {
             "{\"exists\":true,\"settings\":{\"trailing\":true}}\n"
         );
 
-        // Not UTF-8: Go writes the file with U+FFFD substituted and answers
-        // 200. This port cannot reproduce that, so it forwards rather than
-        // answering the 400 it used to.
+        // Not UTF-8: Go wrote the file with U+FFFD substituted and answered
+        // 200. Until #278 this forwarded so Go could do that; with the sidecar
+        // gone a request body this build cannot carry is a 400, and the app's
+        // own requests are always UTF-8.
         assert!(matches!(
             put_settings(&dir, b"{\"a\":\"\xff\"}").unwrap_err(),
-            WriteError::Fallback(_)
+            WriteError::InvalidBody
         ));
 
         // Deeper than the scanner's 10000 levels: `Decode` fails, so this is
@@ -1335,11 +1355,13 @@ mod tests {
             );
         }
 
-        // Duplicate keys forward: Go type-checks every occurrence and keeps the
-        // last, and serde can do neither.
+        // Duplicate keys are a 400 since #278: Go type-checked every
+        // occurrence and kept the last, serde can do neither, and there is no
+        // sidecar left to defer to — the same rule `writes::decode_body` now
+        // applies.
         assert!(matches!(
             decode_request::<Probe>(br#"{"name":"a","name":"b"}"#).unwrap_err(),
-            WriteError::Fallback(_)
+            WriteError::InvalidBody
         ));
     }
 

@@ -355,9 +355,9 @@
     {
       "method": "PUT",
       "route": "/api/settings",
-      "status": "deferred",
-      "owner": "#305",
-      "reason": "the sidecar holds a snapshot these preferences resolve through; no AGENTO_SCANNER=off equivalent exists"
+      "status": "native",
+      "owner": "#278",
+      "reason": "the snapshot blocker (#305) died with the sidecar; the written handler is claimed"
     },
     {
       "method": "PUT",

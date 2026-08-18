@@ -101,6 +101,58 @@ pub fn open_read_write(path: &Path) -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// Create-if-missing open, for exactly one caller: startup (#278).
+///
+/// Go's `NewSQLiteDB` created the file, ran the migrations and seeded the
+/// pricing catalog before the server listened; with the sidecar gone the shell
+/// does the same, once, in `lib.rs`'s setup. Every other open in this module
+/// deliberately does **not** create — `open_read_write` on a missing file is
+/// an error, pinned by `a_missing_database_is_an_error_not_a_new_file`,
+/// because outside startup a missing database means a misresolved path, and
+/// writing a fresh schema at a wrong location would hide that.
+///
+/// The parent directory is created too: on a fresh install `~/.agento` itself
+/// does not exist yet, which was likewise Go's job.
+pub fn ensure_database(path: &Path) -> Result<Connection, String> {
+    if let Some(dir) = path.parent() {
+        // 0750, matching Go's `os.MkdirAll(filepath.Dir(dbPath), 0750)`
+        // (`internal/storage/sqlite.go`): the database this directory holds
+        // stores integration credentials, and `create_dir_all`'s default mode
+        // would leave it world-traversable.
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o750);
+        }
+        builder
+            .create(dir)
+            .map_err(|e| format!("creating data dir {}: {e}", dir.display()))?;
+    }
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("opening {} for startup: {e}", path.display()))?;
+
+    conn.busy_timeout(BUSY_TIMEOUT)
+        .map_err(|e| format!("setting busy_timeout: {e}"))?;
+    let mode: String = conn
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .map_err(|e| format!("setting journal_mode: {e}"))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(format!("expected WAL journal mode, got {mode}"));
+    }
+    for pragma in ["PRAGMA foreign_keys=ON", "PRAGMA synchronous=NORMAL"] {
+        conn.execute_batch(pragma)
+            .map_err(|e| format!("setting {pragma}: {e}"))?;
+    }
+    Ok(conn)
+}
+
 /// Run a synchronous database section on the blocking pool.
 ///
 /// **Everything in this module blocks a thread, and `BUSY_TIMEOUT` says for how
@@ -142,6 +194,40 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one open allowed to create (#278): startup. It builds the data dir
+    /// with Go's 0750 — the database stores integration credentials, and the
+    /// default mode would leave the directory world-traversable — creates the
+    /// file, and comes back in WAL mode ready for `migrate::apply`.
+    #[test]
+    fn ensure_database_creates_dir_and_file_with_gos_modes() {
+        let dir = std::env::temp_dir()
+            .join("agento-native-db-test")
+            .join(format!("ensure-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("data").join("agento.db");
+
+        let conn = ensure_database(&path).expect("startup open creates");
+        assert!(path.exists(), "the database file must exist");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("journal_mode");
+        assert!(mode.eq_ignore_ascii_case("wal"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = std::fs::metadata(path.parent().expect("parent"))
+                .expect("stat")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o750, "Go creates the data dir 0750");
+        }
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_missing_database_is_an_error_not_a_new_file() {

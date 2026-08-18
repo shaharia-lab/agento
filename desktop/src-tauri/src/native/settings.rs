@@ -573,13 +573,11 @@ const MAX_IDLE_GAP_MINUTES: i64 = 240;
 ///
 /// One exception, and it is not a status: a failure of the machinery rather
 /// than of the request — opening the database, verifying the migrations, the
-/// `INSERT`, or encoding the answer — is a [`WriteError::Fallback`] and
-/// **forwards to Go** rather than answering at all, because those wrap driver
-/// and `os` errors whose Go text is not reproducible. The first three forward
-/// with nothing written, which is what makes forwarding safe; the encode
-/// happens after the row is saved, and forwarding there re-applies a `PUT`
-/// that replaces the whole row with the same values, so it is idempotent
-/// rather than merely harmless.
+/// `INSERT`, or encoding the answer — is a [`WriteError::Fallback`], answered
+/// as the default 500 since #278 (those wrap driver and `os` errors whose Go
+/// text is not reproducible; the reason goes to the log). The first three fail
+/// with nothing written; the encode happens after the row is saved, which is
+/// harmless — a `PUT` replaces the whole row, so a retry is idempotent.
 pub fn update(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     update_with(db_path, body, super::scan::force_scan)
 }
@@ -779,11 +777,11 @@ fn validate_claude_config_dir(raw: &str) -> Result<(), WriteError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(WriteError::BadRequest(format!(
             "claude config dir {normalized:?} does not exist"
         ))),
-        // Go wraps the underlying `os.Stat` error and its text is the Go
-        // runtime's. Reproducing that is not possible, so this forwards rather
-        // than inventing a message the user would read — and it forwards before
-        // anything is written, which is what makes forwarding safe.
-        Err(e) => Err(WriteError::Fallback(format!(
+        // Go wraps the underlying `os.Stat` error, and the handler flattens it
+        // to a 400 carrying that text. The Go runtime's wording is not
+        // reproducible, and since #278 there is no sidecar to supply it — so
+        // this is the same 400 class with this build's own wording.
+        Err(e) => Err(WriteError::BadRequest(format!(
             "claude config dir {normalized:?} is not readable: {e}"
         ))),
     }
@@ -941,55 +939,33 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
     serve,
 };
 
-/// The two reads. **`PUT /api/settings` is deliberately not among them**, even
-/// though [`update`] above implements it in full.
+/// The two reads and, since #278, the write.
 ///
-/// Not because Rust cannot do the write — it can, and the snapshot half is
-/// free here, since nothing in `native/` caches these preferences. Because the
-/// **Go sidecar** still holds `config.claudeDirs`, `claudesessions.dataSettings`
-/// and `SettingsManager.settings` in memory, and it is still serving routes that
-/// read all three. A native write updates the row underneath them:
+/// **`PUT /api/settings` was written, unit-tested against Go's literal answers,
+/// and deliberately left unclaimed until the cut-over** — the `migrate::apply`
+/// precedent from #274. The blocker was the sidecar's own in-memory snapshot:
+/// `config.claudeDirs`, `claudesessions.dataSettings` and
+/// `SettingsManager.settings` were read by routes Go still served, and worst of
+/// all `notificationServiceImpl.UpdateSettings` was a read-modify-write over
+/// `settingsMgr.Get()` that persisted the **whole** `user_settings` row — one
+/// unrelated `PUT /api/notifications/settings` silently reverted a native
+/// settings write, reproduced against a live parity instance. That blocker
+/// died with the sidecar, so the route is claimed in the same change that
+/// removed it — one commit, one owner, no window in which two processes
+/// disagree about the row.
 ///
-/// - `PUT /api/notifications/settings` is Go's, and
-///   `notificationServiceImpl.UpdateSettings` is a read-modify-write over
-///   `settingsMgr.Get()` that persists the **whole** `user_settings` row. Saving
-///   an SMTP host after a native settings save therefore rewrites
-///   `hidden_projects`, `idle_gap_threshold_minutes` and both config-dir columns
-///   from the sidecar's boot-time copy — silent, total reversion of the Data &
-///   Analytics tab, reproduced against a live parity instance.
-/// - `internal/agent/runner.go` resolves each run's Claude account through
-///   `config.ResolveAgentClaudeDir`, i.e. `claudeDirs.runOverride`. Scheduled
-///   tasks (#275) and Telegram triggers still run in Go, so a changed
-///   `claude_config_dir` would keep authenticating them as the previous account.
-/// - `internal/config/profiles.go` resolves Claude settings profiles against the
-///   same snapshot, so `/api/claude-settings*` would read and write the old dir.
-///
-/// #274's rule decides it: *a route moves only when Rust can reproduce every
-/// effect it has*, and one of this route's effects is "the sidecar now agrees".
-/// #289 and #311 both got past that by switching the Go half off
-/// (`AGENTO_SCANNER`, `AGENTO_INTEGRATIONS`), but neither shape applies here:
-/// those switch off a *subsystem* the sidecar owns, while this is a snapshot the
-/// sidecar **reads** on paths it is still serving, and no switch makes those
-/// paths read the row instead. Nor is there a forward-after-write that is not
-/// just the forward. So the handler is written, unit-tested against Go's literal
-/// answers, and left unwired — exactly as `migrate::apply` was in #274 — and it
-/// turns on with the cut-over that removes the sidecar.
-///
-/// `/api/settings/claude-config-dirs` **is** claimed. #266 left it behind
-/// because it is a filesystem probe rather than a row read; the probe is the
-/// only new part, and the `indexed` half it shares with the row cannot disagree
-/// with Go's snapshot while Go still owns every write to it.
-///
-/// It is claimed on **every** platform but answered only on Unix: [`serve`]
-/// forwards the probe on Windows, because it is `filepath` arithmetic and
-/// `native/gopath.rs` implements the Unix rules. Claiming platform-independently
-/// and refusing in `serve` is what `native/fs.rs` does, and it keeps the
-/// platform decision in one readable place rather than making the route vanish
-/// from the registry. Windows x86_64 is a shipped target
-/// (`.github/workflows/desktop-release.yml`) while desktop CI is ubuntu-only, so
-/// nothing else would catch it.
+/// `/api/settings/claude-config-dirs` is claimed on **every** platform but
+/// answered only on Unix: the probe is `filepath` arithmetic and
+/// `native/gopath.rs` implements the Unix rules, so on Windows [`serve`]
+/// answers 501 — the same decision `native/fs.rs` makes. Windows x86_64 is a
+/// shipped target (`.github/workflows/desktop-release.yml`) while desktop CI is
+/// ubuntu-only, so nothing else would catch it.
 fn claims(method: &Method, path: &str) -> bool {
-    method == Method::GET && matches!(path, "/api/settings" | "/api/settings/claude-config-dirs")
+    match path {
+        "/api/settings" => method == Method::GET || method == Method::PUT,
+        "/api/settings/claude-config-dirs" => method == Method::GET,
+        _ => false,
+    }
 }
 
 fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
@@ -1000,11 +976,18 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
     // process working directory instead of `$HOME`, and `gopath::join` would
     // build `C:\Users\u/.claude-work`, which no `configured` entry can match —
     // silently empty suggestions at best, an outright wrong list at worst.
-    // Forwarding is the seam's own mechanism for "cannot answer", exactly as
-    // `native/fs.rs` does. `GET /api/settings` is a plain row read and is
-    // deliberately still answered.
+    // A 501 naming the gap is the honest answer since #278 removed the sidecar
+    // that used to take this — the same decision `native/fs.rs` makes.
+    // `GET /api/settings` is a plain row read and is deliberately still
+    // answered.
     if !cfg!(unix) && req.path == "/api/settings/claude-config-dirs" {
-        return Err("the config-dir probe is not ported for Windows path semantics".to_string());
+        return super::Answer::error(
+            axum::http::StatusCode::NOT_IMPLEMENTED,
+            "the Claude config-dir probe is not supported on Windows in this build",
+        );
+    }
+    if req.method == Method::PUT {
+        return super::writes::finish(update(&ctx.db_path, req.body));
     }
     let conn = super::db::open_read_only(&ctx.db_path)?;
     let body = if req.path == "/api/settings/claude-config-dirs" {
@@ -1946,14 +1929,14 @@ mod tests {
     }
 
     #[test]
-    fn only_the_two_settings_reads_are_claimed() {
+    fn the_two_reads_and_the_write_are_claimed() {
         assert!(claims(&Method::GET, "/api/settings"));
         assert!(claims(&Method::GET, "/api/settings/claude-config-dirs"));
-        // The write is implemented but unwired: the Go sidecar's own snapshots
-        // would go stale behind it. See `claims` for the three routes that read
-        // them and the reversion the first of those causes.
-        assert!(!claims(&Method::PUT, "/api/settings"));
+        // Claimed since the cut-over (#278): the sidecar snapshot that kept
+        // this unwired died with the sidecar. See `claims`.
+        assert!(claims(&Method::PUT, "/api/settings"));
         assert!(!claims(&Method::PUT, "/api/settings/claude-config-dirs"));
+        assert!(!claims(&Method::POST, "/api/settings"));
         assert!(!claims(&Method::GET, "/api/settings/"));
     }
 }

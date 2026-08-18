@@ -17,11 +17,6 @@
     "core:window:allow-start-dragging",
     "core:window:allow-set-theme",
     "core:event:default",
-    "shell:default",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [{ "name": "binaries/agento-server", "sidecar": true, "args": true }]
-    },
     "log:default",
     "opener:allow-open-url",
     "updater:default",

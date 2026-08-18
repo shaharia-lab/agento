@@ -1,11 +1,16 @@
 # Agento Desktop — working notes
 
 Native desktop client for Agento, living at `desktop/` inside the Agento repo.
-**Tauri 2 + Rust** shell, **React + TypeScript** UI, and — for now — the
-repo's own **Go** server running inside the app as a bundled sidecar.
+**Tauri 2 + Rust** shell, **React + TypeScript** UI, and a **native Rust
+backend** (`src-tauri/src/native/`) — the subsystem-by-subsystem port of the
+repo's Go server, completed by #278, which removed the bundled Go sidecar.
 
-The long-term goal is to port the Go backend to Rust. Read
-[Porting Go → Rust](#porting-go--rust) before touching `src-tauri/`.
+The Go sources remain in the repo (the `main` branch ships them as the web
+server) and remain the port's **specification**: every handler here is pinned
+to a Go server built from this same checkout by the parity corpus. Read
+[Porting Go → Rust](#porting-go--rust) before touching `src-tauri/` — the
+seam's forwarding half is gone, but its registry shape, its verification
+recipe and its Go-isms all still govern.
 
 ## Branch and release model
 
@@ -33,17 +38,10 @@ npm run build        # typecheck + build the frontend alone
 cd src-tauri && cargo build
 ```
 
-First run needs the Go sidecar built. The script maps the Rust target triple to
-`GOOS`/`GOARCH` and names the output the way Tauri's `externalBin` expects:
-
-```bash
-./scripts/build-sidecar.sh                        # host
-./scripts/build-sidecar.sh aarch64-apple-darwin   # cross
-```
-
-The Go server is pure Go (`modernc.org/sqlite`, no CGO), so `CGO_ENABLED=0`
-cross-compiles every target from any host. Tauri's *bundles* cannot cross-
-compile, which is why the release workflow uses one runner per OS.
+Tauri's *bundles* cannot cross-compile, which is why the release workflow uses
+one runner per OS. (There is no sidecar to build since #278;
+`scripts/parity-instance.sh` still builds the Go server, but only as the parity
+tests' reference.)
 
 Linux system deps (once): `libwebkit2gtk-4.1-dev build-essential curl wget file
 libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`.
@@ -55,10 +53,9 @@ libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`.
 ```
 ┌─ Agento.app ────────────────────────────────────────────┐
 │ Tauri (Rust)                                            │
-│   sidecar.rs ── spawns ──> agento web --port <random>   │
-│                            (Go binary, bundled)         │
+│   lib.rs     ── ensure db + migrate + seed pricing      │
 │   proxy.rs   ── axum on 127.0.0.1:<port>                │
-│        /api/*  ──> Go sidecar        (streams, incl SSE)│
+│        /api/*  ──> native/ registry  (streams, incl SSE)│
 │        /*      ──> frontend assets   (release only)     │
 │   menu.rs    ── native menu, emits menu://action        │
 │                                                         │
@@ -66,19 +63,18 @@ libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`.
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Why the proxy exists.** The Go server answers `/api` for same-origin requests
-only — its CORS middleware is a deliberate no-op in production builds. Putting
-one origin in front of both the UI and the API sidesteps CORS entirely and
-keeps SSE intact, which a Rust-side `fetch` shim would not. It is also the
-migration seam (see below). **Do not remove it** to "simplify".
+**Why the local HTTP server exists.** One origin in front of both the UI and
+the API sidesteps CORS entirely and keeps SSE intact, which a Rust-side
+`fetch` shim would not. It was also the migration seam while the Go sidecar
+existed. **Do not remove it** to "simplify".
 
 **Dev vs release**
 | | dev | release |
 |---|---|---|
-| UI served by | Vite :1420 | Rust proxy (embedded assets) |
-| `/api` reaches Go via | Vite proxy → Rust proxy :8991 | Rust proxy (same origin) |
-| Proxy port | fixed 8991 | OS-assigned |
-| Sidecar data dir | `~/.agento-desktop-dev` | `~/.agento` (the real one) |
+| UI served by | Vite :1420 | Rust server (embedded assets) |
+| `/api` reaches Rust via | Vite proxy → :8991 | same origin |
+| Server port | fixed 8991 | OS-assigned |
+| Data dir | `~/.agento-desktop-dev` | `~/.agento` (the real one) |
 
 Dev uses a separate data directory on purpose: two Agento processes sharing
 `~/.agento` share one SQLite file *and* one scheduler, so a scheduled task
@@ -105,10 +101,9 @@ src/
   styles/        tokens → base → shell → controls → views (+ per-view files)
 
 src-tauri/src/
-  lib.rs         setup: ports, sidecar, proxy, window, menu
-  paths.rs       data dir + database path; shared by the sidecar and native/
-  sidecar.rs     spawn + health-wait + shutdown of the Go server
-  proxy.rs       axum reverse proxy; route_is_native() is the porting switch
+  lib.rs         setup: database (create/migrate/seed), api server, window, menu
+  paths.rs       data dir + database path
+  proxy.rs       axum server; routes every request into native/'s registry
   menu.rs        native menu → menu://action events
   claude/        the Claude Agent SDK, ported from Go (phase 5's foundation)
     process.rs   spawn, the control protocol, and the initialize handshake
@@ -136,7 +131,12 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   the 27 migrations, embedded from parity/ — verified, not applied
+    migrate.rs   the 27 migrations, embedded from parity/ — applied at startup
+                 since #278; verify() still guards every write
+    pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
+                 embeds internal/pricing/catalog.json, pinned to
+                 parity/pricing_seed_vectors.json
+    health.rs    GET /health — one constant, Go's literal bytes (#278)
     writes.rs    what a write may answer, and what it hands back to Go
     chat/        the SSE turn and the three routes that steer it (#276)
       live.rs    the process-local live-session registry — why the four move together
@@ -155,10 +155,10 @@ src-tauri/src/
                  failure sentences — and what a cancelled call answers
       body.rs    json.Marshal over a Go map, and encoding/json's unmarshal errors
       repos.rs / issues.rs / pulls.rs / actions.rs / releases.rs  one per service
-    settings.rs  GET /api/settings and /settings/claude-config-dirs (a filesystem
-                 probe; Unix, forwards on Windows); the preferences + config dirs
-                 a read is scoped to; and `update`, the PUT — written and tested,
-                 deliberately unclaimed
+    settings.rs  GET+PUT /api/settings and /settings/claude-config-dirs (a
+                 filesystem probe; Unix, 501 on Windows); the preferences +
+                 config dirs a read is scoped to. The PUT is claimed since #278
+                 — its blocker was the sidecar's own snapshot
     claude_settings/ Claude Code's own settings.json and the profiles beside it (#304) —
       mod.rs     the run config dir, Go's `any`/`MarshalIndent`/`Indent`, GET+PUT
                  /api/claude-settings, and the request decoder that is NOT writes::decode_body
@@ -174,14 +174,12 @@ src-tauri/src/
                  plus POST /api/integrations, the trigger-rule writes (#277) and
                  PUT/DELETE /{id} (#311)
     integrations/registry.rs
-                 Start/Reload/Stop for the MCP servers of HOSTED_TYPES — the one
-                 list both processes are configured from (the sidecar is started
-                 with AGENTO_INTEGRATIONS=off:<it>). The one place a credential
-                 is read, behind its own projection
+                 Start/Reload/Stop for the MCP servers of HOSTED_TYPES. The one
+                 place a credential is read, behind its own projection
     integration_credentials.rs the seven per-type validators, and the two failures
                  whose Go error text is not reproducible (both forward)
     scan.rs      GET /api/claude-sessions/status, POST /refresh — and the scan
-                 itself: the shell owns it now, the sidecar runs with AGENTO_SCANNER=off
+                 itself: the shell owns it (#289)
     fs.rs        GET /api/fs and POST /api/fs/mkdir — the working-dir picker's
                  listing and its one create (Unix; forwards on Windows)
     uploads.rs   POST /api/uploads — the one multipart body, and the extension
@@ -262,19 +260,68 @@ SVG using `var(--accent)` etc. — no chart libraries.
 
 ## Porting Go → Rust
 
-The Go backend is ~80k lines across ~90 REST endpoints. The agreed strategy is
+The Go backend is ~80k lines across ~90 REST endpoints. The agreed strategy was
 **sidecar first, then port subsystem by subsystem**, because two Go
-dependencies have no mature Rust equivalent — the Claude Agent SDK for Go and
+dependencies had no mature Rust equivalent — the Claude Agent SDK for Go and
 `whatsmeow` for WhatsApp — and a big-bang rewrite would leave nothing runnable
 for months. The SDK was ported (`src/claude/`); **WhatsApp was dropped instead**
-(see below).
+(see below). **#278 completed the port and deleted the sidecar** — the notes
+below are kept in the present tense of the era they describe, because they are
+the record of *why* each mechanism is shaped the way it is.
+
+### The cut-over (#278): what changed and what survives
+
+With the last subsystem ported, #278 removed the bundled Go binary, the spawn
+in `sidecar.rs`, the `externalBin` bundling, `scripts/build-sidecar.sh`, the
+`AGENTO_SCANNER`/`AGENTO_INTEGRATIONS`/`AGENTO_SCHEDULER` hand-off environment
+and the seam's forwarding half (`AGENTO_DESKTOP_NATIVE` included — there is no
+second implementation to switch to). The consequences, each deliberate:
+
+- **The shell performs Go's startup effects.** `lib.rs` creates the data dir
+  and database (`db::ensure_database`), applies the migrations
+  (`migrate::apply`, written and left unwired since #274 for exactly this day)
+  and seeds the pricing catalog (`native/pricing_seed.rs`, pinned to
+  `parity/pricing_seed_vectors.json`) before the window shows. The one Go
+  startup effect deliberately *not* ported is the legacy filesystem→SQLite
+  import, which predates every desktop install.
+- **`Err` no longer forwards; it answers.** A read handler's `Err` and a write
+  handler's `WriteError::Fallback` are rendered as `httpErr`'s default
+  `500 {"error":"internal server error"}`, with the reason in the log. The
+  deliberate 4xx cases that used to ride the fallback answer their own Go
+  status and body now — the missing agent/chat/session/integration 404s, the
+  cursor-mismatch 400, the chat steering routes' 409s — and the handful of
+  cases whose *wording* only Go could produce (credential blobs
+  `encoding/json` refuses, site URLs `url.Parse` refuses, config dirs
+  `os.Stat` cannot read) keep Go's status class with this build's own wording.
+- **An unclaimed route is chi's own 404** (`404 page not found`, text/plain,
+  nosniff). The routes that deliberately answer it are recorded in
+  `parity/read_routes.json` — the write audit's read-side twin, generated by
+  `read_routes_parity_test.go` and asserted by `native/mod.rs`, so the read
+  surface can no longer drift silently. (One divergence is accepted: a wrong
+  *method* on an existing path is also that 404, where chi answered 405.)
+- **`/health` is native** (`native/health.rs`, Go's literal bytes) and
+  **`/metrics` is declined** — claimed by `monitoring.rs` so it answers the
+  same deliberate 501 as the monitoring writes (#309), never a
+  version-mismatch-shaped 404.
+- **`PUT /api/settings` is claimed.** Its blocker was the sidecar's boot-time
+  snapshot (#305); that died with the sidecar.
+- **`GET /api/version/update-check` short-circuits for every build** —
+  offering an update there would duplicate the Tauri updater.
+- **On Windows, the three `filepath` surfaces answer 501** (`fs.rs`,
+  `claude_settings/`, the config-dir probe) instead of forwarding; porting
+  Go's Windows path semantics is a follow-up.
+- **The parity corpus stays**, whole. `desktop/parity/` and
+  `scripts/parity-instance.sh` are the only executable record of what the Go
+  implementation did, and the Go sources still build from this checkout — the
+  live suites diff exactly as before.
 
 ### The seam
 
-`proxy.rs::route_is_native(method, path)` decides per request whether Rust
-answers or the Go sidecar does. Behind it is a **registry**: each ported module
-declares its own `claims` and `serve` as a `native::Endpoint`, and `ENDPOINTS`
-in `native/mod.rs` lists them.
+`proxy.rs` decides per request whether the buffered or the streaming half of
+the registry answers (historically: whether Rust answered or the Go sidecar
+did). Behind it is a **registry**: each ported module declares its own `claims`
+and `serve` as a `native::Endpoint`, and `ENDPOINTS` in `native/mod.rs` lists
+them.
 
 Two properties, both load-bearing:
 
@@ -323,18 +370,15 @@ and forwarded, and Go answered correctly. It stopped being invisible when #274
 and #276 claimed writes: `agents::update` *answers* 404 and `chats::patch`
 answers `chat not found` for a request Go would have applied to a real row.
 
-`AGENTO_DESKTOP_NATIVE` steers the whole seam:
+`AGENTO_DESKTOP_NATIVE` steered the seam while both implementations ran
+(`on` / `off` / `diff` shadow mode); #278 removed it with the forwarding half —
+an escape hatch to a process that no longer exists would brick the app, not
+save it.
 
-| value | behaviour |
-|---|---|
-| unset / `on` | claimed routes are answered by Rust |
-| `off` | nothing is claimed; everything forwards to Go |
-| `diff` | Go answers, Rust computes alongside, bytes are compared and mismatches logged |
-
-**A native failure is never surfaced.** Handlers return `Result`, and an `Err`
-is logged and forwarded to Go rather than turned into a 500 — a ported route
-can only ever be as broken as an unported one. That is what makes flipping a
-route safe: the worst case is the behaviour the app had before.
+**A native failure is a clean 500 now** (`httpErr`'s default body, reason in
+the log). While the sidecar existed it was never surfaced at all — an `Err`
+forwarded, so a ported route could only ever be as broken as an unported one,
+which is what made flipping a route safe.
 
 **The guards used to be the one place that property did not hold, and now they
 are not** (#329). A natively-served request never reached
@@ -352,13 +396,12 @@ are refused identically. Four things about it are load-bearing:
   is mounted at the root, arrives from Telegram's servers with a foreign `Host`
   and is authenticated by its own secret token; a global guard would break
   inbound triggers. `/health`, `/metrics` and the SPA are likewise untouched.
-- **For the content type the sidecar's copy is a second line. For the `Host` it
-  is not.** `forward` rewrites `Host` to the upstream authority — that is what
-  makes a proxied request indistinguishable from a same-origin one, and the
-  sidecar would 403 everything without it — so Go's `validateHost` has never
-  seen the browser's `Host`. The proxy is the only place it can be checked,
-  which is also why the check runs before `gourl::route_path`: the two "no route
-  path" cases forward, and forwarding is where the `Host` is lost.
+- **It runs before `gourl::route_path`**, an ordering set when the seam still
+  forwarded: the two "no route path" cases used to forward, `forward` rewrote
+  the `Host` to the upstream authority, and forwarding was where the browser's
+  `Host` got lost — so the guard had to see it first. The forward is gone
+  (#278); the ordering stays because a guard that needs no route to say no is
+  the simpler property to keep true.
 - **A body-less request is not exempt**, whatever the root `CLAUDE.md` said
   before this change and whatever #329's own text repeated. `guards_test.go`
   pins "a body-less DELETE is refused without the header", and the reason is in
@@ -376,8 +419,9 @@ are refused identically. Four things about it are load-bearing:
 A rejection logs as `Served::Rejected` (`rejected`) rather than under either
 half, because the check runs before routing is decided.
 
-Because both implementations run at once, a ported route is verifiable:
-replay the same request against Rust and against Go and diff the JSON.
+Because the Go server still builds from this checkout, a ported route stays
+verifiable: `parity-instance.sh` runs it against a scratch copy of the data,
+and the live suites replay the same request against both and diff the JSON.
 **Byte-identical JSON is the bar** — the frontend is shared, so any
 field-name, key-order, escaping or float-spelling drift is a regression, and
 only a byte comparison catches all four.
@@ -427,8 +471,8 @@ only a byte comparison catches all four.
      It also compares differently: a write cannot be asked of both
      implementations at once, so it pins Go's answers — status *and* bytes — as
      literals, and the unit tests assert the same literals against Rust;
-   - optionally `AGENTO_DESKTOP_NATIVE=diff npm run app`, which compares every
-     real request the UI makes.
+   (Shadow-diff mode — `AGENTO_DESKTOP_NATIVE=diff` — used to be a fourth
+   proof; it died with the sidecar in #278.)
 5. Only then leave it claimed.
 
 ### Never diff against the installed server
@@ -580,33 +624,33 @@ null case and the malformed case need separate tests.
 ### The build stamp, and the half of `/version` that is not ported
 
 `internal/build`'s three variables are set by `-ldflags`, and **only the
-Makefile does that**. `scripts/build-sidecar.sh` builds with `-ldflags "-s -w"`
-and `scripts/parity-instance.sh` with none at all, so the sidecar the app ships
-and the server every parity test diffs against both serve the package defaults —
+Makefile does that**. `scripts/parity-instance.sh` builds with no flags, so the
+server every parity test diffs against serves the package defaults —
 `dev` / `unknown` / `unknown`. `native/version.rs` declares the same defaults,
-behind `option_env!("AGENTO_BUILD_VERSION")` and friends, so stamping the desktop
-bundle later is a build-script change rather than a code change. Do not stamp
-Rust while the Go sidecar is still unstamped: that is a parity failure by
-construction.
+behind `option_env!("AGENTO_BUILD_VERSION")` and friends, so stamping the
+desktop bundle is a build-script change rather than a code change — possible
+since #278 removed the Go binary that would have had to agree. (The parity
+test for `/api/version` still assumes an unstamped build; stamp CI, not the
+test environment.)
 
-`/api/version/update-check` is deliberately **half** ported. Go's answer for a
-build that names no published release needs no network — it short-circuits to
-`update_available: false`, and that is every build the desktop app ships. Its
-other branch asks GitHub for the latest release and compares, which *is* the
-self-updater, the one subsystem the handover excludes because Tauri's updater
-replaces it. So the short-circuit is native and anything else returns `Err` and
-forwards. That is the seam working as designed, not an omission — but it is one
-of the `Err` arms the cut-over has to turn into a real response.
+`/api/version/update-check` answers the short-circuit —
+`update_available: false` — for **every** build since #278. Go's other branch
+asked GitHub for the latest release and compared, which *is* the self-updater,
+the one subsystem the handover excludes because Tauri's updater replaces it;
+offering an update from this route would duplicate (and race) that updater.
 
 ### Phase order (easiest → hardest)
 
 | Phase | Subsystem | Go source | Notes |
 |---|---|---|---|
-| 1 ✅ | Sidecar + proxy | — | done |
-| 2 ← | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
-| 3 ← | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274, #275).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. The scheduler's *schedule computation* is ported and pinned (#275); its ownership is not, and is blocked — see below. |
-| 4 ← | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. **GitHub is done (#312)** — `native/integrations/github/`, the worked example for an *integration*. **The registry is done (#311)** — `native/integrations/registry.rs` plus `PUT`/`DELETE /api/integrations/{id}`, and the sidecar now runs with `AGENTO_INTEGRATIONS=off:<the types the shell hosts>`, so every type has exactly one owner. **Confluence is done (#317)** — `native/integrations/confluence/`, the smallest of the six and the one that shows what an integration adds over #312: a per-row API base, basic auth, and a `Start` check that is a decision. **Jira is done (#316)** — `native/integrations/jira/`, Confluence's twin, and the one that shows that a shared credential type does not mean shared behaviour: `jira.Start` validates nothing, so a bad base is answered per call instead of by refusing to host. **Slack is done (#315)** — `native/integrations/slack/`, the first that is not Atlassian-shaped: no model input in the URL at all, and the only integration whose token can come from the `auth` column. **Telegram is done (#314)** — `native/integrations/telegram/`, the outbound half, and the one that reached two reflector divergences the map had recorded as unreachable. **Google is done (#313)** — `native/integrations/google/`, the last of the six and the only one whose requests are built by a generated client rather than by the handlers, so its vectors are a specification rather than a confirmation. **With its flip, `HOSTED_TYPES` covers every type the port will ever cover**, and the phase is closed. WhatsApp is **not** among them — but Go still hosts its rows, because its starter opens a live connection rather than just a port; see below. |
-| 5 ← | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
+All five phases are **complete**, and #278 deleted the sidecar the strategy
+started from. The per-phase notes are kept as the record of what landed where.
+
+| 1 ✅ | Sidecar + proxy | — | done; the sidecar itself was removed by #278 |
+| 2 ✅ | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
+| 3 ✅ | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274, #275).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. The scheduler's *schedule computation* is ported and pinned (#275); its ownership is not, and is blocked — see below. |
+| 4 ✅ | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. **GitHub is done (#312)** — `native/integrations/github/`, the worked example for an *integration*. **The registry is done (#311)** — `native/integrations/registry.rs` plus `PUT`/`DELETE /api/integrations/{id}`, and the sidecar now runs with `AGENTO_INTEGRATIONS=off:<the types the shell hosts>`, so every type has exactly one owner. **Confluence is done (#317)** — `native/integrations/confluence/`, the smallest of the six and the one that shows what an integration adds over #312: a per-row API base, basic auth, and a `Start` check that is a decision. **Jira is done (#316)** — `native/integrations/jira/`, Confluence's twin, and the one that shows that a shared credential type does not mean shared behaviour: `jira.Start` validates nothing, so a bad base is answered per call instead of by refusing to host. **Slack is done (#315)** — `native/integrations/slack/`, the first that is not Atlassian-shaped: no model input in the URL at all, and the only integration whose token can come from the `auth` column. **Telegram is done (#314)** — `native/integrations/telegram/`, the outbound half, and the one that reached two reflector divergences the map had recorded as unreachable. **Google is done (#313)** — `native/integrations/google/`, the last of the six and the only one whose requests are built by a generated client rather than by the handlers, so its vectors are a specification rather than a confirmation. **With its flip, `HOSTED_TYPES` covers every type the port will ever cover**, and the phase is closed. WhatsApp is **not** among them — but Go still hosts its rows, because its starter opens a live connection rather than just a port; see below. |
+| 5 ✅ | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
 
 ### The session scanner (`src-tauri/src/native/scanner/`)
 
@@ -2555,9 +2599,11 @@ implementations in one directory — a diff across two would mean nothing.
 **Only one process may schedule.** Two schedulers over one `scheduled_tasks`
 table fire every task twice and re-register the Telegram webhook under whichever
 instance registered last, so this is a *flip* on the #289 model — sidecar off,
-shell on, one commit — not a route that can forward on doubt. The flip has
-happened: `sidecar.rs` starts the Go server with **`AGENTO_SCHEDULER=off`**, and
-`cmd/web.go`'s `initTaskScheduler` returns before constructing one. Same four
+shell on, one commit — not a route that can forward on doubt. The flip
+happened: `sidecar.rs` started the Go server with **`AGENTO_SCHEDULER=off`**,
+and `cmd/web.go`'s `initTaskScheduler` returns before constructing one. (#278
+then removed the sidecar and the env plumbing with it; `shell_owns_scheduler`
+is now just "is there a database".) Same four
 off-values and the same unset-means-on rule as `AGENTO_SCANNER`; unlike
 `AGENTO_INTEGRATIONS` it carries **no list**, because a scheduler is owned whole
 or not at all.
@@ -2569,11 +2615,10 @@ that stored the row. `may_serve` forwards every non-`GET` in both `Mode::Off` an
 `Mode::Diff`, so in those modes Go is the only writer — and a Go that had been
 told to stand down would store a task neither process ever schedules until the
 app restarts, which is exactly the split this change closes, reappearing through
-the escape hatch. `runtime::shell_owns_scheduler` is therefore the single
-predicate behind **both** halves: whether the sidecar is told to stand down, and
-whether `start` installs any timers. `AGENTO_DESKTOP_NATIVE=off` consequently
-means what it is documented to mean — the app behaves exactly as it did before
-the port.
+the escape hatch. `runtime::shell_owns_scheduler` was therefore the single
+predicate behind **both** halves: whether the sidecar was told to stand down,
+and whether `start` installs any timers. Since #278 only the second half
+exists, and the seam-mode condition is gone from the predicate.
 
 One detail in the Go half is not cosmetic: `initTaskScheduler` now returns
 `service.TaskScheduler`, the interface, rather than `*scheduler.Scheduler`.
@@ -2949,8 +2994,8 @@ telemetry.** "Do not port" covers the exporters; Go's `internal/logger` is not
 on that list, and its logging never depended on OTel being configured — the
 `otelslog` bridge is an optional add-on. The desktop equivalent is **one access
 line per `/api` request, emitted at the seam** in `proxy.rs::handle`: method,
-path, status, elapsed ms, and which implementation answered (`native`,
-`native-stream`, `forwarded`, `native-failed-forwarded`, `diff`).
+path, status, elapsed ms, and how it was handled (`native`, `native-stream`,
+`unrouted`, `rejected` — the forwarding labels died with the sidecar, #278).
 
 **Be precise about which Go log that is.** What is reproduced there is Go's
 `requestLogger` (`internal/server/server.go`) — method, path, status, duration —
@@ -3069,14 +3114,11 @@ the one where the evidence has already been deleted. `lib.rs` therefore sets
 and days of history. Both settings are load-bearing in the same way the default
 targets are, and neither should be dropped back to the default.
 
-The elapsed figure is time-to-headers whenever the body is still arriving, which
-is more lines than the `native-stream` label suggests. `forward` also streams —
-it builds its body with `Body::from_stream` — so any `forwarded` or
-`native-failed-forwarded` line for an SSE route reports the same thing. Under
-`AGENTO_DESKTOP_NATIVE=off`, a documented and supported mode, a three-minute
-chat turn logs `POST /api/chats/{id}/messages 200 9ms forwarded`. Only `native`
-and `diff` buffer the whole response before the line is written, and only they
-report a duration the request actually took.
+The elapsed figure is time-to-headers whenever the body is still arriving —
+`native-stream` lines, i.e. every chat turn. Only buffered `native` answers
+report a duration the request actually took. (The `forwarded`,
+`native-failed-forwarded` and `diff` labels died with the sidecar in #278; the
+remaining set is `native`, `native-stream`, `unrouted` and `rejected`.)
 
 None of this is a property of the *data*. An `agento web` pointed at the same
 `~/.agento` exports OTel exactly as it always did; it is this build that
