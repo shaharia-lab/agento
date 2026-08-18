@@ -195,7 +195,12 @@ var dispositions = map[string]disposition{
 	// with a foreign `Host` — and its effect is a trigger-rule match plus an
 	// agent run through the dispatcher, which is the scheduler's executor by
 	// another name.
-	"POST /webhooks/telegram/{id}": {statusDeferred, "#275", "dispatches an agent run; the executor is still Go's"},
+	// #275 moved the executor, which was the reason recorded here, and #319
+	// moved the dispatcher that uses it. The route is mounted at the root, so it
+	// is the one claimed path outside `/api` and outside both guards — it
+	// arrives from Telegram with a foreign Host and authenticates on its own
+	// secret token.
+	"POST /webhooks/telegram/{id}": {statusNative, "#319", "the shell receives the update and dispatches the run"},
 
 	// ── Not deferred: dropped (#273) ────────────────────────────────────────
 	"POST /api/integrations/{id}/whatsapp/pair":      {statusDropped, "#273", "WhatsApp is dropped, not deferred; dies with the sidecar"},

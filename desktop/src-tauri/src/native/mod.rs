@@ -97,6 +97,15 @@ pub struct Request<'a> {
     /// which lives only in this header — every other claimed route decodes JSON
     /// and ignores it.
     pub content_type: &'a str,
+    /// `X-Telegram-Bot-Api-Secret-Token`, or `""` when absent.
+    ///
+    /// Carried for exactly one route, on the same terms as `content_type`
+    /// above: `POST /webhooks/telegram/{id}` is authenticated by this header and
+    /// nothing else. It is mounted at the **root**, so neither guard in
+    /// `guards.rs` applies — the request arrives from Telegram with a foreign
+    /// `Host`, which `validate_host` would 403 — and this header is what makes
+    /// that safe rather than open.
+    pub secret_token: &'a str,
     /// The request body, already buffered. Empty for a GET, and empty for the
     /// several writes Go accepts with no payload at all.
     pub body: &'a [u8],
@@ -123,6 +132,8 @@ pub struct Answer {
     pub status: StatusCode,
     /// `None` sends no body and no `Content-Type`.
     pub body: Option<Vec<u8>>,
+    /// Send the body as `text/plain` rather than JSON. See [`Answer::text_status`].
+    pub text: bool,
 }
 
 impl Answer {
@@ -131,6 +142,7 @@ impl Answer {
         Self {
             status: StatusCode::OK,
             body: Some(body),
+            text: false,
         }
     }
 
@@ -139,6 +151,7 @@ impl Answer {
         Self {
             status,
             body: Some(body),
+            text: false,
         }
     }
 
@@ -146,7 +159,27 @@ impl Answer {
     /// call `w.WriteHeader(...)` directly rather than going through `writeJSON`
     /// — `POST /api/claude-sessions/refresh` answers `202` this way.
     pub fn status_only(status: StatusCode) -> Self {
-        Self { status, body: None }
+        Self {
+            status,
+            body: None,
+            text: false,
+        }
+    }
+
+    /// `http.Error`'s answer: a plain-text body under a status the handler
+    /// chooses.
+    ///
+    /// The one non-JSON body in the seam, and it has one caller:
+    /// `POST /webhooks/telegram/{id}` refuses a bad secret through `http.Error`
+    /// rather than the API's JSON envelope, because it is not an `/api` route
+    /// and Go's handler there writes with `http.Error` directly. That also sets
+    /// `X-Content-Type-Options: nosniff`, which `response` reproduces.
+    pub fn text_status(status: StatusCode, body: &str) -> Self {
+        Self {
+            status,
+            body: Some(body.as_bytes().to_vec()),
+            text: true,
+        }
     }
 
     /// `204 No Content`: no body, no `Content-Type`.
@@ -154,6 +187,7 @@ impl Answer {
         Self {
             status: StatusCode::NO_CONTENT,
             body: None,
+            text: false,
         }
     }
 }
@@ -265,6 +299,8 @@ const ENDPOINTS: &[Endpoint] = &[
     integrations::ENDPOINT,
     scan::ENDPOINT,
     uploads::ENDPOINT,
+    // The one entry that is not under `/api`; see its `claims`.
+    trigger::ENDPOINT,
 ];
 
 /// Whether this request is answered by ported Rust code.
@@ -386,6 +422,11 @@ pub fn serve(req: &Request) -> Result<Answer, String> {
 pub fn response(answer: Answer) -> Response<Body> {
     let builder = Response::builder().status(answer.status);
     let built = match answer.body {
+        // `http.Error` sets both of these; every other body is the API's JSON.
+        Some(body) if answer.text => builder
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .header("X-Content-Type-Options", "nosniff")
+            .body(Body::from(body)),
         Some(body) => builder
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(body)),
@@ -779,6 +820,7 @@ mod tests {
             path: "/api/nothing-here",
             query: "",
             content_type: "",
+            secret_token: "",
             body: &[],
         })
         .is_err());
@@ -922,6 +964,8 @@ mod tests {
         let writes = [
             (Method::POST, "/api/uploads"),
             (Method::POST, "/api/claude-sessions/abc/continue"),
+            // The one claimed route outside `/api` (#319).
+            (Method::POST, "/webhooks/telegram/abc"),
         ];
         for endpoint in ENDPOINTS {
             let reachable = probes.iter().any(|p| (endpoint.claims)(&Method::GET, p))

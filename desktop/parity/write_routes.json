@@ -285,9 +285,9 @@
     {
       "method": "POST",
       "route": "/webhooks/telegram/{id}",
-      "status": "deferred",
-      "owner": "#275",
-      "reason": "dispatches an agent run; the executor is still Go's"
+      "status": "native",
+      "owner": "#319",
+      "reason": "the shell receives the update and dispatches the run"
     },
     {
       "method": "PUT",
