@@ -1328,21 +1328,21 @@ because neither type was hosted here — true until #315. Now that `Reload` reac
 nothing, so a Slack integration authenticated by OAuth would first be served at
 the next boot.
 
-`reload_after_auth` cannot cover it: that hook hangs off a **forwarded request**,
-and an OAuth token does not arrive on one — the browser delivers it to a callback
-server the *sidecar* opens on its own port, which this process never sees. The
-one part of the flow that does come through the proxy is the UI polling
-`GET /api/integrations/{id}/auth/status` while it waits, so `reload_after_forward`
-now recognises two routes and returns a `Trigger` saying which:
+`reload_after_auth` could not cover it **while the sidecar owned the callback
+server**: that hook hangs off a forwarded request, and an OAuth token did not
+arrive on one — the browser delivered it to a port Go opened, which this process
+never saw. The only part of the flow that came through the proxy was the UI
+polling `GET /api/integrations/{id}/auth/status` while it waited, so
+`reload_after_forward` recognised that route too and drove a
+reload-only-if-the-fingerprint-moved.
 
-- `POST …/auth/validate` is an **event** — reload unconditionally, as Go does.
-- `GET …/auth/status` is a **poll** — `registry::reload_if_secrets_changed`
-  compares the row's current `credentials`+`auth` fingerprint against the one the
-  running server was started with, and does nothing when they match. That matters
-  because `reload` is unconditional by design: firing it per poll would rebind
-  the port and drop in-flight `tools/call`s once a second while the dialog is
-  open. The registry keeps the fingerprint (a hash, not the values) beside each
-  handle for exactly this question.
+**#318 removed all of that.** The shell binds the callback server now, writes the
+token and calls `reload_after_auth` directly, so the poll is no longer evidence
+of anything: `Trigger::AuthStatusPolled`, `registry::reload_if_secrets_changed`
+and the `secrets` fingerprint map it was the only reader of are gone.
+`reload_after_forward` recognises exactly one route again —
+`POST …/auth/validate`, an **event**, reloaded unconditionally as Go does — and
+it is still needed only because that route is still forwarded.
 
 It is **best-effort**: a user who closes the dialog before the flow completes is
 still served only at the next boot. #318 owns the OAuth flow itself and is where
@@ -1522,9 +1522,10 @@ ones — so it is test-only, and the Rust equivalent is behind `#[cfg(test)]`.
 **The flip landed as its own change**, after the port. That split was worth it
 for the reason it was made: the flip is where the risk in this series has lived —
 #315's hosting of Slack silently broke `completeOAuth`'s reload, and Google is the
-*other* provider `startProviderCallback` supports. With both hosted,
-`reload_if_secrets_changed` now covers **every** OAuth integration in the product,
-and there is no longer a case it does not have to catch.
+*other* provider `startProviderCallback` supports. With both hosted, the
+poll-driven net covered every OAuth integration in the product. **#318 then made
+the net unnecessary** by moving the flow itself, so the reload is an event again
+rather than an inference.
 
 `start_google` is the only starter needing **both** secret columns for different
 things: `credentials` carries the OAuth2 client pair, `auth` carries the token.
@@ -2783,6 +2784,65 @@ Two more the vectors pin, both invisible in UTC:
 `chrono`'s calendar arithmetic — robfig resets the lower fields with
 `time.Date`, which *normalizes* a wall clock a DST gap removed instead of
 failing, and that normalization is the answer on the spring-forward day.
+
+### The OAuth flow, and the workaround it retires (#318)
+
+`POST /api/integrations/{id}/auth/start` and `GET …/auth/status` share
+`integrationService.oauthFlows`, a map in the process that started the flow —
+split them across two processes and `status` polls a map that will never be
+populated. That is why #300 deferred them together, and it is the whole reason
+they move together now: `native/integrations/oauth/flow.rs` binds the loopback
+callback server, exchanges the code, writes the token and reloads the hosted
+server, all here.
+
+**It retires an inference.** While the sidecar owned the callback server, the
+shell could not see a token land — the browser delivers it straight to a port Go
+opened — so `reload_after_forward` watched the UI *poll* `auth/status` and
+reloaded when the row stopped matching what was running
+(`Trigger::AuthStatusPolled`). The shell writes the token itself now, so that
+trigger, `registry::reload_if_secrets_changed` and the `secrets` fingerprint map
+it was the only reader of are **gone** rather than left running beside the real
+event. `CredentialWritten` stays, because `auth/validate` is still forwarded.
+
+**`POST …/auth/validate` is deliberately not part of this**, and the reason
+recorded in `write_routes.json` until now was wrong. It was grouped with the
+other two because the credentials it writes were read by *Go's* MCP servers —
+expired when #311–#313 moved all six here — and it never touches `oauthFlows`
+at all. Its error text is also largely reproducible: every validator's transport
+failure is a fixed string, as the ported clients' are. What actually holds it
+back is that each of the five writes a **type-specific** auth payload its own MCP
+server reads (`{"validated":true,"bot_username":…}` for Telegram, not a shared
+flag), so it is five remote-call reproductions rather than one.
+
+**The URL is a vector, not a live diff.** The redirect port comes from a fresh
+`FreePort()`, so two implementations answering the same request produce
+different URLs. `desktop/parity/oauth_vectors.json` records what Go's own
+`BuildAuthURL` produced for a fixed port. Generating rather than transcribing
+was not ceremony — `oauth2.ApprovalForce` emits **`prompt=consent`**, not the
+`approval_prompt=force` its name suggests. The vectors also pin that the Google
+scope union is *ordered* (calendar → gmail → drive) rather than sorted, that
+`scope` is **absent** rather than empty when no service is enabled, and that the
+encoding is `url.Values.Encode` where a space is `+`.
+
+**The exchange has neither a vector nor a diff**, being a call to the provider,
+so its request shape is pinned against a fake token endpoint that records what
+it was sent. That is what caught the difference that matters: Google declares
+`AuthStyleInParams` and puts its credentials in the body, while Slack declares
+no style at all, so `oauth2` tries **HTTP Basic first** and only retries in the
+body. "Params first" works against a server that accepts both and fails against
+one that does not.
+
+The stored token is Go's `json.Marshal(*oauth2.Token)`, which the sidecar's MCP
+servers still read through the ungated `StartFilteredServer`. Note **`expiry` is
+always present**: `omitempty` does not omit a struct, so a token that never
+expires stores `0001-01-01T00:00:00Z` rather than dropping the key.
+
+`WriteError::Internal` was added for this route and is not a house style: it is
+**500 with a body produced here**, where `Fallback` means "the sidecar answers".
+The distinction bites exactly once — a failed OAuth flow. Forwarding it would
+have Go answer from the stored token (`authenticated: false`, a plausible lie)
+where Go itself would have answered 500, because the map the answer depends on
+is now the shell's.
 
 ### Do not port
 

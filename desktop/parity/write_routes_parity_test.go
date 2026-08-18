@@ -168,8 +168,19 @@ var dispositions = map[string]disposition{
 	"POST /api/tasks/{id}/resume": {statusNative, "#275", "re-registers the cron entry"},
 
 	// ── Deferred: it talks to somebody else's server ────────────────────────
-	"POST /api/integrations/{id}/auth/start":                {statusDeferred, "-", "mints an OAuth URL and holds the in-flight flow in memory"},
-	"POST /api/integrations/{id}/auth/validate":             {statusDeferred, "-", "dials the remote service; the error text is not reproducible"},
+	// #318 moved the flow itself: the shell binds the loopback callback
+	// server, exchanges the code and writes the token, so the in-flight map is
+	// its own. `auth/status` reads that same map, which is why the two could
+	// never be split.
+	"POST /api/integrations/{id}/auth/start": {statusNative, "#318", "the shell owns the callback server and the in-flight flow"},
+	// Still deferred, but not for the reason recorded until #318. The error
+	// text *is* largely reproducible — every validator's transport failure is a
+	// fixed string, as the ported clients' are, and the rest interpolates the
+	// provider's own response. What actually holds it back is that each of the
+	// five writes a **type-specific** auth payload its MCP server reads
+	// (`{"validated":true,"bot_username":…}` for Telegram, not a shared flag),
+	// so this is five remote-call reproductions rather than one.
+	"POST /api/integrations/{id}/auth/validate":             {statusDeferred, "-", "five per-type remote validations, each writing its own auth payload"},
 	"POST /api/integrations/{id}/webhook/register":          {statusDeferred, "-", "registers the webhook with Telegram"},
 	"DELETE /api/integrations/{id}/webhook/register":        {statusDeferred, "-", "deregisters the webhook with Telegram"},
 	"POST /api/integrations/{id}/webhook/regenerate-secret": {statusDeferred, "-", "rotates the secret and re-registers with Telegram"},

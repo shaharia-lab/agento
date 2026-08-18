@@ -345,13 +345,14 @@ pub fn after_forward(method: &Method, path: &str, status: StatusCode) {
     tokio::spawn(async move {
         match trigger {
             // A credential was just written: reload, as Go does.
+            //
+            // The only trigger since #318. `AuthStatusPolled` used to sit
+            // beside it, reloading when a polled row stopped matching what was
+            // running — an inference standing in for an OAuth token the shell
+            // could not see land, because the sidecar owned the callback
+            // server. The shell owns it now and reloads directly.
             integrations::Trigger::CredentialWritten => {
                 integrations::registry::reload_after_auth(&db_path, &id).await;
-            }
-            // A poll, not an event — so only if the row stopped matching what is
-            // running. See `registry::reload_if_secrets_changed`.
-            integrations::Trigger::AuthStatusPolled => {
-                integrations::registry::reload_if_secrets_changed(&db_path, &id).await;
             }
         }
     });
@@ -604,7 +605,9 @@ mod tests {
         assert!(claims(&Method::PUT, "/api/integrations/abc"));
         assert!(claims(&Method::DELETE, "/api/integrations/abc"));
         assert!(!claims(&Method::PATCH, "/api/integrations/abc"));
-        assert!(!claims(&Method::GET, "/api/integrations/abc/auth/status"));
+        // #318: the OAuth flow moved, so its two routes are the shell's.
+        assert!(claims(&Method::GET, "/api/integrations/abc/auth/status"));
+        assert!(claims(&Method::POST, "/api/integrations/abc/auth/start"));
         assert!(!claims(
             &Method::GET,
             "/api/integrations/abc/webhook/status"
