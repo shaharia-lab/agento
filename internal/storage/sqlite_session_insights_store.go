@@ -12,7 +12,11 @@ import (
 // It mirrors the database schema without importing the claudesessions package,
 // avoiding a circular dependency between storage and claudesessions.
 type InsightRecord struct {
-	SessionID        string
+	SessionID string
+	// ProjectPath is the second half of the key, matching
+	// claude_session_cache: one session id under two project paths is two
+	// transcripts and therefore two insight rows (#362).
+	ProjectPath      string
 	ProcessorVersion int
 	ScannedAt        time.Time
 
@@ -115,7 +119,7 @@ func insightArgs(r InsightRecord) ([]any, error) {
 		hasErrors = 1
 	}
 	return []any{
-		r.SessionID, r.ProcessorVersion, r.ScannedAt.UTC().Format(time.RFC3339),
+		r.SessionID, r.ProjectPath, r.ProcessorVersion, r.ScannedAt.UTC().Format(time.RFC3339),
 		r.TurnCount, r.StepsPerTurnAvg, r.AutonomyScore,
 		r.ToolCallsTotal, breakdown, r.ToolErrorRate,
 		r.TotalDurationMs, r.ActiveDurationMs, r.ClaudeWorkingTimeMs,
@@ -160,7 +164,7 @@ func unmarshalCounts(raw string) map[string]int {
 
 const insightUpsertSQL = `
 INSERT INTO session_insights (
-    session_id, processor_version, scanned_at,
+    session_id, project_path, processor_version, scanned_at,
     turn_count, steps_per_turn_avg, autonomy_score,
     tool_calls_total, tool_breakdown, tool_error_rate,
     total_duration_ms, active_duration_ms, claude_working_time_ms,
@@ -172,8 +176,8 @@ INSERT INTO session_insights (
     skill_breakdown, plugin_breakdown, mcp_server_breakdown,
     mcp_tool_breakdown, effort_breakdown, unattributed_calls,
     agent_breakdown
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(session_id) DO UPDATE SET
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(session_id, project_path) DO UPDATE SET
     processor_version           = excluded.processor_version,
     scanned_at                  = excluded.scanned_at,
     turn_count                  = excluded.turn_count,
@@ -204,12 +208,34 @@ ON CONFLICT(session_id) DO UPDATE SET
     agent_breakdown             = excluded.agent_breakdown`
 
 // Get retrieves the insight for a single session. Returns nil, nil when not found.
+//
+// The route behind this — `GET /api/claude-sessions/{id}/insights` — carries no
+// project path, while the table is keyed on one since #362. A session id that
+// exists under two project paths therefore has two rows and this has to choose.
+// It takes the lowest `project_path`, which is **deterministic but not
+// necessarily the transcript the detail page is showing**, and the difference is
+// worth stating rather than glossing:
+//
+// the session detail read resolves a duplicated id by walking `projects/` and
+// taking the alphabetically first *directory name* (`os.ReadDir` sorts, which
+// is what `find_session_file` relies on). This orders the *stored*
+// `project_path`, and the two are not the same string — the scanner decodes a
+// project directory to a real path when the transcript lets it and leaves it in
+// the encoded form when it does not, so one row of the reference corpus's
+// duplicated pair reads `-home-u-Projects-a` and the other `/home/u/Projects/b`.
+// Sorting those cannot reproduce a sort of the directory names.
+//
+// Reproducing it would mean walking the config dirs from a storage method,
+// which this layer has no business doing. The effect is bounded to the insight
+// card of one session on a corpus that has such a session, and both rows are now
+// correct in themselves — which is the part #362 was actually about.
 func (s *SQLiteSessionInsightsStore) Get(ctx context.Context, sessionID string) (*InsightRecord, error) {
 	ctx, end := withStorageSpan(ctx, "get", "session_insights")
 	var err error
 	defer func() { end(err) }()
 
-	row := s.db.QueryRowContext(ctx, insightSelectCols+` WHERE session_id = ?`, sessionID)
+	row := s.db.QueryRowContext(ctx,
+		insightSelectCols+` WHERE session_id = ? ORDER BY project_path LIMIT 1`, sessionID)
 	r, err := scanInsightRecord(row)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -450,7 +476,10 @@ func appendIfPresent(dst []string, v string) []string {
 // SessionToProcess pairs a session ID with its JSONL file path for processing.
 type SessionToProcess struct {
 	SessionID string
-	FilePath  string
+	// ProjectPath identifies which of a duplicated id's transcripts this is —
+	// the insight row is keyed on it, so the worker cannot write without it.
+	ProjectPath string
+	FilePath    string
 }
 
 // NeedsProcessing returns sessions from claude_session_cache that either
@@ -465,9 +494,10 @@ func (s *SQLiteSessionInsightsStore) NeedsProcessing(
 	defer func() { end(err) }()
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT DISTINCT c.session_id, c.file_path
+SELECT DISTINCT c.session_id, c.project_path, c.file_path
 FROM claude_session_cache c
-LEFT JOIN session_insights i ON c.session_id = i.session_id
+LEFT JOIN session_insights i
+       ON c.session_id = i.session_id AND c.project_path = i.project_path
 WHERE i.session_id IS NULL OR i.processor_version < ?`, version)
 	if err != nil {
 		return nil, err
@@ -481,7 +511,7 @@ WHERE i.session_id IS NULL OR i.processor_version < ?`, version)
 	var sessions []SessionToProcess
 	for rows.Next() {
 		var s SessionToProcess
-		if scanErr := rows.Scan(&s.SessionID, &s.FilePath); scanErr != nil {
+		if scanErr := rows.Scan(&s.SessionID, &s.ProjectPath, &s.FilePath); scanErr != nil {
 			return nil, scanErr
 		}
 		sessions = append(sessions, s)
@@ -490,7 +520,7 @@ WHERE i.session_id IS NULL OR i.processor_version < ?`, version)
 }
 
 const insightSelectCols = `
-SELECT session_id, processor_version, scanned_at,
+SELECT session_id, project_path, processor_version, scanned_at,
        turn_count, steps_per_turn_avg, autonomy_score,
        tool_calls_total, tool_breakdown, tool_error_rate,
        total_duration_ms, active_duration_ms, claude_working_time_ms,
@@ -520,6 +550,7 @@ func scanInsightRecord(row rowScanner) (*InsightRecord, error) {
 
 	err := row.Scan(
 		&r.SessionID,
+		&r.ProjectPath,
 		&r.ProcessorVersion,
 		&scannedAt,
 		&r.TurnCount,

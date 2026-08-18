@@ -680,6 +680,144 @@ CREATE INDEX IF NOT EXISTS idx_claude_session_cache_activity
 	ON claude_session_cache(last_activity DESC, session_id DESC, project_path DESC);
 `,
 	},
+	{
+		version: 29,
+		sql: `
+-- session_insights is keyed on session_id alone while claude_session_cache is
+-- keyed on (session_id, project_path), so a session id that exists under two
+-- project paths had **two transcripts and one insight row** — whichever the
+-- pipeline processed last won, and the row was a mix of neither (#362).
+--
+-- Third of the same family, after #344 (the side-table attach) and #364 (the
+-- keyset tiebreak): every reader that assumed a session id is unique is a bug,
+-- because setting up a second Claude account by copying ~/.claude duplicates
+-- every session id under a new project path.
+--
+-- SQLite cannot alter a primary key, so the table is rebuilt. Column order and
+-- every default are carried over verbatim from migrations 1, 20, 22, 24 and 26
+-- — note thinking_time_ms was renamed to claude_working_time_ms by 24, so the
+-- rebuilt table declares the current name in the position the rename left it.
+CREATE TABLE session_insights_new (
+    session_id                  TEXT NOT NULL,
+    processor_version           INTEGER NOT NULL DEFAULT 0,
+    scanned_at                  DATETIME NOT NULL,
+
+    turn_count                  INTEGER NOT NULL DEFAULT 0,
+    steps_per_turn_avg          REAL    NOT NULL DEFAULT 0,
+
+    autonomy_score              REAL    NOT NULL DEFAULT 0,
+
+    tool_calls_total            INTEGER NOT NULL DEFAULT 0,
+    tool_breakdown              TEXT    NOT NULL DEFAULT '{}',
+    tool_error_rate             REAL    NOT NULL DEFAULT 0,
+
+    total_duration_ms           INTEGER NOT NULL DEFAULT 0,
+    claude_working_time_ms      INTEGER NOT NULL DEFAULT 0,
+
+    cache_hit_rate              REAL    NOT NULL DEFAULT 0,
+    tokens_per_turn_avg         REAL    NOT NULL DEFAULT 0,
+    cost_estimate_usd           REAL    NOT NULL DEFAULT 0,
+
+    tool_error_count            INTEGER NOT NULL DEFAULT 0,
+    has_errors                  INTEGER NOT NULL DEFAULT 0,
+
+    max_consecutive_tool_calls  INTEGER NOT NULL DEFAULT 0,
+    longest_autonomous_chain    INTEGER NOT NULL DEFAULT 0,
+
+    avg_user_response_time_ms   REAL    NOT NULL DEFAULT 0,
+    avg_claude_response_time_ms REAL    NOT NULL DEFAULT 0,
+
+    session_type                TEXT    NOT NULL DEFAULT '',
+
+    skill_breakdown             TEXT    NOT NULL DEFAULT '{}',
+    plugin_breakdown            TEXT    NOT NULL DEFAULT '{}',
+    mcp_server_breakdown        TEXT    NOT NULL DEFAULT '{}',
+    mcp_tool_breakdown          TEXT    NOT NULL DEFAULT '{}',
+    effort_breakdown            TEXT    NOT NULL DEFAULT '{}',
+    unattributed_calls          INTEGER NOT NULL DEFAULT 0,
+
+    agent_breakdown             TEXT    NOT NULL DEFAULT '{}',
+
+    active_duration_ms          INTEGER NOT NULL DEFAULT 0,
+
+    -- The new half of the key. Defaulted to '' so the INSERT below can fill it
+    -- per row rather than needing the home directory, which is not a SQL
+    -- constant — the same reason claude_session_cache.config_dir defaults to
+    -- empty in migration 27.
+    project_path                TEXT    NOT NULL DEFAULT '',
+
+    PRIMARY KEY (session_id, project_path)
+);
+
+-- Carry the rows over, resolving each one's project path from the cache rather
+-- than leaving it empty. An empty value would match no cache row, so
+-- NeedsProcessing's join would report the entire corpus as unprocessed and
+-- force a full re-read on the next boot — minutes of work to arrive at figures
+-- that are already correct for every session that is not duplicated.
+--
+-- The first path is taken when there are several, which is the same rule
+-- claimSession and the session detail read use for a duplicated id. Those rows
+-- were a mix of two transcripts anyway; the losing path gets no row and is
+-- picked up as new work by the very next scan, which is the point of the issue.
+--
+-- COALESCE covers an insight whose session has since left the cache: it keeps
+-- the row rather than failing the NOT NULL, and it is unreachable by any join
+-- afterwards, which is what a stale row should be.
+INSERT INTO session_insights_new (
+    session_id, processor_version, scanned_at,
+    turn_count, steps_per_turn_avg, autonomy_score,
+    tool_calls_total, tool_breakdown, tool_error_rate,
+    total_duration_ms, claude_working_time_ms,
+    cache_hit_rate, tokens_per_turn_avg, cost_estimate_usd,
+    tool_error_count, has_errors,
+    max_consecutive_tool_calls, longest_autonomous_chain,
+    avg_user_response_time_ms, avg_claude_response_time_ms,
+    session_type,
+    skill_breakdown, plugin_breakdown, mcp_server_breakdown,
+    mcp_tool_breakdown, effort_breakdown, unattributed_calls,
+    agent_breakdown, active_duration_ms, project_path
+)
+SELECT
+    i.session_id, i.processor_version, i.scanned_at,
+    i.turn_count, i.steps_per_turn_avg, i.autonomy_score,
+    i.tool_calls_total, i.tool_breakdown, i.tool_error_rate,
+    i.total_duration_ms, i.claude_working_time_ms,
+    i.cache_hit_rate, i.tokens_per_turn_avg, i.cost_estimate_usd,
+    i.tool_error_count, i.has_errors,
+    i.max_consecutive_tool_calls, i.longest_autonomous_chain,
+    i.avg_user_response_time_ms, i.avg_claude_response_time_ms,
+    i.session_type,
+    i.skill_breakdown, i.plugin_breakdown, i.mcp_server_breakdown,
+    i.mcp_tool_breakdown, i.effort_breakdown, i.unattributed_calls,
+    i.agent_breakdown, i.active_duration_ms,
+    COALESCE((SELECT c.project_path FROM claude_session_cache c
+              WHERE c.session_id = i.session_id
+              ORDER BY c.project_path LIMIT 1), '')
+FROM session_insights i;
+
+DROP TABLE session_insights;
+ALTER TABLE session_insights_new RENAME TO session_insights;
+
+CREATE INDEX IF NOT EXISTS idx_session_insights_version ON session_insights(processor_version);
+
+-- Backfilling a project path relabels a row; it does not make it right. The
+-- rows for a duplicated id are the ones this issue is about: they were computed
+-- from whichever transcript the pipeline happened to reach last and are a mix of
+-- neither, so the surviving one is now carrying the first project's label over
+-- the second project's figures.
+--
+-- Zeroing processor_version is how the rest of this codebase says "recompute
+-- me" — it is what a CurrentProcessorVersion bump and an idle-threshold change
+-- both do — and NeedsProcessing picks these up on the next pass, once per
+-- transcript now that its join runs on the whole key. Scoped to duplicated ids
+-- so the other ~1,000 sessions keep figures that were already correct.
+UPDATE session_insights SET processor_version = 0
+WHERE session_id IN (
+    SELECT session_id FROM claude_session_cache
+    GROUP BY session_id HAVING COUNT(*) > 1
+);
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

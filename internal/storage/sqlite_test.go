@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,8 +45,8 @@ func TestNewSQLiteDB_MigrationVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("querying version: %v", err)
 	}
-	if version != 28 {
-		t.Errorf("expected version 28, got %d", version)
+	if version != 29 {
+		t.Errorf("expected version 29, got %d", version)
 	}
 }
 
@@ -808,5 +809,83 @@ func TestLoadUserSettingsReadOnly_UnmigratedDatabase(t *testing.T) {
 	defer func() { _ = db.Close() }()
 	if !fresh {
 		t.Error("the read-only load created schema it should not have")
+	}
+}
+
+// TestSessionInsights_RebuiltTableKeepsEveryColumn guards migration 29, which
+// could not add the second key column in place — SQLite cannot alter a primary
+// key, so the table is created anew and the rows copied across.
+//
+// That shape has one failure mode and it is silent: a column left out of the
+// new DDL or out of the INSERT list is simply gone, and the only complaint
+// comes much later from whichever read still selects it. The column set is
+// therefore spelled out here rather than derived, for the same reason
+// sqlite_test.go hardcodes the schema version — a list computed from the table
+// agrees with itself no matter what the table lost.
+func TestSessionInsights_RebuiltTableKeepsEveryColumn(t *testing.T) {
+	db := newTestDB(t)
+
+	rows, err := db.QueryContext(context.Background(),
+		`SELECT name FROM pragma_table_info('session_insights')`)
+	if err != nil {
+		t.Fatalf("reading table info: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	got := map[string]bool{}
+	for rows.Next() {
+		var name string
+		if scanErr := rows.Scan(&name); scanErr != nil {
+			t.Fatalf("scanning column: %v", scanErr)
+		}
+		got[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("reading columns: %v", err)
+	}
+
+	// Every column migrations 1, 20, 22, 24 and 26 built, plus 29's own.
+	// `claude_working_time_ms` is migration 24's rename of `thinking_time_ms`.
+	want := []string{
+		"session_id", "project_path", "processor_version", "scanned_at",
+		"turn_count", "steps_per_turn_avg", "autonomy_score",
+		"tool_calls_total", "tool_breakdown", "tool_error_rate",
+		"total_duration_ms", "claude_working_time_ms", "active_duration_ms",
+		"cache_hit_rate", "tokens_per_turn_avg", "cost_estimate_usd",
+		"tool_error_count", "has_errors",
+		"max_consecutive_tool_calls", "longest_autonomous_chain",
+		"avg_user_response_time_ms", "avg_claude_response_time_ms",
+		"session_type",
+		"skill_breakdown", "plugin_breakdown", "mcp_server_breakdown",
+		"mcp_tool_breakdown", "effort_breakdown", "unattributed_calls",
+		"agent_breakdown",
+	}
+	for _, col := range want {
+		if !got[col] {
+			t.Errorf("column %q did not survive the rebuild", col)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("table has %d columns, want %d — a column was added without "+
+			"being listed here", len(got), len(want))
+	}
+
+	// The whole point of the migration.
+	var pk []string
+	pkRows, err := db.QueryContext(context.Background(),
+		`SELECT name FROM pragma_table_info('session_insights') WHERE pk > 0 ORDER BY pk`)
+	if err != nil {
+		t.Fatalf("reading primary key: %v", err)
+	}
+	defer func() { _ = pkRows.Close() }()
+	for pkRows.Next() {
+		var name string
+		if scanErr := pkRows.Scan(&name); scanErr != nil {
+			t.Fatalf("scanning pk column: %v", scanErr)
+		}
+		pk = append(pk, name)
+	}
+	if got, want := strings.Join(pk, ","), "session_id,project_path"; got != want {
+		t.Errorf("primary key = %q, want %q", got, want)
 	}
 }

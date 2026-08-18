@@ -634,7 +634,7 @@ func TestProcessorRegistry_RunSession(t *testing.T) {
 
 	path := writeJSONLFile(t, lines)
 	registry := claudesessions.DefaultProcessorRegistry(nil)
-	insight, err := registry.RunSession("test-session-id", path)
+	insight, err := registry.RunSession(claudesessions.SessionRef{SessionID: "test-session-id"}, path)
 	if err != nil {
 		t.Fatalf("RunSession failed: %v", err)
 	}
@@ -675,7 +675,7 @@ func TestProcessorRegistry_SkipsHistorySnapshot(t *testing.T) {
 	}
 	path := writeJSONLFile(t, lines)
 	registry := claudesessions.DefaultProcessorRegistry(nil)
-	insight, err := registry.RunSession("sid", path)
+	insight, err := registry.RunSession(claudesessions.SessionRef{SessionID: "sid"}, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +686,7 @@ func TestProcessorRegistry_SkipsHistorySnapshot(t *testing.T) {
 
 func TestProcessorRegistry_MissingFile(t *testing.T) {
 	registry := claudesessions.DefaultProcessorRegistry(nil)
-	_, err := registry.RunSession("sid", "/nonexistent/path/session.jsonl")
+	_, err := registry.RunSession(claudesessions.SessionRef{SessionID: "sid"}, "/nonexistent/path/session.jsonl")
 	if err == nil {
 		t.Error("expected error for missing file")
 	}
@@ -716,7 +716,7 @@ func TestProcessorRegistry_FullPipeline(t *testing.T) {
 	}
 	path := writeJSONLFile(t, lines)
 	registry := claudesessions.DefaultProcessorRegistry(nil)
-	insight, err := registry.RunSession("full-test", path)
+	insight, err := registry.RunSession(claudesessions.SessionRef{SessionID: "full-test"}, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -989,7 +989,7 @@ func TestAttributionProcessor_DecodesRawJSONKeys(t *testing.T) {
 	}
 
 	registry := claudesessions.DefaultProcessorRegistry(nil)
-	insight, err := registry.RunSession("json-keys", writeJSONLFile(t, lines))
+	insight, err := registry.RunSession(claudesessions.SessionRef{SessionID: "json-keys"}, writeJSONLFile(t, lines))
 	if err != nil {
 		t.Fatalf("run session: %v", err)
 	}

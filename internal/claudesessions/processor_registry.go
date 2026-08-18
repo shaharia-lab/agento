@@ -55,12 +55,27 @@ func DefaultProcessorRegistry(logger *slog.Logger) *ProcessorRegistry {
 	)
 }
 
+// SessionRef identifies **which transcript** an insight belongs to.
+//
+// It is a struct rather than two string parameters on purpose. `session_insights`
+// is keyed on `(session_id, project_path)` since #362, so both halves have to
+// reach the processors — and adding a second string beside the first, in front
+// of a variadic, is a signature every existing call still compiles against
+// while meaning something else entirely. That is not hypothetical: it is what
+// happened on the first attempt at this change, and the tests failed at runtime
+// with "no session files given" rather than at the call site. A named type
+// makes the same mistake a compile error.
+type SessionRef struct {
+	SessionID   string
+	ProjectPath string
+}
+
 // RunSession opens filePath, feeds every event to all registered processors in
 // sequence, then finalizes them and returns a populated SessionInsight.
 // It is safe to call from multiple goroutines concurrently; each call creates
 // independent processor instances so no locking is required.
-func (r *ProcessorRegistry) RunSession(sessionID, filePath string) (*SessionInsight, error) {
-	return r.RunSessionFiles(sessionID, filePath)
+func (r *ProcessorRegistry) RunSession(ref SessionRef, filePath string) (*SessionInsight, error) {
+	return r.RunSessionFiles(ref, filePath)
 }
 
 // RunSessionFiles is RunSession over several transcripts that belong to one
@@ -73,9 +88,11 @@ func (r *ProcessorRegistry) RunSession(sessionID, filePath string) (*SessionInsi
 //
 // A file that cannot be read is logged and skipped rather than failing the
 // whole session; only a failure on the first (parent) file is fatal.
-func (r *ProcessorRegistry) RunSessionFiles(sessionID string, filePaths ...string) (*SessionInsight, error) {
+func (r *ProcessorRegistry) RunSessionFiles(
+	ref SessionRef, filePaths ...string,
+) (*SessionInsight, error) {
 	if len(filePaths) == 0 {
-		return nil, fmt.Errorf("no session files given for %q", sessionID)
+		return nil, fmt.Errorf("no session files given for %q", ref.SessionID)
 	}
 	processors := r.newProcessors()
 	if err := r.feedProcessors(filePaths[0], processors); err != nil {
@@ -87,7 +104,8 @@ func (r *ProcessorRegistry) RunSessionFiles(sessionID string, filePaths ...strin
 		}
 	}
 	insight := &SessionInsight{
-		SessionID:        sessionID,
+		SessionID:        ref.SessionID,
+		ProjectPath:      ref.ProjectPath,
 		ProcessorVersion: CurrentProcessorVersion,
 		ScannedAt:        time.Now().UTC(),
 		ToolBreakdown:    make(map[string]int),
