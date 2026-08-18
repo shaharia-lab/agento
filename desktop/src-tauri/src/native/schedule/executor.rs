@@ -45,6 +45,11 @@ pub async fn execute_task(scheduler: &Arc<Scheduler>, task_id: &str) {
         let (scheduler, task_id) = (Arc::clone(scheduler), task_id.to_string());
         db::blocking("scheduled run", move || due_task(&scheduler, &task_id)).await
     };
+    // Two shapes of `None` collapse here, and they mean different things: not
+    // due (or unreadable, which `due_task` has already logged), and a panic in
+    // the section itself, which `db::blocking` logs. Neither has written
+    // anything, so neither owes a job row — this is the one place in the file
+    // where returning without one is right.
     let Some(Some(task)) = due else {
         return;
     };
@@ -117,8 +122,9 @@ fn auto_pause(scheduler: &Arc<Scheduler>, mut task: ScheduledTask, reason: &str)
 /// after it is synchronous rusqlite, and the run itself is the only part that
 /// awaits — often for hours. Written inline the two ends would park an axum
 /// worker on `busy_timeout` (see [`db::blocking`]), three at a time because that
-/// is what the scheduler's semaphore permits, which is enough to stall the SPA
-/// and every SSE stream on a four-core machine. So [`prepare`] and [`finish`]
+/// is what the scheduler's semaphore permits. Tokio runs one worker per core, so
+/// on a four-core machine that is three of the four — the SPA and every SSE
+/// stream sharing the runtime are left with one. So [`prepare`] and [`finish`]
 /// are whole synchronous sections handed to the pool, rather than eight
 /// individually wrapped calls: the database work in one run is contiguous, and
 /// splitting it any finer would only add hand-offs.
@@ -165,6 +171,13 @@ async fn run_task(scheduler: &Arc<Scheduler>, task: ScheduledTask) {
         })
         .await
     };
+    // A panic in `finish` is the one case that can leave evidence behind: it may
+    // have written the session results and not the job row, so `job_history`
+    // keeps a `running` row that nothing will ever finish. There is nothing
+    // useful to do about it from here — the state is unknown, and a second
+    // write attempt from a path that just panicked is not an improvement — but
+    // it is the reason the module header's rule is "every path ends in a job
+    // history row" rather than "every path ends correctly".
     let Some(recorded) = recorded else {
         return;
     };
@@ -197,9 +210,11 @@ struct Ready {
 /// publish it. The task travels back because `update_task_after_run` re-reads
 /// the row and writes the fresh counters onto it.
 ///
-/// Boxed at the `Result` — a `ScheduledTask` is ~500 bytes, and the success side
-/// carries one too, so the unboxed `Result` would pay for the larger of them on
-/// every call. Failure is also the rarer half.
+/// Boxed to satisfy `clippy::result_large_err`, whose threshold is 128 bytes and
+/// which a bare `ScheduledTask` (~450) clears on its own. It does **not** shrink
+/// the `Result`: `Ready` carries a task, a job and an agent, so the enum is that
+/// size either way. The lint is about the cost of moving an error along a `?`
+/// chain, which is why boxing the rarer half is the answer it wants.
 struct Failed {
     task: ScheduledTask,
     message: String,

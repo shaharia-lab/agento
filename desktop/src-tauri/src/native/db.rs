@@ -106,21 +106,25 @@ pub fn open_read_write(path: &Path) -> Result<Connection, String> {
 /// **Everything in this module blocks a thread, and `BUSY_TIMEOUT` says for how
 /// long.** A lock held by the Go sidecar or by the session scanner's batch
 /// writer parks the caller for up to five seconds. On an async worker that is
-/// not a slow call, it is a *stalled runtime*: `proxy.rs` puts every native
-/// handler on the blocking pool for exactly this reason — "one slow read cannot
+/// not a slow call, it is a *stalled runtime*: `proxy.rs` puts its native
+/// handlers on the blocking pool for exactly this reason — "one slow read cannot
 /// stall an SSE stream sharing the runtime" — and the tokio default is one
 /// worker per core, so a four-core machine has four to lose.
 ///
-/// The callers this exists for are the ones the proxy does **not** cover: work
-/// spawned from a timer or a webhook rather than from a request. The scheduler's
-/// executor (#366) and the trigger dispatcher (#319) both run up to
-/// their own concurrency limit — three and ten — which is more than the workers
-/// a laptop has.
+/// **The proxy's cover is narrower than it looks**, which is why this exists.
+/// `serve` — the buffered path, thirteen areas' worth of handlers — is on the
+/// pool. `serve_stream` is not: it awaits on the worker, and `STREAM_ENDPOINTS`
+/// is the chat turn. So the callers here are the streaming turn's own commit
+/// plus everything reached from a timer or a webhook rather than a request: the
+/// scheduler's executor (#366), which runs three at once, and the trigger
+/// dispatcher (#319), which runs ten — against a tokio default of one worker per
+/// core.
 ///
 /// `None` means the pool task itself failed, which is a panic inside `f` and
-/// nothing else. Callers fold it into whatever they already do when the database
-/// call fails, because at that point nothing was written and there is no result;
-/// it is logged here so the panic is never silent.
+/// nothing else. It is logged here so a panic is never silent, but **what it
+/// leaves behind is the caller's problem, not this function's**: a closure
+/// holding several writes can panic between them, and only the caller knows what
+/// a half-finished section left in the database.
 pub async fn blocking<T, F>(what: &'static str, f: F) -> Option<T>
 where
     F: FnOnce() -> T + Send + 'static,

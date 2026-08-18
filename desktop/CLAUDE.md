@@ -2651,13 +2651,16 @@ starving the proxy and every in-flight SSE stream.
 **Nor may the rusqlite, and that needs saying separately** (#366). A database
 call reads as arithmetic and is not: `db::open_read_write` sets a five-second
 `busy_timeout`, so a call meeting a lock held by the Go sidecar or by the session
-scanner's batch writer parks its thread for up to that long. `proxy.rs` already
-puts every native *handler* on the blocking pool for this reason, which covers
-everything reached from a request — and covers nothing reached from a timer or a
-webhook. The two that are, the scheduler's executor and the trigger dispatcher,
-both run to their own concurrency limit (three and ten) against a tokio default
-of one worker per core. `db::blocking(what, f)` is the single hand-off both use,
-and it is greppable on purpose. The executor's shape follows from it: `prepare`
+scanner's batch writer parks its thread for up to that long. `proxy.rs` puts its
+native handlers on the blocking pool for this reason — but **only the buffered
+ones**: `serve_stream` awaits on the worker, and `STREAM_ENDPOINTS` is the chat
+turn, so `persist::commit` was a per-turn `open_read_write` plus three writes on
+a worker. Beyond that, nothing reached from a *timer* or a *webhook* is covered
+at all: the scheduler's executor runs three at once and the trigger dispatcher
+ten, against a tokio default of one worker per core — three of four leaves the
+SPA and every SSE stream one. `db::blocking(what, f)` is the single hand-off all
+three use, and it is greppable on purpose; the label is per call site so the log
+says which section panicked. The executor's shape follows from it: `prepare`
 and `finish` are whole synchronous sections either side of the one long `await`,
 rather than eight individually wrapped calls, because a run's database work is
 contiguous. `tests/scheduled_run.rs`'s
@@ -2667,8 +2670,14 @@ longest gap goes from ~11 ms to the full 1,500 ms hold if the hand-off is
 removed. Its `last` is seeded **before** the spawn deliberately: a starved task
 is never polled, so seeding on the first poll starts the clock after the stall
 and the test passes against the defect. What is still on the worker is
-`run_headless`'s own option-building, shared verbatim with chat and the
-scheduler — worth knowing, not fixed here.
+option-building — `runner::load`, `TurnSettings::stored`, `registry::can_host` —
+which chat, the scheduler and the dispatcher share verbatim; those are reads, so
+WAL keeps them off the write lock, and the regression test measures the leftover
+exposure at ~11 ms. Worth knowing, not fixed here. A panic *inside* a handed-off
+section is the one thing `db::blocking` cannot make safe: the executor's `finish`
+may have written the session results and not the job row, leaving a `running`
+row nothing will finish, which is why the rule is "every path ends in a job
+history row" rather than "every path ends correctly".
 
 **A scheduled run uses `claude::client::query`, not `Session`.** That is Go's
 own choice — `RunAgent` calls `claude.Query` — and it is not interchangeable

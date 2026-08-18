@@ -393,9 +393,10 @@ async fn a_run_that_outlives_its_timeout_is_recorded_as_a_deadline() {
 /// than what a run wrote, because that is what the defect was: `execute_task`
 /// did its rusqlite work inline on an axum worker, and `db::open_read_write`
 /// sets a five-second `busy_timeout`, so a run that met a contended write lock
-/// parked a worker for up to five seconds. Three at once — the scheduler's
-/// semaphore permits exactly that — is every worker on a four-core machine, and
-/// the SPA and every SSE stream sharing the runtime stop with them.
+/// parked a worker for up to five seconds. Tokio runs one worker per core and
+/// the scheduler's semaphore permits three runs at once, so on a four-core
+/// machine that is three of the four — the SPA and every SSE stream sharing the
+/// runtime are left with one.
 ///
 /// The shape is deliberate and each part is load-bearing:
 ///

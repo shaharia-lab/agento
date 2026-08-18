@@ -77,6 +77,12 @@ pub fn handle_update(
     });
 }
 
+/// What `db::blocking` answering `None` costs at each call site below, since it
+/// is not the same everywhere: `claim_update` and `find_matching_rule` stop the
+/// dispatch, exactly as a failed read already does; `resolve_agent` and
+/// `create_trigger_session` become the error reply; and the two `save_messages`
+/// calls are best-effort in Go too, so they are ignored.
+///
 /// `processTelegramUpdate`.
 async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: TelegramUpdate) {
     // A non-message update, or one with no text, is not a trigger.
@@ -88,10 +94,10 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
     // Claimed before the rules are read, so a Telegram retry cannot run the
     // agent twice — see `receiver::claim_update` for why the claim is atomic
     // here where Go's is two statements.
-    // **Every database call this module makes goes through [`db::blocking`].**
-    // (Not every call the *dispatch* makes: `run_headless` opens SQLite on the
-    // worker while building its options, which chat and the scheduler share
-    // verbatim.) `process` runs on an axum worker, and each of these opens a connection and may sit on
+    // **Every database call this module makes goes through [`db::blocking`],**
+    // each under its own label so the log says which one panicked. (Not every
+    // call the *dispatch* makes: `run_headless` opens SQLite on the worker while
+    // building its options, which chat and the scheduler share verbatim.) `process` runs on an axum worker, and each of these opens a connection and may sit on
     // `db.rs`'s five-second `busy_timeout` while the session scan batch-writes —
     // ten of them at `MAX_CONCURRENT` is every worker on a four-core machine,
     // stalling the SPA and any SSE stream. `proxy.rs` puts native handlers on the
@@ -102,7 +108,7 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
             integration_id.to_string(),
             update.update_id,
         );
-        db::blocking("telegram dispatch", move || {
+        db::blocking("telegram claim", move || {
             super::receiver::claim_update(&db, &id, update_id)
         })
         .await
@@ -117,7 +123,7 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
             integration_id.to_string(),
             msg.clone(),
         );
-        db::blocking("telegram dispatch", move || {
+        db::blocking("telegram rule match", move || {
             find_matching_rule(&db, &id, &msg)
         })
         .await
@@ -228,7 +234,7 @@ async fn execute_and_reply(
 
     let resolved = {
         let (db, slug) = (db_path.to_path_buf(), rule.agent_slug.clone());
-        db::blocking("telegram dispatch", move || resolve_agent(&db, &slug))
+        db::blocking("telegram agent lookup", move || resolve_agent(&db, &slug))
             .await
             .unwrap_or_else(|| Err("the agent lookup task failed".to_string()))
     };
@@ -248,7 +254,7 @@ async fn execute_and_reply(
     // profile — a trigger run is not configurable the way a task is.
     let created = {
         let (db, rule) = (db_path.to_path_buf(), rule.clone());
-        db::blocking("telegram dispatch", move || {
+        db::blocking("telegram session", move || {
             create_trigger_session(&db, &rule)
         })
         .await
@@ -281,7 +287,7 @@ async fn execute_and_reply(
                 chat_session_id.clone(),
                 prompt.to_string(),
             );
-            db::blocking("telegram dispatch", move || {
+            db::blocking("telegram failed turn", move || {
                 save_messages(&db, &session, &prompt, "")
             })
             .await;
@@ -296,7 +302,7 @@ async fn execute_and_reply(
             prompt.to_string(),
         );
         let usage = result.clone();
-        db::blocking("telegram dispatch", move || {
+        db::blocking("telegram turn", move || {
             save_messages(&db, &session, &prompt, &usage.answer);
             update_session_usage(&db, &session, &usage);
         })
