@@ -11,6 +11,7 @@ import type {
 } from "../lib/types";
 import {
   Checkbox,
+  Dropdown,
   Empty,
   FormRow,
   InspGroup,
@@ -795,18 +796,12 @@ function Picker({
   onChange(v: string): void;
 }) {
   return (
-    <div className="select agents-select">
-      <select value={value} onChange={(e) => onChange(e.target.value)}>
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-      <span className="select__chevron">
-        <Icon name="chevronUD" size={12} />
-      </span>
-    </div>
+    <Dropdown
+      value={value}
+      options={options}
+      onChange={onChange}
+      className="agents-select"
+    />
   );
 }
 

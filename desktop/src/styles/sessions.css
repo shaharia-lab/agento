@@ -4,28 +4,61 @@
    shared sheets.
    ========================================================================== */
 
-/* A real <select> laid invisibly over the shared .select shell, so the menu is
-   the OS one while the control keeps the app's chrome. */
+/* Toolbar dropdown sizing — the control itself is the shared Dropdown. */
 .sess-select {
-  position: relative;
   max-width: 230px;
 }
-.sess-select__value {
-  display: block;
-  max-width: 190px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+
+/* --- Session detail (read-only transcript) -------------------------------- */
+.sess-detail__meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-7);
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-7);
+  border-bottom: var(--hairline) solid var(--line);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
   white-space: nowrap;
 }
-.sess-select__native {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  opacity: 0;
-  appearance: none;
-  -webkit-appearance: none;
-  cursor: default;
+.sess-detail__meta > * {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.sess-detail__meta > .mono {
+  flex: 0 1 auto;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sess-todos {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  font-family: var(--font-ui);
+  white-space: normal;
+}
+.sess-todo {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+}
+.sess-todo > svg {
+  flex: none;
+  align-self: center;
+}
+.sess-todo--completed {
+  color: var(--fg-tertiary);
+}
+.sess-todo--completed > svg {
+  color: var(--green);
+}
+.sess-todo--in_progress {
+  color: var(--fg);
 }
 
 /* --- Table cells --------------------------------------------------------- */
@@ -106,7 +139,7 @@
   background: var(--red-soft);
   color: var(--red);
   font-size: var(--text-sm);
-  border-top: 0.5px solid var(--line);
+  border-top: var(--hairline) solid var(--line);
 }
 .sess-err__msg {
   overflow: hidden;

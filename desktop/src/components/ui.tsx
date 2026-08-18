@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import { Icon, type IconName } from "../lib/icons";
 
 /* --- Segmented control --------------------------------------------------- */
@@ -96,22 +103,231 @@ export function Checkbox({
   );
 }
 
-/* --- Select (native-looking, non-functional in v1) ----------------------- */
+/* --- Dropdown ------------------------------------------------------------- */
 
-export function Select({
+export interface DropdownOption {
+  value: string;
+  label: string;
+}
+
+/**
+ * The app's one select control. A native <select> keeps the platform's own
+ * popup, which fights the app styling on every OS (worst on WebKitGTK), so the
+ * menu is rendered by the app instead: a portal to <body>, positioned off the
+ * trigger, styled like every other .menu. Replaces both the old display-only
+ * Select and the per-view native-<select> wrappers.
+ */
+export function Dropdown({
   value,
+  options,
+  onChange,
   small,
+  disabled,
+  label,
+  placeholder = "Choose…",
+  className,
+  style,
+  ariaLabel,
 }: {
   value: string;
+  options: DropdownOption[];
+  onChange(v: string): void;
   small?: boolean;
+  disabled?: boolean;
+  /** Overrides the trigger text (e.g. "Sort: Recent"). */
+  label?: string;
+  placeholder?: string;
+  className?: string;
+  style?: React.CSSProperties;
+  ariaLabel?: string;
 }) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{
+    left: number;
+    top: number;
+    minWidth: number;
+    maxHeight: number;
+    up: boolean;
+  }>();
+
+  const selectedIndex = options.findIndex((o) => o.value === value);
+  const current = selectedIndex >= 0 ? options[selectedIndex] : undefined;
+
+  const openMenu = useCallback(() => {
+    const el = triggerRef.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    const below = window.innerHeight - r.bottom - 8;
+    const above = r.top - 8;
+    const up = below < 160 && above > below;
+    setPos({
+      left: Math.max(4, Math.min(r.left, window.innerWidth - r.width - 4)),
+      top: up ? r.top - 4 : r.bottom + 4,
+      minWidth: r.width,
+      maxHeight: Math.min(320, up ? above : below),
+      up,
+    });
+    setActive(options.findIndex((o) => o.value === value));
+    setOpen(true);
+  }, [options, value]);
+
+  const close = useCallback(() => setOpen(false), []);
+
+  const pick = useCallback(
+    (v: string) => {
+      setOpen(false);
+      if (v !== value) onChange(v);
+    },
+    [onChange, value]
+  );
+
+  // The menu is a portal, so "outside" means outside both the trigger and the
+  // menu. Any scroll or resize under an open menu would strand it, so close.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (menuRef.current?.contains(t) || triggerRef.current?.contains(t)) return;
+      close();
+    };
+    const onScroll = (e: Event) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      close();
+    };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open, close]);
+
+  // Keep the selected row in view when the menu opens.
+  useLayoutEffect(() => {
+    if (!open) return;
+    menuRef.current
+      ?.querySelector('[aria-selected="true"]')
+      ?.scrollIntoView({ block: "nearest" });
+  }, [open]);
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (!open) {
+      if (["ArrowDown", "ArrowUp", "Enter", " "].includes(e.key)) {
+        e.preventDefault();
+        openMenu();
+      }
+      return;
+    }
+    switch (e.key) {
+      case "Escape":
+        e.preventDefault();
+        close();
+        break;
+      case "ArrowDown":
+        e.preventDefault();
+        setActive((i) => Math.min(options.length - 1, i + 1));
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        setActive((i) => Math.max(0, i < 0 ? 0 : i - 1));
+        break;
+      case "Home":
+        e.preventDefault();
+        setActive(0);
+        break;
+      case "End":
+        e.preventDefault();
+        setActive(options.length - 1);
+        break;
+      case "Enter":
+      case " ":
+        e.preventDefault();
+        if (active >= 0 && options[active]) pick(options[active].value);
+        else close();
+        break;
+      case "Tab":
+        close();
+        break;
+    }
+  };
+
+  // Keyboard movement must keep the active row visible in a scrolled menu.
+  useEffect(() => {
+    if (!open || active < 0) return;
+    menuRef.current
+      ?.querySelector(`[data-index="${active}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [open, active]);
+
   return (
-    <button className={`select ${small ? "select--sm" : ""}`}>
-      {value}
-      <span className="select__chevron">
-        <Icon name="chevronUD" size={12} />
-      </span>
-    </button>
+    <>
+      <button
+        type="button"
+        ref={triggerRef}
+        className={`select ${small ? "select--sm" : ""} ${
+          open ? "select--open" : ""
+        } ${className ?? ""}`}
+        style={style}
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={ariaLabel}
+        title={label ?? current?.label}
+        onClick={() => (open ? close() : openMenu())}
+        onKeyDown={onKeyDown}
+      >
+        <span className="select__label">
+          {label ?? current?.label ?? placeholder}
+        </span>
+        <span className="select__chevron">
+          <Icon name="chevronUD" size={12} />
+        </span>
+      </button>
+
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="menu dropdown__menu scroll"
+            role="listbox"
+            style={{
+              left: pos.left,
+              ...(pos.up
+                ? { bottom: window.innerHeight - pos.top }
+                : { top: pos.top }),
+              minWidth: pos.minWidth,
+              maxHeight: pos.maxHeight,
+            }}
+          >
+            {options.map((o, i) => (
+              <button
+                key={o.value}
+                type="button"
+                role="option"
+                data-index={i}
+                aria-selected={o.value === value}
+                className={`dropdown__item ${
+                  i === active ? "dropdown__item--active" : ""
+                }`}
+                onMouseEnter={() => setActive(i)}
+                onClick={() => pick(o.value)}
+              >
+                <span className="dropdown__check">
+                  {o.value === value && <Icon name="check" size={11} />}
+                </span>
+                <span className="truncate">{o.label}</span>
+              </button>
+            ))}
+          </div>,
+          document.body
+        )}
+    </>
   );
 }
 

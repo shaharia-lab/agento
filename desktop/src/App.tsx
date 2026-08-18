@@ -30,6 +30,8 @@ export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(true);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Bumped by every "New Chat" entry point; ChatsView opens a draft on change.
+  const [newChatNonce, setNewChatNonce] = useState(0);
   const [focused, setFocused] = useState(true);
   const [theme, setTheme] = useState<Theme>(
     () => (localStorage.getItem("agento.theme") as Theme) || "system"
@@ -74,6 +76,13 @@ export default function App() {
     setView(history[next]);
   }, [cursor, history]);
 
+  // "New Chat" everywhere (sidebar, menu, ⌘N, palette) means "go to Chats AND
+  // open a fresh draft" — navigating alone left the button looking dead.
+  const newChat = useCallback(() => {
+    navigate("chats");
+    setNewChatNonce((n) => n + 1);
+  }, [navigate]);
+
   const stats = useAppStats();
   const host = useHostInfo();
   const update = useBackgroundUpdate(host?.can_self_update);
@@ -99,7 +108,7 @@ export default function App() {
         group: "Actions",
         icon: "plus",
         shortcut: `${MOD} N`,
-        run: () => navigate("chats"),
+        run: newChat,
       },
       {
         id: "toggle-sidebar",
@@ -148,7 +157,7 @@ export default function App() {
       },
       ...nav,
     ];
-  }, [navigate]);
+  }, [navigate, newChat]);
 
   /* --- Global shortcuts -------------------------------------------------- */
   useEffect(() => {
@@ -171,7 +180,7 @@ export default function App() {
         navigate("settings");
       } else if (k === "n") {
         e.preventDefault();
-        navigate("chats");
+        newChat();
       } else if (k === "[") {
         e.preventDefault();
         goBack();
@@ -188,7 +197,7 @@ export default function App() {
 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [goBack, goForward, navigate]);
+  }, [goBack, goForward, navigate, newChat]);
 
   /* --- Native menu ------------------------------------------------------- */
   useEffect(
@@ -200,7 +209,7 @@ export default function App() {
         }
         switch (id) {
           case "new_chat":
-            navigate("chats");
+            newChat();
             break;
           case "new_agent":
             navigate("agents");
@@ -237,7 +246,7 @@ export default function App() {
             break;
         }
       }),
-    [goBack, goForward, navigate]
+    [goBack, goForward, navigate, newChat]
   );
 
   const counts: Partial<Record<ViewId, number>> = {
@@ -266,7 +275,7 @@ export default function App() {
           active={view}
           onSelect={navigate}
           counts={counts}
-          onNewChat={() => navigate("chats")}
+          onNewChat={newChat}
         />
 
         <main className="main">
@@ -315,7 +324,9 @@ export default function App() {
               </button>
             </div>
           )}
-          {view === "chats" && <ChatsView inspectorOpen={inspectorOpen} />}
+          {view === "chats" && (
+            <ChatsView inspectorOpen={inspectorOpen} newChatNonce={newChatNonce} />
+          )}
           {view === "agents" && <AgentsView inspectorOpen={inspectorOpen} />}
           {view === "integrations" && (
             <IntegrationsView inspectorOpen={inspectorOpen} />

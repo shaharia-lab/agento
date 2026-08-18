@@ -18,13 +18,13 @@
   padding: var(--sp-5);
   border-radius: var(--r-lg);
   background: var(--bg-list);
-  box-shadow: inset 0 0 0 0.5px var(--line);
+  box-shadow: inset 0 0 0 var(--hairline) var(--line);
   text-align: left;
   transition: background var(--dur-fast), box-shadow var(--dur-fast);
 }
 .provcard:hover {
   background: var(--bg-hover);
-  box-shadow: inset 0 0 0 0.5px var(--line-strong);
+  box-shadow: inset 0 0 0 var(--hairline) var(--line-strong);
 }
 .provcard__body {
   min-width: 0;
@@ -49,7 +49,7 @@
 .svcblock {
   border-radius: var(--r-lg);
   background: var(--bg-list);
-  box-shadow: inset 0 0 0 0.5px var(--line);
+  box-shadow: inset 0 0 0 var(--hairline) var(--line);
   overflow: hidden;
 }
 .svcblock + .svcblock {
@@ -73,7 +73,7 @@
   color: var(--fg-tertiary);
 }
 .svcblock__tools {
-  border-top: 0.5px solid var(--line);
+  border-top: var(--hairline) solid var(--line);
   padding: var(--sp-4) var(--sp-6) var(--sp-5);
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
@@ -136,7 +136,7 @@
   padding: var(--sp-5) var(--sp-6);
 }
 .rulerow + .rulerow {
-  border-top: 0.5px solid var(--line);
+  border-top: var(--hairline) solid var(--line);
 }
 .rulerow__body {
   flex: 1;
@@ -154,34 +154,6 @@
 }
 
 /* --- Shared bits --------------------------------------------------------- */
-
-.nselect {
-  height: var(--control-h-lg);
-  padding: 0 var(--sp-4);
-  background: var(--bg-raised);
-  border-radius: var(--r-md);
-  box-shadow: 0 0 0 0.5px var(--line-strong), var(--shadow-sm);
-  font-size: var(--text-base);
-  font-family: inherit;
-  color: var(--fg);
-  min-width: 0;
-  transition: background var(--dur-fast), box-shadow var(--dur-fast);
-}
-.nselect:hover {
-  background: var(--bg-hover);
-}
-.nselect:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 1px var(--accent), 0 0 0 3px var(--accent-soft);
-}
-.nselect:disabled {
-  opacity: 0.45;
-  pointer-events: none;
-}
-.nselect--sm {
-  height: var(--control-h);
-  font-size: var(--text-sm);
-}
 
 .msgline {
   display: flex;
@@ -235,7 +207,7 @@
   padding: var(--sp-4) var(--sp-6);
   border-radius: var(--r-lg);
   background: var(--bg-raised);
-  box-shadow: 0 0 0 0.5px var(--line-strong), var(--shadow-md);
+  box-shadow: 0 0 0 var(--hairline) var(--line-strong), var(--shadow-md);
 }
 .savebar__text {
   flex: 1;
