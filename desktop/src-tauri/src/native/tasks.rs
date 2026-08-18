@@ -1856,7 +1856,10 @@ fn encode_task(task: &ScheduledTask) -> Result<super::Answer, WriteError> {
 
 /// [`get_task`] against a connection the caller already holds, so the existence
 /// check and the write share one transaction.
-fn get_task_in(conn: &rusqlite::Connection, id: &str) -> Result<Option<ScheduledTask>, WriteError> {
+pub fn get_task_in(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Option<ScheduledTask>, WriteError> {
     let sql = format!("{TASK_COLUMNS} WHERE id = ?");
     conn.query_row(&sql, [id], scan_task)
         .optional()

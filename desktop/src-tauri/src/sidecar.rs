@@ -90,20 +90,6 @@ pub async fn spawn(app: &AppHandle, port: u16) -> Result<Sidecar, String> {
             "AGENTO_INTEGRATIONS",
             crate::native::integrations::registry::hosting_env_value(),
         )
-        // The shell owns the task scheduler (#275). This is the scan's model
-        // rather than the integrations' — whole, not a list — because the
-        // hazard is one table: two schedulers over `scheduled_tasks` fire every
-        // task twice, and one of the things a task can do is re-register the
-        // Telegram webhook, which then points at whichever instance registered
-        // last.
-        //
-        // Unlike the scan, there is **no second implementation behind a
-        // declined fire**: with this set, a task the shell does not run is a
-        // task nothing runs. That is why `native/schedule/executor.rs` records a
-        // failed `job_history` row for every case it cannot serve instead of
-        // returning early, and why the five task writes moved natively in the
-        // same change — a task stored by one process and scheduled by the other
-        // is the split this closes.
         .env("PORT", port.to_string());
 
     // The shell owns the task scheduler (#275) — but **only when the seam is

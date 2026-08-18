@@ -615,33 +615,86 @@ fn finish_job_history(
 }
 
 /// `updateTaskAfterRun`: the run counters, then the two auto-pause rules.
+///
+/// **The row is re-read inside the write's own transaction**, and the run's
+/// changes are applied to *that* rather than to the snapshot the timer loaded.
+/// Go writes the stale snapshot back wholesale, which clobbers any edit made
+/// while the run was in flight — a task paused mid-run (timeouts reach 240
+/// minutes) comes back `active`. Go got away with it because nothing
+/// re-registered the cron entry, so the task stayed quiet until restart; here
+/// `reconcile` would reinstall the timer within a minute and the "paused" task
+/// would keep firing. Re-reading is the smaller divergence.
 fn update_task_after_run(
     scheduler: &Arc<Scheduler>,
     task: &mut ScheduledTask,
     ran_at: chrono::DateTime<Utc>,
     status: &str,
 ) {
-    task.run_count += 1;
+    // Decided before the write, because both also drop the timer.
+    let one_shot = task.schedule_type == "one_off" || task.schedule_type == "run_immediately";
+    let run_count = task.run_count + 1;
+    let hit_limit = task.stop_after_count > 0 && run_count >= task.stop_after_count;
+
+    // Keep the caller's copy in step: `publishTaskFinished` reads `run_count`
+    // off it after this returns.
+    task.run_count = run_count;
     task.last_run_at = Some(crate::native::gotime::GoTime::from_utc(ran_at));
     task.last_run_status = status.to_string();
-
-    // A one-shot task is paused after its run so a restart does not re-run it —
-    // the timer is already exhausted, but the *row* is what `Start` reads.
-    if task.schedule_type == "one_off" || task.schedule_type == "run_immediately" {
+    if one_shot || hit_limit {
         task.status = "paused".to_string();
-        scheduler.unschedule_task(&task.id);
-    }
-    if task.stop_after_count > 0 && task.run_count >= task.stop_after_count {
-        task.status = "paused".to_string();
-        scheduler.unschedule_task(&task.id);
     }
 
-    if let Err(e) = tasks::update_task_row(scheduler.db_path(), task) {
+    if let Err(e) = write_run_result(
+        scheduler,
+        &task.id,
+        ran_at,
+        status,
+        run_count,
+        one_shot || hit_limit,
+    ) {
         log::error!(
             "failed to update task after run task_id={:?} error={e}",
             task.id
         );
     }
+
+    // A one-shot task is paused after its run so a restart does not re-run it —
+    // the timer is already exhausted, but the *row* is what `Start` reads.
+    if one_shot || hit_limit {
+        scheduler.unschedule_task(&task.id);
+    }
+}
+
+/// The read-modify-write behind [`update_task_after_run`].
+fn write_run_result(
+    scheduler: &Arc<Scheduler>,
+    task_id: &str,
+    ran_at: chrono::DateTime<Utc>,
+    status: &str,
+    run_count: i64,
+    pause: bool,
+) -> Result<(), String> {
+    let mut conn = crate::native::db::open_read_write(scheduler.db_path())?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("begin task update after run: {e}"))?;
+
+    let Some(mut fresh) = tasks::get_task_in(&tx, task_id).map_err(|e| e.message())? else {
+        // Deleted while the run was in flight. Go's UPDATE would match no row
+        // and its store would report "not found"; there is nothing to write.
+        return Ok(());
+    };
+
+    fresh.run_count = run_count;
+    fresh.last_run_at = Some(crate::native::gotime::GoTime::from_utc(ran_at));
+    fresh.last_run_status = status.to_string();
+    if pause {
+        fresh.status = "paused".to_string();
+    }
+
+    tasks::update_task_in(&tx, &mut fresh)?;
+    tx.commit()
+        .map_err(|e| format!("commit task update after run: {e}"))
 }
 
 /// `recordFailedRun`: a job row that is created already finished, for a failure
@@ -919,6 +972,136 @@ mod tests {
         assert_eq!(done.prompt_preview, "the prompt");
     }
 
+    /// Finding #1 of PR #365's third review: a pause landed while the run was
+    /// in flight must survive the run's own write-back.
+    ///
+    /// Go writes the stale snapshot back wholesale and clobbers it, and got
+    /// away with it because nothing re-registered the cron entry. Here
+    /// `reconcile` would reinstall the timer within a minute, so a "paused"
+    /// task would go on firing.
+    #[test]
+    fn a_pause_that_lands_mid_run_survives_the_runs_own_write_back() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                (id, name, prompt, schedule_type, schedule_config, status,
+                 created_at, updated_at)
+             VALUES ('t1','T','p','interval','{\"every_minutes\":5}','active',
+                     '2026-01-01 00:00:00 +0000 UTC','2026-01-01 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("seed");
+        drop(conn);
+
+        // The snapshot the timer loaded, before the pause.
+        let mut snapshot = sample_task();
+        snapshot.id = "t1".to_string();
+        snapshot.status = "active".to_string();
+
+        // The user pauses while the run is in flight.
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        conn.execute(
+            "UPDATE scheduled_tasks SET status = 'paused' WHERE id = 't1'",
+            [],
+        )
+        .expect("pause");
+        drop(conn);
+
+        let scheduler = test_scheduler(file.path());
+        update_task_after_run(&scheduler, &mut snapshot, Utc::now(), "success");
+
+        let stored = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored.status, "paused", "the run must not resurrect it");
+        // …while the run's own fields are still recorded.
+        assert_eq!(stored.run_count, 1);
+        assert_eq!(stored.last_run_status, "success");
+        assert!(stored.last_run_at.is_some());
+    }
+
+    #[test]
+    fn a_one_shot_run_still_pauses_its_own_task() {
+        // The other half of the same write: the run *does* own the pause when
+        // it is the one imposing it.
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                (id, name, prompt, schedule_type, schedule_config, status,
+                 created_at, updated_at)
+             VALUES ('t1','T','p','run_immediately','{}','active',
+                     '2026-01-01 00:00:00 +0000 UTC','2026-01-01 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("seed");
+        drop(conn);
+
+        let mut snapshot = sample_task();
+        snapshot.id = "t1".to_string();
+        snapshot.schedule_type = "run_immediately".to_string();
+
+        let scheduler = test_scheduler(file.path());
+        update_task_after_run(&scheduler, &mut snapshot, Utc::now(), "success");
+
+        let stored = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored.status, "paused", "a one-shot parks itself");
+        assert_eq!(snapshot.status, "paused", "and the caller's copy agrees");
+    }
+
+    #[test]
+    fn a_stop_after_count_run_pauses_on_the_limit() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        conn.execute(
+            "INSERT INTO scheduled_tasks
+                (id, name, prompt, schedule_type, schedule_config, status,
+                 run_count, stop_after_count, created_at, updated_at)
+             VALUES ('t1','T','p','interval','{\"every_minutes\":5}','active',
+                     1, 2, '2026-01-01 00:00:00 +0000 UTC','2026-01-01 00:00:00 +0000 UTC')",
+            [],
+        )
+        .expect("seed");
+        drop(conn);
+
+        let mut snapshot = sample_task();
+        snapshot.id = "t1".to_string();
+        snapshot.run_count = 1;
+        snapshot.stop_after_count = 2;
+
+        let scheduler = test_scheduler(file.path());
+        update_task_after_run(&scheduler, &mut snapshot, Utc::now(), "success");
+
+        let stored = tasks::get_task(file.path(), "t1")
+            .expect("read")
+            .expect("row");
+        assert_eq!(stored.run_count, 2);
+        assert_eq!(stored.status, "paused", "the second run hits the limit");
+    }
+
+    #[test]
+    fn a_task_deleted_mid_run_is_not_recreated_by_the_write_back() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = rusqlite::Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        drop(conn);
+
+        let mut snapshot = sample_task();
+        snapshot.id = "gone".to_string();
+        let scheduler = test_scheduler(file.path());
+        // No row, no panic, no resurrection.
+        update_task_after_run(&scheduler, &mut snapshot, Utc::now(), "success");
+        assert!(tasks::get_task(file.path(), "gone")
+            .expect("read")
+            .is_none());
+    }
+
     #[test]
     fn the_prompt_preview_cuts_at_200_bytes_and_never_splits_a_character() {
         assert_eq!(prompt_preview("short"), "short");
@@ -1005,6 +1188,10 @@ mod tests {
             Utc::now() + chrono::Duration::hours(1),
         ));
         assert!(!should_auto_pause(&task));
+    }
+
+    fn test_scheduler(db_path: &std::path::Path) -> Arc<Scheduler> {
+        super::super::runtime::for_test(db_path)
     }
 
     fn sample_task() -> ScheduledTask {

@@ -2664,6 +2664,27 @@ Fingerprinting on `updated_at` would make each sweep replace a live timer, and
 replacing a `DurationJob`'s timer restarts its interval from now — a five-minute
 task swept every minute would never fire at all.
 
+**The run's write-back re-reads the row.** `updateTaskAfterRun` writes the whole
+`ScheduledTask` snapshot the timer loaded, so an edit made while the run was in
+flight is clobbered — a task paused mid-run (timeouts reach 240 minutes) comes
+back `active`. Go got away with that because nothing re-registered the cron
+entry; with a reconcile sweep the timer returns within a minute and the "paused"
+task goes on firing. So the port re-reads inside the write's own transaction and
+applies only the fields the run owns. It never assigns `active`, so a concurrent
+pause simply survives.
+
+**The sweep is armed before the first read can fail.** A transient `SQLITE_BUSY`
+at boot used to return from `start` with `RUNNING` already set and the sidecar
+already told to stand down — no timers, no sweep, no way back until restart. The
+mechanism written to recover from missing timers has to survive the failure it is
+most likely to be needed for.
+
+**It also remembers what it acted on** (`swept`, cleared by `unschedule_task`),
+which is why an unschedulable task is not retried every minute: an active
+`one_off` whose `run_at` passed while the machine was off fails forever, and
+~1440 warning lines a day into a 5 MiB log is worse than the one line Go wrote at
+startup.
+
 **`agent.Interpolate` has two callers with two policies**, in
 `native/template.rs`. The scheduler uses the strict form, because Go's
 `resolveSystemPrompt` propagates `MissingVariableError` and a scheduled run must

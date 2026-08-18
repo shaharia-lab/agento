@@ -99,6 +99,18 @@ pub struct Scheduler {
     /// `s.jobs`: task id → the timer driving it. Aborting the handle is
     /// `cron.RemoveJob`.
     jobs: Mutex<HashMap<String, Job>>,
+    /// What [`Scheduler::reconcile`] has already acted on: task id → the
+    /// fingerprint it acted on.
+    ///
+    /// Separate from `jobs` because it must **outlive the timer**. A sweep that
+    /// looked only at `jobs` would retry a task it cannot schedule on every
+    /// pass — an active `one_off` whose `run_at` is in the past because the
+    /// machine was off at the appointed time fails forever, at ~1440 warning
+    /// lines a day into a 5 MiB log the user is asked to attach to bug reports,
+    /// where Go logged once at startup. It also bounds the pathological case
+    /// where a task's own auto-pause write fails: without this the sweep would
+    /// reinstall a `run_immediately` timer every minute, indefinitely.
+    swept: Mutex<HashMap<String, String>>,
     /// `s.semaphore`, acquired around the *execution* rather than around the
     /// timer, exactly as Go's `executeTask` does — a job whose turn is waiting
     /// still advances its own schedule.
@@ -145,6 +157,11 @@ impl Scheduler {
         );
         drop(jobs);
 
+        self.swept
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(task.id.clone(), fingerprint(task));
+
         log::info!(
             "task scheduled task_id={:?} task_name={:?} schedule_type={:?}",
             task.id,
@@ -156,6 +173,12 @@ impl Scheduler {
 
     /// `UnscheduleTask`. Silent when the task has no timer, exactly as Go's is.
     pub fn unschedule_task(&self, task_id: &str) {
+        // Forgotten here as well as dropped: a task that is unscheduled and
+        // later becomes active again must be reachable by the sweep.
+        self.swept
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(task_id);
         if let Some(job) = self.lock_jobs().remove(task_id) {
             job.handle.abort();
             log::info!("task unscheduled task_id={task_id:?}");
@@ -215,16 +238,34 @@ impl Scheduler {
             log::info!("task scheduler: reconcile dropped a stale timer task_id={id:?}");
         }
 
+        // Anything this sweep has not already acted on at this exact schedule —
+        // which is what stops an unschedulable task being retried every minute.
+        // `swept` is written whether the attempt succeeds or fails, and cleared
+        // by `unschedule_task`, so a task genuinely returning to service is
+        // still picked up.
         for (id, task) in &active {
-            if self.lock_jobs().contains_key(*id) {
+            let print = fingerprint(task);
+            let already = self
+                .swept
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(*id)
+                .is_some_and(|seen| *seen == print);
+            if already {
                 continue;
             }
+            self.swept
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert((*id).to_string(), print);
+
             match self.schedule_task(task) {
                 Ok(()) => {
                     log::info!("task scheduler: reconcile installed a missing timer task_id={id:?}")
                 }
                 Err(e) => log::warn!(
-                    "task scheduler: reconcile could not schedule task_id={id:?} error={e}"
+                    "task scheduler: reconcile could not schedule task_id={id:?} error={e} \
+                     (not retried until its schedule changes)"
                 ),
             }
         }
@@ -359,7 +400,12 @@ fn local_tz() -> Tz {
 /// mean — the app behaves exactly as it did before the port, with Go scheduling
 /// and Go writing.
 pub fn shell_owns_scheduler() -> bool {
-    crate::native::mode() == crate::native::Mode::On
+    // The database path is part of the answer, not a detail of `start`. With no
+    // database this process cannot schedule at all, and telling the sidecar to
+    // stand down anyway would leave *nobody* firing a task, silently — the same
+    // two-halves-in-step rule `registry::hosting_env_value` follows for
+    // integrations.
+    crate::native::mode() == crate::native::Mode::On && crate::paths::database_path().is_some()
 }
 
 /// `initTaskScheduler` + `Scheduler.Start`: load the active tasks, schedule
@@ -371,7 +417,10 @@ pub fn start(db_path: PathBuf) {
     if !shell_owns_scheduler() {
         // The sidecar was not told to stop scheduling either, so Go owns it and
         // installing timers here would be the two-scheduler hazard.
-        log::info!("task scheduler left with the sidecar: the native seam is not fully on");
+        log::info!(
+            "task scheduler left with the sidecar: the native seam is not fully on, \
+             or there is no database to read"
+        );
         return;
     }
 
@@ -379,6 +428,7 @@ pub fn start(db_path: PathBuf) {
         db_path,
         loc: local_tz(),
         jobs: Mutex::new(HashMap::new()),
+        swept: Mutex::new(HashMap::new()),
         semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
     });
     if RUNNING.set(Arc::clone(&scheduler)).is_err() {
@@ -386,11 +436,27 @@ pub fn start(db_path: PathBuf) {
         return;
     }
 
+    // **Armed before the first read, not after it.** A transient `SQLITE_BUSY`
+    // at boot used to return from here with `RUNNING` already set and the
+    // sidecar already told to stand down — a process with no timers, no sweep
+    // and no way back until restart, behind one `log::warn!`. The mechanism
+    // written to recover from missing timers has to survive the failure it is
+    // most likely to be needed for.
+    let sweeper = Arc::clone(&scheduler);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(RECONCILE_INTERVAL).await;
+            sweeper.reconcile();
+        }
+    });
+
     let tasks = match crate::native::tasks::list_tasks(scheduler.db_path()) {
         Ok(tasks) => tasks,
         Err(e) => {
             // Go returns this error from `Start` and `initTaskScheduler` logs
-            // it as a warning, leaving the scheduler running with no jobs.
+            // it as a warning, leaving the scheduler running with no jobs. The
+            // sweep above then heals it on its next pass, which Go had no
+            // equivalent of.
             log::warn!("failed to start task scheduler: loading tasks: {e}");
             return;
         }
@@ -411,17 +477,21 @@ pub fn start(db_path: PathBuf) {
         }
     }
     log::info!("task scheduler started active_tasks={scheduled}");
+}
 
-    // The sweep that catches a task write which fell back to the sidecar; see
-    // `reconcile`. Spawned rather than awaited — it runs for the life of the
-    // process.
-    let sweeper = Arc::clone(&scheduler);
-    tokio::spawn(async move {
-        loop {
-            tokio::time::sleep(RECONCILE_INTERVAL).await;
-            sweeper.reconcile();
-        }
-    });
+/// A scheduler over `db_path` that is **not** installed as the process-wide one.
+///
+/// For tests that need to drive `Scheduler`'s own methods — the run write-back,
+/// the reconcile — without the `OnceLock` that makes [`start`] single-shot.
+#[cfg(test)]
+pub fn for_test(db_path: impl Into<PathBuf>) -> Arc<Scheduler> {
+    Arc::new(Scheduler {
+        db_path: db_path.into(),
+        loc: local_tz(),
+        jobs: Mutex::new(HashMap::new()),
+        swept: Mutex::new(HashMap::new()),
+        semaphore: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
+    })
 }
 
 /// The running scheduler, or `None` when this process does not schedule.
