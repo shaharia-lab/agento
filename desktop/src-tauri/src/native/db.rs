@@ -112,7 +112,7 @@ pub fn open_read_write(path: &Path) -> Result<Connection, String> {
 /// worker per core, so a four-core machine has four to lose.
 ///
 /// **The proxy's cover is narrower than it looks**, which is why this exists.
-/// `serve` — the buffered path, thirteen areas' worth of handlers — is on the
+/// `serve` — the buffered path, every entry in `native::ENDPOINTS` — is on the
 /// pool. `serve_stream` is not: it awaits on the worker, and `STREAM_ENDPOINTS`
 /// is the chat turn. So the callers here are the streaming turn's own commit
 /// plus everything reached from a timer or a webhook rather than a request: the

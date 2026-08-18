@@ -1351,3 +1351,135 @@ async fn one_turn_emits_the_service_layer_lines_go_emits() {
     );
     assert!(committed.starts_with("INFO "), "{committed}");
 }
+
+/// The turn's commit must not stall the runtime while the write lock is held
+/// (#366).
+///
+/// The scheduler half of that issue got its own version of this test; this is
+/// the chat half, and it exists because the defect is otherwise invisible — the
+/// turn streams correctly and stores the right rows either way. What changes is
+/// *who waits*: `serve_stream` awaits on an axum worker rather than on the
+/// blocking pool `proxy.rs` uses for the buffered handlers, so an inline
+/// `persist::commit` — `open_read_write` plus up to three writes — parks a
+/// worker for the full five-second `busy_timeout` whenever the Go sidecar or the
+/// session scanner's batch writer holds the lock. Once per turn.
+///
+/// Every part of the shape is load-bearing, and two of them were false greens in
+/// the scheduler version before they were fixed there:
+///
+/// - **one worker thread**, so a single parked worker is the whole runtime;
+/// - the ticker's `last` is seeded **before** the spawn, because a starved task
+///   is never polled and seeding it on the first poll starts the clock after the
+///   stall;
+/// - the fixture is converted to **WAL** first, since `open_read_write`'s
+///   `PRAGMA journal_mode=WAL` against a rollback-journal file is a mode change
+///   that fails outright in a millisecond instead of waiting on `busy_timeout`.
+///   In production the file is always already WAL.
+///
+/// Verified in both directions rather than assumed: calling `persist::commit`
+/// inline in `turn.rs` takes the longest gap from ~11 ms to 1,540 ms — the whole
+/// hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_contended_write_lock_does_not_stall_the_runtime() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let Some(_) = python3() else {
+        eprintln!("skipping: no python3");
+        return;
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cli = fake_cli(
+        dir.path(),
+        r#"
+    if msg.get("type") == "control_request" and req.get("subtype") == "initialize":
+        ack(req.get("request_id") or msg.get("request_id"))
+    elif msg.get("type") == "user":
+        raw('{"type":"assistant","message":{"content":[{"type":"text","text":"the reply"}]}}')
+        raw('{"type":"result","subtype":"success","is_error":false,"result":"the reply","session_id":"sdk-lock","usage":{"input_tokens":1,"output_tokens":1}}')
+"#,
+    );
+
+    let id = unique_id("contended");
+    let file = migrated_with_chat(&id);
+    agento_lib::native::db::open_read_write(file.path()).expect("convert the fixture to WAL");
+
+    /// Long enough that a parked worker is unmistakable, short enough to stay
+    /// inside the 5 s `busy_timeout` so the commit still succeeds.
+    const HOLD: Duration = Duration::from_millis(1_500);
+
+    // A writer outside the runtime, holding the lock the commit needs.
+    let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+    let lock_path = file.path().to_path_buf();
+    let holder = std::thread::spawn(move || {
+        let mut conn = rusqlite::Connection::open(&lock_path).expect("open");
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("begin immediate");
+        holding_tx.send(()).expect("signal");
+        std::thread::sleep(HOLD);
+        tx.rollback().expect("rollback");
+    });
+    holding_rx.recv().expect("the writer took the lock");
+
+    let worst_gap_ms = Arc::new(AtomicU64::new(0));
+    let ticks = Arc::new(AtomicU64::new(0));
+    let ticker = {
+        let (worst_gap_ms, ticks, mut last) = (
+            Arc::clone(&worst_gap_ms),
+            Arc::clone(&ticks),
+            Instant::now(),
+        );
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let now = Instant::now();
+                let gap = u64::try_from(now.duration_since(last).as_millis()).unwrap_or(u64::MAX);
+                worst_gap_ms.fetch_max(gap, Ordering::Relaxed);
+                ticks.fetch_add(1, Ordering::Relaxed);
+                last = now;
+            }
+        })
+    };
+
+    let _env = env_lock().lock().await;
+    std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", &cli);
+    let response = agento_lib::native::chat::turn::run(
+        file.path().to_path_buf(),
+        id.clone(),
+        "hello".to_string(),
+    )
+    .await
+    .expect("the turn should stream");
+    collect_with_timeout(response).await;
+
+    // The commit is detached from the request, so the body ending does not mean
+    // it has landed. Wait for the row rather than for a duration.
+    let mut committed = false;
+    for _ in 0..400 {
+        if messages(&file, &id).len() == 2 {
+            committed = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    ticker.abort();
+    holder.join().expect("the writer finished");
+
+    assert!(committed, "the turn's messages were never committed");
+
+    let worst = worst_gap_ms.load(Ordering::Relaxed);
+    assert!(
+        worst < 500,
+        "the runtime stalled for {worst} ms while the write lock was held \
+         (the hold is {} ms; anything near it means the commit blocked a worker)",
+        HOLD.as_millis()
+    );
+    let ticks = ticks.load(Ordering::Relaxed);
+    assert!(
+        ticks > 50,
+        "the ticker only advanced {ticks} times across a {} ms hold",
+        HOLD.as_millis()
+    );
+}

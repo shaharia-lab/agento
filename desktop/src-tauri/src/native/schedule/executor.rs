@@ -45,11 +45,15 @@ pub async fn execute_task(scheduler: &Arc<Scheduler>, task_id: &str) {
         let (scheduler, task_id) = (Arc::clone(scheduler), task_id.to_string());
         db::blocking("scheduled run", move || due_task(&scheduler, &task_id)).await
     };
-    // Two shapes of `None` collapse here, and they mean different things: not
-    // due (or unreadable, which `due_task` has already logged), and a panic in
-    // the section itself, which `db::blocking` logs. Neither has written
-    // anything, so neither owes a job row — this is the one place in the file
-    // where returning without one is right.
+    // Two shapes of `None` collapse here: not due, and a panic in the section
+    // itself, which `db::blocking` logs. Neither owes a job row — no run was
+    // started, and this is the one place in the file where returning without one
+    // is right.
+    //
+    // "Not due" is not the same as "wrote nothing", though: the auto-pause
+    // branch parks the row and drops the timer. A panic between those two leaves
+    // a `paused` row with a live gocron entry — which `reconcile` corrects
+    // within the minute, since it reads the row.
     let Some(Some(task)) = due else {
         return;
     };
@@ -211,7 +215,7 @@ struct Ready {
 /// the row and writes the fresh counters onto it.
 ///
 /// Boxed to satisfy `clippy::result_large_err`, whose threshold is 128 bytes and
-/// which a bare `ScheduledTask` (~450) clears on its own. It does **not** shrink
+/// which a bare `ScheduledTask` (472 bytes, measured) clears on its own. It does **not** shrink
 /// the `Result`: `Ready` carries a task, a job and an agent, so the enum is that
 /// size either way. The lint is about the cost of moving an error along a `?`
 /// chain, which is why boxing the rarer half is the answer it wants.

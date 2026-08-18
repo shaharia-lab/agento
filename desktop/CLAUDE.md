@@ -2663,17 +2663,18 @@ three use, and it is greppable on purpose; the label is per call site so the log
 says which section panicked. The executor's shape follows from it: `prepare`
 and `finish` are whole synchronous sections either side of the one long `await`,
 rather than eight individually wrapped calls, because a run's database work is
-contiguous. `tests/scheduled_run.rs`'s
-`a_contended_write_lock_does_not_stall_the_runtime` is the regression — a
+contiguous. `a_contended_write_lock_does_not_stall_the_runtime` — one in
+`tests/scheduled_run.rs`, one in `tests/chat_turn.rs` — is the regression — a
 one-worker runtime, an outside thread holding the write lock, and a ticker whose
 longest gap goes from ~11 ms to the full 1,500 ms hold if the hand-off is
 removed. Its `last` is seeded **before** the spawn deliberately: a starved task
 is never polled, so seeding on the first poll starts the clock after the stall
 and the test passes against the defect. What is still on the worker is
-option-building — `runner::load`, `TurnSettings::stored`, `registry::can_host` —
-which chat, the scheduler and the dispatcher share verbatim; those are reads, so
-WAL keeps them off the write lock, and the regression test measures the leftover
-exposure at ~11 ms. Worth knowing, not fixed here. A panic *inside* a handed-off
+option-building — `TurnSettings::stored` and `registry::can_host`, shared by all
+three callers, plus `runner::load`, which is the chat turn's alone. Every one is
+`open_read_only`, and a WAL reader does not wait on a writer, which is why they
+are left: the test's contention is a write lock, so it says nothing about them
+either way. A *write* added there would be a different matter. A panic *inside* a handed-off
 section is the one thing `db::blocking` cannot make safe: the executor's `finish`
 may have written the session results and not the job row, leaving a `running`
 row nothing will finish, which is why the rule is "every path ends in a job

@@ -233,6 +233,14 @@ pub async fn run(
         // The commit is detached from the request on purpose, so a client that
         // disconnected mid-stream still has its turn persisted. Errors are
         // logged and never surfaced — the stream has already ended.
+        //
+        // What a `None` from the hand-off would leave behind, which
+        // [`crate::native::db::blocking`] asks each caller to state: `commit` is
+        // up to two inserts and an update with **no surrounding transaction**,
+        // so a panic between them can store the reply while `sdk_session_id` and
+        // the token counters stay stale — and the next turn would then resume
+        // the wrong CLI session. Nothing here can repair that; it is recorded
+        // because the shape is worth knowing before anyone adds a fourth write.
         // On the blocking pool, not this task's worker. This is the one
         // *request*-driven write that `proxy.rs` does not already cover:
         // `STREAM_ENDPOINTS` sends the chat turn down `serve_stream`, which

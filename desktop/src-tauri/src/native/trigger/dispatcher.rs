@@ -97,7 +97,9 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
     // **Every database call this module makes goes through [`db::blocking`],**
     // each under its own label so the log says which one panicked. (Not every
     // call the *dispatch* makes: `run_headless` opens SQLite on the worker while
-    // building its options, which chat and the scheduler share verbatim.) `process` runs on an axum worker, and each of these opens a connection and may sit on
+    // building its options, which chat and the scheduler share verbatim.)
+    // `process` runs on an axum worker, and each of these opens a connection and
+    // may sit on
     // `db.rs`'s five-second `busy_timeout` while the session scan batch-writes —
     // ten of them at `MAX_CONCURRENT` is every worker on a four-core machine,
     // stalling the SPA and any SSE stream. `proxy.rs` puts native handlers on the
