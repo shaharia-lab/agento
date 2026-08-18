@@ -415,7 +415,15 @@ fn load_stored_rows(conn: &rusqlite::Connection) -> Vec<StoredRow> {
                     i.max_consecutive_tool_calls, i.longest_autonomous_chain,
                     i.avg_user_response_time_ms, i.avg_claude_response_time_ms
              FROM session_insights i
-             JOIN claude_session_cache c ON c.session_id = i.session_id
+             -- Both key columns, not just the id (#362). `claude_session_cache`
+             -- is keyed on `(session_id, project_path)` and `session_insights`
+             -- now is too, so joining on the id alone cross-products a
+             -- duplicated id's rows against each other's transcripts and then
+             -- compares one project's stored figures with the other project's
+             -- file. That is what this suite had been reporting as a permanent
+             -- one-session divergence.
+             JOIN claude_session_cache c
+               ON c.session_id = i.session_id AND c.project_path = i.project_path
              WHERE i.processor_version = ?",
         )
         .expect("prepare stored insights");

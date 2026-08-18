@@ -108,8 +108,9 @@ func (a *insightStoreAdapter) NeedsProcessing(
 	sessions := make([]claudesessions.SessionToProcess, len(raw))
 	for i, r := range raw {
 		sessions[i] = claudesessions.SessionToProcess{
-			SessionID: r.SessionID,
-			FilePath:  r.FilePath,
+			SessionID:   r.SessionID,
+			ProjectPath: r.ProjectPath,
+			FilePath:    r.FilePath,
 		}
 	}
 	return sessions, nil
@@ -123,6 +124,7 @@ func toInsightRecord(ins *claudesessions.SessionInsight) storage.InsightRecord {
 	}
 	return storage.InsightRecord{
 		SessionID:               ins.SessionID,
+		ProjectPath:             ins.ProjectPath,
 		ProcessorVersion:        ins.ProcessorVersion,
 		ScannedAt:               ins.ScannedAt,
 		TurnCount:               ins.TurnCount,
@@ -162,6 +164,7 @@ func fromInsightRecord(r *storage.InsightRecord) *claudesessions.SessionInsight 
 	}
 	return &claudesessions.SessionInsight{
 		SessionID:               r.SessionID,
+		ProjectPath:             r.ProjectPath,
 		ProcessorVersion:        r.ProcessorVersion,
 		ScannedAt:               r.ScannedAt,
 		TurnCount:               r.TurnCount,

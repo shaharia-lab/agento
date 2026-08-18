@@ -295,8 +295,11 @@ func TestSQLiteSessionInsightsStore_NeedsProcessing(t *testing.T) {
 		t.Errorf("expected ['cached-session'], got %v", ids)
 	}
 
-	// Insert an insight with version 1.
+	// Insert an insight with version 1. The project path is part of the key
+	// since #362, and NeedsProcessing joins on it, so it has to match the cache
+	// row rather than defaulting to empty.
 	r := sampleRecord("cached-session")
+	r.ProjectPath = "/proj"
 	r.ProcessorVersion = 1
 	if err := store.Upsert(ctx, r); err != nil {
 		t.Fatal(err)
@@ -610,6 +613,10 @@ func TestNeedsProcessing_ReturnsRowsBelowCurrentVersion(t *testing.T) {
 
 	const current = 4 // CurrentProcessorVersion at the time of writing
 	r := sampleRecord("stale")
+	// The insight is keyed on the project path too since #362, and the join in
+	// NeedsProcessing matches on both — so a row written without it describes a
+	// different (empty) project and the session stays pending forever.
+	r.ProjectPath = "/p"
 	r.ProcessorVersion = current - 1
 	if err := store.Upsert(ctx, r); err != nil {
 		t.Fatal(err)
@@ -737,5 +744,102 @@ func TestMigration20_AppliesToExistingDatabaseWithRows(t *testing.T) {
 	}
 	if len(got.AgentBreakdown) != 0 {
 		t.Errorf("AgentBreakdown = %v, want empty — the column was dropped and re-added", got.AgentBreakdown)
+	}
+}
+
+// TestSessionInsights_OneIDUnderTwoProjectsKeepsBothRows is #362 itself.
+//
+// `claude_session_cache` is keyed on `(session_id, project_path)`, so a session
+// id that exists under two project paths is two transcripts. While
+// `session_insights` was keyed on the id alone they shared one row: whichever
+// the pipeline processed last won and the row was a mix of neither, which is
+// what `parity_insights::every_stored_insight_recomputes_to_the_same_values`
+// had been reporting as a permanent single-session divergence.
+//
+// The reference corpus has exactly one such id — copying a `~/.claude` to set
+// up a second account duplicates every session under a new project path.
+func TestSessionInsights_OneIDUnderTwoProjectsKeepsBothRows(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, _, err := storage.NewSQLiteDB(dbPath, slog.Default())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store := storage.NewSQLiteSessionInsightsStore(db)
+	ctx := context.Background()
+
+	const id = "1de427b5-3f0b-4847-9bef-a5c8aa85da90"
+	first := sampleRecord(id)
+	first.ProjectPath = "/home/u/project-a"
+	first.TurnCount = 4
+	first.CostEstimateUSD = 20.37
+
+	second := sampleRecord(id)
+	second.ProjectPath = "/home/u/project-b"
+	second.TurnCount = 1
+	second.CostEstimateUSD = 6.97
+
+	for _, r := range []storage.InsightRecord{first, second} {
+		if err := store.Upsert(ctx, r); err != nil {
+			t.Fatalf("upserting %s: %v", r.ProjectPath, err)
+		}
+	}
+
+	var rows int
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_insights WHERE session_id = ?`, id).Scan(&rows); err != nil {
+		t.Fatalf("counting rows: %v", err)
+	}
+	if rows != 2 {
+		t.Fatalf("stored %d rows for two transcripts, want 2 — the second "+
+			"overwrote the first", rows)
+	}
+
+	// Each row kept its own figures rather than the last writer's.
+	for _, want := range []storage.InsightRecord{first, second} {
+		var turns int
+		var cost float64
+		if err := db.QueryRowContext(ctx,
+			`SELECT turn_count, cost_estimate_usd FROM session_insights
+			 WHERE session_id = ? AND project_path = ?`, id, want.ProjectPath,
+		).Scan(&turns, &cost); err != nil {
+			t.Fatalf("reading %s: %v", want.ProjectPath, err)
+		}
+		if turns != want.TurnCount || cost != want.CostEstimateUSD {
+			t.Errorf("%s = (turns %d, cost %v), want (%d, %v)",
+				want.ProjectPath, turns, cost, want.TurnCount, want.CostEstimateUSD)
+		}
+	}
+
+	// Re-upserting one must update it in place, not add a third row.
+	first.TurnCount = 9
+	if err := store.Upsert(ctx, first); err != nil {
+		t.Fatalf("re-upserting: %v", err)
+	}
+	if err := db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM session_insights WHERE session_id = ?`, id).Scan(&rows); err != nil {
+		t.Fatalf("counting rows: %v", err)
+	}
+	if rows != 2 {
+		t.Errorf("re-upsert produced %d rows, want 2 — ON CONFLICT must name "+
+			"both key columns", rows)
+	}
+
+	// Get carries no project path, so it resolves the ambiguity deterministically
+	// — the lowest one. Deliberately *not* claimed to agree with the detail
+	// page's transcript, which sorts directory names on disk rather than stored
+	// project paths; see the method's own comment.
+	got, err := store.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got == nil {
+		t.Fatal("Get returned nothing for a session that has two rows")
+	}
+	if got.ProjectPath != "/home/u/project-a" {
+		t.Errorf("Get resolved to %q, want the first project path", got.ProjectPath)
+	}
+	if got.TurnCount != 9 {
+		t.Errorf("Get turn_count = %d, want the re-upserted 9", got.TurnCount)
 	}
 }

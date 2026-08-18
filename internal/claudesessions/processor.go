@@ -117,7 +117,11 @@ func (u *EventUsage) Split() (fiveMin, oneHour int) {
 // SessionInsight holds all computed static-analysis metrics for a single
 // Claude Code session JSONL file.
 type SessionInsight struct {
-	SessionID        string    `json:"session_id"`
+	SessionID string `json:"session_id"`
+	// ProjectPath is the second half of the row key, matching
+	// claude_session_cache. A session id under two project paths is two
+	// transcripts and therefore two insights (#362).
+	ProjectPath      string    `json:"project_path"`
 	ProcessorVersion int       `json:"processor_version"`
 	ScannedAt        time.Time `json:"scanned_at"`
 
@@ -259,7 +263,10 @@ type InsightStorer interface {
 // filesystem walk to locate the JSONL file.
 type SessionToProcess struct {
 	SessionID string
-	FilePath  string
+	// ProjectPath identifies which of a duplicated id's transcripts this is.
+	// The insight row is keyed on it, so the worker cannot write without it.
+	ProjectPath string
+	FilePath    string
 }
 
 // contentBlock is the decoded form of a single block within a message's content array.

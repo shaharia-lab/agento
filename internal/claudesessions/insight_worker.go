@@ -27,7 +27,10 @@ const (
 // workItem is a single unit of work for the InsightWorker pool.
 type workItem struct {
 	sessionID string
-	filePath  string
+	// projectPath is the other half of the insight row's key (#362). Two
+	// transcripts can share a session id, and each is its own unit of work.
+	projectPath string
+	filePath    string
 }
 
 // InsightWorker subscribes to session lifecycle events and runs the processor
@@ -79,8 +82,11 @@ func (w *InsightWorker) Start(ctx context.Context) {
 		if sessionID == "" || filePath == "" {
 			return
 		}
+		// The scanner already publishes the project path, which is what makes
+		// the two transcripts of a duplicated id distinguishable here.
+		projectPath := ev.Payload[eventbus.PayloadKeyProjectPath]
 		// Non-blocking enqueue: the subscriber must not block the bus worker pool.
-		w.enqueue(sessionID, filePath)
+		w.enqueue(sessionID, projectPath, filePath)
 	})
 
 	for range insightWorkerPoolSize {
@@ -106,9 +112,9 @@ func (w *InsightWorker) Wait() {
 
 // enqueue submits a session to the work channel in a non-blocking manner.
 // If the channel is full the item is dropped and a warning is logged.
-func (w *InsightWorker) enqueue(sessionID, filePath string) {
+func (w *InsightWorker) enqueue(sessionID, projectPath, filePath string) {
 	select {
-	case w.work <- workItem{sessionID: sessionID, filePath: filePath}:
+	case w.work <- workItem{sessionID: sessionID, projectPath: projectPath, filePath: filePath}:
 	default:
 		w.logger.Warn("insight_worker: work queue full, dropping session", "session_id", sessionID)
 	}
@@ -119,7 +125,7 @@ func (w *InsightWorker) runWorker(ctx context.Context) {
 	for {
 		select {
 		case item := <-w.work:
-			w.tryProcess(ctx, item.sessionID, item.filePath)
+			w.tryProcess(ctx, item.sessionID, item.projectPath, item.filePath)
 		case <-ctx.Done():
 			return
 		}
@@ -128,20 +134,28 @@ func (w *InsightWorker) runWorker(ctx context.Context) {
 
 // tryProcess deduplicates in-flight sessions before calling processOne.
 // If the session is already being processed, the call is a no-op.
-func (w *InsightWorker) tryProcess(ctx context.Context, sessionID, filePath string) {
-	if _, loaded := w.inFlight.LoadOrStore(sessionID, struct{}{}); loaded {
+//
+// Keyed on the **whole row key**, not the session id. On the id alone the two
+// transcripts of a duplicated id were one unit of work, so whichever arrived
+// second was dropped outright while the first was still running — which is how
+// the losing transcript's numbers went missing even before the single-row
+// primary key overwrote them (#362).
+func (w *InsightWorker) tryProcess(ctx context.Context, sessionID, projectPath, filePath string) {
+	key := sessionID + "\x00" + projectPath
+	if _, loaded := w.inFlight.LoadOrStore(key, struct{}{}); loaded {
 		return
 	}
-	defer w.inFlight.Delete(sessionID)
-	w.processOne(ctx, sessionID, filePath)
+	defer w.inFlight.Delete(key)
+	w.processOne(ctx, sessionID, projectPath, filePath)
 }
 
 // processOne runs the processor pipeline for a single session and upserts the result.
 // The session's sub-agent transcripts are fed through the same run, so insights
 // account for delegated work rather than only the main thread.
-func (w *InsightWorker) processOne(ctx context.Context, sessionID, filePath string) {
+func (w *InsightWorker) processOne(ctx context.Context, sessionID, projectPath, filePath string) {
 	files := append([]string{filePath}, SubagentFiles(sessionID, filePath)...)
-	insight, err := w.registry.RunSessionFiles(sessionID, files...)
+	ref := SessionRef{SessionID: sessionID, ProjectPath: projectPath}
+	insight, err := w.registry.RunSessionFiles(ref, files...)
 	if err != nil {
 		w.logger.Warn("insight_worker: failed to process session",
 			"session_id", sessionID, "error", err)
@@ -191,6 +205,6 @@ func (w *InsightWorker) rescanOutdated(ctx context.Context) {
 		if s.FilePath == "" {
 			continue
 		}
-		w.enqueue(s.SessionID, s.FilePath)
+		w.enqueue(s.SessionID, s.ProjectPath, s.FilePath)
 	}
 }
