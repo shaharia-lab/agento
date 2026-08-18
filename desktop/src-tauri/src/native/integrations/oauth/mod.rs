@@ -33,6 +33,7 @@
 //!   than one scope.
 
 pub mod exchange;
+pub mod flow;
 
 use std::collections::BTreeMap;
 
@@ -91,6 +92,17 @@ pub fn google_scopes(services: &BTreeMap<String, ServiceConfig>) -> Vec<String> 
         }
     }
     out
+}
+
+/// The `services` column, for the scope union. Read separately from the hosting
+/// row because that projection carries secrets and this does not.
+pub fn services_of(
+    db_path: &std::path::Path,
+    id: &str,
+) -> Result<BTreeMap<String, ServiceConfig>, String> {
+    Ok(crate::native::integrations::get(db_path, id)?
+        .and_then(|i| i.services)
+        .unwrap_or_default())
 }
 
 /// `fmt.Sprintf("http://localhost:%d/callback", redirectPort)`.

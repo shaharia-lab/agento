@@ -407,6 +407,28 @@ fn trigger_rule_by_id(
     .optional()
 }
 
+// ─── OAuth (#318) ─────────────────────────────────────────────────────────────
+
+/// `map[string]bool{"authenticated": …}` — one key, so nothing to sort.
+#[derive(Serialize)]
+struct AuthStatusResponse {
+    authenticated: bool,
+}
+
+/// `map[string]string{"auth_url": …}`.
+#[derive(Serialize)]
+struct AuthStartResponse {
+    auth_url: String,
+}
+
+/// `handleStartOAuth`.
+fn start_oauth(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
+    let auth_url = oauth::flow::start(db_path, id)?;
+    let body = super::gojson::to_vec(&AuthStartResponse { auth_url })
+        .map_err(|e| WriteError::Fallback(format!("encoding auth start: {e}")))?;
+    Ok(super::Answer::json(body))
+}
+
 // ─── The seam ─────────────────────────────────────────────────────────────────
 
 /// This module's entry in `native::ENDPOINTS`.
@@ -423,6 +445,10 @@ enum Route<'a> {
     Triggers(&'a str),
     /// `{id}/triggers/{rid}` — the rule routes that take a rule id.
     Trigger(&'a str, &'a str),
+    /// `{id}/auth/start` — begins an OAuth flow and answers its URL (#318).
+    AuthStart(&'a str),
+    /// `{id}/auth/status` — polls the in-flight flow, or the stored token.
+    AuthStatus(&'a str),
 }
 
 /// Match the reads, plus the write routes that share their paths.
@@ -441,6 +467,12 @@ fn route_of(path: &str) -> Option<Route<'_>> {
     }
     if let Some(id) = rest.strip_suffix("/triggers") {
         return segment(id).map(Route::Triggers);
+    }
+    if let Some(id) = rest.strip_suffix("/auth/start") {
+        return segment(id).map(Route::AuthStart);
+    }
+    if let Some(id) = rest.strip_suffix("/auth/status") {
+        return segment(id).map(Route::AuthStatus);
     }
     if let Some((id, tail)) = rest.split_once("/triggers/") {
         return match (segment(id), segment(tail)) {
@@ -499,12 +531,14 @@ fn segment(value: &str) -> Option<&str> {
 /// set up in: create, `PUT` and `auth/validate` all leave it unauthenticated or
 /// unheard, and it appears only at the next boot's `start_all`.
 ///
-/// The fifth is `completeOAuth`, which this hook does **not** cover and which is
-/// not safe by the gate either — `startProviderCallback` supports `google` and
-/// `slack`, and `slack` has been hosted here since #315. Its token never crosses
-/// this proxy at all (the browser delivers it to a callback server the sidecar
-/// opens), so it is picked up from the *other* route below instead. See
-/// `registry::reload_if_secrets_changed`.
+/// The fifth is `completeOAuth`, whose token used to reach neither this proxy
+/// nor this process: the browser delivered it to a callback server the
+/// **sidecar** opened. #318 moved that server here, so the shell now writes the
+/// token itself and reloads directly from `oauth::flow` — which is why the
+/// `AuthStatusPolled` trigger this function used to return is **gone** rather
+/// than kept beside the real thing. Watching the UI poll `auth/status` and
+/// reloading when the row stopped matching what was running was an inference
+/// standing in for an event the shell could not see; it can see it now.
 ///
 /// The route predicate below is deliberately **type-blind**: it answers with the
 /// id for every integration, and `registry::reload_after_auth` reads the row's
@@ -516,30 +550,16 @@ fn segment(value: &str) -> Option<&str> {
 /// restarted. Go fires its own from a goroutine (`reloadIntegration`), so doing
 /// it off the response path is parity rather than a shortcut.
 ///
-/// # Two routes, two triggers
+/// # What is left
 ///
-/// `POST …/auth/validate` is an **event**: a credential was just written, so the
-/// reload is unconditional, exactly as Go's is.
-///
-/// `GET …/auth/status` is a **poll**, added by #315. Go's `handleOAuthToken`
-/// reloads after an OAuth token lands, and `startProviderCallback` supports
-/// `google` and `slack` — so the moment `slack` became a hosted type, that
-/// reload started reaching nothing. The token itself never comes through this
-/// proxy (the browser delivers it to a callback server the *sidecar* opens), so
-/// the UI's polling of this route is the only part of the flow the shell can
-/// see. Being a poll, it must not fire an unconditional reload — see
-/// `registry::reload_if_secrets_changed`, which reloads only when the row stops
-/// matching what is running.
+/// One route: `POST …/auth/validate`, an **event** — a credential was just
+/// written, so the reload is unconditional, exactly as Go's is. It stays here
+/// because that route is still forwarded; see `claims`.
 pub fn reload_after_forward<'a>(method: &Method, path: &'a str) -> Option<(&'a str, Trigger)> {
     let rest = path.strip_prefix("/api/integrations/")?;
     if method == Method::POST {
         if let Some(id) = rest.strip_suffix("/auth/validate") {
             return segment(id).map(|id| (id, Trigger::CredentialWritten));
-        }
-    }
-    if method == Method::GET {
-        if let Some(id) = rest.strip_suffix("/auth/status") {
-            return segment(id).map(|id| (id, Trigger::AuthStatusPolled));
         }
     }
     None
@@ -551,8 +571,6 @@ pub enum Trigger {
     /// A credential was written by a forwarded request. Reload unconditionally,
     /// as Go does.
     CredentialWritten,
-    /// The UI polled an in-flight OAuth flow. Reload only if something changed.
-    AuthStatusPolled,
 }
 
 fn claims(method: &Method, path: &str) -> bool {
@@ -564,6 +582,23 @@ fn claims(method: &Method, path: &str) -> bool {
         }
         Some(Route::Triggers(_)) => method == Method::GET || method == Method::POST,
         Some(Route::Trigger(..)) => method == Method::PUT || method == Method::DELETE,
+        // #318 moved the OAuth **flow**: `start` and `status` share the
+        // in-flight map, so splitting them across two processes leaves `status`
+        // polling a map that is never populated. That pair is the part #300
+        // could not split and the reason it deferred all three.
+        //
+        // `POST …/auth/validate` is **deliberately still forwarded**. It was
+        // grouped with them for a second reason that has since expired — the
+        // credentials it writes were read by *Go's* MCP servers, and #311–#313
+        // moved all six here — and it never touches `oauthFlows` at all. What
+        // it does do is dial five different services and write a
+        // **type-specific** auth payload each one's MCP server reads
+        // (`{"validated":true,"bot_username":…}` for Telegram, not a shared
+        // flag). Five remote-call reproductions belong in their own change.
+        // `reload_after_forward`'s `CredentialWritten` trigger keeps covering
+        // its reload meanwhile.
+        Some(Route::AuthStart(_)) => method == Method::POST,
+        Some(Route::AuthStatus(_)) => method == Method::GET,
         None => false,
     }
 }
@@ -580,6 +615,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
                 finish(update_trigger_rule(db, id, rid, req.body))
             }
             Some(Route::Trigger(id, rid)) => finish(delete_trigger_rule(db, id, rid)),
+            Some(Route::AuthStart(id)) => finish(start_oauth(db, id)),
             _ => Err(format!(
                 "{} {} is not an integration write",
                 req.method, req.path
@@ -605,9 +641,26 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         Some(Route::Triggers(id)) => super::gojson::to_vec(&list_trigger_rules(db, id)?)
             .map_err(|e| format!("encoding trigger rules: {e}"))?,
 
+        Some(Route::AuthStatus(id)) => {
+            let authenticated = match oauth::flow::status(db, id) {
+                Ok(authenticated) => authenticated,
+                // A read, so the seam wants a `Result<_, String>`; `finish`
+                // is the write path's shape. `Internal` and the typed errors
+                // answer natively, and only `Fallback` forwards.
+                Err(WriteError::Fallback(reason)) => return Err(reason),
+                Err(e) => {
+                    let body = super::gojson::to_vec(&super::writes::error_body(&e.message()))
+                        .map_err(|enc| format!("encoding error body: {enc}"))?;
+                    return Ok(super::Answer::json_status(e.status(), body));
+                }
+            };
+            super::gojson::to_vec(&AuthStatusResponse { authenticated })
+                .map_err(|e| format!("encoding auth status: {e}"))?
+        }
+
         // `claims` never admits a GET here — chi has no such route, so Go 405s
         // and forwarding is what reproduces that.
-        Some(Route::Trigger(..)) | None => {
+        Some(Route::AuthStart(_)) | Some(Route::Trigger(..)) | None => {
             return Err(format!("{} is not an integration read", req.path))
         }
     };
@@ -1547,8 +1600,23 @@ mod tests {
         assert!(!claims(&Method::POST, "/api/integrations/abc/triggers/r1"));
         assert!(!claims(&Method::PUT, "/api/integrations/abc/triggers/r1/x"));
 
+        // #318: the OAuth flow is the shell's, so its two routes are claimed.
+        assert!(claims(&Method::GET, "/api/integrations/abc/auth/status"));
+        assert!(claims(&Method::POST, "/api/integrations/abc/auth/start"));
+        // …and only for their own methods.
+        assert!(!claims(&Method::POST, "/api/integrations/abc/auth/status"));
+        assert!(!claims(&Method::GET, "/api/integrations/abc/auth/start"));
+        // An id is one segment on both.
+        assert!(!claims(&Method::GET, "/api/integrations//auth/status"));
+        assert!(!claims(&Method::POST, "/api/integrations/a/b/auth/start"));
+        // `validate` is still forwarded — five remote-call reproductions, and
+        // it never touched the flow map. See `claims`.
+        assert!(!claims(
+            &Method::POST,
+            "/api/integrations/abc/auth/validate"
+        ));
+
         // Reads that stay with Go, each for its own reason — see the header.
-        assert!(!claims(&Method::GET, "/api/integrations/abc/auth/status"));
         assert!(!claims(
             &Method::GET,
             "/api/integrations/abc/webhook/status"
@@ -2082,17 +2150,22 @@ mod tests {
         );
     }
 
-    /// The two routes the seam owes something after Go has answered them — one
-    /// an event (#311) and one a poll (#315).
+    /// The one route the seam still owes something after Go has answered it.
+    ///
+    /// It was two until #318: `GET …/auth/status` used to trigger a
+    /// reload-if-changed, because the shell could not see an OAuth token land
+    /// in a callback server the sidecar owned. It owns that server now, so the
+    /// poll is no longer evidence of anything and the trigger is gone.
     #[test]
-    fn only_the_two_auth_routes_ask_the_shell_to_look_again() {
+    fn only_the_validate_route_asks_the_shell_to_look_again() {
         assert_eq!(
             reload_after_forward(&Method::POST, "/api/integrations/int-1/auth/validate"),
             Some(("int-1", Trigger::CredentialWritten))
         );
         assert_eq!(
             reload_after_forward(&Method::GET, "/api/integrations/int-1/auth/status"),
-            Some(("int-1", Trigger::AuthStatusPolled))
+            None,
+            "the shell answers this route itself now"
         );
         // The method matters on both, and neither admits an empty or
         // multi-segment id.

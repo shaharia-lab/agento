@@ -70,6 +70,19 @@ pub enum WriteError {
     /// users (#309): the desktop build exports no telemetry, so a save that
     /// appeared to succeed would be the worst answer available.
     NotImplemented(String),
+    /// Go answers **500 with this exact body**, and forwarding would answer
+    /// something else.
+    ///
+    /// The distinction from [`Self::Fallback`] is the whole reason this exists.
+    /// `Fallback` means "the sidecar can answer this better than I can", which
+    /// holds for every 500 whose body comes from a Go error string. It stops
+    /// holding the moment the state the answer depends on lives **here**:
+    /// `GET /api/integrations/{id}/auth/status` reads the in-flight OAuth map,
+    /// and since #318 that map is the shell's. Forwarding a failed flow would
+    /// have Go answer from the stored token — `authenticated: false`, a
+    /// plausible-looking lie — where Go itself would have answered 500. So the
+    /// 500 is produced here, with `httpErr`'s default body verbatim.
+    Internal(String),
     /// Not reproducible here: let the sidecar answer.
     Fallback(String),
 }
@@ -92,7 +105,7 @@ impl WriteError {
             Self::NotFound { .. } | Self::NotFoundMessage(_) => StatusCode::NOT_FOUND,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
             Self::NotImplemented(_) => StatusCode::NOT_IMPLEMENTED,
-            Self::Fallback(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Internal(_) | Self::Fallback(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 
@@ -121,15 +134,15 @@ impl WriteError {
             Self::NotFoundMessage(m) => m.clone(),
             Self::Forbidden(m) => m.clone(),
             Self::NotImplemented(m) => m.clone(),
-            Self::Fallback(m) => m.clone(),
+            Self::Internal(m) | Self::Fallback(m) => m.clone(),
         }
     }
 }
 
 /// Go's `writeError` body: a one-key map, so the encoder sorts nothing.
 #[derive(Serialize)]
-struct ErrorBody<'a> {
-    error: &'a str,
+pub struct ErrorBody<'a> {
+    pub error: &'a str,
 }
 
 /// Turn a handler result into what the seam expects.
@@ -139,6 +152,13 @@ struct ErrorBody<'a> {
 /// user which field is wrong is an *answer*, not a failure to answer, and
 /// forwarding it would make the sidecar redo the work to reach the same
 /// conclusion.
+/// `writeError`'s body, for a handler that answers a typed error outside the
+/// write path — `GET …/auth/status`, whose 404 and 500 are the *read* seam's
+/// shape but Go's own `httpErr` mapping.
+pub fn error_body(message: &str) -> ErrorBody<'_> {
+    ErrorBody { error: message }
+}
+
 pub fn finish(result: Result<super::Answer, WriteError>) -> Result<super::Answer, String> {
     match result {
         Ok(answer) => Ok(answer),

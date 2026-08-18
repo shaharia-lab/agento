@@ -110,7 +110,6 @@
 //! token is delivered by the browser to a callback server the *sidecar* opens on
 //! its own port. The only part of that flow this process sees is the UI polling
 //! `GET /api/integrations/{id}/auth/status`, which is a *poll* rather than an
-//! event — see [`reload_if_secrets_changed`] for why that one is conditional
 //! where [`reload_after_auth`] is not.
 //!
 //! ## Secrets
@@ -140,15 +139,15 @@ use super::{decode_services, ServiceConfig};
 /// on it is a mistake: `Serialize` would put a token on the wire and `Debug`
 /// would put one in a log line, which is the same leak with a longer fuse. See
 /// the module header.
-struct HostingRow {
-    id: String,
-    integration_type: String,
+pub(super) struct HostingRow {
+    pub(super) id: String,
+    pub(super) integration_type: String,
     enabled: bool,
     /// `IsAuthenticated()`, computed in SQL so the predicate does not depend on
     /// parsing [`Self::auth`].
     authenticated: bool,
     /// The raw `credentials` column. A secret.
-    credentials: String,
+    pub(super) credentials: String,
     /// The raw `auth` column. **Also a secret**, and the newer of the two.
     ///
     /// Until #315 this projection selected `auth` only as the boolean above, and
@@ -169,21 +168,6 @@ impl HostingRow {
     /// `Reload` apply before they reach a starter.
     fn is_startable(&self) -> bool {
         self.enabled && self.authenticated
-    }
-
-    /// A fingerprint of the two secret columns, for [`reload_if_secrets_changed`].
-    ///
-    /// A hash, so the registry's record of "what is this server running on" is
-    /// not a second place the token itself lives. `DefaultHasher` because the
-    /// question is only ever "did this change", within one process, against a
-    /// value this process wrote — there is nothing here for a collision to buy
-    /// an attacker that reading the database would not.
-    fn secrets_fingerprint(&self) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.credentials.hash(&mut hasher);
-        self.auth.hash(&mut hasher);
-        hasher.finish()
     }
 
     /// The services map a starter sees. A stored `null` is a nil Go map, which
@@ -242,13 +226,6 @@ struct State {
     /// since. A `DELETE` in that window therefore drops the new server instead
     /// of leaving a bound port holding a credential for a deleted row.
     generations: HashMap<String, u64>,
-    /// A fingerprint of the secrets each hosted server was **started with**.
-    ///
-    /// Only [`reload_if_secrets_changed`] reads it, and only to answer "is what
-    /// is running still what the row says". It is a hash rather than the values,
-    /// so this map is not a second place a token lives — see that function for
-    /// why the question needs asking at all.
-    secrets: HashMap<String, u64>,
 }
 
 /// The process-wide registry.
@@ -284,7 +261,6 @@ impl Registry {
     pub fn stop(&self, id: &str) {
         let mut state = self.lock();
         *state.generations.entry(id.to_string()).or_default() += 1;
-        state.secrets.remove(id);
         let removed = state.servers.remove(id);
         drop(state);
         if removed.is_some() {
@@ -312,47 +288,19 @@ impl Registry {
     /// Returns whether the handle was kept. A refused handle is dropped here,
     /// which fires its shutdown oneshot — so the listener the caller started
     /// goes away rather than outliving the row it was built from.
-    fn put_if_current(
-        &self,
-        id: &str,
-        generation: u64,
-        server: InProcessMcpServer,
-        secrets: u64,
-    ) -> bool {
+    fn put_if_current(&self, id: &str, generation: u64, server: InProcessMcpServer) -> bool {
         let mut state = self.lock();
         if state.generations.get(id).copied().unwrap_or_default() != generation {
             return false;
         }
         state.servers.insert(id.to_string(), server);
-        state.secrets.insert(id.to_string(), secrets);
         true
-    }
-
-    /// The fingerprint the server hosted under `id` was started with, or `None`
-    /// when nothing is hosted for it.
-    fn secrets(&self, id: &str) -> Option<u64> {
-        self.lock().secrets.get(id).copied()
     }
 
     /// Whether an integration is hosted right now. Nothing on the wire reads
     /// this; it exists so the lifecycle can be asserted.
     pub fn is_hosted(&self, id: &str) -> bool {
         self.lock().servers.contains_key(id)
-    }
-
-    /// The loopback URL a hosted server is listening on.
-    ///
-    /// Test-only, and it is how "did this reload actually restart anything"
-    /// is observed: `reload` binds a fresh port every time, so an unchanged URL
-    /// is proof that nothing was torn down. Not exposed outside tests because
-    /// nothing else needs it — `InProcessMcpServer` deliberately has no `Debug`,
-    /// and the URL is the one part of it that is safe to look at.
-    #[cfg(test)]
-    fn url(&self, id: &str) -> Option<String> {
-        self.lock()
-            .servers
-            .get(id)
-            .map(|server| server.url().to_string())
     }
 }
 
@@ -419,7 +367,7 @@ pub async fn reload(db_path: &Path, id: &str) -> Result<(), String> {
 async fn start_one(row: &HostingRow, generation: u64) -> Result<(), String> {
     let server = start_for_type(row).await?;
     let url = server.url().to_string();
-    if !registry().put_if_current(&row.id, generation, server, row.secrets_fingerprint()) {
+    if !registry().put_if_current(&row.id, generation, server) {
         log::info!(
             "integration MCP server discarded before it was recorded, \
              the integration was stopped while it started: id={:?} type={:?}",
@@ -1051,7 +999,7 @@ pub(super) fn google_oauth_token(
 /// projection in the port that reads the secret columns, and its charter is to
 /// read them *to build a tool server*. Two callers only want to know whether the
 /// type is one this process hosts, and both are on hot paths for rows it does
-/// not: [`can_host`] runs per chat turn, and [`reload_if_secrets_changed`] runs
+/// not: [`can_host`] runs per chat turn, and the reload paths run
 /// per poll of an OAuth dialog — which the Google, WhatsApp and detail pages all
 /// poll. Answering that question through the secret-carrying projection would
 /// pull an unrelated integration's token into memory to decide it belongs to
@@ -1167,7 +1115,7 @@ fn list_for_hosting(db_path: &Path) -> Result<Vec<HostingRow>, String> {
     Ok(out)
 }
 
-fn get_for_hosting(db_path: &Path, id: &str) -> Result<Option<HostingRow>, String> {
+pub(super) fn get_for_hosting(db_path: &Path, id: &str) -> Result<Option<HostingRow>, String> {
     let conn = crate::native::db::open_read_only(db_path)?;
     let sql = format!("{HOSTING_COLUMNS}\n     WHERE id = ?1");
     conn.query_row(&sql, [id], scan_hosting_row)
@@ -1244,84 +1192,6 @@ pub async fn reload_after_auth(db_path: &Path, id: &str) {
     }
 }
 
-/// Reload only if what the row says no longer matches what is hosted.
-///
-/// # The hole this fills, which #315 opened
-///
-/// Go's `handleOAuthToken` writes the token to the `auth` column and then calls
-/// `registry.Reload` — and `startProviderCallback` supports exactly `google` and
-/// `slack`. While neither was hosted here that was harmless, and
-/// `registry.rs`'s own header said so. **#315 made `slack` a hosted type**, so
-/// that `Reload` now reaches nothing and a Slack integration authenticated by
-/// OAuth would first be served at the next boot's [`start_all`]. **#313 made
-/// `google` one too**, which means this hook now covers *both* providers
-/// `startProviderCallback` supports — every OAuth integration in the product
-/// depends on it, and there is no longer a case it does not have to catch.
-///
-/// Google is also the one where being served late costs the most, and for a
-/// reason peculiar to it: a Google token *expires*. Slack's does not, so a Slack
-/// row served at the next boot is merely served late; a Google row carries an
-/// `expiry` that [`super::google::client::TokenSource`] reads, so a token first
-/// picked up hours later may already need the refresh this process would then
-/// have to make on the first tool call. That still works — it is what the refresh
-/// is for — but it turns a silent staleness into a visible one, which is worth
-/// knowing when reading a bug report about a slow first Google call.
-///
-/// [`reload_after_auth`] cannot cover it: that hook hangs off a *forwarded
-/// request*, and an OAuth token does not arrive on one. It is delivered by the
-/// browser to a callback server the **sidecar** opens on its own port, which
-/// this process never sees. The one part of the flow that does come through the
-/// proxy is the UI polling `GET /api/integrations/{id}/auth/status` while it
-/// waits, so that is where this hangs — which makes it **best-effort**: a user
-/// who closes the dialog before it completes is served at the next boot, as they
-/// were before. #318 owns the flow itself and is where that stops being true.
-///
-/// # Why conditional, where [`reload_after_auth`] is not
-///
-/// A poll is not an event. `reload` is unconditional by design — stop, then
-/// start, with a new port each time — so firing it per poll would restart the
-/// server every second the dialog is open and drop any in-flight `tools/call`
-/// with it. So this compares the row's current secrets against the ones the
-/// running server was started with and does nothing when they match. That covers
-/// every transition without churn: unauthenticated → authenticated (nothing
-/// hosted, now startable), a re-authentication that replaces the token
-/// (fingerprint moved), and a de-authentication (startable → not, which stops
-/// it).
-pub async fn reload_if_secrets_changed(db_path: &Path, id: &str) {
-    // The type first, through a projection that reads no secret: every page with
-    // an auth dialog polls this route, and most of those rows are types this
-    // process does not host.
-    match type_of(db_path, id) {
-        Ok(Some(integration_type)) if hosts_type(&integration_type) => {}
-        // Not ours, or deleted between the poll and this read. `stop` is the
-        // `DELETE` path's job and has already run; nothing to do here.
-        Ok(_) => return,
-        Err(e) => {
-            log::warn!("reloading integration {id:?} after an auth-status poll: {e}");
-            return;
-        }
-    }
-
-    let row = match get_for_hosting(db_path, id) {
-        Ok(Some(row)) => row,
-        Ok(None) => return,
-        Err(e) => {
-            log::warn!("reloading integration {id:?} after an auth-status poll: {e}");
-            return;
-        }
-    };
-
-    let want = row.is_startable().then(|| row.secrets_fingerprint());
-    if want == registry().secrets(id) {
-        return;
-    }
-
-    log::info!("integration {id:?} changed while its auth status was polled; reloading");
-    if let Err(e) = reload(db_path, id).await {
-        log::warn!("failed to reload integration server after auth: id={id:?} error={e}");
-    }
-}
-
 pub fn reload_blocking(db_path: &Path, id: &str) {
     let db_path = db_path.to_path_buf();
     let owned_id = id.to_string();
@@ -1382,96 +1252,6 @@ mod tests {
 
     fn github_credentials() -> String {
         format!(r#"{{"auth_mode":"pat","personal_access_token":"{PAT}"}}"#)
-    }
-
-    /// The poll-driven reload: it fires on a change and, crucially, **not**
-    /// otherwise.
-    ///
-    /// #315 opened the hole this fills — Go reloads after an OAuth token lands
-    /// and `slack` is now hosted here, but the token arrives on the sidecar's own
-    /// callback port, so the UI's polling of `auth/status` is the only part of
-    /// the flow this process sees. A poll is not an event, so the anti-churn half
-    /// is as load-bearing as the firing half: `reload` rebinds the port and drops
-    /// in-flight calls, and the dialog polls every second.
-    #[tokio::test]
-    async fn a_polled_auth_status_reloads_on_a_change_and_not_on_a_poll() {
-        let file = db();
-        // Unauthenticated, so not startable. Slack would be the true subject, but
-        // its starter needs a live token to be interesting; the condition under
-        // test is type-blind and github is the type these tests already seed.
-        insert(
-            &file,
-            "gh-oauth",
-            "github",
-            true,
-            None,
-            &github_credentials(),
-            "{}",
-        );
-
-        // Nothing hosted and nothing startable: the poll must be a no-op rather
-        // than an attempt.
-        reload_if_secrets_changed(file.path(), "gh-oauth").await;
-        assert!(!registry().is_hosted("gh-oauth"));
-
-        // The token lands — which is what Go's `handleOAuthToken` does, and what
-        // it then tells nobody about.
-        Connection::open(file.path())
-            .expect("open")
-            .execute(
-                "UPDATE integrations SET auth = ?1 WHERE id = 'gh-oauth'",
-                rusqlite::params![r#"{"login":"octocat"}"#],
-            )
-            .expect("authenticate");
-
-        reload_if_secrets_changed(file.path(), "gh-oauth").await;
-        assert!(
-            registry().is_hosted("gh-oauth"),
-            "the poll after the token landed must host it"
-        );
-        let first = registry()
-            .url("gh-oauth")
-            .expect("a hosted server has a url");
-
-        // …and every later poll must leave it exactly where it is. A changed
-        // port here would mean the dialog restarts the server once a second.
-        for _ in 0..3 {
-            reload_if_secrets_changed(file.path(), "gh-oauth").await;
-            assert_eq!(
-                registry().url("gh-oauth").as_deref(),
-                Some(first.as_str()),
-                "a poll that changed nothing must not rebind the port"
-            );
-        }
-
-        // A token *replaced* is a change, and must be picked up.
-        Connection::open(file.path())
-            .expect("open")
-            .execute(
-                "UPDATE integrations SET credentials = ?1 WHERE id = 'gh-oauth'",
-                rusqlite::params![r#"{"auth_mode":"pat","personal_access_token":"ghp-second"}"#],
-            )
-            .expect("re-authenticate");
-        reload_if_secrets_changed(file.path(), "gh-oauth").await;
-        assert!(registry().is_hosted("gh-oauth"));
-        assert_ne!(
-            registry().url("gh-oauth").as_deref(),
-            Some(first.as_str()),
-            "a replaced credential must restart the server"
-        );
-
-        // …and a de-authentication stops it.
-        Connection::open(file.path())
-            .expect("open")
-            .execute(
-                "UPDATE integrations SET auth = NULL WHERE id = 'gh-oauth'",
-                [],
-            )
-            .expect("de-authenticate");
-        reload_if_secrets_changed(file.path(), "gh-oauth").await;
-        assert!(!registry().is_hosted("gh-oauth"));
-
-        registry().stop("gh-oauth");
     }
 
     /// The whole lifecycle over the one type Rust hosts.
@@ -1695,7 +1475,7 @@ mod tests {
             .await
             .expect("a server to race with");
         assert!(
-            !registry().put_if_current("gh-race", generation, server, 0),
+            !registry().put_if_current("gh-race", generation, server),
             "a handle whose generation has moved must be refused"
         );
         assert!(!registry().is_hosted("gh-race"));
@@ -1705,7 +1485,7 @@ mod tests {
         let server = start_filtered_server(file.path(), "gh-race", &[])
             .await
             .expect("server");
-        assert!(registry().put_if_current("gh-race", generation, server, 0));
+        assert!(registry().put_if_current("gh-race", generation, server));
         assert!(registry().is_hosted("gh-race"));
         registry().stop("gh-race");
     }
