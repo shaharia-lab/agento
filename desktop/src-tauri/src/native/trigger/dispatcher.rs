@@ -78,8 +78,11 @@ pub fn handle_update(
 
 /// Run a blocking database call off the runtime's workers.
 ///
-/// `None` when the pool task itself failed, which the callers treat as "do not
-/// proceed" — the same answer a failed read gives.
+/// `None` when the pool task itself failed — a panic inside the closure. Each
+/// caller folds that into the answer a failed *read* already gives it, which is
+/// not the same answer everywhere: `process` stops, `execute_and_reply` sends
+/// the error reply, and the two message writes are best-effort in Go too and so
+/// ignore it.
 async fn blocking<T, F>(f: F) -> Option<T>
 where
     F: FnOnce() -> T + Send + 'static,
@@ -105,8 +108,10 @@ async fn process(db_path: &Path, integration_id: &str, bot_token: &str, update: 
     // Claimed before the rules are read, so a Telegram retry cannot run the
     // agent twice — see `receiver::claim_update` for why the claim is atomic
     // here where Go's is two statements.
-    // **Every database call here goes to the blocking pool.** `process` runs on
-    // an axum worker, and each of these opens a connection and may sit on
+    // **Every database call this module makes goes to the blocking pool.**
+    // (Not every call the *dispatch* makes: `run_headless` opens SQLite on the
+    // worker while building its options, which chat and the scheduler share
+    // verbatim.) `process` runs on an axum worker, and each of these opens a connection and may sit on
     // `db.rs`'s five-second `busy_timeout` while the session scan batch-writes —
     // ten of them at `MAX_CONCURRENT` is every worker on a four-core machine,
     // stalling the SPA and any SSE stream. `proxy.rs` puts native handlers on the
@@ -294,15 +299,14 @@ async fn execute_and_reply(
     };
 
     {
-        let (db, session, prompt, answer) = (
+        let (db, session, prompt) = (
             db_path.to_path_buf(),
             chat_session_id.clone(),
             prompt.to_string(),
-            result.answer.clone(),
         );
         let usage = result.clone();
         blocking(move || {
-            save_messages(&db, &session, &prompt, &answer);
+            save_messages(&db, &session, &prompt, &usage.answer);
             update_session_usage(&db, &session, &usage);
         })
         .await;
