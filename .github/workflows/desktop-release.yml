@@ -118,6 +118,11 @@ jobs:
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
+          # The Azure apt mirror has outages long enough to eat a whole step
+          # timeout in retries; drop it so apt goes straight to the canonical
+          # archive (or ports, on arm64).
+          sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com|https://archive.ubuntu.com|g; s|https?://azure\.ports\.ubuntu\.com|http://ports.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
