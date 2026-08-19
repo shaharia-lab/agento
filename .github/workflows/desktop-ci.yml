@@ -31,13 +31,24 @@ jobs:
   check:
     name: Typecheck, lint and build
     runs-on: ubuntu-22.04
+    # A hung step otherwise runs until GitHub's 6-hour cap: apt has stalled on
+    # a dead mirror socket twice (56 min and 3h42m of silence after
+    # "Get:5 ... jammy-security InRelease"), burning runner time and blocking
+    # the PR with a check that will never report.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
       - name: Install Linux build dependencies
+        # Azure's mirror regularly fails over to archive.ubuntu.com, and a
+        # stalled fetch there is the hang the timeouts above exist for — so
+        # give apt its own tight deadline and per-request timeouts + retries,
+        # which turn a dead mirror into a fast, retryable failure.
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          APT_OPTS='-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30'
+          sudo apt-get $APT_OPTS update
+          sudo apt-get $APT_OPTS install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
             libayatana-appindicator3-dev libxdo-dev libssl-dev \
             build-essential file
