@@ -14,6 +14,7 @@ import {
 import { Icon } from "../lib/icons";
 import type { Agent, ChatDetail, ChatMessage, ChatSession } from "../lib/types";
 import {
+  Dropdown,
   Empty,
   InspGroup,
   InspRow,
@@ -42,7 +43,13 @@ async function fetchDetail(id: string, signal: AbortSignal): Promise<ChatDetail>
   return { ...session, messages: raw.messages ?? [] };
 }
 
-export function ChatsView({ inspectorOpen }: { inspectorOpen: boolean }) {
+export function ChatsView({
+  inspectorOpen,
+  newChatNonce = 0,
+}: {
+  inspectorOpen: boolean;
+  newChatNonce?: number;
+}) {
   const chats = useResource<ChatSession[]>(
     (signal) => api.get<ChatSession[]>("/chats", signal),
     []
@@ -167,12 +174,27 @@ export function ChatsView({ inspectorOpen }: { inspectorOpen: boolean }) {
     autoSelected.current = true;
   }, []);
 
+  // The sidebar button, the native menu and ⌘N all land here: App bumps the
+  // nonce, and the view answers by opening a draft. 0 is "never asked".
+  const seenNonce = useRef(0);
+  useEffect(() => {
+    if (newChatNonce === seenNonce.current) return;
+    seenNonce.current = newChatNonce;
+    startNew();
+  }, [newChatNonce, startNew]);
+
   const send = useCallback(async () => {
     const content = draft.trim();
     if (!content || busy) return;
 
     let id = selected;
     if (!id) {
+      // An agent run without a working directory lands in whatever directory
+      // the server happened to start in — refuse to create the chat instead.
+      if (!newDir.trim()) {
+        setActionError("Set a working directory before starting the chat.");
+        return;
+      }
       try {
         const created = await api.post<ChatSession>("/chats", {
           agent_slug: newAgent,
@@ -363,23 +385,19 @@ export function ChatsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             </div>
 
             <div className="newchat">
-              <span className="selectwrap">
-                <select
-                  className="select select--sm chatpick"
-                  value={newAgent}
-                  onChange={(e) => setNewAgent(e.target.value)}
-                >
-                  <option value="">No agent — direct chat</option>
-                  {(agents.data ?? []).map((a) => (
-                    <option key={a.slug} value={a.slug}>
-                      {a.name || a.slug}
-                    </option>
-                  ))}
-                </select>
-                <span className="select__chevron">
-                  <Icon name="chevronUD" size={12} />
-                </span>
-              </span>
+              <Dropdown
+                small
+                value={newAgent}
+                onChange={setNewAgent}
+                ariaLabel="Agent"
+                options={[
+                  { value: "", label: "No agent — direct chat" },
+                  ...(agents.data ?? []).map((a) => ({
+                    value: a.slug,
+                    label: a.name || a.slug,
+                  })),
+                ]}
+              />
 
               <label className="field field--sm newchat__dir">
                 <span className="field__icon">
@@ -388,7 +406,7 @@ export function ChatsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                 <input
                   value={newDir}
                   onChange={(e) => setNewDir(e.target.value)}
-                  placeholder="Working directory (optional)"
+                  placeholder="Working directory (required)"
                   spellCheck={false}
                 />
               </label>
@@ -403,7 +421,7 @@ export function ChatsView({ inspectorOpen }: { inspectorOpen: boolean }) {
               <Empty
                 icon="sparkle"
                 title="Start the conversation"
-                text="Pick an agent and working directory, then send the first message. The chat is created when you send."
+                text="Pick an agent and a working directory, then send the first message. The chat is created when you send — a working directory is required."
               />
             </div>
 

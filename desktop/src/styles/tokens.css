@@ -67,6 +67,19 @@
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --dur-fast: 90ms;
   --dur-med: 160ms;
+
+  /* --- Hairline width ----------------------------------------------------- */
+  /* A 0.5px line only rasterizes on displays that have a physical half pixel.
+     On 1x screens (most Linux and Windows monitors) WebKit and WebView2 round
+     it away edge by edge, which is why every field looked borderless there —
+     so the hairline is 1 CSS px at 1x and a true half pixel on 2x+ displays. */
+  --hairline: 1px;
+}
+
+@media (min-resolution: 1.5dppx) {
+  :root {
+    --hairline: 0.5px;
+  }
 }
 
 /* ============================================================================
@@ -121,9 +134,9 @@
 
   /* Elevation — desktop shadows are tight and low-opacity */
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.07);
-  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.09), 0 0 0 0.5px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.16), 0 0 0 0.5px rgba(0, 0, 0, 0.08);
-  --shadow-pane: 0 0 0 0.5px rgba(0, 0, 0, 0.09), 0 1px 3px rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 2px 6px rgba(0, 0, 0, 0.09), 0 0 0 var(--hairline) rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 32px rgba(0, 0, 0, 0.16), 0 0 0 var(--hairline) rgba(0, 0, 0, 0.08);
+  --shadow-pane: 0 0 0 var(--hairline) rgba(0, 0, 0, 0.09), 0 1px 3px rgba(0, 0, 0, 0.05);
 
   --focus-ring: 0 0 0 3px var(--accent-soft), 0 0 0 1px var(--accent);
   color-scheme: light;
@@ -175,9 +188,9 @@
     --teal-soft: rgba(62, 192, 212, 0.16);
 
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 0 0.5px rgba(255, 255, 255, 0.07);
-    --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 0 0.5px rgba(255, 255, 255, 0.09);
-    --shadow-pane: 0 0 0 0.5px rgba(255, 255, 255, 0.07), 0 1px 3px rgba(0, 0, 0, 0.3);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 0 var(--hairline) rgba(255, 255, 255, 0.07);
+    --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 0 var(--hairline) rgba(255, 255, 255, 0.09);
+    --shadow-pane: 0 0 0 var(--hairline) rgba(255, 255, 255, 0.07), 0 1px 3px rgba(0, 0, 0, 0.3);
 
     color-scheme: dark;
   }
@@ -225,9 +238,9 @@
   --teal-soft: rgba(62, 192, 212, 0.16);
 
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 0 0.5px rgba(255, 255, 255, 0.07);
-  --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 0 0.5px rgba(255, 255, 255, 0.09);
-  --shadow-pane: 0 0 0 0.5px rgba(255, 255, 255, 0.07), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45), 0 0 0 var(--hairline) rgba(255, 255, 255, 0.07);
+  --shadow-lg: 0 12px 36px rgba(0, 0, 0, 0.6), 0 0 0 var(--hairline) rgba(255, 255, 255, 0.09);
+  --shadow-pane: 0 0 0 var(--hairline) rgba(255, 255, 255, 0.07), 0 1px 3px rgba(0, 0, 0, 0.3);
 
   color-scheme: dark;
 }

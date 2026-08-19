@@ -225,7 +225,7 @@ function statusOf(live: Live | null, tools: Record<string, ToolState>): string {
 
 /* --- Blocks -------------------------------------------------------------- */
 
-function Thinking({ text, defaultOpen }: { text: string; defaultOpen?: boolean }) {
+export function Thinking({ text, defaultOpen }: { text: string; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(defaultOpen ?? false);
   return (
     <div className="toolcall">
@@ -244,7 +244,7 @@ function Thinking({ text, defaultOpen }: { text: string; defaultOpen?: boolean }
   );
 }
 
-function ToolCall({
+export function ToolCall({
   name,
   input,
   state,
@@ -441,7 +441,7 @@ function PermissionPrompt({
 /* --- Text ---------------------------------------------------------------- */
 
 /** Paragraphs, plus fenced code lifted out so long output stays scannable. */
-function RichText({ text, caret }: { text: string; caret?: boolean }) {
+export function RichText({ text, caret }: { text: string; caret?: boolean }) {
   if (!text) return null;
   const parts = text.split(/```/);
   return (

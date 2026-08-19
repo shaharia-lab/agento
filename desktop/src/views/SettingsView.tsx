@@ -10,7 +10,7 @@ import { api, ApiError, qs } from "../lib/api";
 import { describeError, useResource, type Resource } from "../lib/hooks";
 import { dateTime, relativeTime, tildePath, usd } from "../lib/format";
 import { Icon, type IconName } from "../lib/icons";
-import { Checkbox, Empty, FormRow, Switch } from "../components/ui";
+import { Checkbox, Dropdown, Empty, FormRow, Switch } from "../components/ui";
 import { useHostInfo } from "../lib/host";
 import {
   UPDATE_PREF_OPTIONS,
@@ -476,22 +476,18 @@ function GeneralPane({
                 : undefined
           }
         >
-          <select
-            className="nselect"
+          <Dropdown
             style={{ maxWidth: 200 }}
             value={user.default_model}
-            onChange={(e) => onPatch({ default_model: e.target.value })}
+            onChange={(v) => onPatch({ default_model: v })}
             disabled={!!modelLock}
-          >
-            {MODELS.some((m) => m.value === user.default_model) ? null : (
-              <option value={user.default_model}>{user.default_model}</option>
-            )}
-            {MODELS.map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.label}
-              </option>
-            ))}
-          </select>
+            options={[
+              ...(MODELS.some((m) => m.value === user.default_model)
+                ? []
+                : [{ value: user.default_model, label: user.default_model }]),
+              ...MODELS,
+            ]}
+          />
         </FormRow>
 
         <FormRow
@@ -1133,21 +1129,18 @@ function AppearancePane({
       </FormRow>
 
       <FormRow label="Font size" help="Stored with your account. 0 keeps the system size.">
-        <select
-          className="nselect"
+        <Dropdown
           style={{ maxWidth: 160 }}
           value={String(user.appearance_font_size)}
-          onChange={(e) =>
-            onPatch({ appearance_font_size: Number(e.target.value) })
-          }
-        >
-          <option value="0">System default</option>
-          {[12, 13, 14, 15, 16, 17, 18].map((n) => (
-            <option key={n} value={String(n)}>
-              {n} px
-            </option>
-          ))}
-        </select>
+          onChange={(v) => onPatch({ appearance_font_size: Number(v) })}
+          options={[
+            { value: "0", label: "System default" },
+            ...[12, 13, 14, 15, 16, 17, 18].map((n) => ({
+              value: String(n),
+              label: `${n} px`,
+            })),
+          ]}
+        />
       </FormRow>
 
       <FormRow label="Font family" help="Blank uses the system UI font.">
@@ -1283,16 +1276,16 @@ function NotificationsPane({
         </FormRow>
 
         <FormRow label="Encryption">
-          <select
-            className="nselect"
+          <Dropdown
             style={{ maxWidth: 180 }}
             value={provider.encryption || "none"}
-            onChange={(e) => patchProvider({ encryption: e.target.value })}
-          >
-            <option value="none">None</option>
-            <option value="starttls">STARTTLS</option>
-            <option value="ssl_tls">SSL / TLS</option>
-          </select>
+            onChange={(v) => patchProvider({ encryption: v })}
+            options={[
+              { value: "none", label: "None" },
+              { value: "starttls", label: "STARTTLS" },
+              { value: "ssl_tls", label: "SSL / TLS" },
+            ]}
+          />
         </FormRow>
 
         <FormRow label="Username">

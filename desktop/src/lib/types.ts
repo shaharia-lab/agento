@@ -291,6 +291,56 @@ export interface ClaudeSessionSummary {
   unpriced_tokens?: number;
 }
 
+/** One content block of an assistant turn, normalized by the scanner. */
+export interface NormalizedBlock {
+  type: string; // "thinking" | "text" | "tool_use"
+  text?: string;
+  id?: string;
+  name?: string;
+  input?: unknown;
+}
+
+/** One conversation turn from a session transcript. */
+export interface ClaudeMessage {
+  uuid: string;
+  parent_uuid?: string;
+  type: string; // "user" | "assistant"
+  timestamp: string;
+  role?: string;
+  content?: string;
+  blocks?: NormalizedBlock[] | null;
+  usage?: TokenUsage | null;
+  git_branch?: string;
+  is_sidechain?: boolean;
+  children?: ClaudeMessage[] | null;
+}
+
+export interface ClaudeTodo {
+  content: string;
+  status: string; // "completed" | "in_progress" | "pending"
+  active_form?: string;
+}
+
+export interface ClaudeSubagent {
+  agent_id: string;
+  agent_type?: string;
+  description?: string;
+  tool_use_id?: string;
+  start_time: string;
+  last_activity: string;
+  message_count: number;
+  event_count: number;
+  usage: TokenUsage;
+  model?: string;
+}
+
+/** GET /api/claude-sessions/{id} — the summary plus the full transcript. */
+export interface ClaudeSessionDetail extends ClaudeSessionSummary {
+  messages: ClaudeMessage[] | null;
+  todos: ClaudeTodo[] | null;
+  subagents: ClaudeSubagent[] | null;
+}
+
 export interface SessionPage {
   items: ClaudeSessionSummary[];
   next_cursor: string;
