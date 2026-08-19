@@ -28,6 +28,7 @@ import {
   usd,
 } from "../lib/format";
 import { Icon } from "../lib/icons";
+import { openExternal } from "../lib/tauri";
 import {
   Dropdown,
   Empty,
@@ -1000,7 +1001,13 @@ function Inspector({
           <div className="sess-prs">
             {prs.map((pr) => (
               <div className="sess-pr" key={`${pr.pr_repository}#${pr.pr_number}`}>
-                <a href={pr.pr_url} target="_blank" rel="noreferrer">
+                <a
+                  href={pr.pr_url}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    openExternal(pr.pr_url);
+                  }}
+                >
                   #{pr.pr_number}
                 </a>
                 <span className="sess-pr__repo">{pr.pr_repository}</span>

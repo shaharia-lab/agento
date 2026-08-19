@@ -21,11 +21,11 @@
         "minHeight": 560,
         "resizable": true,
         "center": true,
-        "decorations": false,
+        "decorations": true,
         "transparent": false,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "dragDropEnabled": true,
+        "dragDropEnabled": false,
         "theme": null
       }
     ],
@@ -51,12 +51,12 @@
     "longDescription": "Agento runs your AI agents locally — scheduling them, giving them tools, and keeping every conversation and job on your own machine.",
     "linux": {
       "deb": {
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0", "libayatana-appindicator3-1"],
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"],
         "section": "utils",
         "priority": "optional"
       },
       "rpm": {
-        "depends": ["webkit2gtk4.1", "gtk3", "libappindicator-gtk3"],
+        "depends": ["webkit2gtk4.1", "gtk3"],
         "epoch": 0
       }
     },
