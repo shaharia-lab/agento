@@ -7,9 +7,11 @@
 //! Four things can happen and the loop selects over all of them: an event
 //! arrives from the CLI, the permission handler asks a question, the permission
 //! handler asks for an allow/deny, or the client disconnects. There is **no
-//! timeout** and **no heartbeat** — a long tool call sends nothing for minutes,
-//! by design, which is exactly why the disconnect arm has to be explicit rather
-//! than inferred from a failed send.
+//! timeout** — a long tool call sends nothing for minutes, by design, which is
+//! exactly why the disconnect arm has to be explicit rather than inferred from
+//! a failed send. There **is** a heartbeat: a one-second SSE comment frame,
+//! because WebKitGTK strands a frame that arrives right before a silence (see
+//! [`HEARTBEAT`]); it is transport padding, never an event.
 //!
 //! # Rules that are silent when broken
 //!
@@ -388,11 +390,14 @@ fn build_permission_handler(
             Box::pin(async move {
                 if tool_name == "AskUserQuestion" {
                     let raw = input.unwrap_or_else(empty_object);
+                    log::info!("AskUserQuestion can_use_tool received; queueing question frame");
                     // Non-blocking: a full buffer drops the notification, matching
                     // Go's `default:` arm. The wait below is then unbounded, which
                     // is how a dropped notification wedges the turn — reproduced
                     // rather than fixed, so the two implementations agree.
-                    let _ = notify.try_send(Notify::Question(raw));
+                    if let Err(e) = notify.try_send(Notify::Question(raw)) {
+                        log::error!("dropping AskUserQuestion notification: {e}");
+                    }
                     let mut rx = answers.input.lock().await;
                     return tokio::select! {
                         answer = rx.recv() => match answer {
@@ -451,8 +456,25 @@ async fn stream_events(
     let mut state = TurnState::default();
     let mut pending_input: Option<Box<RawValue>> = None;
 
+    // SSE comment heartbeat, every second for the whole turn. WebKitGTK's
+    // fetch delivers a frame that arrives after a quiet gap only once further
+    // bytes push it through on a long-lived connection — reproduced with
+    // `user_input_required`, which is by construction the last frame before an
+    // unbounded silence, so the prompt never surfaced in the desktop webview
+    // while the same stream read fine in Chrome and curl. A comment frame is
+    // invisible to the SSE parser (`parseFrame` drops `:`-lines) and keeps the
+    // stream from ever going quiet. Go does not send these; the divergence is
+    // transport-level padding, not an event.
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
+            _ = heartbeat.tick() => {
+                if out.send(Ok(HEARTBEAT.to_vec())).await.is_err() {
+                    return state;
+                }
+            }
             event = session.next_event() => {
                 let Some(event) = event else {
                     // The subprocess ended. This is the only "the turn is over"
@@ -474,6 +496,7 @@ async fn stream_events(
                         // A prompt from the handler supersedes one noticed in
                         // the assistant event, so the user is not asked twice.
                         pending_input = None;
+                        log::info!("emitting user_input_required (permission path)");
                         sse::json_frame("user_input_required", &UserInputRequired { input })
                     }
                     Notify::Permission(req) => sse::json_frame("permission_request", req),
@@ -496,6 +519,9 @@ async fn stream_events(
         }
     }
 }
+
+/// One SSE comment frame — protocol-visible bytes, event-invisible.
+const HEARTBEAT: &[u8] = b": hb\n\n";
 
 enum Flow {
     Continue,
@@ -584,14 +610,27 @@ async fn handle_event(
 
             // The answer arrives on the same channel the permission handler
             // waits on — whichever is listening consumes it, exactly as Go's
-            // shared `inputCh` does.
+            // shared `inputCh` does. This wait runs on the stream loop's own
+            // task, so the loop's heartbeat arm is not ticking — the wait
+            // carries its own, or the frame just emitted is exactly the one
+            // WebKitGTK strands (see `stream_events`).
             let answer = {
                 let mut rx = answers.input.lock().await;
-                tokio::select! {
-                    answer = rx.recv() => answer,
-                    // Same disconnect race as the permission handler: this wait
-                    // is unbounded and the user may simply close the tab.
-                    _ = out.closed() => None,
+                let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(1));
+                heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    tokio::select! {
+                        answer = rx.recv() => break answer,
+                        // Same disconnect race as the permission handler: this
+                        // wait is unbounded and the user may simply close the
+                        // tab.
+                        _ = out.closed() => break None,
+                        _ = heartbeat.tick() => {
+                            if out.send(Ok(HEARTBEAT.to_vec())).await.is_err() {
+                                break None;
+                            }
+                        }
+                    }
                 }
             };
             let Some(answer) = answer else {
