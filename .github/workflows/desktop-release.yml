@@ -177,6 +177,20 @@ jobs:
                -o -name '*.dmg' -o -name '*-setup.exe' \
                -o -name '*.app.tar.gz' -o -name '*.sig' \) \
             -exec cp {} out/ \;
+          # Tauri names the macOS updater tarball Agento.app.tar.gz with no
+          # arch — identical on both macOS legs, so the release job's merged
+          # artifact download would silently overwrite one arch's payload
+          # with the other's. Rename to the arch-suffixed form the manifest
+          # script keys platforms by.
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) suffix=aarch64 ;;
+            x86_64-apple-darwin)  suffix=x64 ;;
+            *)                    suffix= ;;
+          esac
+          if [ -n "$suffix" ] && [ -f out/Agento.app.tar.gz ]; then
+            mv out/Agento.app.tar.gz "out/Agento_${suffix}.app.tar.gz"
+            mv out/Agento.app.tar.gz.sig "out/Agento_${suffix}.app.tar.gz.sig"
+          fi
           ls -lh out
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
