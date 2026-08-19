@@ -46,6 +46,11 @@ jobs:
         # which turn a dead mirror into a fast, retryable failure.
         timeout-minutes: 10
         run: |
+          # When the Azure mirror is fully down, per-request timeouts alone
+          # still blow the step deadline: 30s x 3 retries x dozens of index
+          # files. Drop it from the mirror list so apt never contacts it.
+          sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com|https://archive.ubuntu.com|g; s|https?://azure\.ports\.ubuntu\.com|http://ports.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list 2>/dev/null || true
           APT_OPTS='-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30'
           sudo apt-get $APT_OPTS update
           sudo apt-get $APT_OPTS install -y \

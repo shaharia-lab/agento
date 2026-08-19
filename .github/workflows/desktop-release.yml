@@ -92,13 +92,15 @@ jobs:
           - label: linux-aarch64
             os: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
-          # macos-14 is Apple Silicon, macos-13 is Intel. Both ship: a
+          # macos-15 is Apple Silicon, macos-15-intel is Intel. Both ship: a
           # universal binary would be simpler but doubles every download.
+          # A job naming a retired image (macos-13 was one) queues forever
+          # rather than erroring — check actions/runner-images before bumping.
           - label: macos-aarch64
-            os: macos-14
+            os: macos-15
             target: aarch64-apple-darwin
           - label: macos-x86_64
-            os: macos-13
+            os: macos-15-intel
             target: x86_64-apple-darwin
           - label: windows-x86_64
             os: windows-latest
@@ -110,9 +112,17 @@ jobs:
       # Ubuntu 22.04 carries webkit2gtk-4.1, which Tauri 2 requires. The .deb
       # links against whatever the build host has, so building on the oldest
       # supported LTS is what keeps the package installable on newer ones.
+      # runner.os, not a matrix.os comparison: the arm64 runner is
+      # `ubuntu-22.04-arm`, which a string equality on `ubuntu-22.04` silently
+      # skipped — gdk-sys then failed against a runner with no GTK headers.
       - name: Install Linux build dependencies
-        if: matrix.os == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         run: |
+          # The Azure apt mirror has outages long enough to eat a whole step
+          # timeout in retries; drop it so apt goes straight to the canonical
+          # archive (or ports, on arm64).
+          sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com|https://archive.ubuntu.com|g; s|https?://azure\.ports\.ubuntu\.com|http://ports.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
