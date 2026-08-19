@@ -135,7 +135,10 @@ function Blocks({
     <>
       {blocks.map((b, i) => {
         if (b.type === "thinking") {
-          return <Thinking key={i} text={b.text ?? ""} />;
+          // Redacted thinking is stored as an empty block; an openable box
+          // with nothing inside reads as broken, so it is not rendered.
+          if (!b.text) return null;
+          return <Thinking key={i} text={b.text} />;
         }
         if (b.type === "tool_use") {
           return (
@@ -214,11 +217,19 @@ function statusOf(live: Live | null, tools: Record<string, ToolState>): string {
     if (b.type !== "tool_use") continue;
     const state = b.id ? tools[b.id] : undefined;
     if (state?.result !== undefined) break;
+    // AskUserQuestion never "runs": the CLI's permission round trip is what
+    // delivers the prompt, a few seconds after the call appears. Naming that
+    // wait keeps the gap from reading as a stuck tool.
+    if (b.name === "AskUserQuestion") return "Preparing a question for you…";
     return state?.progress
       ? `${b.name ?? "Tool"} — ${state.progress}`
       : `Running ${b.name ?? "tool"}…`;
   }
   if (live.thinking && !live.text) return "Thinking…";
+  // Redacted thinking sends no text; the token estimate is the only signal.
+  if (live.thinkingTokens && !live.text) {
+    return `Thinking… (~${live.thinkingTokens} tokens)`;
+  }
   if (live.text) return "Writing…";
   return "Working…";
 }

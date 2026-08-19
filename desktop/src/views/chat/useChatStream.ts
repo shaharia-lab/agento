@@ -19,6 +19,7 @@ import {
   readQuestions,
   readResult,
   readSystemInit,
+  readThinkingTokens,
   readToolProgress,
   readToolResults,
   type PermissionRequest,
@@ -43,9 +44,14 @@ export interface Live {
   /** Deltas for the block currently being produced. */
   text: string;
   thinking: string;
+  /**
+   * Running estimate of redacted thinking. Models that hide their thinking
+   * stream no text at all — this count is the only sign it is happening.
+   */
+  thinkingTokens: number;
 }
 
-const EMPTY: Live = { blocks: [], text: "", thinking: "" };
+const EMPTY: Live = { blocks: [], text: "", thinking: "", thinkingTokens: 0 };
 
 export interface ChatStream {
   /** The chat this turn belongs to, or null when nothing is in flight. */
@@ -139,6 +145,7 @@ export function useChatStream(
               if (!blocks.length) return;
               // The complete message supersedes the deltas that built it.
               update((l) => ({
+                ...l,
                 blocks: [...l.blocks, ...blocks],
                 text: "",
                 thinking: "",
@@ -177,6 +184,11 @@ export function useChatStream(
               return;
             }
             case "system": {
+              const thinkingTokens = readThinkingTokens(payload);
+              if (thinkingTokens !== undefined) {
+                update((l) => ({ ...l, thinkingTokens }));
+                return;
+              }
               const init = readSystemInit(payload);
               if (init) setSystem(init);
               return;
