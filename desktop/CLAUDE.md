@@ -243,7 +243,7 @@ including on the payload-free endpoints. `GET`/`HEAD`/`OPTIONS` are untouched.
 `api.ts` does this for you.
 
 **Desktop, not web.** The UI deliberately diverges from the Agento web app:
-three resizable panes per section, 13px type, 26px rows, hairline borders,
+three resizable panes per section, 14px type, 28px rows, hairline borders,
 status bar, focus-aware selection (accent when the window is focused, grey
 when not), ⌘K palette, no browser affordances. Reuse the existing CSS classes;
 new CSS goes in a per-view file imported by that view.

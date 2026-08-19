@@ -14,11 +14,16 @@
     "Roboto Mono", Menlo, Consolas, monospace;
 
   /* Desktop apps run denser than the web. 13px is the native baseline. */
-  --text-xs: 10.5px;
-  --text-sm: 11.5px;
-  --text-base: 13px;
-  --text-md: 14px;
-  --text-lg: 16px;
+  /* Reading tiers sit one step above the original 13px-base scale: side by
+     side with other desktop apps (Slack runs 15px body) the old scale read
+     visibly small. Whole pixels only — the old 10.5/11.5 fractions render
+     blurry at devicePixelRatio 1, the common case on Linux/Windows. The two
+     display tiers (xl/2xl, the KPI numerals) are deliberately unchanged. */
+  --text-xs: 11px;
+  --text-sm: 12px;
+  --text-base: 14px;
+  --text-md: 15px;
+  --text-lg: 17px;
   --text-xl: 20px;
   --text-2xl: 26px;
 
@@ -44,11 +49,12 @@
   --sp-10: 32px;
   --sp-11: 40px;
 
-  /* --- Control metrics --------------------------------------------------- */
-  --row-h: 26px;           /* sidebar / list row */
-  --row-h-lg: 56px;        /* chat list row with preview text */
-  --control-h: 24px;       /* buttons, inputs in toolbars */
-  --control-h-lg: 30px;    /* primary form fields */
+  /* --- Control metrics (scaled with the 14px base — 26/56/24/30 were tuned
+     for the old 13px type and clip or cramp the larger lines) -------------- */
+  --row-h: 28px;           /* sidebar / list row */
+  --row-h-lg: 60px;        /* chat list row with preview text */
+  --control-h: 26px;       /* buttons, inputs in toolbars */
+  --control-h-lg: 32px;    /* primary form fields */
   --titlebar-h: 38px;
   --toolbar-h: 40px;
   --statusbar-h: 24px;
