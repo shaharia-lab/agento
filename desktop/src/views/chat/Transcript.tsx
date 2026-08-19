@@ -217,6 +217,10 @@ function statusOf(live: Live | null, tools: Record<string, ToolState>): string {
     if (b.type !== "tool_use") continue;
     const state = b.id ? tools[b.id] : undefined;
     if (state?.result !== undefined) break;
+    // AskUserQuestion never "runs": the CLI's permission round trip is what
+    // delivers the prompt, a few seconds after the call appears. Naming that
+    // wait keeps the gap from reading as a stuck tool.
+    if (b.name === "AskUserQuestion") return "Preparing a question for you…";
     return state?.progress
       ? `${b.name ?? "Tool"} — ${state.progress}`
       : `Running ${b.name ?? "tool"}…`;
