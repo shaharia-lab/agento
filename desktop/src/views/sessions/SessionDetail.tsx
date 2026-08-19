@@ -161,7 +161,9 @@ function Message({ msg, agent }: { msg: ClaudeMessage; agent: string }) {
         {blocks ? (
           blocks.map((b, i) =>
             b.type === "thinking" ? (
-              <Thinking key={i} text={b.text ?? ""} />
+              // Redacted thinking is an empty block plus a signature — there
+              // is nothing to open, so no box is drawn.
+              b.text ? <Thinking key={i} text={b.text} /> : null
             ) : b.type === "tool_use" ? (
               <ToolCall
                 key={b.id ?? i}

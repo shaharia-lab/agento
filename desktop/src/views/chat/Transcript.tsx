@@ -135,7 +135,10 @@ function Blocks({
     <>
       {blocks.map((b, i) => {
         if (b.type === "thinking") {
-          return <Thinking key={i} text={b.text ?? ""} />;
+          // Redacted thinking is stored as an empty block; an openable box
+          // with nothing inside reads as broken, so it is not rendered.
+          if (!b.text) return null;
+          return <Thinking key={i} text={b.text} />;
         }
         if (b.type === "tool_use") {
           return (
@@ -219,6 +222,10 @@ function statusOf(live: Live | null, tools: Record<string, ToolState>): string {
       : `Running ${b.name ?? "tool"}…`;
   }
   if (live.thinking && !live.text) return "Thinking…";
+  // Redacted thinking sends no text; the token estimate is the only signal.
+  if (live.thinkingTokens && !live.text) {
+    return `Thinking… (~${live.thinkingTokens} tokens)`;
+  }
   if (live.text) return "Writing…";
   return "Working…";
 }

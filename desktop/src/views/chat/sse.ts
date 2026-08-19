@@ -70,7 +70,11 @@ export function readBlocks(payload: unknown): MessageBlock[] {
     const type = str(raw.type);
     if (!type) continue;
     if (type === "thinking") {
-      out.push({ type, text: str(raw.thinking) ?? str(raw.text) ?? "" });
+      // Current models redact thinking: the block arrives as `thinking: ""`
+      // plus a signature. An empty block would render as an openable box with
+      // nothing inside, so it is dropped here.
+      const text = str(raw.thinking) ?? str(raw.text) ?? "";
+      if (text) out.push({ type, text });
     } else if (type === "text") {
       out.push({ type, text: str(raw.text) ?? "" });
     } else if (type === "tool_use") {
@@ -181,6 +185,17 @@ export interface SystemInit {
   tools: string[];
 }
 
+/**
+ * Redacted thinking sends no text, only a running token estimate
+ * (`system`/`thinking_tokens`); it is the one signal that thinking is
+ * happening at all.
+ */
+export function readThinkingTokens(payload: unknown): number | undefined {
+  if (!isRecord(payload) || payload.subtype !== "thinking_tokens")
+    return undefined;
+  return num(payload.estimated_tokens);
+}
+
 export function readSystemInit(payload: unknown): SystemInit | undefined {
   if (!isRecord(payload) || payload.subtype !== "init") return undefined;
   return {
@@ -206,8 +221,18 @@ export interface QuestionItem {
 }
 
 export function readQuestions(payload: unknown): QuestionItem[] {
+  // The CLI disables AskUserQuestion in SDK sessions, so the call this frame
+  // carries is usually one the model emitted freehand — and a freehand input
+  // routinely arrives with `questions` (or the whole input) as a JSON-encoded
+  // *string* rather than an array. Parsing it is the difference between a
+  // prompt with options and the bare "Type your answer…" box.
+  let input = pick(payload, "input");
+  if (typeof input === "string") input = parseData(input);
+  let questions = pick(input, "questions");
+  if (typeof questions === "string") questions = parseData(questions);
+
   const out: QuestionItem[] = [];
-  for (const raw of arr(pick(payload, "input", "questions"))) {
+  for (const raw of arr(questions)) {
     if (!isRecord(raw)) continue;
     out.push({
       question: str(raw.question) ?? "",
