@@ -22,6 +22,7 @@ import {
   Segmented,
   Splitter,
 } from "../components/ui";
+import { IS_TAURI, pickDirectory } from "../lib/tauri";
 import { Composer } from "./chat/Composer";
 import { Transcript } from "./chat/Transcript";
 import { useChatStream } from "./chat/useChatStream";
@@ -430,6 +431,21 @@ export function ChatsView({
                   spellCheck={false}
                 />
               </label>
+              {IS_TAURI && (
+                <button
+                  className="btn"
+                  title="Browse for a folder"
+                  onClick={async () => {
+                    const picked = await pickDirectory(
+                      "Choose working directory",
+                      newDir
+                    );
+                    if (picked) setNewDir(picked);
+                  }}
+                >
+                  Browse…
+                </button>
+              )}
               {agents.error && (
                 <span className="newchat__note">
                   Agents unavailable — {agents.error}

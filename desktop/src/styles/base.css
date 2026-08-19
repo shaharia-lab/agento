@@ -91,6 +91,9 @@ a {
 /* --- Scrollbars: overlay style, appear on hover, never reserve layout ----- */
 .scroll {
   overflow-y: auto;
+  /* body's overscroll-behavior does not reach nested scrollers, so without
+     this macOS rubber-bands inside every pane — a web tell. */
+  overscroll-behavior: contain;
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
   transition: scrollbar-color var(--dur-med);

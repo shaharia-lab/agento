@@ -5,7 +5,7 @@ import { useHostInfo } from "../lib/host";
 import type { VersionInfo } from "../lib/types";
 import { Icon } from "../lib/icons";
 import { dateTime } from "../lib/format";
-import { IS_TAURI } from "../lib/tauri";
+import { IS_TAURI, openExternal } from "../lib/tauri";
 import {
   RELEASES_URL,
   checkForUpdate,
@@ -69,7 +69,7 @@ export function AboutView() {
     }
   };
 
-  const open = (url: string) => window.open(url, "_blank", "noopener");
+  const open = (url: string) => void openExternal(url);
   const busy = state.kind === "checking" || state.kind === "downloading";
 
   return (

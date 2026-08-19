@@ -11,6 +11,7 @@ import { describeError, useResource, type Resource } from "../lib/hooks";
 import { dateTime, relativeTime, tildePath, usd } from "../lib/format";
 import { Icon, type IconName } from "../lib/icons";
 import { Checkbox, Dropdown, Empty, FormRow, Switch } from "../components/ui";
+import { IS_TAURI, openExternal, pickDirectory } from "../lib/tauri";
 import { useHostInfo } from "../lib/host";
 import {
   UPDATE_PREF_OPTIONS,
@@ -457,7 +458,20 @@ function GeneralPane({
             </label>
             <button
               className="btn btn--lg"
-              onClick={() => setBrowsing(true)}
+              onClick={async () => {
+                // Prefer the OS's own folder picker; the in-app browser is
+                // the fallback for a plain browser tab (and it also depends
+                // on /api/fs, which is Unix-only).
+                if (!IS_TAURI) {
+                  setBrowsing(true);
+                  return;
+                }
+                const picked = await pickDirectory(
+                  "Choose working directory",
+                  user.default_working_dir
+                );
+                if (picked) onPatch({ default_working_dir: picked });
+              }}
               disabled={!!dirLock}
             >
               <Icon name="folder" size={14} />
@@ -1856,7 +1870,13 @@ function VersionSection() {
               </span>
               <span>
                 Version {check.latest_version} is available.{" "}
-                <a href={check.release_url} target="_blank" rel="noreferrer">
+                <a
+                  href={check.release_url}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    openExternal(check.release_url);
+                  }}
+                >
                   Release notes
                 </a>
               </span>

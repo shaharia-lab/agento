@@ -18,6 +18,7 @@
     "core:window:allow-set-theme",
     "core:event:default",
     "log:default",
+    "dialog:default",
     "opener:allow-open-url",
     "updater:default",
     "process:allow-restart"

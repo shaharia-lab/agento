@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import { describeError, useResource } from "../lib/hooks";
 import { dateTime, relativeTime } from "../lib/format";
 import { Icon } from "../lib/icons";
-import { IS_TAURI } from "../lib/tauri";
+import { openExternal } from "../lib/tauri";
 import {
   Checkbox,
   Dropdown,
@@ -41,29 +41,6 @@ type Selection =
   | { kind: "provider"; type: string };
 
 type Services = Record<string, ServiceConfig>;
-
-/**
- * Open a URL in the user's real browser.
- *
- * An OAuth consent screen must not run inside the app's own webview: the user
- * cannot see the address bar to check who is asking, and the provider's session
- * cookies would live in a container that is thrown away. The opener plugin is
- * optional, so its absence falls back rather than failing.
- */
-async function openExternal(url: string): Promise<void> {
-  if (IS_TAURI) {
-    try {
-      const { openUrl } = await import("@tauri-apps/plugin-opener");
-      await openUrl(url);
-      return;
-    } catch (err) {
-      // Falling back keeps the flow usable, but in the webview the user loses
-      // the address bar they would otherwise check before consenting.
-      console.warn("opener plugin unavailable, falling back to window.open", err);
-    }
-  }
-  window.open(url, "_blank", "noopener,noreferrer");
-}
 
 function emptyServices(provider: Provider, on: boolean): Services {
   const out: Services = {};
