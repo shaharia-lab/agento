@@ -345,6 +345,25 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
     );
   }, [openId, items, lastSelected]);
 
+  // Single click selects, and the transcript opens on an explicit action:
+  // double-click, the inspector's "View session", or Enter. Rows never take
+  // focus, so Enter is only claimed while nothing focusable holds it — a
+  // focused button or the search field keeps its own Enter.
+  useEffect(() => {
+    if (openId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Enter" || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey)
+        return;
+      const active = document.activeElement;
+      if (active && active !== document.body) return;
+      if (!selectedId) return;
+      e.preventDefault();
+      setOpenId(selectedId);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openId, selectedId]);
+
   // A native list always has a selection: take the first row whenever the
   // current one is not among the loaded rows.
   useEffect(() => {
@@ -645,7 +664,8 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                           className={
                             s.session_id === selectedId ? "is-selected" : ""
                           }
-                          onClick={() => {
+                          onClick={() => select(s)}
+                          onDoubleClick={() => {
                             select(s);
                             setOpenId(s.session_id);
                           }}
@@ -776,6 +796,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                   busy={busy}
                   error={actionError}
                   continuedChat={continuedChat}
+                  onOpen={(s) => setOpenId(s.session_id)}
                   onToggleFavorite={toggleFavorite}
                   onContinue={continueInChat}
                 />
@@ -797,6 +818,7 @@ function Inspector({
   busy,
   error,
   continuedChat,
+  onOpen,
   onToggleFavorite,
   onContinue,
 }: {
@@ -804,6 +826,7 @@ function Inspector({
   busy: "favorite" | "continue" | undefined;
   error: string | undefined;
   continuedChat: string | undefined;
+  onOpen(s: ClaudeSessionSummary): void;
   onToggleFavorite(s: ClaudeSessionSummary): void;
   onContinue(s: ClaudeSessionSummary): void;
 }) {
@@ -989,6 +1012,10 @@ function Inspector({
 
       <InspGroup title="Actions">
         <div className="sess-actions">
+          <button className="btn btn--primary" onClick={() => onOpen(session)}>
+            <Icon name="chat" size={13} />
+            View session
+          </button>
           <button
             className="btn"
             disabled={busy !== undefined}
