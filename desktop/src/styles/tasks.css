@@ -4,44 +4,6 @@
    affordances. Everything else reuses the existing classes.
    ========================================================================== */
 
-/* --- Native select, dressed as the app's .select -------------------------- */
-.selectwrap {
-  position: relative;
-  display: flex;
-  align-items: center;
-  min-width: 0;
-}
-
-.selectfield {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 100%;
-  height: var(--control-h-lg);
-  padding: 0 var(--sp-8) 0 var(--sp-5);
-  border-radius: var(--r-md);
-  background: var(--bg-raised);
-  box-shadow: 0 0 0 0.5px var(--line-strong), var(--shadow-sm);
-  font-size: var(--text-base);
-  color: var(--fg);
-  cursor: default;
-  transition: background var(--dur-fast), box-shadow var(--dur-fast);
-}
-.selectfield:hover {
-  background: var(--bg-hover);
-}
-.selectfield:focus-visible {
-  box-shadow: var(--focus-ring);
-}
-
-.selectwrap--sm .selectfield {
-  height: var(--control-h);
-  padding-left: var(--sp-4);
-  font-size: var(--text-sm);
-}
-.selectwrap--sm .select__chevron {
-  right: var(--sp-3);
-}
-
 /* --- Field sizing for the schedule editor -------------------------------- */
 .inline {
   display: flex;

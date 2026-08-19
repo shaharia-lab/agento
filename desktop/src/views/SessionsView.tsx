@@ -28,7 +28,15 @@ import {
   usd,
 } from "../lib/format";
 import { Icon } from "../lib/icons";
-import { Empty, InspGroup, InspRow, Search, Splitter } from "../components/ui";
+import {
+  Dropdown,
+  Empty,
+  InspGroup,
+  InspRow,
+  Search,
+  Splitter,
+} from "../components/ui";
+import { SessionDetail } from "./sessions/SessionDetail";
 import "../styles/sessions.css";
 
 /**
@@ -314,6 +322,8 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
   const [selectedId, setSelectedId] = useState<string>();
   const [lastSelected, setLastSelected] = useState<ClaudeSessionSummary>();
+  /** Session whose transcript fills the pane; unset shows the table. */
+  const [openId, setOpenId] = useState<string>();
 
   // Prefer the row in the current page set so favourite toggles show through;
   // fall back to the last selection while a reload has emptied the table.
@@ -326,6 +336,33 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
     setSelectedId(s.session_id);
     setLastSelected(s);
   }, []);
+
+  const openSession = useMemo(() => {
+    if (!openId) return undefined;
+    return (
+      items.find((s) => s.session_id === openId) ??
+      (lastSelected?.session_id === openId ? lastSelected : undefined)
+    );
+  }, [openId, items, lastSelected]);
+
+  // Single click selects, and the transcript opens on an explicit action:
+  // double-click, the inspector's "View session", or Enter. Rows never take
+  // focus, so Enter is only claimed while nothing focusable holds it — a
+  // focused button or the search field keeps its own Enter.
+  useEffect(() => {
+    if (openId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Enter" || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey)
+        return;
+      const active = document.activeElement;
+      if (active && active !== document.body) return;
+      if (!selectedId) return;
+      e.preventDefault();
+      setOpenId(selectedId);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [openId, selectedId]);
 
   // A native list always has a selection: take the first row whenever the
   // current one is not among the loaded rows.
@@ -440,6 +477,13 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   return (
     <div className="panes">
       <div className="pane-detail">
+        {openSession ? (
+          <SessionDetail
+            session={openSession}
+            onBack={() => setOpenId(undefined)}
+          />
+        ) : (
+          <>
         <div className="toolbar">
           <div style={{ width: 260, display: "flex" }}>
             <Search
@@ -450,6 +494,8 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
           </div>
 
           <Dropdown
+            small
+            className="sess-select"
             label={
               filters.project
                 ? projectLabel(projectOptions, filters.project)
@@ -459,14 +505,18 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             onChange={(v) => patchFilters({ project: v })}
             options={[
               { value: "", label: "All projects" },
+              // The server filters on project_path — the decoded path, exactly.
+              // encoded_name silently matches nothing.
               ...projectOptions.map((p) => ({
-                value: p.encoded_name,
+                value: p.decoded_path,
                 label: `${p.decoded_path} (${p.session_count})`,
               })),
             ]}
           />
 
           <Dropdown
+            small
+            className="sess-select"
             label={`Sort: ${
               SORTS.find((s) => s.value === filters.sort)?.label ?? "Recent"
             }`}
@@ -615,6 +665,10 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                             s.session_id === selectedId ? "is-selected" : ""
                           }
                           onClick={() => select(s)}
+                          onDoubleClick={() => {
+                            select(s);
+                            setOpenId(s.session_id);
+                          }}
                         >
                           <td title={s.display_title}>
                             <span className="sess-title">
@@ -726,6 +780,8 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             </button>
           </div>
         ) : null}
+          </>
+        )}
       </div>
 
       {inspectorOpen && (
@@ -740,6 +796,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                   busy={busy}
                   error={actionError}
                   continuedChat={continuedChat}
+                  onOpen={(s) => setOpenId(s.session_id)}
                   onToggleFavorite={toggleFavorite}
                   onContinue={continueInChat}
                 />
@@ -761,6 +818,7 @@ function Inspector({
   busy,
   error,
   continuedChat,
+  onOpen,
   onToggleFavorite,
   onContinue,
 }: {
@@ -768,6 +826,7 @@ function Inspector({
   busy: "favorite" | "continue" | undefined;
   error: string | undefined;
   continuedChat: string | undefined;
+  onOpen(s: ClaudeSessionSummary): void;
   onToggleFavorite(s: ClaudeSessionSummary): void;
   onContinue(s: ClaudeSessionSummary): void;
 }) {
@@ -953,6 +1012,10 @@ function Inspector({
 
       <InspGroup title="Actions">
         <div className="sess-actions">
+          <button className="btn btn--primary" onClick={() => onOpen(session)}>
+            <Icon name="chat" size={13} />
+            View session
+          </button>
           <button
             className="btn"
             disabled={busy !== undefined}
@@ -996,44 +1059,6 @@ function Inspector({
 /* --- Toolbar dropdown ----------------------------------------------------- */
 
 function projectLabel(options: ClaudeProject[], value: string): string {
-  const hit = options.find((p) => p.encoded_name === value);
+  const hit = options.find((p) => p.decoded_path === value);
   return hit ? hit.decoded_path : value;
-}
-
-/**
- * The shared <Select> is display-only, so the toolbar wears its chrome over a
- * real <select> — the menu is then the platform's own.
- */
-function Dropdown({
-  label,
-  value,
-  onChange,
-  options,
-}: {
-  label: string;
-  value: string;
-  onChange(v: string): void;
-  options: { value: string; label: string }[];
-}) {
-  return (
-    <span className="select select--sm sess-select">
-      <span className="sess-select__value" title={label}>
-        {label}
-      </span>
-      <select
-        className="sess-select__native"
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-      <span className="select__chevron">
-        <Icon name="chevronUD" size={12} />
-      </span>
-    </span>
-  );
 }

@@ -6,6 +6,7 @@ import { Icon } from "../lib/icons";
 import { IS_TAURI } from "../lib/tauri";
 import {
   Checkbox,
+  Dropdown,
   Empty,
   InspGroup,
   InspRow,
@@ -1220,18 +1221,16 @@ function RuleForm({
           />
         </label>
         {agents.length > 0 ? (
-          <select
-            className="nselect nselect--sm"
+          <Dropdown
+            small
             value={draft.agent_slug}
-            onChange={(e) => onChange({ ...draft, agent_slug: e.target.value })}
-          >
-            <option value="">Choose an agent…</option>
-            {agents.map((a) => (
-              <option key={a.slug} value={a.slug}>
-                {a.name}
-              </option>
-            ))}
-          </select>
+            onChange={(v) => onChange({ ...draft, agent_slug: v })}
+            placeholder="Choose an agent…"
+            options={[
+              { value: "", label: "Choose an agent…" },
+              ...agents.map((a) => ({ value: a.slug, label: a.name })),
+            ]}
+          />
         ) : (
           <label className="field field--sm" style={{ flex: 1 }}>
             <input

@@ -79,6 +79,15 @@ a {
   border-radius: var(--r-sm);
 }
 
+/* A wrapper that paints its own focus-within ring speaks for its control.
+   Text inputs match :focus-visible even on mouse focus, so without this the
+   global ring draws a second ring nested inside the wrapper's. */
+.field input:focus-visible,
+.search input:focus-visible,
+.composer__inner :focus-visible {
+  box-shadow: none;
+}
+
 /* --- Scrollbars: overlay style, appear on hover, never reserve layout ----- */
 .scroll {
   overflow-y: auto;

@@ -8,7 +8,14 @@ import type {
   ClaudeProject,
   InsightsSummary,
 } from "../lib/types";
-import { Empty, InspGroup, InspRow, Segmented, Splitter } from "../components/ui";
+import {
+  Dropdown,
+  Empty,
+  InspGroup,
+  InspRow,
+  Segmented,
+  Splitter,
+} from "../components/ui";
 import {
   RANGE_OPTIONS,
   TZ,
@@ -266,20 +273,21 @@ function ProjectFilter({
   );
 
   return (
-    <select
-      className="select select--sm a-select"
+    <Dropdown
+      small
+      className="a-select"
       value={value}
-      onChange={(e) => onChange(e.target.value)}
-      aria-label="Project filter"
-      title={value ? projectLabel(value) : "All projects"}
-    >
-      <option value="">All projects</option>
-      {visible.map((p) => (
-        <option key={p.encoded_name} value={p.decoded_path}>
-          {projectLabel(p.decoded_path)} ({p.session_count})
-        </option>
-      ))}
-    </select>
+      onChange={onChange}
+      ariaLabel="Project filter"
+      label={value ? projectLabel(value) : "All projects"}
+      options={[
+        { value: "", label: "All projects" },
+        ...visible.map((p) => ({
+          value: p.decoded_path,
+          label: `${projectLabel(p.decoded_path)} (${p.session_count})`,
+        })),
+      ]}
+    />
   );
 }
 
