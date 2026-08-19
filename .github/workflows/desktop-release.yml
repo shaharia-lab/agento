@@ -110,8 +110,11 @@ jobs:
       # Ubuntu 22.04 carries webkit2gtk-4.1, which Tauri 2 requires. The .deb
       # links against whatever the build host has, so building on the oldest
       # supported LTS is what keeps the package installable on newer ones.
+      # runner.os, not a matrix.os comparison: the arm64 runner is
+      # `ubuntu-22.04-arm`, which a string equality on `ubuntu-22.04` silently
+      # skipped — gdk-sys then failed against a runner with no GTK headers.
       - name: Install Linux build dependencies
-        if: matrix.os == 'ubuntu-22.04'
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
