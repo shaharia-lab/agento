@@ -3,11 +3,29 @@ name: Desktop Release
 # Builds the native installers for the Tauri desktop app and publishes the
 # update manifest the in-app updater reads.
 #
-# Tauri cannot cross-compile its bundles: a .dmg needs macOS, an .msi needs
+# Tauri cannot cross-compile its bundles: a .dmg needs macOS, an .exe needs
 # Windows, a .deb needs Linux. So the matrix is one runner per target OS.
 #
 # Releases are cut from the `desktop` branch, not `main`, until the two merge.
-# Tag with `desktop-v0.1.0` on `desktop` to publish.
+# Tag with `desktop-v0.1.0` on `desktop` to build. The flow has a deliberate
+# human gate in the middle:
+#
+#   tag push        -> guard + build matrix -> DRAFT release with installers
+#                      and `latest.json` staged as one of its assets. Draft
+#                      assets are not publicly downloadable, so nothing has
+#                      shipped yet — installed apps cannot even fetch it.
+#   publish draft   -> the `release: published` event runs `promote`, which
+#                      copies the staged `latest.json` to the fixed
+#                      `desktop-latest` tag. That URL is what every installed
+#                      app polls, so THIS is the moment a release goes live.
+#
+# Publishing the manifest immediately at build time would point updaters at
+# draft asset URLs that 404 until someone remembers to publish the draft —
+# every installed app would see "update available" and fail the download.
+#
+# A prerelease tag (`desktop-v0.1.0-rc.1`) builds and drafts identically and
+# is auto-marked prerelease, but is never promoted: release candidates are
+# shareable from the versioned release page without being pushed to updaters.
 on:
   push:
     tags: ["desktop-v*"]
@@ -17,17 +35,50 @@ on:
         description: "Build installers without creating a release"
         type: boolean
         default: true
+  release:
+    types: [published]
 
+# The event name is part of the group so publishing a draft (a `release`
+# event carrying the same tag ref) can never cancel a build run in flight.
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  group: desktop-release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
+  # The installed app compares the version baked into it at build time (from
+  # tauri.conf.json) against the manifest's version (taken from the tag). If
+  # the tag says 0.1.1 but the conf still says 0.1.0, every "updated" install
+  # keeps reporting 0.1.0 and is re-offered the same update forever — so a
+  # mismatched tag must never reach the build matrix.
+  guard:
+    name: Tag matches tauri.conf.json
+    if: github.event_name != 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - name: Check the tag against the bundled version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          case "$tag" in
+            desktop-v*) ;;
+            *) echo "not a desktop-v* tag build; nothing to check"; exit 0 ;;
+          esac
+          tag_version="${tag#desktop-v}"
+          conf_version="$(python3 -c 'import json; print(json.load(open("desktop/src-tauri/tauri.conf.json"))["version"])')"
+          if [ "$tag_version" != "$conf_version" ]; then
+            echo "::error::tag ${tag} says ${tag_version} but desktop/src-tauri/tauri.conf.json says ${conf_version}. Bump the conf and re-tag, or the shipped app will re-offer itself as an update forever."
+            exit 1
+          fi
+          echo "ok: ${tag_version}"
+
   build:
     name: ${{ matrix.label }}
+    needs: guard
+    if: github.event_name != 'release'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -87,6 +138,9 @@ jobs:
         working-directory: desktop
         run: npm ci
 
+      # bundle.targets in tauri.conf.json lists exactly what ships — notably
+      # NSIS and not MSI on Windows, since the updater manifest expects the
+      # -setup.exe and a built-but-dropped .msi only wasted CI time.
       - name: Build installers
         working-directory: desktop
         run: npx tauri build --target ${{ matrix.target }}
@@ -120,9 +174,9 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Publish release
+    name: Draft release
     needs: build
-    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -132,8 +186,19 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: Release metadata
+        id: meta
+        run: |
+          version="${GITHUB_REF_NAME#desktop-v}"
+          # A prerelease suffix (desktop-v0.1.0-rc.1) marks the draft as a
+          # prerelease, which is one of the two things keeping `promote` from
+          # ever pushing it to updaters.
+          case "$version" in
+            *-*) echo "prerelease=true" >>"$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >>"$GITHUB_OUTPUT" ;;
+          esac
+
       - name: Build update manifest
-        id: manifest
         run: |
           python3 .github/scripts/build-update-manifest.py \
             --artifacts artifacts \
@@ -142,8 +207,13 @@ jobs:
             --output artifacts/latest.json
           cat artifacts/latest.json
 
-      # The versioned release: what people download.
-      - name: Publish release
+      # The versioned release: what people download. It is a DRAFT — a human
+      # vets the installers before anything ships, and draft assets are not
+      # publicly downloadable. That is also why latest.json is only STAGED
+      # here rather than published to desktop-latest now: a live manifest
+      # pointing at draft asset URLs would make every installed app report an
+      # update it cannot download. Publishing this draft fires `promote`.
+      - name: Publish draft release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           files: |
@@ -154,7 +224,9 @@ jobs:
             artifacts/*-setup.exe
             artifacts/*.app.tar.gz
             artifacts/*.sig
+            artifacts/latest.json
           draft: true
+          prerelease: ${{ steps.meta.outputs.prerelease }}
           generate_release_notes: true
           body: |
             Desktop builds of Agento.
@@ -174,17 +246,53 @@ jobs:
 
             Requires the Claude Code CLI to be installed and signed in.
 
+  # Runs when a human publishes the draft. Promotion, not regeneration: the
+  # manifest was built and signed beside the artifacts it points at, and this
+  # job only copies it to the fixed URL the updater polls. The `if` filters
+  # out everything else that flows through `release: published` — the Go
+  # server's v* releases, desktop-latest's own publication, and any release
+  # marked prerelease; the version check below catches an rc tag even if
+  # someone unticked the prerelease box before publishing.
+  promote:
+    name: Promote update manifest
+    if: >-
+      github.event_name == 'release' &&
+      !github.event.release.prerelease &&
+      startsWith(github.event.release.tag_name, 'desktop-v')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Download the staged manifest
+        run: |
+          version="${TAG#desktop-v}"
+          case "$version" in
+            *-*)
+              echo "::error::${TAG} is a prerelease tag published without the prerelease flag; refusing to promote it to desktop-latest."
+              exit 1
+              ;;
+          esac
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern latest.json --output latest.json
+          python3 - "$version" <<'EOF'
+          import json, sys
+          version = sys.argv[1]
+          manifest = json.load(open("latest.json"))
+          if manifest["version"] != version:
+              sys.exit(f"staged manifest says {manifest['version']!r}, tag says {version!r}")
+          print(f"promoting {version}: {', '.join(sorted(manifest['platforms']))}")
+          EOF
+
       # A fixed tag so the updater has a stable manifest URL. Marked as a
       # prerelease so it never displaces the real "Latest release" on the repo
       # page — asset download URLs work for prereleases just the same.
-      - name: Publish update manifest
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          files: artifacts/latest.json
-          tag_name: desktop-latest
-          name: Desktop update manifest
-          body: |
-            Machine-readable manifest the Agento desktop updater polls.
-            Not a download — see the `desktop-v*` releases for installers.
-          prerelease: true
-          draft: false
+      - name: Publish to desktop-latest
+        run: |
+          if ! gh release view desktop-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create desktop-latest --repo "$GITHUB_REPOSITORY" \
+              --prerelease --title "Desktop update manifest" \
+              --notes "Machine-readable manifest the Agento desktop updater polls.
+          Not a download — see the \`desktop-v*\` releases for installers."
+          fi
+          gh release upload desktop-latest latest.json --clobber --repo "$GITHUB_REPOSITORY"

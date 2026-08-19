@@ -35,7 +35,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "rpm", "appimage", "app", "dmg", "nsis"],
     "publisher": "Shaharia Lab",
     "homepage": "https://github.com/shaharia-lab/agento",
     "license": "MIT",
