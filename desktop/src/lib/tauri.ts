@@ -7,11 +7,7 @@ export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 type AppWindow = {
-  minimize(): Promise<void>;
-  toggleMaximize(): Promise<void>;
-  close(): Promise<void>;
-  isMaximized(): Promise<boolean>;
-  startDragging(): Promise<void>;
+  setTheme(theme: "light" | "dark" | null): Promise<void>;
   onFocusChanged(
     handler: (event: { payload: boolean }) => void
   ): Promise<() => void>;
@@ -27,21 +23,53 @@ async function appWindow(): Promise<AppWindow | null> {
   return cached;
 }
 
-export async function winMinimize() {
-  (await appWindow())?.minimize();
+/**
+ * Native folder picker for path fields — writing an absolute path by hand is
+ * the kind of thing a web app forces and a desktop app must not. Returns the
+ * chosen directory, or null when cancelled or when running in a plain browser
+ * tab, where the caller keeps its text input as the fallback.
+ */
+export async function pickDirectory(
+  title: string,
+  defaultPath?: string
+): Promise<string | null> {
+  if (!IS_TAURI) return null;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const picked = await open({
+    directory: true,
+    multiple: false,
+    title,
+    defaultPath: defaultPath || undefined,
+  });
+  return typeof picked === "string" ? picked : null;
 }
 
-export async function winToggleMaximize() {
-  (await appWindow())?.toggleMaximize();
+/**
+ * Open a URL in the user's real browser. `window.open`/`target="_blank"` do
+ * not reliably leave a Tauri webview (WKWebView ignores them, WebKitGTK needs
+ * a create handler), so every external link must go through the opener
+ * plugin. The plugin being unavailable falls back rather than failing.
+ */
+export async function openExternal(url: string): Promise<void> {
+  if (IS_TAURI) {
+    try {
+      const { openUrl } = await import("@tauri-apps/plugin-opener");
+      await openUrl(url);
+      return;
+    } catch (err) {
+      console.warn("opener plugin unavailable, falling back to window.open", err);
+    }
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
 }
 
-export async function winClose() {
-  (await appWindow())?.close();
-}
-
-export async function winIsMaximized(): Promise<boolean> {
-  const w = await appWindow();
-  return w ? w.isMaximized() : false;
+/**
+ * Mirror the user's explicit appearance choice onto the native window, so the
+ * OS-drawn titlebar and UA surfaces follow the app instead of the OS. `null`
+ * returns the window to following the system.
+ */
+export async function setWindowTheme(theme: "light" | "dark" | null) {
+  (await appWindow())?.setTheme(theme);
 }
 
 /**

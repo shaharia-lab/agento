@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Icon } from "../../lib/icons";
-import { MOD } from "../../lib/tauri";
+import { IS_MAC, MOD } from "../../lib/tauri";
 
 export function Composer({
   value,
@@ -43,7 +43,7 @@ export function Composer({
           disabled={busy}
           onChange={(e) => onChange(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+            if (e.key === "Enter" && (IS_MAC ? e.metaKey : e.ctrlKey)) {
               e.preventDefault();
               if (!busy && value.trim()) onSend();
             }

@@ -1,13 +1,5 @@
-import { useEffect, useState } from "react";
 import { Icon } from "../lib/icons";
-import {
-  IS_MAC,
-  MOD,
-  winClose,
-  winIsMaximized,
-  winMinimize,
-  winToggleMaximize,
-} from "../lib/tauri";
+import { IS_MAC, IS_TAURI, MOD } from "../lib/tauri";
 
 interface Props {
   title: string;
@@ -22,8 +14,15 @@ interface Props {
 }
 
 /**
- * Unified titlebar: window drag region, navigation, and window controls in one
- * strip. Decorations are off in tauri.conf.json, so this is the real chrome.
+ * Unified titlebar: window drag region plus navigation in one strip. The OS
+ * draws the window controls — macOS inset traffic lights over this strip
+ * (titleBarStyle "Overlay"), Linux/Windows their own decorated titlebar above
+ * it — so nothing here re-implements minimize/maximize/close.
+ *
+ * Dragging is Tauri's `data-tauri-drag-region`, which only applies to the
+ * element it is set on directly — hence it is repeated on every container
+ * whose bare surface should drag. Buttons are separate targets, so they stay
+ * clickable without opting out.
  */
 export function TitleBar({
   title,
@@ -36,27 +35,21 @@ export function TitleBar({
   canBack,
   canForward,
 }: Props) {
-  const [maximized, setMaximized] = useState(false);
-
-  useEffect(() => {
-    winIsMaximized().then(setMaximized);
-  }, []);
-
-  const toggleMax = () => {
-    winToggleMaximize();
-    setMaximized((m) => !m);
-  };
-
   return (
-    <div className="titlebar">
-      {/* macOS draws its own traffic lights on the left; reserve room for them. */}
-      {IS_MAC && <div style={{ width: 68 }} />}
+    <div className="titlebar" data-tauri-drag-region>
+      {/* macOS draws its traffic lights over the left edge; reserve room.
+          The shell places them at x=16 with AppKit's ~20px button pitch
+          (src-tauri/src/macos_window.rs), so the group ends near 70px; with
+          the strip's own 8px padding this starts the icons at ~84px. */}
+      {IS_TAURI && IS_MAC && (
+        <div style={{ width: 76, flex: "0 0 auto" }} data-tauri-drag-region />
+      )}
 
-      <div className="row" style={{ gap: 2 }}>
+      <div className="row" style={{ gap: 2 }} data-tauri-drag-region>
         <button
           className={`iconbtn ${sidebarOpen ? "" : "iconbtn--active"}`}
           onClick={onToggleSidebar}
-          title={`Toggle Sidebar  ${MOD} B`}
+          title={`Toggle Sidebar  ${MOD} B`}
         >
           <Icon name="sidebar" />
         </button>
@@ -81,57 +74,23 @@ export function TitleBar({
         </button>
       </div>
 
-      <div className="titlebar__title">
+      <div className="titlebar__title" data-tauri-drag-region>
         {title}
         {subtitle && <small>{"  —  " + subtitle}</small>}
       </div>
 
-      <div className="row no-drag" style={{ marginLeft: "auto", gap: 2 }}>
+      <div
+        className="row"
+        style={{ marginLeft: "auto", gap: 2 }}
+        data-tauri-drag-region
+      >
         <button
           className="iconbtn"
           onClick={onOpenPalette}
-          title={`Command Palette  ${MOD} K`}
+          title={`Command Palette  ${MOD} K`}
         >
           <Icon name="command" />
         </button>
-
-        {!IS_MAC && (
-          <div className="wincontrols" style={{ marginLeft: 6 }}>
-            <button className="wincontrol" onClick={winMinimize} title="Minimize">
-              <Icon name="minus" size={14} />
-            </button>
-            <button
-              className="wincontrol"
-              onClick={toggleMax}
-              title={maximized ? "Restore" : "Maximize"}
-            >
-              <svg
-                width="12"
-                height="12"
-                viewBox="0 0 12 12"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.3"
-              >
-                {maximized ? (
-                  <>
-                    <rect x="1.5" y="3.5" width="6" height="6" rx="1" />
-                    <path d="M4 3.5V2.5a1 1 0 0 1 1-1h4.5a1 1 0 0 1 1 1V7a1 1 0 0 1-1 1H8.5" />
-                  </>
-                ) : (
-                  <rect x="2" y="2" width="8" height="8" rx="1.2" />
-                )}
-              </svg>
-            </button>
-            <button
-              className="wincontrol wincontrol--close"
-              onClick={winClose}
-              title="Close"
-            >
-              <Icon name="close" size={14} />
-            </button>
-          </div>
-        )}
       </div>
     </div>
   );

@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Icon } from "../../lib/icons";
+import { IS_MAC } from "../../lib/tauri";
 import { clockTime, initials, type Tone } from "../../lib/format";
 import type { ChatMessage, MessageBlock } from "../../lib/types";
 import { prettyJson, summarizeInput, type QuestionItem } from "./sse";
@@ -378,7 +379,11 @@ function QuestionPrompt({
             }
             onChange={(e) => setFree(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && composed) {
+              if (
+                e.key === "Enter" &&
+                (IS_MAC ? e.metaKey : e.ctrlKey) &&
+                composed
+              ) {
                 onAnswer(composed);
               }
             }}

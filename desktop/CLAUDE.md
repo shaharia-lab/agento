@@ -57,7 +57,7 @@ libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`.
 │   proxy.rs   ── axum on 127.0.0.1:<port>                │
 │        /api/*  ──> native/ registry  (streams, incl SSE)│
 │        /*      ──> frontend assets   (release only)     │
-│   menu.rs    ── native menu, emits menu://action        │
+│   menu.rs    ── native menu (macOS only), emits menu://action        │
 │                                                         │
 │   WebView ──> React UI ──> fetch("/api/...")            │
 └─────────────────────────────────────────────────────────┘
@@ -243,10 +243,35 @@ including on the payload-free endpoints. `GET`/`HEAD`/`OPTIONS` are untouched.
 `api.ts` does this for you.
 
 **Desktop, not web.** The UI deliberately diverges from the Agento web app:
-three resizable panes per section, 13px type, 26px rows, hairline borders,
-custom titlebar, status bar, focus-aware selection (accent when the window is
-focused, grey when not), ⌘K palette, no browser affordances. Reuse the existing
-CSS classes; new CSS goes in a per-view file imported by that view.
+three resizable panes per section, 14px type, 28px rows, hairline borders,
+status bar, focus-aware selection (accent when the window is focused, grey
+when not), ⌘K palette, no browser affordances. Reuse the existing CSS classes;
+new CSS goes in a per-view file imported by that view.
+
+**Window chrome is the OS's, not ours.** `decorations: true` everywhere: on
+macOS `titleBarStyle: "Overlay"` + `hiddenTitle` put the native traffic
+lights over the app's own titlebar strip, while Linux/Windows get their
+ordinary decorated titlebar above it. **Do not use the config's
+`trafficLightPosition`**: tao applies it inside the content view's
+`drawRect:`, which the WKWebView covers and so rarely repaints — the value
+stores and the buttons stay at AppKit's default corner position. The shell
+positions them directly instead (`src-tauri/src/macos_window.rs`, centered in
+the `--titlebar-h` band, re-applied on resize/theme/focus events), the same
+approach `tauri-plugin-decorum` exists for. Dragging is
+Tauri's `data-tauri-drag-region` attribute (`TitleBar.tsx`) — `-webkit-app-region`
+is an Electron-ism the WKWebView/WebKitGTK webviews do not honor, so CSS can
+never make a strip draggable. Do not reintroduce hand-drawn min/max/close
+buttons; the OS draws them on every platform now. The menubar is macOS-only
+(`menu.rs` behind `cfg(target_os = "macos")`), and its custom items carry no
+accelerators on purpose — the webview's keydown handler (`App.tsx`) owns the
+shortcuts, and WKWebView sees key equivalents before the menu, so declaring
+them twice double-fires. External links must go through `openExternal`
+(`lib/tauri.ts`); `window.open`/`target="_blank"` do not leave a Tauri
+webview. Directory fields get a native picker via `pickDirectory`
+(`tauri-plugin-dialog`); the in-app `DirBrowser` is the plain-browser
+fallback only, since `/api/fs` is Unix-only. `tauri-plugin-window-state`
+remembers geometry; `tauri-plugin-single-instance` focuses the running window
+instead of letting a second process share one database and scheduler.
 
 **No `window.confirm` / `alert` / `prompt`** — they block the WebView and can
 wedge the app. Render inline confirmation UI.

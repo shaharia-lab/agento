@@ -4,6 +4,13 @@
 // outside the crate.
 pub mod claude;
 mod guards;
+// The menubar is macOS-only: the app menu (About/Hide/Quit ⌘Q) is what macOS
+// users expect, while an in-window GTK/win32 menubar is not the convention
+// for this class of app — the titlebar and the ⌘K palette carry the same
+// actions there.
+#[cfg(target_os = "macos")]
+mod macos_window;
+#[cfg(target_os = "macos")]
 mod menu;
 // `native` and `paths` are public so `tests/live_parity.rs` can diff a ported
 // endpoint against the running Go server without going through a window.
@@ -148,11 +155,28 @@ pub struct AppPorts {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
+        // Registered first, as its docs require. A second launch would be a
+        // second scheduler and a second writer on one ~/.agento/agento.db —
+        // exactly the collision the dev data-dir split exists to avoid — so
+        // it focuses the existing window instead.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         // OAuth consent must open in the user's real browser: inside the app's
         // own webview there is no address bar to check who is asking, and the
         // provider's session would live in a container we throw away.
         .plugin(tauri_plugin_opener::init())
+        // Native open-folder dialogs for every working-directory field; the
+        // HTML fallback browser depends on /api/fs, which is Unix-only.
+        .plugin(tauri_plugin_dialog::init())
+        // Remember size/position/maximized across launches; without it every
+        // launch is a centered 1280×820, which no native app does.
+        .plugin(tauri_plugin_window_state::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // Relaunching after an update is the only reason this is here.
         .plugin(tauri_plugin_process::init())
@@ -192,8 +216,8 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
 
-            let menu = menu::build(&handle)?;
-            app.set_menu(menu)?;
+            #[cfg(target_os = "macos")]
+            app.set_menu(menu::build(&handle)?)?;
 
             // Bring up the backend before showing the window. Everything the UI
             // renders comes from this process now (#278), so the database has
@@ -292,11 +316,40 @@ pub fn run() {
 
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
+
+                #[cfg(target_os = "macos")]
+                if let Ok(ptr) = window.ns_window() {
+                    // SAFETY: a live window's NSWindow pointer, on the main
+                    // thread (setup runs inside the event loop).
+                    unsafe { macos_window::position_traffic_lights(ptr) };
+                }
             }
 
             Ok(())
-        })
+        });
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .on_menu_event(menu::on_event)
+        // AppKit re-lays-out the titlebar (and resets the button positions)
+        // on resize, fullscreen transitions, theme changes and focus — the
+        // same class of resets tauri-plugin-decorum re-applies on.
+        .on_window_event(|window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::Resized(_)
+                    | tauri::WindowEvent::ThemeChanged(_)
+                    | tauri::WindowEvent::Focused(_)
+            ) {
+                if let Ok(ptr) = window.ns_window() {
+                    // SAFETY: a live window's NSWindow pointer, on the main
+                    // thread (window events dispatch from the event loop).
+                    unsafe { macos_window::position_traffic_lights(ptr) };
+                }
+            }
+        });
+
+    builder
         .run(tauri::generate_context!())
         .expect("error while running Agento");
 }

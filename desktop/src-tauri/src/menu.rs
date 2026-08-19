@@ -1,8 +1,18 @@
-//! Native application menu.
+//! Native application menu — macOS only.
 //!
-//! The menu is the part of a desktop app a web port always forgets. It carries
-//! the real accelerators; the webview listens for the emitted action and
-//! performs it, so the keyboard path and the menu path stay identical.
+//! On macOS the menubar is the app's front door: the first submenu becomes
+//! the application menu, and users expect About / Services / Hide / Quit ⌘Q
+//! there and Settings… beside them. On Linux and Windows an in-window
+//! menubar is not the convention for this class of app (the custom titlebar
+//! and the ⌘K palette carry the same actions), so `lib.rs` installs this
+//! menu behind `#[cfg(target_os = "macos")]` and this module compiles only
+//! there.
+//!
+//! Keyboard shortcuts live in the webview's own keydown handler (`App.tsx`);
+//! the menu deliberately declares no accelerators for the custom items,
+//! because WKWebView sees key equivalents before the menu does and the two
+//! paths would double-fire. The predefined items (Quit, Hide, clipboard)
+//! carry their system accelerators, which the webview does not intercept.
 
 use tauri::menu::{Menu, MenuBuilder, MenuEvent, SubmenuBuilder};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
@@ -11,12 +21,25 @@ use tauri::{AppHandle, Emitter, Manager, Runtime};
 pub const MENU_EVENT: &str = "menu://action";
 
 pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    // The label is ignored on macOS — the system shows the process name.
+    let app_menu = SubmenuBuilder::new(app, "Agento")
+        .about(None)
+        .separator()
+        .text("settings", "Settings…")
+        .separator()
+        .services()
+        .separator()
+        .hide()
+        .hide_others()
+        .show_all()
+        .separator()
+        .quit()
+        .build()?;
+
     let file = SubmenuBuilder::new(app, "File")
         .text("new_chat", "New Chat")
         .text("new_agent", "New Agent")
         .text("new_task", "New Scheduled Task")
-        .separator()
-        .text("settings", "Settings…")
         .separator()
         .close_window()
         .build()?;
@@ -29,8 +52,6 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .copy()
         .paste()
         .select_all()
-        .separator()
-        .text("find", "Find…")
         .build()?;
 
     let view = SubmenuBuilder::new(app, "View")
@@ -74,7 +95,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .build()?;
 
     MenuBuilder::new(app)
-        .items(&[&file, &edit, &view, &go, &window, &help])
+        .items(&[&app_menu, &file, &edit, &view, &go, &window, &help])
         .build()
 }
 

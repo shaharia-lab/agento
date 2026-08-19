@@ -121,6 +121,13 @@ mime_guess = "2"
 tauri-plugin-opener = "2.5.4"
 tauri-plugin-updater = "2.0.0-rc.4"
 tauri-plugin-process = "2.0.0-rc.1"
+# Native window behaviors the web app cannot have: OS folder pickers for the
+# working-directory fields, window size/position remembered across launches,
+# and a second launch focusing the first instance instead of putting a second
+# scheduler and a second writer on one ~/.agento/agento.db.
+tauri-plugin-dialog = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-single-instance = "2"
 
 # Ported endpoints (phase 2 onward) read the same SQLite file the Go server
 # owns. `bundled` compiles SQLite from source rather than linking the system
@@ -229,6 +236,26 @@ schemars = "1"
 # `Child::kill` is SIGKILL only, so the SIGTERM step needs raw kill(2).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# macOS traffic-light positioning (src/macos_window.rs). The config's
+# `trafficLightPosition` is applied by tao inside the content view's
+# `drawRect:`, which the WKWebView covers and so rarely repaints — the shell
+# repositions the buttons directly instead. Versions and features mirror what
+# tao 0.35 already has in the lockfile, so nothing new compiles.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSButton",
+    "NSControl",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSGeometry",
+] }
 
 [profile.release]
 codegen-units = 1

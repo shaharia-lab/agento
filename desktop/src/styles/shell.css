@@ -21,25 +21,19 @@
 }
 
 /* --- Titlebar ------------------------------------------------------------ */
+/* Dragging comes from Tauri's `data-tauri-drag-region` attribute (set in
+   TitleBar.tsx) — `-webkit-app-region` is an Electron-ism WKWebView and
+   WebKitGTK do not honor, so CSS cannot make this strip draggable. */
 .titlebar {
   height: var(--titlebar-h);
   flex: 0 0 var(--titlebar-h);
   display: flex;
   align-items: center;
   padding-left: var(--sp-4);
+  padding-right: var(--sp-4);
   background: var(--bg-window);
-  -webkit-app-region: drag;
-  app-region: drag;
   position: relative;
   z-index: 40;
-}
-
-/* Everything interactive inside the drag region must opt out of dragging. */
-.titlebar button,
-.titlebar input,
-.titlebar .no-drag {
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
 }
 
 .titlebar__title {
@@ -56,30 +50,6 @@
 .titlebar__title small {
   font-weight: var(--weight-normal);
   color: var(--fg-tertiary);
-}
-
-/* Window controls — right-aligned (Windows/Linux GNOME convention). */
-.wincontrols {
-  display: flex;
-  align-items: stretch;
-  height: 100%;
-  margin-left: auto;
-}
-
-.wincontrol {
-  width: 44px;
-  display: grid;
-  place-items: center;
-  color: var(--fg-secondary);
-  transition: background var(--dur-fast), color var(--dur-fast);
-}
-.wincontrol:hover {
-  background: var(--bg-hover);
-  color: var(--fg);
-}
-.wincontrol--close:hover {
-  background: #e5484d;
-  color: #fff;
 }
 
 /* --- Body: sidebar + main ------------------------------------------------ */

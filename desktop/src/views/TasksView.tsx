@@ -10,6 +10,7 @@ import type {
 import { describeError, usePoll, useResource } from "../lib/hooks";
 import { dateTime, duration, relativeTime, toneFor } from "../lib/format";
 import { Icon } from "../lib/icons";
+import { IS_TAURI, pickDirectory } from "../lib/tauri";
 import {
   Dropdown,
   Empty,
@@ -527,14 +528,33 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                 <div className="formsec">
                   <div className="formsec__title">Execution</div>
                   <FormRow label="Working directory">
-                    <label className="field">
-                      <input
-                        value={draft.working_directory}
-                        onChange={(e) => edit({ working_directory: e.target.value })}
-                        placeholder="Agent default"
-                        spellCheck={false}
-                      />
-                    </label>
+                    <div className="row" style={{ gap: "var(--sp-3)" }}>
+                      <label className="field" style={{ flex: 1 }}>
+                        <input
+                          value={draft.working_directory}
+                          onChange={(e) =>
+                            edit({ working_directory: e.target.value })
+                          }
+                          placeholder="Agent default"
+                          spellCheck={false}
+                        />
+                      </label>
+                      {IS_TAURI && (
+                        <button
+                          className="btn"
+                          title="Browse for a folder"
+                          onClick={async () => {
+                            const picked = await pickDirectory(
+                              "Choose working directory",
+                              draft.working_directory
+                            );
+                            if (picked) edit({ working_directory: picked });
+                          }}
+                        >
+                          Browse…
+                        </button>
+                      )}
+                    </div>
                   </FormRow>
                   <FormRow label="Model">
                     <label className="field">

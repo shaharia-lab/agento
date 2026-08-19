@@ -18,7 +18,16 @@ import { useHostInfo } from "./lib/host";
 import { useBackgroundUpdate } from "./lib/useBackgroundUpdate";
 import { compactNumber, usd } from "./lib/format";
 import { Icon } from "./lib/icons";
-import { MOD, onMenuAction, onWindowFocus } from "./lib/tauri";
+import {
+  IS_MAC,
+  MOD,
+  onMenuAction,
+  onWindowFocus,
+  openExternal,
+  setWindowTheme,
+} from "./lib/tauri";
+
+const REPO_URL = "https://github.com/shaharia-lab/agento";
 
 type Theme = "light" | "dark" | "system";
 
@@ -43,6 +52,9 @@ export default function App() {
     if (theme === "system") root.removeAttribute("data-theme");
     else root.setAttribute("data-theme", theme);
     localStorage.setItem("agento.theme", theme);
+    // The OS draws the window chrome now, so an explicit choice must reach
+    // the native window too, not just the document's tokens.
+    setWindowTheme(theme === "system" ? null : theme);
   }, [theme]);
 
   /* --- Window focus drives the selection highlight ----------------------- */
@@ -162,10 +174,24 @@ export default function App() {
   /* --- Global shortcuts -------------------------------------------------- */
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey;
-      if (!mod) return;
+      // ⌘ on macOS, Ctrl elsewhere — accepting either hijacks macOS's own
+      // Ctrl+B/K/N text-editing bindings and Win+K on Windows.
+      const mod = IS_MAC ? e.metaKey : e.ctrlKey;
+      if (!mod || e.altKey) return;
 
       const k = e.key.toLowerCase();
+
+      // While the user is typing, only the palette and Settings may steal a
+      // chord; Ctrl/⌘+B or +N inside the composer must not navigate away.
+      const t = e.target as HTMLElement | null;
+      const typing =
+        !!t &&
+        (t.tagName === "INPUT" ||
+          t.tagName === "TEXTAREA" ||
+          t.tagName === "SELECT" ||
+          t.isContentEditable);
+      if (typing && k !== "k" && k !== ",") return;
+
       if (k === "k") {
         e.preventDefault();
         setPaletteOpen((p) => !p);
@@ -243,6 +269,12 @@ export default function App() {
             break;
           case "go_forward":
             goForward();
+            break;
+          case "docs":
+            openExternal(`${REPO_URL}#readme`);
+            break;
+          case "github":
+            openExternal(REPO_URL);
             break;
         }
       }),
