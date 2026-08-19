@@ -249,9 +249,15 @@ when not), ⌘K palette, no browser affordances. Reuse the existing CSS classes;
 new CSS goes in a per-view file imported by that view.
 
 **Window chrome is the OS's, not ours.** `decorations: true` everywhere: on
-macOS `titleBarStyle: "Overlay"` + `hiddenTitle` + `trafficLightPosition`
-inset the native traffic lights over the app's own titlebar strip, while
-Linux/Windows get their ordinary decorated titlebar above it. Dragging is
+macOS `titleBarStyle: "Overlay"` + `hiddenTitle` put the native traffic
+lights over the app's own titlebar strip, while Linux/Windows get their
+ordinary decorated titlebar above it. **Do not use the config's
+`trafficLightPosition`**: tao applies it inside the content view's
+`drawRect:`, which the WKWebView covers and so rarely repaints — the value
+stores and the buttons stay at AppKit's default corner position. The shell
+positions them directly instead (`src-tauri/src/macos_window.rs`, centered in
+the `--titlebar-h` band, re-applied on resize/theme/focus events), the same
+approach `tauri-plugin-decorum` exists for. Dragging is
 Tauri's `data-tauri-drag-region` attribute (`TitleBar.tsx`) — `-webkit-app-region`
 is an Electron-ism the WKWebView/WebKitGTK webviews do not honor, so CSS can
 never make a strip draggable. Do not reintroduce hand-drawn min/max/close

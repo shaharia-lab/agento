@@ -37,9 +37,12 @@ export function TitleBar({
 }: Props) {
   return (
     <div className="titlebar" data-tauri-drag-region>
-      {/* macOS draws its traffic lights over the left edge; reserve room. */}
+      {/* macOS draws its traffic lights over the left edge; reserve room.
+          The shell places them at x=16 with AppKit's ~20px button pitch
+          (src-tauri/src/macos_window.rs), so the group ends near 70px; with
+          the strip's own 8px padding this starts the icons at ~84px. */}
       {IS_TAURI && IS_MAC && (
-        <div style={{ width: 72, flex: "0 0 auto" }} data-tauri-drag-region />
+        <div style={{ width: 76, flex: "0 0 auto" }} data-tauri-drag-region />
       )}
 
       <div className="row" style={{ gap: 2 }} data-tauri-drag-region>

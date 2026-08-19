@@ -9,6 +9,8 @@ mod guards;
 // for this class of app — the titlebar and the ⌘K palette carry the same
 // actions there.
 #[cfg(target_os = "macos")]
+mod macos_window;
+#[cfg(target_os = "macos")]
 mod menu;
 // `native` and `paths` are public so `tests/live_parity.rs` can diff a ported
 // endpoint against the running Go server without going through a window.
@@ -314,13 +316,38 @@ pub fn run() {
 
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
+
+                #[cfg(target_os = "macos")]
+                if let Ok(ptr) = window.ns_window() {
+                    // SAFETY: a live window's NSWindow pointer, on the main
+                    // thread (setup runs inside the event loop).
+                    unsafe { macos_window::position_traffic_lights(ptr) };
+                }
             }
 
             Ok(())
         });
 
     #[cfg(target_os = "macos")]
-    let builder = builder.on_menu_event(menu::on_event);
+    let builder = builder
+        .on_menu_event(menu::on_event)
+        // AppKit re-lays-out the titlebar (and resets the button positions)
+        // on resize, fullscreen transitions, theme changes and focus — the
+        // same class of resets tauri-plugin-decorum re-applies on.
+        .on_window_event(|window, event| {
+            if matches!(
+                event,
+                tauri::WindowEvent::Resized(_)
+                    | tauri::WindowEvent::ThemeChanged(_)
+                    | tauri::WindowEvent::Focused(_)
+            ) {
+                if let Ok(ptr) = window.ns_window() {
+                    // SAFETY: a live window's NSWindow pointer, on the main
+                    // thread (window events dispatch from the event loop).
+                    unsafe { macos_window::position_traffic_lights(ptr) };
+                }
+            }
+        });
 
     builder
         .run(tauri::generate_context!())
