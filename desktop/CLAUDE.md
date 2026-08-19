@@ -22,6 +22,21 @@ server and is left alone until the two converge.
   (`.github/workflows/desktop-release.yml`).
 - The Go server keeps its own release on `v*` tags. The two tag patterns do not
   overlap, so both ship independently from the same repo.
+- The tag must equal `desktop-v` + the `version` in
+  `desktop/src-tauri/tauri.conf.json`; a guard job fails the build otherwise.
+  The updater compares the version baked into the app against the manifest's
+  (taken from the tag), so a mismatch makes every "updated" install re-offer
+  itself forever. Bump the conf in the release commit, then tag it.
+- Tagging builds a **draft** release with `latest.json` staged as an asset.
+  Nothing has shipped at that point — draft assets are not publicly
+  downloadable. **Publishing the draft is the release act**: the
+  `release: published` event runs the `promote` job, which copies the staged
+  manifest to the fixed `desktop-latest` tag every installed app polls.
+- A prerelease tag (`desktop-v0.1.0-rc.1`) builds and drafts identically, is
+  auto-marked prerelease, and is **never promoted** — a shareable release
+  candidate no installed app is offered. For private smoke-test builds, run
+  the workflow manually with `dry_run` instead: installers land as CI
+  artifacts and no release is created.
 
 ---
 

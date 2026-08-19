@@ -19,20 +19,29 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Filename suffix -> the platform key the updater looks itself up by.
-# macOS updates ship as .app.tar.gz; the .dmg is only for first install.
+# Filename suffix -> the platform key the updater looks itself up by. The key
+# is tauri-plugin-updater's `{os}-{arch}` where arch is Rust's target_arch
+# spelling ("aarch64", never "arm64") — a key it will not look up strands that
+# platform's users silently. macOS updates ship as .app.tar.gz; the .dmg is
+# only for first install.
 PLATFORMS: list[tuple[str, str]] = [
     ("aarch64.app.tar.gz", "darwin-aarch64"),
     ("x64.app.tar.gz", "darwin-x86_64"),
     ("amd64.AppImage", "linux-x86_64"),
-    ("aarch64.AppImage", "linux-arm64"),
+    ("aarch64.AppImage", "linux-aarch64"),
     ("x64-setup.exe", "windows-x86_64"),
     ("arm64-setup.exe", "windows-aarch64"),
 ]
 
-# Platforms a release must contain. The arm64 Linux and Windows entries above
-# are recognised if present but are not currently built.
-REQUIRED = {"darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"}
+# Platforms a release must contain — everything the workflow matrix builds.
+# The arm64 Windows entry above is recognised if present but not yet built.
+REQUIRED = {
+    "darwin-aarch64",
+    "darwin-x86_64",
+    "linux-x86_64",
+    "linux-aarch64",
+    "windows-x86_64",
+}
 
 
 def platform_for(name: str) -> str | None:
