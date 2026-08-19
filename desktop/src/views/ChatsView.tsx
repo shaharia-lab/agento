@@ -225,6 +225,26 @@ export function ChatsView({
     stream.start(chatId, content);
   }, [draft, busy, selected, newAgent, newDir, chats, stream]);
 
+  // The answer to an agent question travels over /input, not /messages, and
+  // the server does not persist it — echoing it here keeps the exchange
+  // readable ("what did I answer?") for the rest of the sitting.
+  const answerPrompt = useCallback(
+    (text: string) => {
+      const chatId = stream.chatId;
+      if (chatId) {
+        setExtra((prev) => ({
+          ...prev,
+          [chatId]: [
+            ...(prev[chatId] ?? []),
+            { role: "user", content: text, timestamp: new Date().toISOString() },
+          ],
+        }));
+      }
+      void stream.answer(text);
+    },
+    [stream]
+  );
+
   const patch = useCallback(
     async (id: string, body: { title?: string; is_favorite?: boolean }) => {
       try {
@@ -574,7 +594,7 @@ export function ChatsView({
                 tools={stream.tools}
                 prompt={stream.chatId === selected ? stream.prompt : null}
                 streaming={stream.chatId === selected}
-                onAnswer={(text) => void stream.answer(text)}
+                onAnswer={answerPrompt}
                 onDecide={(allow) => void stream.decide(allow)}
               />
             )}

@@ -390,10 +390,13 @@ async fn control_response_for(dir: &Path, request_id: &str) -> serde_json::Value
 }
 
 /// Collect an SSE body into frames, splitting on the blank line.
+///
+/// Comment-only frames — the `: hb` heartbeats — are dropped exactly as an SSE
+/// parser drops them; they are transport padding, never events.
 fn frames(body: &str) -> Vec<(String, String)> {
     body.split("\n\n")
         .filter(|chunk| !chunk.trim().is_empty())
-        .map(|chunk| {
+        .filter_map(|chunk| {
             let mut event = String::new();
             let mut data = String::new();
             for line in chunk.lines() {
@@ -403,7 +406,10 @@ fn frames(body: &str) -> Vec<(String, String)> {
                     data = rest.to_string();
                 }
             }
-            (event, data)
+            if event.is_empty() && data.is_empty() {
+                return None;
+            }
+            Some((event, data))
         })
         .collect()
 }
