@@ -64,6 +64,7 @@ All commands run from `desktop/`.
 | Command | What it does |
 | --- | --- |
 | `npm run app` | The real desktop window, with hot reload |
+| `npm run app:alongside` | The same, but without taking over an installed Agento's window |
 | `npm run dev` | Vite only, in a browser tab. Fastest loop for pure layout work |
 | `npm run build` | Typecheck and build the frontend alone |
 | `npm run app:build` | Native installers for the current platform |
@@ -75,6 +76,37 @@ so every scheduled task would fire twice. Release builds use the real directory.
 
 To seed the dev instance with data, copy your real database into it, or create
 rows through the UI.
+
+### Running beside an installed Agento
+
+`npm run app` **cannot** run while an installed Agento is open. It will exit
+immediately with no output and focus the installed window instead — which looks
+like the command silently failing.
+
+Nothing is wrong and nothing is shared: `tauri-plugin-single-instance` derives
+its identity from the app identifier, and dev and release have the same one, so
+the dev launch finds the installed app's claim and hands off to it.
+
+```bash
+npm run app:alongside
+```
+
+merges a one-key config override (`src-tauri/tauri.alongside.conf.json`) that
+changes the identifier to `com.shaharialab.agento.dev`. That is the only lever
+that works on every platform: the plugin accepts an explicit `dbus_id` on Linux
+alone, while Windows uses a named mutex and macOS a socket path, both derived
+from the identifier. On Linux you can watch both claims coexist:
+
+```
+$ busctl --user list | grep shaharialab
+com.shaharialab.agento.SingleInstance       …  agento-desktop
+com.shaharialab.agento.dev.SingleInstance   …  agento
+```
+
+**It does not help you test anything origin-dependent.** A dev build loads the
+configured `devUrl`, which Tauri's ACL treats as a *local* origin, so the whole
+class of permission bug that only affects release builds is invisible in dev by
+construction. That needs `npm run app:build`.
 
 ### Pointing at a different Claude CLI
 

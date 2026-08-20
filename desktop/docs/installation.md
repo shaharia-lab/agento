@@ -189,6 +189,23 @@ the matching public key. A download that does not verify is rejected. This is
 independent of Apple and Microsoft code signing, which is why in-app updates work
 smoothly even though the first launch needs a Gatekeeper or SmartScreen bypass.
 
+### Updates are one-way
+
+An update can add to the database, and Agento refuses to write to a database
+newer than itself rather than risk corrupting it. So going *back* to an older
+version stops working at the first release that changed the schema — the older
+build launches and then fails on every action.
+
+That is the only reason to take a copy of `~/.agento` before a major upgrade. It
+is a single directory, so a copy is the whole backup:
+
+```bash
+cp -r ~/.agento ~/.agento.backup
+```
+
+`agento web` is not affected either way: it ignores schema it does not
+recognise.
+
 ---
 
 ## Where your data lives
