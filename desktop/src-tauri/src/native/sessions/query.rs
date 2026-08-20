@@ -4,12 +4,13 @@
 //! `session_page.go`, plus `sessionQueryFromRequest` in
 //! `internal/api/claude_sessions.go`.
 //!
-//! The metric expressions below are the load-bearing part. They must agree
-//! exactly with `frontend/src/lib/sessionMetrics.ts`, which renders the columns:
-//! a row showing $36.30 must not be hidden by "cost at most $40". Go and
-//! TypeScript already assert that agreement from
-//! `internal/claudesessions/testdata/session_metric_vectors.json`; this file's
-//! tests make Rust the third reader of the same fixture.
+//! The metric expressions below are the load-bearing part: a row showing $36.30
+//! must not be hidden by "cost at most $40". That used to be a three-language
+//! agreement — this SQL, `session_query.go` and
+//! `frontend/src/lib/sessionMetrics.ts`, all asserting the same fixture. #388
+//! deleted the other two, so this is the only implementation left and
+//! `parity/session_metric_vectors.json` is a frozen record of the figures Go
+//! produced. `tests_db.rs` is its one reader.
 
 use std::collections::HashMap;
 

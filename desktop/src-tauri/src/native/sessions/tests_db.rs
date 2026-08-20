@@ -1,13 +1,22 @@
 //! Tests for the sessions list that need a database.
 //!
-//! The metric-vector test here is the third reader of
-//! `internal/claudesessions/testdata/session_metric_vectors.json`, after
-//! `session_page_test.go` and `frontend/src/lib/sessionMetrics.test.ts`. The
+//! The metric-vector test here reads `parity/session_metric_vectors.json`. The
 //! fixture exists because a rendered column and the filter that hides its row
 //! must not disagree — a session showing $36.30 must not be hidden by "cost at
 //! most $40" — and that bug had already happened once before the filtering
 //! moved into SQL. Adding a third implementation of those figures without
 //! adding a third reader of the fixture would reopen it in a new language.
+//!
+//! It lived at `internal/claudesessions/testdata/session_metric_vectors.json`
+//! and had three readers — `session_page_test.go`,
+//! `frontend/src/lib/sessionMetrics.test.ts` and this one. #388 deleted the Go
+//! tree and the web frontend, so this is the **only** reader left and the file
+//! moved into `parity/` with the rest of the frozen goldens. It is no longer a
+//! cross-language check — this app computes these figures in SQL and renders
+//! what the API returns, with no second implementation in the UI. What it still
+//! pins is the SQL itself against the numbers Go was asserted to produce, which
+//! is the whole reason the values are worth keeping now that the generator is
+//! gone.
 
 use rusqlite::Connection;
 
@@ -220,8 +229,7 @@ fn metric_sql_matches_the_shared_cross_language_vectors() {
         messages: i64,
     }
 
-    let raw =
-        include_str!("../../../../../internal/claudesessions/testdata/session_metric_vectors.json");
+    let raw = include_str!("../../../../parity/session_metric_vectors.json");
     let vectors: Vectors = serde_json::from_str(raw).expect("parsing the shared vectors");
     assert!(
         !vectors.cases.is_empty(),
