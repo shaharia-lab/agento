@@ -21,9 +21,11 @@
 }
 
 /* --- Titlebar ------------------------------------------------------------ */
-/* Dragging comes from Tauri's `data-tauri-drag-region` attribute (set in
+/* Dragging comes from Tauri's `data-tauri-drag-region="deep"` attribute (set in
    TitleBar.tsx) — `-webkit-app-region` is an Electron-ism WKWebView and
-   WebKitGTK do not honor, so CSS cannot make this strip draggable. */
+   WebKitGTK do not honor, so CSS cannot make this strip draggable. Note the
+   attribute is *only* on the outer strip: a bare one on a child would shadow
+   the deep walk. See TitleBar.tsx. */
 .titlebar {
   height: var(--titlebar-h);
   flex: 0 0 var(--titlebar-h);

@@ -165,11 +165,12 @@ func (s *Scheduler) runTask(parentCtx context.Context, task *storage.ScheduledTa
 func (s *Scheduler) createTaskSession(
 	ctx context.Context, task *storage.ScheduledTask,
 ) (*storage.ChatSession, error) {
-	chatSession, err := s.cfg.ChatStore.CreateSession(
-		ctx,
-		task.AgentSlug, task.WorkingDirectory,
-		task.Model, task.SettingsProfileID,
-	)
+	chatSession, err := s.cfg.ChatStore.CreateSession(ctx, storage.NewSessionParams{
+		AgentSlug:         task.AgentSlug,
+		WorkingDir:        task.WorkingDirectory,
+		Model:             task.Model,
+		SettingsProfileID: task.SettingsProfileID,
+	})
 	if err != nil {
 		return nil, err
 	}

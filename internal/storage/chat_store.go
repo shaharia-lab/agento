@@ -8,15 +8,22 @@ import (
 
 // ChatSession represents a chat session's metadata.
 type ChatSession struct {
-	ID                string    `json:"id"`
-	Title             string    `json:"title"`
-	AgentSlug         string    `json:"agent_slug"`
-	SDKSession        string    `json:"sdk_session_id"`
-	WorkingDir        string    `json:"working_directory"`
-	Model             string    `json:"model"`
-	SettingsProfileID string    `json:"settings_profile_id,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                string `json:"id"`
+	Title             string `json:"title"`
+	AgentSlug         string `json:"agent_slug"`
+	SDKSession        string `json:"sdk_session_id"`
+	WorkingDir        string `json:"working_directory"`
+	Model             string `json:"model"`
+	SettingsProfileID string `json:"settings_profile_id,omitempty"`
+	// PermissionMode overrides the agent's own mode for this conversation:
+	// "bypass", "default", "plan" or "dontAsk". Empty means no choice was
+	// recorded, which is not a fifth mode — the run falls back to the agent's
+	// configured mode, and to "default" for a chat with no agent. See
+	// migration 30. `omitempty` keeps it off the wire for every row written
+	// before it existed.
+	PermissionMode string    `json:"permission_mode,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 	// Cumulative token usage across all turns in this session.
 	TotalInputTokens         int  `json:"total_input_tokens,omitempty"`
 	TotalOutputTokens        int  `json:"total_output_tokens,omitempty"`
@@ -44,12 +51,27 @@ type ChatMessage struct {
 	Blocks    []MessageBlock `json:"blocks,omitempty"`
 }
 
+// NewSessionParams is everything CreateSession writes onto a fresh row.
+//
+// A struct rather than positional arguments because every field is a string:
+// `CreateSession(ctx, slug, dir, model, profile, mode)` has no call site where
+// transposing two of them fails to compile, and there are five such pairs.
+type NewSessionParams struct {
+	AgentSlug         string
+	WorkingDir        string
+	Model             string
+	SettingsProfileID string
+	// PermissionMode is empty for "no choice recorded" — see the field's note
+	// on ChatSession and migration 30.
+	PermissionMode string
+}
+
 // ChatStore defines the interface for chat session persistence.
 type ChatStore interface {
 	ListSessions(ctx context.Context) ([]*ChatSession, error)
 	GetSession(ctx context.Context, id string) (*ChatSession, error)
 	GetSessionWithMessages(ctx context.Context, id string) (*ChatSession, []ChatMessage, error)
-	CreateSession(ctx context.Context, agentSlug, workingDir, model, settingsProfileID string) (*ChatSession, error)
+	CreateSession(ctx context.Context, p NewSessionParams) (*ChatSession, error)
 	AppendMessage(ctx context.Context, sessionID string, msg ChatMessage) error
 	UpdateSession(ctx context.Context, session *ChatSession) error
 	DeleteSession(ctx context.Context, id string) error

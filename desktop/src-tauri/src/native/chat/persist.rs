@@ -271,6 +271,7 @@ mod tests {
             working_dir: String::new(),
             model: String::new(),
             settings_profile_id: String::new(),
+            permission_mode: String::new(),
         }
     }
 

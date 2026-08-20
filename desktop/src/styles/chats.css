@@ -46,22 +46,13 @@
   color: var(--fg-tertiary);
 }
 
+/* CommonMark folds a single newline inside a paragraph into a space, which is
+   right for prose and wrong for the way a model writes a chat turn — an
+   address, a short enumeration, a two-line aside. `pre-wrap` keeps them,
+   which is what `remark-breaks` would buy at the cost of another dependency.
+   It applies to paragraphs only, so fenced blocks and tables are untouched. */
 .msg__text p {
-  /* Agent output relies on single newlines for lists and tables. */
   white-space: pre-wrap;
-}
-
-.codeblock {
-  margin: var(--sp-4) 0;
-  padding: var(--sp-5);
-  background: var(--bg-inset);
-  border-radius: var(--r-md);
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  line-height: var(--leading-normal);
-  color: var(--fg-secondary);
-  white-space: pre;
-  overflow-x: auto;
 }
 
 .toolcall__sep {
@@ -189,26 +180,7 @@
 }
 
 /* --- New conversation strip ---------------------------------------------- */
-.newchat {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-4);
-  padding: var(--sp-4) var(--sp-6);
-  background: var(--bg-content);
-  border-bottom: var(--hairline) solid var(--line);
-}
-
-.newchat__dir {
-  flex: 1;
-  min-width: 0;
-  max-width: 420px;
-}
-
-.newchat__note {
-  font-size: var(--text-sm);
-  color: var(--red);
-}
+/* The New Chat strip lives in newchat.css, beside the component. */
 
 /* --- Toolbar title / rename ---------------------------------------------- */
 .renametrigger {

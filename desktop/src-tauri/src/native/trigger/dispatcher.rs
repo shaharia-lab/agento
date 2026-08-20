@@ -374,8 +374,17 @@ fn create_trigger_session(db_path: &Path, rule: &Rule) -> Result<String, String>
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| format!("begin trigger session: {e}"))?;
-    let session = crate::native::chats::insert_session(&tx, &rule.agent_slug, "", "", "")
-        .map_err(|e| e.message())?;
+    let session = crate::native::chats::insert_session(
+        &tx,
+        crate::native::chats::NewSessionParams {
+            agent_slug: &rule.agent_slug,
+            working_directory: "",
+            model: "",
+            settings_profile_id: "",
+            permission_mode: "",
+        },
+    )
+    .map_err(|e| e.message())?;
     tx.commit()
         .map_err(|e| format!("commit trigger session: {e}"))?;
 

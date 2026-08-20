@@ -58,7 +58,16 @@ pub fn continue_session(db_path: &std::path::Path, session_id: &str) -> Result<A
 
     // No agent slug: a continued conversation belongs to whoever ran it, and
     // `CreateSession` accepts an empty slug without looking one up.
-    let session = chats::insert_session(&tx, "", &detail.summary.cwd, &detail.summary.model, "")?;
+    let session = chats::insert_session(
+        &tx,
+        chats::NewSessionParams {
+            agent_slug: "",
+            working_directory: &detail.summary.cwd,
+            model: &detail.summary.model,
+            settings_profile_id: "",
+            permission_mode: "",
+        },
+    )?;
 
     // `chatService.UpdateSession`, which stamps its own `updated_at` — so this
     // is a second statement with a second clock reading rather than a value

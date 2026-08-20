@@ -300,13 +300,20 @@ func TestCreateSession(t *testing.T) {
 
 			// Only expect CreateSession if agent validation passes.
 			if !tc.wantErr || tc.chatCreateErr != nil {
-				chatRepo.On("CreateSession", mock.Anything, tc.agentSlug, tc.workingDir, tc.model, tc.settingsProfileID).
-					Return(tc.chatCreateResult, tc.chatCreateErr)
+				chatRepo.On("CreateSession", mock.Anything, storage.NewSessionParams{
+					AgentSlug:         tc.agentSlug,
+					WorkingDir:        tc.workingDir,
+					Model:             tc.model,
+					SettingsProfileID: tc.settingsProfileID,
+				}).Return(tc.chatCreateResult, tc.chatCreateErr)
 			}
 
-			result, err := svc.CreateSession(
-				context.Background(), tc.agentSlug, tc.workingDir, tc.model, tc.settingsProfileID,
-			)
+			result, err := svc.CreateSession(context.Background(), storage.NewSessionParams{
+				AgentSlug:         tc.agentSlug,
+				WorkingDir:        tc.workingDir,
+				Model:             tc.model,
+				SettingsProfileID: tc.settingsProfileID,
+			})
 
 			if tc.wantErr {
 				assert.Error(t, err)

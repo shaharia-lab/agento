@@ -197,7 +197,9 @@ func (d *Dispatcher) executeAndReply(
 		return
 	}
 
-	chatSession, err := d.chatStore.CreateSession(ctx, rule.AgentSlug, "", "", "")
+	chatSession, err := d.chatStore.CreateSession(ctx, storage.NewSessionParams{
+		AgentSlug: rule.AgentSlug,
+	})
 	if err != nil {
 		d.logger.Error("failed to create chat session for trigger", "error", err)
 		d.sendErrorReply(ctx, botToken, msg.Chat.ID, msg.MessageID)

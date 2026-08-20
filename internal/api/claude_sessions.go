@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/shaharia-lab/agento/internal/claudesessions"
+	"github.com/shaharia-lab/agento/internal/storage"
 )
 
 // handleListClaudeSessions returns one page of Claude Code sessions.
@@ -380,7 +381,10 @@ func (s *Server) handleContinueClaudeSession(w http.ResponseWriter, r *http.Requ
 	}
 
 	// Create a new Agento chat session with no agent slug, inheriting the session's cwd.
-	chatSession, err := s.chatSvc.CreateSession(r.Context(), "", detail.CWD, detail.Model, "")
+	chatSession, err := s.chatSvc.CreateSession(r.Context(), storage.NewSessionParams{
+		WorkingDir: detail.CWD,
+		Model:      detail.Model,
+	})
 	if err != nil {
 		s.logger.Error("continue claude session: create chat failed", "error", err)
 		s.writeError(w, http.StatusInternalServerError, "failed to create chat session")
