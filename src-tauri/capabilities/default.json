@@ -29,6 +29,7 @@
     "log:default",
     "dialog:default",
     "opener:allow-open-url",
+    "opener:allow-default-urls",
     "updater:default",
     "process:allow-restart"
   ]
