@@ -124,7 +124,7 @@ async fn the_session_detail_matches_the_live_go_response() {
     );
     pick_first(&|s| s.get("prs").is_some(), &mut picks);
     pick_first(&|s| nonzero(s, "compaction_count"), &mut picks);
-    pick_first(&|s| !s.get("is_favorite").is_none(), &mut picks);
+    pick_first(&|s| s.get("is_favorite").is_some(), &mut picks);
     // The most recent, and the busiest, whatever else they are.
     if let Some(s) = sessions.first() {
         picks.insert(id_of(s));
