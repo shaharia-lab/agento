@@ -66,25 +66,43 @@ On macOS use `⌘` instead of `Ctrl`, and the menu bar carries the same actions.
 
 A chat is a conversation with an agent, kept for as long as you want it.
 
-**Start one:** press `Ctrl N` or click the `+` above the chat list. Pick an agent
-(or none), choose a **working directory**, and type your first message.
+**Start one:** press `Ctrl N` or click the `+` above the chat list. Set up how the
+conversation should run, then type your first message. The chat is created when
+you send.
+
+| Setting | What it does |
+| --- | --- |
+| **Agent** | Which saved agent to talk to, or none for a direct chat. Hidden until you have created one |
+| **Model** | Sonnet, Opus or Haiku. Locked when the agent already names one, because the agent's wins |
+| **Permissions** | How much this conversation may do without asking. See below |
+| **Settings** | Which Claude settings profile to run under, if you have more than one |
+| **Working directory** | Required. The folder the agent can see and act in |
 
 The working directory matters. It is the folder the agent can see and act in, the
-same way `claude` behaves when you run it from that folder. Click the folder icon
-to pick one with your system's file picker.
+same way `claude` behaves when you run it from that folder. **Browse…** opens your
+system's file picker, falling back to a built-in one if that is unavailable.
+
+Your choices are remembered and filled in next time you start a chat. They start
+from **Settings → General** the first time.
+
+**Replies are rendered as markdown** — headings, lists, tables, links and code
+blocks. Hover a message for a **copy** button, and any code block for its own.
+Copying a message gives you the markdown source, which is what you want when it
+is going into an issue or a commit message.
 
 **While a turn is running:**
 
 - The reply streams in as it is produced.
 - Tool calls appear inline, with the input and the result.
 - If the agent needs permission for a tool, a prompt appears. Approve or deny.
+  Chats set to *Never ask* skip this.
 - If the agent asks you a question, answer it in the composer and the run
   continues.
 - **Stop** halts the run. Anything already written stays.
 
-**The inspector** shows the agent, the model, the message count and the token
-usage of the whole conversation, split into input, output, cache read and cache
-write, with the cost.
+**The inspector** shows the agent, the model, the permission mode, the message
+count and the token usage of the whole conversation, split into input, output,
+cache read and cache write, with the cost.
 
 Rename a chat from the title, or delete it from the toolbar. Deleting removes its
 messages too.
@@ -92,6 +110,22 @@ messages too.
 **One thing worth knowing:** a turn that produced no final answer, for example one
 you stopped immediately, stores nothing. That is the same rule Claude Code
 follows.
+
+### Permissions, per conversation
+
+The **Permissions** setting decides how much this chat may do on its own:
+
+| Choice | Behaviour |
+| --- | --- |
+| **Agent default** | Use whatever the agent is configured for, or ask if it has no preference |
+| **Ask before acting** | Prompt in the transcript before every tool call |
+| **Never ask** | Run tools without prompting. For work you have already decided to trust |
+| **Plan only** | Propose a plan without acting on it |
+| **Don't ask** | Claude Code's `dontAsk` mode |
+
+It applies to that conversation alone and does not change the agent. A tool the
+agent does not list is still denied without asking, whatever you pick here — the
+allowlist is enforced separately.
 
 ---
 
@@ -110,27 +144,31 @@ Fields:
 | **Thinking** | Adaptive, always on, or disabled. Controls extended reasoning |
 | **Permission mode** | How much an unattended run may do without asking. See below |
 | **System prompt** | The agent's instructions |
-| **Claude config dir** | Run this agent as a different Claude Code account |
+| **Claude config dir** | Run this agent as a different Claude Code account. **Browse…** picks one |
 | **Tools** | Exactly what this agent is allowed to use |
 
 ### Permissions
 
-Two rules, and they do not depend on the agent's settings:
+One rule holds everywhere, whatever anything is set to:
 
-- **In a chat, Agento asks you before a tool runs.** You are there to answer, so
-  the prompt appears in the transcript and the run waits.
 - **A tool the agent does not list is denied without asking.** The allowlist is
-  enforced whatever the permission mode says.
+  enforced independently of every permission mode.
 
-The **permission mode** field applies to unattended runs, meaning scheduled
-tasks, where nothing can answer a prompt. Left unset, those runs proceed without
-prompting, because the alternative is a task that hangs until it times out.
+Beyond that, who decides depends on whether anyone is watching:
 
-**Known limitation:** the permission mode you pick in the form is not currently
+- **In a chat**, the conversation decides. Each chat carries its own permission
+  mode, chosen when you start it — see [Permissions, per
+  conversation](#permissions-per-conversation). Left at *Agent default* it falls
+  back to the agent's, and to asking you if the agent has no preference.
+- **In an unattended run**, meaning a scheduled task, the agent's **permission
+  mode** field decides. Left unset those runs proceed without prompting, because
+  the alternative is a task that hangs until it times out.
+
+**Known limitation:** the permission mode you pick on an *agent* is not currently
 saved. The underlying API drops the field, and the desktop app reproduces the
-server's behaviour rather than diverging from it. Treat the selector as
-informational for now, and rely on the tool allowlist and the working directory
-to bound what an agent can do.
+server's behaviour rather than diverging from it. This does not affect chats,
+which store their own mode. For agents, rely on the tool allowlist and the
+working directory to bound what a run can do.
 
 ### Tools
 
@@ -201,8 +239,9 @@ listed and its data is safe, but it cannot be edited or used here.
 A scheduled task runs an agent on its own, on a schedule, and records what
 happened.
 
-Create one with a name, an agent, and the **prompt** sent to that agent verbatim
-on every run.
+Create one with a name, an agent and the **prompt** sent to that agent verbatim
+on every run. The agent is chosen from a list; if you have not created one yet
+the form says so, and the Agents section is where to start.
 
 **Schedules:**
 
@@ -215,7 +254,7 @@ on every run.
 
 Other options:
 
-- **Working directory**: the folder the run happens in.
+- **Working directory**: the folder the run happens in. **Browse…** picks one.
 - **Model**: override the agent's model for this task.
 - **Timeout**: runs longer than this are cancelled and recorded as failed.
 - **Save output**: keep the agent's reply in the run history.
