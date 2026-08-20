@@ -11,9 +11,9 @@ repos:
       # elides — so stripping it silently changes the mail the app sends.
       # Byte-exact is the point of the file, and nothing can regenerate it.
       - id: trailing-whitespace
-        exclude: ^desktop/src-tauri/src/native/notifications/email\.html$
+        exclude: ^src-tauri/src/native/notifications/email\.html$
       - id: end-of-file-fixer
-        exclude: ^desktop/src-tauri/src/native/notifications/email\.html$
+        exclude: ^src-tauri/src/native/notifications/email\.html$
       - id: check-yaml
       - id: check-json
       - id: check-merge-conflict

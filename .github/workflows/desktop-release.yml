@@ -68,9 +68,9 @@ jobs:
             *) echo "not a desktop-v* tag build; nothing to check"; exit 0 ;;
           esac
           tag_version="${tag#desktop-v}"
-          conf_version="$(python3 -c 'import json; print(json.load(open("desktop/src-tauri/tauri.conf.json"))["version"])')"
+          conf_version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
           if [ "$tag_version" != "$conf_version" ]; then
-            echo "::error::tag ${tag} says ${tag_version} but desktop/src-tauri/tauri.conf.json says ${conf_version}. Bump the conf and re-tag, or the shipped app will re-offer itself as an update forever."
+            echo "::error::tag ${tag} says ${tag_version} but src-tauri/tauri.conf.json says ${conf_version}. Bump the conf and re-tag, or the shipped app will re-offer itself as an update forever."
             exit 1
           fi
           echo "ok: ${tag_version}"
@@ -137,24 +137,22 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: desktop/src-tauri -> target
+          workspaces: src-tauri -> target
           key: ${{ matrix.target }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: desktop/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: desktop
         run: npm ci
 
       # bundle.targets in tauri.conf.json lists exactly what ships — notably
       # NSIS and not MSI on Windows, since the updater manifest expects the
       # -setup.exe and a built-but-dropped .msi only wasted CI time.
       - name: Build installers
-        working-directory: desktop
         run: npx tauri build --target ${{ matrix.target }}
         env:
           # Signs the updater artifacts. This is Tauri's own minisign key, not
@@ -169,7 +167,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p out
-          base="desktop/src-tauri/target/${{ matrix.target }}/release/bundle"
+          base="src-tauri/target/${{ matrix.target }}/release/bundle"
           # Installers users download, plus the updater payloads and their
           # signatures. macOS updates ship as .app.tar.gz, not as the .dmg.
           find "$base" -type f \
