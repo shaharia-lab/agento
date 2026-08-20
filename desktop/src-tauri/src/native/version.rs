@@ -5,12 +5,14 @@
 //! Two things here are not obvious.
 //!
 //! **The build stamp defaults to Go's unstamped values.** Go's `internal/build`
-//! variables are set by `-ldflags`, and only the Makefile does that —
-//! `scripts/parity-instance.sh` builds with no flags, so the server the parity
-//! test diffs against serves the package defaults. [`VERSION`] and friends read
-//! the same defaults, with an `option_env!` hook (`AGENTO_BUILD_VERSION` and
-//! friends) for the day the desktop bundle starts stamping itself — possible
-//! since #278 removed the Go binary that would have had to agree.
+//! variables were set by `-ldflags`, and only the Makefile did that —
+//! `scripts/parity-instance.sh` built with no flags, so the server the parity
+//! tests diffed against served the package defaults, and these were pinned to
+//! them. [`VERSION`] and friends still read those defaults, with an
+//! `option_env!` hook (`AGENTO_BUILD_VERSION` and friends) for the day the
+//! desktop bundle starts stamping itself. Nothing constrains them any more —
+//! #278 removed the Go binary that would have had to agree and #388 removed the
+//! Go tree — so stamping is now a build-script change and nothing else.
 //!
 //! **The update check is not the updater.** Go's release-lookup branch asked
 //! GitHub and compared, which is the self-updater — the one subsystem the

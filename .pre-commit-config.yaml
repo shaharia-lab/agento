@@ -3,12 +3,13 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
-      # The email skeleton is generated: it is what `html/template` *renders*
-      # from internal/notification/template.go, and the notification port is
-      # asserted against a golden Go wrote. Its trailing whitespace is Go's —
-      # the spaces either side of the six HTML comments html/template elides —
-      # so stripping it silently makes the desktop app send different mail from
-      # the server. Byte-exact is the point of the file.
+      # The email skeleton is generated: it is what Go's `html/template`
+      # *rendered* from `internal/notification/template.go`, and the
+      # notification port is asserted against a golden Go wrote — now frozen in
+      # parity/, since #388 deleted the generator. Its trailing whitespace is
+      # Go's — the spaces either side of the six HTML comments html/template
+      # elides — so stripping it silently changes the mail the app sends.
+      # Byte-exact is the point of the file, and nothing can regenerate it.
       - id: trailing-whitespace
         exclude: ^desktop/src-tauri/src/native/notifications/email\.html$
       - id: end-of-file-fixer
@@ -23,43 +24,13 @@ repos:
         args: [--branch, main]
         stages: [pre-push]
 
-  # ── Go — golangci-lint ───────────────────────────────────────────────────────
-  - repo: https://github.com/dnephin/pre-commit-golang
-    rev: v0.5.1
-    hooks:
-      - id: golangci-lint
-        args: [--config=.golangci.yml]
-
-  # ── Frontend — ESLint ────────────────────────────────────────────────────────
-  - repo: local
-    hooks:
-      - id: frontend-eslint
-        name: Frontend ESLint
-        language: node
-        entry: sh -c 'cd frontend && npm run lint'
-        files: ^frontend/src/.*\.(ts|tsx)$
-        pass_filenames: false
-
-      # ── Frontend — Prettier ──────────────────────────────────────────────────
-      - id: frontend-prettier
-        name: Frontend Prettier
-        language: node
-        entry: sh -c 'cd frontend && npm run format:check'
-        files: ^frontend/src/.*\.(ts|tsx|css)$
-        pass_filenames: false
-
-      # ── Frontend — TypeScript type check ────────────────────────────────────
-      - id: frontend-typecheck
-        name: Frontend TypeScript type check
-        language: node
-        entry: sh -c 'cd frontend && npm run typecheck'
-        files: ^frontend/src/.*\.(ts|tsx)$
-        pass_filenames: false
-
-      # ── Frontend — Production build ──────────────────────────────────────────
-      - id: frontend-build
-        name: Frontend build
-        language: node
-        entry: sh -c 'cd frontend && npm run build'
-        files: ^frontend/src/.*\.(ts|tsx|css)$
-        pass_filenames: false
+# The Go and web hooks went with the trees they checked (#388): golangci-lint
+# over `internal/`, and the four `frontend/`-scoped node hooks. All four were
+# scoped to `^frontend/src/`, so none of them ever fired on desktop work — this
+# removes dead configuration rather than lowering the bar on anything.
+#
+# Desktop checks live in `.github/workflows/desktop-ci.yml`: `cargo fmt
+# --check`, `cargo clippy -D warnings`, `cargo test`, and `npm run build`
+# (which typechecks). They are deliberately not mirrored here — a `cargo
+# clippy --all-targets` on every commit is a minute-plus, and CI is where the
+# gate belongs.
