@@ -1,3 +1,14 @@
+# Frontend
+node_modules
+dist
+dist-ssr
+*.local
+.vite
+
+# Tauri
+src-tauri/target
+src-tauri/gen
+
 # macOS
 .DS_Store
 
