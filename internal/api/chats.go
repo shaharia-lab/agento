@@ -93,6 +93,9 @@ type createChatRequest struct {
 	WorkingDirectory  string `json:"working_directory"`
 	Model             string `json:"model"`
 	SettingsProfileID string `json:"settings_profile_id"`
+	// PermissionMode is optional and validated by the service; empty means
+	// "no choice recorded", not a mode.
+	PermissionMode string `json:"permission_mode"`
 }
 
 type sendMessageRequest struct {
@@ -120,13 +123,22 @@ func (s *Server) handleCreateChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, err := s.chatSvc.CreateSession(
-		r.Context(), req.AgentSlug, req.WorkingDirectory, req.Model, req.SettingsProfileID,
-	)
+	session, err := s.chatSvc.CreateSession(r.Context(), storage.NewSessionParams{
+		AgentSlug:         req.AgentSlug,
+		WorkingDir:        req.WorkingDirectory,
+		Model:             req.Model,
+		SettingsProfileID: req.SettingsProfileID,
+		PermissionMode:    req.PermissionMode,
+	})
 	if err != nil {
 		var nfe *service.NotFoundError
 		if errors.As(err, &nfe) {
 			s.writeError(w, http.StatusNotFound, nfe.Error())
+			return
+		}
+		var ve *service.ValidationError
+		if errors.As(err, &ve) {
+			s.writeError(w, http.StatusUnprocessableEntity, ve.Error())
 			return
 		}
 		s.logger.Error("create chat failed", "error", err)

@@ -1,0 +1,41 @@
+/* ============================================================================
+   The New Chat configuration strip.
+
+   Two rows rather than one: the four pickers wrap on a narrow detail pane,
+   while the working directory wants the full width it can get — it is the one
+   required field and the one whose value is unreadable when truncated.
+   ========================================================================== */
+
+.newchat {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-6);
+  background: var(--bg-content);
+  border-bottom: var(--hairline) solid var(--line);
+}
+
+.newchat__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* A picker sized to its label would make the row jump every time the label
+   changed (the model one carries the agent's model in its text), so they share
+   a floor and grow only with the row. */
+.newchat__row .select {
+  min-width: 132px;
+  max-width: 260px;
+}
+
+.newchat__note {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--text-sm);
+  color: var(--red);
+}

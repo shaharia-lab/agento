@@ -58,6 +58,13 @@ export interface ChatSession {
   working_directory: string;
   model: string;
   settings_profile_id?: string;
+  /**
+   * This conversation's own permission mode — "bypass" | "default" | "plan" |
+   * "dontAsk". Optional because Go marks it `omitempty`, and absent is not a
+   * fifth mode: it means no choice was recorded, so the run falls back to the
+   * agent's own mode (and to "default" for a chat with no agent).
+   */
+  permission_mode?: string;
   created_at: string;
   updated_at: string;
   total_input_tokens?: number;

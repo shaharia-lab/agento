@@ -196,9 +196,9 @@ func (_c *MockChatService_CommitMessage_Call) RunAndReturn(run func(context.Cont
 	return _c
 }
 
-// CreateSession provides a mock function with given fields: ctx, agentSlug, workingDir, model, settingsProfileID
-func (_m *MockChatService) CreateSession(ctx context.Context, agentSlug string, workingDir string, model string, settingsProfileID string) (*storage.ChatSession, error) {
-	ret := _m.Called(ctx, agentSlug, workingDir, model, settingsProfileID)
+// CreateSession provides a mock function with given fields: ctx, p
+func (_m *MockChatService) CreateSession(ctx context.Context, p storage.NewSessionParams) (*storage.ChatSession, error) {
+	ret := _m.Called(ctx, p)
 
 	if len(ret) == 0 {
 		panic("no return value specified for CreateSession")
@@ -206,19 +206,19 @@ func (_m *MockChatService) CreateSession(ctx context.Context, agentSlug string, 
 
 	var r0 *storage.ChatSession
 	var r1 error
-	if rf, ok := ret.Get(0).(func(context.Context, string, string, string, string) (*storage.ChatSession, error)); ok {
-		return rf(ctx, agentSlug, workingDir, model, settingsProfileID)
+	if rf, ok := ret.Get(0).(func(context.Context, storage.NewSessionParams) (*storage.ChatSession, error)); ok {
+		return rf(ctx, p)
 	}
-	if rf, ok := ret.Get(0).(func(context.Context, string, string, string, string) *storage.ChatSession); ok {
-		r0 = rf(ctx, agentSlug, workingDir, model, settingsProfileID)
+	if rf, ok := ret.Get(0).(func(context.Context, storage.NewSessionParams) *storage.ChatSession); ok {
+		r0 = rf(ctx, p)
 	} else {
 		if ret.Get(0) != nil {
 			r0 = ret.Get(0).(*storage.ChatSession)
 		}
 	}
 
-	if rf, ok := ret.Get(1).(func(context.Context, string, string, string, string) error); ok {
-		r1 = rf(ctx, agentSlug, workingDir, model, settingsProfileID)
+	if rf, ok := ret.Get(1).(func(context.Context, storage.NewSessionParams) error); ok {
+		r1 = rf(ctx, p)
 	} else {
 		r1 = ret.Error(1)
 	}
@@ -233,17 +233,14 @@ type MockChatService_CreateSession_Call struct {
 
 // CreateSession is a helper method to define mock.On call
 //   - ctx context.Context
-//   - agentSlug string
-//   - workingDir string
-//   - model string
-//   - settingsProfileID string
-func (_e *MockChatService_Expecter) CreateSession(ctx interface{}, agentSlug interface{}, workingDir interface{}, model interface{}, settingsProfileID interface{}) *MockChatService_CreateSession_Call {
-	return &MockChatService_CreateSession_Call{Call: _e.mock.On("CreateSession", ctx, agentSlug, workingDir, model, settingsProfileID)}
+//   - p storage.NewSessionParams
+func (_e *MockChatService_Expecter) CreateSession(ctx interface{}, p interface{}) *MockChatService_CreateSession_Call {
+	return &MockChatService_CreateSession_Call{Call: _e.mock.On("CreateSession", ctx, p)}
 }
 
-func (_c *MockChatService_CreateSession_Call) Run(run func(ctx context.Context, agentSlug string, workingDir string, model string, settingsProfileID string)) *MockChatService_CreateSession_Call {
+func (_c *MockChatService_CreateSession_Call) Run(run func(ctx context.Context, p storage.NewSessionParams)) *MockChatService_CreateSession_Call {
 	_c.Call.Run(func(args mock.Arguments) {
-		run(args[0].(context.Context), args[1].(string), args[2].(string), args[3].(string), args[4].(string))
+		run(args[0].(context.Context), args[1].(storage.NewSessionParams))
 	})
 	return _c
 }
@@ -253,7 +250,7 @@ func (_c *MockChatService_CreateSession_Call) Return(_a0 *storage.ChatSession, _
 	return _c
 }
 
-func (_c *MockChatService_CreateSession_Call) RunAndReturn(run func(context.Context, string, string, string, string) (*storage.ChatSession, error)) *MockChatService_CreateSession_Call {
+func (_c *MockChatService_CreateSession_Call) RunAndReturn(run func(context.Context, storage.NewSessionParams) (*storage.ChatSession, error)) *MockChatService_CreateSession_Call {
 	_c.Call.Return(run)
 	return _c
 }

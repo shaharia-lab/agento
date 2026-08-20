@@ -121,6 +121,9 @@ pub fn headless_spec(
         settings: Arc::new(runner::TurnSettings::from_db(db_path)),
         working_dir,
         settings_profile_id,
+        // A headless run carries no conversation-level choice, so the agent's
+        // own mode applies — `buildRunOptions` sets no permission mode either.
+        permission_mode: String::new(),
         resume_session_id: None,
         custom_session_id: String::new(),
     }

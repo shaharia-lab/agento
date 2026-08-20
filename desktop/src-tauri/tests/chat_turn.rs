@@ -177,6 +177,7 @@ fn chat_row(id: &str) -> agento_lib::native::chat::runner::ChatRow {
         working_dir: String::new(),
         model: String::new(),
         settings_profile_id: String::new(),
+        permission_mode: String::new(),
     }
 }
 

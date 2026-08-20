@@ -373,10 +373,15 @@ fn create_task_session(db_path: &std::path::Path, task: &ScheduledTask) -> Resul
 
     let session = crate::native::chats::insert_session(
         &tx,
-        &task.agent_slug,
-        &task.working_directory,
-        &task.model,
-        &task.settings_profile_id,
+        crate::native::chats::NewSessionParams {
+            agent_slug: &task.agent_slug,
+            working_directory: &task.working_directory,
+            model: &task.model,
+            settings_profile_id: &task.settings_profile_id,
+            // A task carries no per-conversation choice; its agent's own mode
+            // applies, which is what `buildRunOptions` has always done.
+            permission_mode: "",
+        },
     )
     .map_err(|e| e.message())?;
 

@@ -174,6 +174,7 @@ pub async fn run(
         settings,
         working_dir: row.working_dir.clone(),
         settings_profile_id: row.settings_profile_id.clone(),
+        permission_mode: row.permission_mode.clone(),
         resume_session_id: Some(row.sdk_session_id.clone()).filter(|s| !s.is_empty()),
         // A chat pins a new CLI session to its own id; a scheduled run does not
         // (#275), which is why this is a field rather than an unconditional.

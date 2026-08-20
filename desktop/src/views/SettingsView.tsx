@@ -11,7 +11,8 @@ import { describeError, useResource, type Resource } from "../lib/hooks";
 import { dateTime, relativeTime, tildePath, usd } from "../lib/format";
 import { Icon, type IconName } from "../lib/icons";
 import { Checkbox, Dropdown, Empty, FormRow, Switch } from "../components/ui";
-import { IS_TAURI, openExternal, pickDirectory } from "../lib/tauri";
+import { openExternal } from "../lib/tauri";
+import { DirField, useDirPicker } from "../components/DirField";
 import { useHostInfo } from "../lib/host";
 import {
   UPDATE_PREF_OPTIONS,
@@ -21,7 +22,6 @@ import {
 } from "../lib/updatePref";
 import type {
   ClaudeSettingsProfile,
-  FSEntry,
   NotificationLogEntry,
   PricingCatalog,
   UserSettings,
@@ -92,12 +92,6 @@ interface UpdateCheck {
   latest_version: string;
   release_url: string;
   update_available: boolean;
-}
-
-interface FSListing {
-  path: string;
-  parent: string;
-  entries: FSEntry[] | null;
 }
 
 /** The sentinel the server accepts to mean "keep the stored password". */
@@ -425,7 +419,7 @@ function GeneralPane({
   modelFromEnv: boolean;
   onPatch(patch: Partial<UserSettings>): void;
 }) {
-  const [browsing, setBrowsing] = useState(false);
+  const picker = useDirPicker();
 
   const dirLock = locked.default_working_dir;
   const modelLock = locked.default_model;
@@ -443,41 +437,13 @@ function GeneralPane({
               : "Where agents create and edit files unless told otherwise."
           }
         >
-          <div className="row" style={{ gap: "var(--sp-3)" }}>
-            <label
-              className={`field ${dirLock ? "field--locked" : ""}`}
-              style={{ flex: 1 }}
-            >
-              <input
-                value={user.default_working_dir}
-                onChange={(e) => onPatch({ default_working_dir: e.target.value })}
-                className="mono"
-                disabled={!!dirLock}
-                spellCheck={false}
-              />
-            </label>
-            <button
-              className="btn btn--lg"
-              onClick={async () => {
-                // Prefer the OS's own folder picker; the in-app browser is
-                // the fallback for a plain browser tab (and it also depends
-                // on /api/fs, which is Unix-only).
-                if (!IS_TAURI) {
-                  setBrowsing(true);
-                  return;
-                }
-                const picked = await pickDirectory(
-                  "Choose working directory",
-                  user.default_working_dir
-                );
-                if (picked) onPatch({ default_working_dir: picked });
-              }}
-              disabled={!!dirLock}
-            >
-              <Icon name="folder" size={14} />
-              Browse…
-            </button>
-          </div>
+          <DirField
+            value={user.default_working_dir}
+            onChange={(path) => onPatch({ default_working_dir: path })}
+            title="Choose working directory"
+            disabled={!!dirLock}
+            browse={picker.browse}
+          />
         </FormRow>
 
         <FormRow
@@ -531,16 +497,7 @@ function GeneralPane({
 
       <UpdatesSection />
 
-      {browsing && (
-        <DirBrowser
-          start={user.default_working_dir}
-          onPick={(path) => {
-            onPatch({ default_working_dir: path });
-            setBrowsing(false);
-          }}
-          onClose={() => setBrowsing(false)}
-        />
-      )}
+      {picker.browser}
     </>
   );
 }
@@ -603,150 +560,6 @@ function UpdatesSection() {
 
 function lockHelp(envVar: string): string {
   return `Locked by ${envVar}. Change the environment variable and restart Agento — saving a different value here is rejected.`;
-}
-
-/* --- Directory browser --------------------------------------------------- */
-
-function DirBrowser({
-  start,
-  onPick,
-  onClose,
-}: {
-  start: string;
-  onPick(path: string): void;
-  onClose(): void;
-}) {
-  const [path, setPath] = useState(start || "~");
-  const [creating, setCreating] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [error, setError] = useState<string>();
-
-  const listing = useResource(
-    (signal) => api.get<FSListing>(`/fs${qs({ path })}`, signal),
-    [path]
-  );
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const here = listing.data?.path ?? path;
-  const entries = listing.data?.entries ?? [];
-
-  async function mkdir() {
-    const name = newName.trim();
-    if (!name) return;
-    setError(undefined);
-    try {
-      await api.post("/fs/mkdir", { path: `${here}/${name}` });
-      setNewName("");
-      setCreating(false);
-      listing.reload();
-    } catch (err) {
-      setError(describeError(err));
-    }
-  }
-
-  return (
-    <div className="overlay" onMouseDown={onClose}>
-      <div className="browser" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="browser__head">
-          <button
-            className="iconbtn"
-            onClick={() => listing.data && setPath(listing.data.parent)}
-            disabled={!listing.data || listing.data.parent === here}
-            title="Parent directory"
-          >
-            <Icon name="arrowUp" size={14} />
-          </button>
-          <div className="browser__path" title={here}>
-            {tildePath(here)}
-          </div>
-          <button className="iconbtn" onClick={listing.reload} title="Refresh">
-            <Icon name="refresh" size={13} />
-          </button>
-        </div>
-
-        <div className="browser__list scroll">
-          {listing.error ? (
-            <div className="msgline msgline--error" style={{ margin: "var(--sp-4)" }}>
-              {listing.error}
-            </div>
-          ) : entries.length === 0 ? (
-            <div
-              style={{
-                padding: "var(--sp-7)",
-                textAlign: "center",
-                fontSize: "var(--text-sm)",
-                color: "var(--fg-tertiary)",
-              }}
-            >
-              {listing.loading ? "Loading…" : "No sub-directories."}
-            </div>
-          ) : (
-            entries.map((e) => (
-              <button
-                key={e.path}
-                className="browser__row"
-                onDoubleClick={() => setPath(e.path)}
-                onClick={() => setPath(e.path)}
-              >
-                <Icon name="folder" size={14} />
-                <span>{e.name}</span>
-              </button>
-            ))
-          )}
-        </div>
-
-        {error && (
-          <div className="msgline msgline--error" style={{ margin: "var(--sp-4)" }}>
-            {error}
-          </div>
-        )}
-
-        <div className="browser__foot">
-          {creating ? (
-            <>
-              <label className="field field--sm" style={{ flex: 1 }}>
-                <input
-                  autoFocus
-                  value={newName}
-                  onChange={(ev) => setNewName(ev.target.value)}
-                  onKeyDown={(ev) => ev.key === "Enter" && mkdir()}
-                  placeholder="Folder name"
-                  spellCheck={false}
-                />
-              </label>
-              <button className="btn" onClick={mkdir}>
-                Create
-              </button>
-              <button className="btn btn--ghost" onClick={() => setCreating(false)}>
-                Cancel
-              </button>
-            </>
-          ) : (
-            <>
-              <button className="btn" onClick={() => setCreating(true)}>
-                <Icon name="plus" size={13} />
-                New folder
-              </button>
-              <div className="spacer" />
-              <button className="btn" onClick={onClose}>
-                Cancel
-              </button>
-              <button className="btn btn--primary" onClick={() => onPick(here)}>
-                Choose
-              </button>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 /* --- Claude -------------------------------------------------------------- */

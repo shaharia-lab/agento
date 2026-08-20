@@ -112,7 +112,7 @@ func (c *stubChatStore) GetSession(_ context.Context, _ string) (*storage.ChatSe
 func (c *stubChatStore) GetSessionWithMessages(_ context.Context, _ string) (*storage.ChatSession, []storage.ChatMessage, error) {
 	return nil, nil, nil
 }
-func (c *stubChatStore) CreateSession(_ context.Context, _, _, _, _ string) (*storage.ChatSession, error) {
+func (c *stubChatStore) CreateSession(_ context.Context, _ storage.NewSessionParams) (*storage.ChatSession, error) {
 	if c.createErr != nil {
 		return nil, c.createErr
 	}

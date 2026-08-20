@@ -1,8 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions the Agento main window needs to draw its own chrome.",
+  "description": "Permissions the Agento main window needs to draw its own chrome, pick directories, open external links and update itself.",
   "windows": ["main"],
+  "remote": {
+    "urls": [
+      "http://127.0.0.1:*",
+      "http://127.0.0.1:*/*",
+      "http://localhost:*",
+      "http://localhost:*/*"
+    ]
+  },
   "permissions": [
     "core:default",
     "core:window:allow-minimize",
@@ -10,6 +18,7 @@
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",
+    "core:window:allow-internal-toggle-maximize",
     "core:window:allow-is-maximized",
     "core:window:allow-close",
     "core:window:allow-show",

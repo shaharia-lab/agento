@@ -36,12 +36,13 @@ type ChatService interface {
 	// GetSessionWithMessages returns the session and its full message history.
 	GetSessionWithMessages(ctx context.Context, id string) (*storage.ChatSession, []storage.ChatMessage, error)
 
-	// CreateSession starts a new chat session. agentSlug may be empty for no-agent chat.
-	// workingDir and model are stored with the session and used during message processing.
-	// settingsProfileID optionally links the session to a named Claude settings profile.
-	CreateSession(
-		ctx context.Context, agentSlug, workingDir, model, settingsProfileID string,
-	) (*storage.ChatSession, error)
+	// CreateSession starts a new chat session. p.AgentSlug may be empty for
+	// no-agent chat. p.WorkingDir and p.Model are stored with the session and
+	// used during message processing. p.SettingsProfileID optionally links the
+	// session to a named Claude settings profile, and p.PermissionMode
+	// optionally overrides the agent's own permission mode for this
+	// conversation.
+	CreateSession(ctx context.Context, p storage.NewSessionParams) (*storage.ChatSession, error)
 
 	// DeleteSession removes a session and all its messages.
 	DeleteSession(ctx context.Context, id string) error
@@ -151,15 +152,23 @@ func (s *chatService) GetSessionWithMessages(
 }
 
 func (s *chatService) CreateSession(
-	ctx context.Context, agentSlug, workingDir, model, settingsProfileID string,
+	ctx context.Context, p storage.NewSessionParams,
 ) (*storage.ChatSession, error) {
+	agentSlug := p.AgentSlug
 	ctx, span := otel.Tracer("agento").Start(ctx, "chat.create_session")
 	defer span.End()
 
 	span.SetAttributes(
 		attribute.String("chat.agent_slug", agentSlug),
-		attribute.String("chat.model", model),
+		attribute.String("chat.model", p.Model),
 	)
+
+	if !isValidChatPermissionMode(p.PermissionMode) {
+		return nil, &ValidationError{
+			Field:   "permission_mode",
+			Message: `must be one of "bypass", "default", "plan", "dontAsk", or empty`,
+		}
+	}
 
 	// Validate agent slug if provided.
 	if agentSlug != "" {
@@ -174,7 +183,7 @@ func (s *chatService) CreateSession(
 		}
 	}
 
-	session, err := s.chatRepo.CreateSession(ctx, agentSlug, workingDir, model, settingsProfileID)
+	session, err := s.chatRepo.CreateSession(ctx, p)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -192,9 +201,28 @@ func (s *chatService) CreateSession(
 	s.logger.Info("chat session created",
 		"session_id", session.ID,
 		"agent_slug", agentSlug,
-		"settings_profile_id", settingsProfileID,
+		"settings_profile_id", p.SettingsProfileID,
+		"permission_mode", p.PermissionMode,
 	)
 	return session, nil
+}
+
+// isValidChatPermissionMode reports whether a chat may be created with this
+// permission mode.
+//
+// All four of Claude Code's modes are accepted, unlike the *agent* validator,
+// which takes only "" / "bypass" / "default". That asymmetry is deliberate
+// rather than an oversight: an agent's mode is applied to unattended runs where
+// nothing can answer a prompt, while a chat always has a human in front of it,
+// so "plan" and "dontAsk" are exactly the modes a conversation wants and an
+// agent cannot safely have. Empty is not a mode — see NewSessionParams.
+func isValidChatPermissionMode(mode string) bool {
+	switch mode {
+	case "", "bypass", "default", "plan", "dontAsk":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *chatService) DeleteSession(ctx context.Context, id string) error {
@@ -318,6 +346,10 @@ func (s *chatService) populateRunOptions(opts *agent.RunOptions, session *storag
 	// The profile is resolved to a path inside the runner, which is the only
 	// place that knows which Claude config dir this agent's run targets.
 	opts.SettingsProfileID = session.SettingsProfileID
+
+	// Empty leaves appendPermissionOpts on its pre-existing rules: the agent's
+	// own mode, or "default" because an interactive handler is present.
+	opts.PermissionMode = session.PermissionMode
 }
 
 func (s *chatService) CommitMessage(

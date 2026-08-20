@@ -300,6 +300,23 @@ pub fn run() {
                 // Release builds load the UI from the proxy, which makes the
                 // page same-origin with the API. Debug builds load Vite, which
                 // proxies /api to the same place.
+                //
+                // **This navigation is why `capabilities/default.json` carries a
+                // `remote` block**, and the coupling is invisible from either
+                // file. Tauri's ACL asks `Webview::is_local_url` which side of
+                // the local/remote split a request came from, and that compares
+                // the page's URL against `tauri://localhost` (release) or the
+                // configured `devUrl` (debug) — so a release window pointed at
+                // `http://127.0.0.1:<port>` is **remote**, while the identical
+                // dev window on `http://localhost:1420` is local. A capability
+                // with no `remote.urls` is local-only, so every plugin and
+                // `core:` command was denied in release builds and allowed in
+                // dev: no window dragging (which on macOS is the *only* way to
+                // move the window, since `titleBarStyle: Overlay` leaves no OS
+                // titlebar to grab), no folder picker, no external links, no
+                // updater, no theme sync and no macOS menu events. Commands
+                // registered through `invoke_handler` — `host_info` — bypass the
+                // ACL entirely, which is why the app otherwise looked healthy.
                 #[cfg(not(debug_assertions))]
                 if let Some(window) = handle.get_webview_window("main") {
                     let url = format!("http://127.0.0.1:{proxy}");

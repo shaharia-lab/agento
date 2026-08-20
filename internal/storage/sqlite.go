@@ -818,6 +818,28 @@ WHERE session_id IN (
 );
 `,
 	},
+	{
+		version: 30,
+		sql: `
+-- A chat picks its own permission mode.
+--
+-- Until now every chat turn ran with Claude Code's "default" permissions,
+-- unconditionally: appendPermissionOpts overrides whatever the agent configured
+-- whenever an interactive permission handler exists, and a chat always has one.
+-- That is why a bypass agent still prompted in the chat UI and a plan agent
+-- still acted, and it left the user with no way to say "stop asking me" for a
+-- conversation they trust — the one place the answer is obviously per
+-- conversation rather than per agent.
+--
+-- Empty is not a fourth mode, it is "no choice recorded": the run then falls
+-- back to the agent's own permission_mode, and to "default" for a chat with no
+-- agent. So every existing row keeps exactly the behavior it had, which is
+-- what makes the default safe — the alternative, defaulting to 'default'
+-- literally, would be indistinguishable from a deliberate choice and would pin
+-- future agent-level changes out of a chat that never expressed an opinion.
+ALTER TABLE chat_sessions ADD COLUMN permission_mode TEXT NOT NULL DEFAULT '';
+`,
+	},
 }
 
 // NewSQLiteDB opens (or creates) a SQLite database at dbPath, configures

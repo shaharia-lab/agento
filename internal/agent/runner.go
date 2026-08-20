@@ -58,6 +58,13 @@ type RunOptions struct {
 	// behavior and may block (e.g. to ask a human before a tool runs).
 	PermissionHandler claude.PermissionHandler
 
+	// PermissionMode overrides both the agent's configured mode and the
+	// handler-forces-default rule below, for one run. It exists because the
+	// interactive branch of appendPermissionOpts is unconditional, so a chat
+	// had no way to say "stop asking me" — see appendPermissionOpts. Empty
+	// means no override, which is what every caller but the chat turn passes.
+	PermissionMode string
+
 	// SettingsProfileID names the Claude settings profile this session runs
 	// under. It is resolved to a file path at run time rather than by the
 	// caller, because the path depends on which Claude config dir the run
@@ -213,18 +220,23 @@ func appendSettingsOpts(sdkOpts []claude.Option, opts RunOptions, agentCfg *conf
 }
 
 func appendPermissionOpts(sdkOpts []claude.Option, opts RunOptions, agentCfg *config.AgentConfig) []claude.Option {
+	// The run's own mode wins over everything: it is the conversation-level
+	// choice a user made in the chat UI, and it is the only way past the
+	// interactive branch below.
+	mode := opts.PermissionMode
+
 	// When the web UI provides an interactive permission handler (e.g. for
 	// approve/deny prompts), we use WithDefaultPermissions so the handler
-	// receives each tool call. This takes precedence over the agent's
-	// configured permission_mode, which means "plan" and "dontAsk" agents
-	// will still behave as "default" when used through the chat UI.
-	if opts.PermissionHandler != nil {
-		return append(sdkOpts, claude.WithDefaultPermissions())
-	}
-
-	mode := ""
-	if agentCfg != nil {
-		mode = agentCfg.PermissionMode
+	// receives each tool call. Absent a run-level choice this takes precedence
+	// over the agent's configured permission_mode, which means "plan" and
+	// "dontAsk" agents still behave as "default" when used through the chat UI.
+	if mode == "" {
+		if opts.PermissionHandler != nil {
+			return append(sdkOpts, claude.WithDefaultPermissions())
+		}
+		if agentCfg != nil {
+			mode = agentCfg.PermissionMode
+		}
 	}
 
 	switch mode {
