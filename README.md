@@ -1,10 +1,15 @@
 # Agento Desktop
 
-A native desktop app for [Agento](https://github.com/shaharia-lab/agento): build
-AI agents, chat with them, schedule them, and see exactly what your Claude Code
-usage costs. Everything runs on your own machine.
+A native desktop app for Agento: build AI agents, chat with them, schedule them,
+and see exactly what your Claude Code usage costs. Everything runs on your own
+machine.
 
 One window, no browser tab, no server to start.
+
+> This is the **`desktop`** branch, and the app is the whole of it (#388).
+> [`main`](https://github.com/shaharia-lab/agento/tree/main) carries Agento's Go
+> web server, which is a separate download and has its own releases on `v*`
+> tags. Desktop releases are tagged `desktop-v*`.
 
 - **Docs:** [User Guide](docs/user-guide.md) | [Installation](docs/installation.md) | [Troubleshooting](docs/troubleshooting.md)
 - **For contributors:** [Development](docs/development.md) | [Architecture](docs/architecture.md) | [Releasing](docs/releasing.md)
