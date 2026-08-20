@@ -3,6 +3,8 @@ import { Icon } from "../../lib/icons";
 import { IS_MAC } from "../../lib/tauri";
 import { clockTime, initials, type Tone } from "../../lib/format";
 import type { ChatMessage, MessageBlock } from "../../lib/types";
+import { CopyButton } from "../../components/CopyButton";
+import { Markdown } from "./Markdown";
 import { prettyJson, summarizeInput, type QuestionItem } from "./sse";
 import type { Live, Prompt, ToolState } from "./useChatStream";
 
@@ -111,15 +113,43 @@ function Message({
         <div className="msg__head">
           <span className="msg__author">{isUser ? "You" : agent}</span>
           <span className="msg__time">{clockTime(msg.timestamp)}</span>
+          <div className="spacer" />
+          {/* The turn's prose, not its tool calls: what a reader wants to
+              paste elsewhere is the answer, and a JSON tool payload pasted
+              into a commit message or an issue is never it. Each tool call
+              keeps its own disclosure, and each code block its own button. */}
+          <span className="msg__copy">
+            <CopyButton
+              text={() => plainText(msg)}
+              title="Copy message"
+              size={11}
+            />
+          </span>
         </div>
         {blocks ? (
           <Blocks blocks={blocks} tools={tools} live={false} />
         ) : (
-          <RichText text={msg.content} />
+          <Markdown text={msg.content} />
         )}
       </div>
     </div>
   );
+}
+
+/**
+ * What "copy this message" means: the text the model wrote.
+ *
+ * A message is either plain content or an ordered block list; when it is
+ * blocks, the text ones are the message and the thinking and tool_use ones are
+ * the working. Joining with a blank line reproduces the paragraph break the
+ * renderer draws between two adjacent text blocks.
+ */
+function plainText(msg: ChatMessage): string {
+  if (!msg.blocks?.length) return msg.content;
+  return msg.blocks
+    .filter((b) => b.type === "text" && b.text)
+    .map((b) => b.text as string)
+    .join("\n\n");
 }
 
 function Blocks({
@@ -152,7 +182,7 @@ function Blocks({
             />
           );
         }
-        return <RichText key={i} text={b.text ?? ""} />;
+        return <Markdown key={i} text={b.text ?? ""} />;
       })}
     </>
   );
@@ -185,7 +215,7 @@ function LiveTurn({
         </div>
         <Blocks blocks={live.blocks} tools={tools} live />
         {live.thinking && <Thinking text={live.thinking} defaultOpen />}
-        {live.text && <RichText text={live.text} caret />}
+        {live.text && <Markdown text={live.text} caret />}
       </div>
     </div>
   );
@@ -455,29 +485,6 @@ function PermissionPrompt({
 }
 
 /* --- Text ---------------------------------------------------------------- */
-
-/** Paragraphs, plus fenced code lifted out so long output stays scannable. */
-export function RichText({ text, caret }: { text: string; caret?: boolean }) {
-  if (!text) return null;
-  const parts = text.split(/```/);
-  return (
-    <div className="msg__text">
-      {parts.map((part, i) =>
-        i % 2 === 1 ? (
-          <pre key={i} className="codeblock selectable">
-            {part.replace(/^[^\n]*\n/, "").replace(/\n$/, "")}
-          </pre>
-        ) : (
-          part
-            .split(/\n{2,}/)
-            .filter((p) => p.trim())
-            .map((p, j) => <p key={`${i}-${j}`}>{p}</p>)
-        )
-      )}
-      {caret && <span className="caret" />}
-    </div>
-  );
-}
 
 function firstLine(text: string): string {
   const line = text.trim().split("\n")[0] ?? "";

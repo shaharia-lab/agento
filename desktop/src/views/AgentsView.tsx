@@ -19,6 +19,7 @@ import {
   Search,
   Splitter,
 } from "../components/ui";
+import { DirField, useDirPicker } from "../components/DirField";
 import "../styles/agents.css";
 
 /* --- Vocabulary the backend recognises ------------------------------------ */
@@ -98,6 +99,7 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   const [saveError, setSaveError] = useState<string>();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busyDelete, setBusyDelete] = useState(false);
+  const picker = useDirPicker();
 
   const agents = useMemo(() => list.data ?? [], [list.data]);
 
@@ -246,6 +248,7 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
   return (
     <div className="panes">
+      {picker.browser}
       <div className="pane-list">
         <div className="listhead">
           <div className="listhead__row">
@@ -530,20 +533,13 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                     label="Claude config dir"
                     help="Absolute path. Leave empty to use the global default."
                   >
-                    <label className="field">
-                      <span className="field__icon">
-                        <Icon name="folder" size={14} />
-                      </span>
-                      <input
-                        className="mono"
-                        spellCheck={false}
-                        placeholder="/home/you/.claude"
-                        value={draft.claude_config_dir}
-                        onChange={(e) =>
-                          patch({ claude_config_dir: e.target.value })
-                        }
-                      />
-                    </label>
+                    <DirField
+                      value={draft.claude_config_dir}
+                      onChange={(claude_config_dir) => patch({ claude_config_dir })}
+                      title="Choose Claude config directory"
+                      placeholder="/home/you/.claude"
+                      browse={picker.browse}
+                    />
                   </FormRow>
                 </div>
 

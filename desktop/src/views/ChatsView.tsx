@@ -14,7 +14,6 @@ import {
 import { Icon } from "../lib/icons";
 import type { Agent, ChatDetail, ChatMessage, ChatSession } from "../lib/types";
 import {
-  Dropdown,
   Empty,
   InspGroup,
   InspRow,
@@ -22,7 +21,12 @@ import {
   Segmented,
   Splitter,
 } from "../components/ui";
-import { IS_TAURI, pickDirectory } from "../lib/tauri";
+import {
+  NewChatBar,
+  NEW_CHAT_INITIAL,
+  PERMISSION_LABELS,
+} from "./chat/NewChatBar";
+import { saveNewChatPrefs, type NewChatPrefs } from "../lib/newChatPrefs";
 import { Composer } from "./chat/Composer";
 import { Transcript } from "./chat/Transcript";
 import { useChatStream } from "./chat/useChatStream";
@@ -65,8 +69,13 @@ export function ChatsView({
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<Filter>("all");
   const [draft, setDraft] = useState("");
-  const [newAgent, setNewAgent] = useState("");
-  const [newDir, setNewDir] = useState("");
+  /**
+   * How the *next* chat will be created. Held as one record rather than five
+   * `useState`s so `NewChatBar` can resolve its defaults in a single edit —
+   * five separate setters would each fire a render with the others still
+   * unresolved, and the working directory would flicker through empty.
+   */
+  const [newChat, setNewChat] = useState<NewChatPrefs>(NEW_CHAT_INITIAL);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -192,20 +201,25 @@ export function ChatsView({
     if (!id) {
       // An agent run without a working directory lands in whatever directory
       // the server happened to start in — refuse to create the chat instead.
-      if (!newDir.trim()) {
+      const workingDir = newChat.workingDir.trim();
+      if (!workingDir) {
         setActionError("Set a working directory before starting the chat.");
         return;
       }
       try {
         const created = await api.post<ChatSession>("/chats", {
-          agent_slug: newAgent,
-          working_directory: newDir.trim(),
-          model: "",
-          settings_profile_id: "",
+          agent_slug: newChat.agentSlug,
+          working_directory: workingDir,
+          model: newChat.model,
+          settings_profile_id: newChat.settingsProfileId,
+          permission_mode: newChat.permissionMode,
         });
         id = created.id;
         setSelected(created.id);
         setDrafting(false);
+        // Only a chat that was actually created is a preference — see
+        // `saveNewChatPrefs`.
+        saveNewChatPrefs({ ...newChat, workingDir });
         chats.reload();
       } catch (err) {
         setActionError(describeError(err));
@@ -224,7 +238,7 @@ export function ChatsView({
       ],
     }));
     stream.start(chatId, content);
-  }, [draft, busy, selected, newAgent, newDir, chats, stream]);
+  }, [draft, busy, selected, newChat, chats, stream]);
 
   // The answer to an agent question travels over /input, not /messages, and
   // the server does not persist it — echoing it here keeps the exchange
@@ -405,59 +419,18 @@ export function ChatsView({
               </button>
             </div>
 
-            <div className="newchat">
-              <Dropdown
-                small
-                value={newAgent}
-                onChange={setNewAgent}
-                ariaLabel="Agent"
-                options={[
-                  { value: "", label: "No agent — direct chat" },
-                  ...(agents.data ?? []).map((a) => ({
-                    value: a.slug,
-                    label: a.name || a.slug,
-                  })),
-                ]}
-              />
-
-              <label className="field field--sm newchat__dir">
-                <span className="field__icon">
-                  <Icon name="folder" size={12} />
-                </span>
-                <input
-                  value={newDir}
-                  onChange={(e) => setNewDir(e.target.value)}
-                  placeholder="Working directory (required)"
-                  spellCheck={false}
-                />
-              </label>
-              {IS_TAURI && (
-                <button
-                  className="btn"
-                  title="Browse for a folder"
-                  onClick={async () => {
-                    const picked = await pickDirectory(
-                      "Choose working directory",
-                      newDir
-                    );
-                    if (picked) setNewDir(picked);
-                  }}
-                >
-                  Browse…
-                </button>
-              )}
-              {agents.error && (
-                <span className="newchat__note">
-                  Agents unavailable — {agents.error}
-                </span>
-              )}
-            </div>
+            <NewChatBar
+              agents={agents.data ?? []}
+              agentsError={agents.error}
+              value={newChat}
+              onChange={setNewChat}
+            />
 
             <div className="transcript scroll">
               <Empty
                 icon="sparkle"
                 title="Start the conversation"
-                text="Pick an agent and a working directory, then send the first message. The chat is created when you send — a working directory is required."
+                text="Choose how this conversation should run, then send the first message. The chat is created when you send — a working directory is required."
               />
             </div>
 
@@ -470,7 +443,7 @@ export function ChatsView({
               busy={busy}
               stopping={stream.stopping}
               onStop={stream.stop}
-              placeholder={`Message ${newAgent || "Agento"}…`}
+              placeholder={`Message ${newChat.agentSlug || "Agento"}…`}
             />
           </>
         ) : !selected ? (
@@ -654,6 +627,15 @@ export function ChatsView({
                 <InspRow label="Agent">{session.agent_slug || "None"}</InspRow>
                 <InspRow label="Model">
                   {session.model || stream.system?.model || "Default"}
+                </InspRow>
+                {/* The stored choice, which is what the *next* turn will run
+                    under. `stream.system.permissionMode` below reports what the
+                    CLI is running under right now; they agree once a turn has
+                    started, and differ for a chat created before this column
+                    existed. */}
+                <InspRow label="Permissions">
+                  {PERMISSION_LABELS[session.permission_mode ?? ""] ??
+                    session.permission_mode}
                 </InspRow>
                 <InspRow label="Messages">
                   <span className="tnum">{messages.length}</span>

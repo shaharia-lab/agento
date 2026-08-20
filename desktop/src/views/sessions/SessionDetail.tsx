@@ -10,7 +10,8 @@ import type {
   ClaudeTodo,
 } from "../../lib/types";
 import { Empty } from "../../components/ui";
-import { RichText, Thinking, ToolCall } from "../chat/Transcript";
+import { Thinking, ToolCall } from "../chat/Transcript";
+import { Markdown } from "../chat/Markdown";
 
 /**
  * Read-only transcript of one indexed Claude Code session, rendered with the
@@ -173,11 +174,11 @@ function Message({ msg, agent }: { msg: ClaudeMessage; agent: string }) {
                 live={false}
               />
             ) : (
-              <RichText key={i} text={b.text ?? ""} />
+              <Markdown key={i} text={b.text ?? ""} />
             )
           )
         ) : (
-          <RichText text={msg.content ?? ""} />
+          <Markdown text={msg.content ?? ""} />
         )}
       </div>
     </div>

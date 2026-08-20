@@ -29,7 +29,7 @@ func (s *SQLiteChatStore) ListSessions(ctx context.Context) (sessions []*ChatSes
 	var rows *sql.Rows
 	rows, err = s.db.QueryContext(ctx, `
 		SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
-		       settings_profile_id, total_input_tokens, total_output_tokens,
+		       settings_profile_id, permission_mode, total_input_tokens, total_output_tokens,
 		       total_cache_creation_tokens, total_cache_read_tokens,
 		       created_at, updated_at, is_favorite
 		FROM chat_sessions
@@ -58,7 +58,7 @@ func (s *SQLiteChatStore) GetSession(ctx context.Context, id string) (cs *ChatSe
 
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
-		       settings_profile_id, total_input_tokens, total_output_tokens,
+		       settings_profile_id, permission_mode, total_input_tokens, total_output_tokens,
 		       total_cache_creation_tokens, total_cache_read_tokens,
 		       created_at, updated_at, is_favorite
 		FROM chat_sessions WHERE id = ?`, id)
@@ -66,7 +66,7 @@ func (s *SQLiteChatStore) GetSession(ctx context.Context, id string) (cs *ChatSe
 	cs = &ChatSession{}
 	err = row.Scan(
 		&cs.ID, &cs.Title, &cs.AgentSlug, &cs.SDKSession, &cs.WorkingDir,
-		&cs.Model, &cs.SettingsProfileID,
+		&cs.Model, &cs.SettingsProfileID, &cs.PermissionMode,
 		&cs.TotalInputTokens, &cs.TotalOutputTokens,
 		&cs.TotalCacheCreationTokens, &cs.TotalCacheReadTokens,
 		&cs.CreatedAt, &cs.UpdatedAt, &cs.IsFavorite,
@@ -119,7 +119,7 @@ func (s *SQLiteChatStore) GetSessionWithMessages(ctx context.Context, id string)
 
 // CreateSession creates a new chat session.
 func (s *SQLiteChatStore) CreateSession(
-	ctx context.Context, agentSlug, workingDir, model, settingsProfileID string,
+	ctx context.Context, p NewSessionParams,
 ) (cs *ChatSession, err error) {
 	ctx, end := withStorageSpan(ctx, "create", "chat_session")
 	defer func() { end(err) }()
@@ -129,10 +129,11 @@ func (s *SQLiteChatStore) CreateSession(
 	cs = &ChatSession{
 		ID:                id,
 		Title:             "New Chat",
-		AgentSlug:         agentSlug,
-		WorkingDir:        workingDir,
-		Model:             model,
-		SettingsProfileID: settingsProfileID,
+		AgentSlug:         p.AgentSlug,
+		WorkingDir:        p.WorkingDir,
+		Model:             p.Model,
+		SettingsProfileID: p.SettingsProfileID,
+		PermissionMode:    p.PermissionMode,
 		CreatedAt:         now,
 		UpdatedAt:         now,
 	}
@@ -140,11 +141,11 @@ func (s *SQLiteChatStore) CreateSession(
 	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO chat_sessions
 			(id, title, agent_slug, sdk_session_id, working_directory, model,
-			 settings_profile_id, total_input_tokens, total_output_tokens,
+			 settings_profile_id, permission_mode, total_input_tokens, total_output_tokens,
 			 total_cache_creation_tokens, total_cache_read_tokens, created_at, updated_at)
-		VALUES (?, ?, ?, '', ?, ?, ?, 0, 0, 0, 0, ?, ?)`,
+		VALUES (?, ?, ?, '', ?, ?, ?, ?, 0, 0, 0, 0, ?, ?)`,
 		cs.ID, cs.Title, cs.AgentSlug, cs.WorkingDir, cs.Model,
-		cs.SettingsProfileID, cs.CreatedAt, cs.UpdatedAt,
+		cs.SettingsProfileID, cs.PermissionMode, cs.CreatedAt, cs.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("creating session: %w", err)
@@ -187,14 +188,14 @@ func (s *SQLiteChatStore) UpdateSession(ctx context.Context, session *ChatSessio
 	res, err = s.db.ExecContext(ctx, `
 		UPDATE chat_sessions SET
 			title = ?, agent_slug = ?, sdk_session_id = ?, working_directory = ?,
-			model = ?, settings_profile_id = ?,
+			model = ?, settings_profile_id = ?, permission_mode = ?,
 			total_input_tokens = ?, total_output_tokens = ?,
 			total_cache_creation_tokens = ?, total_cache_read_tokens = ?,
 			is_favorite = ?,
 			updated_at = ?
 		WHERE id = ?`,
 		session.Title, session.AgentSlug, session.SDKSession, session.WorkingDir,
-		session.Model, session.SettingsProfileID,
+		session.Model, session.SettingsProfileID, session.PermissionMode,
 		session.TotalInputTokens, session.TotalOutputTokens,
 		session.TotalCacheCreationTokens, session.TotalCacheReadTokens,
 		session.IsFavorite,
@@ -261,7 +262,7 @@ func scanChatSession(rows *sql.Rows) (*ChatSession, error) {
 	cs := &ChatSession{}
 	err := rows.Scan(
 		&cs.ID, &cs.Title, &cs.AgentSlug, &cs.SDKSession, &cs.WorkingDir,
-		&cs.Model, &cs.SettingsProfileID,
+		&cs.Model, &cs.SettingsProfileID, &cs.PermissionMode,
 		&cs.TotalInputTokens, &cs.TotalOutputTokens,
 		&cs.TotalCacheCreationTokens, &cs.TotalCacheReadTokens,
 		&cs.CreatedAt, &cs.UpdatedAt, &cs.IsFavorite,

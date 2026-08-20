@@ -111,7 +111,10 @@ src/
     nav.ts       sidebar sections, view ids, titles
     icons.tsx    16px / 1.5-stroke icon set
     tauri.ts     window + menu bridge; degrades to a plain browser tab
-  components/    TitleBar, Sidebar, StatusBar, CommandPalette, ui.tsx
+    clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
+    newChatPrefs.ts  what the New Chat bar was last set to (localStorage)
+  components/    TitleBar, Sidebar, StatusBar, CommandPalette, ui.tsx,
+                 DirField (native picker + the /api/fs fallback), CopyButton
   views/         one file per section
   styles/        tokens → base → shell → controls → views (+ per-view files)
 
@@ -146,7 +149,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   the 27 migrations, embedded from parity/ — applied at startup
+    migrate.rs   the 30 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -263,6 +266,31 @@ status bar, focus-aware selection (accent when the window is focused, grey
 when not), ⌘K palette, no browser affordances. Reuse the existing CSS classes;
 new CSS goes in a per-view file imported by that view.
 
+**The window's origin has to be in the capability's scope, or every IPC
+command is denied — silently.** This is the single most expensive thing to
+re-discover in this shell, because it fails *only in release builds* and it
+fails with no error anywhere. `lib.rs` navigates a release window to
+`http://127.0.0.1:<port>` so the UI is same-origin with the API (see "Why the
+local HTTP server exists"), and Tauri's ACL classifies a webview by comparing
+its URL against `tauri://localhost` in release or the configured `devUrl` in
+debug — so that window is **remote** while the identical dev window on
+`http://localhost:1420` is **local**. A capability with no `remote` block is
+local-only, so `capabilities/default.json` covered dev and nothing else:
+`plugin:window|start_dragging`, `plugin:dialog|open`, `plugin:opener|open_url`,
+the updater, `core:window:allow-set-theme` and `plugin:event|listen` were all
+refused in every shipped build. Commands registered through `invoke_handler`
+(`host_info`) bypass the ACL entirely, which is what made the app look healthy.
+
+The symptoms were platform-shaped, which is what hid it: on Linux and Windows
+the OS draws its own titlebar above the strip, so the window still dragged and
+only "Browse…" was visibly dead; on macOS `titleBarStyle: "Overlay"` leaves no
+OS titlebar to grab, so `data-tauri-drag-region` is the *only* way to move the
+window and the app could not be moved at all. Resizing kept working throughout,
+because that never leaves the compositor. The fix is the `remote.urls` block
+naming the loopback origins; keep it in step with whatever `lib.rs` navigates
+to, and treat "works in `npm run app`, not in the installer" as this bug until
+proven otherwise.
+
 **Window chrome is the OS's, not ours.** `decorations: true` everywhere: on
 macOS `titleBarStyle: "Overlay"` + `hiddenTitle` put the native traffic
 lights over the app's own titlebar strip, while Linux/Windows get their
@@ -275,7 +303,13 @@ the `--titlebar-h` band, re-applied on resize/theme/focus events), the same
 approach `tauri-plugin-decorum` exists for. Dragging is
 Tauri's `data-tauri-drag-region` attribute (`TitleBar.tsx`) — `-webkit-app-region`
 is an Electron-ism the WKWebView/WebKitGTK webviews do not honor, so CSS can
-never make a strip draggable. Do not reintroduce hand-drawn min/max/close
+never make a strip draggable. It is declared **once, as `deep`**, on the outer
+strip: a bare attribute means "only a direct click on *this* element drags"
+(`el === composedPath[0]` in Tauri's `drag.js`), so it had to be repeated on
+every container and still missed anything nested a level further, while `deep`
+walks the composed path and stops at the first clickable ancestor — so buttons
+still block the drag without opting out. Do not re-add a bare attribute to an
+inner container: the walk hits it first and answers "not a direct click". Do not reintroduce hand-drawn min/max/close
 buttons; the OS draws them on every platform now. The menubar is macOS-only
 (`menu.rs` behind `cfg(target_os = "macos")`), and its custom items carry no
 accelerators on purpose — the webview's keydown handler (`App.tsx`) owns the
@@ -688,7 +722,7 @@ started from. The per-phase notes are kept as the record of what landed where.
 
 | 1 ✅ | Sidecar + proxy | — | done; the sidecar itself was removed by #278 |
 | 2 ✅ | Pricing + analytics | `internal/pricing`, `internal/claudesessions` | Pure computation over JSONL + SQLite. No external deps. **In progress**: `/api/pricing/catalog`, `/api/claude-sessions`, `/api/claude-sessions/facets`, `/api/claude-analytics`, `/api/claude-sessions/insights/summary` and the agent reads are native and diff clean. |
-| 3 ✅ | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274, #275).** `db.rs` is read-write, the 27 migrations are ported, and the writes whose every effect Rust owns are native — see below. The scheduler's *schedule computation* is ported and pinned (#275); its ownership is not, and is blocked — see below. |
+| 3 ✅ | Storage + tasks | `internal/storage`, `internal/scheduler` | **In progress (#274, #275).** `db.rs` is read-write, the migrations are ported, and the writes whose every effect Rust owns are native — see below. The scheduler's *schedule computation* is ported and pinned (#275); its ownership is not, and is blocked — see below. |
 | 4 ✅ | Integrations | `internal/integrations`, `internal/trigger` | OAuth2 + MCP servers. Six of them: google, github, slack, jira, confluence, telegram, plus `internal/tools`. **How to host one is settled (#282)** — `claude::ToolServer`, see "Hosting a tool" below; do not invent a second way. **`internal/tools` is done (#310)** — `native/tools/`, and it is the worked example the six should be read against. **GitHub is done (#312)** — `native/integrations/github/`, the worked example for an *integration*. **The registry is done (#311)** — `native/integrations/registry.rs` plus `PUT`/`DELETE /api/integrations/{id}`, and the sidecar now runs with `AGENTO_INTEGRATIONS=off:<the types the shell hosts>`, so every type has exactly one owner. **Confluence is done (#317)** — `native/integrations/confluence/`, the smallest of the six and the one that shows what an integration adds over #312: a per-row API base, basic auth, and a `Start` check that is a decision. **Jira is done (#316)** — `native/integrations/jira/`, Confluence's twin, and the one that shows that a shared credential type does not mean shared behaviour: `jira.Start` validates nothing, so a bad base is answered per call instead of by refusing to host. **Slack is done (#315)** — `native/integrations/slack/`, the first that is not Atlassian-shaped: no model input in the URL at all, and the only integration whose token can come from the `auth` column. **Telegram is done (#314)** — `native/integrations/telegram/`, the outbound half, and the one that reached two reflector divergences the map had recorded as unreachable. **Google is done (#313)** — `native/integrations/google/`, the last of the six and the only one whose requests are built by a generated client rather than by the handlers, so its vectors are a specification rather than a confirmation. **With its flip, `HOSTED_TYPES` covers every type the port will ever cover**, and the phase is closed. WhatsApp is **not** among them — but Go still hosts its rows, because its starter opens a live connection rather than just a port; see below. |
 | 5 ✅ | Agent execution | `internal/agent`, `internal/service` | **In progress (#276).** The chat SSE turn is native: `/messages`, `/input`, `/permission` and `/stop`, on top of the ported SDK. The scheduler's executor (#275) is the other caller and still Go's. |
 
@@ -1854,6 +1888,9 @@ timeout included) are fine; the parity suites use those.
   ones Agento adds (`user_input_required`, `permission_request`).
 - **`AskUserQuestion` is answered by *denying* the tool** with the user's text
   in `Message` — that is how the answer reaches the model. Not a bug.
+- **A chat's permission mode is the chat's, then the agent's, then `default`.**
+  `chat_sessions.permission_mode` (migration 30) beats the rule that an
+  interactive handler forces `default`; empty means "no choice", not a mode.
 - **There is no terminal SSE event**, and `result` can arrive more than once in
   one request (an `AskUserQuestion` keeps the stream open past it). End the
   turn on stream close, never on `result`.
@@ -2691,6 +2728,23 @@ where a chat forwards, a scheduled run records a **failed** row reading
 `agent tools unavailable in this build: …` and publishes the failed event.
 Silence is the one outcome that is not allowed, because a job history with no row
 is indistinguishable from a task that was not due.
+
+**A chat picks its own permission mode (migration 30).** Everything below about
+`appendPermissionOpts` describes the state before it, and the two-branch rule it
+describes is still exactly what runs — but only when the chat has expressed no
+choice. `chat_sessions.permission_mode` is the conversation-level override, it
+wins outright over both branches, and it exists because the interactive branch
+was unconditional: a chat *always* has a permission handler, so a `bypass` agent
+still stopped to ask and a `plan` agent silently behaved as `default`. Empty is
+**not** a fifth mode — it means no choice was recorded, so every row written
+before the migration keeps the behaviour it had, and `omitempty` keeps the field
+off the wire for them too. All four of Claude Code's modes are accepted here,
+where the *agent* validator takes only `""`/`bypass`/`default`: an agent's mode
+governs unattended runs where nothing can answer a prompt, a chat's does not.
+One trap the port reproduces rather than tidies — the bypass flag is not a
+function of the mode. Go calls `WithPermissionMode` alone for `plan` and
+`dontAsk`, so the SDK's own default (bypass on) survives for both; only
+`default` clears it and only `bypass` sets it deliberately.
 
 **What `build_options` had to grow, and why it is not a special case.** The chat
 turn always has an interactive permission handler; a scheduled run never does.

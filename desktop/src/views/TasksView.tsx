@@ -10,7 +10,7 @@ import type {
 import { describeError, usePoll, useResource } from "../lib/hooks";
 import { dateTime, duration, relativeTime, toneFor } from "../lib/format";
 import { Icon } from "../lib/icons";
-import { IS_TAURI, pickDirectory } from "../lib/tauri";
+import { DirField, useDirPicker } from "../components/DirField";
 import {
   Dropdown,
   Empty,
@@ -147,6 +147,7 @@ function blankTask(agentSlug: string): ScheduledTask {
 /* --- View ----------------------------------------------------------------- */
 
 export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
+  const picker = useDirPicker();
   const tasksRes = useResource<ScheduledTask[] | null>(
     (signal) => api.get("/tasks", signal),
     []
@@ -319,6 +320,7 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
   return (
     <div className="panes">
+      {picker.browser}
       <div className="pane-list">
         <div className="listhead">
           <div className="listhead__row">
@@ -528,33 +530,13 @@ export function TasksView({ inspectorOpen }: { inspectorOpen: boolean }) {
                 <div className="formsec">
                   <div className="formsec__title">Execution</div>
                   <FormRow label="Working directory">
-                    <div className="row" style={{ gap: "var(--sp-3)" }}>
-                      <label className="field" style={{ flex: 1 }}>
-                        <input
-                          value={draft.working_directory}
-                          onChange={(e) =>
-                            edit({ working_directory: e.target.value })
-                          }
-                          placeholder="Agent default"
-                          spellCheck={false}
-                        />
-                      </label>
-                      {IS_TAURI && (
-                        <button
-                          className="btn"
-                          title="Browse for a folder"
-                          onClick={async () => {
-                            const picked = await pickDirectory(
-                              "Choose working directory",
-                              draft.working_directory
-                            );
-                            if (picked) edit({ working_directory: picked });
-                          }}
-                        >
-                          Browse…
-                        </button>
-                      )}
-                    </div>
+                    <DirField
+                      value={draft.working_directory}
+                      onChange={(working_directory) => edit({ working_directory })}
+                      title="Choose working directory"
+                      placeholder="Agent default"
+                      browse={picker.browse}
+                    />
                   </FormRow>
                   <FormRow label="Model">
                     <label className="field">
@@ -801,18 +783,21 @@ function AgentPicker({
   loading: boolean;
   onChange(slug: string): void;
 }) {
-  // With no agents to choose from the slug still has to be editable, or a task
-  // whose agent was removed could never be pointed at a new one.
+  // A free-text slug box was the old answer here, on the reasoning that a task
+  // whose agent was removed must stay repointable. It reads as "type the slug
+  // from memory", which is not something anyone can do — and the case it was
+  // for is covered by the `(missing)` entry below, which keeps an unknown slug
+  // selectable inside the dropdown. With genuinely no agents there is nothing
+  // to point at, so say so rather than offering an input that can only produce
+  // a 404 on save.
   if (!loading && agents.length === 0) {
     return (
-      <label className="field">
-        <input
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          placeholder="agent-slug"
-          spellCheck={false}
-        />
-      </label>
+      <div className="row" style={{ gap: "var(--sp-3)" }}>
+        <span className="badge">No agents configured</span>
+        <span className="formrow__help" style={{ margin: 0 }}>
+          Create one in Agents first.
+        </span>
+      </div>
     );
   }
 

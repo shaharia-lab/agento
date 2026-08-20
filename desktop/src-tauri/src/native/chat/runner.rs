@@ -205,6 +205,12 @@ pub struct RunSpec {
     pub settings: std::sync::Arc<TurnSettings>,
     pub working_dir: String,
     pub settings_profile_id: String,
+    /// `RunOptions.PermissionMode` — the conversation's own choice, which
+    /// overrides both the agent's configured mode and the
+    /// interactive-handler-forces-default rule in [`build_options`]. Empty is
+    /// "no choice recorded", which is what every caller but the chat turn
+    /// passes, and it leaves the pre-existing rules exactly as they were.
+    pub permission_mode: String,
     /// `Some` resumes an existing CLI session; `None` falls through to
     /// [`Self::custom_session_id`].
     pub resume_session_id: Option<String>,
@@ -271,24 +277,38 @@ pub async fn build_options(
         opts = opts.with_settings(path);
     }
 
-    // `appendPermissionOpts`. An interactive permission handler forces default
-    // permissions, overriding whatever the agent configured — that is Go's
-    // behaviour and it is why a `plan` or `dontAsk` agent still prompts in the
-    // chat UI. **Without one the agent's own mode applies**, which is the
-    // branch a scheduled run takes (#275): nothing is there to answer a prompt,
-    // so a `bypass` agent must actually bypass rather than block forever.
-    opts = match permission_handler {
-        Some(_) => opts.with_default_permissions(),
-        None => match spec.agent.as_ref().map(|a| a.permission_mode.as_str()) {
-            Some("default") => opts.with_default_permissions(),
-            Some("plan") => opts.with_permission_mode(permission_mode::PLAN),
-            Some("dontAsk") => opts.with_permission_mode(permission_mode::DONT_ASK),
-            // "bypass", empty, unknown, or no agent at all. Go sets the mode
-            // *and* the bypass flag, so both are set here.
-            _ => opts
-                .with_permission_mode(permission_mode::BYPASS_PERMISSIONS)
-                .with_bypass_permissions(),
-        },
+    // `appendPermissionOpts`, in Go's own precedence order.
+    //
+    // The run's own mode wins outright. It is the conversation-level choice a
+    // user made in the New Chat bar, and it is the only way past the
+    // interactive branch below — which is why it exists: a chat *always* has a
+    // permission handler, so before migration 30 there was no way to say "stop
+    // asking me" for one conversation, and a `plan` or `dontAsk` agent silently
+    // behaved as `default` in the chat UI.
+    //
+    // Absent that choice the pre-existing rules are untouched: an interactive
+    // permission handler forces default permissions, overriding whatever the
+    // agent configured; **without one the agent's own mode applies**, which is
+    // the branch a scheduled run takes (#275) — nothing is there to answer a
+    // prompt, so a `bypass` agent must actually bypass rather than block
+    // forever.
+    let mode = if spec.permission_mode.is_empty() {
+        match permission_handler {
+            Some(_) => Some("default"),
+            None => spec.agent.as_ref().map(|a| a.permission_mode.as_str()),
+        }
+    } else {
+        Some(spec.permission_mode.as_str())
+    };
+    opts = match mode {
+        Some("default") => opts.with_default_permissions(),
+        Some("plan") => opts.with_permission_mode(permission_mode::PLAN),
+        Some("dontAsk") => opts.with_permission_mode(permission_mode::DONT_ASK),
+        // "bypass", empty, unknown, or no agent at all. Go sets the mode
+        // *and* the bypass flag, so both are set here.
+        _ => opts
+            .with_permission_mode(permission_mode::BYPASS_PERMISSIONS)
+            .with_bypass_permissions(),
     };
 
     opts = opts.with_claude_executable(claude_executable());
@@ -731,6 +751,8 @@ pub struct ChatRow {
     pub working_dir: String,
     pub model: String,
     pub settings_profile_id: String,
+    /// The conversation's own permission mode, empty when none was chosen.
+    pub permission_mode: String,
 }
 
 /// Load the chat and its agent. `Ok(None)` is Go's 404.
@@ -742,7 +764,7 @@ pub fn load(
     let row = conn
         .query_row(
             "SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
-                    settings_profile_id
+                    settings_profile_id, permission_mode
              FROM chat_sessions WHERE id = ?1",
             [id],
             |row| {
@@ -754,6 +776,7 @@ pub fn load(
                     working_dir: row.get(4)?,
                     model: row.get(5)?,
                     settings_profile_id: row.get(6)?,
+                    permission_mode: row.get(7)?,
                 })
             },
         )
@@ -819,6 +842,7 @@ mod tests {
                 settings: std::sync::Arc::new(TurnSettings::none()),
                 working_dir: String::new(),
                 settings_profile_id: String::new(),
+                permission_mode: String::new(),
                 resume_session_id: None,
                 custom_session_id: "c1".into(),
             },
@@ -835,6 +859,7 @@ mod tests {
             settings: std::sync::Arc::new(TurnSettings::none()),
             working_dir: String::new(),
             settings_profile_id: String::new(),
+            permission_mode: String::new(),
             resume_session_id: None,
             custom_session_id: "c1".into(),
         }
@@ -895,6 +920,71 @@ mod tests {
             "an agent's empty model is not a request for the session's or the user's"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The whole of migration 30, from the side that decides what the CLI does.
+    ///
+    /// A chat always has an interactive permission handler, so before this the
+    /// `Some(_)` arm forced `default` unconditionally and a conversation had no
+    /// way to opt out. All four modes have to reach the CLI *through* that
+    /// handler, so the assertion is on the resolved options rather than on
+    /// which branch ran.
+    #[tokio::test]
+    async fn a_chats_own_permission_mode_beats_the_interactive_default() {
+        // The bypass flag is not a function of the mode, and reproducing that
+        // is the point: Go's `appendPermissionOpts` calls `WithPermissionMode`
+        // alone for "plan" and "dontAsk", so the SDK's own default (bypass on)
+        // survives for both — only "default" clears it and only "bypass" sets
+        // it deliberately. A port that tidied this into "flag == is bypass"
+        // would change what two of the four modes send.
+        for (chosen, want_mode, want_bypass) in [
+            ("bypass", permission_mode::BYPASS_PERMISSIONS, true),
+            ("default", permission_mode::DEFAULT, false),
+            ("plan", permission_mode::PLAN, true),
+            ("dontAsk", permission_mode::DONT_ASK, true),
+        ] {
+            let (mut spec, _) = spec_with(Some(agent_with(Capabilities::default())));
+            spec.permission_mode = chosen.to_string();
+            let (opts, _servers) = build_options(&spec, no_op_handler())
+                .await
+                .expect("options");
+            assert_eq!(
+                opts.permission_mode, want_mode,
+                "a chat asking for {chosen:?} did not get it"
+            );
+            assert_eq!(
+                opts.allow_dangerously_skip_permissions, want_bypass,
+                "the bypass flag for {chosen:?} is not what Go's appendPermissionOpts leaves"
+            );
+        }
+    }
+
+    /// The other half, and the one that makes the migration safe: an empty mode
+    /// is *not* a fifth mode. Every row written before migration 30 has one, so
+    /// the pre-existing rules — handler forces `default`, no handler falls to
+    /// the agent's own — have to be untouched.
+    #[tokio::test]
+    async fn an_unset_chat_mode_leaves_the_previous_rules_alone() {
+        let mut agent = agent_with(Capabilities::default());
+        agent.permission_mode = "plan".into();
+
+        let (spec, _) = spec_with(Some(agent.clone()));
+        let (opts, _servers) = build_options(&spec, no_op_handler())
+            .await
+            .expect("options");
+        assert_eq!(
+            opts.permission_mode,
+            permission_mode::DEFAULT,
+            "an interactive handler still overrides the agent when the chat is silent"
+        );
+
+        let (spec, _) = spec_with(Some(agent));
+        let (opts, _servers) = build_options(&spec, None).await.expect("options");
+        assert_eq!(
+            opts.permission_mode,
+            permission_mode::PLAN,
+            "without a handler the agent's own mode still applies"
+        );
     }
 
     /// A settings row on disk, migrated and empty.

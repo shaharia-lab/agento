@@ -45,8 +45,8 @@ func TestNewSQLiteDB_MigrationVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("querying version: %v", err)
 	}
-	if version != 29 {
-		t.Errorf("expected version 29, got %d", version)
+	if version != 30 {
+		t.Errorf("expected version 30, got %d", version)
 	}
 }
 
@@ -186,7 +186,13 @@ func TestSQLiteChatStore_CRUD(t *testing.T) {
 	}
 
 	// Create
-	session, err := store.CreateSession(ctx, "test-agent", "/tmp/work", "claude-sonnet-4-6", "profile1")
+	session, err := store.CreateSession(ctx, NewSessionParams{
+		AgentSlug:         "test-agent",
+		WorkingDir:        "/tmp/work",
+		Model:             "claude-sonnet-4-6",
+		SettingsProfileID: "profile1",
+		PermissionMode:    "plan",
+	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -210,6 +216,9 @@ func TestSQLiteChatStore_CRUD(t *testing.T) {
 	}
 	if got.Model != "claude-sonnet-4-6" {
 		t.Errorf("expected model, got %q", got.Model)
+	}
+	if got.PermissionMode != "plan" {
+		t.Errorf("expected permission mode 'plan', got %q", got.PermissionMode)
 	}
 
 	// Get not found

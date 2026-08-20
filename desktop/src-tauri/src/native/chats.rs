@@ -52,6 +52,11 @@ pub struct ChatSession {
     pub model: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub settings_profile_id: String,
+    /// This conversation's own permission mode, empty when none was chosen.
+    /// `omitempty` in Go, so an empty one is off the wire — which is what keeps
+    /// every row written before migration 30 byte-identical to what it was.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub permission_mode: String,
     pub created_at: GoTime,
     pub updated_at: GoTime,
     #[serde(skip_serializing_if = "is_zero")]
@@ -140,7 +145,7 @@ const SESSION_COLUMNS: &str =
     "SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
        settings_profile_id, total_input_tokens, total_output_tokens,
        total_cache_creation_tokens, total_cache_read_tokens,
-       created_at, updated_at, is_favorite
+       created_at, updated_at, is_favorite, permission_mode
 FROM chat_sessions";
 
 /// Every chat session, most recently updated first, as the store orders them.
@@ -207,6 +212,7 @@ fn scan_session(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatSession> {
         working_directory: row.get(4)?,
         model: row.get(5)?,
         settings_profile_id: row.get(6)?,
+        permission_mode: row.get(14)?,
         created_at: timestamp(row, 11)?,
         updated_at: timestamp(row, 12)?,
         total_input_tokens: row.get(7)?,
@@ -354,6 +360,8 @@ struct CreateChatRequest {
     model: String,
     #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
     settings_profile_id: String,
+    #[serde(deserialize_with = "super::gojson::null_is_zero_value")]
+    permission_mode: String,
 }
 
 /// The PATCH body. Both fields are genuinely optional — `null` and absent mean
@@ -386,6 +394,17 @@ const MAX_BULK_IDS: usize = 500;
 /// legal — and the row is created with a fixed title and zeroed counters.
 fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     let req = decode_body::<CreateChatRequest>(body)?;
+
+    // `isValidChatPermissionMode`, and it runs before the agent lookup for the
+    // same reason Go's does: a body that is wrong about two things reports the
+    // mode, not the missing agent.
+    if !is_valid_permission_mode(&req.permission_mode) {
+        return Err(WriteError::validation(
+            "permission_mode",
+            r#"must be one of "bypass", "default", "plan", "dontAsk", or empty"#,
+        ));
+    }
+
     let mut conn = open_for_write(db_path)?;
 
     let tx = conn
@@ -412,10 +431,13 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
 
     let session = insert_session(
         &tx,
-        &req.agent_slug,
-        &req.working_directory,
-        &req.model,
-        &req.settings_profile_id,
+        NewSessionParams {
+            agent_slug: &req.agent_slug,
+            working_directory: &req.working_directory,
+            model: &req.model,
+            settings_profile_id: &req.settings_profile_id,
+            permission_mode: &req.permission_mode,
+        },
     )?;
 
     // Everything fallible happens before the commit. After it, an `Err` would
@@ -431,10 +453,11 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     // `chatService.CreateSession`'s own line, with its three keys in Go's order
     // — see `writes::service_log_convention`.
     log::info!(
-        "chat session created session_id={:?} agent_slug={:?} settings_profile_id={:?}",
+        "chat session created session_id={:?} agent_slug={:?} settings_profile_id={:?} permission_mode={:?}",
         session.id,
         req.agent_slug,
-        req.settings_profile_id
+        req.settings_profile_id,
+        req.permission_mode
     );
     Ok(super::Answer::json_status(StatusCode::CREATED, body))
 }
@@ -449,12 +472,27 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
 /// The handler answers with the session the store built rather than a re-read,
 /// so the timestamps are the ones just written, parsed back from the same text
 /// rather than re-taken from the clock.
+/// `storage.NewSessionParams`, borrowed.
+///
+/// A struct rather than five positional `&str`s for the reason the Go side gives:
+/// there is no call site where transposing two of them fails to compile.
+pub(super) struct NewSessionParams<'a> {
+    pub agent_slug: &'a str,
+    pub working_directory: &'a str,
+    pub model: &'a str,
+    pub settings_profile_id: &'a str,
+    pub permission_mode: &'a str,
+}
+
+/// `isValidChatPermissionMode` (`internal/service/chat_service.go`). All four of
+/// Claude Code's modes plus empty; the *agent* validator is narrower on purpose.
+pub(super) fn is_valid_permission_mode(mode: &str) -> bool {
+    matches!(mode, "" | "bypass" | "default" | "plan" | "dontAsk")
+}
+
 pub(super) fn insert_session(
     tx: &rusqlite::Transaction,
-    agent_slug: &str,
-    working_directory: &str,
-    model: &str,
-    settings_profile_id: &str,
+    p: NewSessionParams<'_>,
 ) -> Result<ChatSession, WriteError> {
     let id = uuid::Uuid::new_v4().to_string();
     let now = super::gotime::now_go_text();
@@ -463,16 +501,17 @@ pub(super) fn insert_session(
     tx.execute(
         "INSERT INTO chat_sessions
             (id, title, agent_slug, sdk_session_id, working_directory, model,
-             settings_profile_id, total_input_tokens, total_output_tokens,
+             settings_profile_id, permission_mode, total_input_tokens, total_output_tokens,
              total_cache_creation_tokens, total_cache_read_tokens, created_at, updated_at)
-         VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, 0, 0, 0, 0, ?7, ?8)",
+         VALUES (?1, ?2, ?3, '', ?4, ?5, ?6, ?7, 0, 0, 0, 0, ?8, ?9)",
         rusqlite::params![
             id,
             "New Chat",
-            agent_slug,
-            working_directory,
-            model,
-            settings_profile_id,
+            p.agent_slug,
+            p.working_directory,
+            p.model,
+            p.settings_profile_id,
+            p.permission_mode,
             now,
             now,
         ],
@@ -484,11 +523,12 @@ pub(super) fn insert_session(
     Ok(ChatSession {
         id,
         title: "New Chat".to_string(),
-        agent_slug: agent_slug.to_string(),
+        agent_slug: p.agent_slug.to_string(),
         sdk_session_id: String::new(),
-        working_directory: working_directory.to_string(),
-        model: model.to_string(),
-        settings_profile_id: settings_profile_id.to_string(),
+        working_directory: p.working_directory.to_string(),
+        model: p.model.to_string(),
+        settings_profile_id: p.settings_profile_id.to_string(),
+        permission_mode: p.permission_mode.to_string(),
         created_at: stamp,
         updated_at: stamp,
         total_input_tokens: 0,
@@ -549,12 +589,12 @@ fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteEr
     tx.execute(
         "UPDATE chat_sessions SET
             title = ?1, agent_slug = ?2, sdk_session_id = ?3, working_directory = ?4,
-            model = ?5, settings_profile_id = ?6,
-            total_input_tokens = ?7, total_output_tokens = ?8,
-            total_cache_creation_tokens = ?9, total_cache_read_tokens = ?10,
-            is_favorite = ?11,
-            updated_at = ?12
-         WHERE id = ?13",
+            model = ?5, settings_profile_id = ?6, permission_mode = ?7,
+            total_input_tokens = ?8, total_output_tokens = ?9,
+            total_cache_creation_tokens = ?10, total_cache_read_tokens = ?11,
+            is_favorite = ?12,
+            updated_at = ?13
+         WHERE id = ?14",
         rusqlite::params![
             session.title,
             session.agent_slug,
@@ -562,6 +602,7 @@ fn patch(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteEr
             session.working_directory,
             session.model,
             session.settings_profile_id,
+            session.permission_mode,
             session.total_input_tokens,
             session.total_output_tokens,
             session.total_cache_creation_tokens,
@@ -642,7 +683,7 @@ fn get_session_tx(tx: &rusqlite::Transaction, id: &str) -> Result<Option<ChatSes
         "SELECT id, title, agent_slug, sdk_session_id, working_directory, model,
                 settings_profile_id, total_input_tokens, total_output_tokens,
                 total_cache_creation_tokens, total_cache_read_tokens, is_favorite,
-                created_at, updated_at
+                created_at, updated_at, permission_mode
          FROM chat_sessions WHERE id = ?1",
         [id],
         |row| {
@@ -654,6 +695,7 @@ fn get_session_tx(tx: &rusqlite::Transaction, id: &str) -> Result<Option<ChatSes
                 working_directory: row.get(4)?,
                 model: row.get(5)?,
                 settings_profile_id: row.get(6)?,
+                permission_mode: row.get(14)?,
                 total_input_tokens: row.get(7)?,
                 total_output_tokens: row.get(8)?,
                 total_cache_creation_tokens: row.get(9)?,
@@ -694,7 +736,8 @@ mod tests {
             total_cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
             created_at                  DATETIME NOT NULL,
             updated_at                  DATETIME NOT NULL,
-            is_favorite                 INTEGER NOT NULL DEFAULT 0
+            is_favorite                 INTEGER NOT NULL DEFAULT 0,
+            permission_mode             TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE chat_messages (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -991,6 +1034,54 @@ mod tests {
         assert!(uuid::Uuid::parse_str(body["id"].as_str().unwrap()).is_ok());
 
         assert_eq!(list(file.path()).expect("list").len(), 1);
+    }
+
+    /// Migration 30's column, round-tripped. `omitempty` is what keeps every
+    /// pre-existing row byte-identical, so the absence in the test above is as
+    /// load-bearing as the presence here.
+    #[test]
+    fn a_chats_permission_mode_is_stored_and_returned() {
+        let file = migrated();
+        let answer = create(
+            file.path(),
+            br#"{"working_directory":"/tmp","permission_mode":"plan"}"#,
+        )
+        .expect("create");
+
+        let body: serde_json::Value =
+            serde_json::from_slice(answer.body.as_deref().expect("body")).expect("json");
+        assert_eq!(body["permission_mode"], "plan");
+
+        let stored = list(file.path()).expect("list");
+        assert_eq!(stored[0].permission_mode, "plan");
+    }
+
+    /// `isValidChatPermissionMode`. All four of Claude Code's modes are legal
+    /// here — unlike the *agent* validator, which takes only bypass/default —
+    /// and anything else is the service layer's 422 rather than a handler 400.
+    /// The check runs before the row is touched, so a rejected request leaves
+    /// nothing behind.
+    #[test]
+    fn an_unknown_permission_mode_is_422_and_creates_nothing() {
+        let file = migrated();
+        for mode in ["bypass", "default", "plan", "dontAsk", ""] {
+            let body = format!(r#"{{"permission_mode":"{mode}"}}"#);
+            create(file.path(), body.as_bytes())
+                .unwrap_or_else(|e| panic!("{mode:?} should be accepted: {}", e.message()));
+        }
+        let accepted = list(file.path()).expect("list").len();
+
+        let err = create(file.path(), br#"{"permission_mode":"acceptEverything"}"#).unwrap_err();
+        assert_eq!(err.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            err.message(),
+            "validation error for \"permission_mode\": must be one of \"bypass\", \"default\", \"plan\", \"dontAsk\", or empty"
+        );
+        assert_eq!(
+            list(file.path()).expect("list").len(),
+            accepted,
+            "a rejected mode must not have written a row"
+        );
     }
 
     /// A chat with no agent is legal, so the slug is only checked when present.
