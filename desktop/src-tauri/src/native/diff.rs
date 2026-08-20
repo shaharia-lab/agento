@@ -3,12 +3,15 @@
 //! The bar for a port is a byte-identical response, and the only way to know is
 //! to ask both. [`compare`] describes the first difference with the offset and
 //! the surrounding bytes, which is what turns "the numbers look slightly off"
-//! into "byte 4,181, `0.30000000000000004` vs `0.3`". Its caller is the live
-//! parity harness (`tests/parity_common/`), which replays each request against
-//! a Go server built from this checkout by `scripts/parity-instance.sh` and
-//! against the native handler, and diffs the two. (Until #278 the proxy's
-//! shadow-diff mode — `AGENTO_DESKTOP_NATIVE=diff` — was the second caller,
-//! comparing live traffic against the sidecar; it died with the sidecar.)
+//! into "byte 4,181, `0.30000000000000004` vs `0.3`".
+//!
+//! **It has no caller left.** Both were removed with the implementation they
+//! compared against: the proxy's shadow-diff mode (`AGENTO_DESKTOP_NATIVE=diff`)
+//! died with the sidecar in #278, and the live parity harness
+//! (`tests/parity_common/`, driven by `scripts/parity-instance.sh` against a Go
+//! server built from the checkout) died with the Go tree in #388. It is kept
+//! because it is the tool a *future* byte-comparison would want and it is
+//! self-contained and tested; if nothing has used it in a year, delete it.
 
 /// The outcome of comparing two responses for the same request.
 #[derive(Debug, PartialEq, Eq)]
