@@ -4,23 +4,18 @@ name: Desktop CI
 # the integration branch: desktop PRs target it, and desktop releases are tagged
 # from it.
 #
-# Scoped to desktop/ so the Go server's own CI is untouched — and skipped
-# entirely for changes that cannot affect the app.
+# The app is the whole repository on this branch (#388), so there is no path
+# filter left to write — the `desktop/**` prefix and the `go.mod`/`go.sum`/
+# `internal/**` triggers (which existed so a change to the Go tree the app
+# `include_str!`d still ran these checks) all named things that no longer
+# exist. An unfiltered trigger is also the safer default now: with one tree
+# there is no such thing as a change that cannot affect the app.
 
 on:
   pull_request:
     branches: [desktop]
-    paths:
-      - "desktop/**"
-      - ".github/workflows/desktop-*.yml"
-      - "go.mod"
-      - "go.sum"
-      - "internal/**"
   push:
     branches: [desktop]
-    paths:
-      - "desktop/**"
-      - ".github/workflows/desktop-*.yml"
   workflow_dispatch:
 
 concurrency:
@@ -64,40 +59,39 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
-          workspaces: desktop/src-tauri -> target
+          workspaces: src-tauri -> target
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: desktop/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install frontend dependencies
-        working-directory: desktop
         run: npm ci
 
       - name: Typecheck and build frontend
-        working-directory: desktop
         run: npm run build
 
       - name: Rust formatting
-        working-directory: desktop/src-tauri
+        working-directory: src-tauri
         run: cargo fmt --check
 
       - name: Rust lints
-        working-directory: desktop/src-tauri
+        working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
-      # Covers the ported endpoints, including the cross-language parity
-      # fixtures in desktop/parity/ that the Go suite asserts from the other
-      # side. The live-instance diff is #[ignore]d and does not run here.
+      # Covers every endpoint, including the frozen goldens in parity/ — which
+      # a Go suite used to assert from the other side and now nothing does, so
+      # this is their only remaining reader (#388). The live-instance diff suites
+      # went with the Go server they diffed against.
       - name: Rust tests
-        working-directory: desktop/src-tauri
+        working-directory: src-tauri
         run: cargo test
 
       # A full `tauri build` here would double CI time; compiling the release
       # profile is what actually catches the `cfg(not(debug_assertions))` code
       # that never builds during development.
       - name: Compile Rust (release)
-        working-directory: desktop/src-tauri
+        working-directory: src-tauri
         run: cargo build --release
