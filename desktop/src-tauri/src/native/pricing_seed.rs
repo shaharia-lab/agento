@@ -7,13 +7,18 @@
 //! that startup effect — a fresh install would have an empty `model_pricing`
 //! table and every session would cost an unknown $0, and a build shipping a
 //! corrected catalog would never reach existing installs. So the shell seeds,
-//! right after `migrate::apply`, from **the same** `internal/pricing/catalog.json`
-//! the Go server embeds — one file, two consumers, no second copy to drift.
+//! right after `migrate::apply`, from `pricing_catalog.json` beside this file.
+//!
+//! That file was `internal/pricing/catalog.json`, `include_str!`d across the two
+//! trees — one file, two consumers, no second copy to drift. It is vendored here
+//! because the Go tree is being deleted (#388) and this is not a test fixture: a
+//! missing catalog fails `cargo build`, not one test. Maintain it here now; there
+//! is no other copy left to keep it in step with.
 //!
 //! The normalization rules are `catalog.go`'s, pinned cross-language by
-//! `desktop/parity/pricing_seed_vectors.json` (generated from Go's
-//! `BuiltinCatalog` by `go test ./desktop/parity/ -run TestPricingSeed
-//! -update-pricing-seed`): absent cache rates derive from input × the
+//! `parity/pricing_seed_vectors.json` — a **frozen** golden since #388, taken from
+//! Go's `BuiltinCatalog` by a generator that no longer exists: absent cache rates
+//! derive from input × the
 //! Anthropic TTL multipliers (5m 1.25×, 1h 2×, read 0.1×), an absent
 //! `effective_from` is the far past, patterns are lowercased, `match_type`
 //! defaults to `exact`, and a billable rate must price every category above
@@ -27,8 +32,9 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
-/// The embedded seed — the Go server's own file, not a copy.
-const CATALOG: &str = include_str!("../../../../internal/pricing/catalog.json");
+/// The embedded seed. A build input, not a fixture: a missing one fails the
+/// compile.
+const CATALOG: &str = include_str!("pricing_catalog.json");
 
 /// `farPast` in `catalog.go`: stamps models with a single, never-changed rate.
 const FAR_PAST: &str = "2020-01-01T00:00:00Z";

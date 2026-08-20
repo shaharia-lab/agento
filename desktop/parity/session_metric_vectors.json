@@ -1,0 +1,118 @@
+{
+  "_comment": [
+    "Shared parity fixture for the per-session figures the sessions list shows and filters on.",
+    "",
+    "Two implementations compute them: session_query.go's SQL expressions, which the server",
+    "filters and sorts a page by, and frontend/src/lib/sessionMetrics.ts, which renders the",
+    "columns. They must agree exactly — a row displaying $36.30 must not be hidden by",
+    "'cost at most $40' — and before the filtering moved server-side that class of bug had",
+    "already happened once, which is why sessionMetrics.ts exists at all.",
+    "",
+    "Both languages read this file: internal/claudesessions/session_metrics_parity_test.go",
+    "inserts each session and asserts the SQL, and frontend/src/lib/sessionMetrics.test.ts",
+    "asserts the TypeScript. Change a definition on one side and the other side's test fails,",
+    "rather than the two disagreeing in production.",
+    "",
+    "Every figure but `messages` sums the main thread and its delegated sub-agents. `messages`",
+    "is deliberately main-thread only, matching the column beside it: message_count and",
+    "event_count are not rolled up, exactly as Usage and Cost are not.",
+    "",
+    "`duration` is ACTIVE duration — inter-event gaps capped at the idle threshold — never the",
+    "start/last wall-clock span. A resumed-after-28-days session's span carried 82% of the",
+    "dashboard's average duration on its own."
+  ],
+  "cases": [
+    {
+      "name": "main thread only",
+      "session": {
+        "input_tokens": 1200,
+        "output_tokens": 340,
+        "subagent_input_tokens": 0,
+        "subagent_output_tokens": 0,
+        "total_cost_usd": 1.5,
+        "subagent_cost_usd": 0,
+        "active_duration_ms": 600000,
+        "subagent_active_duration_ms": 0,
+        "message_count": 12
+      },
+      "expect": {
+        "input_tokens": 1200,
+        "output_tokens": 340,
+        "tokens": 1540,
+        "cost_usd": 1.5,
+        "duration_ms": 600000,
+        "duration_minutes": 10,
+        "messages": 12
+      }
+    },
+    {
+      "name": "delegated work is added, never dropped",
+      "session": {
+        "input_tokens": 1000,
+        "output_tokens": 200,
+        "subagent_input_tokens": 4500,
+        "subagent_output_tokens": 900,
+        "total_cost_usd": 12.05,
+        "subagent_cost_usd": 24.25,
+        "active_duration_ms": 900000,
+        "subagent_active_duration_ms": 2400000,
+        "message_count": 40
+      },
+      "expect": {
+        "input_tokens": 5500,
+        "output_tokens": 1100,
+        "tokens": 6600,
+        "cost_usd": 36.3,
+        "duration_ms": 3300000,
+        "duration_minutes": 55,
+        "messages": 40
+      }
+    },
+    {
+      "name": "a session that delegated nothing contributes zero, not null",
+      "session": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "subagent_input_tokens": 0,
+        "subagent_output_tokens": 0,
+        "total_cost_usd": 0,
+        "subagent_cost_usd": 0,
+        "active_duration_ms": 0,
+        "subagent_active_duration_ms": 0,
+        "message_count": 0
+      },
+      "expect": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "tokens": 0,
+        "cost_usd": 0,
+        "duration_ms": 0,
+        "duration_minutes": 0,
+        "messages": 0
+      }
+    },
+    {
+      "name": "sub-agent time alone still counts as active duration",
+      "session": {
+        "input_tokens": 50,
+        "output_tokens": 10,
+        "subagent_input_tokens": 800000,
+        "subagent_output_tokens": 20000,
+        "total_cost_usd": 0.02,
+        "subagent_cost_usd": 3.4,
+        "active_duration_ms": 30000,
+        "subagent_active_duration_ms": 2370000,
+        "message_count": 2
+      },
+      "expect": {
+        "input_tokens": 800050,
+        "output_tokens": 20010,
+        "tokens": 820060,
+        "cost_usd": 3.42,
+        "duration_ms": 2400000,
+        "duration_minutes": 40,
+        "messages": 2
+      }
+    }
+  ]
+}
