@@ -19,26 +19,53 @@ hops, bisect them instead of guessing.
 | Browser engine | Chrome via Vite dev server | frontend logic, CSS, UI flows |
 | WebKitGTK engine | Python `gi` WebKit2 probe | engine-level behavior without the app |
 | **Real Tauri webview** | WebKit remote inspector | the only place webview-specific bugs exist |
+| **Tauri IPC / ACL** | `__TAURI_INTERNALS__.invoke` in that webview | whether a command is *permitted*, separate from whether the UI calls it |
+| **OS handoff** | PATH shim over the launcher | whether the OS was actually asked to do the thing |
 
 A bug reported from the desktop app is not verified fixed until the fix is
 observed **in the real webview** (or the root cause is proven to live in a hop
 that Chrome shares).
 
+**Bisect down the table, not up.** A dead button has at least four candidate
+hops (handler never fired → command denied by the ACL → OS never asked →
+OS asked and did nothing). Probing `invoke` directly settles the middle two in
+one call and costs seconds; clicking through the UI settles none of them,
+because every one of those failures looks identical from the UI.
+
+## Pre-flight — run this before the first launch, always
+
+`npm run app:alongside` has two failure modes that report themselves as
+something else, and both cost a full launch cycle to diagnose:
+
+- **A stale `:1420`.** A previous Vite survives `pkill -f vite` often enough
+  that the port is the only reliable test. `tauri dev` then dies with
+  `The beforeDevCommand terminated with a non-zero status code.` — the real
+  line (`Port 1420 is already in use`) is ~10 lines above the tail you read.
+- **A stale `node_modules`.** Branches add frontend deps; the tree on
+  disk is from whatever branch you last built. Vite fails *after* announcing
+  itself as ready, with `imported but could not be resolved`.
+
+```bash
+.claude/skills/local-verify/preflight.sh
+```
+
+Kills the stale processes, frees `:1420` by port, and syncs `node_modules`.
+Run it first and both failure modes disappear.
+
 ## Scratch environments — never touch the real instances
 
 - The user's live Agento is on `:8990`. **GET only, never write to it.**
-- Scratch Go backend (serves the same API the frontend needs):
-  ```bash
-  PORT=8991 AGENTO_DATA_DIR="$HOME/.cache/agento-scratch" go run -tags dev . web
-  ```
-  Vite (`cd desktop && npm run dev`, port 1420) proxies `/api` to `:8991`, so
-  Chrome at `http://localhost:1420` is a full web-stack sandbox. The scanner
-  will index the real `~/.claude` corpus into the scratch DB — reads only,
-  and it gives every sessions/analytics view real data to verify against.
-- Desktop Rust backend: run `desktop/src-tauri/target/debug/agento` directly
-  (dev builds use `~/.agento-desktop-dev` and bind `127.0.0.1:8991`; a window
-  opens on the user's display). Build with the shared target dir:
-  `CARGO_TARGET_DIR=<main checkout>/desktop/src-tauri/target cargo build`.
+- The Rust backend is the only backend (#391 deleted the Go server; #392 moved
+  the app to the repository root, so every path below is root-relative). Run
+  `src-tauri/target/debug/agento` directly, or let `npm run app:alongside`
+  start it: dev builds use `~/.agento-desktop-dev` and bind `127.0.0.1:8991`,
+  so **the dev instance is already an isolated scratch environment** — its
+  database is not the one the user's installed app writes. Creating a probe
+  row there (an integration, an agent) is safe; delete it when done.
+- Vite (`npm run dev`, port 1420) proxies `/api` to `:8991`, so Chrome at
+  `http://localhost:1420` against a running dev backend is a full web-stack
+  sandbox. The scanner indexes the real `~/.claude` corpus — reads only — so
+  every sessions/analytics view has real data to verify against.
 - Chats created for testing: delete them afterwards
   (`DELETE /api/chats/{id}`). A turn abandoned mid-park leaves an orphaned
   `claude` subprocess holding the session id — the next send fails
@@ -77,26 +104,49 @@ Read `/tmp/sse.txt` for the exact frames. Facts that save a loop (verified
 
 ## Driving the real Tauri webview
 
-Launch with the inspector and attach from outside — no clicking needed:
+Launch with the inspector and attach from outside — no clicking needed. The
+env var works on **either** launcher; prefer `app:alongside`, because it
+hot-rebuilds (below):
 
 ```bash
-WEBKIT_INSPECTOR_HTTP_SERVER=127.0.0.1:9224 desktop/src-tauri/target/debug/agento
+WEBKIT_INSPECTOR_HTTP_SERVER=127.0.0.1:9224 \
+  setsid nohup npm run app:alongside > /tmp/app.log 2>&1 < /dev/null &
+# or, against an already-built binary:
+WEBKIT_INSPECTOR_HTTP_SERVER=127.0.0.1:9224 src-tauri/target/debug/agento
 ```
 
-`http://127.0.0.1:9224/` lists targets, but its inspector UI only works in a
-WebKit browser. Drive the protocol directly instead: WebSocket to
-`ws://127.0.0.1:9224/socket/1/1/WebPage`, wait for `Target.targetCreated`,
-then wrap every command in
+**Do not hand-roll the protocol client — use the one in this directory:**
+
+```bash
+node .claude/skills/local-verify/drive.mjs '<js expression>'      # evaluate
+node .claude/skills/local-verify/drive.mjs --await '<js promise>' # settle a promise
+node .claude/skills/local-verify/drive.mjs --console              # stream console
+```
+
+It needs no dependencies (Node ≥ 22 has a global `WebSocket`) and encodes both
+traps below. The protocol, if you must extend it: WebSocket to
+`ws://127.0.0.1:9224/socket/1/1/WebPage`, wait for `Target.targetCreated`, wrap
+every command in
 `Target.sendMessageToTarget {targetId, message: JSON.stringify({id, method, params})}`
-and unwrap `Target.dispatchMessageFromTarget`. `Runtime.evaluate` (with
-`returnByValue: true`) runs JS in the page; `Console.enable` streams console
-messages. A `ws` client is available without installing anything:
+and unwrap `Target.dispatchMessageFromTarget`. `http://127.0.0.1:9224/` lists
+targets but its inspector UI only works in a WebKit browser.
 
-```js
-import { createRequire } from "module";
-const require = createRequire("<repo>/e2e/node_modules/playwright-core/package.json");
-const { ws } = require("playwright-core/lib/utilsBundle");
-```
+Two traps that both read as success:
+
+- **`awaitPromise: true` does not work.** WebKit returns
+  `{type:"object", value:{}}` with `wasThrown:false` — indistinguishable from
+  a call that returned nothing. Park the promise on a `window.__x` slot and
+  poll it with a second evaluate. `--await` does this.
+- **Do not use `e2e/node_modules/playwright-core` for a `ws` client.** That
+  tree is usually not installed, and the failure (`Cannot find module`) sends
+  you looking for a WebSocket library you do not need.
+
+**`tauri dev` hot-rebuilds on any `src-tauri` change — including
+`capabilities/*.json` and `tauri.conf.json`.** The log says
+`File src-tauri/… changed. Rebuilding application...`, the window is replaced,
+and the inspector comes back on the same port. So the edit→verify loop for
+Rust *and* ACL changes is: edit, wait for `api server listening` in the log,
+re-run the same `drive.mjs` probe. No relaunch, no rebuild command.
 
 Driving the React UI from injected JS: set inputs through the **native value
 setter** then dispatch an `input` event (React ignores plain `.value =`):
@@ -109,6 +159,33 @@ el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", ctrlKey: true, bub
 
 For async observations, write timeline entries into a `window.__log` array and
 poll it with a second `Runtime.evaluate` — a long-running evaluate blocks.
+
+## Verifying an OS handoff (opener, reveal-in-dir, any external launch)
+
+"A browser opened" is not observable from inside the app, and letting the real
+launcher run sprays tabs across the user's desktop on every probe. Shim the
+launcher on `PATH` and assert on its log instead — `open`'s Linux backend
+probes `xdg-open`, `gio`, `gnome-open`, `kde-open` in order, so shim all four:
+
+```bash
+mkdir -p /tmp/shim && cat > /tmp/shim/xdg-open <<'EOF'
+#!/bin/sh
+printf '%s OPENED %s\n' "$(date -Is)" "$*" >> /tmp/opened.log
+EOF
+chmod +x /tmp/shim/xdg-open
+for c in gio gnome-open kde-open; do cp /tmp/shim/xdg-open /tmp/shim/$c; done
+PATH=/tmp/shim:$PATH ... npm run app:alongside   # launch under the shim
+```
+
+`/tmp/opened.log` now holds the exact URL, which is stronger evidence than a
+tab appearing — it shows *what* was requested, not just that something opened.
+
+**Then do one final un-shimmed run.** Under the shim the user sees nothing
+happen, which is indistinguishable from the bug they reported; say so
+explicitly before they ask, and finish by relaunching without the shim so the
+handoff is confirmed on the real desktop. A capability fix is not proven by an
+error disappearing — `openExternal` swallows failures into a `console.warn`
+and returns normally, so "no error" is the *symptom*, not the fix.
 
 ## Engine-only probe (no app)
 
@@ -138,8 +215,14 @@ reproduce there.
 
 ## Gates before pushing
 
-Mirror CI, from `desktop/`: `npm run build` (tsc + vite). For
-`src-tauri/` changes: `cargo fmt --check`, `cargo clippy --all-targets -- -D
-warnings`, `cargo test` (use the shared `CARGO_TARGET_DIR`). `cargo test`
-stops at the first failing test *binary* — add `--no-fail-fast` for sweeps.
+Mirror CI, from the repository root: `npm run build` (tsc + vite). For
+`src-tauri/` changes: `cargo fmt --check` and `cargo clippy --all-targets -- -D
+warnings` (checking only, no linking — safe).
+
+**Never run bare `cargo test` here.** The crate has many integration-test
+binaries and Cargo links them concurrently; linking a Tauri binary is
+memory-hungry and the parallel step hangs this machine. Scope every run to the
+target you touched and cap parallelism: `cargo test --test <name> -j 4`. CI
+runs the full suite.
+
 Then re-run the original reproduction one last time on the final build.
