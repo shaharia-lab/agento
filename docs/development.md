@@ -4,7 +4,7 @@ Setting up, running and testing Agento Desktop locally.
 
 Read [Architecture](architecture.md) first if you have not. The full working
 notes, with the reasoning behind individual decisions, are in
-[`desktop/CLAUDE.md`](../CLAUDE.md).
+[`CLAUDE.md`](../CLAUDE.md).
 
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
@@ -59,7 +59,7 @@ Note the branch. Desktop work happens on `desktop`, not `main`.
 
 ## Running it
 
-All commands run from `desktop/`.
+All commands run from the repository root.
 
 | Command | What it does |
 | --- | --- |
@@ -121,23 +121,23 @@ This is also how the turn tests point the runner at a scripted fake CLI.
 ## Project layout
 
 ```
-desktop/
-  src/                 the React frontend
-  src-tauri/
-    src/lib.rs         startup: database, migrations, pricing seed, window, menu
-    src/proxy.rs       the axum server; routes every request into native/
-    src/guards.rs      the Host and Content-Type guards, applied before routing
-    src/menu.rs        the native macOS menu
-    src/paths.rs       data directory and database path
-    src/claude/        the Claude Agent SDK, ported from Go
-    src/native/        the ported backend, one module per API area
-    tests/             integration tests, including the parity suites
-  parity/              cross-language fixtures, asserted by both Go and Rust
-  scripts/
-    parity-instance.sh a Go server built from this checkout, on a copy of the DB
-  docs/                this documentation
-  CLAUDE.md            the full working notes
+src/                 the React frontend
+src-tauri/
+  src/lib.rs         startup: database, migrations, pricing seed, window, menu
+  src/proxy.rs       the axum server; routes every request into native/
+  src/guards.rs      the Host and Content-Type guards, applied before routing
+  src/menu.rs        the native macOS menu
+  src/paths.rs       data directory and database path
+  src/claude/        the Claude Agent SDK, ported from Go
+  src/native/        the ported backend, one module per API area
+  tests/             integration tests
+parity/              frozen goldens from the Go server; see parity/README.md
+docs/                this documentation
+CLAUDE.md            the full working notes
 ```
+
+Until #388 this all lived under `desktop/`, beside the Go server it was ported
+from. The Go tree is gone from this branch and the app is the repository.
 
 ---
 
@@ -151,19 +151,22 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-From `desktop/`:
+From the repository root:
 
 ```bash
 npm run build                 # tsc --noEmit plus the Vite build
 ```
 
-CI runs exactly those four. It only runs on changes under `desktop/`,
-`.github/workflows/desktop-*`, and the Go sources the parity fixtures come from.
+CI runs exactly those four, on every push and pull request. It used to carry a
+path filter naming `desktop/**` and the Go sources the parity fixtures came
+from; with one tree there is no change that cannot affect the app, so there is
+nothing left to filter on.
 
 ### Tests that need something
 
-Several suites are `#[ignore]`d because they need a corpus, a database or a
-running Go server that CI does not have.
+Several suites are `#[ignore]`d because they need a corpus or a database that CI
+does not have. (The suites that needed a running Go server went with it in
+#388 — see [Parity testing](#parity-testing) below.)
 
 ```bash
 # The scan, against a copy of your real corpus.
@@ -197,59 +200,55 @@ Two traps in writing those tests:
 
 ## Parity testing
 
-The Rust backend is a port of the Go server, and correctness means matching it
-byte for byte. See [Architecture](architecture.md#parity-with-the-go-server) for
-why.
+The Rust backend is a port of the Go server, and correctness meant matching it
+byte for byte. **The Go server is no longer in this repository** (#388), so what
+survives is the evidence rather than the check. See
+[Architecture](architecture.md#parity-with-the-go-server) for why the bar was
+what it was.
 
-### Fixtures
+### Frozen goldens
 
-`parity/` holds files generated from Go and asserted by both languages.
-Regenerate from the repository root:
+`parity/` holds files that were generated from the Go server and asserted by
+both languages. They are still asserted here, on every CI run — Go's JSON
+encoder, Go's `filepath` and `net/url`, gocron's schedule arithmetic, the 30
+migrations, the reflected tool schemas, and the request each integration tool
+builds. Nothing regenerates them.
+
+**Read [`parity/README.md`](../parity/README.md) before touching one.** It
+records every generator command (for tracing, not for running), which files were
+*audits* rather than fixtures and what freezing costs them, and how each golden
+is read — `include_str!` with a relative path, or anchored to
+`CARGO_MANIFEST_DIR`.
+
+A golden should change by deliberate edit with a reason in the commit message,
+never by "refresh until green". To see how one was produced, read its generator
+out of history:
 
 ```bash
-go test ./desktop/parity/ -run TestGitHubVectors    -update-github-vectors
-go test ./desktop/parity/ -run TestWriteRoutes      -update-write-routes
-go test ./internal/scheduler/ -run TestScheduleVectors -update-scheduler-vectors
-go test ./internal/storage/ -update-migration-vectors
+git show main:desktop/parity/github_parity_test.go
 ```
 
-Each vector file names its own generator in the test beside it. Regenerate
-**after** deciding whether the change was intended: these files are the record of
-what Go does, not a snapshot to be refreshed on failure.
+### What is gone, and what to do instead
 
-### Live diffs
+The live-diff harness — `scripts/parity-instance.sh` and the ~20
+`src-tauri/tests/parity_*.rs` suites — built a Go server from the checkout, ran
+it on a copy of `~/.agento`, replayed each request against both implementations
+and compared the bytes. It went with the Go tree; there is nothing to diff
+against.
 
-```bash
-cd desktop
-eval "$(./scripts/parity-instance.sh start)"
-(cd src-tauri && cargo test --test parity_analytics -- --ignored --nocapture)
-./scripts/parity-instance.sh stop
-```
+For a change to a ported surface, the checks that remain are the frozen goldens,
+the unit tests beside each module, and the `#[ignore]`d suites above that run
+against your real corpus. If you need to know what Go did for a case no golden
+covers, `main` still ships the Go server: build it there and ask it.
 
-To run every suite, drop `--test` and add `--no-fail-fast`. Without it, cargo
-stops at the first failing test **binary**, so one red suite hides every suite
-after it.
+### Go was not always byte-stable
 
-Notes:
-
-- `parity-instance.sh` builds the Go server from this checkout and runs it
-  against a **copy** of `~/.agento`. Never diff against the Agento you have
-  installed: it drifts behind the repository, and a stale baseline that happens
-  to agree hides a real divergence.
-- It is safe to run concurrently from separate checkouts. Two agents sharing one
-  checkout need `AGENTO_PARITY_WORKER=<id>` or `AGENTO_PARITY_DIR=<path>`.
-- `parity_writes` **mutates**, unlike every other suite, so it refuses to run
-  unless `AGENTO_LIVE_URL` is set rather than defaulting to `:8990`.
-- `parity_claude_settings` refuses to run unless `CLAUDE_CONFIG_DIR` points
-  somewhere other than `~/.claude`, because it overwrites `settings.json`.
-
-### Go is not always byte-stable
-
-Several Go analytics builders collect into a map, which iterates randomly, and
-then sort unstably, so two rows tying on the sort key come out in either order.
-The Rust port sorts stably, so it matches only one of the orderings Go produces.
-
-Before assuming a diff is your bug, **ask Go the same question twice.**
+Kept because it explains shapes you will meet in the goldens. Several Go
+analytics builders collect into a map, which iterates randomly, and then sort
+unstably, so two rows tying on the sort key came out in either order. The Rust
+port sorts stably, so it matches only one of the orderings Go produced — which
+is why `parity/claude_analytics_golden.json`'s fixture is built with no ties on
+any sort key.
 
 ---
 

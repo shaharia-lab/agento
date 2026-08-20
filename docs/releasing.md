@@ -47,7 +47,7 @@ cannot download.
 
 ## Cutting a release
 
-1. **Bump the version** in `desktop/src-tauri/tauri.conf.json`. Commit it on
+1. **Bump the version** in `src-tauri/tauri.conf.json`. Commit it on
    `desktop`.
 
    ```json

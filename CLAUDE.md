@@ -1,16 +1,46 @@
 # Agento Desktop — working notes
 
-Native desktop client for Agento, living at `desktop/` inside the Agento repo.
+Native desktop client for Agento, and **the whole of this branch**.
 **Tauri 2 + Rust** shell, **React + TypeScript** UI, and a **native Rust
 backend** (`src-tauri/src/native/`) — the subsystem-by-subsystem port of the
 repo's Go server, completed by #278, which removed the bundled Go sidecar.
 
-The Go sources remain in the repo (the `main` branch ships them as the web
-server) and remain the port's **specification**: every handler here is pinned
-to a Go server built from this same checkout by the parity corpus. Read
-[Porting Go → Rust](#porting-go--rust) before touching `src-tauri/` — the
-seam's forwarding half is gone, but its registry shape, its verification
-recipe and its Go-isms all still govern.
+Read [Porting Go → Rust](#porting-go--rust) before touching `src-tauri/` — the
+seam's forwarding half is gone, but its registry shape and its Go-isms all
+still govern.
+
+> ## ⚠️ Read this before following any instruction below
+>
+> **The Go tree is gone from this branch** (#388). `cmd/`, `internal/`,
+> `main.go`, `go.mod`, `frontend/` and `e2e/` were deleted, and everything that
+> was under `desktop/` moved to the repository root. `main` still ships the Go
+> server; this branch does not.
+>
+> Three consequences, and they invalidate instructions written throughout this
+> file:
+>
+> 1. **The Go sources are no longer the port's live specification.** They were —
+>    every handler was pinned to a Go server built from the same checkout. Now
+>    the *frozen goldens* in `parity/` are what remains of that. They are still
+>    asserted on every CI run; nothing regenerates them. See
+>    [`parity/README.md`](parity/README.md), which records every generator
+>    command for tracing, which goldens were *audits* rather than fixtures, and
+>    what freezing costs each one.
+> 2. **`scripts/parity-instance.sh` and `src-tauri/tests/parity_*.rs` are
+>    deleted.** Every "run the live diff" recipe below — including step 4 of
+>    "How to port a route" — describes a harness that no longer exists. There is
+>    no second implementation to diff against on this branch. If you need Go's
+>    answer for a case no golden covers, build the server on `main` and ask it.
+> 3. **Paths shifted.** `parity/` is now `parity/`,
+>    `desktop/src-tauri/` is `src-tauri/`, and commands that ran "from
+>    `desktop/`" run from the repository root. Every `go test ./desktop/parity/
+>    …` command quoted below is **historical** — kept so a golden can be traced
+>    to what produced it, not so it can be run.
+>
+> The rest of this file is deliberately kept in the present tense of the era it
+> describes: it is the record of *why* each mechanism is shaped the way it is,
+> and rewriting it would destroy that. Read it as history, with the three points
+> above applied.
 
 ## Branch and release model
 
@@ -23,7 +53,7 @@ server and is left alone until the two converge.
 - The Go server keeps its own release on `v*` tags. The two tag patterns do not
   overlap, so both ship independently from the same repo.
 - The tag must equal `desktop-v` + the `version` in
-  `desktop/src-tauri/tauri.conf.json`; a guard job fails the build otherwise.
+  `src-tauri/tauri.conf.json`; a guard job fails the build otherwise.
   The updater compares the version baked into the app against the manifest's
   (taken from the tag), so a mismatch makes every "updated" install re-offer
   itself forever. Bump the conf in the release commit, then tag it.
@@ -42,7 +72,7 @@ server and is left alone until the two converge.
 
 ## Run it
 
-All commands run from `desktop/`.
+All commands run from the repository root.
 
 ```bash
 npm install
@@ -75,9 +105,9 @@ described under "The window's origin has to be in the capability's scope"
 is invisible in dev by construction. That needs `app:build`.
 
 Tauri's *bundles* cannot cross-compile, which is why the release workflow uses
-one runner per OS. (There is no sidecar to build since #278;
-`scripts/parity-instance.sh` still builds the Go server, but only as the parity
-tests' reference.)
+one runner per OS. (There is nothing else to build: the sidecar went in #278 and
+`scripts/parity-instance.sh`, which built the Go server as the parity tests'
+reference, went with the Go tree in #388.)
 
 Linux system deps (once): `libwebkit2gtk-4.1-dev build-essential curl wget file
 libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`.
@@ -253,11 +283,8 @@ src-tauri/src/
       summary.rs    the aggregate the endpoint answers with
     diff.rs      byte comparison + reporting for shadow mode
 
-scripts/
-  parity-instance.sh   Go server built from THIS checkout, on a copy of the DB
-
-src-tauri/tests/ one live-diff suite per area, plus parity_common/ shared by all
-parity/          cross-language fixtures, asserted by both Go and Rust tests
+src-tauri/tests/ integration suites (the live-diff ones went with the Go tree)
+parity/          frozen goldens from the Go server; see parity/README.md
 ```
 
 ---
@@ -405,10 +432,12 @@ second implementation to switch to). The consequences, each deliberate:
 - **On Windows, the three `filepath` surfaces answer 501** (`fs.rs`,
   `claude_settings/`, the config-dir probe) instead of forwarding; porting
   Go's Windows path semantics is a follow-up.
-- **The parity corpus stays**, whole. `desktop/parity/` and
-  `scripts/parity-instance.sh` are the only executable record of what the Go
-  implementation did, and the Go sources still build from this checkout — the
-  live suites diff exactly as before.
+- **The parity corpus stays**, whole — *at the time*. `parity/` and
+  `scripts/parity-instance.sh` were the only executable record of what the Go
+  implementation did, and the Go sources still built from this checkout, so the
+  live suites diffed exactly as before. **#388 ended that**: the script and the
+  live suites are deleted and `parity/`'s goldens are frozen. The corpus is
+  still the record; it is no longer executable against Go.
 
 ### The seam
 
@@ -457,7 +486,7 @@ whose decoded path is not UTF-8, has **no** route path: the first is a 400
 carry, so both forward and Go answers. The order of those two checks is
 load-bearing — `/api/agents/%ff` decodes to the same unrepresentable byte as
 `%FF` but is not canonical, so chi routes on the raw target, which is plain
-ASCII. `desktop/parity/gourl_vectors.json` records what a live chi router
+ASCII. `parity/gourl_vectors.json` records what a live chi router
 actually did, not what the rule says it should.
 
 While every claimed route was a read this was invisible — a miss produced `Err`
@@ -514,81 +543,92 @@ are refused identically. Four things about it are load-bearing:
 A rejection logs as `Served::Rejected` (`rejected`) rather than under either
 half, because the check runs before routing is decided.
 
-Because the Go server still builds from this checkout, a ported route stays
-verifiable: `parity-instance.sh` runs it against a scratch copy of the data,
-and the live suites replay the same request against both and diff the JSON.
-**Byte-identical JSON is the bar** — the frontend is shared, so any
-field-name, key-order, escaping or float-spelling drift is a regression, and
-only a byte comparison catches all four.
+While the Go server still built from this checkout, a ported route stayed
+verifiable: `parity-instance.sh` ran it against a scratch copy of the data, and
+the live suites replayed the same request against both and diffed the JSON.
+**Byte-identical JSON was the bar** — the frontend was shared, so any
+field-name, key-order, escaping or float-spelling drift was a regression, and
+only a byte comparison catches all four. Since #388 the goldens in `parity/` are
+what is left of that check: they still fail on a regression in the port, and
+they can no longer notice Go moving.
 
 ### How to port a route
 
+**This procedure is history.** Steps 3 and 4 depend on a Go server built from
+this checkout, and #388 deleted it along with `scripts/parity-instance.sh` and
+the `tests/parity_*.rs` suites. It is kept because the *reasoning* in it is
+still the reasoning — and because a port of anything left (Windows `filepath`,
+the OTel exporters) has to answer the same questions with weaker tools. What
+survives today is steps 1, 2 and the first bullet of 4, asserted against frozen
+goldens; if you need a fresh answer from Go, build the server on `main`.
+
 1. Read `native/gojson.rs` first. Rust's natural JSON is *not* Go's, and the
-   differences (`3` vs `3.0`, `<` vs `<`, the encoder's trailing newline)
+   differences (`3` vs `3.0`, `<` vs `\u003c`, the encoder's trailing newline)
    are on nearly every response. Encode through `gojson::to_vec`, keep struct
    fields in the Go struct's declaration order, and use
    `skip_serializing_if` for `omitempty`.
 2. Implement it, mirroring the Go source's ordering and grouping exactly —
    including anything hashed, since a fingerprint over rows in a different
    order is a different fingerprint for identical data.
-3. Seed the scratch instance if the endpoint has no data on this machine. It is
-   a *copy*, so writing to it is safe and it is the only way to diff a shape the
-   developer's own install does not contain — the agents list was empty here, so
-   the first "identical" meant nothing until two agents were created through it.
-4. Prove it three ways:
-   - a fixture both languages build, compared against a golden file Go wrote
-     (`desktop/parity/`, `go test ./desktop/parity/ -update-golden`). A shared
-     *primitive* rather than a response takes the vector form instead —
-     `gopath_vectors.json` records what Go's `filepath.Clean`/`Dir`/`Join`
-     answer and both languages assert against it, which is how #268 found a
-     doubled separator the Rust `Clean` produced. Build the
-     fixture with **no ties on any sort key** — see below; a tie makes the
-     golden flaky in Go before Rust ever sees it, which is why
-     `TestAnalyticsFixtureHasNoTiesOnAnySortKey` asserts the property;
-   - the live diff, against real data **and a Go server built from this
-     checkout**:
+3. ~~Seed the scratch instance if the endpoint has no data on this machine.~~ It
+   was a *copy*, so writing to it was safe, and it was the only way to diff a
+   shape the developer's own install did not contain — the agents list was empty
+   here, so the first "identical" meant nothing until two agents were created
+   through it. The lesson generalizes past the harness: **an "identical" over an
+   empty result set is not evidence.**
+4. Prove it:
+   - **(still live)** a fixture both languages build, compared against a golden
+     file Go wrote (`parity/`, generated by `go test ./desktop/parity/
+     -update-golden`). A shared *primitive* rather than a response takes the
+     vector form instead — `gopath_vectors.json` records what Go's
+     `filepath.Clean`/`Dir`/`Join` answer and both languages asserted against
+     it, which is how #268 found a doubled separator the Rust `Clean` produced.
+     Build the fixture with **no ties on any sort key** — see below; a tie made
+     the golden flaky in Go before Rust ever saw it, which is why
+     `TestAnalyticsFixtureHasNoTiesOnAnySortKey` asserted the property. Rust is
+     the only reader of these now, and nothing regenerates them, so treat a
+     golden as a decision rather than a snapshot;
+   - ~~the live diff, against real data **and a Go server built from this
+     checkout**~~ — deleted with the Go tree:
      ```bash
+     # No longer works. Recover from history if you ever need to reconstruct it:
+     #   git show main:desktop/scripts/parity-instance.sh
      eval "$(./scripts/parity-instance.sh start)"
      (cd src-tauri && cargo test --test parity_analytics -- --ignored --nocapture)
      ./scripts/parity-instance.sh stop
      ```
-     One suite per area (`tests/parity_<area>.rs`, sharing `tests/parity_common/`),
-     so a port runs its own diff and two ports do not edit one file. **There is
-     no `tests/live_parity.rs`** — several issue templates say
-     `cargo test --test live_parity`, and that names nothing. Drop the
-     `--test` flag to run them all, and add **`--no-fail-fast`** when you do:
-     `cargo test` stops at the first failing test *binary*, so one red suite
-     hides every suite listed after it and a sweep reports one failure where
-     there are three. Note also that `parity_writes` **mutates**,
-     unlike every other suite. It creates, renames and deletes rows, so it
-     refuses to run unless `AGENTO_LIVE_URL` is set rather than falling back to
-     the `:8990` default the read suites use. Start the scratch instance first.
-     It also compares differently: a write cannot be asked of both
-     implementations at once, so it pins Go's answers — status *and* bytes — as
-     literals, and the unit tests assert the same literals against Rust;
-   (Shadow-diff mode — `AGENTO_DESKTOP_NATIVE=diff` — used to be a fourth
+     One suite per area (`tests/parity_<area>.rs`, sharing
+     `tests/parity_common/`), so a port ran its own diff and two ports did not
+     edit one file. Two of its rules are worth carrying to any future suite:
+     `cargo test` stops at the first failing test **binary**, so a sweep needs
+     `--no-fail-fast` or one red suite hides every suite after it; and a *write*
+     cannot be asked of both implementations at once, so `parity_writes` pinned
+     Go's answers — status **and** bytes — as literals, and the unit tests assert
+     the same literals against Rust. Those literal assertions live on in the unit
+     tests and are unaffected by the deletion.
+   (Shadow-diff mode — `AGENTO_DESKTOP_NATIVE=diff` — used to be a third
    proof; it died with the sidecar in #278.)
 5. Only then leave it claimed.
 
 ### Never diff against the installed server
 
-`parity-instance.sh` exists because the Agento on `:8990` is whatever binary the
+**The harness this section describes is deleted** (#388); the rule it exists for
+is not, and applies to any future comparison.
+
+`parity-instance.sh` existed because the Agento on `:8990` is whatever binary the
 developer installed, which drifts behind the repo. The first sessions-list diff
 "failed" purely because that instance predated `config_dir` joining the summary
 — the port was right and the baseline was stale. The reverse is worse: an old
-server that happens to agree hides a real divergence. The script builds the
-server from the checkout and runs it against a **copy** of `~/.agento` (the
-current source may carry migrations the installed one has never applied, and
-applying them to the real file would upgrade it under a running instance).
+server that happens to agree hides a real divergence. The script built the
+server from the checkout and ran it against a **copy** of `~/.agento` (the
+source may carry migrations the installed one has never applied, and applying
+them to the real file would upgrade it under a running instance).
 
-**It is safe to run concurrently.** The work dir defaults to a name derived from
-the checkout's own path, and `stop` kills only the PID recorded in that dir — so
-two agents in separate worktrees need no coordination, and neither can clobber
-the other's scratch database or replace the binary underneath a running server.
-Two agents sharing one checkout still collide; set `AGENTO_PARITY_WORKER=<id>`
-(a suffix) or `AGENTO_PARITY_DIR=<path>` to separate them. `start` exports
-`AGENTO_PARITY_DIR` alongside the URL, and `parity-instance.sh url` re-prints
-the exports for a shell that lost them, without restarting anything.
+Everything that made it safe to run concurrently — a work dir derived from the
+checkout's own path, `stop` killing only the PID recorded there,
+`AGENTO_PARITY_WORKER` / `AGENTO_PARITY_DIR` to separate two agents sharing one
+checkout — is recoverable from `git show main:desktop/scripts/parity-instance.sh`
+if a comparable harness is ever wanted again.
 
 ### Go itself is not always byte-stable
 
@@ -1013,7 +1053,7 @@ three by #310 and one by #312 — and all six inherit every one:
   against.
 - **The reflector divergence map is generated, and it is the file to read
   before porting an integration** (#312).
-  `desktop/parity/jsonschema_reflect_vectors.json` reflects one reference struct
+  `parity/jsonschema_reflect_vectors.json` reflects one reference struct
   covering every shape class through `jsonschema.For`, and
   `src-tauri/src/claude/schema_vectors.rs` declares the corresponding Rust
   shapes and pins, per shape, whether they match and what to write when they do
@@ -1059,7 +1099,7 @@ three by #310 and one by #312 — and all six inherit every one:
   them; add another only if a port stops going through `new_tool`.
 - **A tool's name is not renameable.** `mcp__local-tools__current_time` is in
   agents' stored `capabilities.local` allowlists and in every `tool_use` block
-  already written to `chat_messages`. `desktop/parity/local_tools_vectors.json`
+  already written to `chat_messages`. `parity/local_tools_vectors.json`
   pins the server name, the tool names, the descriptions and the schemas, taken
   from a **live `tools/list`** against the Go server rather than from its source;
   it also pins `current_time`'s answer text across seventeen zones and two
@@ -1113,7 +1153,7 @@ the union of *every enabled service's* `tools` list names it — **or when that
 union is empty**. So all-enabled-with-no-lists hosts all twenty, and one name
 anywhere narrows every service at once. Both halves are in the vectors.
 
-**Four surfaces are pinned, not one.** `desktop/parity/github_vectors.json` is
+**Four surfaces are pinned, not one.** `parity/github_vectors.json` is
 taken from the real Go server over its real MCP transport, against a fake GitHub
 that **records the request each tool built**: the hosted tool set, each
 description and input schema, the request (method, encoded target, headers,
@@ -1176,7 +1216,7 @@ Five things it brought that #313 will want:
   gunzipped `resp.Body` caps.
 - **The test seam is `#[cfg(test)]`, and should stay that way in #313.**
   `githubAPIBase` had to be *exported* on the Go side (`parity.go`) because
-  `desktop/parity` is a different package; both Rust callers are in-crate, so
+  `parity` is a different package; both Rust callers are in-crate, so
   `API_BASE`/`set_api_base` compile out of a shipped binary entirely. What they
   are is a primitive for pointing every GitHub request — each bearing the
   user's PAT — at an arbitrary host.
@@ -1247,7 +1287,7 @@ The second of the six and the smallest: six tools in one service group
 after `native/integrations/github/` — that one settles how to port an
 integration, this one is what an integration adds when its API is not GitHub's.
 
-**Five surfaces are pinned, not four.** `desktop/parity/confluence_vectors.json`
+**Five surfaces are pinned, not four.** `parity/confluence_vectors.json`
 carries the four #312 established — hosted tool set, schema, request, result
 text — plus `ValidateSiteURL` per input, because that is the one piece of
 `Start` that is a *decision* rather than plumbing: it is what stops an `http://`
@@ -1351,7 +1391,7 @@ between them is #277's, deliberately preserved.
 | inside `Start` | `ValidateSiteURL` again | **nothing at all** |
 | client timeout | 30s | 15s |
 | failure sentence | names nothing | names the method and the path |
-| `desktop/parity` seam | `StartAtSiteURL` needed | **none needed** |
+| `parity` seam | `StartAtSiteURL` needed | **none needed** |
 
 Two of those rows change the shape of the port:
 
@@ -1548,7 +1588,7 @@ with `http.NewRequest` and `json.Marshal`, so the port reproduces bytes visible 
 `gmail/v1`, `drive/v3`) over an `oauth2` transport, and what those put on the wire
 is in neither this repository nor the port. Every URL, query parameter, body field
 and sentence was therefore *recorded* off the real libraries against a fake
-endpoint — `desktop/parity/google_vectors.json` is not a confirmation of the port,
+endpoint — `parity/google_vectors.json` is not a confirmation of the port,
 it is the **only written specification** of what the third party's code generator
 emits. Three things the port had wrong were found by running those vectors for the
 first time, and none was visible from either side's source:
@@ -2010,7 +2050,7 @@ said whether the categories covered every route, and two escaped all of them
 A prose table has the same problem one release later, so the table is
 **generated and cross-checked** instead:
 
-- `desktop/parity/write_routes_parity_test.go` runs `chi.Walk` over the router
+- `parity/write_routes_parity_test.go` runs `chi.Walk` over the router
   **`server.New` actually builds**, reached through `Server.Routes()`, and
   classifies every non-GET route against a `dispositions` map. Asking the router
   rather than rebuilding its mounts is deliberate: an earlier version
@@ -2020,7 +2060,7 @@ A prose table has the same problem one release later, so the table is
   route unconditionally. A route the
   router has and the map does not classify **fails the Go suite**; a
   classification naming a route the router no longer has fails it too.
-- `desktop/parity/write_routes.json` is what that produces: method, route,
+- `parity/write_routes.json` is what that produces: method, route,
   `status`, the owning issue, and the one-line reason. For a deferral the reason
   is the *effect Rust cannot reproduce*, because that is the only thing #274's
   rule turns on. `status` is `native` | `deferred` | `dropped` rather than a
@@ -2121,7 +2161,7 @@ Two Go behaviours the port reproduces rather than improves:
   with a 400. A `null` body, conversely, is a *no-op* to Go — zero value, no
   error — so it reaches the handler and fails validation with a 422.
 
-The migrations are **not transcribed**: `desktop/parity/migrations_vectors.json`
+The migrations are **not transcribed**: `parity/migrations_vectors.json`
 is generated from Go (`go test ./internal/storage/ -update-migration-vectors`),
 asserted against the slice by `internal/storage/migrations_vector_test.go`, and
 embedded by `native/migrate.rs` with `include_str!`. Adding migration 28 without
@@ -2395,7 +2435,7 @@ are load-bearing:
   bar; "fixing" it moves a working configuration to a port nothing answers on.
 - **The parity bar is the rendered mail, not JSON.** Nothing downstream parses
   it, so a divergence has nothing to report it — the first sign would be a user
-  saying the email looks different. `desktop/parity/notification_template_golden.json`
+  saying the email looks different. `parity/notification_template_golden.json`
   is rendered by Go and asserted by both languages. It earned its keep
   immediately: `html/template`'s text escaper is **seven** entries (the usual
   five plus `+` and NUL), and this port had also escaped `=`, which lives in the
@@ -2728,7 +2768,7 @@ call `ScheduleTask` on a nil receiver and panic on its mutex.
 
 - `native/schedule/` already held the *computation* — `buildJobDefinition` and
   the `next()` of each `gocron/v2` job type, pinned to
-  `desktop/parity/scheduler_vectors.json` (68 cases from a real
+  `parity/scheduler_vectors.json` (68 cases from a real
   `gocron.Scheduler` on a `clockwork` fake clock). Untouched by this change; see
   the semantics below, which are still the part most likely to be subtly wrong.
 - `native/schedule/runtime.rs` is `scheduler.go`: the `task id → timer` registry,
@@ -3014,7 +3054,7 @@ flag), so it is five remote-call reproductions rather than one.
 
 **The URL is a vector, not a live diff.** The redirect port comes from a fresh
 `FreePort()`, so two implementations answering the same request produce
-different URLs. `desktop/parity/oauth_vectors.json` records what Go's own
+different URLs. `parity/oauth_vectors.json` records what Go's own
 `BuildAuthURL` produced for a fixed port. Generating rather than transcribing
 was not ceremony — `oauth2.ApprovalForce` emits **`prompt=consent`**, not the
 `approval_prompt=force` its name suggests. The vectors also pin that the Google
