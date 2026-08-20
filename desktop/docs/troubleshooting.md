@@ -136,12 +136,21 @@ started in.
 
 ### The agent keeps asking permission
 
-That is by design in a chat. You are there to answer, so Agento prompts before a
-tool runs, whatever the agent's permission mode says. Unattended runs, meaning
-scheduled tasks, do not prompt, because nothing could answer.
+Asking is the default in a chat, because you are there to answer. Each chat
+carries its own permission mode, so to stop the prompts for a conversation you
+trust, start it with **Permissions → Never ask**.
+
+The setting is chosen when the chat is created and the inspector shows what a
+chat is running under. Existing chats keep whatever they were created with;
+chats created before this setting existed fall back to the agent's mode, and to
+asking if the agent has no preference.
+
+Unattended runs, meaning scheduled tasks, never prompt, because nothing could
+answer.
 
 If a tool is denied without any prompt at all, it is not on the agent's tool
-list. Add it there.
+list. Add it there — the allowlist is enforced whatever the permission mode
+says.
 
 ---
 
@@ -249,6 +258,16 @@ its data is safe, but it cannot be edited or used here.
 You installed from a `.deb` or `.rpm`. Those are notify only, because your package
 manager owns the installed files. Download the new package and install it the way
 you installed the first one, or switch to the AppImage for in-app updates.
+
+### Can I go back to an older version?
+
+Not below 0.1.1. That release added a database column, and Agento refuses to
+write to a database newer than itself rather than corrupting it — so an older
+build would appear to fail on every action.
+
+Your data is not damaged by this and `agento web` is unaffected; it simply
+ignores schema it does not know. If you need an older desktop build, restore the
+`~/.agento` backup you took before upgrading.
 
 ### The update download fails
 
