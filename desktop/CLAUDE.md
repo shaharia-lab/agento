@@ -47,11 +47,32 @@ All commands run from `desktop/`.
 ```bash
 npm install
 npm run app          # desktop window, hot reload (Vite + cargo watch)
+npm run app:alongside  # ...without taking over an installed Agento's window
 npm run dev          # browser-only UI; no backend, most views will error
 npm run app:build    # native installers for the current platform
 npm run build        # typecheck + build the frontend alone
 cd src-tauri && cargo build
 ```
+
+**`app:alongside` exists because `npm run app` cannot run beside an installed
+Agento.** `tauri-plugin-single-instance` derives its identity from
+`app.config().identifier` on all three platforms — the DBus name
+`<identifier>.SingleInstance` on Linux, a named mutex on Windows, a socket path
+on macOS — and dev and release share that identifier, so a dev launch finds the
+installed app's claim, focuses *its* window and exits. Nothing is damaged and no
+data is shared (`paths.rs` already gives debug its own `~/.agento-desktop-dev`,
+and dev binds a fixed 8991), but you get the wrong window.
+
+`src-tauri/tauri.alongside.conf.json` is a one-key merge overriding `identifier`
+to `com.shaharialab.agento.dev`, which is the only lever that works on every
+platform: the plugin lets Linux override the bus name directly, Windows and
+macOS have no such parameter and read the identifier. Verified with `busctl
+--user list` showing both names claimed by two live processes at once.
+
+It does **not** let you test anything origin-dependent. A dev build loads the
+configured `devUrl`, which the ACL treats as *local* — so the whole class of bug
+described under "The window's origin has to be in the capability's scope"
+is invisible in dev by construction. That needs `app:build`.
 
 Tauri's *bundles* cannot cross-compile, which is why the release workflow uses
 one runner per OS. (There is no sidecar to build since #278;

@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "app": "tauri dev",
+    "app:alongside": "tauri dev --config src-tauri/tauri.alongside.conf.json",
     "app:build": "tauri build"
   },
   "dependencies": {
