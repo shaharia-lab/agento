@@ -1,154 +1,144 @@
 # Agento Desktop
 
-A native desktop client for [Agento](https://github.com/shaharia-lab/agento),
-built with **Tauri 2 + Rust + React**.
+A native desktop app for [Agento](https://github.com/shaharia-lab/agento): build
+AI agents, chat with them, schedule them, and see exactly what your Claude Code
+usage costs. Everything runs on your own machine.
 
-The backend is native Rust (`src-tauri/src/native/`), a subsystem-by-subsystem
-port of the Agento Go server completed with #278 — the bundled Go sidecar is
-gone. Behaviour is pinned to the Go implementation by the byte-level parity
-corpus in `parity/`; see [CLAUDE.md](CLAUDE.md) for how that works.
+One window, no browser tab, no server to start.
 
----
-
-## Running it
-
-```bash
-npm install
-npm run app        # Tauri dev window, hot reload on save
-```
-
-Development runs against `~/.agento-desktop-dev`, not your real `~/.agento` —
-two Agento processes sharing a data directory share a scheduler, which would
-double-fire scheduled tasks. Release builds use the real one.
-
-Other scripts:
-
-| Command | What it does |
-| --- | --- |
-| `npm run dev` | Vite only, in a browser tab — fastest loop for pure layout work |
-| `npm run app` | The real desktop window with hot reload |
-| `npm run app:build` | Production bundle (`.deb`, `.AppImage`, `.rpm`) |
-| `npm run build` | Typecheck + build the frontend alone |
-
-### Linux system dependencies
-
-Already installed on this machine. On a fresh box:
-
-```bash
-sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
-  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
-```
+- **Docs:** [User Guide](docs/user-guide.md) | [Installation](docs/installation.md) | [Troubleshooting](docs/troubleshooting.md)
+- **For contributors:** [Development](docs/development.md) | [Architecture](docs/architecture.md) | [Releasing](docs/releasing.md)
 
 ---
 
-## Why it doesn't look like the web app
+## Before you install
 
-The web version is a page: a nav rail, a big `<h1>`, a primary button in the top
-right, and a wide column of cards. That layout is correct for a browser and
-wrong for a window. The desktop build deliberately breaks from it:
+Agento Desktop needs the **[Claude Code CLI](https://claude.ai/code)**, installed
+and signed in. If `claude` runs in your terminal, you are ready.
 
-**Three panes, not one page.** Every section is `list → detail → inspector`,
-resizable by dragging the hairline dividers. You navigate *within* a window
-instead of replacing its contents, which is why there's no page-level heading
-anywhere — the titlebar already says where you are.
+There is no Anthropic API key to enter. Agento reuses the sign-in Claude Code
+already has. The app checks for the CLI on launch and tells you if it is missing.
 
-**Density.** 13px base type, 26px rows, 24px toolbar controls, hairline
-`0.5px` borders. The web app runs roughly 16px/48px; at desktop distances that
-reads as a website embedded in a frame.
+---
 
-**The window owns its chrome.** `decorations: false`, so the titlebar is ours:
-drag region, back/forward, sidebar toggle, and window controls that follow
-platform convention (right on Linux/Windows, reserved space for the traffic
-lights on macOS).
+## Download
 
-**A status bar.** Persistent, always truthful — running agents, active model,
-today's tokens and spend, connection state. Web apps almost never have one.
+Get the files from the
+[latest desktop release](https://github.com/shaharia-lab/agento/releases?q=desktop&expanded=true).
+Release tags start with `desktop-v`.
 
-**Selection behaves natively.** The source list and table rows fill with the
-accent colour when the window is focused and drop to neutral grey when it
-isn't — the single strongest "this is a real app" signal, and something almost
-no web port does.
+| Platform | Download | Auto-update |
+| --- | --- | --- |
+| **macOS** (Apple Silicon) | `Agento_<version>_aarch64.dmg` | Yes, in-app |
+| **macOS** (Intel) | `Agento_<version>_x64.dmg` | Yes, in-app |
+| **Windows** (x64) | `Agento_<version>_x64-setup.exe` | Yes, in-app |
+| **Linux** (any distro) | `Agento_<version>_amd64.AppImage` or `_aarch64.AppImage` | Yes, in-app |
+| **Linux** (Debian, Ubuntu) | `Agento_<version>_amd64.deb` or `_arm64.deb` | No, notify only |
+| **Linux** (Fedora, RHEL, openSUSE) | `Agento-<version>-1.x86_64.rpm` or `.aarch64.rpm` | No, notify only |
 
-**Keyboard first.** A ⌘K palette plus a real native menu (`src-tauri/src/menu.rs`)
-that emits actions the webview handles, so the menu path and the shortcut path
-run identical code.
+**Auto-update** means the app can download and install a new version itself, then
+restart. The `.deb` and `.rpm` packages are owned by your system package manager,
+so Agento never overwrites them: it tells you a new version exists and links to
+the download. Pick the AppImage if you want in-app updates on Linux.
 
-**No browser affordances.** Text isn't selectable except where you'd actually
-read or copy it, the context menu is suppressed, scrollbars are overlay-style,
-and focus rings appear for keyboard navigation only.
+Every download is also published with a `.sig` file. That signature is Agento's
+own update key, used by the in-app updater to verify a download.
+
+---
+
+## Install
+
+### macOS
+
+1. Open the `.dmg` and drag **Agento** into Applications.
+2. Launch it. macOS blocks it the first time, because the app is not signed with
+   an Apple Developer certificate.
+3. Open **System Settings → Privacy & Security**, scroll down, and click
+   **Open Anyway**. Confirm once.
+
+Only the first launch needs this. Updates installed by the app do not.
+
+### Windows
+
+1. Run `Agento_<version>_x64-setup.exe`.
+2. Windows SmartScreen warns about an unrecognized publisher. Click **More info**,
+   then **Run anyway**.
+3. The installer asks for administrator rights, because it installs for all users.
+
+The bundled WebView2 runtime installs automatically if your machine does not
+already have it.
+
+### Linux, AppImage
+
+```bash
+chmod +x Agento_*.AppImage
+./Agento_*.AppImage
+```
+
+No installation, no root. Keep the file wherever you like. The app updates itself
+in place.
+
+### Linux, Debian or Ubuntu
+
+```bash
+sudo apt install ./Agento_*_amd64.deb
+```
+
+### Linux, Fedora, RHEL or openSUSE
+
+```bash
+sudo dnf install ./Agento-*.x86_64.rpm
+```
+
+Both packages declare their GTK and WebKitGTK dependencies, so your package
+manager pulls in what is missing.
+
+---
+
+## First run
+
+The app opens on **Chats**. On launch it starts reading the Claude Code history
+already on your disk. A large history takes a few minutes to index the first
+time, and the Sessions view shows progress while it works. Everything else is
+usable meanwhile.
+
+Your data lives in `~/.agento` (`%USERPROFILE%\.agento` on Windows) as a single
+SQLite file. Nothing is uploaded anywhere.
+
+Read the [User Guide](docs/user-guide.md) next.
 
 ---
 
 ## Keyboard shortcuts
 
+`Ctrl` on Windows and Linux, `⌘` on macOS.
+
 | Shortcut | Action |
 | --- | --- |
 | `Ctrl K` | Command palette |
-| `Ctrl B` | Toggle sidebar |
-| `Ctrl I` | Toggle inspector |
 | `Ctrl N` | New chat |
 | `Ctrl ,` | Settings |
+| `Ctrl B` | Show or hide the sidebar |
+| `Ctrl I` | Show or hide the inspector |
 | `Ctrl [` / `Ctrl ]` | Back / forward |
-| `Ctrl 1`–`7` | Jump to a section |
+| `Ctrl 1` to `Ctrl 7` | Jump to a section |
 
 ---
 
-## Layout
+## Building from source
 
-```
-┌──────────────────────────────────────────────────────┐
-│ titlebar — drag, nav, window controls                │
-├─────────┬────────────────────────────────────────────┤
-│ sidebar │ toolbar                                    │
-│ (source ├──────────┬──────────────────┬──────────────┤
-│  list)  │ list     │ detail           │ inspector    │
-├─────────┴──────────┴──────────────────┴──────────────┤
-│ status bar                                           │
-└──────────────────────────────────────────────────────┘
+```bash
+cd desktop
+npm install
+npm run app          # dev window with hot reload
+npm run app:build    # installers for your platform
 ```
 
-## Project structure
-
-```
-src/
-  lib/
-    api.ts         fetch wrapper + POST-based SSE for chat streaming
-    types.ts       TypeScript mirrors of the Go JSON, field-for-field
-    hooks.ts       useResource / useDebounced / usePoll
-    format.ts      shared number, money, duration and date formatting
-    stats.ts       sidebar + status bar counters
-    icons.tsx      16px / 1.5-stroke icon set
-    nav.ts         sidebar sections and view ids
-    tauri.ts       window + menu bridge; degrades to a plain browser tab
-  styles/
-    tokens.css     type scale, spacing, control metrics, light + dark palettes
-    base.css       app-shell resets (no document scrolling, no text selection)
-    shell.css      titlebar, sidebar, panes, splitters, status bar
-    controls.css   buttons, segmented controls, fields, switches, menus
-    views.css      list rows, transcript, tables, dashboard, inspector, forms
-  components/      TitleBar, Sidebar, StatusBar, CommandPalette, ui primitives
-  views/           one file per section
-
-src-tauri/
-  src/lib.rs       app setup: database, migrations, api server, window, menu
-  src/proxy.rs     axum server: routes every request to src/native/
-  src/native/      the ported backend — one module per API area
-  src/claude/      the Claude Agent SDK, ported from Go
-  src/menu.rs      native menu; emits `menu://action` to the webview
-  tauri.conf.json  undecorated 1280×820 window, CSP, bundle targets
-  capabilities/    the window permissions the custom chrome needs
-```
-
-## Theming
-
-Three states — light, dark, and match-system — set via the status bar, the
-Appearance pane, or the palette. Tokens are defined on bare `:root` for light,
-then re-declared under both `@media (prefers-color-scheme: dark)` and
-`:root[data-theme="dark"]`, so an explicit choice wins in either direction.
+See [Development](docs/development.md) for the full setup, including Linux system
+dependencies and how the parity test suite works.
 
 ---
 
-## Not built yet
+## License
 
-Multi-window, tray icon, native context menus, drag-and-drop, virtualised lists
-for the session table, and Tauri auto-update.
+MIT, same as the rest of the Agento repository.

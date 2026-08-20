@@ -109,6 +109,17 @@ agento service install     # then: status | stop | start | restart | logs | unin
 
 <br>
 
+## Prefer a desktop app?
+
+Agento also ships as a native desktop app for macOS, Windows and Linux. Same
+features, no browser tab and no server to start, with in-app updates on most
+install types.
+
+Download it from the [desktop releases](https://github.com/shaharia-lab/agento/releases?q=desktop&expanded=true),
+or read the [desktop documentation](desktop/README.md) first.
+
+<br>
+
 ## What you get
 
 ### Every token type, priced properly
@@ -339,6 +350,13 @@ Only do that on a network you trust, or put a proxy that authenticates in front 
 - [Security](docs/security.md): network exposure, the API guards, and where your data lives
 - [Monitoring](docs/monitoring.md): OpenTelemetry traces, metrics and logs
 - [Development](docs/development.md): architecture and contribution guidelines
+
+**Desktop app**
+
+- [Installation](desktop/docs/installation.md): downloads per platform, updates, and where your data lives
+- [User guide](desktop/docs/user-guide.md): every section of the app
+- [Troubleshooting](desktop/docs/troubleshooting.md): common problems and the logs
+- [Architecture](desktop/docs/architecture.md) and [development](desktop/docs/development.md): for contributors
 
 <br>
 
