@@ -3,11 +3,15 @@
 //! This began as the far side of a migration seam (`proxy.rs`): a route listed
 //! in [`claims`] was served from here, everything else forwarded to the Go
 //! sidecar, and both implementations stayed runnable at once so a port was
-//! *verifiable* rather than merely finished. The sidecar is gone now. What
-//! remains of the seam is its registry shape — one module per area, claiming
-//! and serving in the same file — and the parity corpus (`desktop/parity/`,
-//! `tests/parity_*.rs`), which still diffs these handlers against a Go server
-//! built from the checkout by `scripts/parity-instance.sh`.
+//! *verifiable* rather than merely finished. The sidecar is gone now (#278) and
+//! so is the Go tree (#388). What remains of the seam is its registry shape —
+//! one module per area, claiming and serving in the same file — and the parity
+//! corpus (`desktop/parity/`), which is **frozen**: the goldens are still
+//! asserted here, but the Go generators and the live-diff suites
+//! (`tests/parity_*.rs`, `scripts/parity-instance.sh`) that produced and
+//! replayed them are gone. See `desktop/parity/README.md` for what that costs —
+//! notably that `read_routes.json` and `write_routes.json` now answer the
+//! "is every route ported?" audit from a snapshot rather than from chi.
 //!
 //! **Failure means a 500 now, not a fallback.** Every native handler returns a
 //! `Result`, and the proxy answers an `Err` with
