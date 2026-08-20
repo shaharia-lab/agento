@@ -60,6 +60,19 @@ jobs:
         with:
           version: v2.5.0
           args: --config=.golangci.yml
+          # The action's default is to run `golangci-lint config verify` first,
+          # which validates .golangci.yml against a JSON schema it downloads
+          # from golangci-lint.run. That makes every backend CI run depend on a
+          # third-party site being reachable from the runner, and when it is not
+          # the job fails *before linting anything* — a red build carrying no
+          # information about the code. Observed twice in a row on #385 with the
+          # host answering fine from elsewhere.
+          #
+          # What it checks is the config file, which changes rarely and whose
+          # breakage is immediate and local (the lint run itself rejects an
+          # unparseable config). Trading that for a CI run that cannot be
+          # blocked by someone else's CDN is the right way round.
+          verify: false
 
   # ── Frontend ───────────────────────────────────────────────────────────────
   frontend:
