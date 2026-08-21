@@ -28,6 +28,7 @@ import {
   usd,
 } from "../lib/format";
 import { Icon } from "../lib/icons";
+import { sessionAgentName } from "../lib/sessionAgent";
 import { openExternal } from "../lib/tauri";
 import {
   Dropdown,
@@ -837,6 +838,7 @@ function Inspector({
   const subCost = costOf(session.subagent_cost);
   const prs = session.prs ?? [];
   const badge = modeBadge(session);
+  const agentName = sessionAgentName(session);
 
   return (
     <>
@@ -859,6 +861,12 @@ function Inspector({
         {session.native_title && (
           <InspRow label="Native">{session.native_title}</InspRow>
         )}
+        {/* Another name Claude Code recorded for the session, shown only when
+            it is not one of the titles above — the same suppression the AI
+            title gets, for the reasons in lib/sessionAgent.ts. It was labelled
+            "Agent" and sat beside Model and Config until it turned out never to
+            name an agent, so it belongs here with the other titles. */}
+        {agentName && <InspRow label="Named">{agentName}</InspRow>}
         <InspRow label="Project">
           <span title={session.project_path}>
             {tildePath(session.project_path)}
@@ -889,9 +897,6 @@ function Inspector({
           )}
         </InspRow>
         <InspRow label="Config">{session.config_dir ?? "Default"}</InspRow>
-        {session.agent_name && (
-          <InspRow label="Agent">{session.agent_name}</InspRow>
-        )}
       </InspGroup>
 
       <InspGroup title="Activity">
