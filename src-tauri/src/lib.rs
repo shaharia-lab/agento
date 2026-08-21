@@ -4,6 +4,9 @@
 // outside the crate.
 pub mod claude;
 mod guards;
+// Reading back the log file the plugin below writes, for Settings → Logs.
+// Commands rather than `/api` routes: see the module header.
+mod logs;
 // The menubar is macOS-only: the app menu (About/Hide/Quit ⌘Q) is what macOS
 // users expect, while an in-window GTK/win32 menubar is not the convention
 // for this class of app — the titlebar and the ⌘K palette carry the same
@@ -212,7 +215,12 @@ pub fn run() {
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(3))
                 .build(),
         )
-        .invoke_handler(tauri::generate_handler![host_info])
+        .invoke_handler(tauri::generate_handler![
+            host_info,
+            logs::log_files,
+            logs::read_log,
+            logs::export_logs
+        ])
         .setup(|app| {
             let handle = app.handle().clone();
 

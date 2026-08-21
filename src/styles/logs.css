@@ -1,0 +1,235 @@
+/* ============================================================================
+   Settings → Logs.
+
+   A log viewer is a table of very many small rows, so everything here is about
+   density and about the level being legible at a glance — the pane exists so a
+   user can find the red line and send it to us.
+
+   Colours come from the semantic tokens (`--red`, `--amber`, …), which are
+   declared on bare `:root` and re-declared in both dark blocks, so nothing
+   here needs a media query of its own.
+   ========================================================================== */
+
+/* The Logs tab replaces the settings form's centred, scrolling column: the
+   lines want the pane's whole width, and their scroller is their own. */
+.logs__host {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--sp-7) var(--sp-9) var(--sp-9);
+}
+
+.logspane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  /* The pane's own scrolling lives in .logs__body; without this the parent's
+     scroller takes it and the toolbar leaves with the lines. */
+  min-height: 0;
+  flex: 1;
+}
+
+/* --- Toolbars ------------------------------------------------------------ */
+
+.logs__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.logs__bar--levels {
+  gap: var(--sp-2);
+}
+
+.logs__spacer {
+  flex: 1;
+}
+
+.logs__meta {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  white-space: nowrap;
+}
+
+/* The follow toggle reads as pressed rather than as a second primary action:
+   it is a mode, and the page already has one primary button (Save a copy). */
+.logspane .btn--on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  box-shadow: 0 0 0 var(--hairline) var(--accent);
+}
+
+.logspane .btn--sm {
+  height: 22px;
+  padding: 0 var(--sp-4);
+  font-size: var(--text-sm);
+}
+
+/* --- Level chips --------------------------------------------------------- */
+
+.logchip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 22px;
+  padding: 0 var(--sp-4);
+  border-radius: 999px;
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+  background: var(--bg-inset);
+  box-shadow: 0 0 0 var(--hairline) var(--line-soft);
+  transition: opacity var(--dur-fast), background var(--dur-fast);
+}
+.logchip:hover {
+  background: var(--bg-hover);
+}
+
+/* An excluded level stays readable — it is a toggle, not a disabled control,
+   and its count is still information. */
+.logchip--off {
+  opacity: 0.45;
+}
+.logchip--off .logchip__dot {
+  background: var(--fg-quaternary);
+}
+
+.logchip__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--fg-tertiary);
+}
+.logchip--error .logchip__dot {
+  background: var(--red);
+}
+.logchip--warn .logchip__dot {
+  background: var(--amber);
+}
+.logchip--info .logchip__dot {
+  background: var(--accent);
+}
+.logchip--debug .logchip__dot {
+  background: var(--fg-tertiary);
+}
+.logchip--trace .logchip__dot {
+  background: var(--fg-quaternary);
+}
+
+.logchip__count {
+  color: var(--fg-tertiary);
+  font-size: var(--text-xs);
+}
+
+/* --- Notices ------------------------------------------------------------- */
+
+.logs__notice {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  color: var(--fg-secondary);
+  font-size: var(--text-sm);
+}
+
+/* --- The lines ----------------------------------------------------------- */
+
+.logs__body {
+  flex: 1;
+  min-height: 240px;
+  overflow: auto;
+  padding: var(--sp-3) 0;
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  box-shadow: inset 0 0 0 var(--hairline) var(--line);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.55;
+}
+
+.logs__idle {
+  padding: var(--sp-7);
+  text-align: center;
+  color: var(--fg-tertiary);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+}
+
+.logline {
+  display: grid;
+  grid-template-columns: 62px 46px 116px 1fr;
+  gap: var(--sp-4);
+  padding: 1px var(--sp-5);
+  align-items: baseline;
+}
+.logline:hover {
+  background: var(--bg-hover);
+}
+
+.logline__time {
+  color: var(--fg-quaternary);
+}
+
+.logline__level {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.02em;
+  color: var(--fg-tertiary);
+}
+
+.logline__target {
+  color: var(--fg-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A message may be a whole panic backtrace, so it wraps and keeps its own
+   newlines rather than being cut to one line. */
+.logline__text {
+  color: var(--fg-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.logline--error {
+  background: var(--red-soft);
+}
+.logline--error .logline__level,
+.logline--error .logline__text {
+  color: var(--red);
+}
+.logline--warn {
+  background: var(--amber-soft);
+}
+.logline--warn .logline__level,
+.logline--warn .logline__text {
+  color: var(--amber);
+}
+.logline--info .logline__text {
+  color: var(--fg);
+}
+.logline--debug .logline__text,
+.logline--trace .logline__text {
+  color: var(--fg-tertiary);
+}
+
+/* --- Footer -------------------------------------------------------------- */
+
+.logs__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+.logs__path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 60%;
+}
