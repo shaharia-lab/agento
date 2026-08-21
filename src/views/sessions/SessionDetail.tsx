@@ -113,9 +113,7 @@ export function SessionDetail({
                 This transcript holds no conversation turns.
               </div>
             ) : (
-              messages.map((m, i) => (
-                <Message key={m.uuid || i} msg={m} agent={agentLabel(detail.data)} />
-              ))
+              messages.map((m, i) => <Message key={m.uuid || i} msg={m} />)
             )}
           </div>
         </div>
@@ -138,11 +136,18 @@ const INJECTED_MARKERS = [
   "Base directory for this skill:",
 ];
 
-function agentLabel(d: ClaudeSessionDetail | null | undefined): string {
-  return d?.agent_name || "Claude";
-}
+/**
+ * The byline every assistant message carries.
+ *
+ * A constant, and deliberately not the session's `agent_name`: Claude Code's
+ * `agent-name` event is the session's own name — what `/rename` sets — in every
+ * version that has written one, so using it here bylined all 104 messages of a
+ * renamed session with its 100-character title. `lib/sessionAgent.ts` carries
+ * the evidence and the rest of the rule.
+ */
+const ASSISTANT_LABEL = "Claude";
 
-function Message({ msg, agent }: { msg: ClaudeMessage; agent: string }) {
+function Message({ msg }: { msg: ClaudeMessage }) {
   const isUser = msg.type === "user";
   const blocks = msg.blocks?.length ? msg.blocks : null;
 
@@ -156,7 +161,9 @@ function Message({ msg, agent }: { msg: ClaudeMessage; agent: string }) {
       </div>
       <div className="msg__body">
         <div className="msg__head">
-          <span className="msg__author">{isUser ? "You" : agent}</span>
+          <span className="msg__author">
+            {isUser ? "You" : ASSISTANT_LABEL}
+          </span>
           <span className="msg__time">{dateTime(msg.timestamp)}</span>
         </div>
         {blocks ? (
