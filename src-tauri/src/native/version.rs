@@ -4,15 +4,27 @@
 //!
 //! Two things here are not obvious.
 //!
-//! **The build stamp defaults to Go's unstamped values.** Go's `internal/build`
-//! variables were set by `-ldflags`, and only the Makefile did that —
-//! `scripts/parity-instance.sh` built with no flags, so the server the parity
-//! tests diffed against served the package defaults, and these were pinned to
-//! them. [`VERSION`] and friends still read those defaults, with an
-//! `option_env!` hook (`AGENTO_BUILD_VERSION` and friends) for the day the
-//! desktop bundle starts stamping itself. Nothing constrains them any more —
-//! #278 removed the Go binary that would have had to agree and #388 removed the
-//! Go tree — so stamping is now a build-script change and nothing else.
+//! **The build stamp is the release workflow's, and an unstamped build is
+//! honestly `dev`.** Go's `internal/build` variables were set by `-ldflags`,
+//! and only the Makefile did that — `scripts/parity-instance.sh` built with no
+//! flags, so the server the parity tests diffed against served the package
+//! defaults, and [`VERSION`] and friends were pinned to them behind an
+//! `option_env!` hook for the day the desktop bundle started stamping itself.
+//! That day did not arrive with the hook: every release through
+//! `desktop-v0.1.1` shipped `dev`/`unknown`/`unknown` on the About screen,
+//! because nothing anywhere set the variables. `desktop-release.yml`'s "Build
+//! installers" step sets all three now, via `src-tauri/build.rs` — read its
+//! `stamp_build_info` before changing either half, because passing the
+//! variables to `cargo build` alone does *not* survive a restored build cache.
+//!
+//! The defaults stay, and they are not a fallback to paper over a missing
+//! stamp: a build nobody stamped is a development build, so it says so.
+//!
+//! **This is not the version the updater compares.** That one is baked into the
+//! bundle from `tauri.conf.json` and is pinned to the tag by the release
+//! workflow's guard job; it was correct throughout, which is why an install
+//! reporting `dev` here was still offered the right updates. Two independent
+//! version sources, and only this one is cosmetic — see [`update_check`].
 //!
 //! **The update check is not the updater.** Go's release-lookup branch asked
 //! GitHub and compared, which is the self-updater — the one subsystem the
@@ -134,14 +146,29 @@ mod tests {
         );
     }
 
-    /// The unstamped defaults are what both the bundled sidecar and the parity
-    /// server serve, so parity depends on them matching `internal/build`.
+    /// The unstamped defaults are `internal/build`'s, which is what the parity
+    /// server served — and an unstamped build must keep saying `dev` rather
+    /// than borrowing `tauri.conf.json`'s version, or a local build becomes
+    /// indistinguishable from a release.
+    ///
+    /// The other arm is the regression: every release through `desktop-v0.1.1`
+    /// took it and reported `dev`, because nothing set the variables. It is
+    /// `desktop-release.yml`'s "Build installers" step and
+    /// `src-tauri/build.rs` that make a release take the first arm; a test here
+    /// can only pin that a stamp, when present, is what the route answers.
     #[test]
-    fn the_unstamped_defaults_match_the_go_package() {
-        if option_env!("AGENTO_BUILD_VERSION").is_none() {
-            assert_eq!(VERSION, "dev");
-            assert_eq!(COMMIT_SHA, "unknown");
-            assert_eq!(BUILD_DATE, "unknown");
+    fn a_stamped_build_reports_its_stamp_and_an_unstamped_one_says_dev() {
+        match option_env!("AGENTO_BUILD_VERSION") {
+            Some(stamped) => {
+                assert_eq!(VERSION, stamped);
+                assert_ne!(VERSION, "dev", "an empty stamp must not be emitted");
+                assert_eq!(version().version, stamped);
+            }
+            None => {
+                assert_eq!(VERSION, "dev");
+                assert_eq!(COMMIT_SHA, "unknown");
+                assert_eq!(BUILD_DATE, "unknown");
+            }
         }
     }
 

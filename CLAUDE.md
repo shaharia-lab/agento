@@ -763,10 +763,41 @@ Makefile does that**. `scripts/parity-instance.sh` builds with no flags, so the
 server every parity test diffs against serves the package defaults —
 `dev` / `unknown` / `unknown`. `native/version.rs` declares the same defaults,
 behind `option_env!("AGENTO_BUILD_VERSION")` and friends, so stamping the
-desktop bundle is a build-script change rather than a code change — possible
-since #278 removed the Go binary that would have had to agree. (The parity
-test for `/api/version` still assumes an unstamped build; stamp CI, not the
-test environment.)
+desktop bundle was left as a build-script change rather than a code change —
+possible since #278 removed the Go binary that would have had to agree. (The
+parity test for `/api/version` still assumes an unstamped build; stamp CI, not
+the test environment.)
+
+**That change was never made, and every release through `desktop-v0.1.1`
+shipped an About screen reading `Version dev` over `unknown · Invalid Date`.**
+The hook was there and nothing anywhere set the variables, so a release build
+and a `cargo build` in a checkout were byte-identical on this route. Two halves
+fix it, and **neither works alone**:
+
+- `desktop-release.yml`'s **"Compute the build stamp"** step derives the version
+  from the tag (`desktop-v0.1.2` → `0.1.2`), or from `tauri.conf.json` with a
+  `-dev` suffix for a `workflow_dispatch` dry run, which has no tag to read.
+  Together with `github.sha` and an RFC 3339 date it goes into "Build
+  installers"' `env:`.
+- `src-tauri/build.rs`'s **`stamp_build_info`** re-emits each set variable as
+  `cargo:rustc-env` and declares `cargo:rerun-if-env-changed` for it. The
+  release job restores a `Swatinem/rust-cache` target dir from an earlier tag's
+  run, so exporting the variables to `cargo build` alone would let the
+  *previous* release's stamp ship — a build script that only declared the
+  dependency would rerun and change nothing, and only a changed `rustc-env`
+  forces the crate to recompile.
+
+An unset variable emits nothing, so `option_env!` still answers `None` and a
+local `npm run app:build` still reports `dev`. That is the point: an unstamped
+build is a development build. Do not "fix" it by falling back to
+`tauri.conf.json`'s version, which would make the two indistinguishable.
+
+**This was never an updater bug**, and the distinction is worth keeping
+straight because the symptom invites the wrong fix. The updater compares the
+version the bundler bakes in from `tauri.conf.json` — which the guard job
+already pins to the tag — against `desktop-latest/latest.json`. That was
+correct throughout; a `0.1.1` install reporting `dev` here was still offered
+`0.1.2`. `/api/version` is cosmetic, and the guard has no visibility into it.
 
 `/api/version/update-check` answers the short-circuit —
 `update_available: false` — for **every** build since #278. Go's other branch
