@@ -149,12 +149,40 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # What `GET /api/version` reports, and so what the About screen shows.
+      # It is NOT what the updater compares — that reads the version baked
+      # into tauri.conf.json by the bundler, which the guard job already pins
+      # to the tag. These three are a separate, purely informational stamp
+      # that nothing set until now, which is why every release through
+      # desktop-v0.1.1 displayed "dev · unknown".
+      #
+      # Kept out of the `env:` block below so a dry run can name itself: a
+      # workflow_dispatch has no tag, and stamping a dispatch build with the
+      # conf version would make it indistinguishable from the real release.
+      - name: Compute the build stamp
+        id: stamp
+        shell: bash
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            desktop-v*) version="${GITHUB_REF_NAME#desktop-v}" ;;
+            *) version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')-dev" ;;
+          esac
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
+          # RFC 3339, which is what the About screen's dateTime() parses.
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GITHUB_OUTPUT"
+          echo "stamping ${version}"
+
       # bundle.targets in tauri.conf.json lists exactly what ships — notably
       # NSIS and not MSI on Windows, since the updater manifest expects the
       # -setup.exe and a built-but-dropped .msi only wasted CI time.
       - name: Build installers
         run: npx tauri build --target ${{ matrix.target }}
         env:
+          # Read by src-tauri/build.rs, which re-emits them as rustc-env so a
+          # restored rust-cache cannot ship the previous tag's stamp.
+          AGENTO_BUILD_VERSION: ${{ steps.stamp.outputs.version }}
+          AGENTO_BUILD_COMMIT: ${{ github.sha }}
+          AGENTO_BUILD_DATE: ${{ steps.stamp.outputs.date }}
           # Signs the updater artifacts. This is Tauri's own minisign key, not
           # an Apple or Microsoft certificate — it only proves an update came
           # from us. Without it the build still succeeds but produces no .sig,
