@@ -164,14 +164,17 @@ src/
     tauri.ts     window + menu bridge; degrades to a plain browser tab
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
     newChatPrefs.ts  what the New Chat bar was last set to (localStorage)
+    logs.ts      the log commands, and the line parser (target before level)
   components/    TitleBar, Sidebar, StatusBar, CommandPalette, ui.tsx,
                  DirField (native picker + the /api/fs fallback), CopyButton
   views/         one file per section
+    settings/LogsPane.tsx  Settings → Logs: tail, follow, filter, save a copy
   styles/        tokens → base → shell → controls → views (+ per-view files)
 
 src-tauri/src/
   lib.rs         setup: database (create/migrate/seed), api server, window, menu
   paths.rs       data dir + database path
+  logs.rs        the app log read back for Settings → Logs — commands, not /api
   proxy.rs       axum server; routes every request into native/'s registry
   menu.rs        native menu → menu://action events
   claude/        the Claude Agent SDK, ported from Go (phase 5's foundation)
@@ -3305,6 +3308,40 @@ The elapsed figure is time-to-headers whenever the body is still arriving —
 report a duration the request actually took. (The `forwarded`,
 `native-failed-forwarded` and `diff` labels died with the sidecar in #278; the
 remaining set is `native`, `native-stream`, `unrouted` and `rejected`.)
+
+**Settings → Logs is where that file is read back**, and it is what makes the
+retention above worth anything: a log a user cannot find is a log nobody sends.
+`src-tauri/src/logs.rs` lists the directory, tails a file, follows it and
+concatenates the lot into one file at a path the native save dialog returned;
+`src/views/settings/LogsPane.tsx` renders it with the level coloured and
+filterable. Four things about it are decisions rather than details:
+
+- **They are Tauri commands, not `/api` routes.** The log belongs to the plugin
+  in this process and has no Go counterpart, so a route would be a permanent
+  divergence in `parity/read_routes.json` — the one place the read surface is
+  kept honest. Commands also bypass the ACL, so nothing in `capabilities/` had
+  to move (the save dialog is already covered: `dialog:default` is
+  `allow-message`, `allow-save`, `allow-open`).
+- **The file name from the webview is a key into the listing, never a path
+  fragment.** `dir.join(name)` would serve `../../.ssh/id_rsa` to the page, and
+  this command hands whatever it reads straight back —
+  `a_name_outside_the_directory_is_refused` is the whole property.
+- **The pane renders outside the settings form's loading and error gates.** A
+  failed `GET /api/settings` is exactly when someone comes looking for the log;
+  rendering inside would replace it with "Settings unavailable" at the one
+  moment it is worth reading.
+- **The line format is `[date][time][target][LEVEL]` — target *before* level**,
+  which is the default `tauri_plugin_log` writes and is not what its own
+  `.timezone_strategy()` format writes (that one swaps the two). Measured
+  against a running build rather than read off the source, and the parser tells
+  the fields apart by which one *is* a level name, so neither ordering can
+  break it.
+
+The export is deliberately unfiltered and unredacted: nothing in the file is a
+secret by construction — `proxy.rs` logs no bodies, headers or query strings —
+and a redacted log is worth less than no log. What it does carry is the two
+user-authored path segments the access line already accepts (an agent slug, a
+settings-profile id), which is the same trade recorded above.
 
 None of this is a property of the *data*. An `agento web` pointed at the same
 `~/.agento` exports OTel exactly as it always did; it is this build that
