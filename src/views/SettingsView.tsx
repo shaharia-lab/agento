@@ -14,6 +14,7 @@ import { Checkbox, Dropdown, Empty, FormRow, Switch } from "../components/ui";
 import { openExternal } from "../lib/tauri";
 import { DirField, useDirPicker } from "../components/DirField";
 import { useHostInfo } from "../lib/host";
+import { LogsPane } from "./settings/LogsPane";
 import {
   UPDATE_PREF_OPTIONS,
   loadUpdatePref,
@@ -113,6 +114,7 @@ type Pane =
   | "notifications"
   | "data"
   | "pricing"
+  | "logs"
   | "advanced";
 
 const PANES: { id: Pane; label: string; icon: IconName }[] = [
@@ -122,6 +124,7 @@ const PANES: { id: Pane; label: string; icon: IconName }[] = [
   { id: "notifications", label: "Notifications", icon: "bell" },
   { id: "data", label: "Data", icon: "database" },
   { id: "pricing", label: "Pricing", icon: "dollar" },
+  { id: "logs", label: "Logs", icon: "terminal" },
   { id: "advanced", label: "Advanced", icon: "cpu" },
 ];
 
@@ -303,6 +306,17 @@ export function SettingsView({
           ))}
         </div>
 
+        {/* Logs sit outside the settings form, and outside its loading and
+            error gates. Both are deliberate: the lines want the pane's whole
+            width and their own scroller, and — more importantly — a settings
+            request that failed is exactly when someone comes looking for the
+            log. Rendering it inside would replace the log with "Settings
+            unavailable" at the one moment it is worth reading. */}
+        {pane === "logs" ? (
+          <div className="logs__host">
+            <LogsPane />
+          </div>
+        ) : (
         <div className="scroll" style={{ flex: 1, padding: "var(--sp-9)" }}>
           {loading ? (
             <Empty icon="gear" title="Loading" text="Reading settings from the server." />
@@ -401,6 +415,7 @@ export function SettingsView({
             </div>
           )}
         </div>
+        )}
       </div>
     </div>
   );

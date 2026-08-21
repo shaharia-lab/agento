@@ -50,6 +50,7 @@ const PATHS = {
   chevronUD: "m6.5 8 3.5-3.5L13.5 8m-7 4 3.5 3.5L13.5 12",
   arrowUp: "M10 15.5v-11m0 0-4 4m4-4 4 4",
   arrowDown: "M10 4.5v11m0 0 4-4m-4 4-4-4",
+  download: "M10 3.5v8m0 0 3.5-3.5M10 11.5 6.5 8M4 13.5v1.5a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-1.5",
 
   // Domain
   terminal: "M4.5 4.5h11v11h-11v-11Zm2.5 3.5 2 2-2 2m4 .5h3",
