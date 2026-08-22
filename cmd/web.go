@@ -38,6 +38,7 @@ import (
 	"github.com/shaharia-lab/agento/internal/server"
 	"github.com/shaharia-lab/agento/internal/service"
 	"github.com/shaharia-lab/agento/internal/storage"
+	"github.com/shaharia-lab/agento/internal/sunset"
 	"github.com/shaharia-lab/agento/internal/telemetry"
 	"github.com/shaharia-lab/agento/internal/tools"
 	"github.com/shaharia-lab/agento/internal/trigger"
@@ -544,9 +545,16 @@ const (
 func printBanner(version, serverURL, logFile string) {
 	if termenv.ColorProfile() == termenv.Ascii {
 		printPlainBanner(version, serverURL, logFile)
-		return
+	} else {
+		printFancyBanner(version, serverURL, logFile)
 	}
-	printFancyBanner(version, serverURL, logFile)
+	// The retirement notice follows the banner on every start, in both
+	// renderings. It is unconditional here rather than rate-limited: starting
+	// the server is a deliberate act, not something that happens on every shell
+	// command, and this is the surface where the notice has room to say what is
+	// happening and what to do about it.
+	fmt.Println(sunset.FullNotice())
+	fmt.Println()
 }
 
 func printFancyBanner(version, serverURL, logFile string) {

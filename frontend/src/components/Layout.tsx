@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Outlet } from 'react-router-dom'
 import { Menu } from 'lucide-react'
 import Sidebar from './Sidebar'
+import SunsetBanner from './SunsetBanner'
 import UpdateBanner from './UpdateBanner'
 
 function AgentoLogo() {
@@ -31,6 +32,7 @@ export default function Layout() {
       <Sidebar mobileOpen={mobileOpen} onMobileClose={() => setMobileOpen(false)} />
 
       <div className="flex flex-1 flex-col overflow-hidden">
+        <SunsetBanner />
         <UpdateBanner />
 
         {/* Mobile top bar */}

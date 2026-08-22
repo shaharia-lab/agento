@@ -1,154 +1,173 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
-	"errors"
 	"fmt"
+	"io"
 	"os"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/shaharia-lab/agento/internal/build"
 	"github.com/shaharia-lab/agento/internal/config"
 	"github.com/shaharia-lab/agento/internal/daemon"
+	"github.com/shaharia-lab/agento/internal/sunset"
 	"github.com/shaharia-lab/agento/internal/updater"
 )
 
-// NewUpdateCmd returns the "update" subcommand that self-updates the binary.
+// NewUpdateCmd returns the "update" subcommand.
 //
-// Unlike the auto-check hook, this command always performs a live network
-// check (no 24-hour cache) and writes the freshly observed result back to the
-// cache so the next auto-check can rely on it.
+// It no longer self-updates the Go binary. The Go/web build is being retired in
+// favor of Agento Desktop, so this command resolves the current desktop
+// release and hands the user the direct installer link for their platform.
+//
+// Retiring the command rather than deleting it is deliberate: `agento update`
+// is the one place a user of the old build already goes when they want to be
+// current, so it is the most reliable channel we have for telling them where
+// "current" now lives.
 func NewUpdateCmd(cfg *config.AppConfig) *cobra.Command {
 	var yes bool
 	var noRestart bool
 
 	cmd := &cobra.Command{
 		Use:   "update",
-		Short: "Update agento to the latest release",
-		Long:  "Check GitHub releases for a newer version of agento and update the binary in place.",
+		Short: "Show how to move to Agento Desktop (this build is no longer self-updating)",
+		Long: "The Go/web build of Agento is being retired. This command resolves the current " +
+			"Agento Desktop release and prints the download for your platform. It also offers to " +
+			"remove a leftover background service, which would otherwise run a second scheduler " +
+			"alongside the desktop app.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpdate(cmd.Context(), cfg, yes, noRestart)
+			return runUpdate(cmd.Context(), cfg, yes)
 		},
 	}
 
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Skip confirmation prompt")
-	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "Do not restart a managed agento service after updating")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "Accept the service-removal prompt without asking")
+	cmd.Flags().BoolVar(&noRestart, "no-restart", false, "No longer used; kept so existing scripts do not break")
+	// The flag is retained rather than removed so a script or a service unit
+	// passing it keeps working instead of failing on an unknown flag.
+	_ = cmd.Flags().MarkDeprecated("no-restart", "this build no longer self-updates") //nolint:errcheck
+
 	return cmd
+}
+
+// outf and outln write terminal output to w. The write error is deliberately
+// discarded: this is the user's console, and there is no recovery available if
+// writing to it fails — nor any way to report the failure.
+func outf(w io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(w, format, args...) //nolint:errcheck
+}
+
+func outln(w io.Writer, args ...any) {
+	_, _ = fmt.Fprintln(w, args...) //nolint:errcheck
 }
 
 // newServiceManager is a seam over daemon.New so tests can substitute a stub
 // Manager without touching a real init system.
 var newServiceManager = daemon.New
 
-func runUpdate(ctx context.Context, cfg *config.AppConfig, skipConfirm, noRestart bool) error {
-	current := strings.TrimPrefix(build.Version, "v")
-	if current == "dev" || current == "unknown" {
-		return fmt.Errorf("cannot update a dev build; install a tagged release first")
+// updateNow is a seam over time.Now so tests can drive the cutoff branch.
+var updateNow = time.Now
+
+func runUpdate(ctx context.Context, cfg *config.AppConfig, skipConfirm bool) error {
+	return runUpdateTo(ctx, os.Stdout, os.Stdin, cfg, skipConfirm)
+}
+
+// runUpdateTo is runUpdate with its streams injected, so the whole flow is
+// testable without touching the process's stdio.
+func runUpdateTo(ctx context.Context, out io.Writer, in io.Reader, cfg *config.AppConfig, skipConfirm bool) error {
+	outf(out, "Current version: %s\n\n", build.Version)
+
+	// Past the cutoff there is nothing to offer, so say so and stop. Note what
+	// this does NOT do: the binary keeps working, every other command is
+	// untouched, and nothing here refuses to run. Only updating stops.
+	if sunset.Passed(updateNow()) {
+		outln(out, sunset.MigrationMessage())
+	} else {
+		printDesktopMigration(ctx, out)
 	}
 
-	fmt.Printf("Current version: %s\n", build.Version)
-	fmt.Print("Checking for updates... ")
-
-	checker := &updater.Checker{CacheDir: cfg.DataDir}
-	result, err := checker.Check(ctx, build.Version, true) // forceFresh: explicit command bypasses cache
-	if err != nil {
-		if errors.Is(err, updater.ErrNotReleaseBuild) {
-			fmt.Println()
-			return fmt.Errorf("cannot update a non-release build (%s)", build.Version)
-		}
-		return fmt.Errorf("checking for updates: %w", err)
-	}
-
-	if !result.UpdateAvailable {
-		fmt.Println("already up to date.")
-		return nil
-	}
-
-	fmt.Printf("found %s\n", result.LatestVersion)
-
-	// Homebrew installs cannot be self-updated; print instructions and return.
-	if updater.DetectInstallMethod() == updater.InstallMethodHomebrew {
-		fmt.Printf("\nA new version (v%s) is available.\n", result.LatestVersion)
-		fmt.Println(updater.HomebrewUpgradeMessage)
-		return nil
-	}
-
-	if !skipConfirm {
-		fmt.Printf("Update to %s? [y/N] ", result.LatestVersion)
-		var input string
-		fmt.Scanln(&input) //nolint:errcheck,gosec
-		if input != "y" && input != "Y" {
-			fmt.Println("Update canceled.")
-			return nil
-		}
-	}
-
-	fmt.Printf("Updating to %s...\n", result.LatestVersion)
-	if err := updater.Install(ctx, result.LatestVersion); err != nil {
-		if errors.Is(err, updater.ErrHomebrewManaged) {
-			// Defensive: the earlier branch already handled this, but keep the
-			// guard so a future refactor cannot accidentally call Install on a
-			// Homebrew binary.
-			fmt.Println(updater.HomebrewUpgradeMessage)
-			return nil
-		}
-		return fmt.Errorf("updating: %w", err)
-	}
-
-	fmt.Printf("Updated to %s.\n", result.LatestVersion)
-	maybeRestartService(ctx, cfg, noRestart)
-
-	// Belt-and-suspenders: ensure stdout is flushed before the process exits in
-	// any embedded environment that may not auto-flush.
-	_ = os.Stdout.Sync() //nolint:errcheck
+	offerServiceRemoval(ctx, out, in, cfg, skipConfirm)
 	return nil
 }
 
-// maybeRestartService restarts a managed agento service after a successful
-// update so the new binary takes effect without manual intervention. It never
-// influences the command's exit code — the update itself already succeeded, so
-// every outcome here is informational: restarted, installed-but-stopped, no
-// managed service (manual hint), or a non-fatal warning.
-func maybeRestartService(ctx context.Context, cfg *config.AppConfig, noRestart bool) {
-	if noRestart {
-		fmt.Println("Restart agento to use the new version.")
-		return
-	}
-	mgr, err := newServiceManager(cfg)
+// printDesktopMigration resolves the current desktop release and prints the
+// platform-specific download. Resolution failures degrade to the releases page
+// rather than failing the command — the user asked how to get current, and
+// "here is the page" always answers that.
+func printDesktopMigration(ctx context.Context, out io.Writer) {
+	outln(out, sunset.FullNotice())
+	outln(out)
+
+	rel, err := updater.ResolveDesktopRelease(ctx)
 	if err != nil {
-		// Unsupported OS (e.g. Windows) or any daemon-layer error: there is no
-		// managed service we can restart — fall back to the manual hint.
-		fmt.Println("Restart agento to use the new version.")
+		outf(out, "Download Agento Desktop: %s\n", updater.ReleasesPageURL())
 		return
 	}
-	restarted, status, err := restartManagedService(ctx, mgr)
-	switch {
-	case err != nil:
-		fmt.Printf("warning: restarting the agento service failed (%v). Run 'agento service restart' manually\n", err)
-	case restarted:
-		fmt.Println("Restarted the agento service. The new version is live.")
-	case status.Installed:
-		fmt.Println("The agento service is installed but not running; start it with 'agento service start'.")
-	default:
-		fmt.Println("Restart agento to use the new version.")
+
+	outf(out, "Latest Agento Desktop: %s\n", rel.Version)
+	if rel.DownloadURL != "" {
+		outf(out, "  Download   %s\n", rel.DownloadURL)
+	} else {
+		outf(out, "  Download   no installer is published for %s/%s — see the release page\n",
+			runtime.GOOS, runtime.GOARCH)
 	}
+	outf(out, "  Release    %s\n", rel.ReleasePage)
 }
 
-// restartManagedService restarts the managed service when it is both installed
-// and running. It reports the observed Status so the caller can word the
-// outcome; a Status error is returned as-is (treated as non-fatal upstream).
-func restartManagedService(ctx context.Context, mgr daemon.Manager) (restarted bool, status daemon.Status, err error) {
-	status, err = mgr.Status(ctx)
+// offerServiceRemoval checks for a leftover `agento service` unit and offers to
+// remove it.
+//
+// This matters more than it looks. A leftover launchd/systemd unit holds :8990,
+// runs its OWN scheduler — so every scheduled task fires twice once the desktop
+// app is installed — and re-registers the Telegram webhook under whichever
+// instance started last. None of that is visible to the user.
+//
+// It is an offer, never an action. Removing someone's service unit unprompted
+// is destructive, so a declined prompt, an unreadable answer, and an
+// unsupported platform all leave the unit exactly where it is.
+func offerServiceRemoval(ctx context.Context, out io.Writer, in io.Reader, cfg *config.AppConfig, skipConfirm bool) {
+	mgr, err := newServiceManager(cfg)
 	if err != nil {
-		return false, status, err
+		// Unsupported OS or a daemon-layer error: there is no managed service
+		// we can see, so there is nothing to offer.
+		return
 	}
-	if !status.Installed || !status.Running {
-		return false, status, nil
+	status, err := mgr.Status(ctx)
+	if err != nil || !status.Installed {
+		return
 	}
-	if err := mgr.Restart(ctx); err != nil {
-		return false, status, err
+
+	outln(out)
+	outln(out, "A background agento service is still installed on this machine.")
+	outln(out, "Leaving it in place alongside Agento Desktop means two schedulers:")
+	outln(out, "every scheduled task fires twice, and the Telegram webhook is claimed")
+	outln(out, "by whichever instance started last.")
+
+	if !skipConfirm && !confirm(out, in, "Remove the agento background service now? [y/N] ") {
+		outln(out, "Left in place. Remove it later with 'agento service uninstall'.")
+		return
 	}
-	return true, status, nil
+
+	if err := mgr.Uninstall(ctx); err != nil {
+		outf(out, "warning: removing the service failed (%v). Run 'agento service uninstall' manually\n", err)
+		return
+	}
+	outln(out, "Removed the agento background service.")
+}
+
+// confirm reads a yes/no answer. A read error or EOF is a decline, so a piped
+// or closed stdin can never be mistaken for consent to remove a service unit.
+func confirm(out io.Writer, in io.Reader, prompt string) bool {
+	outf(out, "%s", prompt)
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && line == "" {
+		outln(out)
+		return false
+	}
+	answer := strings.TrimSpace(strings.ToLower(line))
+	return answer == "y" || answer == "yes"
 }

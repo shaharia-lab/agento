@@ -1,5 +1,29 @@
 # Agento
 
+> ## 🌇 Agento (web) is being retired — move to Agento Desktop
+>
+> **This is the final release of the Go/web build.** Support ends **1 September 2026**;
+> after that date `agento update` stops offering updates. The app itself keeps
+> working indefinitely — nothing shuts off, nothing expires, and staying on it is
+> your call.
+>
+> **[Agento Desktop](https://github.com/shaharia-lab/agento/releases)** is where
+> development continues. It reads the **same `~/.agento/agento.db`**, so there is
+> no export and no migration: install it and your history, agents and analytics
+> are already there.
+>
+> ```bash
+> brew install --cask shaharia-lab/tap/agento     # macOS
+> ```
+>
+> Or grab the `.dmg`, `.deb`, `.rpm`, `.AppImage` or `.exe` from
+> [Releases](https://github.com/shaharia-lab/agento/releases).
+>
+> **One thing to do after installing:** if you ran `agento service install`, remove
+> the old background service with `agento service uninstall`. Left in place it runs
+> a second scheduler, so every scheduled task fires twice. `agento update` offers to
+> do this for you.
+
 [![Release](https://img.shields.io/github/v/release/shaharia-lab/agento)](https://github.com/shaharia-lab/agento/releases)
 [![Stars](https://img.shields.io/github/stars/shaharia-lab/agento?style=flat)](https://github.com/shaharia-lab/agento/stargazers)
 [![License](https://img.shields.io/github/license/shaharia-lab/agento)](https://github.com/shaharia-lab/agento/blob/main/LICENSE)
@@ -16,11 +40,10 @@ Claude Code forgets everything the moment it exits. Agento reads the session fil
 ![Agento Insights dashboard showing cost cards and productivity metrics](docs/images/insights.png)
 
 ```bash
-brew install shaharia-lab/tap/agento
-agento web
+brew install --cask shaharia-lab/tap/agento
 ```
 
-That is the whole setup. Agento opens at `http://localhost:8990`, finds your Claude Code history, and starts building your dashboards.
+That is the whole setup. Agento finds your Claude Code history and starts building your dashboards.
 
 > ### ⭐ Star this repository
 >
@@ -35,28 +58,48 @@ That is the whole setup. Agento opens at `http://localhost:8990`, finds your Cla
 <table>
 <tr><td width="50%">
 
-**Homebrew**
+**Homebrew (macOS)**
 
 ```bash
-brew install shaharia-lab/tap/agento
-agento web
+brew install --cask shaharia-lab/tap/agento
 ```
 
 </td><td width="50%">
 
 **Direct download**
 
+Grab the installer for your platform from
+[Releases](https://github.com/shaharia-lab/agento/releases):
+`.dmg` (macOS), `.deb` / `.rpm` / `.AppImage` (Linux),
+`-setup.exe` (Windows).
+
+</td></tr>
+</table>
+
+Installers for Linux (x86_64, arm64), macOS (Intel, Apple Silicon) and Windows are on the [Releases page](https://github.com/shaharia-lab/agento/releases).
+
+<details>
+<summary><b>Legacy: the Go/web build (unsupported after 1 September 2026)</b></summary>
+
+The single Go binary that serves the browser UI on `localhost:8990`. It still
+installs and still runs, but it receives no further releases — see the notice at
+the top of this file.
+
 ```bash
-# grab the archive for your platform from Releases
+brew install shaharia-lab/tap/agento     # the formula, not the cask
+agento web
+```
+
+```bash
+# or grab the archive for your platform from Releases
 tar -xzf agento_Linux_x86_64.tar.gz
 sudo mv agento /usr/local/bin/
 agento web
 ```
 
-</td></tr>
-</table>
+Everything below this point describes both builds unless it says otherwise.
 
-Binaries for Linux (x86_64, arm64), macOS (Intel, Apple Silicon) and Windows are on the [Releases page](https://github.com/shaharia-lab/agento/releases).
+</details>
 
 Useful flags: `agento web --port 3000` to change the port, `--no-browser` to skip opening a tab. To keep it running in the background across reboots:
 

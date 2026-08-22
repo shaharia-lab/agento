@@ -1,18 +1,17 @@
 package cmd
 
 import (
-	"bufio"
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/shaharia-lab/agento/internal/build"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/sunset"
 	"github.com/shaharia-lab/agento/internal/updater"
 )
 
@@ -46,6 +45,7 @@ func NewRootCmd(cfg *config.AppConfig) *cobra.Command {
 		Long:    "A platform for running Claude agents defined in YAML configuration files.",
 		Version: build.String(),
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			maybePrintSunsetNotice(cmd, cfg)
 			runAutoUpdateCheck(cmd, cfg)
 			return nil
 		},
@@ -75,8 +75,80 @@ func Execute() {
 	}
 }
 
+// sunsetSkipCommands lists subcommands that must never print the one-line
+// sunset notice, and why each one is on the list.
+//
+// The list is deliberately far shorter than updateCheckSkipCommands, and it
+// skips for two different reasons:
+//
+//   - `completion` and `__complete`: cobra's shell integration parses their
+//     stdout, and although the notice goes to stderr, a shell that merges the
+//     two streams would ingest it as a completion candidate.
+//   - `web` and `update`: both print the FULL notice themselves, so the
+//     one-liner would be an immediate duplicate of a longer message the user is
+//     about to read anyway. This skips a redundant line, not a user.
+//
+// Everything else — `service`, `help`, a piped `ask`, a cron-driven run — still
+// prints, because none of those has a notice of its own and they are exactly
+// the installs a TTY-gated notice would miss.
+var sunsetSkipCommands = map[string]struct{}{ //nolint:gochecknoglobals
+	"completion": {},
+	"__complete": {},
+	"web":        {},
+	"update":     {},
+}
+
+// sunsetNow is a seam over time.Now so tests can drive the rate limit.
+var sunsetNow = time.Now //nolint:gochecknoglobals
+
+// maybePrintSunsetNotice prints the retirement notice ahead of the user's
+// command, at most once a day.
+//
+// It deliberately does NOT reuse shouldRunAutoCheck's gating. That helper
+// requires an interactive TTY on both stdin and stdout and skips `update` and
+// `service` — reasonable for a prompt that expects an answer, but wrong for a
+// one-way notice, because it would exclude exactly the people who most need to
+// see it: anyone running agento from a script, from a cron job, or under
+// `agento service`.
+//
+// The notice is static and offline. It makes no network call, so it cannot slow
+// a command down, cannot time out, and cannot break when the desktop releases
+// stop carrying their tag prefix.
+func maybePrintSunsetNotice(cmd *cobra.Command, cfg *config.AppConfig) {
+	if !shouldPrintSunsetNotice(cmd) {
+		return
+	}
+	now := sunsetNow()
+	if !sunset.ShouldPrint(cfg.DataDir, now) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n%s\n\n", sunset.Notice())
+	// Best-effort: a failed stamp only means the notice shows again sooner.
+	_ = sunset.Stamp(cfg.DataDir, now) //nolint:errcheck
+}
+
+// shouldPrintSunsetNotice applies the notice's own skip rules.
+func shouldPrintSunsetNotice(cmd *cobra.Command) bool {
+	// A dev build is not an install anyone needs to migrate.
+	if build.IsDevBuild(build.Version) {
+		return false
+	}
+	// Honor the existing opt-out. It already means "do not talk to me about
+	// versions", which is the same wish.
+	if v := os.Getenv(skipUpdateCheckEnv); v == "1" || strings.EqualFold(v, "true") {
+		return false
+	}
+	if cmd == nil || !cmd.Runnable() {
+		return false
+	}
+	if _, skip := sunsetSkipCommands[cmd.Name()]; skip {
+		return false
+	}
+	return true
+}
+
 // runAutoUpdateCheck is the PersistentPreRunE body. It performs a cached
-// update check and, on a fresh hit, prompts the user to update.
+// update check and, on a fresh hit, announces the newer release.
 //
 // The function is split out so it can be unit-tested without spinning up cobra.
 // All paths return without raising errors — auto-check must never fail the user's command.
@@ -96,7 +168,7 @@ func runAutoUpdateCheck(cmd *cobra.Command, cfg *config.AppConfig) {
 		return
 	}
 
-	promptAndMaybeUpdate(cmd.Context(), result)
+	announceUpdate(result)
 }
 
 // shouldRunAutoCheck applies all skip rules and returns true only when the
@@ -113,7 +185,10 @@ func shouldRunAutoCheck(cmd *cobra.Command) bool {
 		return false
 	}
 
-	// Non-interactive (CI, pipes, redirected stdin/stdout) — no point prompting.
+	// Non-interactive (CI, pipes, redirected stdin/stdout). The announcement no
+	// longer prompts, but a scripted run has already had the sunset notice —
+	// which is the message that matters now — so this stays a skip rather than
+	// becoming a second unsolicited line in every pipeline.
 	if !isInteractive() {
 		return false
 	}
@@ -140,53 +215,25 @@ func shouldRunAutoCheck(cmd *cobra.Command) bool {
 }
 
 // isInteractive reports whether both stdin and stdout are connected to a TTY.
-// We require both because a yes/no prompt is meaningless if either side is piped.
 func isInteractive() bool {
 	return isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd())
 }
 
-// promptAndMaybeUpdate handles the interactive flow when an update is available.
-// It writes prompts to stderr so it doesn't pollute the stdout of subcommands
-// that emit machine-readable output.
+// announceUpdate tells the user a newer release exists and points them at
+// `agento update`. It writes to stderr so it doesn't pollute the stdout of
+// subcommands that emit machine-readable output.
 //
-// On confirmed update, it installs the new binary and exits the process — the
-// user will rerun their command against the new binary. On decline or error,
-// it returns and the original command proceeds.
-func promptAndMaybeUpdate(ctx context.Context, result *updater.CheckResult) {
-	// Homebrew install: print instructions and continue with the user's command.
-	if updater.DetectInstallMethod() == updater.InstallMethodHomebrew {
-		fmt.Fprintf(os.Stderr, "\nA new version (v%s) is available.\n", result.LatestVersion)
-		fmt.Fprintln(os.Stderr, updater.HomebrewUpgradeMessage)
-		fmt.Fprintln(os.Stderr)
-		return
-	}
-
-	fmt.Fprintf(os.Stderr, "\nA new version (v%s) is available. Update now? [y/N] ", result.LatestVersion)
-	// bufio.Reader is used (rather than fmt.Scanln) so the whole line — including
-	// the trailing newline — is consumed. Otherwise leftover bytes leak into the
-	// stdin of the user's subcommand (e.g. `agento ask` reading from a pipe).
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		// EOF or read error → treat as decline. Continue with the user's command.
-		return
-	}
-	answer := strings.TrimSpace(strings.ToLower(line))
-	if answer != "y" && answer != "yes" {
-		return
-	}
-
-	fmt.Fprintf(os.Stderr, "Updating to %s...\n", result.LatestVersion)
-	if err := updater.Install(ctx, result.LatestVersion); err != nil {
-		if errors.Is(err, updater.ErrHomebrewManaged) {
-			fmt.Fprintln(os.Stderr, updater.HomebrewUpgradeMessage)
-			return
-		}
-		fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "Updated to %s. Re-run your command to use the new version.\n", result.LatestVersion)
-	// Exit cleanly so the user re-runs against the new binary. We use 0 because
-	// the update succeeded — the original subcommand simply hasn't been invoked.
-	os.Exit(0)
+// It deliberately does NOT install anything. This hook used to prompt and then
+// replace the running binary in place, which cannot survive the retirement of
+// this build: `agento update` no longer self-updates, and a binary that refuses
+// to update itself on request while quietly doing it behind an unrelated command
+// is incoherent. Removing the install path here is what makes "this build no
+// longer self-updates" true of the binary rather than only of one subcommand.
+//
+// The check itself is kept because the version it reports is still useful
+// information, and because it is the surface through which a user on an older
+// build sees this release's title at all.
+func announceUpdate(result *updater.CheckResult) {
+	fmt.Fprintf(os.Stderr, "\nA newer release (v%s) is available: %s\n", result.LatestVersion, result.ReleaseURL)
+	fmt.Fprintf(os.Stderr, "Run 'agento update' to see how to move to Agento Desktop.\n\n")
 }
