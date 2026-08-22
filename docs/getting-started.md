@@ -1,10 +1,45 @@
 # Getting Started
 
+> **🌇 Start with Agento Desktop.** The Go/web build described below is being
+> retired: it receives no releases after **1 September 2026**, when
+> `agento update` stops offering updates. The app keeps working past that date —
+> only updating stops — but new work happens in the desktop app.
+>
+> Agento Desktop reads the **same `~/.agento/agento.db`**, so moving over needs
+> no export and no migration. Install it and your history is already there.
+
 **Requirements:** the [Claude Code CLI](https://claude.ai/code), installed and
 authenticated. If `claude` runs in your terminal, Agento works — it uses the
 authentication Claude Code already has, so no Anthropic API key is needed.
 
-## Install
+## Install Agento Desktop (recommended)
+
+**Homebrew (macOS)**
+
+```bash
+brew install --cask shaharia-lab/tap/agento
+```
+
+**Download an installer**
+
+Go to [Releases](https://github.com/shaharia-lab/agento/releases) and take the
+one for your platform: `.dmg` (macOS), `.deb` / `.rpm` / `.AppImage` (Linux),
+`-setup.exe` (Windows).
+
+Already running the web build? Install the desktop app, then remove the old
+background service if you had one:
+
+```bash
+agento service uninstall
+```
+
+Leaving it installed runs a second scheduler alongside the desktop app, so every
+scheduled task fires twice and the Telegram webhook is claimed by whichever
+instance started last. `agento update` offers to do this for you.
+
+## Install the legacy web build
+
+Unsupported after 1 September 2026. Still installable, still runs.
 
 **Homebrew (macOS and Linux)**
 

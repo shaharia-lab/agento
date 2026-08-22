@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
 
 	"github.com/shaharia-lab/agento/internal/build"
 	"github.com/shaharia-lab/agento/internal/config"
+	"github.com/shaharia-lab/agento/internal/sunset"
 	"github.com/shaharia-lab/agento/internal/updater"
 )
 
@@ -46,6 +48,7 @@ func NewRootCmd(cfg *config.AppConfig) *cobra.Command {
 		Long:    "A platform for running Claude agents defined in YAML configuration files.",
 		Version: build.String(),
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			maybePrintSunsetNotice(cmd, cfg)
 			runAutoUpdateCheck(cmd, cfg)
 			return nil
 		},
@@ -73,6 +76,78 @@ func Execute() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+}
+
+// sunsetSkipCommands lists subcommands that must never print the one-line
+// sunset notice, and why each one is on the list.
+//
+// The list is deliberately far shorter than updateCheckSkipCommands, and it
+// skips for two different reasons:
+//
+//   - `completion` and `__complete`: cobra's shell integration parses their
+//     stdout, and although the notice goes to stderr, a shell that merges the
+//     two streams would ingest it as a completion candidate.
+//   - `web` and `update`: both print the FULL notice themselves, so the
+//     one-liner would be an immediate duplicate of a longer message the user is
+//     about to read anyway. This skips a redundant line, not a user.
+//
+// Everything else — `service`, `help`, a piped `ask`, a cron-driven run — still
+// prints, because none of those has a notice of its own and they are exactly
+// the installs a TTY-gated notice would miss.
+var sunsetSkipCommands = map[string]struct{}{ //nolint:gochecknoglobals
+	"completion": {},
+	"__complete": {},
+	"web":        {},
+	"update":     {},
+}
+
+// sunsetNow is a seam over time.Now so tests can drive the rate limit.
+var sunsetNow = time.Now //nolint:gochecknoglobals
+
+// maybePrintSunsetNotice prints the retirement notice ahead of the user's
+// command, at most once a day.
+//
+// It deliberately does NOT reuse shouldRunAutoCheck's gating. That helper
+// requires an interactive TTY on both stdin and stdout and skips `update` and
+// `service` — reasonable for a prompt that expects an answer, but wrong for a
+// one-way notice, because it would exclude exactly the people who most need to
+// see it: anyone running agento from a script, from a cron job, or under
+// `agento service`.
+//
+// The notice is static and offline. It makes no network call, so it cannot slow
+// a command down, cannot time out, and cannot break when the desktop releases
+// stop carrying their tag prefix.
+func maybePrintSunsetNotice(cmd *cobra.Command, cfg *config.AppConfig) {
+	if !shouldPrintSunsetNotice(cmd) {
+		return
+	}
+	now := sunsetNow()
+	if !sunset.ShouldPrint(cfg.DataDir, now) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "\n%s\n\n", sunset.Notice())
+	// Best-effort: a failed stamp only means the notice shows again sooner.
+	_ = sunset.Stamp(cfg.DataDir, now) //nolint:errcheck
+}
+
+// shouldPrintSunsetNotice applies the notice's own skip rules.
+func shouldPrintSunsetNotice(cmd *cobra.Command) bool {
+	// A dev build is not an install anyone needs to migrate.
+	if build.IsDevBuild(build.Version) {
+		return false
+	}
+	// Honor the existing opt-out. It already means "do not talk to me about
+	// versions", which is the same wish.
+	if v := os.Getenv(skipUpdateCheckEnv); v == "1" || strings.EqualFold(v, "true") {
+		return false
+	}
+	if cmd == nil || !cmd.Runnable() {
+		return false
+	}
+	if _, skip := sunsetSkipCommands[cmd.Name()]; skip {
+		return false
+	}
+	return true
 }
 
 // runAutoUpdateCheck is the PersistentPreRunE body. It performs a cached

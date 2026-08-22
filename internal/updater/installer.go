@@ -91,7 +91,13 @@ func isHomebrewPath(path string) bool {
 // HomebrewUpgradeMessage is the user-facing instruction printed when an update
 // is available for a Homebrew-managed install. It is exported so callers can
 // log or format it however they need.
-const HomebrewUpgradeMessage = "You installed agento via Homebrew. Run: brew upgrade agento"
+//
+// It points at the desktop cask rather than at `brew upgrade agento`, because
+// the formula is the retiring Go build: upgrading it now only moves someone
+// between two unsupported versions. The cask lives in the same tap, so a user
+// who installed with `brew install shaharia-lab/tap/agento` needs no new tap.
+const HomebrewUpgradeMessage = "You installed agento via Homebrew. The Go build is being retired — " +
+	"install Agento Desktop instead: brew install --cask shaharia-lab/tap/agento"
 
 // ErrHomebrewManaged is returned by Install when the binary is Homebrew-managed
 // and self-update was attempted. Callers should print HomebrewUpgradeMessage instead.
