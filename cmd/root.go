@@ -1,9 +1,6 @@
 package cmd
 
 import (
-	"bufio"
-	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -151,7 +148,7 @@ func shouldPrintSunsetNotice(cmd *cobra.Command) bool {
 }
 
 // runAutoUpdateCheck is the PersistentPreRunE body. It performs a cached
-// update check and, on a fresh hit, prompts the user to update.
+// update check and, on a fresh hit, announces the newer release.
 //
 // The function is split out so it can be unit-tested without spinning up cobra.
 // All paths return without raising errors — auto-check must never fail the user's command.
@@ -171,7 +168,7 @@ func runAutoUpdateCheck(cmd *cobra.Command, cfg *config.AppConfig) {
 		return
 	}
 
-	promptAndMaybeUpdate(cmd.Context(), result)
+	announceUpdate(result)
 }
 
 // shouldRunAutoCheck applies all skip rules and returns true only when the
@@ -188,7 +185,10 @@ func shouldRunAutoCheck(cmd *cobra.Command) bool {
 		return false
 	}
 
-	// Non-interactive (CI, pipes, redirected stdin/stdout) — no point prompting.
+	// Non-interactive (CI, pipes, redirected stdin/stdout). The announcement no
+	// longer prompts, but a scripted run has already had the sunset notice —
+	// which is the message that matters now — so this stays a skip rather than
+	// becoming a second unsolicited line in every pipeline.
 	if !isInteractive() {
 		return false
 	}
@@ -215,53 +215,25 @@ func shouldRunAutoCheck(cmd *cobra.Command) bool {
 }
 
 // isInteractive reports whether both stdin and stdout are connected to a TTY.
-// We require both because a yes/no prompt is meaningless if either side is piped.
 func isInteractive() bool {
 	return isatty.IsTerminal(os.Stdin.Fd()) && isatty.IsTerminal(os.Stdout.Fd())
 }
 
-// promptAndMaybeUpdate handles the interactive flow when an update is available.
-// It writes prompts to stderr so it doesn't pollute the stdout of subcommands
-// that emit machine-readable output.
+// announceUpdate tells the user a newer release exists and points them at
+// `agento update`. It writes to stderr so it doesn't pollute the stdout of
+// subcommands that emit machine-readable output.
 //
-// On confirmed update, it installs the new binary and exits the process — the
-// user will rerun their command against the new binary. On decline or error,
-// it returns and the original command proceeds.
-func promptAndMaybeUpdate(ctx context.Context, result *updater.CheckResult) {
-	// Homebrew install: print instructions and continue with the user's command.
-	if updater.DetectInstallMethod() == updater.InstallMethodHomebrew {
-		fmt.Fprintf(os.Stderr, "\nA new version (v%s) is available.\n", result.LatestVersion)
-		fmt.Fprintln(os.Stderr, updater.HomebrewUpgradeMessage)
-		fmt.Fprintln(os.Stderr)
-		return
-	}
-
-	fmt.Fprintf(os.Stderr, "\nA new version (v%s) is available. Update now? [y/N] ", result.LatestVersion)
-	// bufio.Reader is used (rather than fmt.Scanln) so the whole line — including
-	// the trailing newline — is consumed. Otherwise leftover bytes leak into the
-	// stdin of the user's subcommand (e.g. `agento ask` reading from a pipe).
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		// EOF or read error → treat as decline. Continue with the user's command.
-		return
-	}
-	answer := strings.TrimSpace(strings.ToLower(line))
-	if answer != "y" && answer != "yes" {
-		return
-	}
-
-	fmt.Fprintf(os.Stderr, "Updating to %s...\n", result.LatestVersion)
-	if err := updater.Install(ctx, result.LatestVersion); err != nil {
-		if errors.Is(err, updater.ErrHomebrewManaged) {
-			fmt.Fprintln(os.Stderr, updater.HomebrewUpgradeMessage)
-			return
-		}
-		fmt.Fprintf(os.Stderr, "Update failed: %v\n", err)
-		return
-	}
-	fmt.Fprintf(os.Stderr, "Updated to %s. Re-run your command to use the new version.\n", result.LatestVersion)
-	// Exit cleanly so the user re-runs against the new binary. We use 0 because
-	// the update succeeded — the original subcommand simply hasn't been invoked.
-	os.Exit(0)
+// It deliberately does NOT install anything. This hook used to prompt and then
+// replace the running binary in place, which cannot survive the retirement of
+// this build: `agento update` no longer self-updates, and a binary that refuses
+// to update itself on request while quietly doing it behind an unrelated command
+// is incoherent. Removing the install path here is what makes "this build no
+// longer self-updates" true of the binary rather than only of one subcommand.
+//
+// The check itself is kept because the version it reports is still useful
+// information, and because it is the surface through which a user on an older
+// build sees this release's title at all.
+func announceUpdate(result *updater.CheckResult) {
+	fmt.Fprintf(os.Stderr, "\nA newer release (v%s) is available: %s\n", result.LatestVersion, result.ReleaseURL)
+	fmt.Fprintf(os.Stderr, "Run 'agento update' to see how to move to Agento Desktop.\n\n")
 }
