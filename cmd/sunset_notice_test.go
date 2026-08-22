@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"os"
 	"strings"
 	"testing"
@@ -135,11 +136,15 @@ func captureStderr(t *testing.T, fn func()) string {
 	os.Stderr = w
 	defer func() { os.Stderr = orig }()
 
+	// Drain to EOF rather than issuing a single Read. A single Read returns as
+	// soon as ANY bytes are available, so a function that makes several separate
+	// writes — a multi-line banner, say — is captured as only its first chunk,
+	// and whether that happens at all depends on goroutine scheduling. That made
+	// it a test that passed locally and failed in CI.
 	done := make(chan string, 1)
 	go func() {
-		buf := make([]byte, 64*1024)
-		n, _ := r.Read(buf) //nolint:errcheck
-		done <- string(buf[:n])
+		out, _ := io.ReadAll(r) //nolint:errcheck
+		done <- string(out)
 	}()
 
 	fn()
