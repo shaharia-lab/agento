@@ -11,6 +11,15 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# Every step here reads the checkout and writes nothing back — no comment, no
+# release, no package, no check run of its own. Without this block the job runs
+# with whatever the repository default is, which for a public repo can still be
+# the read/write token; a workflow that only ever needs `contents: read` should
+# say so rather than inherit a wider one. `release.yml` declares its own, wider
+# set for the same reason.
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
