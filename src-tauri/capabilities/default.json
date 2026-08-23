@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions the Agento main window needs to draw its own chrome, pick directories, open external links and update itself.",
+  "description": "Permissions the Agento main window needs to call the shell's own commands, draw its own chrome, pick directories, open external links and update itself.",
   "windows": ["main"],
   "remote": {
     "urls": [
@@ -12,6 +12,10 @@
     ]
   },
   "permissions": [
+    "allow-host-info",
+    "allow-log-files",
+    "allow-read-log",
+    "allow-export-logs",
     "core:default",
     "core:window:allow-minimize",
     "core:window:allow-unminimize",

@@ -444,9 +444,18 @@ pub fn run() {
                 // dev: no window dragging (which on macOS is the *only* way to
                 // move the window, since `titleBarStyle: Overlay` leaves no OS
                 // titlebar to grab), no folder picker, no external links, no
-                // updater, no theme sync and no macOS menu events. Commands
-                // registered through `invoke_handler` — `host_info` — bypass the
-                // ACL entirely, which is why the app otherwise looked healthy.
+                // updater, no theme sync and no macOS menu events.
+                //
+                // **The app's own commands are checked exactly the same way**,
+                // and believing otherwise is what shipped #401. `on_message`
+                // gates app and plugin commands on one condition — see
+                // `build.rs`'s `app_manifest` for the excerpt — so a remote
+                // origin needs `AppManifest::commands` to generate an
+                // `allow-<kebab>` permission and this capability to grant it.
+                // Without that, `read_log` answered `Command read_log not
+                // allowed by ACL` and `host_info` failed silently, which is why
+                // #395 could fix the plugin half and still leave the app
+                // looking healthy.
                 #[cfg(not(debug_assertions))]
                 if let Some(window) = handle.get_webview_window("main") {
                     let url = format!("http://127.0.0.1:{proxy}");
@@ -499,6 +508,107 @@ pub fn run() {
     builder
         .run(tauri::generate_context!())
         .expect("error while running Agento");
+}
+
+/// The three places an app command has to be named, and the assertion that they
+/// have not drifted apart.
+///
+/// A command missing from any one of them is refused at runtime with
+/// `Command <name> not allowed by ACL`, and **nothing at build time says so** —
+/// which is the whole of #401. Before the app manifest existed the drift was
+/// also invisible in dev, because a `devUrl` origin is local and the ACL was
+/// only consulted for plugin commands; it is enforced in both now, so this test
+/// is a second net rather than the only one. It is still worth having: it names
+/// the missing entry and the file it belongs in, where the runtime failure is a
+/// dead pane in an installer somebody has to build first.
+///
+/// Source text rather than values, because `generate_handler!` takes literal
+/// idents — it cannot read a const, so there is no shared list to compare
+/// against and the macro invocation itself is the only honest source of truth.
+#[cfg(test)]
+mod acl_manifest_tests {
+    use std::collections::BTreeSet;
+
+    const LIB_RS: &str = include_str!("lib.rs");
+    const BUILD_RS: &str = include_str!("../build.rs");
+    const CAPABILITY: &str = include_str!("../capabilities/default.json");
+
+    /// The contents of the first `[…]` that follows `marker`, split on commas.
+    ///
+    /// Both lists are flat and hold no brackets or strings of their own, so the
+    /// first `]` is the closing one and no bracket matching is needed.
+    fn items_after(source: &str, marker: &str) -> Vec<String> {
+        let rest = source
+            .split_once(marker)
+            .unwrap_or_else(|| panic!("{marker} not found"))
+            .1;
+        let list = rest
+            .split_once(']')
+            .unwrap_or_else(|| panic!("unterminated list after {marker}"))
+            .0;
+        list.split(',')
+            .map(|item| item.trim().trim_matches('"'))
+            .filter(|item| !item.is_empty())
+            // `logs::read_log` and `host_info` both name one command.
+            .map(|item| item.rsplit("::").next().unwrap_or(item).to_string())
+            .collect()
+    }
+
+    fn registered_commands() -> BTreeSet<String> {
+        items_after(LIB_RS, "tauri::generate_handler![")
+            .into_iter()
+            .collect()
+    }
+
+    fn manifest_commands() -> BTreeSet<String> {
+        items_after(BUILD_RS, "const APP_COMMANDS: &[&str] = &[")
+            .into_iter()
+            .collect()
+    }
+
+    /// The capability's app-scoped grants — the ones with no `plugin:`/`core:`
+    /// prefix, which is how `tauri-build` spells a permission it resolved under
+    /// `APP_ACL_KEY`.
+    fn granted_commands() -> BTreeSet<String> {
+        let capability: serde_json::Value =
+            serde_json::from_str(CAPABILITY).expect("capabilities/default.json is not valid JSON");
+        capability["permissions"]
+            .as_array()
+            .expect("permissions is not an array")
+            .iter()
+            .filter_map(|permission| permission.as_str())
+            .filter(|permission| !permission.contains(':'))
+            .map(|permission| {
+                let command = permission
+                    .strip_prefix("allow-")
+                    .unwrap_or_else(|| panic!("unexpected app permission {permission:?}"));
+                // `autogenerate_command_permissions` slugifies `_` to `-`.
+                command.replace('-', "_")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn app_commands_capability_and_handler_agree() {
+        let registered = registered_commands();
+        assert!(
+            !registered.is_empty(),
+            "no commands parsed out of generate_handler! — the parser has drifted from the source"
+        );
+        assert_eq!(
+            registered,
+            manifest_commands(),
+            "generate_handler! in src/lib.rs and APP_COMMANDS in build.rs disagree: \
+             a command with no generated permission can never be granted"
+        );
+        assert_eq!(
+            registered,
+            granted_commands(),
+            "generate_handler! in src/lib.rs and the app permissions in \
+             capabilities/default.json disagree: an ungranted command is refused \
+             with `Command <name> not allowed by ACL` in every release build"
+        );
+    }
 }
 
 #[cfg(all(test, debug_assertions))]
