@@ -14,22 +14,22 @@
 //! meaning here would move a working configuration to a port that never
 //! answers, from a release note nobody reads.
 //!
-//! # Why a failure forwards instead of being answered
+//! # Why a failure is a 500 rather than a worded 400
 //!
-//! Go answers a failed test send with `400` and `err.Error()`, and those
-//! strings come from go-mail and the Go runtime — `dial tcp …: connect:
-//! connection refused`, `failed to create mail client: …`. None of them is
-//! reproducible from Rust, and inventing a paraphrase would put a different
-//! sentence on a user's screen than the one the Go server shows. So the
-//! failure arm returns `Err` and the sidecar answers, which is the precedent
+//! The inherited behaviour answers a failed test send with `400` and the
+//! underlying error text — `dial tcp …: connect: connection refused`, `failed
+//! to create mail client: …`. Those strings come from the mail library and the
+//! runtime it was written against; none is reproducible here, and inventing a
+//! paraphrase would put a different sentence on the user's screen. So the
+//! failure arm answers a 500 with the reason in the log, the precedent
 //! `integration_credentials.rs` set for exactly this.
 //!
-//! **That is only safe because a forward re-sends.** The rule is in [`send`] and
-//! in its one caller: nothing that can fail may run after the server has
-//! accepted the message. `SmtpTransport::send` returns `Ok` once the server has answered
-//! the final `.` with a 2xx, and an `Err` from it therefore means the message
-//! was not accepted — so Go's retry is a second *failed* dial, not a second
-//! email.
+//! **A retry must not re-send.** The rule is in [`send`] and in its one caller:
+//! nothing that can fail may run after the server has accepted the message.
+//! `SmtpTransport::send` returns `Ok` once the server has answered the final `.`
+//! with a 2xx, so an `Err` from it means the message was *not* accepted — which
+//! is what makes a user pressing the button again a second failed dial rather
+//! than a second email.
 
 use lettre::message::{header::ContentType, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
@@ -57,8 +57,8 @@ pub fn test_mail() -> Mail {
 
 /// `SMTPProvider.Send`.
 ///
-/// Every failure is a `String`, and every one of them forwards — see the module
-/// header. The messages are for the log, not for the wire.
+/// Every failure is a `String`, and every one of them becomes a 500 — see the
+/// module header. The messages are for the log, not for the wire.
 pub fn send(config: &SmtpConfig, mail: &Mail) -> Result<(), String> {
     let message = build_message(config, mail)?;
     let transport = build_transport(config)?;
@@ -128,7 +128,7 @@ fn build_message(config: &SmtpConfig, mail: &Mail) -> Result<Message, String> {
 ///
 /// Auth is configured unconditionally, as `WithSMTPAuth(SMTPAuthPlain)` is —
 /// including when the username is blank. A relay that wants no auth will
-/// refuse, which is what Go does today, and the refusal forwards.
+/// refuse, which is the inherited behaviour, and the refusal is a 500.
 fn build_transport(config: &SmtpConfig) -> Result<SmtpTransport, String> {
     let tls = tls_policy(&config.encryption, &config.host)?;
     let port = u16::try_from(config.port).map_err(|_| format!("invalid port {}", config.port))?;
@@ -358,9 +358,9 @@ mod tests {
         assert!(transcript.contains("text/html"), "{transcript}");
     }
 
-    /// The property the forwarding rule rests on: a failed send must be a
-    /// failure *to deliver*, or Go's retry would be a second email rather than
-    /// a second failed dial.
+    /// The property the whole ordering rests on: a failed send must be a
+    /// failure *to deliver*, or a user pressing the button again would send a
+    /// second email rather than making a second failed dial.
     #[test]
     fn a_refused_connection_is_an_error_and_delivers_nothing() {
         // Bind and drop, so the port is almost certainly free and nothing

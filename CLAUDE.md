@@ -3123,6 +3123,17 @@ because each one cost real time to find:
   by backfilling out of band.
 - **Windows `filepath` semantics are unimplemented.** `fs.rs`,
   `claude_settings/` and the config-dir probe answer 501 there.
+- **`GET /api/fs` answers 500 where it should answer 404 or 400.** The
+  directory picker reports "internal server error" for a path the user simply
+  mistyped. The three typed bodies (404 missing, 400 unreadable, 500 no home)
+  were never written, because at the time an `Err` here reached an
+  implementation that had them. Fixing it means giving `fs::list` a typed error.
+- **Several surfaces answer 500 for input they cannot decide about**, rather
+  than reproducing an answer they cannot be sure of: a non-ASCII settings-profile
+  name, a request body that is not UTF-8, duplicate JSON keys, a document past
+  serde's recursion limit, a site URL `url::Url` rejects. Each is documented at
+  its site. They were invisible while something else could answer; they are
+  user-visible 500s now, and each is a small piece of work to resolve properly.
 - Cross-view navigation: "Continue in chat" on a session can only report the
   new `chat_id`; it cannot switch to the Chats view. Needs a nav context in
   `App.tsx`.

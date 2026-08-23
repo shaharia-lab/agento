@@ -25,7 +25,7 @@
 //! turn's stream task. Nothing observable follows from that: the URL is
 //! argv-only, it is never stored, and a per-turn port closes when the
 //! subprocess it was started for is gone. What it buys is that a crashed or
-//! forwarded turn leaks no bound port.
+//! refused turn leaks no bound port.
 //!
 //! The other difference is the version in the initialize handshake — Go's
 //! `mcp.Implementation` says `1.0.0`, [`crate::claude::ToolServer`] reports the

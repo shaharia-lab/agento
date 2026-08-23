@@ -4,14 +4,11 @@
 //! `Cache.ScanInProgress`, `Cache.CostsStale` and `Cache.LastScannedAt`
 //! (`internal/claudesessions/cache.go`), over the scanner ported in #270.
 //!
-//! # This is the port's first ownership flip
+//! # The scan is owned here, whole
 //!
-//! Every route before this one could forward on doubt: `Err` meant "let the
-//! sidecar answer", so a ported route could only ever be as broken as an
-//! unported one. **That property does not hold here.** Once the sidecar stops
-//! scanning there is no second implementation to fall back to — forwarding
-//! `/status` would ask Go about a scan Go is not running, and it would answer
-//! `false`/`0`/`0` with complete confidence.
+//! There is one scanner and this is it, so `/status` has to answer from this
+//! process's own state. A confident `false`/`0`/`0` from anywhere else would be
+//! a wrong answer rather than a missing one.
 //!
 //! So the flip has to be all of a piece: Rust scans, Rust answers, and the Go
 //! scanner is switched off in the same change. A half-flip is the one state
@@ -208,10 +205,10 @@ fn invalidate(conn: &rusqlite::Connection) -> Result<(), String> {
 ///
 /// Both halves are **best effort by design**. This runs after the rate write has
 /// committed, and everything after a commit must be infallible — returning an
-/// error here would forward the request to Go, which would apply the write a
-/// second time. A failure to invalidate costs at most an hour of stale costs,
-/// which the TTL then clears; a second rate row would be data the user did not
-/// ask for.
+/// error here would answer 500 for a rate that was actually written, inviting a
+/// retry that adds a second row. A failure to invalidate costs at most an hour
+/// of stale costs, which the TTL then clears; a duplicate rate row would be data
+/// the user did not ask for.
 pub fn after_pricing_change(db_path: &Path) {
     match super::db::open_read_write(db_path) {
         Ok(conn) => {
@@ -267,7 +264,7 @@ fn live_pricing_rev(db_path: &Path) -> i64 {
 /// This works only because **every profile unwinds** — `panic = "abort"` runs no
 /// destructors, so under it the guard would be a debug-only net and a scan panic
 /// would kill the app outright. `Cargo.toml` sets `panic = "unwind"` for release
-/// for this reason and for `proxy.rs`'s panic-to-forward, and says so there.
+/// for this reason and for `proxy.rs`'s panic handling, and says so there.
 struct ScanGuard;
 
 impl Drop for ScanGuard {

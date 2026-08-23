@@ -16,8 +16,9 @@
 //! can always supply every tool, since it *is* the process that hosts them;
 //! [`crate::native::chat::runner::build_options`] can refuse (an agent naming an
 //! `mcps.yaml` server, or a `whatsapp` integration this build dropped). In a
-//! chat that refusal forwards. Here it is a recorded failure with the reason in
-//! `error_message`, which is the only answer that leaves evidence.
+//! chat that refusal is a 500. Here it is a recorded failure with the reason in
+//! `error_message`, which is the only answer that leaves evidence — a job
+//! history with no row is indistinguishable from a task that was not due.
 //!
 //! # What is deliberately not reproduced
 //!

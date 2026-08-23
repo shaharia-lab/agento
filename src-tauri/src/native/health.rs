@@ -1,11 +1,9 @@
-//! `GET /health` — the liveness probe, answered natively since #278.
+//! `GET /health` — the liveness probe.
 //!
-//! The route sat outside `/api`, so the write-routes audit (writes-only by
-//! design) never decided it, and while the sidecar existed it simply forwarded.
-//! With the sidecar gone the choice was drop or answer, and answering wins on
-//! cost: it is one constant, and anything external that ever probed the Go
-//! server's `/health` — a script, a monitor, the sidecar supervisor itself used
-//! to — keeps getting the same bytes.
+//! The route sits outside `/api`, so the write-routes audit (writes-only by
+//! design) never decided it. Answering wins on cost over dropping it: it is one
+//! constant, and anything external that ever probed `/health` — a script, a
+//! monitor — keeps getting the same bytes.
 //!
 //! The body is Go's literal `w.Write([]byte(`{"status":"ok"}`))`
 //! (`internal/server/server.go`): no trailing newline, because it never went

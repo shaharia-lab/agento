@@ -22,11 +22,17 @@
 //!
 //! # Failing before the file exists
 //!
-//! `Err` means "forward to Go", and Go would then write the file itself. So
-//! nothing fallible may run once the destination exists: the response bytes are
-//! built first, the directory is created before the file, and a partial file is
-//! removed before the failure is returned. A forward after a completed write
-//! would leave two uploads on disk and hand the second path to the user.
+//! An `Err` answers 500, so nothing fallible may run once the destination
+//! exists: a 500 for an upload that actually landed tells the user their file
+//! is gone when it is on disk, and invites a retry that writes it a second time
+//! under a fresh name. So the response bytes are built first, the directory is
+//! created before the file, and a partial file is removed before the failure is
+//! returned.
+//!
+//! Building the response first now buys less than it did — there is no second
+//! implementation to re-run the write — but the ordering costs nothing and the
+//! partial-file cleanup is load-bearing on its own. Do not "simplify" either
+//! away.
 
 use std::path::{Path, PathBuf};
 
@@ -121,8 +127,8 @@ fn upload(content_type: &str, body: &[u8], upload_dir: &Path) -> Result<super::A
 
     create_upload_dir(upload_dir)?;
 
-    // `os.Create` then `io.Copy`, with Go's cleanup: a failed copy removes the
-    // partial file. Here that also makes the forward safe.
+    // `os.Create` then `io.Copy`, with the same cleanup: a failed copy removes
+    // the partial file rather than leaving a truncated upload behind.
     std::fs::write(&dest, part.content).map_err(|e| {
         let _ = std::fs::remove_file(&dest);
         WriteError::Fallback(format!("failed to save file {dest:?}: {e}"))

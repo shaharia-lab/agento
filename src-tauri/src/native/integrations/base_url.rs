@@ -51,7 +51,7 @@
 //!
 //! `parseHost` is itself an **allowlist** — `integration_credentials::split_url`
 //! says so, having enumerated every ASCII byte through it — so [`Base::new`]
-//! uses one too, and a narrower one, because that module may forward what it is
+//! uses one too, and a narrower one, because that module may refuse what it is
 //! unsure of and a starter may not. See [`Mismatch::Authority`].
 //!
 //! # What each caller does with a [`Mismatch`], and why they differ

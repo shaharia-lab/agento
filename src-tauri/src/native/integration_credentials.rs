@@ -92,9 +92,9 @@ fn raw_is_absent(credentials: Option<&RawValue>) -> bool {
 
 /// `cfg.ParseCredentials(&creds)`.
 ///
-/// The empty case is Go's own `fmt.Errorf("credentials are empty")`, which is a
-/// fixed string and so reproducible. A real unmarshal failure is not, and
-/// forwards.
+/// The empty case is a fixed string and so reproducible. A real unmarshal
+/// failure is not, so it is reported as a 422 with this build's own wording
+/// rather than the decoder's — which would quote the offending value.
 fn parse<T>(kind: &str, credentials: Option<&RawValue>) -> Result<T, WriteError>
 where
     T: for<'de> Deserialize<'de> + Default,
@@ -110,8 +110,8 @@ where
     //
     // - `Option<T>` rather than straight to `T`, because a literal `null` is a
     //   *type error* to serde and the zero value to Go — a direct deserialize
-    //   would forward `"credentials": null` instead of reporting the first
-    //   missing field the way Go does.
+    //   would refuse `"credentials": null` outright instead of reporting the
+    //   first missing field, which is the inherited behaviour.
     // - `GoStruct<T>`, because serde fills a struct from a JSON **array**
     //   positionally when every field has a default, so `"credentials":["tok"]`
     //   decoded to a populated struct, passed the non-empty check and **created
@@ -382,32 +382,35 @@ fn validate_whatsapp(credentials: Option<&RawValue>) -> Result<(), WriteError> {
 ///
 /// **This is the second of two places that reason about `net/url`'s rules, and
 /// they answer different questions.** Here the question is *create*: may this
-/// row be stored, and is forwarding to Go an option (it always is). In
-/// `native/integrations/confluence`, `validate_site_url` asks *start*: may a
-/// stored row be hosted — where there is nobody to forward to, so it decides
+/// row be stored, so an uncertain input can be refused with a 422 the user
+/// sees. In `native/integrations/confluence`, `validate_site_url` asks *start*:
+/// may a stored row be hosted — where a refusal is silent, so it decides
 /// everything itself and reproduces `getScheme` and the authority split
 /// outright. They agree on every realistic input and are deliberately not
 /// merged; #316 adds a third caller of the same Go rules with a *different*
 /// answer again, since Jira does not require HTTPS.
 fn split_url(raw: &str) -> Result<(String, String), WriteError> {
-    let forward =
+    // Answers a 422 with this build's own wording. It was called `forward`
+    // when an `Err` here reached a second implementation; it never has since,
+    // and the name outlived the mechanism.
+    let refuse =
         || WriteError::validation("credentials.site_url", format!("invalid site URL {raw:?}"));
     if raw.chars().any(|c| c.is_control() || c == ' ') {
-        return Err(forward());
+        return Err(refuse());
     }
     for (i, b) in raw.bytes().enumerate() {
         if b == b'%' {
             let rest = raw.as_bytes().get(i + 1..i + 3).unwrap_or(b"");
             if rest.len() != 2 || !rest.iter().all(|c| c.is_ascii_hexdigit()) {
-                return Err(forward());
+                return Err(refuse());
             }
         }
     }
 
     // A leading `:` is `getScheme`'s own error (`missing protocol scheme`),
-    // not an empty scheme, so it must forward rather than answer.
+    // not an empty scheme, so it is refused rather than parsed.
     if raw.starts_with(':') {
-        return Err(forward());
+        return Err(refuse());
     }
 
     // `url.Parse` takes the scheme only when what precedes the first ':' is a
@@ -441,7 +444,7 @@ fn split_url(raw: &str) -> Result<(String, String), WriteError> {
     // `site_url` Go's own parser can never read, and being native the request
     // never reaches Go to be refused.
     if authority.contains(['@', '[', ']', '%']) {
-        return Err(forward());
+        return Err(refuse());
     }
     // `parseHost` enforces an **allowlist**, not a blocklist, so this has to be
     // spelled the same way round. Enumerating every ASCII byte through
@@ -455,12 +458,12 @@ fn split_url(raw: &str) -> Result<(String, String), WriteError> {
         .bytes()
         .any(|b| b < 0x80 && !b.is_ascii_alphanumeric() && !HOST_PUNCT.contains(&b))
     {
-        return Err(forward());
+        return Err(refuse());
     }
     // A `:` introduces a port, which Go requires to be digits.
     if let Some((_, port)) = authority.split_once(':') {
         if !port.chars().all(|c| c.is_ascii_digit()) {
-            return Err(forward());
+            return Err(refuse());
         }
     }
     // The **whole authority**, port included: both Go validators test `u.Host`,
@@ -692,7 +695,7 @@ mod tests {
             "https://x.net:80:90", // two ports
             // Go rejects an escape whose first hex digit is below 8; it
             // *accepts* `%25` (host `x%net`) and valid multi-byte sequences
-            // such as `%C3%A9` (host `xénet`). This port forwards all of them
+            // such as `%C3%A9` (host `xénet`). This port refuses all of them
             // rather than encoding that rule — deliberately, but do not
             // "correct" the guard toward "a host may never carry an escape",
             // which is not Go's rule.
@@ -721,7 +724,7 @@ mod tests {
     /// every one of them — testing `split_url` directly keeps the JSON escaping
     /// of the outer credentials blob out of the way.
     #[test]
-    fn the_six_characters_go_rejects_in_a_host_all_forward() {
+    fn the_six_characters_rejected_in_a_host_are_all_refused() {
         for bad in ['\\', '^', '`', '{', '|', '}'] {
             let url = format!("https://x.net{bad}a");
             assert!(
@@ -732,15 +735,15 @@ mod tests {
     }
 
     /// The other side of the allowlist: punctuation that *looks* rejectable but
-    /// which Go accepts must not forward, or the port over-refuses.
+    /// which is accepted must not be refused, or this over-rejects.
     #[test]
-    fn the_punctuation_go_allows_in_a_host_is_not_forwarded() {
+    fn the_punctuation_allowed_in_a_host_is_not_refused() {
         for ok in [
             '!', '"', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '<', '=', '>', '_', '~',
         ] {
             let url = format!("https://x.net{ok}a");
             let (scheme, host) = split_url(&url)
-                .unwrap_or_else(|e| panic!("{url:?} forwarded, but Go accepts it: {e:?}"));
+                .unwrap_or_else(|e| panic!("{url:?} was refused, but it is valid: {e:?}"));
             assert_eq!(scheme, "https");
             assert_eq!(host, format!("x.net{ok}a"));
         }
@@ -766,7 +769,7 @@ mod tests {
     /// …but an ordinary port is not a shape to be unsure of, and must not make
     /// the host look empty.
     #[test]
-    fn a_numeric_port_is_understood_and_not_forwarded() {
+    fn a_numeric_port_is_understood_and_not_refused() {
         assert!(validate(
             "jira",
             Some(&raw(

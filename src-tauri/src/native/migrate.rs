@@ -20,56 +20,46 @@
 //!
 //! - **Do not edit 1–30.** They are a frozen record of what Go produced, and
 //!   the only thing that still makes the "not transcribed" argument above true.
-//! - **Anything appended must be additive.** `main` still ships the Go server
-//!   and it opens the same `~/.agento/agento.db`. `applyMigrations` runs only
-//!   migrations *newer* than the recorded version, so a database at 31 makes an
-//!   older build apply nothing and carry on — it simply never reads the new
-//!   table. A migration that *altered* an existing column would break such a
-//!   process instead, silently, on a user's machine.
+//! - **Anything appended must be additive.** Migrations run only when *newer*
+//!   than the recorded version, so a database at 31 makes an older build apply
+//!   nothing and carry on — it simply never reads the new table. A migration
+//!   that *altered* an existing column would break a downgrade instead,
+//!   silently, on a user's machine. Downgrades are already refused below 0.1.1
+//!   (see `docs/troubleshooting.md`), but the rule keeps the damage to a
+//!   refusal rather than corruption.
 //!
 //! Twenty-seven migrations of hand-copied DDL is precisely the kind of thing
 //! that agrees on every table anyone happens to check and differs on one column
 //! default nobody does — and the failure would surface as a write succeeding
 //! against a column that is `NOT NULL DEFAULT ''` on one side and nullable on
 //! the other. Embedding the file removes the transcription entirely. It also
-//! outlives the Go server: when the sidecar is deleted, this file is the record
-//! of what the schema was, the same reason `desktop/parity/` keeps its other
-//! vectors.
+//! outlives the implementation that generated it: this file **is** the record
+//! of what the schema is, the same reason the rest of `parity/` exists.
 //!
-//! # Rust verifies; it does not apply. Yet.
+//! # `verify` and `apply` are separate, and the split is load-bearing
 //!
-//! This is the load-bearing part of #274, and it is a deliberate departure from
-//! the issue's wording ("Rust owns migration ordering").
+//! [`apply`] runs once at startup, from `lib.rs`, before anything serves.
+//! [`verify`] runs on every write, and refuses a database whose version is not
+//! the one this build compiled against — in either direction.
 //!
-//! Go's `applyMigrations` reads the current version **outside** the transaction
-//! that applies the next one (`internal/storage/sqlite.go`). Two processes
-//! starting together therefore both read the same version, both decide to
-//! apply the next migration, and both run its DDL: the loser gets
-//! `table already exists`, which is not a
-//! conflict it retries but an error that fails `NewSQLiteDB` and takes the whole
-//! startup with it. Whichever process loses simply does not come up.
-//!
-//! So while the Go sidecar is still bundled — and it is, until #278 deletes it —
-//! exactly one process may apply migrations, and that process is Go, because it
-//! is the one that also creates the database, seeds the pricing catalog and runs
-//! the legacy filesystem import. Rust [`verify`]s instead: it reads the version
-//! and refuses to serve a database it does not recognise, which sends the
-//! request to Go rather than writing through a schema it has guessed at.
-//!
-//! [`apply`] is written, tested and unused. It is what #278 turns on, in the
-//! same change that stops the sidecar from migrating — one commit, one owner,
-//! no window in which both do it.
+//! Keeping them apart matters because the version is read **outside** the
+//! transaction that applies the next migration. Two processes starting together
+//! would both read the same version, both decide to apply the next migration,
+//! and both run its DDL: the loser gets `table already exists`, which is not a
+//! conflict it retries but an error that fails startup outright. Exactly one
+//! process may migrate a given data directory, which is what
+//! `tauri-plugin-single-instance` is for — and why pointing a second instance
+//! at the same `AGENTO_DATA_DIR` is documented as unsupported.
 //!
 //! # Two directions, two different answers
 //!
 //! A database **older** than this build is a hard error: some migration this
 //! code depends on has not run, so a write would hit a missing column. A
-//! database **newer** is also an error here, though Go accepts it silently — Go
-//! can afford to, because its queries are written against the schema it shipped
-//! with, whereas a Rust build reading a newer file is reading columns it was
-//! never compiled against. Both directions return `Err`, and `Err` means the
-//! request forwards to the sidecar, which is the implementation that does know
-//! the schema in front of it.
+//! database **newer** is also an error here: this build's queries are compiled
+//! against the schema it ships with, so a newer file has columns it was never
+//! compiled against. Both directions return `Err`, which is a 500 — the honest
+//! answer, because the alternative is reading or writing a shape this build
+//! does not understand.
 
 use std::sync::OnceLock;
 
@@ -140,26 +130,25 @@ pub fn verify(conn: &Connection) -> Result<(), String> {
     if have == want {
         return Ok(());
     }
-    // Both directions forward to Go, but they are different situations and a
-    // log line that says which one saves the next person a bisect.
+    // Both directions are a 500, but they are different situations and a log
+    // line that says which one saves the next person a bisect.
     if have < want {
         return Err(format!(
             "database is at schema version {have}, this build writes version {want}; \
-             the sidecar has not migrated it yet"
+             migrations have not been applied"
         ));
     }
     Err(format!(
         "database is at schema version {have}, newer than this build's {want}; \
-         forwarding to the sidecar, which knows the schema in front of it"
+         it was written by a later version of Agento"
     ))
 }
 
 /// Apply every pending migration.
 ///
-/// **Not called while the Go sidecar exists** — see the module header. This is
-/// the body #278 turns on once the sidecar stops migrating.
+/// Called once at startup, from `lib.rs`, before the window shows.
 ///
-/// Mirrors Go's `applyMigrations`/`applyMigration`: create the tracking table,
+/// Mirrors `applyMigrations`/`applyMigration`: create the tracking table,
 /// read the current version, then run each pending migration and record it.
 /// One departure, and it is the reason the Go version cannot be run twice
 /// concurrently: the version is re-read **inside** the transaction that applies
@@ -442,11 +431,17 @@ mod tests {
         .expect("seed");
 
         let err = verify(&conn).expect_err("a behind database must not be served");
-        assert!(err.contains("has not migrated"), "got: {err}");
+        // The two directions must stay distinguishable in the message — a log
+        // line that says which one saves the next person a bisect.
+        assert!(err.contains("have not been applied"), "got: {err}");
+        assert!(
+            err.contains("26"),
+            "the stored version must be named: {err}"
+        );
     }
 
-    /// Go accepts a newer database silently. Rust must not: its queries were
-    /// compiled against this schema, not that one.
+    /// A newer database is refused, not accepted silently: this build's queries
+    /// were compiled against its own schema, not that one.
     #[test]
     fn a_database_ahead_of_this_build_is_refused() {
         let file = tempfile::NamedTempFile::new().expect("temp file");

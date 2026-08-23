@@ -831,7 +831,7 @@ fn open_for_write(db_path: &Path) -> Result<Connection, WriteError> {
 /// handler answers 500; collapsing it into `None` here would make [`add_rate`]
 /// see no conflict and write straight over an existing row through the upsert —
 /// silent data loss on the one path whose whole job is to refuse it. So the
-/// failure is its own arm, and it forwards.
+/// failure is its own arm, answered rather than silently treated as "no row".
 fn find_rate(
     conn: &Connection,
     model_pattern: &str,
@@ -913,8 +913,8 @@ fn correct_rate(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError
 /// flag the store applies on the way in included.
 ///
 /// The answer is encoded **before** the commit. Everything after a commit must
-/// be infallible, because an `Err` forwards to Go and Go would apply the write
-/// a second time.
+/// be infallible, because an `Err` there answers 500 for a rate that was
+/// actually written — inviting a retry that writes it twice.
 fn save(
     tx: &rusqlite::Transaction,
     input: &RateInput,
@@ -922,8 +922,8 @@ fn save(
 ) -> Result<super::Answer, WriteError> {
     upsert_rate(tx, input)?;
     let Some(saved) = find_rate(tx, &input.model_pattern, input.effective_from)? else {
-        // Go's "vanished after write" — a 500. Nothing is committed yet, so
-        // rolling back and forwarding is safe.
+        // "vanished after write" — a 500. Nothing is committed yet, so
+        // rolling back leaves no trace of it.
         return Err(WriteError::Fallback(format!(
             "saving rate: {} vanished after write",
             rate_key(&input.model_pattern, input.effective_from)
@@ -1044,7 +1044,8 @@ fn delete_rate(db_path: &Path, query: &str) -> Result<super::Answer, WriteError>
         .map_err(|e| WriteError::Fallback(format!("deleting rate: {e}")))?;
     if affected == 0 {
         // `Store.DeleteRate`'s own "no rate for …" error, which is a 500. The
-        // transaction has not committed, so forwarding cannot double-apply.
+        // transaction has not committed, so the 500 reports a delete that did
+        // not happen.
         return Err(WriteError::Fallback(format!(
             "pricing: no rate for {:?} at {}",
             pattern,

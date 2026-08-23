@@ -105,10 +105,9 @@ pub struct TurnState {
 /// answered as a clean JSON error — a 404 for a missing chat, Go's fixed
 /// `500 "failed to start message"` for machinery failures (reason in the log,
 /// as Go logged it), and a 500 carrying the refusal reason for the cases that
-/// have no Go counterpart (`whatsapp` tools are dropped, `mcps.yaml` is not
-/// read). There is nothing to forward to since #278. Once the stream has
-/// begun, a failure ends the stream rather than changing the status — the 200
-/// is already committed.
+/// this build refuses outright (`whatsapp` tools are dropped, `mcps.yaml` is
+/// not read). Once the stream has begun, a failure ends the stream rather than
+/// changing the status — the 200 is already committed.
 pub async fn run(
     db_path: std::path::PathBuf,
     chat_id: String,

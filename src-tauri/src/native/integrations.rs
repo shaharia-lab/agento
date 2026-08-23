@@ -88,8 +88,8 @@
 //!   the desktop app by decision (`whatsmeow` has no Rust equivalent), so these
 //!   routes must keep answering exactly as the sidecar answers them. As of
 //!   #273 the desktop UI no longer calls them, so they are unreachable rather
-//!   than merely unported — but they stay unclaimed, because forwarding is what
-//!   makes them the sidecar's problem to answer and then to delete.
+//!   than merely unported. They stay unclaimed, so they answer the unrouted
+//!   404 and can simply be deleted.
 //!
 //! ## A `whatsapp` row is data, not a type this code knows
 //!
@@ -526,9 +526,10 @@ fn segment(value: &str) -> Option<&str> {
 /// port, holding a token the user had just revoked. The sidecar now runs with
 /// `AGENTO_INTEGRATIONS=off:<the types the shell hosts>` and [`registry`] is the
 /// only implementation **for those types**, so both effects are reproduced
-/// rather than lost. Note the switch is per type, not per process: a `whatsapp`
-/// row is still Go's, and a write for one is declined here and forwarded whole
-/// (see [`claims`]'s caller and `writes.rs`). All six are the shell's as of #313
+/// rather than lost. Note the switch is per type, not per process: a write for
+/// a `whatsapp` row is declined rather than applied, because nothing here can
+/// start or stop its connection (see [`claims`]'s caller and `writes.rs`). All
+/// six of the others are hosted as of #313
 /// — `github`, `confluence`, `jira`, `slack`, `telegram`, `google` — and the
 /// list to read is `registry::HOSTED_TYPES`, never this comment.
 ///
@@ -560,13 +561,12 @@ fn claims(method: &Method, path: &str) -> bool {
         // network, with the bot token" — was simply wrong: `GetWebhookStatus`
         // reads three columns off the row and composes a URL from the public
         // URL, and `internal/integrations/telegram` has no status call at all.
-        // The network belongs to *registration*, which is a different route and
-        // still forwards.
+        // The network belongs to *registration*, which is a different route.
         Some(Route::WebhookStatus(_)) => method == Method::GET,
         // The three that call Telegram. Every fallible step happens *before*
-        // the call — an `Err` after a successful `setWebhook` forwards, and Go
-        // would register the webhook a second time under its own secret. See
-        // `trigger::registration`.
+        // the call — an `Err` after a successful `setWebhook` answers 500 for a
+        // registration that landed, inviting a retry that registers it twice
+        // under a new secret. See `trigger::registration`.
         Some(Route::WebhookRegister(_)) => method == Method::POST || method == Method::DELETE,
         Some(Route::WebhookRegenerate(_)) => method == Method::POST,
         None => false,
@@ -628,7 +628,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
                 Ok(authenticated) => authenticated,
                 // A read, so the seam wants a `Result<_, String>`; `finish`
                 // is the write path's shape. `Internal` and the typed errors
-                // answer natively, and only `Fallback` forwards.
+                // carry their own status; `Fallback` becomes a plain 500.
                 Err(WriteError::Fallback(reason)) => return Err(reason),
                 Err(e) => {
                     let body = super::gojson::to_vec(&super::writes::error_body(&e.message()))
@@ -643,8 +643,8 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         Some(Route::WebhookStatus(id)) => super::gojson::to_vec(&webhook::status(db, id)?)
             .map_err(|e| format!("encoding webhook status: {e}"))?,
 
-        // `claims` never admits a GET here — chi has no such route, so Go 405s
-        // and forwarding is what reproduces that.
+        // `claims` never admits a GET here — there is no such route, so it
+        // falls through to the unrouted 404.
         Some(Route::AuthStart(_))
         | Some(Route::AuthValidate(_))
         | Some(Route::WebhookRegister(_))
@@ -844,11 +844,10 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
     decline_a_type_go_still_hosts(id, &existing.integration_type)?;
     // **Before the write, not after.** Its input comes out of the database, so
     // unlike the timestamps this process formats itself it can genuinely fail —
-    // and a `Fallback` after `conn.execute` would forward to Go, which re-runs
-    // the whole `PUT`: a second `updated_at`, a second credential overwrite, a
-    // second reload. Go fails before saving here too, because
-    // `integrationService.Update` calls `s.Get` — which scans `created_at` —
-    // first. See the invariant in `writes.rs`.
+    // and a `Fallback` after `conn.execute` would answer 500 for a `PUT` that
+    // already landed, inviting a retry that overwrites the credential and
+    // reloads a second time. The reference implementation fails before saving
+    // here too. See the invariant in `writes.rs`.
     let created_at = parse_stored(&existing.created_at)?;
 
     let now = super::gotime::now_go_text();
@@ -898,8 +897,8 @@ fn update(db_path: &Path, id: &str, body: &[u8]) -> Result<super::Answer, WriteE
 
     // **After the write, and its failure is swallowed.** Go logs a reload
     // failure and answers 200 regardless: "row written, server dead" is the
-    // accepted outcome. It must never become a `Fallback` — the seam forwards
-    // one to Go, which would re-apply a write that already landed.
+    // accepted outcome. It must never become a `Fallback`: that would report
+    // failure for a write that already landed.
     registry::reload_blocking(db_path, id);
 
     let updated = ScrubbedIntegration {
@@ -992,10 +991,9 @@ fn existing_for_update(
 /// "server" is a live whatsmeow connection registered in a package global, so a
 /// missed reload strands a socket, not a port.
 ///
-/// A `Fallback` forwards the *whole* request, so Go re-reads the body and does
-/// everything. That is only safe while nothing has been written yet, which is
-/// why both callers check straight after their existence read and before any
-/// mutation — the invariant in `writes.rs`.
+/// A `Fallback` is a 500, which is only honest while nothing has been written
+/// yet — which is why both callers check straight after their existence read
+/// and before any mutation. The invariant in `writes.rs`.
 fn decline_a_type_go_still_hosts(id: &str, integration_type: &str) -> Result<(), WriteError> {
     if registry::hosts_type(integration_type) {
         return Ok(());
@@ -1567,8 +1565,7 @@ mod tests {
         // the servers they reload and stop.
         assert!(claims(&Method::PUT, "/api/integrations/abc"));
         assert!(claims(&Method::DELETE, "/api/integrations/abc"));
-        // Still only those three methods on that path — chi has no others, so
-        // a PATCH must forward and get Go's 405.
+        // Still only those three methods on that path; a PATCH is unrouted.
         assert!(!claims(&Method::PATCH, "/api/integrations/abc"));
         assert!(!claims(&Method::POST, "/api/integrations/abc"));
         // The collection has no PUT/DELETE.
@@ -1593,8 +1590,7 @@ mod tests {
         assert!(claims(&Method::GET, "/api/integrations/abc/auth/status"));
         assert!(claims(&Method::POST, "/api/integrations/abc/auth/start"));
         assert!(claims(&Method::POST, "/api/integrations/abc/auth/validate"));
-        // …and only for their own methods. chi mounts no GET on `validate`, so
-        // forwarding is what reproduces Go's 405.
+        // …and only for their own methods. There is no GET on `validate`.
         assert!(!claims(&Method::POST, "/api/integrations/abc/auth/status"));
         assert!(!claims(&Method::GET, "/api/integrations/abc/auth/start"));
         assert!(!claims(&Method::GET, "/api/integrations/abc/auth/validate"));
@@ -2059,14 +2055,14 @@ mod tests {
         assert!(get(file.path(), "int-1").expect("get").is_none());
     }
 
-    /// A row whose MCP server the **sidecar** still hosts must be forwarded
-    /// whole, because only Go's own handler fires the `Reload`/`Stop` that
-    /// process needs. WhatsApp is the case that makes this more than tidiness:
+    /// A row whose MCP server this build cannot host must be declined rather
+    /// than written, because nothing here can fire the `Reload`/`Stop` it
+    /// needs. WhatsApp is the case that makes this more than tidiness:
     /// its "server" is a live whatsmeow connection registered in a package
     /// global that the status, reconnect and QR endpoints read, so a missed
     /// reload strands a socket and a paired client that never connects.
     #[test]
-    fn a_write_for_a_type_the_sidecar_hosts_forwards_without_touching_the_row() {
+    fn a_write_for_a_type_this_build_cannot_host_is_declined_without_touching_the_row() {
         // `whatsapp` alone since #313 landed google — and it is the case that
         // makes this more than tidiness, per the doc comment above.
         {
@@ -2089,8 +2085,8 @@ mod tests {
                     "int-1",
                     br#"{"name":"Renamed","type":"github","enabled":false}"#,
                 )
-                .expect_err("must forward"),
-                delete(file.path(), "int-1").expect_err("must forward"),
+                .expect_err("must decline"),
+                delete(file.path(), "int-1").expect_err("must decline"),
             ] {
                 assert!(
                     matches!(err, WriteError::Fallback(_)),
@@ -2098,9 +2094,9 @@ mod tests {
                 );
             }
 
-            // **Nothing was written.** A `Fallback` forwards the whole request
-            // and Go re-applies it, so a partial write here would be applied
-            // twice — the invariant in `writes.rs`.
+            // **Nothing was written**, so the 500 is honest: a partial write
+            // behind it would be reported as a failure that half-happened —
+            // the invariant in `writes.rs`.
             assert_eq!(stored(&file, "SELECT name FROM integrations"), "Original");
             assert_eq!(
                 stored(&file, "SELECT type FROM integrations"),
@@ -2137,10 +2133,10 @@ mod tests {
 
     /// `created_at` comes out of the database, so unlike the timestamps this
     /// process formats itself it can genuinely fail to parse — and its
-    /// `Fallback` therefore has to happen **before** the `UPDATE`, or Go's
-    /// re-run would be the second application of a write that already landed.
+    /// `Fallback` therefore has to happen **before** the `UPDATE`, or the 500
+    /// would be reporting a write that had already landed.
     #[test]
-    fn an_unparseable_created_at_forwards_before_anything_is_written() {
+    fn an_unparseable_created_at_fails_before_anything_is_written() {
         let file = migrated();
         Connection::open(file.path())
             .expect("open")
@@ -2158,7 +2154,7 @@ mod tests {
             "int-1",
             br#"{"name":"Renamed","type":"github"}"#,
         )
-        .expect_err("an unparseable stored timestamp forwards");
+        .expect_err("an unparseable stored timestamp fails");
         assert!(matches!(err, WriteError::Fallback(_)), "{err:?}");
 
         assert_eq!(stored(&file, "SELECT name FROM integrations"), "Original");

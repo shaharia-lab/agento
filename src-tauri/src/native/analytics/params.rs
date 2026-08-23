@@ -36,11 +36,10 @@ pub struct AnalyticsParams {
 impl AnalyticsParams {
     /// Read the parameters out of a raw query string.
     ///
-    /// `Err` means "let Go answer this one". The only case is a timezone this
-    /// build's tzdata does not know: Go would fall back to UTC, but *its*
-    /// tzdata may well know the zone, and answering in UTC when Go would answer
-    /// in Asia/Kathmandu is a wrong answer rather than a missing one. Forwarding
-    /// gets whichever answer Go would have given, which is the bar.
+    /// `Err` is a 500, and the only case is a timezone this build's tzdata does
+    /// not know. Refusing beats the alternative: silently bucketing in UTC when
+    /// the user asked for Asia/Kathmandu is a *wrong* answer rather than a
+    /// missing one, and every figure on the dashboard would be quietly shifted.
     pub fn parse(query: &str) -> Result<Self, String> {
         let params = first_values(query);
         let get = |key: &str| params.get(key).cloned().unwrap_or_default();
@@ -173,8 +172,8 @@ fn parse_ymd(raw: &str) -> Option<(i32, i32, i32)> {
 }
 
 /// Resolve an IANA timezone name. Empty is UTC, matching `parseTimezone`;
-/// anything this build's tzdata cannot resolve is an error, so the request
-/// forwards to Go rather than being answered in the wrong zone.
+/// anything this build's tzdata cannot resolve is an error rather than being
+/// answered in the wrong zone.
 fn parse_timezone(name: &str) -> Result<Tz, String> {
     if name.is_empty() {
         return Ok(Tz::UTC);

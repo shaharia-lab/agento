@@ -26,9 +26,10 @@
 //!   `desktop/CLAUDE.md`; reproducing it is the parity bar, and "fixing" it here
 //!   would make the two implementations disagree.
 //! - **Deleting a missing agent is a 500, not a 404.** The store returns a plain
-//!   `fmt.Errorf` rather than a `NotFoundError`, so `httpErr` falls through to
-//!   its default arm. This port does not reproduce 500s: it detects the case,
-//!   writes nothing, and forwards, so Go produces its own answer.
+//!   error rather than a typed not-found, so the error mapping falls through to
+//!   its default arm. Inherited behaviour, reproduced: the case is detected,
+//!   nothing is written, and the answer is a 500. It is on the known-bugs list
+//!   in `CLAUDE.md`.
 
 use std::path::{Path, PathBuf};
 
@@ -135,9 +136,9 @@ fn scan(row: &rusqlite::Row<'_>) -> rusqlite::Result<Agent> {
         thinking: row.get(4)?,
         permission_mode: row.get(5)?,
         system_prompt: row.get(6)?,
-        // Go fails the whole request on unparsable capabilities rather than
-        // serving an agent whose tool allowlist is unknown. So does this: the
-        // error reaches the proxy, which falls back to Go.
+        // An unparsable capabilities column fails the whole request rather
+        // than serving an agent whose tool allowlist is unknown — a silently
+        // empty allowlist is the dangerous answer here, not the loud one.
         //
         // Through [`GoStruct`] (#337) so a stored *array* fails here too. Go's
         // `json.Unmarshal` refuses one and this used to accept a full-length
@@ -175,7 +176,7 @@ fn claims(method: &Method, path: &str) -> bool {
         Method::GET => path == "/api/agents" || slug_of(path).is_some(),
         Method::POST => path == "/api/agents",
         // One agent: replaced or removed. `/api/agents/{slug}/duplicate` is a
-        // different route and `slug_of` rejects it, so it still forwards.
+        // different route and `slug_of` rejects it, so it is unclaimed.
         Method::PUT | Method::DELETE => slug_of(path).is_some(),
         _ => false,
     }
@@ -218,9 +219,7 @@ fn serve_read(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, S
             Some(agent) => {
                 super::gojson::to_vec(&agent).map_err(|e| format!("encoding agent: {e}"))?
             }
-            // `handleGetAgent`'s own 404, body verbatim. This used to forward
-            // so Go could answer it; with the sidecar gone (#278) it is
-            // answered here.
+            // `handleGetAgent`'s own 404, body verbatim.
             None => {
                 return super::Answer::error(axum::http::StatusCode::NOT_FOUND, "agent not found")
             }
@@ -334,9 +333,10 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
     save(&tx, &agent)?;
 
     // Encode *before* committing. Everything after the commit must be
-    // infallible: an `Err` there forwards to Go, which would create a second
-    // agent. A failing `commit` is the one safe exception — it rolls back, so
-    // forwarding is exactly right.
+    // infallible: a failure there would answer 500 for an agent that was
+    // actually created, so the caller retries and creates a second one. A
+    // failing `commit` is the one safe exception — it rolls back, so there is
+    // nothing to be wrong about.
     let answer = encode(StatusCode::CREATED, &agent)?;
     tx.commit()
         .map_err(|e| WriteError::Fallback(format!("commit agent create: {e}")))?;
@@ -387,15 +387,15 @@ fn update(db_path: &Path, slug: &str, body: &[u8]) -> Result<super::Answer, Writ
     Ok(answer)
 }
 
-/// `agentService.Delete`. A missing agent is a 500 in Go, so it forwards.
+/// `agentService.Delete`. A missing agent is a 500 — inherited, not a 404.
 fn delete(db_path: &Path, slug: &str) -> Result<super::Answer, WriteError> {
     let conn = open_for_write(db_path)?;
     let affected = conn
         .execute("DELETE FROM agents WHERE slug = ?1", [slug])
         .map_err(|e| WriteError::Fallback(format!("deleting agent {slug:?}: {e}")))?;
     if affected == 0 {
-        // Nothing was written, so forwarding cannot double-apply. Go answers
-        // its own 500, which is the behaviour the app has today.
+        // Nothing was written, so the 500 is honest: it reports a delete that
+        // did not happen rather than hiding one that did.
         return Err(WriteError::Fallback(format!("agent {slug:?} not found")));
     }
     log::info!("agent deleted slug={slug:?}");
@@ -452,9 +452,9 @@ fn normalize_config_dir(agent: &mut Agent) -> Result<(), WriteError> {
                 format!("claude config dir {normalized:?} does not exist"),
             ))
         }
-        // Go wraps the underlying error here, and its text is the Go runtime's.
-        // Reproducing it is not possible, so this forwards instead of inventing
-        // a message the user would see.
+        // The original wrapped a runtime error whose text is not reproducible,
+        // so this answers the same status class with the reason in the log
+        // rather than inventing a message the user would see.
         Err(e) => {
             return Err(WriteError::Fallback(format!(
                 "claude config dir {normalized:?} is not readable: {e}"
@@ -492,7 +492,8 @@ fn normalize_claude_config_dir(raw: &str) -> String {
 /// `SQLiteAgentStore.Save` — one upsert, `created_at` untouched on conflict.
 fn save(tx: &rusqlite::Transaction, agent: &Agent) -> Result<(), WriteError> {
     // `validateAgentForSave` rejects an unknown thinking value with a plain
-    // error, which is a 500. Detect it before writing and forward.
+    // error, which is a 500. Detect it *before* writing, so the 500 reports a
+    // save that did not happen.
     if !matches!(
         agent.thinking.as_str(),
         "" | "adaptive" | "disabled" | "enabled"
@@ -1019,9 +1020,9 @@ mod tests {
         assert!(stored(&file, "bye").is_none());
     }
 
-    /// Go answers 500 here, and this port does not reproduce 500s — it forwards
-    /// so Go answers for itself. The important half is that nothing was written
-    /// first, or the forward would delete something else.
+    /// A missing agent is a 500, inherited. The important half is that nothing
+    /// is written first: the status has to report a delete that did not
+    /// happen.
     #[test]
     fn deleting_a_missing_agent_forwards_rather_than_inventing_a_404() {
         let file = migrated();

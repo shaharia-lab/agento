@@ -25,9 +25,10 @@
 //!
 //! #318 changes that. This function's error is interpolated into the 400 body
 //! `auth/validate` answers, so a port-worded refusal would be a visible
-//! divergence. Hence [`Refusal`]: the two rules Go states itself (HTTPS, and a
-//! hostname) are answered here, and the `url.Parse` refusals forward instead.
-//! Forwarding is free at this point — nothing has been called yet.
+//! divergence. Hence [`Refusal`]: the two rules stated outright (HTTPS, and a
+//! hostname) are answered here with their own wording, while the `url.Parse`
+//! refusals — whose text is not reproducible — become a plain 500. That is free
+//! at this point, because nothing has been called yet.
 //!
 //! The response is decoded into `confluenceSpacesResponse` and **thrown away**.
 //! That is not dead code to delete: a 200 carrying non-JSON is a failure, and
@@ -41,10 +42,10 @@ use super::client::{http_client, read_capped_at};
 pub enum Refusal {
     /// A sentence Go produces verbatim, safe to put on the wire.
     Reproducible(String),
-    /// `net/url`'s own wording, which this port does not reproduce. The caller
-    /// forwards, which is safe here because it can only arise before the
-    /// network call.
-    Forward(String),
+    /// A wording this build does not reproduce. The caller answers a 500 with
+    /// the reason in the log rather than inventing a sentence the user sees —
+    /// safe here because it can only arise before the network call.
+    Unreproducible(String),
 }
 
 /// `io.LimitReader(resp.Body, 1*1024*1024)` — validate.go's own cap.
@@ -84,7 +85,7 @@ pub async fn validate_credentials(
     // `url.Parse`'s wording; see the module header.
     let clean = super::validate_site_url(site_url).map_err(|e| {
         if e.starts_with("invalid site URL: ") {
-            Refusal::Forward(e)
+            Refusal::Unreproducible(e)
         } else {
             Refusal::Reproducible(e)
         }
@@ -92,10 +93,10 @@ pub async fn validate_credentials(
 
     let failed = "calling confluence API: request failed".to_string();
     let url = reqwest::Url::parse(&format!("{clean}/wiki/api/v2/spaces?limit=1"))
-        // `http.NewRequestWithContext` failing is `creating confluence request:
-        // %w`; the wording is `net/http`'s, so this forwards rather than
-        // inventing one — and nothing has been called yet.
-        .map_err(|e| Refusal::Forward(format!("creating confluence request: {e}")))?;
+        // `http.NewRequestWithContext` failing has a wording this build does
+        // not reproduce, so this is a 500 rather than an invented sentence —
+        // and nothing has been called yet.
+        .map_err(|e| Refusal::Unreproducible(format!("creating confluence request: {e}")))?;
 
     let request = http_client()
         .ok_or_else(|| Refusal::Reproducible(failed.clone()))?

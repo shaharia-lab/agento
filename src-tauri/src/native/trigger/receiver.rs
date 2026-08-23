@@ -339,7 +339,7 @@ mod tests {
         // `visit_seq` would build the struct from a JSON **array** — and an
         // update that decoded from `[7,{…}]` would dispatch a real agent run
         // where Go's `json.Unmarshal` errors and answers a silent 200. The
-        // seam's `Err`-means-forward cannot catch an over-accept, so the
+        // an over-accept is answered rather than reported, so the
         // `GoStruct` wrapper is the only guard.
         let dir = tempfile::tempdir().expect("tempdir");
         let db = migrated(dir.path(), true, "s3cret", "active");
