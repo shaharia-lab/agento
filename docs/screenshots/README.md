@@ -62,9 +62,11 @@ photographed from the real webview via the `ui-verify` skill. The skill's
 `SKILL.md` carries the procedure and the traps; run it again after a UI change
 and replace `light/`.
 
-One thing it documents is a real finding rather than a tooling detail: **Agento
-never writes `session_insights`** — the processors exist but no worker runs
-them, so the Insights page is empty on a fresh install and silently stale on a
-migrated one. The Insights shots exist only because the skill backfills that
-table out of band. That is a bug worth fixing, not a property of the
-screenshots.
+This set was where a real bug surfaced rather than a tooling detail: Agento
+never wrote `session_insights` — the processors existed but no worker ran them,
+so the Insights page was empty on a fresh install and silently stale on a
+migrated one, and the Insights shots could only be taken by backfilling the
+table out of band with a Go writer built from git history. Fixed by #408; the
+app populates the table itself now, so the only thing left of it is that an
+Insights shot taken within a minute of launch may still catch the sweep
+mid-flight.

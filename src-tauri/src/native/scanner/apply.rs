@@ -62,6 +62,12 @@ pub fn scan_readers() -> usize {
     cores.saturating_sub(1).clamp(2, 8)
 }
 
+/// `claude_session_cache`'s primary key: `(session_id, project_path)`.
+///
+/// Named rather than spelled out at each use so the pairing is legible and so
+/// the type cannot quietly become a `String` again.
+type SessionKey = (String, String);
+
 /// One file to re-read, with what the diff already knows about it.
 #[derive(Debug, Clone)]
 pub struct ScanUnit {
@@ -82,6 +88,15 @@ struct ScanResult {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Notification {
     pub session_id: String,
+    /// The other half of the cache key, and the reason it is here (#408).
+    ///
+    /// Go's event payload carried the id and the path only, because its one
+    /// subscriber — the insight worker — keyed on the id alone. That is the
+    /// #362 defect: `claude_session_cache` is keyed on
+    /// `(session_id, project_path)`, so a session id under two project paths is
+    /// two rows with two transcripts, and an announcement that cannot tell them
+    /// apart is an announcement one of them never gets.
+    pub project_path: String,
     pub file_path: PathBuf,
     /// True only for a genuinely new row. A claim shift is an update, and a
     /// sub-agent is never a discovery in its own right.
@@ -116,9 +131,10 @@ pub fn apply_changes(
     progress(0, total);
 
     let mut outcome = ApplyOutcome::default();
-    // Keyed by session id so a session with several changed files is announced
-    // once. Ordered so the announcement order is deterministic.
-    let mut pending: BTreeMap<String, Notification> = BTreeMap::new();
+    // Keyed by the cache's own key so a session with several changed files is
+    // announced once, and two sessions sharing an id are announced twice.
+    // Ordered so the announcement order is deterministic.
+    let mut pending: BTreeMap<SessionKey, Notification> = BTreeMap::new();
 
     let (result_tx, result_rx) = mpsc::sync_channel::<ScanResult>(SCAN_BATCH_SIZE);
     // A rendezvous channel: a reader takes the next unit only when it is free,
@@ -260,7 +276,7 @@ fn flush(
     conn: &mut Connection,
     batch: &mut Vec<ScanResult>,
     outcome: &mut ApplyOutcome,
-    pending: &mut BTreeMap<String, Notification>,
+    pending: &mut BTreeMap<SessionKey, Notification>,
 ) -> usize {
     let count = batch.len();
     let items = std::mem::take(batch);
@@ -308,7 +324,12 @@ fn write_batch(conn: &mut Connection, items: &[ScanResult]) -> Result<(), String
 /// A sub-agent is recorded against its **parent's** id and path, always as an
 /// update, and never overwrites an entry already present — so the parent's own
 /// record, which may be a discovery, wins regardless of write order.
-fn record_pending(pending: &mut BTreeMap<String, Notification>, item: &ScanResult) {
+///
+/// **Keyed on `(session_id, project_path)`, not on the id** (#408): the pair is
+/// the cache's primary key, so collapsing on the id alone would announce one of
+/// a duplicated id's two sessions and silently swallow the other — including
+/// its `is_new`, and including the parent path a sub-agent row resolves to.
+fn record_pending(pending: &mut BTreeMap<SessionKey, Notification>, item: &ScanResult) {
     let file = &item.unit.file;
     let (path, is_new) = if file.is_subagent {
         (file.parent_file_path.clone(), false)
@@ -317,9 +338,10 @@ fn record_pending(pending: &mut BTreeMap<String, Notification>, item: &ScanResul
     };
 
     pending
-        .entry(file.session_id.clone())
+        .entry((file.session_id.clone(), file.project_path.clone()))
         .or_insert(Notification {
             session_id: file.session_id.clone(),
+            project_path: file.project_path.clone(),
             file_path: path,
             is_new,
         });
@@ -355,7 +377,7 @@ mod tests {
         record_pending(&mut pending, &sub);
         record_pending(&mut pending, &parent);
         assert_eq!(pending.len(), 1);
-        let n = &pending["s1"];
+        let n = &pending[&key("s1", "/p")];
         assert_eq!(
             n.file_path,
             PathBuf::from("/d/s1.jsonl"),
@@ -370,7 +392,39 @@ mod tests {
         let mut pending = BTreeMap::new();
         record_pending(&mut pending, &parent);
         record_pending(&mut pending, &sub);
-        assert!(pending["s1"].is_new);
+        assert!(pending[&key("s1", "/p")].is_new);
+    }
+
+    /// The collapse key is the cache's key, not the session id (#408).
+    ///
+    /// Copying a `~/.claude` to set up a second account gives one session id two
+    /// project paths, two transcripts and two cache rows. Keyed on the id alone
+    /// this announces one of them and silently swallows the other, so its
+    /// insight is never computed from the event path — the defect #362 fixed in
+    /// the schema and the sessions list, in its third form.
+    #[test]
+    fn one_session_id_under_two_projects_is_two_notifications() {
+        let mut pending = BTreeMap::new();
+        record_pending(
+            &mut pending,
+            &result_in("/a", "s1", "/a/s1.jsonl", false, true),
+        );
+        record_pending(
+            &mut pending,
+            &result_in("/b", "s1", "/b/s1.jsonl", false, true),
+        );
+
+        assert_eq!(pending.len(), 2);
+        assert_eq!(
+            pending
+                .values()
+                .map(|n| (n.project_path.as_str(), n.file_path.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("/a", PathBuf::from("/a/s1.jsonl")),
+                ("/b", PathBuf::from("/b/s1.jsonl")),
+            ],
+        );
     }
 
     #[test]
@@ -387,12 +441,26 @@ mod tests {
         assert_eq!(pending.len(), 1);
     }
 
+    fn key(session: &str, project: &str) -> SessionKey {
+        (session.to_string(), project.to_string())
+    }
+
     fn result(session: &str, path: &str, is_subagent: bool, is_new: bool) -> ScanResult {
+        result_in("/p", session, path, is_subagent, is_new)
+    }
+
+    fn result_in(
+        project: &str,
+        session: &str,
+        path: &str,
+        is_subagent: bool,
+        is_new: bool,
+    ) -> ScanResult {
         ScanResult {
             unit: ScanUnit {
                 file: DiskFile {
                     session_id: session.into(),
-                    project_path: "/p".into(),
+                    project_path: project.into(),
                     file_path: PathBuf::from(path),
                     mtime: chrono::DateTime::UNIX_EPOCH,
                     is_subagent,

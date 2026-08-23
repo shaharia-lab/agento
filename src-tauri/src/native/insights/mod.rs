@@ -1,25 +1,36 @@
 //! The Claude session insights pipeline and the summary it feeds.
 //!
-//! Two halves, deliberately split by what they can safely do today:
+//! Four parts:
 //!
+//! - [`processors`] recomputes one session's row from its transcripts. Pure
+//!   computation — a function from a transcript to a `SessionInsight`.
+//! - [`store`] is the `session_insights` half: what needs recomputing, the
+//!   upsert, and the reconcile. **Every statement there keys on
+//!   `(session_id, project_path)`**, which is where it parts company with the
+//!   Go store; read its header before touching any of them.
+//! - [`worker`] is the loop that joins the two — the boot sweep, the five-minute
+//!   rescan, and the queue `scan.rs` announces changed sessions on.
 //! - [`summary`] answers `GET /api/claude-sessions/insights/summary` by reading
-//!   the `session_insights` rows. It is live behind the seam.
-//! - [`processors`] recomputes those rows from a transcript. It is **pure
-//!   computation and writes nothing** — see below.
+//!   the rows back.
 //!
-//! ## Why the pipeline does not write
+//! ## The writer arrived late, and its absence was invisible
 //!
-//! On the Go side `insight_worker.go` is a background writer: it subscribes to
-//! session events, reprocesses on a version bump, and upserts `session_insights`.
-//! Porting that *writer* now would put two processes on one SQLite file — the
-//! Go sidecar's worker and this one — racing each other over the same rows.
-//! Storage and the write endpoints move together later.
+//! This file used to say the pipeline deliberately wrote nothing, because
+//! porting `insight_worker.go`'s upsert "would put two processes on one SQLite
+//! file — the Go sidecar's worker and this one", and that "when the storage
+//! layer moves, the worker is a loop around this". The storage layer moved
+//! (#274, #278) and the Go tree was deleted (#391); the loop was not written
+//! until #408.
 //!
-//! So the processors are ported as what they actually are: a function from a
-//! transcript to a `SessionInsight`. That is enough to verify them against real
-//! data — run them over the same transcripts the Go worker already processed and
-//! compare against the rows it stored — and it is the whole of the logic. When
-//! the storage layer moves, the worker is a loop around this.
+//! What that cost is worth keeping in mind, because nothing reported it: with
+//! no writer, `session_insights` had exactly one remaining mutation in the whole
+//! codebase — `scan.rs`'s `UPDATE … SET processor_version = 0`, which *queues*
+//! rows for reprocessing. So a fresh install scanned its entire corpus and
+//! Insights still read "0 sessions analysed", a migrated install silently
+//! stopped gaining rows at the cut-over, and an idle-threshold change zeroed
+//! every existing row's version and then left the summary reading figures
+//! computed under the old threshold for good. Every one of those looks exactly
+//! like a corpus with nothing interesting in it.
 //!
 //! ## What decides the numbers
 //!
@@ -31,8 +42,10 @@
 //! drift the shared predicate exists to prevent.
 
 pub mod processors;
+pub mod store;
 pub mod summary;
 pub mod transcript;
+pub mod worker;
 
 use axum::http::Method;
 

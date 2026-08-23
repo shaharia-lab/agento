@@ -516,13 +516,38 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
         },
     );
 
-    // `outcome.notifications` is deliberately dropped. Go publishes them on its
-    // event bus and the insight worker reacts at once; Rust has no bus, so the
-    // desktop app relies on that worker's own 5-minute `rescanOutdated` loop
-    // instead. The effect is bounded latency, not lost work — the rows are
-    // written and carry their versions, so the loop finds them. An event path is
-    // worth building when there is a second consumer; until then a bus with one
-    // subscriber behind a 5-minute fallback is machinery for its own sake.
+    // What Go publishes on its event bus, delivered to the one subscriber that
+    // ever existed for it (#408). There is still no bus — a bus between two
+    // functions is machinery for its own sake — so this is a direct call, the
+    // same shape #275 settled on for the scheduler and the notification
+    // handler.
+    //
+    // It is best-effort by construction: `enqueue` never blocks and drops on a
+    // full queue, and it is a no-op before the worker starts, which the boot
+    // scan races. Nothing durable is lost either way, because a session with no
+    // insight row is exactly what the worker's own sweep selects for.
+    //
+    // The reconcile runs **after** the delete pass rather than inside it, and
+    // keys on "no cache row for this pair remains" rather than on a path — see
+    // `insights::store::delete_orphans` for why a claim shift makes the path
+    // formulation wrong, and why running here inherits the delete pass's
+    // protection for an unreadable config dir.
+    match super::insights::store::delete_orphans(&conn) {
+        Ok(n) if n > 0 => log::info!("insights: reconciled {n} orphaned rows"),
+        Ok(_) => {}
+        // Logged and continued, like the idle-threshold invalidation above:
+        // losing this leaves rows the summary over-counts, where failing the
+        // scan costs the corpus.
+        Err(e) => log::warn!("claude sessions: {e}"),
+    }
+    super::insights::worker::enqueue(outcome.notifications.iter().map(|n| {
+        super::insights::store::Pending {
+            session_id: n.session_id.clone(),
+            project_path: n.project_path.clone(),
+            file_path: n.file_path.to_string_lossy().into_owned(),
+        }
+    }));
+
     state()
         .lock()
         .unwrap_or_else(|e| e.into_inner())

@@ -296,6 +296,9 @@ src-tauri/src/
     insights/    GET /api/claude-sessions/insights/summary
       transcript.rs the session JSONL, decoded — the scanner port builds on this
       processors.rs the nine passes that produce a session_insights row
+      store.rs     the rows — and the three statements that key on the *pair* (#408)
+      worker.rs    the loop that fills the table: boot sweep, 5-minute rescan,
+                   and the queue the scan announces changed sessions on
       summary.rs    the aggregate the endpoint answers with
     diff.rs      byte comparison + reporting for shadow mode
 
@@ -841,6 +844,43 @@ model id may contain a slash but never a newline.
 pipeline deliberately — `is_user_turn_content` decides `message_count`,
 `turn_count` and the journey's turns at once, and the same session's active
 duration is stored in two tables under a user-configurable threshold.
+
+### The insight worker (`src-tauri/src/native/insights/`, #408)
+
+The other writer over the corpus, and the one that did not exist for a long
+time: the nine processors were ported as pure functions, the summary endpoint
+read `session_insights`, and **nothing wrote a row**. Insights therefore
+answered 200 with zeros on every fresh install, which is indistinguishable from
+a corpus with nothing in it — the failure that only a count over the real
+corpus can see, which is what `tests/insights_live.rs` is (`--ignored`; run it
+by hand like `scan_live`).
+
+Three rules, each silent when wrong:
+
+- **Every statement keys on `(session_id, project_path)`.** The Go store keys
+  on the id alone in all three — the upsert's `ON CONFLICT`, the join, and the
+  `SELECT` — and `insight_worker.go` dedups in-flight work on it too. That is
+  the #362 family in its third and fourth form. The upsert is the loud one (the
+  conflict target does not exist since migration 29); the *join* is the quiet
+  one, because a current row for one project satisfies the other project's
+  cache row and that session is reported done forever.
+- **The reconcile keys on "no cache row remains", never on a path.** A claim
+  shift moves a transcript and is an update, not a deletion (#245), and
+  `session_insights` has no `file_path` to get this wrong with. Running it after
+  the scan's own delete pass is what inherits the unreadable-config-dir
+  protection: those cache rows survive, so their insights are not orphans.
+- **A full queue asks for a sweep; it does not drop and wait.** The scan
+  announces changed sessions on a 100-slot channel, and a first scan announces
+  ten times that. Go warns per dropped item and waits for the next five-minute
+  rescan, which reproduces the empty-Insights symptom this issue is named after;
+  `SWEEP_REQUESTED` turns the whole overflow into one sweep instead.
+
+The worker owns a thread rather than a tokio task — every step is blocking, the
+way `scan::ensure_scan` already is — so `db::blocking` does not apply. Note the
+scan's staleness markers deliberately do **not** cover
+`CURRENT_PROCESSOR_VERSION`: a processor-only bump must not force a full
+re-read of `claude_session_cache`, so the five-minute sweep is the only thing
+that notices one.
 
 ### The Claude Agent SDK (`src-tauri/src/claude/`)
 
@@ -3149,11 +3189,6 @@ because each one cost real time to find:
   thing to invalidate correctly, and nothing about the response depends on one.
 
 **Known gaps**
-- **Nothing writes `session_insights`.** The nine processors exist as pure
-  functions and the summary endpoint reads the table, but no worker populates
-  it — so Insights is empty on a fresh install and silently stale on a migrated
-  one. This is the largest outstanding gap; the screenshot skill works around it
-  by backfilling out of band.
 - **Windows `filepath` semantics are unimplemented.** `fs.rs`,
   `claude_settings/` and the config-dir probe answer 501 there.
 - **`GET /api/fs` answers 500 where it should answer 404 or 400.** The
