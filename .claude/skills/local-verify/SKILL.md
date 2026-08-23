@@ -18,7 +18,8 @@ hops, bisect them instead of guessing.
 | Backend wire | `curl -sN` against the API | what bytes the server actually emits |
 | Browser engine | Chrome via Vite dev server | frontend logic, CSS, UI flows |
 | WebKitGTK engine | Python `gi` WebKit2 probe | engine-level behavior without the app |
-| **Real Tauri webview** | WebKit remote inspector | the only place webview-specific bugs exist |
+| **Real Tauri webview** | `ui-verify` skill (`ui.mjs`) | the only place webview-specific bugs exist |
+| **What is on screen** | `ui-verify` skill — `shot` + Read the PNG | that the view actually renders, rather than typechecking |
 | **Tauri IPC / ACL** | `__TAURI_INTERNALS__.invoke` in that webview | whether a command is *permitted*, separate from whether the UI calls it |
 | **OS handoff** | PATH shim over the launcher | whether the OS was actually asked to do the thing |
 
@@ -115,16 +116,21 @@ WEBKIT_INSPECTOR_HTTP_SERVER=127.0.0.1:9224 \
 WEBKIT_INSPECTOR_HTTP_SERVER=127.0.0.1:9224 src-tauri/target/debug/agento
 ```
 
-**Do not hand-roll the protocol client — use the one in this directory:**
+**Do not hand-roll the protocol client — there is exactly one, and it lives in
+the `ui-verify` skill.** It supersedes the `drive.mjs` this file used to carry;
+a second evaluator is how two clients drift apart over the same traps.
 
 ```bash
-node .claude/skills/local-verify/drive.mjs '<js expression>'      # evaluate
-node .claude/skills/local-verify/drive.mjs --await '<js promise>' # settle a promise
-node .claude/skills/local-verify/drive.mjs --console              # stream console
+cd .claude/skills/ui-verify
+node ui.mjs eval  '<js expression>'   # evaluate
+node ui.mjs await '<js promise>'      # settle a promise
+node ui.mjs console 3000              # collect console output
+node ui.mjs shot /tmp/a.png           # ...and photograph the result
 ```
 
 It needs no dependencies (Node ≥ 22 has a global `WebSocket`) and encodes both
-traps below. The protocol, if you must extend it: WebSocket to
+traps below. `app.sh` in the same directory brings the app up with the
+inspector open, reusing a running one rather than relaunching. The protocol, if you must extend it: WebSocket to
 `ws://127.0.0.1:9224/socket/1/1/WebPage`, wait for `Target.targetCreated`, wrap
 every command in
 `Target.sendMessageToTarget {targetId, message: JSON.stringify({id, method, params})}`
@@ -146,7 +152,7 @@ Two traps that both read as success:
 `File src-tauri/… changed. Rebuilding application...`, the window is replaced,
 and the inspector comes back on the same port. So the edit→verify loop for
 Rust *and* ACL changes is: edit, wait for `api server listening` in the log,
-re-run the same `drive.mjs` probe. No relaunch, no rebuild command.
+re-run the same `ui.mjs` probe. No relaunch, no rebuild command.
 
 Driving the React UI from injected JS: set inputs through the **native value
 setter** then dispatch an `input` event (React ignores plain `.value =`):
@@ -215,14 +221,23 @@ reproduce there.
 
 ## Gates before pushing
 
-Mirror CI, from the repository root: `npm run build` (tsc + vite). For
-`src-tauri/` changes: `cargo fmt --check` and `cargo clippy --all-targets -- -D
-warnings` (checking only, no linking — safe).
+```bash
+.claude/skills/local-verify/check.sh                 # fmt + clippy + frontend build
+.claude/skills/local-verify/check.sh --test <name>   # ...and one test binary
+.claude/skills/local-verify/check.sh --tests         # ...and all of them, serially
+```
 
-**Never run bare `cargo test` here.** The crate has many integration-test
-binaries and Cargo links them concurrently; linking a Tauri binary is
-memory-hungry and the parallel step hangs this machine. Scope every run to the
-target you touched and cap parallelism: `cargo test --test <name> -j 4`. CI
-runs the full suite.
+That mirrors CI, and it bounds the one step that can take the machine down
+with it.
+
+**Never run bare `cargo test` here**, and the reason is worth having in
+numbers rather than as a warning: `libagento_lib.a` is **1.2 GB** and the debug
+binary is **429 MB**, each of the eight integration tests links the whole of
+it, and `cargo test` links them **concurrently** — eight multi-gigabyte link
+jobs on a 16 GB machine, which swaps and stops responding. Nothing is wrong
+with the tests; it is linker parallelism, so `check.sh` runs one binary at a
+time with `-j` capped rather than skipping them. `cargo fmt`, `cargo clippy`
+and the frontend build never link, which is why the default mode is safe to run
+as often as you like. CI runs the full suite on its own runner.
 
 Then re-run the original reproduction one last time on the final build.
