@@ -537,6 +537,14 @@ mod acl_manifest_tests {
     ///
     /// Both lists are flat and hold no brackets or strings of their own, so the
     /// first `]` is the closing one and no bracket matching is needed.
+    ///
+    /// **`LIB_RS` contains this module, so it holds the `generate_handler!`
+    /// marker twice** — once as the real invocation and once as the argument
+    /// literal below. The real one is earlier in the file, so `split_once` finds
+    /// it. That ordering is not something to rely on silently: if a future edit
+    /// ever put a mention ahead of the macro, the parse would run on the wrong
+    /// text and the assertions below would fail loudly with a garbled left-hand
+    /// set rather than passing on a stale one.
     fn items_after(source: &str, marker: &str) -> Vec<String> {
         let rest = source
             .split_once(marker)
