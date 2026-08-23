@@ -231,8 +231,8 @@ async fn handle(req: Request<Body>) -> Response<Body> {
 async fn dispatch(req: Request<Body>, raw_path: String) -> (Response<Body>, Served) {
     // `internal/server/guards.go`, applied **before** routing (#329) — so every
     // route, claimed or not, is refused identically. The proxy used to be the
-    // only place the browser's `Host` could be checked because `forward`
-    // rewrote it; the forward is gone, but the ordering stays: the guards need
+    // only place the browser's `Host` could be checked, because forwarding
+    // rewrote it. The forward is gone; the ordering stays, because the guards need
     // no route to say no.
     if let Some((status, message)) = crate::guards::reject(&req) {
         return (error_response(status, message), Served::Rejected);

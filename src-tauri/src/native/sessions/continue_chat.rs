@@ -14,17 +14,17 @@
 //! reproduce faithfully: the user gets a 500 and a stray "New Chat".
 //!
 //! This runs both statements inside one transaction, which is a deliberate
-//! divergence and the only one available. `Err` means "forward to Go", so a
-//! Rust failure *between* the two writes would leave the orphan **and** have Go
-//! create a second chat — the one outcome worse than Go's. Rolling back gives
-//! "both or neither"; the response is a single `chat_id` either way, so nothing
-//! observable changes except that the failure path stops leaking a row.
+//! divergence. A failure *between* the two writes would otherwise leave the
+//! orphan chat behind and report a 500 — so the user sees an error and gains a
+//! stray "New Chat". Rolling back gives "both or neither"; the response is a
+//! single `chat_id` either way, so nothing observable changes except that the
+//! failure path stops leaking a row.
 //!
 //! # The statuses
 //!
-//! A missing session is `404`; a lookup *failure* is `500` and therefore
-//! forwards. `detail::get` collapses both into `None`/`Err`, so the split here
-//! is the same one it makes.
+//! A missing session is `404`; a lookup *failure* is `500`. `detail::get`
+//! collapses both into `None`/`Err`, so the split here is the same one it
+//! makes.
 
 use axum::http::StatusCode;
 use serde::Serialize;
@@ -79,8 +79,8 @@ pub fn continue_session(db_path: &std::path::Path, session_id: &str) -> Result<A
     )
     .map_err(|e| WriteError::Fallback(format!("linking claude session: {e}")))?;
 
-    // Encoded before the commit: after it, an `Err` would forward and Go would
-    // create a second chat.
+    // Encoded before the commit: after it, an `Err` would report failure for a
+    // chat that exists, and a retry would create a second one.
     let body = gojson::to_vec(&ContinueResponse {
         chat_id: session.id.clone(),
     })

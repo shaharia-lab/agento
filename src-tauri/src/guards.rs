@@ -74,20 +74,10 @@
 //!
 //! # Why the proxy, and why this is not belt-and-braces
 //!
-//! `proxy.rs` checked `route_is_native` and, on a match, handed the request
-//! straight to `native::serve` — no `Host` check, no `Content-Type` check. Only
-//! requests that *forwarded* reached `guards.go`. So the guards' coverage shrank
-//! with every endpoint the port claimed, which inverts the seam's rule that a
-//! ported route can only be as broken as an unported one. That is what this
-//! module fixes, and it is why the check runs **before** the `route_is_native`
-//! branch rather than inside either half.
-//!
-//! For the content type the sidecar's own copy is then a second line. **For the
-//! `Host` it is not**: [`crate::proxy::forward`] rewrites the header to the
-//! upstream authority — which is what makes a proxied request indistinguishable
-//! from a direct same-origin one, and is required for the sidecar to answer at
-//! all — so `validateHost` upstream has never seen the browser's `Host`. This is
-//! the only place it can be checked.
+//! These checks run in `dispatch`, **before** routing is decided, so a request
+//! is refused identically whichever endpoint would have answered it. Putting
+//! them inside a handler would mean every new endpoint had to remember them,
+//! and the one that forgot would be the hole.
 //!
 //! # What is deliberately *not* guarded
 //!
@@ -664,9 +654,8 @@ pub(crate) mod tests {
     }
 
     /// DNS rebinding makes an attacker's domain same-origin, so CORS stops
-    /// applying entirely — and unlike the content type, the sidecar's own copy
-    /// of this check cannot help, because `proxy::forward` rewrites the `Host`
-    /// to the upstream authority before it gets there.
+    /// applying entirely. This check is the only thing standing between a
+    /// rebound name and the whole API.
     #[test]
     fn only_a_host_the_proxy_is_served_under_is_admitted() {
         for host in [

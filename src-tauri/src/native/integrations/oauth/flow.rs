@@ -73,9 +73,8 @@ const GO_INTERNAL_ERROR: &str = "internal server error";
 
 /// Log the real reason and answer what Go answers.
 ///
-/// The detail reaches the log, never the wire — `httpErr`'s default arm does the
-/// same, and reproducing it here rather than forwarding is what stops the
-/// sidecar starting a second flow. See [`start`].
+/// The detail reaches the log, never the wire — the default error arm does the
+/// same. See [`start`].
 fn internal<E: std::fmt::Display>(what: &'static str) -> impl Fn(E) -> WriteError {
     move |e| {
         log::error!("internal server error error={what}: {e}");
@@ -116,14 +115,12 @@ struct ClientCredentials {
 ///
 /// # Nothing here may `Fallback`
 ///
-/// Every other native write forwards on doubt and lets Go answer. This one must
-/// not: forwarding `auth/start` makes the **sidecar** run a real flow, with its
-/// own callback server on its own port. The shell would never see that token
-/// land — the inference that used to cover it (`Trigger::AuthStatusPolled`) is
-/// gone precisely because this route moved — and Go's own `registry.Reload` is
-/// switched off for the six hosted types by `AGENTO_INTEGRATIONS`. The result is
-/// an integration that authenticates and is hosted by nobody until the next app
-/// start.
+/// `Fallback` means "the machinery broke" and carries a generic body.
+/// [`WriteError::Internal`] is used instead, because this route's failures are
+/// specific and already logged: a failed flow must not be reported in a way that
+/// invites the caller to read the *stored* token and conclude
+/// `authenticated: false`, which would be a plausible lie about a flow that
+/// errored.
 ///
 /// So the failures Go answers with a flat 500 are answered here as
 /// [`WriteError::Internal`], with Go's own body: the same bytes on the wire, and

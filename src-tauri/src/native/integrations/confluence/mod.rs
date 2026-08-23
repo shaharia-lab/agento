@@ -197,9 +197,9 @@ pub async fn start_confluence_mcp_server(
 /// **The second of two places that reason about `net/url`'s rules.** The first
 /// is `native/integration_credentials.rs`'s `split_url`, and the difference is
 /// which question is being asked: there it is *create* — may this row be stored
-/// — and forwarding the whole request to Go is always available, so it decides
+/// — and refusing the whole request with a 422 is always available, so it decides
 /// only the shapes it is sure of. Here it is *start* — may a stored row be
-/// hosted — and there is nobody to forward to, so this reproduces `getScheme`
+/// hosted — and a refusal there is silent, so this reproduces `getScheme`
 /// and the authority split outright and answers every input. #316 adds a third
 /// caller of the same Go rules with a different answer again, since Jira does
 /// not require HTTPS.
@@ -261,7 +261,7 @@ pub async fn start_confluence_mcp_server(
 ///   `parseHost` is itself an allowlist — `split_url` in
 ///   `native/integration_credentials.rs` says so, having enumerated every ASCII
 ///   byte through it — so the sound shape here is an allowlist too, and a
-///   narrower one, because that module may forward what it is unsure of and
+///   narrower one, because that module may refuse what it is unsure of and
 ///   this one may not. The rule is: ASCII letters, digits, `.`, `-` and `_`,
 ///   with an optional `:`-separated numeric port.
 ///

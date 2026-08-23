@@ -74,11 +74,10 @@ pub fn update(
         .map_err(|e| WriteError::Fallback(format!("opening database: {e}")))?;
     crate::native::migrate::verify(&conn).map_err(WriteError::Fallback)?;
 
-    // Go runs the two statements separately, so a failed second one leaves the
-    // first applied. One transaction is the safe divergence: `Err` forwards, and
-    // a half-applied update followed by Go re-applying both reaches the same
-    // rows either way — but only "both or neither" keeps the rule that a native
-    // write fails *before* it mutates.
+    // The reference runs the two statements separately, so a failed second one
+    // leaves the first applied. One transaction is the safe divergence: "both
+    // or neither" is what keeps the rule that a write fails *before* it
+    // mutates, so a 500 never reports a half-applied update.
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|e| WriteError::Fallback(format!("begin session update: {e}")))?;

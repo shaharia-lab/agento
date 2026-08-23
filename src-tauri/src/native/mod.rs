@@ -197,7 +197,8 @@ pub struct Ctx {
 ///
 /// The pair travels together so claiming a route and implementing it are the
 /// same edit. Splitting them across two files is how a route ends up claimed by
-/// a handler that does not exist, which fails as a fallback to Go — silently.
+/// a handler that does not exist, which fails at runtime rather than at
+/// compile time.
 pub struct Endpoint {
     /// Shown when a claimed request has no handler. Not on the wire.
     pub name: &'static str,
@@ -385,7 +386,7 @@ mod tests {
         assert!(claims(&Method::GET, "/api/claude-sessions/projects"));
         assert!(!claims(&Method::GET, "/api/claude-sessions/"));
         // The rename/favourite write shares that path and is separated by
-        // method (#296). Every other method on it still forwards.
+        // method (#296). Every other method on it is unrouted.
         assert!(claims(&Method::PATCH, "/api/claude-sessions/abc-123"));
         assert!(!claims(&Method::PUT, "/api/claude-sessions/abc-123"));
         assert!(!claims(&Method::DELETE, "/api/claude-sessions/abc-123"));
@@ -403,7 +404,7 @@ mod tests {
         assert!(!claims(&Method::GET, "/api/claude-sessions/abc/insights"));
 
         // Agents: the two reads and, since #274, the three writes. `duplicate`
-        // is a different route and still forwards.
+        // is a different route and is unclaimed.
         assert!(claims(&Method::GET, "/api/agents"));
         assert!(claims(&Method::GET, "/api/agents/my-agent"));
         assert!(claims(&Method::POST, "/api/agents"));
@@ -489,9 +490,9 @@ mod tests {
         assert!(!claims(&Method::GET, "/api/claude-settings/profiles/"));
 
         // Monitoring: the read, plus the two writes this build **declines**
-        // (#309). They are claimed rather than forwarded on purpose — a forward
-        // would reach a sidecar that would save the config and reload its own
-        // providers, which is the outcome the decision exists to stop.
+        // (#309). They are claimed rather than left unrouted on purpose: a
+        // 404 would read as a version mismatch, where the truth is that this
+        // build declines the feature.
         assert!(claims(&Method::GET, "/api/monitoring"));
         assert!(claims(&Method::PUT, "/api/monitoring"));
         assert!(claims(&Method::POST, "/api/monitoring/test"));
@@ -597,7 +598,7 @@ mod tests {
         // An encoded separator stays encoded, which is what keeps a one-segment
         // route one segment. A blanket decode — the obvious fix — would make
         // this `/api/agents/a/b`, `slug_of` would reject it, and a PUT Go
-        // applies would forward instead of being claimed.
+        // should apply would go unrouted instead of being claimed.
         assert_eq!(route("/api/agents/a%2Fb"), "/api/agents/a%2Fb");
         assert!(claims(&Method::PUT, &route("/api/agents/a%2Fb")));
 
@@ -629,8 +630,8 @@ mod tests {
         ));
 
         // A malformed target has no route path at all: `url.ParseRequestURI`
-        // rejects it, so Go answers 400 from inside `net/http` and the proxy
-        // forwards rather than inventing one.
+        // rejects it, so the answer is a 400 from before any handler — see
+        // `proxy.rs`.
         assert!(gourl::route_path("/api/agents/a%2").is_none());
     }
 

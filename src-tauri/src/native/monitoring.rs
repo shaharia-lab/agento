@@ -519,7 +519,7 @@ mod tests {
         assert!(!claims(&Method::PUT, "/api/monitoring/test"));
     }
 
-    /// A declined route must be **answered**, not forwarded: forwarding would
+    /// A declined route must be **answered**, not left unrouted: a 404 would
     /// reach the sidecar, which would happily save the config and reload its
     /// own providers — the outcome this decision exists to stop.
     #[test]

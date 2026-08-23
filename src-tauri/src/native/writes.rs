@@ -74,15 +74,16 @@ pub enum WriteError {
     /// users (#309): the desktop build exports no telemetry, so a save that
     /// appeared to succeed would be the worst answer available.
     NotImplemented(String),
-    /// Go answers **500 with this exact body**, and forwarding would answer
+    /// Answers **500 with this exact body**, where a `Fallback` would answer
     /// something else.
     ///
     /// The distinction from [`Self::Fallback`] is the whole reason this exists.
-    /// `Fallback` means "the sidecar can answer this better than I can", which
+    /// `Fallback` means "the machinery broke in a way this build cannot word", which
     /// holds for every 500 whose body comes from a Go error string. It stops
     /// holding the moment the state the answer depends on lives **here**:
     /// `GET /api/integrations/{id}/auth/status` reads the in-flight OAuth map,
-    /// and since #318 that map is the shell's. Forwarding a failed flow would
+    /// and since #318 that map is this process's. Reporting a failed flow as a
+    /// generic machinery failure would
     /// have Go answer from the stored token — `authenticated: false`, a
     /// plausible-looking lie — where Go itself would have answered 500. So the
     /// 500 is produced here, with `httpErr`'s default body verbatim.
@@ -161,11 +162,10 @@ pub fn error_body(message: &str) -> ErrorBody<'_> {
 
 /// Turn a handler result into what the seam expects.
 ///
-/// Every error becomes a real response with Go's status and Go's body. For
-/// `Fallback` — a machinery failure whose Go wording this build cannot
-/// reproduce — that is `httpErr`'s default 500, and the carried reason goes to
-/// the log instead of the wire, which is where Go put it too. (Until #278
-/// `Fallback` became `Err` and the proxy forwarded it to the sidecar.)
+/// Every error becomes a real response with its own status and body. For
+/// `Fallback` — a machinery failure whose exact wording this build cannot
+/// reproduce — that is the default 500, and the carried reason goes to the log
+/// instead of the wire.
 pub fn finish(result: Result<super::Answer, WriteError>) -> Result<super::Answer, String> {
     match result {
         Ok(answer) => Ok(answer),
@@ -259,7 +259,7 @@ pub fn finish(result: Result<super::Answer, WriteError>) -> Result<super::Answer
 /// because it holds no nested struct, but its `hidden_projects` and
 /// `claude_config_dirs` are plain `Vec<String>` rather than
 /// [`super::gojson::GoList`], so `[null]` is an over-*reject* there. That is
-/// #295's rule rather than this one, and the route still forwards, so it is
+/// #295's rule rather than this one, and the route is unclaimed, so it is
 /// recorded rather than changed.
 pub fn decode_body<T: serde::de::DeserializeOwned>(body: &[u8]) -> Result<T, WriteError> {
     if body.is_empty() {
@@ -469,7 +469,8 @@ mod tests {
         );
     }
 
-    /// Duplicate keys forward, because only Go can answer them.
+    /// Duplicate keys are declined, because neither behaviour can be claimed
+    /// with confidence — see the note above.
     ///
     /// `encoding/json` keeps the **last** occurrence but type-checks **every**
     /// one, so `{"n":"x","n":1}` is a 400 to Go even though the surviving value
@@ -617,7 +618,8 @@ mod tests {
         );
     }
 
-    /// A 422 is an answer, not a failure to answer: it must not forward, or the
+    /// A 422 is an answer, not a failure to answer: it must not become a
+    /// `Fallback`, or the
     /// sidecar would redo the work to reach the same conclusion.
     #[test]
     fn a_validation_failure_is_answered_here() {

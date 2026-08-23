@@ -15,10 +15,10 @@
 //! that is `whatsapp` alone — the local in-process server (#310), github (#311),
 //! confluence (#317), jira (#316), slack (#315), telegram (#314) and google
 //! (#313) are all hosted here — so the remaining blockers are that one type and
-//! the two non-integration forwards. A chat can forward to Go on that
-//! refusal; a scheduled task with no Go scheduler behind it would simply never
-//! run, with nothing to say so. See "The scheduler: the computation moved, the
-//! ownership did not" in `desktop/CLAUDE.md`.
+//! the two non-integration refusals. A chat answers a 500 on that refusal; a
+//! scheduled task records a failed `job_history` row, because a run that simply
+//! never happened would be indistinguishable from one that was not due. See
+//! `super::executor`.
 //!
 //! Porting this half now is worth it because it is the half that is
 //! *verifiable* before ownership moves, and the half most likely to be subtly

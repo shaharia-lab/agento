@@ -55,10 +55,10 @@
 //! exactly as it did before this module existed. What *this* module does with
 //! one is take the path Go's own unregistered type takes — the error `no starter
 //! registered for integration type "slack"`, **logged and never surfaced** —
-//! but it never gets the chance, because the native `PUT`/`DELETE` decline a row
-//! whose type is not [`hosts_type`] and forward the whole request to Go, which
-//! then fires its own `Reload`/`Stop`. That refusal is a *pre-write* one; see
-//! `native/integrations.rs` and the invariant in `writes.rs`.
+//! but it never gets the chance, because the `PUT`/`DELETE` decline a row whose
+//! type is not [`hosts_type`] rather than writing it. That refusal is a
+//! *pre-write* one; see `native/integrations.rs` and the invariant in
+//! `writes.rs`.
 //!
 //! ## Reload is not restart-if-changed
 //!
@@ -93,13 +93,12 @@
 //! and `validateConfluenceAuth`. Each writes a credential for a type *this*
 //! process hosts, from a handler that cannot tell it. Without a hook such an
 //! integration would first be hosted at the next boot's [`start_all`], so the
-//! seam fires [`reload_after_auth`] after forwarding a 2xx for that one route
-//! (`native::after_forward`). That hook needs no per-type list of its own: it
-//! runs for every id on the route and [`reload_after_auth`] reads the row's type
-//! through [`can_host`], so #313 is covered the moment it adds its
-//! string to [`HOSTED_TYPES`]. The reload is idempotent and the response has
-//! already been produced, so doing it on the forward path costs nothing but a
-//! restart of a server that was about to be restarted anyway.
+//! seam fires [`reload_after_auth`] on a 2xx for that one route. That hook needs
+//! no per-type list of its own: it runs for every id on the route and
+//! [`reload_after_auth`] reads the row's type through [`can_host`]. The reload
+//! is idempotent and the response has already been produced, so firing it here
+//! costs nothing but a restart of a server that was about to be restarted
+//! anyway.
 //!
 //! The fifth is `completeOAuth`, and until #318 it needed a **different** hook
 //! because its trigger never crossed the proxy: the token was delivered by the
@@ -1006,8 +1005,9 @@ fn type_of(db_path: &Path, id: &str) -> Result<Option<String>, String> {
 /// Whether a run naming this integration can be served natively at all.
 ///
 /// Separate from [`start_filtered_server`] because the caller has to decide
-/// *before* it starts anything: an agent that names a type Rust cannot host must
-/// forward the whole turn to Go rather than run with some of its tools missing.
+/// *before* it starts anything: an agent that names a type this build cannot
+/// host must have its whole turn refused rather than run with some of its tools
+/// silently missing.
 ///
 /// [`hosts_type`] is the predicate and [`type_of`] is the whole of the read —
 /// one column, chosen because this question has no business touching the other
@@ -1155,9 +1155,9 @@ where
 ///
 /// **Never returns anything.** The row is already written by the time this runs,
 /// and Go's handler logs a reload failure and answers 200 regardless — "row
-/// written, server dead" is its accepted outcome. Turning it into a
-/// `WriteError::Fallback` would be much worse than that: the seam forwards a
-/// fallback to Go, which would re-apply the write.
+/// written, server dead" is the accepted outcome. Turning it into a
+/// `WriteError::Fallback` would be much worse: a 500 reporting failure for a
+/// write that landed, inviting a retry that applies it again.
 /// The reload the seam owes a request Go answered: `POST
 /// /api/integrations/{id}/auth/validate`, whose Go-side `Reload` is a no-op for
 /// a type this process hosts.

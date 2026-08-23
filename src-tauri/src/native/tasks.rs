@@ -271,9 +271,8 @@ fn scan_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledTask> {
         settings_profile_id: row.get(7)?,
         timeout_minutes: row.get(8)?,
         schedule_type: row.get(9)?,
-        // Go fails the whole read on an unparsable schedule config rather than
-        // serving a task whose schedule is unknown. So does this: the error
-        // reaches the proxy, which falls back to Go.
+        // An unparsable schedule config fails the whole read rather than
+        // serving a task whose schedule is unknown.
         //
         // `Option` is what keeps a stored `null` out of that arm. Go unmarshals
         // a JSON `null` into a struct by leaving it at its zero value and
@@ -1685,8 +1684,9 @@ fn create_task(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError>
         .map_err(|e| WriteError::Fallback(format!("begin task create: {e}")))?;
     insert_task_in(&tx, &task).map_err(WriteError::Fallback)?;
 
-    // Everything fallible before the commit: an `Err` after it would forward
-    // and Go would insert a second task under a fresh id.
+    // Everything fallible before the commit: an `Err` after it would answer
+    // 500 for a task that was actually inserted, inviting a retry that inserts
+    // a second one under a fresh id.
     let encoded = super::gojson::to_vec(&task)
         .map_err(|e| WriteError::Fallback(format!("encoding task: {e}")))?;
 
@@ -1768,8 +1768,8 @@ fn delete_task(db_path: &Path, id: &str) -> Result<super::Answer, WriteError> {
 
     // Existence only, deliberately not the decoded row: the delete needs no
     // field, and decoding one would make a task whose `created_at` this port
-    // cannot parse — a row some other tool wrote — forward instead of being
-    // deleted. The three routes below genuinely need the row and do decode it.
+    // cannot parse — a row some other tool wrote — undeletable. The three
+    // routes below genuinely need the row and do decode it.
     let exists: bool = tx
         .query_row("SELECT 1 FROM scheduled_tasks WHERE id = ?1", [id], |_| {
             Ok(true)

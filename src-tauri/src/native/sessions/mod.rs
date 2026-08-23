@@ -94,7 +94,7 @@ fn route_of(path: &str) -> Option<Route<'_>> {
 fn claims(method: &Method, path: &str) -> bool {
     match route_of(path) {
         // The two writes, each claimed for its own method only, so the wrong
-        // pairing still forwards and gets chi's own 405.
+        // pairing is unrouted.
         Some(Route::Continue(_)) => method == Method::POST,
         Some(Route::Detail(_)) => method == Method::GET || method == Method::PATCH,
         Some(_) => method == Method::GET,
@@ -155,7 +155,7 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
     let body = if req.path == "/api/claude-sessions" {
         // `handleListClaudeSessions`: `ErrCursorMismatch` is the one `ListPage`
         // error answered 400 with its own text; everything else is the
-        // handler's generic 500. Both were forwards until #278.
+        // handler's generic 500.
         match page::list_page(&conn, &data_settings, &q) {
             Ok(page) => gojson::to_vec(&page).map_err(|e| format!("encoding session page: {e}"))?,
             Err(e) if e == query::ERR_CURSOR_MISMATCH => {

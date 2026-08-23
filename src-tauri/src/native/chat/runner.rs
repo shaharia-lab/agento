@@ -8,13 +8,10 @@
 //! which `resolveServerConfig` looks up first in the `mcps.yaml` registry and
 //! then among the **integrations** (`internal/integrations`). An agent that
 //! reached a subprocess with some of those silently missing would be a worse
-//! answer than the sidecar's, so [`build_options`] returns `Err` for one, the
-//! seam forwards, and Go runs that chat exactly as before. This is the "a route
-//! moves only when Rust reproduces every effect" rule #274 established, applied
-//! per *agent* rather than per route — which is why `chat::stream` also forwards
-//! `/input`, `/permission` and `/stop` for any chat it does not itself hold a
-//! live session for. Without that, a chat running on Go would have its stop
-//! button claimed by a Rust registry that never saw it.
+//! answer than none, so [`build_options`] returns `Err` and the turn is
+//! **refused** rather than run degraded. In a chat that is a 500 carrying the
+//! reason, produced before any subprocess exists; in a scheduled run it is a
+//! recorded `job_history` failure. Silence is the one outcome not allowed.
 //!
 //! The `local` half of that refusal went in #310: [`build_options`] starts the
 //! local tools server itself and hands back the handle, because the listener's
@@ -25,8 +22,8 @@
 //! natively when *every* name in `capabilities.mcp` is an integration this build
 //! can host — `registry::HOSTED_TYPES`, which since #313 means **all six**:
 //! `github` (#312), `confluence` (#317), `jira` (#316), `slack` (#315),
-//! `telegram` (#314) and `google` (#313). Three things
-//! still forward, and [`mcp_plan`] is where each is decided:
+//! `telegram` (#314) and `google` (#313). Three things are still refused, and
+//! [`mcp_plan`] is where each is decided:
 //!
 //! - **A name whose type is not hosted.** A `whatsapp` row has no Rust starter
 //!   and will not get one; running the turn here would drop its tools.
@@ -225,10 +222,11 @@ pub struct RunSpec {
 
 /// Build the SDK options for one chat turn.
 ///
-/// `Err` means "this port cannot run this chat" and forwards to Go — never a
-/// user-visible failure. Every failure here happens before a subprocess exists,
-/// including the one that binds a port: a local tools server that failed to
-/// start is dropped on the way out, so forwarding leaves nothing behind.
+/// `Err` means "this build cannot run this chat", and it is answered rather
+/// than run degraded — a 500 in a chat, a recorded failure in a scheduled run.
+/// Every failure here happens before a subprocess exists, including the one
+/// that binds a port: a local tools server that failed to start is dropped on
+/// the way out, so a refusal leaves no listener behind.
 ///
 /// The second half of the pair is the **tool listeners** this turn owns: the
 /// local tools server for an agent that named a local tool, plus one per
@@ -240,7 +238,7 @@ pub async fn build_options(
 ) -> Result<(Options, Vec<InProcessMcpServer>), String> {
     let caps = spec.agent.as_ref().map(|a| &a.capabilities);
     // Decided **before** anything binds a port. Everything below this line
-    // either cannot fail or is dropped on the way out, so a forward leaves no
+    // either cannot fail or is dropped on the way out, so a refusal leaves no
     // listener behind.
     let mcp_plan = mcp_plan(
         caps,
@@ -411,7 +409,7 @@ struct McpPlan {
 /// `resolveExternalMCP`'s inputs, checked before any of them is acted on.
 ///
 /// `Ok(None)` is an agent that names no MCP server — the overwhelmingly common
-/// case, and one that must not open the database. `Err` forwards the whole
+/// case, and one that must not open the database. `Err` refuses the whole
 /// turn; see the module header for the three shapes that take that path and why
 /// the third is broader than it strictly has to be.
 ///
@@ -478,12 +476,12 @@ fn mcps_yaml_exists() -> bool {
 ///
 /// Two departures from Go, both deliberate:
 ///
-/// - **A start failure forwards rather than being skipped.** Go's
-///   `resolveServerConfig` discards the error and returns `nil`, so the turn
-///   runs without that server's tools. Forwarding reaches the same place — Go
-///   runs the turn and skips the same server — with one fewer thing this port
-///   has to be right about, and it is the rule `start_local_tools` already
-///   follows.
+/// - **A start failure refuses the turn rather than being skipped.** The
+///   reference `resolveServerConfig` discards the error and returns `nil`, so
+///   the turn runs without that server's tools — silently, which is the
+///   behaviour worth diverging from: an agent that quietly loses a tool set
+///   gives a worse answer than one that says it cannot run. `start_local_tools`
+///   already follows this rule.
 /// - **The map is a `BTreeMap`, so the order is stable.** Go ranges a map, so
 ///   its own `--allowedTools` order for two MCP servers differs between runs.
 ///   Strictly better, and it matches one of the orders Go produces.
@@ -793,7 +791,7 @@ pub fn load(
         match crate::native::agents::get(db_path, &row.agent_slug)? {
             Some(agent) => Some(agent),
             // Go returns NotFoundError{"agent"} here, a 404 with its own
-            // wording. Forward rather than reproduce a second 404 shape.
+            // wording. Decline rather than invent a second 404 shape.
             None => return Err(format!("agent {:?} not found", row.agent_slug)),
         }
     };
@@ -1199,9 +1197,9 @@ mod tests {
             .is_none());
     }
 
-    /// The three shapes that still forward, each for its own reason.
+    /// The three shapes that are still refused, each for its own reason.
     #[test]
-    fn an_mcp_name_this_build_cannot_host_forwards() {
+    fn an_mcp_name_this_build_cannot_host_is_refused() {
         let file = db_with_integration("gh-1", "github");
 
         // A type with no Rust starter. The stand-in has to be a type that is
@@ -1227,10 +1225,10 @@ mod tests {
         .is_err());
 
         // An `mcps.yaml` on disk takes precedence over the integrations in Go,
-        // and this build reads none — so any MCP capability forwards.
+        // and this build reads none — so any MCP capability is refused.
         assert!(mcp_plan(Some(&caps_naming("gh-1", None)), Some(file.path()), true).is_err());
 
-        // One unhostable name among several forwards the whole turn: a partial
+        // One unhostable name among several refuses the whole turn: a partial
         // tool set is the failure the refusal exists to prevent.
         let mut mixed = caps_naming("gh-1", None);
         if let Some(mcp) = mixed.mcp.as_mut() {
@@ -1305,7 +1303,7 @@ mod tests {
     }
 
     /// The whole of #310: an agent naming a local tool builds options rather
-    /// than forwarding, and what it builds is Go's — the server registered
+    /// than refusing, and what it builds is the server registered
     /// under `local-tools`, the qualified name in the allowlist, and
     /// `--strict-mcp-config` alongside so the user's own `.mcp.json` cannot add
     /// to what the agent may reach.

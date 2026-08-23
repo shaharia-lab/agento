@@ -22,7 +22,7 @@
 //! **Unix only.** Windows `filepath` is a different algorithm — a volume name is
 //! stripped before cleaning and both separators are accepted — and there is no
 //! Windows machine in this loop to verify it on. [`super::fs`] therefore still
-//! claims its route there but answers `Err`, so the request forwards to the
+//! claims its route there but answers a 501 naming the gap, rather than the
 //! sidecar.
 
 /// Go's `filepath.Clean`, transcribed from `path/filepath/path.go`.

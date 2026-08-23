@@ -357,10 +357,10 @@ impl<V> From<std::collections::BTreeMap<String, V>> for GoMap<V> {
 ///
 /// **This is the direction that matters.** Every other decode divergence in the
 /// port has been an over-*reject* — a request Go applies is refused, which is
-/// visible and safe, and which `Err`-means-forward turns into Go's own answer.
+/// visible and safe: it answers an error rather than writing a bad row.
 /// This one is an over-*accept*: it writes a row Go refuses, so the two
 /// implementations' databases diverge with nothing to report it, and the
-/// fallback cannot help because nothing errors.
+/// nothing errors, so nothing reports it.
 ///
 /// # Why a type, and not a `deserialize_with`
 ///

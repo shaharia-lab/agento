@@ -1,16 +1,13 @@
 //! The scheduler *runtime*: what `gocron.Scheduler` does around the schedule
 //! computation in this module's parent. Mirrors `internal/scheduler/scheduler.go`.
 //!
-//! # This is an ownership flip, not a route
+//! # The failure mode to design against is silence
 //!
 //! **Only one process may schedule.** Two schedulers over one `scheduled_tasks`
-//! table means every task fires twice, so this could never be a claimed route
-//! that forwards on doubt — the sidecar was started with `AGENTO_SCHEDULER=off`
-//! (until #278 removed it entirely), and nothing else will fire a task. That is
-//! the #289 model, and it is why the
-//! failure mode to design against is *silence*: a task Rust declines to run does
-//! not fall back to Go, it simply never runs, and a job history with no row is
-//! indistinguishable from a task that was not due.
+//! table means every task fires twice — and this process is the only one, so
+//! nothing else will fire a task on its behalf. A task declined here simply
+//! never runs, and a job history with no row is indistinguishable from a task
+//! that was not due.
 //!
 //! Everything here therefore fails **loudly** — see [`super::executor`], where
 //! an agent this build cannot run records a failed `job_history` row and
@@ -200,15 +197,14 @@ impl Scheduler {
 
     /// Bring the installed timers back in line with the stored rows.
     ///
-    /// **This exists because a native task write can fall back.** Every one of
-    /// them returns `WriteError::Fallback` on an unopenable database, a schema
-    /// newer than this build, a `SQLITE_BUSY` past the five-second timeout, or a
-    /// failed begin/commit — and the seam then forwards to a sidecar started
-    /// `AGENTO_SCHEDULER=off`, whose `taskService` applies the row change and
-    /// skips the registration. A created task would never fire, a resumed one
+    /// **This exists because a task write and its timer can come apart.** Every
+    /// task write returns `WriteError::Fallback` on an unopenable database, a
+    /// schema newer than this build, a `SQLITE_BUSY` past the five-second
+    /// timeout, or a failed begin/commit — and a row changed by anything else
+    /// (a hand edit, another tool) is never seen by the registration path at
+    /// all. Without a sweep a created task would never fire, a resumed one
     /// would have no timer, an edited one would keep its old schedule, and all
-    /// three would stay that way until the app restarted. That is the exact
-    /// split this port set out to close, on the error path.
+    /// three would stay that way until the app restarted.
     ///
     /// It is a sweep rather than a hook on the forward, so it also covers a row
     /// changed by anything else — and so the seam needs no knowledge of tasks.
@@ -412,26 +408,14 @@ fn local_tz() -> Tz {
         .unwrap_or(Tz::UTC)
 }
 
-/// Whether **this build** owns the scheduler, which is true only when the seam
-/// is fully on.
+/// Whether this process can own the scheduler at all.
 ///
 /// The scheduler cannot be owned independently of the task writes, because each
 /// write also registers or unregisters a timer and the registration has to
-/// happen in the process that stored the row. `may_serve` forwards every
-/// non-`GET` in both [`Mode::Off`] and [`Mode::Diff`], so in those modes Go is
-/// the only writer — and a Go that had been told `AGENTO_SCHEDULER=off` would
-/// store a task neither process ever schedules until the app restarts. That is
-/// exactly the split this port set out to close, reappearing through the
-/// escape hatch.
-///
-/// While the sidecar existed this decided ownership in **both** directions:
-/// whether `sidecar.rs` set `AGENTO_SCHEDULER=off` *and* whether [`start`]
-/// installed any timers. #278 removed the sidecar and the seam modes with it,
-/// so only the second direction remains.
+/// happen in the process that stored the row. Both are here, so the only
+/// question left is whether there is a database.
 pub fn shell_owns_scheduler() -> bool {
-    // The database path is the whole answer since #278: with no database this
-    // process cannot schedule at all. (The seam-mode half of this check died
-    // with the sidecar — there is no other process to leave the scheduler to.)
+    // With no database this process cannot read tasks, so it cannot schedule.
     crate::paths::database_path().is_some()
 }
 

@@ -235,8 +235,9 @@ fn scan_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChatMessage> {
 
 /// Read a DATETIME column as the `time.Time` the Go driver round-trips.
 ///
-/// Unparsable text is an error rather than a zero time: Go's `rows.Scan` fails
-/// the whole request there, and the proxy's fallback then lets Go answer.
+/// Unparsable text fails the whole request rather than decoding to a zero time,
+/// which is what `rows.Scan` does — a zero timestamp would be indistinguishable
+/// from a real one.
 fn timestamp(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<GoTime> {
     let text: String = row.get(index)?;
     GoTime::parse_any(&text).map_err(|e| {
@@ -440,10 +441,10 @@ fn create(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteError> {
         },
     )?;
 
-    // Everything fallible happens before the commit. After it, an `Err` would
-    // forward to Go, which would mint a fresh UUID and insert a *second* chat.
-    // A failing `commit` is the one safe exception: it rolls back, so
-    // forwarding is exactly right.
+    // Everything fallible happens before the commit. After it, an `Err` answers
+    // 500 for a chat that was actually created — so the caller retries and ends
+    // up with a *second* chat under a fresh UUID. A failing `commit` is the one
+    // safe exception: it rolls back, so the 500 is honest.
     let body = super::gojson::to_vec(&session)
         .map_err(|e| WriteError::Fallback(format!("encoding chat: {e}")))?;
 

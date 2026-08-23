@@ -3,32 +3,28 @@
 //!
 //! # These are the routes that call Telegram, and the order is the whole design
 //!
-//! The issue's own trap: **fail before the call, never after.** A native handler
-//! that returns `Err` forwards to Go, and Go re-runs the whole handler — so an
-//! `Err` raised *after* a successful `setWebhook` registers the webhook twice,
-//! the second time with whatever secret Go generates, silently invalidating the
-//! one this process just stored. Every fallible step therefore happens **before**
-//! the network call, and nothing after it may fail:
+//! The trap: **fail before the call, never after.** An `Err` answers 500, and a
+//! 500 for a registration that actually succeeded invites the caller to retry —
+//! which registers the webhook a second time under a fresh secret, silently
+//! invalidating the one just stored. Every fallible step therefore happens
+//! **before** the network call, and nothing after it may fail:
 //!
 //! 1. resolve the public URL, the row, the type and the credentials;
 //! 2. read or mint the secret;
 //! 3. call Telegram;
 //! 4. store the outcome — and only log if that write fails.
 //!
-//! A **failed** `setWebhook` answers `WriteError::Internal` for a related but
-//! weaker reason. Go answers it with `httpErr`'s flat 500, so forwarding would
-//! spend a second `setWebhook` call to arrive at the same status — and if that
-//! second attempt *succeeded*, the shell would answer 200 where Go's own single
-//! attempt answered 500, overwriting the row this branch just wrote. The secret
-//! itself is not at risk on this path, unlike the one above: step 4 has already
-//! stored it, and Go only mints a new one when the column is empty.
+//! A **failed** `setWebhook` answers `WriteError::Internal` rather than
+//! `Fallback`, and the distinction is not cosmetic: `Internal` is a 500 this
+//! branch has already recorded a reason for, in a row that says `error`.
+//! `Fallback` is a 500 that means "the machinery broke", which is a different
+//! claim about a call that was made and refused.
 //!
-//! Step 4 is where Go and this port part company in one respect worth stating:
-//! Go returns an error if `SetWebhookInfo` fails after a *successful*
-//! registration, which would forward and re-register. Here that write failure is
-//! logged and the request still answers 200, because the webhook **is**
-//! registered at that point and telling the caller otherwise is the more
-//! damaging lie.
+//! Step 4 is a deliberate divergence: the original returns an error if
+//! `SetWebhookInfo` fails after a *successful* registration. Here that write
+//! failure is logged and the request still answers 200, because the webhook
+//! **is** registered at that point and telling the caller otherwise is the more
+//! damaging lie — it invites the retry that registers it twice.
 //!
 //! # The failure path stores its own status
 //!
@@ -112,8 +108,7 @@ fn prepare(db_path: &Path, id: &str) -> Result<Registration, WriteError> {
         bot_token: String,
     }
     let creds: Creds = serde_json::from_str(&row.credentials).map_err(|e| {
-        // Go wraps this and the handler turns it into a 500, which forwards —
-        // and forwarding is safe here because nothing has been called yet.
+        // A 500, and safe to answer here because nothing has been called yet.
         WriteError::Fallback(format!("parsing telegram credentials: {e}"))
     })?;
 
@@ -179,7 +174,7 @@ pub async fn register(db_path: &Path, id: &str) -> Result<(), WriteError> {
         Ok(_) => {
             if let Err(e) = store(db_path, id, &prepared.secret, "active", "") {
                 // The webhook **is** registered. Answering an error would
-                // forward and register it again, under a different secret.
+                // invite a retry that registers it again under a new secret.
                 log::error!("saving webhook info after a successful registration: {e}");
             }
             log::info!(
@@ -196,12 +191,9 @@ pub async fn register(db_path: &Path, id: &str) -> Result<(), WriteError> {
             if let Err(store_err) = store(db_path, id, &prepared.secret, "error", &message) {
                 log::warn!("recording webhook registration failure: {store_err}");
             }
-            // **Answered here, not forwarded.** Go answers a failed
-            // registration with `httpErr`'s flat 500, so `Fallback` would have
-            // the sidecar re-run all of `RegisterWebhook` — a *second*
-            // `setWebhook` — to reach the status this branch already knows. A
-            // retry that succeeded would be worse than wasteful: 200 where Go's
-            // own single attempt answered 500, over a row saying `error`. The
+            // **`Internal`, not `Fallback`.** Both are 500s, but this branch
+            // already knows why it failed and has recorded it in a row saying
+            // `error`; `Fallback` would claim the machinery broke instead. The
             // deliberate cost is that a transient failure is no longer silently
             // retried; the caller retries by asking again.
             log::error!("internal server error error=registering telegram webhook: {message}");
@@ -353,8 +345,8 @@ mod tests {
         );
     }
 
-    /// A failed `setWebhook` records why, keeps the secret, and is answered
-    /// **here** rather than forwarded.
+    /// A failed `setWebhook` records why, keeps the secret, and answers with
+    /// its own recorded reason rather than a bare machinery failure.
     ///
     /// Pointed at a local fake rather than Telegram. The first version of this
     /// test claimed "no network here" and was wrong: it issued a real HTTPS POST

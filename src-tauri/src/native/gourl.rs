@@ -31,12 +31,10 @@
 //! character that needs no escaping does not round-trip, so Go hands over the
 //! escaped text unchanged.
 //!
-//! Matching on the raw path therefore agreed with Go on the second and fifth
-//! rows and disagreed on the third and fourth. While every claimed route was a
-//! read that was invisible — a miss produced `Err` and forwarded, and Go
-//! answered correctly — but #274 and #276 claimed writes, so `agents::update`
-//! now *answers* 404 and `chats::patch` answers `chat not found` for a request
-//! Go would have applied to a real row.
+//! Matching on the raw path therefore agrees on the second and fifth rows and
+//! disagrees on the third and fourth. Getting it wrong is not cosmetic on a
+//! write: `agents::update` *answers* 404 and `chats::patch` answers `chat not
+//! found` for a request that names a real row.
 //!
 //! [`route_path`] is that whole rule in one function, applied once in
 //! `proxy.rs` where `native::Request` is built, so no module's claim function
@@ -297,18 +295,17 @@ pub fn unescape_path(s: &str) -> Option<Vec<u8>> {
 /// `RawPath != "" ? RawPath : Path`, with `RawPath` derived the way
 /// `url.setPath` derives it — see the module header for the table this produces.
 ///
-/// `None` means **forward**, for either of two reasons, and both are the seam
-/// working as designed rather than a gap:
+/// `None` means **there is no route path**, for either of two reasons.
+/// `proxy.rs` tells them apart and answers each:
 ///
 /// - the escaping is malformed (`/api/agents/a%2`). `url.ParseRequestURI` fails
-///   on it, so Go answers 400 from inside `net/http` and never reaches a
-///   handler. Forwarding is how that 400 gets produced — reproducing it here
-///   would mean reproducing the server's error page too.
+///   on it, so the reference server answers 400 before any handler runs, and
+///   `proxy.rs` answers the same 400.
 /// - the escaping is canonical **and** the decoded path is not UTF-8
-///   (`/api/agents/%FF`). Go carries it happily; Rust cannot put it in a `&str`,
-///   and every claim function and bound parameter downstream wants one. Rather
-///   than lossily converting — which would look up a *different* slug than Go
-///   looks up — the request forwards and Go answers it correctly.
+///   (`/api/agents/%FF`). Rust cannot put that byte in a `&str`, and every
+///   claim function and bound parameter downstream wants one. A lossy
+///   conversion would look up a *different* slug, so the request is unrouted
+///   and answers the router's 404. No real client produces one.
 ///
 /// **The canonical check runs on bytes, before anything demands UTF-8**, and the
 /// order is load-bearing: `/api/agents/%ff` decodes to the same unrepresentable
@@ -565,18 +562,18 @@ mod tests {
 
     #[test]
     fn a_malformed_escape_has_no_route_path() {
-        // `ParseRequestURI` fails on each of these, so Go answers 400 from
-        // inside `net/http`. `None` forwards, which is how that 400 is produced.
+        // `ParseRequestURI` fails on each of these, so the answer is a 400
+        // from before any handler — see `proxy.rs`, which produces it.
         assert_eq!(route_path("/api/agents/a%2"), None);
         assert_eq!(route_path("/api/agents/a%"), None);
         assert_eq!(route_path("/api/agents/a%zz"), None);
     }
 
     #[test]
-    fn a_non_utf8_path_forwards_only_when_that_is_what_chi_routes_on() {
-        // `%FF` is canonical, so chi routes on the *decoded* path: one byte Rust
-        // cannot carry in a `&str`, and a lossy conversion would look up a
-        // different slug. Forwarding is the only right answer.
+    fn a_non_utf8_path_is_unrouted_only_when_that_is_what_routes() {
+        // `%FF` is canonical, so the *decoded* path is what routes: one byte
+        // Rust cannot carry in a `&str`, and a lossy conversion would look up a
+        // different slug. Refusing to route it is the only right answer.
         assert_eq!(route_path("/api/agents/%FF"), None);
         assert_eq!(
             unescape_path("/api/agents/%FF"),

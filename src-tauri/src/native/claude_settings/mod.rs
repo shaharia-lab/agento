@@ -47,14 +47,12 @@
 //!
 //! ## …and the bytes are not always UTF-8
 //!
-//! `encoding/json` never rejects a document for its bytes and serde_json does,
-//! which is not a boundary disagreement but a different answer to "is this
-//! JSON". Until #278 every path that parses or re-emits bytes here guarded
-//! with [`is_utf8`] and **forwarded**, deferring to Go's answer. With the
-//! sidecar gone the split is: a *file* that is not UTF-8 is decoded lossily —
-//! the U+FFFD substitution is Go's own answer, so a hand-corrupted
-//! settings.json still renders — while a request *body* that is not UTF-8 is
-//! a 400, because the app's own requests are always UTF-8.
+//! The reference JSON reader never rejects a document for its bytes and
+//! serde_json does, which is not a boundary disagreement but a different answer
+//! to "is this JSON". The split here: a *file* that is not UTF-8 is decoded
+//! lossily — the U+FFFD substitution is the inherited answer, so a
+//! hand-corrupted settings.json still renders — while a request *body* that is
+//! not UTF-8 is a 400, because the app's own requests are always UTF-8.
 //!
 //! # The cache question
 //!
@@ -174,13 +172,13 @@ const GO_MAX_NESTING_DEPTH: usize = 10000;
 /// validate, so [`go_json_valid`] agrees, but `parse_str` does, so every parse
 /// that actually materializes the string fails.
 ///
-/// Left unguarded that produced five *wrong answers* rather than five forwards —
+/// Left unguarded that produced five *wrong answers* rather than five refusals —
 /// a 400 where Go writes the file and answers 200, a seeded default profile
 /// whose bytes are not Go's, and a `settings` key silently missing from a 200.
 /// So every path that is about to parse or re-emit bytes checks this first and
-/// forwards, which is the only answer this port can be sure of: reproducing
-/// Go's substitution would mean reproducing where `encoding/json` puts the
-/// replacement character, and that is a guess.
+/// declines, which is the only honest answer available: reproducing the lossy
+/// substitution would mean reproducing exactly where the replacement character
+/// lands, and that is a guess.
 pub fn is_utf8(src: &[u8]) -> bool {
     std::str::from_utf8(src).is_ok()
 }
@@ -253,7 +251,7 @@ fn nesting_depth_exceeds(src: &[u8], limit: usize) -> bool {
 ///
 /// Matched on the message because `Category` does not distinguish it: the
 /// alternative is `disable_recursion_limit`, which trades a wrong answer for a
-/// stack overflow. Pinned by `a_document_deeper_than_serdes_limit_forwards`.
+/// stack overflow. Pinned by `a_document_deeper_than_serdes_limit_is_declined`.
 fn is_recursion_limit(e: &serde_json::Error) -> bool {
     e.to_string().contains("recursion limit exceeded")
 }
@@ -274,7 +272,8 @@ pub enum Decoded {
     /// *different* 400 message, and on the profile path a 422 — so the two
     /// cases cannot be collapsed.
     NumberOutOfRange,
-    /// Neither parser is the authority. Forward.
+    /// Neither parser is the authority, so this is declined rather than
+    /// guessed at.
     Undecidable(String),
 }
 
@@ -337,9 +336,10 @@ pub fn decode_stream_head(body: &[u8]) -> Result<&[u8], Option<String>> {
 /// value, and anything else — an array, a scalar, nothing at all — is the type
 /// error the handler turns into its 400.
 ///
-/// Duplicate keys forward for the reason `decode_body` documents: `encoding/json`
-/// keeps the last occurrence but type-checks every one, and serde refuses them
-/// outright, so only Go can answer. Safe because this runs before any mutation.
+/// Duplicate keys are declined for the reason `decode_body` documents: the
+/// reference reader keeps the last occurrence but type-checks every one, and
+/// serde refuses them outright, so neither behaviour can be claimed with
+/// confidence. Safe because this runs before any mutation.
 ///
 /// The two guards ahead of the decode are the two places serde and
 /// `encoding/json` disagree about the *body* rather than about a value:
@@ -351,8 +351,9 @@ pub fn decode_stream_head(body: &[u8]) -> Result<&[u8], Option<String>> {
 ///   *created a profile Go refuses*, answering 201 where Go answers
 ///   `400 name is required`. A state-changing divergence, which is why the
 ///   check is on the body and not on the fields.
-/// - **UTF-8.** See [`is_utf8`]: Go substitutes U+FFFD into a `string` field
-///   and carries on, serde fails the decode. Forwarded rather than guessed.
+/// - **UTF-8.** See [`is_utf8`]: the reference reader substitutes U+FFFD into a
+///   `string` field and carries on, serde fails the decode. Declined rather
+///   than guessed.
 pub(crate) fn decode_request<T>(body: &[u8]) -> Result<T, WriteError>
 where
     T: serde::de::DeserializeOwned + Default,
@@ -363,7 +364,7 @@ where
         return Err(WriteError::InvalidBody);
     }
     if !is_utf8(body) {
-        // Go substituted U+FFFD and carried on; with nothing to forward to
+        // The reference reader substituted U+FFFD and carried on; here
         // (#278) the strict decode's refusal is the answer, and the app's own
         // requests are always UTF-8.
         return Err(WriteError::InvalidBody);
@@ -429,7 +430,7 @@ pub fn go_any(body: &[u8]) -> Decoded {
         },
         // A `Value` decode *is* recursive, unlike the `IgnoredAny` skip above,
         // so 129 levels stop it where Go carries on to 10000. That one is
-        // forwarded; an ordinary syntax error is Go's own decode failure, which
+        // declined; an ordinary syntax error is a plain decode failure, which
         // `ensureDefaultProfileExists` handles by seeding an empty object.
         Err(e) if is_recursion_limit(&e) => Decoded::Undecidable(e.to_string()),
         Err(_) => Decoded::NotJson,
@@ -478,7 +479,7 @@ fn numbers_fit_float64(src: &[u8]) -> bool {
             }
             let token = std::str::from_utf8(&src[start..i]).unwrap_or("");
             // A token this port cannot parse at all is one it will not judge —
-            // the `Value` decode below decides, and forwards if it cannot.
+            // the `Value` decode below decides, and declines if it cannot.
             if let Ok(f) = token.parse::<f64>() {
                 if !f.is_finite() {
                     return false;
@@ -534,7 +535,7 @@ pub fn marshal_indent(value: &Value) -> Result<Vec<u8>, String> {
 /// `skip_serializing_if` or a nullable field, so a `None` here would not be an
 /// error — it would be a **200 with the `settings` key quietly missing**, which
 /// is exactly what non-UTF-8 bytes used to produce. Callers now have to say what
-/// a failure means, and all of them say "forward".
+/// a failure means, and none of them can be answered with confidence.
 pub fn raw_field(bytes: &[u8]) -> Result<Box<RawValue>, String> {
     let text = std::str::from_utf8(bytes).map_err(|_| not_utf8_reason("the stored bytes"))?;
     RawValue::from_string(gojson::compact(text))
@@ -634,7 +635,7 @@ pub fn put_settings(dir: &str, body: &[u8]) -> Result<super::Answer, WriteError>
         }
         Decoded::Undecidable(reason) => return Err(WriteError::Fallback(reason)),
         // Step 1 captured a complete value and checked its bytes, so this means
-        // the two parsers disagree about what JSON is. Forward rather than pick
+        // the two parsers disagree about what JSON is. Decline rather than pick
         // a side: the arm that used to answer 400 here was reachable through
         // non-UTF-8 bytes, where Go writes the file and answers 200.
         Decoded::NotJson => {
@@ -732,7 +733,7 @@ fn serve(ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String
         );
     }
     // Resolved once, here: every handler below works inside one directory, and
-    // a failure to resolve it forwards before anything is written.
+    // a failure to resolve it is answered before anything is written.
     let dir = &run_dir(&ctx.db_path)?;
     match (route(req.path), req.method) {
         (Some(Route::Settings), &Method::GET) => get_settings(dir),
@@ -960,19 +961,19 @@ mod tests {
     /// **Go's JSON layer is not UTF-8-strict and serde's is.** Every one of
     /// these is `true`/`Ok` in Go — `json.Valid`, `Unmarshal` into `any`,
     /// `MarshalIndent`, and the encoder's `json.RawMessage` passthrough — so
-    /// none of them may be a Rust *answer*. They forward.
+    /// none of them may be answered with a guessed status. They decline.
     #[test]
-    fn bytes_that_are_not_utf8_forward_rather_than_answering() {
+    fn bytes_that_are_not_utf8_are_declined_rather_than_answered() {
         let src = b"{\"a\":\"\xff\"}";
 
         // `json.Valid` says true, and so does this — the skip does not validate.
         assert!(go_json_valid(src));
-        // …but every parse that materializes the string forwards.
+        // …but every parse that materializes the string declines.
         assert!(matches!(go_any(src), Decoded::Undecidable(_)));
         assert!(matches!(decode_go_any(src), Decoded::Undecidable(_)));
         assert!(
             decode_stream_head(src).unwrap_err().is_some(),
-            "a forward, not Go's decode error"
+            "declined, not answered with a decode error"
         );
 
         #[derive(Debug, Default, Deserialize)]
@@ -1051,9 +1052,9 @@ mod tests {
     }
 
     /// A `Value` decode stops at 128 levels and Go's at 10000. This port
-    /// answers neither way — it forwards, so Go gives whatever answer Go gives.
+    /// answers neither way — it declines rather than guessing between them.
     #[test]
-    fn a_document_deeper_than_serdes_limit_forwards() {
+    fn a_document_deeper_than_serdes_limit_is_declined() {
         let deep = format!("{}{}", "[".repeat(200), "]".repeat(200));
         assert!(matches!(
             decode_go_any(deep.as_bytes()),
@@ -1203,7 +1204,7 @@ mod tests {
         );
 
         // An unparseable file is a 500 in Go, and this port does not invent
-        // 500s — it forwards.
+        // 500s — it declines.
         write_file(&settings_json_path(&dir), b"not json").expect("write");
         assert!(get_settings(&dir).is_err());
 

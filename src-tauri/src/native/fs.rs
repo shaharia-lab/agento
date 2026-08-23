@@ -30,10 +30,11 @@
 //! **Answered on Unix only.** The endpoint is `filepath.Clean`/`Dir`/`Join`
 //! wrapped in a response, and Windows `filepath` strips a volume name before
 //! cleaning and accepts both separators — a different algorithm, with no Windows
-//! machine in this loop to verify a port of it against. The route is still
-//! *claimed* there and [`serve`] returns `Err`, which the seam forwards: gating
+//! machine in this loop to verify an implementation of it against. The route is
+//! still *claimed* there and [`serve`] answers a 501 naming the gap: gating
 //! `claims` instead would leave a registry entry that claims nothing, and the
-//! two registry tests exist precisely to catch that shape. See [`super::gopath`].
+//! two registry tests exist precisely to catch that shape. See
+//! [`super::gopath`].
 //!
 //! `POST /api/fs/mkdir` is here too (#296). It was deferred by #293 as one of
 //! the two routes that escaped every category — ~20 lines, no database, no
@@ -76,10 +77,15 @@ pub struct FsListResponse {
 
 /// `handleFSList`.
 ///
-/// Errors mean "fall back": Go answers 404 for a missing path, 400 for anything
-/// else unreadable and 500 when the home directory cannot be resolved, each with
-/// its own body. Reproducing those here would be three more strings to keep in
-/// step for no gain while the sidecar can answer them itself.
+/// **Every error here is a 500, and two of them should not be.** The inherited
+/// behaviour answers 404 for a missing path, 400 for anything else unreadable
+/// and 500 only when the home directory cannot be resolved. Those three bodies
+/// were never written, because at the time an `Err` reached an implementation
+/// that had them. Nothing does now, so the directory picker reports "internal
+/// server error" for a path the user simply mistyped.
+///
+/// Known gap rather than a decision — it is on the list in `CLAUDE.md`. Fixing
+/// it means giving this function a typed error and three bodies.
 pub fn list(raw_path: &str) -> Result<FsListResponse, String> {
     // `""` and `"~"` — and nothing else — mean the home directory.
     let expanded = if raw_path.is_empty() || raw_path == "~" {
@@ -172,9 +178,9 @@ struct MkdirResponse {
 ///
 /// The response body is built **before** the directory is created, per the
 /// write path's rule that nothing fallible may run after the effect. Here the
-/// consequence would in fact be benign — `MkdirAll` is idempotent, so the
-/// forward would re-run it to the same result — but the rule is cheaper to
-/// keep than to reason about each time.
+/// consequence would in fact be benign — `MkdirAll` is idempotent, so a retry
+/// reaches the same result — but the rule is cheaper to keep than to reason
+/// about each time.
 pub fn mkdir(body: &[u8]) -> Result<super::Answer, WriteError> {
     let req = decode_body::<MkdirRequest>(body)?;
     if req.path.is_empty() {
@@ -244,9 +250,8 @@ fn claims(method: &Method, path: &str) -> bool {
 const PATH_MKDIR: &str = "/api/fs/mkdir";
 
 fn serve(_ctx: &super::Ctx, req: &super::Request) -> Result<super::Answer, String> {
-    // Windows `filepath` is a different algorithm and unverified here. Until
-    // #278 this forwarded and the sidecar answered; with it gone the honest
-    // answer is a 501 naming the gap, not a listing built with Unix path
+    // Windows `filepath` is a different algorithm and unverified here. The
+    // honest answer is a 501 naming the gap, not a listing built with Unix path
     // arithmetic — `gopath::dir` on `C:\Users\u` finds no `/` and answers
     // `"."`, so the picker would silently browse the wrong directory.
     if !cfg!(unix) {
@@ -429,8 +434,7 @@ mod tests {
         );
         assert!(std::path::Path::new(&target).is_dir());
 
-        // `MkdirAll` is idempotent, which is what makes the forward-on-error
-        // arm safe.
+        // `MkdirAll` is idempotent, which is what makes a retry harmless.
         assert!(mkdir(mkdir_body(&target).as_bytes()).is_ok());
     }
 
@@ -548,8 +552,8 @@ mod tests {
     fn the_listing_and_the_mkdir_are_claimed_and_nothing_else_is() {
         assert!(claims(&Method::GET, "/api/fs"));
         assert!(claims(&Method::POST, "/api/fs/mkdir"));
-        // Each route for its own method only, so the wrong pairing still
-        // forwards and gets chi's own 405.
+        // Each route for its own method only, so the wrong pairing is
+        // unrouted.
         assert!(!claims(&Method::POST, "/api/fs"));
         assert!(!claims(&Method::GET, "/api/fs/mkdir"));
         assert!(!claims(&Method::DELETE, "/api/fs/mkdir"));

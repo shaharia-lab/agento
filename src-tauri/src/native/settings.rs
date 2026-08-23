@@ -1337,8 +1337,8 @@ mod tests {
     /// directory built from the vectors.
     ///
     /// `#[cfg(unix)]` for the same reason the vectors are Unix-shaped and
-    /// [`serve`] forwards the route on Windows: the layout needs a symlink, and
-    /// the rule is `filepath` arithmetic this port implements for Unix only.
+    /// [`serve`] answers 501 on Windows: the layout needs a symlink, and the
+    /// rule is `filepath` arithmetic implemented for Unix only.
     #[test]
     #[cfg(unix)]
     fn the_candidate_probe_matches_gos_discovery_rule() {
@@ -1695,10 +1695,8 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::OK);
     }
 
-    /// Nothing may be written before a rejection, or the forward-to-Go that an
-    /// `Err` triggers would apply the change twice. Here the failure is answered
-    /// rather than forwarded, but the invariant is the same one and it is
-    /// cheaper to pin than to re-derive.
+    /// Nothing may be written before a rejection, or the 500 would be reporting
+    /// a change that partly landed. Cheaper to pin than to re-derive.
     #[test]
     fn a_rejected_save_leaves_the_row_untouched() {
         let _env = crate::paths::tests::env_lock();

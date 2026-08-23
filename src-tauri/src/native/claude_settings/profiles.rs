@@ -33,7 +33,7 @@
 //! that the agreement is uninformative, which is a caveat rather than an
 //! exemption.
 //!
-//! # Which errors are answers, and which are forwarded
+//! # Which errors reach the wire
 //!
 //! `httpErr` maps the service's three typed errors and turns everything else
 //! into a 500. Only four failures reach the wire from this file:
@@ -46,7 +46,7 @@
 //! | 409 `profile with id "<id>" already exists` | `ConflictError` — used both for a rename collision **and** for deleting the default profile, where the wording is Go's and reads oddly. Reproduced, not improved. |
 //! | 422 `validation error for "settings": failed to parse settings JSON` | the one reachable `ValidationError`: `json.Valid` passes a number `strconv.ParseFloat` then rejects. |
 //!
-//! Everything else Go answers with a 500, so it forwards.
+//! Everything else is a 500.
 //!
 //! # Two rules with no error to announce them
 //!
@@ -60,8 +60,9 @@
 //!   is a 500 in Go unless every character happens to be dropped. Rust's
 //!   `char::is_alphabetic` is a *different* set (it includes `Nl` and
 //!   `Other_Alphabetic`), so rather than approximate the tables, any non-ASCII
-//!   name forwards. It forwards before anything is written, and Go then gives
-//!   whichever of the two answers is right.
+//!   name is **declined with a 500** before anything is written. That is a
+//!   known limitation rather than a reproduction — see the known-bugs list in
+//!   `CLAUDE.md`.
 
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -112,7 +113,7 @@ struct MetadataOut<'a> {
 }
 
 /// `config.LoadProfilesMetadata`. A missing file is an empty index, not an
-/// error; anything else Go answers with a 500, so it forwards.
+/// error; anything else is a 500.
 ///
 /// Public because the agent runner needs it: `LoadProfileFilePathIn` resolves a
 /// named settings profile through this same index, and there is now exactly one
@@ -195,7 +196,7 @@ fn ensure_default(dir: &str) -> Result<(), WriteError> {
             // Go's parser would have succeeded; ours cannot say — a document
             // past serde's 128-level limit, or bytes that are not UTF-8, which
             // Go decodes with a U+FFFD substitution this port will not guess.
-            // Nothing but the directory has been touched, so forwarding is
+            // Nothing but the directory has been touched, so the 500 is
             // exact.
             Decoded::Undecidable(reason) => return Err(WriteError::Fallback(reason)),
         }
@@ -249,7 +250,7 @@ fn deduplicate_id(base: &str, profiles: &[Profile]) -> String {
 }
 
 /// `slugify`, for the ASCII names it can be reproduced for — see the module
-/// header for why a non-ASCII one forwards instead.
+/// header for why a non-ASCII one is declined instead.
 fn slugify(name: &str) -> Result<String, WriteError> {
     if !name.is_ascii() {
         return Err(WriteError::Fallback(format!(
@@ -297,7 +298,7 @@ fn resolve_profile_file_path(dir: &str, id: &str) -> Result<String, WriteError> 
 
 /// `validatePathWithinDir`.
 ///
-/// A **relative** recorded path forwards rather than being resolved: Go's
+/// A **relative** recorded path is declined rather than resolved: the original's
 /// `filepath.Abs` resolves it against the *server's* working directory, which is
 /// a different process's and unknowable here. Every path this surface writes is
 /// absolute, so this only fires on a hand-edited index.
@@ -361,7 +362,7 @@ fn detail_body(profile: &Profile, dir: &str) -> Result<Vec<u8>, WriteError> {
     if let Ok(data) = std::fs::read(&profile.file_path) {
         // Go's `json.Valid` accepted bytes that are not UTF-8 and its encoder
         // shipped the document with U+FFFD substituted — serde cannot carry
-        // them, so until #278 this forwarded and Go answered. The lossy
+        // them, so this is declined rather than answered. The lossy
         // conversion *is* that substitution, the same answer `get_settings`
         // gives the unnamed file; only a hand-corrupted file ever takes this
         // branch, since the app writes UTF-8.
@@ -482,12 +483,11 @@ pub fn update(dir: &str, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
     let idx = find_index(&profiles, id).ok_or_else(|| not_found(id))?;
 
     // Hoisted out of the closing `detail_body`, which is where it used to run.
-    // It forwards on a relative or out-of-dir recorded path — but by then the
+    // It refuses a relative or out-of-dir recorded path — but by then the
     // rename may have moved the file and `save` rewritten the index under the
-    // new id, so Go would look up the URL's *old* id, find nothing and answer
-    // 404 where Go alone would have answered 500. `delete`, `duplicate` and
-    // `set_default` all validate up front; this is the same rule, and it costs
-    // no parity because the check only ever decides forward-versus-answer.
+    // new id, so the request would fail having already half-applied itself.
+    // `delete`, `duplicate` and `set_default` all validate up front; this is
+    // the same rule.
     validate_path_within_dir(&profiles[idx].file_path, dir)?;
 
     // `validateSettingsJSON` runs before any filesystem mutation so a rename
@@ -496,8 +496,9 @@ pub fn update(dir: &str, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
     // `any`, can, and Go reaches it only after the rename. Parsing here and
     // reporting later keeps both: Go's state and Go's answer.
     //
-    // Deciding it now is also what makes `Undecidable` safe to forward: an
-    // `Err` after the rename would send Go a request whose id no longer exists.
+    // Deciding it now is also what makes `Undecidable` safe to answer: an
+    // `Err` after the rename would report failure for a profile that has
+    // already moved.
     let settings = match req.settings.as_deref().map(RawValue::get) {
         None => None,
         Some("null") => None,
@@ -513,7 +514,7 @@ pub fn update(dir: &str, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
                 Decoded::NumberOutOfRange => Some(Err(())),
                 // `go_json_valid` just passed over the same bytes, so this is
                 // the two parsers disagreeing rather than a malformed request.
-                // Forward — answering 400 here would be inventing a status Go
+                // Declined — answering 400 here would be inventing a status
                 // has no reason to send.
                 Decoded::NotJson => {
                     return Err(WriteError::Fallback(
@@ -722,7 +723,7 @@ mod tests {
     /// character happened to be dropped. Two different answers from one rule
     /// this port does not reproduce, so it hands the name over.
     #[test]
-    fn a_non_ascii_name_forwards_rather_than_guessing_a_slug() {
+    fn a_non_ascii_name_is_declined_rather_than_guessing_a_slug() {
         assert!(matches!(
             slugify("Café").unwrap_err(),
             WriteError::Fallback(_)
@@ -841,7 +842,7 @@ mod tests {
         assert!(load(&d).expect("nil list").is_empty());
 
         // An array where a struct belongs is a type error in Go: a 500, so it
-        // forwards rather than reading as empty.
+        // is declined rather than read as empty.
         std::fs::write(super::super::profiles_path(&d), "[]").expect("write");
         assert!(matches!(load(&d).unwrap_err(), WriteError::Fallback(_)));
     }
@@ -918,9 +919,9 @@ mod tests {
 
     /// A `settings.json` that is valid JSON to Go but not UTF-8: Go seeds the
     /// document with U+FFFD substituted, which this port will not guess. It
-    /// forwards, having touched only the directory.
+    /// is declined, having touched only the directory.
     #[test]
-    fn seeding_from_a_non_utf8_settings_json_forwards() {
+    fn seeding_from_a_non_utf8_settings_json_is_declined() {
         let root = dir();
         let d = path_of(&root);
         std::fs::write(settings_json_path(&d), b"{\"a\":\"\xff\"}").expect("write");
@@ -930,7 +931,7 @@ mod tests {
         ));
         assert!(
             !std::path::Path::new(&format!("{d}/settings_default.json")).exists(),
-            "the forward must leave no seeded profile behind"
+            "the refusal must leave no seeded profile behind"
         );
     }
 
@@ -1044,7 +1045,7 @@ mod tests {
 
         // A file that is valid JSON to Go but not UTF-8 is served lossily
         // since #278: the U+FFFD substitution is Go's own answer, and there is
-        // no sidecar left to forward the raw bytes to.
+        // nothing that could decode the raw bytes the other way.
         std::fs::write(&profile.file_path, b"{\"a\":\"\xff\"}").expect("write");
         let body =
             String::from_utf8(detail_body(&profile, &d).expect("lossy detail")).expect("utf8");
@@ -1261,9 +1262,9 @@ mod tests {
     /// The same cap on `update`, which is a **400** and not the 422 a
     /// hand-written depth check inside `validateSettingsJSON` produced: Go's
     /// `Decode` fails first, so the service never runs. The 128–10000 band
-    /// still forwards, which is the neighbouring case easy to lose.
+    /// is still declined, which is the neighbouring case easy to lose.
     #[test]
-    fn an_update_deeper_than_gos_scanner_is_400_and_the_band_below_forwards() {
+    fn an_update_deeper_than_gos_scanner_is_400_and_the_band_below_is_declined() {
         let root = dir();
         let d = path_of(&root);
         list(&d).expect("seed");
@@ -1278,7 +1279,7 @@ mod tests {
         assert_eq!(err.message(), "invalid JSON body");
 
         // Past serde's 128-level limit but inside Go's 10000: neither parser is
-        // the authority, so it forwards.
+        // the authority, so it declines.
         let band = format!(r#"{{"settings":{}{}}}"#, "[".repeat(200), "]".repeat(200));
         assert!(matches!(
             update(&d, "default", band.as_bytes()).unwrap_err(),
@@ -1289,9 +1290,8 @@ mod tests {
     /// **`update` validates the recorded path before it mutates anything.** It
     /// used to reach `validate_path_within_dir` only in the closing
     /// `detail_body` — after the rename had moved the file and `save` had
-    /// rewritten the index under the new id — so the forward sent Go a request
-    /// whose URL id no longer existed and Go answered 404 where Go alone would
-    /// have answered 500.
+    /// rewritten the index under the new id — so the failure was reported for a
+    /// profile that had already been renamed underneath it.
     #[test]
     fn update_validates_the_recorded_path_before_it_renames() {
         let root = dir();
@@ -1315,8 +1315,7 @@ mod tests {
             WriteError::Fallback(_)
         ));
 
-        // The forward has to be exact, which means the id in the URL still
-        // resolves on Go's side.
+        // The refusal has to be total: nothing may have moved.
         let profiles = load(&d).expect("load");
         assert_eq!(profiles[0].id, "stray", "the index must be untouched");
         assert_eq!(profiles[0].file_path, stray);

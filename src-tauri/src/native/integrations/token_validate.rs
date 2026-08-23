@@ -36,16 +36,16 @@
 //!
 //! # Order, and the one thing that may fail after the call
 //!
-//! `native/trigger/registration.rs`'s rule applies — a native `Err` forwards,
-//! and Go re-runs the whole handler, so an `Err` after a successful remote call
-//! spends a second one. Every fallible step is therefore before the call:
+//! `native/trigger/registration.rs`'s rule applies — an `Err` after a
+//! successful remote call answers 500 for work that landed, inviting a retry
+//! that spends a second call. Every fallible step is therefore before the call:
 //! resolving the row, the field validation, and parsing the credentials.
 //!
 //! The write afterwards is the exception, and it is safe because **Go answers a
 //! failed save the same way it answers a failed validation** — `saving validated
 //! integration: %w` goes into the very same 400 body. So a failed write is
-//! answered here rather than forwarded, and nothing on this path returns
-//! `Fallback` once the network has been touched.
+//! answered with that 400, and nothing on this path returns `Fallback` once the
+//! network has been touched.
 
 use std::path::Path;
 
@@ -185,8 +185,8 @@ fn validate_token_auth(db_path: &Path, row: &registry::HostingRow) -> Result<(),
     )?;
 
     // Go's `saving validated integration: %w` arm, which lands in the *same*
-    // 400 body as a failed validation — so answering it here is what Go does,
-    // not a shortcut around a forward.
+    // 400 body as a failed validation — so this is the inherited behaviour,
+    // not a shortcut.
     save(db_path, &row.id, &stored)
         .map_err(|e| WriteError::BadRequest(format!("saving validated integration: {e}")))?;
 
@@ -222,10 +222,10 @@ async fn call(
                     field: "credentials".to_string(),
                     message: format!("invalid credentials: {message}"),
                 },
-                // A `url.Parse` refusal, whose wording is `net/url`'s. It can
-                // only arise **before** the request, so forwarding is free —
-                // see `confluence::validate`'s header.
-                Refusal::Forward(why) => WriteError::Fallback(format!(
+                // A `url.Parse` refusal, whose wording is not reproducible. It
+                // can only arise **before** the request, so a 500 costs nothing
+                // — see `confluence::validate`'s header.
+                Refusal::Unreproducible(why) => WriteError::Fallback(format!(
                     "confluence site URL needs net/url's own message: {why}"
                 )),
             })?;
@@ -333,9 +333,9 @@ fn save(db_path: &Path, id: &str, stored: &Stored) -> Result<(), String> {
 /// A column that is **present but not valid JSON** is a third case, and it is
 /// neither of the other two: Go reaches `ParseCredentials`, which fails with
 /// `encoding/json`'s own wording inside `invalid <type> credentials: …`. That
-/// sentence is not reproducible, so this forwards rather than reporting the
-/// blob as absent — which would answer "credentials are empty" where Go names
-/// the parse error. Only a hand-edited row can be in this state, since the
+/// sentence is not reproducible, so this answers a 500 rather than reporting
+/// the blob as absent — which would say "credentials are empty" and name the
+/// wrong problem. Only a hand-edited row can be in this state, since the
 /// create and update paths validate before storing.
 fn raw_credentials(column: &str) -> Result<Option<Box<serde_json::value::RawValue>>, WriteError> {
     if column.is_empty() {
@@ -696,10 +696,9 @@ mod tests {
         );
     }
 
-    /// A stored blob that is present but not JSON forwards rather than being
-    /// read as absent: Go reaches `ParseCredentials` and reports
-    /// `encoding/json`'s own message, where "credentials are empty" would name
-    /// the wrong problem. Only a hand-edited row can be in this state.
+    /// A stored blob that is present but not JSON is a 500 rather than being
+    /// read as absent, where "credentials are empty" would name the wrong
+    /// problem. Only a hand-edited row can be in this state.
     #[test]
     fn credentials_that_are_not_json_forward_rather_than_reading_as_absent() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -137,11 +137,9 @@ const MASKED_FIELD_SENTINEL: &str = "***";
 
 /// `GetSettings`: the stored settings with the password masked.
 ///
-/// An unparseable column is an error rather than a default. That is Go's
-/// behaviour — `loadNotificationSettings` returns the decode error and the
-/// handler answers 500 — and the seam turns it into a fallback, so the user
-/// sees Go's 500 rather than a silently empty form that a save would overwrite
-/// their real configuration with.
+/// An unparseable column is an error rather than a default: the user sees a
+/// 500 rather than a silently empty form, which a save would then write over
+/// their real configuration.
 pub fn get_settings(db_path: &Path) -> Result<NotificationSettings, String> {
     let conn = db::open_read_only(db_path)?;
     let raw = super::settings::load_stored(&conn).notification_settings;
@@ -295,12 +293,11 @@ fn update_settings(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteEr
         )
         .map_err(|e| WriteError::Fallback(format!("saving notification settings: {e}")))?;
     if updated == 0 {
-        // No settings row at all — a machine whose server has never saved one.
-        // Go's `Save` inserts the whole row from its snapshot, defaults filled
-        // in; reproducing that here would mean owning every column. Nothing was
-        // written, so forwarding is exact.
+        // No settings row at all. Inserting one would mean owning all fourteen
+        // columns and their defaults, which this write deliberately does not —
+        // see the header. Nothing was written, so the 500 is exact.
         return Err(WriteError::Fallback(
-            "no user_settings row to update; let Go create it".to_string(),
+            "no user_settings row to update".to_string(),
         ));
     }
 
@@ -320,11 +317,12 @@ fn update_settings(db_path: &Path, body: &[u8]) -> Result<super::Answer, WriteEr
 /// point of the button: it lets someone verify credentials before committing to
 /// turning notifications on.
 ///
-/// Only the success path is answered here. Every failure forwards, because Go's
-/// 400 carries `err.Error()` and those strings come from go-mail and the Go
-/// runtime — see `smtp.rs`. Forwarding costs a second dial and is safe for
-/// exactly one reason: the send reports success only after the server has
-/// accepted the message, so an error means nothing was delivered.
+/// Only the success path is answered with its own body. A failure is a 500 with
+/// the reason in the log, because the inherited 400 carries wording from the
+/// mail library and the runtime that this build cannot reproduce — see
+/// `smtp.rs`. That is safe for exactly one reason: the send reports success only
+/// after the server has accepted the message, so an error means nothing was
+/// delivered.
 fn test_notification(db_path: &Path) -> Result<super::Answer, WriteError> {
     let conn = db::open_read_only(db_path).map_err(WriteError::Fallback)?;
     let settings = decode_settings(&super::settings::load_stored(&conn).notification_settings)
@@ -332,7 +330,8 @@ fn test_notification(db_path: &Path) -> Result<super::Answer, WriteError> {
     drop(conn);
 
     // Encoded before the send. Nothing fallible may run after the message is
-    // accepted, or an `Err` would forward and Go would send a second email.
+    // accepted, or a 500 would report a failure for mail that was delivered —
+    // and invite a retry that sends it twice.
     let answer = super::gojson::to_vec(&TestResponse { status: "ok" })
         .map_err(|e| WriteError::Fallback(format!("encoding test response: {e}")))?;
 
@@ -487,9 +486,8 @@ mod tests {
         }
     }
 
-    /// Go answers 500 here, which the seam turns into a fallback. Degrading to
-    /// the zero value instead would show an empty form that a save would then
-    /// write over the user's real SMTP credentials.
+    /// A 500. Degrading to the zero value instead would show an empty form that
+    /// a save would then write over the user's real SMTP credentials.
     #[test]
     fn an_unparseable_column_is_an_error_not_a_default() {
         let file = fixture("{not json", "");
@@ -825,11 +823,11 @@ mod tests {
         assert_eq!(model, "claude-opus-5");
     }
 
-    /// No settings row at all means the server has never saved one, and Go's
-    /// insert fills every column from its snapshot. Owning that would mean
-    /// owning all fourteen, so it forwards — having written nothing.
+    /// No settings row at all means nothing has ever been saved. Inserting one
+    /// would mean owning all fourteen columns, so this refuses — having written
+    /// nothing.
     #[test]
-    fn a_missing_settings_row_forwards_rather_than_inventing_one() {
+    fn a_missing_settings_row_is_refused_rather_than_invented() {
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let mut conn = Connection::open(file.path()).expect("open");
         super::super::migrate::apply(&mut conn).expect("migrate");

@@ -222,7 +222,7 @@ mod tests {
         // The CRUD routes, which `native::chats` owns.
         assert!(!claims(&Method::POST, "/api/chats"));
         assert!(!claims(&Method::POST, "/api/chats/abc"));
-        // Unknown actions and nested paths forward.
+        // Unknown actions and nested paths are unrouted.
         assert!(!claims(&Method::POST, "/api/chats/abc/unknown"));
         assert!(!claims(&Method::POST, "/api/chats//messages"));
         assert!(!claims(&Method::POST, "/api/chats/abc/messages/extra"));
