@@ -1,25 +1,18 @@
-name: Desktop CI
+name: CI
 
-# Checks for the Tauri desktop app. Until `desktop` merges into `main`, this is
-# the integration branch: desktop PRs target it, and desktop releases are tagged
-# from it.
-#
-# The app is the whole repository on this branch (#388), so there is no path
-# filter left to write — the `desktop/**` prefix and the `go.mod`/`go.sum`/
-# `internal/**` triggers (which existed so a change to the Go tree the app
-# `include_str!`d still ran these checks) all named things that no longer
-# exist. An unfiltered trigger is also the safer default now: with one tree
-# there is no such thing as a change that cannot affect the app.
+# Checks for Agento. The app is the whole repository, so there is no path
+# filter to write — an unfiltered trigger is the right default when there is
+# no such thing as a change that cannot affect the app.
 
 on:
   pull_request:
-    branches: [desktop]
+    branches: [main]
   push:
-    branches: [desktop]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
-  group: desktop-ci-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -110,10 +103,9 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
-      # Covers every endpoint, including the frozen goldens in parity/ — which
-      # a Go suite used to assert from the other side and now nothing does, so
-      # this is their only remaining reader (#388). The live-instance diff suites
-      # went with the Go server they diffed against.
+      # Covers every endpoint, including the frozen goldens in parity/. This is
+      # their only reader, so a change to one of those files is only ever
+      # noticed here — see parity/README.md before editing any of them.
       - name: Rust tests
         working-directory: src-tauri
         run: cargo test

@@ -160,7 +160,7 @@ For EVERY finding, use this exact format:
 
 ### [SEV-CRITICAL/HIGH/MEDIUM/LOW] [CWE-XXX] — [Short description]
 
-- **Location:** `file/path.go:42`
+- **Location:** `file/path.rs:42`
 - **Category:** [Which of the 10 categories above]
 - **Severity:** Critical / High / Medium / Low
 - **CVSS estimate:** [0.0 - 10.0] (rough estimate)

@@ -1,14 +1,18 @@
-name: Desktop Release
+name: Release
 
-# Builds the native installers for the Tauri desktop app and publishes the
-# update manifest the in-app updater reads.
+# Builds the native installers for Agento and publishes the update manifest
+# the in-app updater reads.
 #
 # Tauri cannot cross-compile its bundles: a .dmg needs macOS, an .exe needs
 # Windows, a .deb needs Linux. So the matrix is one runner per target OS.
 #
-# Releases are cut from the `desktop` branch, not `main`, until the two merge.
-# Tag with `desktop-v0.1.0` on `desktop` to build. The flow has a deliberate
-# human gate in the middle:
+# Tag with `desktop-v0.1.0` on `main` to build. The `desktop-` prefix is
+# retained deliberately: every installed app polls the fixed `desktop-latest`
+# tag, and the guard job, the manifest script and `promote` all key off the
+# prefix. Renaming it is a release-infrastructure change to make on its own,
+# never as a side effect of something else.
+#
+# The flow has a deliberate human gate in the middle:
 #
 #   tag push        -> guard + build matrix -> DRAFT release with installers
 #                      and `latest.json` staged as one of its assets. Draft
@@ -333,10 +337,10 @@ jobs:
   # Runs when a human publishes the draft. Promotion, not regeneration: the
   # manifest was built and signed beside the artifacts it points at, and this
   # job only copies it to the fixed URL the updater polls. The `if` filters
-  # out everything else that flows through `release: published` — the Go
-  # server's v* releases, desktop-latest's own publication, and any release
-  # marked prerelease; the version check below catches an rc tag even if
-  # someone unticked the prerelease box before publishing.
+  # out everything else that flows through `release: published` —
+  # desktop-latest's own publication, and any release marked prerelease; the
+  # version check below catches an rc tag even if someone unticked the
+  # prerelease box before publishing.
   promote:
     name: Promote update manifest
     if: >-

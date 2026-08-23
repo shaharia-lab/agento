@@ -24,7 +24,6 @@ notes, with the reasoning behind individual decisions, are in
 | --- | --- |
 | Rust | stable, 1.88 or newer |
 | Node.js | 22 |
-| Go | 1.25 or newer, only for the parity tests |
 | Claude Code CLI | any recent version, for running agents |
 
 **Linux system packages**, once:
@@ -48,12 +47,8 @@ it turns on clippy's version-gated lints.
 ```bash
 git clone https://github.com/shaharia-lab/agento.git
 cd agento
-git checkout desktop
-cd desktop
 npm install
 ```
-
-Note the branch. Desktop work happens on `desktop`, not `main`.
 
 ---
 
@@ -128,16 +123,13 @@ src-tauri/
   src/guards.rs      the Host and Content-Type guards, applied before routing
   src/menu.rs        the native macOS menu
   src/paths.rs       data directory and database path
-  src/claude/        the Claude Agent SDK, ported from Go
-  src/native/        the ported backend, one module per API area
+  src/claude/        the Claude Agent SDK
+  src/native/        the backend, one module per API area
   tests/             integration tests
-parity/              frozen goldens from the Go server; see parity/README.md
+parity/              the frozen wire-format spec; see parity/README.md
 docs/                this documentation
 CLAUDE.md            the full working notes
 ```
-
-Until #388 this all lived under `desktop/`, beside the Go server it was ported
-from. The Go tree is gone from this branch and the app is the repository.
 
 ---
 
@@ -157,16 +149,13 @@ From the repository root:
 npm run build                 # tsc --noEmit plus the Vite build
 ```
 
-CI runs exactly those four, on every push and pull request. It used to carry a
-path filter naming `desktop/**` and the Go sources the parity fixtures came
-from; with one tree there is no change that cannot affect the app, so there is
-nothing left to filter on.
+CI runs exactly those four, on every push and pull request, unfiltered — with
+one tree there is no change that cannot affect the app.
 
 ### Tests that need something
 
 Several suites are `#[ignore]`d because they need a corpus or a database that CI
-does not have. (The suites that needed a running Go server went with it in
-#388 — see [Parity testing](#parity-testing) below.)
+does not have.
 
 ```bash
 # The scan, against a copy of your real corpus.
@@ -198,82 +187,49 @@ Two traps in writing those tests:
 
 ---
 
-## Parity testing
+## The wire format is exact
 
-The Rust backend is a port of the Go server, and correctness meant matching it
-byte for byte. **The Go server is no longer in this repository** (#388), so what
-survives is the evidence rather than the check. See
-[Architecture](architecture.md#parity-with-the-go-server) for why the bar was
-what it was.
+Agento's JSON is specified down to the byte: field names, key order, escaping,
+float spelling. `parity/` is that specification, and CI asserts it on every run.
 
-### Frozen goldens
+**Read [`parity/README.md`](../parity/README.md) before touching one of those
+files.** It records which of them are *audits* rather than fixtures and what
+that costs, and how each is read — `include_str!` with a relative path, or
+anchored to `CARGO_MANIFEST_DIR`.
 
-`parity/` holds files that were generated from the Go server and asserted by
-both languages. They are still asserted here, on every CI run — Go's JSON
-encoder, Go's `filepath` and `net/url`, gocron's schedule arithmetic, the 30
-migrations, the reflected tool schemas, and the request each integration tool
-builds. Nothing regenerates them.
+A golden changes by deliberate edit with a reason in the commit message, never
+by "refresh until green". Nothing regenerates them, and that is deliberate: a
+golden re-recorded to match new behaviour does not prove the new behaviour is
+right, it only removes the thing that would have told you it changed.
 
-**Read [`parity/README.md`](../parity/README.md) before touching one.** It
-records every generator command (for tracing, not for running), which files were
-*audits* rather than fixtures and what freezing costs them, and how each golden
-is read — `include_str!` with a relative path, or anchored to
-`CARGO_MANIFEST_DIR`.
-
-A golden should change by deliberate edit with a reason in the commit message,
-never by "refresh until green". To see how one was produced, read its generator
-out of history:
-
-```bash
-git show main:desktop/parity/github_parity_test.go
-```
-
-### What is gone, and what to do instead
-
-The live-diff harness — `scripts/parity-instance.sh` and the ~20
-`src-tauri/tests/parity_*.rs` suites — built a Go server from the checkout, ran
-it on a copy of `~/.agento`, replayed each request against both implementations
-and compared the bytes. It went with the Go tree; there is nothing to diff
-against.
-
-For a change to a ported surface, the checks that remain are the frozen goldens,
-the unit tests beside each module, and the `#[ignore]`d suites above that run
-against your real corpus. If you need to know what Go did for a case no golden
-covers, `main` still ships the Go server: build it there and ask it.
-
-### Go was not always byte-stable
-
-Kept because it explains shapes you will meet in the goldens. Several Go
-analytics builders collect into a map, which iterates randomly, and then sort
-unstably, so two rows tying on the sort key came out in either order. The Rust
-port sorts stably, so it matches only one of the orderings Go produced — which
-is why `parity/claude_analytics_golden.json`'s fixture is built with no ties on
-any sort key.
+One shape you will meet and should not tidy: `parity/claude_analytics_golden.json`'s
+fixture is built with **no ties on any sort key**. A tie makes the expected
+ordering ambiguous, and an ambiguous golden is a flaky test.
 
 ---
 
 ## Conventions
 
-### Porting a route
+### Adding an endpoint
 
-1. **Read `native/gojson.rs` first.** Rust's natural JSON is not Go's. Encode
-   through `gojson::to_vec`, keep struct fields in the Go struct's declaration
-   order, and use `skip_serializing_if` for `omitempty`.
-2. Mirror the Go source's ordering and grouping exactly, including anything
-   hashed. A fingerprint over rows in a different order is a different
-   fingerprint for identical data.
-3. Prove it two ways: a fixture both languages build against a Go-written golden,
-   and the live diff against real data.
-4. Only then leave it claimed.
+1. **Read `native/gojson.rs` first.** Rust's natural JSON is not Agento's.
+   Encode through `gojson::to_vec`, keep struct fields in the order they should
+   appear on the wire, and use `skip_serializing_if` to omit empty values.
+2. Ordering and grouping are part of the answer, including anything hashed — a
+   fingerprint over rows in a different order is a different fingerprint for
+   identical data.
+3. Add it to the endpoint registry in `native/mod.rs`, record it in
+   `parity/read_routes.json` or `write_routes.json`, and cover it with a test
+   beside the module.
 
 ### JSON decoding
 
-Go's `json.Unmarshal` treats `null` as a no-op for every type here, and serde
-rejects it. Three helper types exist for that, and they are **types rather than
-`deserialize_with` functions** for a reason recorded in `gojson.rs`: a function
-makes the field required, which forces `#[serde(default)]` on every call site,
-which in turn widens the struct into accepting short positional arrays that Go
-refuses.
+`null` has to decode as a zero value rather than a type error, and serde rejects
+it by default. Three helper types exist for that, and they are **types rather
+than `deserialize_with` functions** for a reason recorded in `gojson.rs`: a
+function makes the field required, which forces `#[serde(default)]` on every
+call site, which in turn widens the struct into accepting short positional
+arrays that must be refused.
 
 | Helper | Covers |
 | --- | --- |
@@ -281,13 +237,14 @@ refuses.
 | `GoList<T>` / `GoMap<V>` | A `null` element or map value |
 | `GoStruct<T>` | A struct built positionally from a JSON array |
 
-The direction matters. An over-**reject** is visible. An over-**accept** writes a
-row Go would refuse, with nothing to report it.
+The direction matters. An over-**reject** is visible and loud. An
+over-**accept** writes a row that should have been refused, with nothing to
+report it.
 
 ### Wire types
 
-`src/lib/types.ts` uses the Go `json:` tags verbatim. Every array field is
-`T[] | null`, because Go marshals a nil slice as `null`.
+`src/lib/types.ts` mirrors the API's field names verbatim, snake_case included.
+Every array field is `T[] | null`, because an empty slice serialises as `null`.
 
 Every state-changing `/api` request needs `Content-Type: application/json`,
 including the ones with no body. `api.ts` does this for you.
@@ -402,17 +359,15 @@ Chrome but not in the app".
 
 ## Branches and pull requests
 
-- Desktop work happens on the **`desktop`** branch. PRs target `desktop`, not
-  `main`.
-- `main` carries the Go server and is left alone until the two converge.
-- Desktop releases are tagged `desktop-v*` from `desktop`. The Go server keeps
-  its own `v*` tags. The two patterns do not overlap, so both ship independently
-  from one repository.
+- Work happens on a feature branch. PRs target **`main`**.
+- Releases are tagged `desktop-v*` from `main`. The prefix is retained because
+  every installed app polls the fixed `desktop-latest` tag — see
+  [Releasing](releasing.md).
 
-Before opening a PR:
+Before opening a PR, from the repository root:
 
 ```bash
-cd desktop && npm run build
+npm run build
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 

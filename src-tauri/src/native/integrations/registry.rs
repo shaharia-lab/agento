@@ -47,8 +47,7 @@
 //! [`HOSTED_TYPES`] that [`hosts_type`] and the starter dispatch read** — one
 //! list, so the two halves could not drift. #278 removed the sidecar, and with
 //! it the environment plumbing; [`HOSTED_TYPES`] remains the single list the
-//! two in-process consumers read, and `AGENTO_INTEGRATIONS` remains meaningful
-//! only for a standalone `agento web` (see the root CLAUDE.md).
+//! two in-process consumers read.
 //!
 //! ## What happens to a type neither side hosts
 //!

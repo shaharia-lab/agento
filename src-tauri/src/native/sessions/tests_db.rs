@@ -9,7 +9,7 @@
 //!
 //! It lived at `internal/claudesessions/testdata/session_metric_vectors.json`
 //! and had three readers — `session_page_test.go`,
-//! `frontend/src/lib/sessionMetrics.test.ts` and this one. #388 deleted the Go
+//! `frontend/src/lib/sessionMetrics.test.ts` and this one. #391 deleted the Go
 //! tree and the web frontend, so this is the **only** reader left and the file
 //! moved into `parity/` with the rest of the frozen goldens. It is no longer a
 //! cross-language check — this app computes these figures in SQL and renders

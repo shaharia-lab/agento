@@ -56,8 +56,8 @@ Run it first and both failure modes disappear.
 ## Scratch environments — never touch the real instances
 
 - The user's live Agento is on `:8990`. **GET only, never write to it.**
-- The Rust backend is the only backend (#391 deleted the Go server; #392 moved
-  the app to the repository root, so every path below is root-relative). Run
+- There is one backend and it is the Rust one; every path below is
+  root-relative. Run
   `src-tauri/target/debug/agento` directly, or let `npm run app:alongside`
   start it: dev builds use `~/.agento-desktop-dev` and bind `127.0.0.1:8991`,
   so **the dev instance is already an isolated scratch environment** — its

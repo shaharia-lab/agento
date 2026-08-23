@@ -227,10 +227,10 @@ A Telegram integration can also run agents on incoming messages. Add a trigger
 rule saying which messages match and which agent handles them. The agent's reply
 goes back to the same chat.
 
-### If you paired WhatsApp in the web app
+### If you paired WhatsApp in an older version
 
-The desktop app does not support WhatsApp. An existing WhatsApp integration is
-listed and its data is safe, but it cannot be edited or used here.
+Agento does not support WhatsApp. An existing WhatsApp integration is still
+listed and its data is safe, but it cannot be edited or used.
 
 ---
 
@@ -267,8 +267,8 @@ last outcome.
 
 **Times are your local time.** They are stored in UTC and converted for display.
 
-**One process only.** If you also run `agento web` against the same data
-directory, both would fire every task. Run one or the other.
+**Agento has to be running.** A scheduled task fires from the app itself, so
+nothing runs while it is closed.
 
 ---
 
@@ -439,9 +439,9 @@ Either way, your sessions are re-priced in the background afterwards.
 
 ### Advanced
 
-Monitoring configuration, shown read-only. The desktop app does not export
-telemetry. If you also run `agento web` against the same data directory, that is
-where the setting takes effect.
+Monitoring configuration, shown read-only. Agento does not export telemetry, so
+there is nothing here to change — the stored settings are displayed for
+reference, along with any `OTEL_*` environment variables pinning them.
 
 ---
 

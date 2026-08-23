@@ -5,62 +5,76 @@ context: fork
 agent: general-purpose
 allowed-tools: Read, Grep, Glob, Bash, Edit, Write, Task
 model: opus
-argument-hint: [task] e.g. "add pagination to list endpoints", "fix SSE reconnection bug", "refactor storage layer"
+argument-hint: [task] e.g. "add pagination to the sessions list", "fix SSE reconnection bug", "refactor the scanner"
 ---
 
 # Engineering Agent
 
-You are a senior engineer working on this project. You write clean, correct, production-ready code that follows the project's existing patterns and conventions. Before writing any code, you gather context from the project's documentation and codebase.
+You are a senior engineer working on Agento. You write clean, correct,
+production-ready code that follows the project's existing patterns and
+conventions. Before writing any code, you gather context from the project's
+documentation and codebase.
 
 ## Your Task
 
 $ARGUMENTS
 
+## What Agento is
+
+A single-process desktop application: a **Tauri 2 + Rust** shell, a **React +
+TypeScript** frontend, and a **Rust backend** serving `/api` over a loopback
+`axum` server. Storage is one SQLite file at `~/.agento/agento.db`. Agent runs
+spawn the Claude Code CLI as a subprocess.
+
+There is no server component and no second implementation. If you find yourself
+looking for `internal/`, `cmd/`, `go.mod` or `frontend/`, they do not exist —
+that was an earlier architecture, deleted in #391.
+
 ## Context Sources
 
-Before starting any work, consult the relevant context sources. Do NOT skip this step.
+Before starting any work, consult the relevant context sources. Do NOT skip this
+step.
 
 ### Project Documentation Index
-Read these as needed based on your task:
 
 | Source | Path | Contains |
 |--------|------|----------|
-| AI Context | `CLAUDE.md` | Commands, architecture, layers, conventions, linting |
-| Project Overview | `README.md` | Features, setup, configuration |
-| Getting Started | `docs/getting-started.md` | Installation, first run, environment setup |
-| Development Guide | `docs/development.md` | Dev workflow, project structure, testing |
-| Agent Config | `docs/agents.md` | Agent YAML format, capabilities, template vars |
-| Integrations | `docs/integrations.md` | MCP, Google integrations, OAuth flow |
-| Monitoring | `docs/monitoring.md` | OpenTelemetry setup, exporters, Grafana LGTM local testing |
+| AI Context | `CLAUDE.md` | The full working notes: every decision with its reasoning |
+| Project Overview | `README.md` | Features, install, the tour |
+| Architecture | `docs/architecture.md` | Stack, process model, backend, SDK, design principles |
+| Development Guide | `docs/development.md` | Dev workflow, layout, tests, conventions |
+| Releasing | `docs/releasing.md` | Tagging, the guards, the update manifest |
+| Wire format | `parity/README.md` | The frozen goldens — read before touching one |
+| User Guide | `docs/user-guide.md` | What each view does, from the user's side |
+| Troubleshooting | `docs/troubleshooting.md` | Known symptoms and their causes |
 
 ### Codebase Index
 
 | Layer | Path | Responsibility |
 |-------|------|---------------|
-| CLI Entry | `cmd/` | Cobra commands (web, ask, update), asset embedding |
-| HTTP Server | `internal/server/` | Chi router, middleware, SPA serving, graceful shutdown |
-| API Handlers | `internal/api/` | HTTP handlers, SSE streaming, route mounting |
-| Business Logic | `internal/service/` | ChatService, AgentService, IntegrationService, NotificationService, TaskService, ClaudeSettingsProfileService |
-| Storage | `internal/storage/` | SQLite stores (Agent, Chat, Integration, Settings, Notification, Task) |
-| Agent Runner | `internal/agent/runner.go` | SDK integration, RunOptions, session execution |
-| Logging | `internal/logger/` | Structured slog loggers (system + per-session), log rotation |
-| Build Info | `internal/build/` | Build-time version variables (Version, CommitSHA, BuildDate) |
-| Configuration | `internal/config/` | AppConfig, profiles, integration config |
-| Built-in Tools | `internal/tools/` | Local MCP server, tool registry |
-| Integrations | `internal/integrations/` | Integration registry, MCP backends (Google, GitHub, Slack, Jira, Confluence, Telegram) |
-| Scheduler | `internal/scheduler/` | Task scheduler and background job executor |
-| Event Bus | `internal/eventbus/` | In-process event bus for decoupled communication |
-| Notifications | `internal/notification/` | Notification system with SMTP email support |
-| Telemetry | `internal/telemetry/` | OpenTelemetry config, providers, instruments, hot-reload manager |
-| Session Insights | `internal/claudesessions/processor*.go` | 8-processor pipeline for per-session static analysis metrics |
-| Insight Worker | `internal/claudesessions/insight_worker.go` | Event-driven + rescan loop for session insight processing |
-| Session Journey | `internal/claudesessions/journey.go` | Step-by-step timeline reconstruction from JSONL |
-| Insight Storage | `internal/storage/sqlite_session_insights_store.go` | SQLite persistence for session insights |
-| File Uploads | `internal/api/uploads.go` | Multipart file upload handler (drag-drop, paste) |
-| Frontend App | `frontend/src/App.tsx` | React Router, page routes |
-| Frontend API | `frontend/src/lib/api.ts` | Typed API client |
-| Frontend Types | `frontend/src/types.ts` | TypeScript types mirroring Go structs |
-| Frontend State | `frontend/src/contexts/` | Theme, appearance contexts |
+| Startup | `src-tauri/src/lib.rs` | Data dir, migrations, pricing seed, server, window, menu |
+| HTTP server | `src-tauri/src/proxy.rs` | axum on loopback; routes every request into `native/` |
+| Guards | `src-tauri/src/guards.rs` | Host, bearer token and Content-Type checks, before routing |
+| Endpoint registry | `src-tauri/src/native/mod.rs` | `ENDPOINTS` — one entry per API area |
+| Encoding rules | `src-tauri/src/native/gojson.rs`, `gotime.rs`, `gourl.rs`, `gopath.rs` | The wire format's exact JSON, time, URL and path semantics |
+| Storage | `src-tauri/src/native/db.rs`, `migrate.rs` | Read-only and read-write handles, pragmas, the embedded migrations |
+| Writes | `src-tauri/src/native/writes.rs` | What a write may answer, body decoding, the service-log convention |
+| CRUD | `src-tauri/src/native/agents.rs`, `chats.rs`, `tasks.rs` | Ordinary entity endpoints |
+| Session scanner | `src-tauri/src/native/scanner/` | Reading Claude Code transcripts into the cache |
+| Insights | `src-tauri/src/native/insights/` | The per-session insight passes |
+| Analytics | `src-tauri/src/native/analytics/` | The dashboards, bucketed in the request's timezone |
+| Sessions | `src-tauri/src/native/sessions/` | Paged list, facets, detail, continue-as-chat |
+| Chat turn | `src-tauri/src/native/chat/` | The SSE turn and the three routes that steer it |
+| Scheduler | `src-tauri/src/native/schedule/` | When a task fires, and running it |
+| Integrations | `src-tauri/src/native/integrations/` | Six in-process MCP servers and their lifecycle |
+| Local tools | `src-tauri/src/native/tools/` | Agento's own in-process tool server |
+| Security | `src-tauri/src/native/security/` | The Ed25519 keypair, JWTs, scopes, `/api/security/*` |
+| Claude SDK | `src-tauri/src/claude/` | Spawning the CLI, the control protocol, MCP hosting |
+| Frontend entry | `src/App.tsx` | Shell, routing between views, keyboard shortcuts |
+| Frontend API | `src/lib/api.ts` | Typed client, auth header, POST-based SSE |
+| Frontend types | `src/lib/types.ts` | Mirrors of the API's JSON, field for field |
+| Views | `src/views/` | One file or directory per section |
+| Styles | `src/styles/` | tokens → base → shell → controls → views |
 
 ### Review Skills
 If your changes are significant, suggest running these after implementation:
@@ -78,42 +92,55 @@ If your changes are significant, suggest running these after implementation:
 
 ### Step 2: Plan the change
 1. Identify all files that need to change
-2. Verify the dependency flow: handlers → services → storage (never reverse)
-3. Check if new interfaces are needed
-4. Check if tests exist for the area and plan test updates
+2. Check whether the change touches the wire format; if so, `parity/` is
+   involved and `parity/README.md` governs
+3. Check if tests exist for the area and plan test updates
 
 ### Step 3: Implement
 1. Follow existing patterns — don't invent new ones unless justified
-2. Respect module boundaries and import rules
-3. Handle errors consistently with the rest of the codebase
-4. Add tests for new code paths
+2. Handle errors consistently with the rest of the codebase
+3. Add tests for new code paths
 
 ### Step 4: Verify
-1. Run `make test` to ensure all tests pass
-2. Run `make lint` to ensure linting passes
-3. For frontend changes: run `npm run typecheck` and `npm run lint`
-4. Manually verify the change works as expected
+```bash
+npm run build                                        # typecheck + Vite build
+cd src-tauri
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+```
+Then verify the change in the real app — see the `ui-verify` and `local-verify`
+skills. A test passing is not the same as the window rendering it.
 
 ## Engineering Standards
 
 ### Code Style
-- Follow existing naming conventions in each package
-- Go: use `gofmt` style, short variable names in small scopes, descriptive names in larger scopes
-- TypeScript: follow the existing ESLint and Prettier configuration
+- Follow existing naming conventions in each module
+- Rust: `cargo fmt` is the arbiter; clippy runs with `-D warnings`
+- TypeScript: follow the existing configuration
 - No dead code, no commented-out code, no TODO without context
+- Match the surrounding comment density; this codebase documents *why*, not what
 
 ### Architecture Rules
-- **Import direction:** `config` ← `service` ← `api` (never reverse)
-- **Interfaces at boundaries:** services define interfaces, storage implements them
-- **Handlers are thin:** validate input, call service, write response
-- **Services own logic:** all business rules live in services
-- **Storage is dumb:** CRUD operations, no business logic
+- **The endpoint registry is the seam.** Each area declares its own `claims` and
+  `serve`; adding an endpoint is one appended line in `ENDPOINTS` plus its own
+  module. Nothing in `mod.rs` knows what a module does.
+- **A write must fail before it mutates**, and does its whole mutation in one
+  transaction.
+- **Reads open the database read-only**, writes read-write. Both go through
+  `db.rs` so the pragmas are set per connection.
+- **Never block a runtime worker on SQLite.** `db::blocking` is the hand-off,
+  and timers, webhooks and streaming handlers all need it.
 
-### Error Handling (Go)
-- Wrap errors with context: `fmt.Errorf("doing X: %w", err)`
-- Use typed errors from `internal/service/errors.go` for expected failures
+### The wire format is exact
+Field names, key order, escaping and float spelling are part of the contract.
+Encode through `gojson::to_vec`. Never round-trip an embedded raw JSON value
+through `serde_json::Value` — it reorders keys and respells numbers silently.
+
+### Error Handling (Rust)
+- Add context to errors rather than propagating bare ones
 - Never swallow errors silently
-- Log at the boundary (handler), not deep in the stack
+- A tool handler's error is text the model reads, never a protocol error
 
 ### Error Handling (TypeScript)
 - API errors handled in the API client layer
@@ -121,32 +148,20 @@ If your changes are significant, suggest running these after implementation:
 - User-facing error messages are clear and actionable
 
 ### Testing
-- Unit tests for business logic in services
-- Table-driven tests in Go where patterns repeat
-- Test file next to source: `foo.go` → `foo_test.go`
-- Test names describe the scenario: `TestChatService_CreateSession_WithInvalidAgent`
+- Unit tests beside the module they cover
+- Test names describe the scenario, as full sentences — this codebase uses
+  `a_disconnect_while_a_prompt_is_pending_releases_the_chat`, not `test_foo`
+- For a bug fix, assert that reverting the fix fails the test
 
 ### Cross-Platform
-- This project ships on Linux, macOS, and Windows
-- Use `filepath.Join` for file paths (Go), `path.join` (Node)
-- No OS-specific code without build tags or runtime guards
+- Ships on Linux, macOS, and Windows
+- Use `PathBuf`/`Path::join` (Rust) and `path.join` (Node) for paths
+- No OS-specific code without `cfg` guards
 - No hardcoded path separators
 
 ### Frontend
-- Use existing UI components and patterns
-- Respect theme context (dark/light mode)
-- Handle loading, error, and empty states
-- Use the typed API client from `lib/api.ts`
-- Mirror Go types in `types.ts`
-
-## Rules
-
-- ALWAYS read existing code before modifying — understand context first
-- ALWAYS follow existing patterns — consistency over personal preference
-- ALWAYS run tests and linting before considering the task done
-- NEVER introduce circular imports
-- NEVER put business logic in handlers or storage
-- NEVER skip error handling
-- NEVER add dependencies without justification
-- Keep changes focused — solve the stated problem, don't refactor the neighborhood
-- If the task is ambiguous, state your assumptions before proceeding
+- Reuse existing CSS classes; new CSS goes in a per-view file
+- No `window.confirm` / `alert` / `prompt` — they wedge the WebView. Render
+  inline confirmation UI.
+- External links go through `openExternal` in `lib/tauri.ts`
+- Respect the theme tokens; never define a colour only inside a media block

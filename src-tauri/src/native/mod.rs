@@ -4,7 +4,7 @@
 //! in [`claims`] was served from here, everything else forwarded to the Go
 //! sidecar, and both implementations stayed runnable at once so a port was
 //! *verifiable* rather than merely finished. The sidecar is gone now (#278) and
-//! so is the Go tree (#388). What remains of the seam is its registry shape —
+//! so is the Go tree (#391). What remains of the seam is its registry shape —
 //! one module per area, claiming and serving in the same file — and the parity
 //! corpus (`desktop/parity/`), which is **frozen**: the goldens are still
 //! asserted here, but the Go generators and the live-diff suites
@@ -29,7 +29,6 @@ pub mod chat;
 pub mod chats;
 pub mod claude_settings;
 pub mod db;
-pub mod diff;
 pub mod fs;
 pub mod gojson;
 pub mod gopath;
@@ -736,7 +735,7 @@ mod tests {
     /// construction: they iterate their own rows, so a route that is claimed and
     /// never recorded passes. That is tolerable for them — the Go half of each
     /// pair walked chi and failed on an unclassified route, so completeness was
-    /// somebody else's job — and it stopped being tolerable when #388 deleted
+    /// somebody else's job — and it stopped being tolerable when #391 deleted
     /// that half.
     ///
     /// `/api/security/*` and `/.well-known/jwks.json` exist in no Go router at

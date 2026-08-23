@@ -67,17 +67,23 @@ again.
 
 ## The parts that are not obvious
 
-- **`session_insights` has to be backfilled from outside the app.** The desktop
-  build ports the nine insight processors as pure functions and the summary
-  endpoint reads the table, but nothing in the shell runs the worker Go's
-  `insight_worker.go` ran — so Insights is empty on any fresh desktop install
-  (and silently stale on a migrated one). `backfill.sh` runs a Go server built
-  from `3b54e41` — the last desktop commit that still had the Go tree, whose
-  worker upserts on the desktop schema's `(session_id, project_path)` key;
-  `main`'s upserts on `session_id` alone and fails — against the demo data dir,
-  restarting it until every session has a row (its queue is 100 per rescan).
-  Build it with `git worktree add --detach <dir> 3b54e41 && (cd <dir> && go build -o agento-go .)`.
-  Run it only with the desktop app stopped.
+- **`session_insights` has to be backfilled from outside the app.** Agento has
+  the nine insight processors as pure functions and the summary endpoint reads
+  the table, but nothing runs a worker to populate it — so Insights is empty on
+  any fresh install and silently stale on a migrated one. **That is a real bug,
+  not a quirk of this skill**; if it is ever fixed, delete this step.
+
+  Until then `backfill.sh` builds a historical writer out of git history and
+  runs it against the demo data dir, restarting it until every session has a row
+  (its queue is 100 per rescan):
+
+  ```bash
+  git worktree add --detach <dir> 3b54e41 && (cd <dir> && go build -o agento-go .)
+  ```
+
+  `3b54e41` is pinned deliberately: it is the last commit whose worker upserts
+  on the `(session_id, project_path)` key this schema uses. Run it only with
+  Agento stopped.
 - **Hand edits after `seed_api.py`**, in the scratch DB (`sqlite3`):
   - `UPDATE integrations SET auth='{"validated":true,"username":"acme-platform-bot"}' WHERE type='github'`
     (and `team_name` / `display_name` / `bot_username` for slack / jira /

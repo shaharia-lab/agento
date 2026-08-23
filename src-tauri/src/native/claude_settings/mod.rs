@@ -127,11 +127,10 @@ pub fn profiles_path(dir: &str) -> String {
 /// `os.WriteFile` truncates, so a crash between the truncate and the write
 /// leaves an empty file — and for `settings_profiles.json` an empty index
 /// orphans every profile. An atomic replace would be strictly better *and*
-/// byte-identical in final content, so it costs no parity. It is not done here
-/// because the crash window belongs to the Go original too: fixing it in one
-/// implementation and not the other means the desktop app and `agento web`
-/// survive a power cut differently, which is a worse thing to debug than the
-/// window itself. It is on the upstream list in `desktop/CLAUDE.md`.
+/// byte-identical in final content and unobservable through the API. It was
+/// left alone while a second implementation shared this file and would have
+/// survived a power cut differently; that constraint is gone, so this is now
+/// simply a bug to fix. It is on the known-bugs list in `CLAUDE.md`.
 pub fn write_file(path: &str, data: &[u8]) -> io::Result<()> {
     use std::io::Write;
     let mut options = std::fs::OpenOptions::new();
