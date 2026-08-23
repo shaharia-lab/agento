@@ -14,8 +14,9 @@
 //!   as far as the browser is concerned, at which point CORS stops applying at
 //!   all. A loopback bind does not help, for the same reason: the browser is
 //!   already inside.
-//! - **The bearer token** (#400). Both of the above are *browser*-shaped, and
-//!   neither is an obstacle to a caller that simply speaks HTTP:
+//! - **The signed bearer token** (#400, #405). Both of the above are
+//!   *browser*-shaped, and neither is an obstacle to a caller that simply speaks
+//!   HTTP:
 //!   `curl -H 'Content-Type: application/json' http://127.0.0.1:<port>/api/agents`
 //!   passes both trivially, and this API can create an agent with
 //!   `permission_mode: bypass` and run it — arbitrary command execution. The
@@ -39,7 +40,37 @@
 //! powerful API server did not.
 //!
 //! **A 401 is a status Go never answers**, so it is a deliberate divergence from
-//! the ported surface rather than a reproduction of anything.
+//! the ported surface rather than a reproduction of anything. #405 adds a
+//! second, on the same terms: a **403 for insufficient scope**.
+//!
+//! # What the credential is, since #405
+//!
+//! #400's credential was an opaque random string, minted per launch and
+//! compared byte for byte. It authenticated exactly one client — the app's own
+//! webview — and could express nothing else: no identity, no expiry, no scope,
+//! and no revocation short of restarting the app.
+//!
+//! It is now an **EdDSA (Ed25519) JWT signed by a per-install keypair**
+//! ([`crate::native::security`]). The *guard* is unchanged in every respect that
+//! matters here — one check, `/api`-scoped, between the `Host` and
+//! `Content-Type` ones, failing closed when it cannot verify. What changed is
+//! that the check is now `verify(presented, required_scope)` rather than a
+//! comparison, which is exactly the shape #400 left room for on purpose:
+//! its own note said the check should be "does this request carry an accepted
+//! credential — one `verify(&str) -> bool` — not a hardcoded compare against a
+//! single string".
+//!
+//! Two consequences land in this file:
+//!
+//! - **The scope map is [`is_state_changing`], reused.** A `read` credential
+//!   serves `GET`/`HEAD`/`OPTIONS` and is refused on the state-changing four, so
+//!   there is one definition of read-versus-write in the tree rather than a
+//!   second permission table that can drift from the first. The one exception —
+//!   `/api/security/*`, which needs `write` whatever the method — lives with the
+//!   routes it is about, in `security::required_scope`.
+//! - **There is no token in this module any more.** `API_TOKEN` is gone; what
+//!   process-wide state exists is the *keypair*, and it belongs to the module
+//!   that generates and rotates it.
 //!
 //! # Why the proxy, and why this is not belt-and-braces
 //!
@@ -72,10 +103,11 @@
 //! its own `fetch` calls can and do authenticate.
 
 use std::net::IpAddr;
-use std::sync::OnceLock;
 
 use axum::body::Body;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode, Uri};
+
+use crate::native::security;
 
 /// `internal/server/uploadPath` — the one route that legitimately posts
 /// multipart.
@@ -107,54 +139,43 @@ const CONTENT_TYPE_WRONG: Rejection = (
     "Content-Type must be application/json",
 );
 
-/// The 401 (#400). Go has no counterpart, so this wording is this build's own.
+/// The 401 (#400, #405). Go has no counterpart, so this wording is this build's
+/// own.
 ///
-/// It names the scheme deliberately: the only clients are the app's own webview
-/// and a developer holding the dev token file, and both benefit from the answer
-/// saying what was missing.
+/// It names the scheme deliberately: the clients are the app's own webview, a
+/// developer holding the dev token file, and whatever local process the user has
+/// issued a token to — and all three benefit from the answer saying what was
+/// missing.
+///
+/// **One message for every way a credential can fail to be one**: absent,
+/// malformed, signed by another key, expired, wrong `aud`, revoked. That is
+/// deliberate. Distinguishing them would tell a caller holding a forged token
+/// which part of the forgery to fix, and there is no legitimate client that
+/// benefits — the app re-mints on any 401 without reading the reason, and the
+/// *log* carries the detail for a developer who needs it.
 const UNAUTHORIZED: Rejection = (
     StatusCode::UNAUTHORIZED,
     "a valid Authorization: Bearer token is required",
 );
 
+/// The 403 for a credential that verified but does not carry the scope this
+/// request needs (#405).
+///
+/// A different status from [`UNAUTHORIZED`] on the ordinary HTTP terms: 401 is
+/// "I do not know who you are", 403 is "I do, and you may not do this". Retrying
+/// with the same token is pointless, and saying so is what stops a `read`-scoped
+/// script from looping on a re-authentication that would never help.
+///
+/// It shares its status with [`HOST_REJECTION`] and not its body, which is what
+/// the ordering tests distinguish them by.
+const INSUFFICIENT_SCOPE: Rejection = (
+    StatusCode::FORBIDDEN,
+    "this token's scope does not permit this request",
+);
+
 /// The one credential scheme accepted, spelled exactly as
 /// [`crate::claude::mcp`] spells it.
 const BEARER_PREFIX: &str = "Bearer ";
-
-/// The token minted for this launch, set once during `lib.rs`'s `setup`.
-///
-/// A `OnceLock` rather than Tauri state because of who needs to read it:
-/// [`reject`] is called from `proxy::dispatch`, a plain router function with no
-/// state extractor, so there is no `tauri::State` to take. This is the shape
-/// `native::scan::state`, `native::chat::live` and `native::integrations::registry`
-/// already use for process-wide values.
-static API_TOKEN: OnceLock<String> = OnceLock::new();
-
-/// Install this launch's token, returning it.
-///
-/// Idempotent by construction: a second call returns the first token rather than
-/// replacing it, which is what lets the tests seed one without racing each other
-/// (a `cargo test` binary runs them in parallel against this one static).
-pub fn set_api_token(token: String) -> &'static str {
-    API_TOKEN.get_or_init(|| token).as_str()
-}
-
-/// This launch's token, or `None` before `setup` has installed one.
-///
-/// **An empty token reads as "none installed", and that is a safety property
-/// rather than tidiness.** `token_rejection` strips the scheme and compares what
-/// is left, so a request carrying *no* `Authorization` header at all presents
-/// `""` — which against an empty expected token is an exact match, and every
-/// unauthenticated request would be served. Nothing can reach that today (a v4
-/// UUID is 32 hex characters), but the guard must not be one careless
-/// `set_api_token(String::new())` away from being open, and the failure would be
-/// silent in exactly the way this module exists to prevent.
-pub fn api_token() -> Option<&'static str> {
-    API_TOKEN
-        .get()
-        .map(String::as_str)
-        .filter(|token| !token.is_empty())
-}
 
 /// Why a request must be refused, or `None` to let it through.
 ///
@@ -183,33 +204,33 @@ pub fn reject(req: &Request<Body>) -> Option<Rejection> {
     if !host_allowed(&request_host(req.headers(), req.uri())) {
         return Some(HOST_REJECTION);
     }
-    if let Some(rejection) = token_rejection(req.headers(), api_token()) {
+    if let Some(rejection) = token_rejection(req.method(), path, req.headers()) {
         return Some(rejection);
     }
     content_type_rejection(req.method(), path, req.headers())
 }
 
-/// The bearer check (#400).
+/// The credential check (#400, #405).
 ///
 /// **It applies to every method**, unlike `requireJSONContentType`, which is an
 /// allowlist over the state-changing four. A `GET` is what reads chat
 /// transcripts, agent system prompts and the integration list, so exempting
-/// reads would leave most of what is worth stealing reachable.
+/// reads would leave most of what is worth stealing reachable. What the method
+/// decides is not *whether* a credential is needed but *which scope* it must
+/// carry, and that decision lives in `security::required_scope`.
 ///
-/// `expected` is a parameter rather than a read of [`API_TOKEN`] so the
-/// fail-closed branch is testable: a `OnceLock` cannot be un-set, so a test that
-/// wanted to observe "no token installed" could not arrange it otherwise.
+/// **No key installed refuses everything.** That is the safe direction and the
+/// only one available: the sole way to reach it is a `setup` that failed before
+/// loading the keypair, and a listener that cannot verify a signature cannot
+/// tell a forged token from a real one, so it must accept neither.
 ///
-/// **No token installed refuses everything.** That is the safe direction: the
-/// only way to reach it is a `setup` that failed before minting, and answering
-/// an unauthenticated request in that state would be a listener with no
-/// credential at all. The scheme match is exact, as `mcp.rs`'s is — the only
-/// clients are this app's own webview and the Vite dev proxy, and both spell it
-/// `Bearer `.
-fn token_rejection(headers: &HeaderMap, expected: Option<&str>) -> Option<Rejection> {
-    let Some(expected) = expected else {
-        return Some(UNAUTHORIZED);
-    };
+/// The scheme match is exact, as `mcp.rs`'s is. Note what that costs and why it
+/// is still right: a client sending `bearer ` lowercase is refused even though
+/// RFC 7235 makes the scheme case-insensitive. Every client here is ours — the
+/// app's webview, the Vite dev proxy, and whatever a user pastes a `curl` recipe
+/// into — and a credential check is not the place to start accepting variants
+/// nothing sends.
+fn token_rejection(method: &Method, path: &str, headers: &HeaderMap) -> Option<Rejection> {
     let presented = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -217,14 +238,10 @@ fn token_rejection(headers: &HeaderMap, expected: Option<&str>) -> Option<Reject
         .strip_prefix(BEARER_PREFIX)
         .unwrap_or_default();
 
-    // Shared with the MCP servers rather than reimplemented — one constant-time
-    // comparison in the tree is one to get right. The dependency runs app → SDK,
-    // which is the only direction available: `claude/` is a port of an external
-    // SDK and imports nothing from the rest of this crate.
-    if crate::claude::mcp::credentials_match(presented, expected) {
-        None
-    } else {
-        Some(UNAUTHORIZED)
+    match security::verify_request(presented, method, path) {
+        Ok(_) => None,
+        Err(security::token::Denied::Unauthenticated) => Some(UNAUTHORIZED),
+        Err(security::token::Denied::InsufficientScope) => Some(INSUFFICIENT_SCOPE),
     }
 }
 
@@ -330,7 +347,13 @@ fn content_type_rejection(method: &Method, path: &str, headers: &HeaderMap) -> O
 
 /// `isStateChanging` — an allowlist, so `GET`, `HEAD` and `OPTIONS` pass with no
 /// header at all.
-fn is_state_changing(method: &Method) -> bool {
+///
+/// **Two callers since #405**, and that is the point rather than a coincidence:
+/// `security::required_scope` maps the same split onto `read` versus `write`, so
+/// the tree has one definition of which methods change state. A second table
+/// would be the beginning of the per-route permission model #405 explicitly
+/// defers.
+pub(crate) fn is_state_changing(method: &Method) -> bool {
     matches!(
         *method,
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
@@ -442,18 +465,42 @@ fn is_token(s: &str) -> bool {
 pub(crate) mod tests {
     use super::*;
 
-    /// The token every test in this binary authenticates with.
+    use crate::native::security::keys;
+    use crate::native::security::token::{self, Scope};
+
+    /// The keypair every test in this binary verifies against.
     ///
-    /// [`set_api_token`] is `get_or_init`, so the first caller wins and every
-    /// later one — in this module or in `proxy`'s tests, which share the
-    /// process — sees the same value. That is what makes a seeded token safe
-    /// under `cargo test`'s parallelism.
-    pub(crate) fn seeded_token() -> &'static str {
-        set_api_token("test-token".to_string())
+    /// Installed once and never replaced, which is what makes it safe under
+    /// `cargo test`'s parallelism: the tests here share one process and one
+    /// `security::keys::KEYPAIR`, so a test that *swapped* the key — the
+    /// regenerate case — would break every test running beside it. That case is
+    /// therefore tested where it belongs, in `security::token`, against two
+    /// explicit keypairs and no global at all.
+    fn seeded_keys() -> std::sync::Arc<keys::Keypair> {
+        static SEEDED: std::sync::OnceLock<std::sync::Arc<keys::Keypair>> =
+            std::sync::OnceLock::new();
+        std::sync::Arc::clone(SEEDED.get_or_init(|| {
+            // `install` is the whole seam: the tests below reach the guard
+            // through `reject`, which reads the process-wide key, so there is no
+            // parameter to pass one through.
+            keys::install(keys::Keypair::generate().expect("generate"))
+        }))
+    }
+
+    /// A `write` credential — what the app's own webview carries, and therefore
+    /// what the pre-#405 tests below are asserting the *rest* of the guard with.
+    pub(crate) fn seeded_token() -> String {
+        mint(Scope::Write)
+    }
+
+    fn mint(scope: Scope) -> String {
+        let keys = seeded_keys();
+        token::mint(&keys, "test", scope, 3600).expect("mint").token
     }
 
     fn request(method: Method, path: &str, host: &str, content_type: &str) -> Request<Body> {
-        authed_request(method, path, host, content_type, Some(seeded_token()))
+        let token = seeded_token();
+        authed_request(method, path, host, content_type, Some(&token))
     }
 
     fn authed_request(
@@ -725,15 +772,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_wrong_token_is_refused_and_the_right_one_is_served() {
+    fn a_credential_this_key_did_not_sign_is_refused_and_a_real_one_is_served() {
         let token = seeded_token();
+        // Every shape a forgery takes, against the one guard that sees them all.
+        let tampered = {
+            // Flip the last character of the signature. The header and claims
+            // are untouched and still decode, so nothing but the verification
+            // stands between this and being served.
+            let mut chars: Vec<char> = token.chars().collect();
+            let last = chars.len() - 1;
+            chars[last] = if chars[last] == 'A' { 'B' } else { 'A' };
+            chars.into_iter().collect::<String>()
+        };
+        let other_key = {
+            let keys = keys::Keypair::generate().expect("generate");
+            token::mint(&keys, "test", Scope::Write, 3600)
+                .expect("mint")
+                .token
+        };
         for wrong in [
-            "",
-            "not-the-token",
-            // A prefix and an extension of the real token: the comparison is
-            // length-checked before the byte fold, so neither is admitted.
-            &token[..token.len() - 1],
-            &format!("{token}x"),
+            String::new(),
+            "not-a-jwt".to_string(),
+            tampered,
+            other_key,
+            format!("{token}x"),
         ] {
             assert_eq!(
                 reject(&authed_request(
@@ -741,7 +803,7 @@ pub(crate) mod tests {
                     "/api/agents",
                     "localhost",
                     "",
-                    Some(wrong)
+                    Some(&wrong)
                 )),
                 Some(UNAUTHORIZED),
                 "{wrong:?} should be refused"
@@ -753,7 +815,7 @@ pub(crate) mod tests {
                 "/api/agents",
                 "localhost",
                 "",
-                Some(token)
+                Some(&token)
             )),
             None
         );
@@ -763,7 +825,7 @@ pub(crate) mod tests {
     /// allowlist over the state-changing four. A `GET` is what returns chat
     /// transcripts, agent system prompts and the integration list.
     #[test]
-    fn every_method_needs_the_token_not_only_the_state_changing_ones() {
+    fn every_method_needs_a_credential_not_only_the_state_changing_ones() {
         for method in [
             Method::GET,
             Method::HEAD,
@@ -782,15 +844,113 @@ pub(crate) mod tests {
                     None
                 )),
                 Some(UNAUTHORIZED),
-                "{method} should require the token"
+                "{method} should require a credential"
             );
         }
     }
 
-    /// A request failing the `Host` check **and** carrying no token reads 403,
-    /// not 401: the rebinding answer outranks the credential one.
+    /// **The scope split, across all seven methods** (#405).
+    ///
+    /// A `read` token serves the safe three and is refused on the
+    /// state-changing four — with a **403**, not a 401, because the caller has
+    /// proved who it is and retrying with the same token would not help.
     #[test]
-    fn the_host_check_still_runs_before_the_token_check() {
+    fn a_read_token_serves_the_safe_methods_and_is_refused_on_the_rest() {
+        let read = mint(Scope::Read);
+        for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            assert_eq!(
+                reject(&authed_request(
+                    method.clone(),
+                    "/api/agents",
+                    "localhost",
+                    "",
+                    Some(&read)
+                )),
+                None,
+                "a read token should serve {method}"
+            );
+        }
+        for method in [Method::POST, Method::PUT, Method::PATCH, Method::DELETE] {
+            assert_eq!(
+                reject(&authed_request(
+                    method.clone(),
+                    "/api/agents",
+                    "localhost",
+                    "application/json",
+                    Some(&read)
+                )),
+                Some(INSUFFICIENT_SCOPE),
+                "a read token must not serve {method}"
+            );
+        }
+    }
+
+    /// ...and a `write` token serves all seven, which is what the app's own
+    /// session carries.
+    #[test]
+    fn a_write_token_serves_every_method() {
+        let write = mint(Scope::Write);
+        for method in [
+            Method::GET,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ] {
+            assert_eq!(
+                reject(&authed_request(
+                    method.clone(),
+                    "/api/agents",
+                    "localhost",
+                    "application/json",
+                    Some(&write)
+                )),
+                None,
+                "a write token should serve {method}"
+            );
+        }
+    }
+
+    /// The one route family where the scope is not a function of the method:
+    /// a `read` token may not enumerate the machine's credentials.
+    #[test]
+    fn the_security_reads_refuse_a_read_token() {
+        let read = mint(Scope::Read);
+        let write = mint(Scope::Write);
+        for path in ["/api/security/tokens", "/api/security/keys"] {
+            assert_eq!(
+                reject(&authed_request(
+                    Method::GET,
+                    path,
+                    "localhost",
+                    "",
+                    Some(&read)
+                )),
+                Some(INSUFFICIENT_SCOPE),
+                "{path} should refuse a read token"
+            );
+            assert_eq!(
+                reject(&authed_request(
+                    Method::GET,
+                    path,
+                    "localhost",
+                    "",
+                    Some(&write)
+                )),
+                None,
+                "{path} should serve a write token"
+            );
+        }
+    }
+
+    /// A request failing the `Host` check **and** carrying no token reads 403
+    /// with the *rebinding* message, not the credential one: the rebinding
+    /// answer outranks it, and a browser pointed here by DNS should learn
+    /// nothing further.
+    #[test]
+    fn the_host_check_still_runs_before_the_credential_check() {
         assert_eq!(
             reject(&authed_request(
                 Method::POST,
@@ -801,12 +961,15 @@ pub(crate) mod tests {
             )),
             Some(HOST_REJECTION)
         );
+        // The two 403s share a status and not a body, which is what makes this
+        // assertion about ordering rather than about the number.
+        assert_ne!(HOST_REJECTION.1, INSUFFICIENT_SCOPE.1);
     }
 
-    /// ...and the token check runs before the content-type one, so an
+    /// ...and the credential check runs before the content-type one, so an
     /// unauthenticated caller is not told the content-type rule.
     #[test]
-    fn the_token_check_runs_before_the_content_type_check() {
+    fn the_credential_check_runs_before_the_content_type_check() {
         assert_eq!(
             reject(&authed_request(
                 Method::POST,
@@ -817,7 +980,7 @@ pub(crate) mod tests {
             )),
             Some(UNAUTHORIZED)
         );
-        // With a token, the same request is the 415 it was before #400.
+        // With a credential, the same request is the 415 it was before #400.
         assert_eq!(
             reject(&request(
                 Method::POST,
@@ -827,74 +990,102 @@ pub(crate) mod tests {
             )),
             Some(CONTENT_TYPE_WRONG)
         );
-    }
-
-    /// No token installed refuses everything.
-    ///
-    /// Only reachable through a `setup` that failed before minting, and the safe
-    /// direction: the alternative is a listener with no credential at all.
-    /// Tested through the parameter because a `OnceLock` cannot be un-set.
-    #[test]
-    fn no_installed_token_fails_closed() {
-        let headers = HeaderMap::new();
-        assert_eq!(token_rejection(&headers, None), Some(UNAUTHORIZED));
-
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::AUTHORIZATION,
-            "Bearer anything".parse().expect("hv"),
-        );
-        assert_eq!(token_rejection(&headers, None), Some(UNAUTHORIZED));
-    }
-
-    /// An **empty** installed token must not authenticate the request that sends
-    /// no credential at all.
-    ///
-    /// Both sides reduce to `""` — a header-less request presents `""` after the
-    /// scheme strip — so a constant-time compare of the two is a match, and the
-    /// guard would be wide open while looking installed. [`api_token`] maps
-    /// empty to `None` for this reason; without that filter this test fails,
-    /// which is the whole point of having it.
-    #[test]
-    fn an_empty_token_is_not_a_credential() {
-        assert_eq!(
-            token_rejection(&HeaderMap::new(), Some("")),
-            None,
-            "the raw comparison matches, which is exactly why api_token() must never return it"
-        );
-
-        // Seed **first**, and deliberately so. `set_api_token` is `get_or_init`
-        // over a process-wide static, so calling it with an empty string before
-        // anything else had installed a token would install one — poisoning
-        // every other test in this binary, whichever order they happen to run
-        // in. Seeding here makes the assertion about the accessor rather than
-        // about which test won the race.
-        let token = seeded_token();
-        assert_eq!(
-            set_api_token(String::new()),
-            token,
-            "a later set must not replace the installed token"
-        );
-        assert!(!api_token().unwrap_or_default().is_empty());
+        // An insufficient *scope* is also decided before the content type, for
+        // the same reason: the credential question comes first.
         assert_eq!(
             reject(&authed_request(
-                Method::GET,
+                Method::POST,
                 "/api/agents",
                 "localhost",
-                "",
-                None
+                "text/plain",
+                Some(&mint(Scope::Read))
             )),
-            Some(UNAUTHORIZED)
+            Some(INSUFFICIENT_SCOPE)
         );
     }
 
-    /// The scheme is matched exactly, as `mcp.rs` matches it. The only clients
-    /// are this app's webview and the Vite dev proxy, and both send `Bearer `.
+    /// **Every way a credential can fail to be one is a 401 here**, including
+    /// the ones a correct signature does not save: expired, wrong `aud`, wrong
+    /// `iss`, and an unsigned `alg: none`.
+    ///
+    /// These are all signed by the *seeded* key, so the only thing refusing them
+    /// is claim validation — which is what makes this an assertion about the
+    /// guard rather than about the signature check the wrong-key case already
+    /// covers. The individual rules are pinned in `security::token`; what is
+    /// asserted here is that the guard reaches them at all and renders every one
+    /// as the same answer.
+    #[test]
+    fn a_signed_credential_with_bad_claims_is_still_a_401() {
+        use base64::Engine;
+
+        let keys = seeded_keys();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_secs() as i64;
+
+        let signed = |claims: token::Claims| {
+            jsonwebtoken::encode(
+                &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::EdDSA),
+                &claims,
+                keys.encoding(),
+            )
+            .expect("encode")
+        };
+        let base = |exp: i64| token::Claims {
+            iss: token::ISSUER.to_string(),
+            aud: token::AUDIENCE.to_string(),
+            sub: "test".to_string(),
+            scope: "write".to_string(),
+            jti: "j".to_string(),
+            iat: now - 60,
+            exp,
+        };
+
+        let expired = signed(base(now - (token::LEEWAY as i64) - 60));
+        let wrong_audience = signed(token::Claims {
+            aud: "somebody-elses-api".to_string(),
+            ..base(now + 600)
+        });
+        let wrong_issuer = signed(token::Claims {
+            iss: "somebody-else".to_string(),
+            ..base(now + 600)
+        });
+        // Unsigned, with claims that would otherwise pass. It needs no key at
+        // all, so it is what someone who has read the public JWKS reaches for.
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let unsigned = format!(
+            "{}.{}.",
+            engine.encode(br#"{"alg":"none","typ":"JWT"}"#),
+            engine.encode(serde_json::to_vec(&base(now + 600)).expect("claims")),
+        );
+
+        for (what, credential) in [
+            ("expired", expired),
+            ("wrong audience", wrong_audience),
+            ("wrong issuer", wrong_issuer),
+            ("alg: none", unsigned),
+        ] {
+            assert_eq!(
+                reject(&authed_request(
+                    Method::GET,
+                    "/api/agents",
+                    "localhost",
+                    "",
+                    Some(&credential)
+                )),
+                Some(UNAUTHORIZED),
+                "{what} should be refused"
+            );
+        }
+    }
+
+    /// The scheme is matched exactly, as `mcp.rs` matches it.
     #[test]
     fn the_credential_must_carry_the_bearer_scheme() {
         let token = seeded_token();
         for value in [
-            token.to_string(),
+            token.clone(),
             format!("bearer {token}"),
             format!("Basic {token}"),
             format!("Bearer  {token}"),
@@ -902,23 +1093,20 @@ pub(crate) mod tests {
             let mut headers = HeaderMap::new();
             headers.insert(header::AUTHORIZATION, value.parse().expect("hv"));
             assert_eq!(
-                token_rejection(&headers, Some(token)),
+                token_rejection(&Method::GET, "/api/agents", &headers),
                 Some(UNAUTHORIZED),
                 "{value:?} should be refused"
             );
         }
     }
 
-    /// Two launches must not share a token — the `mcp.rs` property, applied to
-    /// the API server. `set_api_token` is `get_or_init` within one process, so
-    /// what is asserted is the generation: the value handed to it is fresh per
-    /// call, which is what makes each launch's token independent.
+    /// Two mints are two credentials — the `mcp.rs` property, applied to the API
+    /// server. Since #405 they share a signing key, so what makes them
+    /// independent is the `jti`, which is what revocation acts on.
     #[test]
-    fn a_freshly_minted_token_is_never_the_previous_one() {
-        let mint = || uuid::Uuid::new_v4().simple().to_string();
-        let first = mint();
-        let second = mint();
+    fn every_minted_credential_is_its_own() {
+        let first = seeded_token();
+        let second = seeded_token();
         assert_ne!(first, second);
-        assert_eq!(first.len(), 32, "128 bits of hex, 122 of them random");
     }
 }

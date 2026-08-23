@@ -466,11 +466,19 @@ mod assets {
 }
 
 /// Paths the API owns; everything else is a frontend route.
+///
+/// The JWKS document (#405) is here rather than under `/api` because RFC 8615
+/// puts it at `/.well-known/`, and because that is the path a stock JWT library
+/// on the other side already knows to ask for. Without this arm a release build
+/// would look it up in the embedded frontend assets and answer 404 — which is
+/// the one failure that would make "an external verifier can check this" false
+/// while every in-app test still passed.
 pub fn is_api_path(path: &str) -> bool {
     path.starts_with("/api")
         || path.starts_with("/webhooks")
         || path == "/health"
         || path == "/metrics"
+        || path == crate::native::security::JWKS_PATH
 }
 
 #[cfg(test)]
@@ -699,7 +707,7 @@ mod tests {
         let uri: Uri = format!("/api/agents?token={token}").parse().expect("uri");
         let logged = log_path(&uri);
         assert_eq!(logged, "/api/agents");
-        assert!(!logged.contains(token), "the log line must never carry it");
+        assert!(!logged.contains(&token), "the log line must never carry it");
     }
 
     /// `handle` returns before the access line for anything that is not an API

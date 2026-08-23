@@ -168,7 +168,9 @@ src/
   components/    TitleBar, Sidebar, StatusBar, CommandPalette, ui.tsx,
                  DirField (native picker + the /api/fs fallback), CopyButton
   views/         one file per section
-    settings/LogsPane.tsx  Settings → Logs: tail, follow, filter, save a copy
+    settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
+    settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
+                 and revoking scoped API tokens (#405)
   styles/        tokens → base → shell → controls → views (+ per-view files)
 
 src-tauri/src/
@@ -203,7 +205,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   the 30 migrations, embedded from parity/ — applied at startup
+    migrate.rs   31 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -264,6 +266,13 @@ src-tauri/src/
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
+    security/    what `/api` accepts as proof of identity (#405)
+      keys.rs    the per-install Ed25519 keypair: create-if-absent, 0600, and
+                 the one path that replaces it
+      token.rs   the JWT format — mint, verify, the claims, and the two scopes
+      tokens.rs  the api_tokens rows, and the revoked-jti set the guard reads
+      mod.rs     verify_request (guards.rs's one call here), the five /api/security
+                 routes, and the unauthenticated JWKS document
     schedule/    when a task fires — pinned to parity/scheduler_vectors.json (#275)
       mod.rs     buildJobDefinition and gocron's four job types; claims no route
       cron.rs    robfig/cron's dialect, which is the one a cron task is written in
@@ -312,23 +321,39 @@ including on the payload-free endpoints. `GET`/`HEAD`/`OPTIONS` are untouched.
 `api.ts` does this for you.
 
 **And every `/api` request — reads included — needs
-`Authorization: Bearer <token>`** (#400). The token is minted per launch, held in
-memory, and delivered to the webview by `host_info` over Tauri IPC; `api.ts`
-attaches it at its two header sites, so nothing in a view changes. Note the
-scope difference from the rule above: the content-type guard is an allowlist over
-the state-changing four, while the token covers **every method**, because a `GET`
-is what returns chat transcripts and agent system prompts.
+`Authorization: Bearer <token>`** (#400, #405). `api.ts` attaches it at its two
+header sites, so nothing in a view changes. Note the scope difference from the
+rule above: the content-type guard is an allowlist over the state-changing four,
+while the credential covers **every method**, because a `GET` is what returns
+chat transcripts and agent system prompts.
 
-Two consequences worth knowing before debugging anything:
+**Since #405 that token is an EdDSA (Ed25519) JWT signed by a per-install
+keypair**, not the opaque per-launch string #400 minted. The keypair is created
+on first run beside the database (`api-signing-key.pk8`, `0600`) and reused on
+every launch; the app's own session is a self-signed JWT with `sub:
+desktop-webview` and no database row, minted fresh by `host_info` on every
+invocation and delivered over Tauri IPC. See `native/security/` for the whole
+thing and the reasoning behind it.
 
-- **`curl` against `:8991` needs the header.** A debug build writes the token to
-  `<data dir>/api-token` (0600) precisely so it can:
+Four consequences worth knowing before debugging anything:
+
+- **`curl` against `:8991` needs the header.** A debug build writes a freshly
+  minted token to `<data dir>/api-token` (0600) precisely so it can:
   `curl -H "Authorization: Bearer $(cat ~/.agento-desktop-dev/api-token)" …`.
   A release build writes it nowhere.
 - **Opening the release URL in an ordinary browser no longer works.** There is no
   IPC there, so no token; `api.ts` turns the resulting 401 into one honest
   message rather than a wall of per-view errors. Chrome on `:1420` is unaffected
   — Vite's proxy adds the header server-side.
+- **A 403 is not a 401.** 401 means the credential did not verify — absent,
+  malformed, expired, revoked, signed by a superseded key. 403 with `this
+  token's scope does not permit this request` means it did, and the token is
+  `read`-scoped against a state-changing method (or against `/api/security/*`,
+  which needs `write` whatever the method). Retrying will not help.
+- **`api.ts` retries a 401 exactly once**, re-invoking `host_info` for a fresh
+  token first. That is what makes a keypair regenerate recoverable without a
+  restart, and the bound is structural rather than a counter — see `withAuth`,
+  and do not turn it into a loop.
 
 **Desktop, not web.** The UI deliberately diverges from the Agento web app:
 three resizable panes per section, 14px type, 28px rows, hairline borders,
@@ -539,7 +564,7 @@ its `hooks` key and `POST /api/fs/mkdir`.
 are refused identically.
 
 **Since #400 it is no longer only `guards.go`.** A third check — this build's
-per-launch bearer token — sits between the two Go ones, and it is the answer to
+own bearer token — sits between the two Go ones, and it is the answer to
 something they were never shaped for: both are *browser* defences, and neither
 inconveniences a local process at all. `curl` sends a loopback `Host` and sets
 its own `Content-Type`, so before the token, the whole API — which can create a
@@ -549,6 +574,35 @@ token since #282, while the far more powerful API server did not. **Do not read
 "Agento ships without authentication on purpose" anywhere as current**; #246
 recorded that and #400 revised it, for the desktop app specifically. A **401 is a
 status Go never answers**, so it is a deliberate divergence, not a reproduction.
+
+**#405 replaced the credential and left the check where it was.** The token is
+now an EdDSA JWT signed by a per-install keypair rather than an opaque
+per-launch string, so `token_rejection` is a signature-and-claims verification
+plus a scope comparison instead of a constant-time compare. That is the shape
+#400 deliberately left room for — its own note said the check should be "does
+this request carry an accepted credential — one `verify(&str) -> bool` — not a
+hardcoded compare against a single string". Everything below still holds
+unchanged. What it adds:
+
+- **A scope, and one definition of it.** `security::required_scope` maps
+  `is_state_changing` onto `read`/`write`, so the guard has a single
+  read-versus-write rule rather than a second table. Its one exception is
+  `/api/security/*`, which needs `write` whatever the method, because those
+  reads *are* the credential system — a `read` token must not enumerate every
+  credential on the machine. A per-route permission model over ~90 endpoints is
+  explicitly deferred.
+- **A second deliberate divergence: 403.** Insufficient scope is a 403, sharing
+  a status with the `Host` rejection and not its body. Go answers neither.
+- **A third and fourth process-wide static, both in `native::security`** — the
+  keypair (a `RwLock`, because regenerate replaces it while the listener
+  serves) and the revoked-`jti` set (in memory, and authoritative rather than a
+  cache, because this process is the only writer of `api_tokens`). `guards.rs`
+  itself now holds no credential at all.
+- **A new unguarded route.** `GET /.well-known/jwks.json` publishes the public
+  key with no credential — requiring one to fetch the thing credentials are
+  verified against is a bootstrap problem with no answer. It is outside `/api`,
+  so the scoping rule below already exempts it, and `proxy::is_api_path` names
+  it so it reaches the registry instead of the embedded frontend assets.
 
 Four things about it are load-bearing:
 
@@ -2030,7 +2084,11 @@ timeout included) are fine; the parity suites use those.
 - **Secrets are stored in plaintext** in `integrations.credentials` / `.auth`.
   Protection is perimeter-only (loopback bind + directory perms, plus the
   `/api` bearer token since #400 — which stops another *process* reading them
-  back out through the API, but does nothing for the bytes at rest). Do not
+  back out through the API, but does nothing for the bytes at rest). #405 adds a
+  second plaintext secret of its own, `api-signing-key.pk8`, on the same terms
+  and deliberately: it is `0600`, it has no reader outside `native::security`,
+  and regenerating it is one click. It is a *durable* secret where #400's died
+  per launch, which is the accepted price of offline verification. Do not
   introduce a UI that echoes them back; the API scrubs them and the UI must not
   reintroduce them.
 

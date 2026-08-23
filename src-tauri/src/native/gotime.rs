@@ -183,6 +183,24 @@ pub fn go_string_from_millis(ms: i64) -> String {
     }
 }
 
+/// An instant given as seconds since the epoch, in the rendering a DATETIME
+/// column stores.
+///
+/// [`now_go_text`]'s sibling for a timestamp that is *computed* rather than
+/// read from the clock — #405's `api_tokens.expires_at`, which comes from the
+/// JWT's `exp` claim, so the row and the token cannot disagree about when a
+/// credential dies. Going through here rather than formatting at the call site
+/// is what keeps it sortable as text alongside every other DATETIME.
+pub fn go_text_at(epoch_seconds: i64) -> String {
+    match DateTime::<Utc>::from_timestamp(epoch_seconds, 0) {
+        Some(t) => format_go_string(&t),
+        // Out of `DateTime`'s range, which needs an `exp` some 260,000 years
+        // out; `MAX_TOKEN_DAYS` puts it far inside. An empty string reads back
+        // as a NULL-ish "no expiry" rather than as a wrong date.
+        None => String::new(),
+    }
+}
+
 fn format_go_string(t: &DateTime<Utc>) -> String {
     let mut out = t.format("%Y-%m-%d %H:%M:%S").to_string();
     let nanos = t.timestamp_subsec_nanos();

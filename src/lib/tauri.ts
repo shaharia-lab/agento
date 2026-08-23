@@ -50,6 +50,24 @@ export function hostInfo(): Promise<HostInfo | null> {
   return hostInfoPromise;
 }
 
+/**
+ * Drop the memoized answer so the next `hostInfo()` invokes the command again.
+ *
+ * **The token is no longer immutable for the life of the process (#405).** It is
+ * a JWT signed by the install's keypair, minted fresh on every `host_info`
+ * invocation, and it has two ways to stop working: its `exp` passing, and the
+ * user regenerating the keypair from Settings → Security — which is *meant* to
+ * sign this window out, since "invalidate everything, now" that spared the app
+ * itself would not be invalidating everything.
+ *
+ * So the memo has to be droppable, and `api.ts` drops it on a 401. Exported only
+ * for that one caller: nothing else has a reason to re-ask, and a view calling
+ * this on a whim would turn one IPC round trip per page into one per render.
+ */
+export function resetHostInfo(): void {
+  hostInfoPromise = undefined;
+}
+
 type AppWindow = {
   setTheme(theme: "light" | "dark" | null): Promise<void>;
   onFocusChanged(

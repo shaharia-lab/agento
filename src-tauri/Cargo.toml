@@ -230,6 +230,34 @@ tracing = { version = "0.1", features = ["log"] }
 # a plain `#[derive(JsonSchema)]`; cargo unifies it with rmcp's copy, so the
 # library itself adds no package — only the two derive crates counted above.
 schemars = "1"
+# The `/api` credential, since #405: an EdDSA (Ed25519) JWT signed by a
+# per-install keypair, replacing #400's opaque per-launch string.
+#
+# **Version 9, deliberately, and it is the one dependency decision here that a
+# `cargo add` gets wrong.** `jsonwebtoken` 9 signs and verifies through `ring`,
+# which this tree already carries (rustls, and `lettre`'s `ring` feature), so
+# the whole change adds **one** package to `Cargo.lock` and no crypto stack at
+# all. Version 11 dropped `ring` for a choice between `aws_lc_rs` and
+# `rust_crypto`: the first links AWS-LC through a C build, which is precisely
+# what the `rusqlite = bundled` and `rustls`-over-`native-tls` notes above exist
+# to keep out of a workflow that cross-builds five release triples, and the
+# second would put a second, differently-audited Ed25519 implementation beside
+# `ring` for no caller's benefit. #405's own scoping named "≥9" for this reason;
+# do not "upgrade" it without re-reading those two notes.
+#
+# `default-features = false` drops `use_pem`, and with it `pem` and
+# `simple_asn1`. Nothing here handles PEM: the private key is stored as the
+# PKCS#8 DER `ring` generates, and the public key travels as JWKS, which is
+# exactly the format that lets an external verifier use a stock library with no
+# PEM handling of its own.
+jsonwebtoken = { version = "9", default-features = false }
+# Key *generation* and the `kid` digest, which `jsonwebtoken` does not provide —
+# it consumes keys and never mints them. Default features on purpose: `alloc` is
+# what `Ed25519KeyPair::generate_pkcs8` needs, and relying on cargo's feature
+# unification with rustls's copy to supply it would make this build depend on
+# another crate's feature flags. Adds no package; `ring` 0.17 was already in the
+# lock.
+ring = "0.17"
 
 # Graceful shutdown of the `claude` subprocess is close stdin → SIGTERM →
 # SIGKILL after 5s, mirroring the TypeScript SDK's close(). Tokio's own

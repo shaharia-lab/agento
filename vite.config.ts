@@ -33,17 +33,35 @@ function devToken(): string {
 }
 
 /**
- * Add the bearer token to a proxied request.
+ * Add the bearer token to a proxied request **that does not already carry one**.
  *
  * This is what keeps the two workflows in `.claude/skills/local-verify/`
  * alive now that `/api` authenticates: Chrome on `localhost:1420` has no Tauri
  * IPC, so the page itself can never hold a token, and without this every request
- * it makes would 401. Inside the Tauri dev webview the page *does* send its own
- * header — this overwrites it with the identical value.
+ * it makes would 401.
+ *
+ * **The "does not already carry one" half is load-bearing since #405**, and this
+ * used to overwrite unconditionally. That was harmless while the token was an
+ * opaque string fixed for the life of the launch: the page's header and the
+ * file's held the identical value, so replacing one with the other changed
+ * nothing. A signed token is not fixed — `host_info` mints a fresh one per
+ * invocation, and regenerating the keypair from Settings → Security invalidates
+ * every token issued before it, this file's included.
+ *
+ * So an unconditional overwrite replaced the webview's *valid* credential with a
+ * *stale* one and turned `api.ts`'s 401-retry into a loop that could never
+ * succeed — a dev-only failure, and the shape that costs most to diagnose,
+ * because the app is correct and the harness is what refuses it. Measured
+ * directly: after a regenerate the page's own token answered 200 against `:8991`
+ * and 401 through this proxy.
+ *
+ * Leaving the header alone when it is present also makes dev match release,
+ * where there is no proxy and the page's header is what arrives.
  */
 function authenticate(): ProxyOptions["configure"] {
   return (proxy) => {
     proxy.on("proxyReq", (proxyReq) => {
+      if (proxyReq.getHeader("Authorization")) return;
       const token = devToken();
       if (token) proxyReq.setHeader("Authorization", `Bearer ${token}`);
     });

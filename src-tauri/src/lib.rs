@@ -54,12 +54,22 @@ pub struct HostInfo {
     /// Origin the frontend should send API requests to. Empty means "same
     /// origin as this page", which is the case once the proxy serves the UI.
     pub api_base: String,
-    /// This launch's bearer token for `/api` (#400).
+    /// A bearer token for `/api`, signed by the install's Ed25519 key (#400,
+    /// #405).
     ///
     /// Tauri IPC is the whole delivery mechanism: it is the one channel a local
-    /// process cannot reach, which is what makes the token worth having. It is
-    /// minted per launch and held in memory, so there is nothing for a user to
-    /// configure and nothing on disk for a release build to leak.
+    /// process cannot reach, which is what makes the token worth having.
+    ///
+    /// **Minted fresh on every invocation**, which is what makes `api.ts`'s
+    /// 401-retry able to recover from anything. #400's token was one value for
+    /// the life of the process, so re-invoking this command would have handed
+    /// back the same dead string; a signed token has two ways to stop working —
+    /// its `exp` passing, and the keypair being regenerated from the Security
+    /// tab — and re-minting answers both. Signing is a few microseconds and this
+    /// is called once per page load, so there is nothing to cache.
+    ///
+    /// Empty when no signing key is installed, which `setup` treats as fatal —
+    /// so in practice the page either gets a working credential or never loads.
     pub api_token: String,
     /// Resolved path to the Claude Code CLI, or null when it is not installed.
     pub claude_cli: Option<String>,
@@ -79,9 +89,15 @@ fn host_info(state: tauri::State<'_, AppPorts>) -> HostInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         controls_on_left: cfg!(target_os = "macos"),
         api_base: format!("http://127.0.0.1:{}", state.proxy),
-        // Read from `guards`, which owns it, rather than carried on `AppPorts`:
-        // one source of truth for the value the guard compares against.
-        api_token: guards::api_token().unwrap_or_default().to_string(),
+        // Minted by `native::security`, which owns the key, rather than carried
+        // on `AppPorts`: one source of truth for what the guard verifies
+        // against. A failure is logged and answered as an empty token — the
+        // page then gets one honest 401 from `api.ts` rather than a command
+        // that rejects and leaves every view with its own error.
+        api_token: native::security::mint_session_token().unwrap_or_else(|e| {
+            log::error!("minting the webview session token: {e}");
+            String::new()
+        }),
         claude_cli: find_claude_cli(),
         can_self_update: install_kind() != "package",
         install_kind: install_kind().to_string(),
@@ -185,9 +201,13 @@ pub struct AppPorts {
 /// easier target, and a guard never exercised where we develop is a guard whose
 /// regressions ship.
 ///
-/// Rewritten on every launch because the token changes on every launch. A stale
-/// file after a crash is a 401 for whoever reads it next, which is the correct
-/// failure — it is a cache of a live value, never the source of one.
+/// Rewritten on every launch. Since #405 the token is a JWT rather than an
+/// opaque string, which changes the *shape* of a stale file's failure and not
+/// the rule: the signing key now survives a restart, so a token left over from a
+/// previous launch keeps working until its `exp` or the next regenerate — where
+/// #400's stopped working the moment the app did. That is a convenience for the
+/// `curl` workflow and nothing more; it is still a cache of a live value, never
+/// the source of one, and a regenerate is what makes it stale for real.
 #[cfg(debug_assertions)]
 fn write_dev_token_file(token: &str) {
     let Some(dir) = paths::data_dir() else {
@@ -322,20 +342,47 @@ pub fn run() {
                     }
                 }
 
-                // The `/api` bearer token (#400), minted **before** the listener
-                // is spawned so no request can arrive while `API_TOKEN` is still
-                // empty — which the guard would fail closed on, but only by
-                // luck of ordering rather than by design.
+                // The `/api` signing key (#405, replacing #400's per-launch
+                // string), loaded **before** the listener is spawned so no
+                // request can arrive while there is nothing to verify against —
+                // which the guard would fail closed on, but only by luck of
+                // ordering rather than by design.
                 //
-                // 122 bits from the OS CSPRNG, which is what `Uuid::new_v4` is,
-                // and the same generation `claude::mcp` uses for its listeners
-                // so there is one way to do this in the tree. It lives and dies
-                // with the process; nothing rotates it, because a window reload
-                // re-invokes `host_info` and gets the same value.
-                let api_token = guards::set_api_token(uuid::Uuid::new_v4().simple().to_string());
+                // Create-if-absent: the first run writes a keypair, every run
+                // after it reuses the same one, and only the Security tab's
+                // regenerate ever replaces it. That is what makes a token the
+                // user issued survive a restart.
+                //
+                // **Fatal on failure, deliberately.** A corrupt or unreadable
+                // private key must not fall back to generating a fresh one
+                // (which would silently invalidate every issued token on a
+                // transient permission problem) and must not fall back to
+                // serving unauthenticated (the hole #400 closed). The data dir
+                // is the same directory the database lives in, so a debug build
+                // gets its own keypair for free and a development launch can
+                // never mint a token the release install would honour.
+                let data_dir = crate::paths::data_dir()
+                    .ok_or_else(|| "no home directory to resolve the data dir".to_string())?;
+                let keypair = crate::native::security::keys::load_or_create(&data_dir)
+                    .map_err(|e| format!("loading the api signing key: {e}"))?;
+                crate::native::security::keys::install(keypair);
+
+                // Which tokens have been revoked, read once into memory because
+                // the guard is on the request path and cannot await a query.
+                // See `native::security::tokens` for why that set is
+                // authoritative rather than a cache.
+                {
+                    let conn = crate::native::db::open_read_only(&db)
+                        .map_err(|e| format!("opening database: {e}"))?;
+                    crate::native::security::tokens::load_revoked(&conn)
+                        .map_err(|e| format!("loading revoked api tokens: {e}"))?;
+                }
 
                 #[cfg(debug_assertions)]
-                write_dev_token_file(api_token);
+                match crate::native::security::mint_session_token() {
+                    Ok(token) => write_dev_token_file(&token),
+                    Err(e) => log::warn!("dev api token: {e}"),
+                }
 
                 #[cfg(debug_assertions)]
                 let proxy_port = DEV_PROXY_PORT;

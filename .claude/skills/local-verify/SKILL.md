@@ -76,11 +76,13 @@ Run it first and both failure modes disappear.
 
 Since #400 **every `/api` request needs `Authorization: Bearer <token>`** — reads
 included, unlike the `Content-Type` rule, which only covers the state-changing
-methods. The token is minted fresh on every app launch and held in memory, so
-there is nothing to configure and nothing to look up between runs.
+methods. Since #405 that token is a **JWT signed by the install's Ed25519 key**
+rather than an opaque string, which changes three things for this playbook and
+nothing else about the recipes.
 
-A debug build also writes it to `~/.agento-desktop-dev/api-token` (0600) purely
-so this playbook still works. Read it per command — it changes every launch:
+A debug build writes a freshly minted one to `~/.agento-desktop-dev/api-token`
+(0600) on every launch, purely so this playbook still works. Read it per
+command:
 
 ```bash
 TOKEN=$(cat ~/.agento-desktop-dev/api-token)
@@ -91,9 +93,32 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8991/api/agents | jq
 and so can never hold the token; `vite.config.ts`'s proxy reads the same file and
 adds the header server-side. That hop is unchanged.
 
-A **401** means one of: the app is not running (the file is last launch's token),
-the header is missing, or you are hitting a release build, which writes no file
-at all — use the app window.
+A **401** means one of: the app is not running, the header is missing, the token
+has expired or been revoked, the signing key has been regenerated since the file
+was written, or you are hitting a release build, which writes no file at all —
+use the app window. Re-read the file first; it is rewritten on every launch.
+
+A **403** carrying `this token's scope does not permit this request` is a
+different failure and retrying will not fix it: the credential verified, and it
+is `read`-scoped against a `POST`/`PUT`/`PATCH`/`DELETE`, or it is any scope
+against `/api/security/*`, which needs `write` whatever the method. The dev
+token file is always `write`, so this only appears with a token issued from
+Settings → Security.
+
+**Bisecting a credential problem needs no app at all**, which is the one genuinely
+new hop #405 adds:
+
+```bash
+# Does the server publish a key? (unauthenticated by design)
+curl -s http://127.0.0.1:8991/.well-known/jwks.json | jq
+
+# Does this token verify against it, and is it the key currently in force?
+scripts/verify-jwks.py --token "$(cat ~/.agento-desktop-dev/api-token)"
+```
+
+If the JWKS `kid` does not match the token header's `kid`, the key was
+regenerated after the token was minted, and every token issued before it is dead
+by design.
 
 ## Capturing the chat SSE stream
 

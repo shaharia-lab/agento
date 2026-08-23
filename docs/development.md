@@ -351,10 +351,10 @@ curl -s -H "Authorization: Bearer $(cat ~/.agento-desktop-dev/api-token)" \
   http://127.0.0.1:8991/api/agents | jq
 ```
 
-The token is minted on every app launch and normally lives only in memory; a
-**debug build also writes it** to `~/.agento-desktop-dev/api-token` (0600) so
-`curl` can reach the API. A release build writes it nowhere — its API is
-reachable from the app window and nothing else. Without the header the guard
+The token is a **JWT signed by the install's Ed25519 key** (#405). A debug build
+writes a freshly minted one to `~/.agento-desktop-dev/api-token` (0600) on every
+launch so `curl` can reach the API; a release build writes it nowhere — its API
+is reachable from the app window and nothing else. Without the header the guard
 answers **401** before the handler runs.
 
 Add `-H "Content-Type: application/json"` for anything that is not a `GET`, or
@@ -362,6 +362,36 @@ the guard answers 415 instead.
 
 Chrome on `:1420` needs no token of its own: Vite's proxy reads the same file and
 adds the header when it forwards.
+
+**A token for something that is not the app** — a script, a CI job, another
+local service — comes from **Settings → Security**, where you choose `read` or
+`write` and can revoke it again. It is shown once and stored nowhere, so copy it
+then. Note what `write` means before issuing one: `POST /api/agents` can create
+an agent with bypassed permissions and `POST /api/chats/{id}/messages` can run
+it, so a `write` token is arbitrary command execution on the machine.
+
+Anything holding the public key can **verify** an Agento token without asking
+Agento — that is what `GET /.well-known/jwks.json` is for, and it needs no
+credential:
+
+```bash
+curl -s http://127.0.0.1:8991/.well-known/jwks.json | jq
+scripts/verify-jwks.py --token "$(cat ~/.agento-desktop-dev/api-token)"
+```
+
+The second line is an independent check (PyJWT over OpenSSL rather than the
+`ring` the app signs with). Run it after changing anything about the token
+format, the JWKS document or the signing key.
+
+**Two 4xx to tell apart.** A **401** is "you have not proved who you are" —
+missing, expired, revoked, or signed by a key this install no longer uses. A
+**403** with `this token's scope does not permit this request` is "you have, and
+a `read` token cannot do that"; retrying will not help, and the fix is a `write`
+token or a different request.
+
+**Regenerating the key in Settings → Security invalidates every token at once**,
+the dev file's included, which is exactly what it is for. The app window recovers
+on its own; a shell holding an old token needs to re-read the file.
 
 There is also a project skill, `local-verify`, describing how to reproduce a bug
 before fixing it and how to verify each hop separately: backend wire, browser
