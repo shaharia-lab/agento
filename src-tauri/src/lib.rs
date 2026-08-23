@@ -424,6 +424,15 @@ pub fn run() {
                     // to read the list is logged rather than fatal.
                     crate::native::schedule::runtime::start(db.clone());
 
+                    // The insight worker (#408): `insight_worker.go`, which was
+                    // the one part of the insights pipeline never ported, so
+                    // nothing had ever written a `session_insights` row in this
+                    // build. `start` only spawns a thread; the sweep it runs
+                    // first is what populates a fresh install, and it is
+                    // deliberately started **before** the scan so the boot
+                    // scan's announcements have somewhere to land.
+                    crate::native::insights::worker::start(db.clone());
+
                     crate::native::scan::ensure_scan(db);
                 }
 

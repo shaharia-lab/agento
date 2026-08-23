@@ -48,8 +48,8 @@ python3 $K/seed_api.py "$DEMO"
 python3 $K/seed_db.py "$DEMO/.agento-desktop-dev/agento.db"
 #    + mark the integrations authenticated and fill service tool lists — see
 #      "Hand edits" below
-$K/backfill.sh <agento-go> "$DEMO"          # session_insights — see below
 setsid nohup $K/launch.sh "$DEMO" > /tmp/agento-app.log 2>&1 < /dev/null &   # relaunch, resize again
+#    session_insights fills itself within a minute of the relaunch — see below
 
 # 4. shoot (light theme — set it in the status bar / ⌘K first)
 $K/shoot.sh docs/screenshots/light
@@ -61,29 +61,29 @@ $K/make_dirs.sh --clean
 
 `gen_corpus.py` is seeded and deterministic in everything except the session
 UUIDs, so a regenerated corpus is a *new* corpus to the scanner: rescan
-(`POST /api/claude-sessions/refresh`), prune orphaned `session_insights` rows
-(`DELETE … WHERE NOT EXISTS (matching claude_session_cache row)`), backfill
-again.
+(`POST /api/claude-sessions/refresh`) and the app reconciles the orphaned
+`session_insights` rows and recomputes the new ones itself.
 
 ## The parts that are not obvious
 
-- **`session_insights` has to be backfilled from outside the app.** Agento has
-  the nine insight processors as pure functions and the summary endpoint reads
-  the table, but nothing runs a worker to populate it — so Insights is empty on
-  any fresh install and silently stale on a migrated one. **That is a real bug,
-  not a quirk of this skill**; if it is ever fixed, delete this step.
+- **`session_insights` fills itself now, and this step used to be manual.**
+  Until #408 the app had the nine insight processors as pure functions and the
+  summary endpoint that reads the table, but nothing that *wrote* one — so
+  Insights was empty on every fresh install, and this skill could only
+  photograph it by building a Go writer out of git history (`backfill.sh`,
+  pinned at `3b54e41`) and running it against the demo data dir with Agento
+  stopped. `backfill.sh` is deleted with the bug.
 
-  Until then `backfill.sh` builds a historical writer out of git history and
-  runs it against the demo data dir, restarting it until every session has a row
-  (its queue is 100 per rescan):
+  What replaces it is `native/insights/worker.rs`, which sweeps at boot and
+  every five minutes. Practically: **relaunch and give it a minute**, then check
+  before shooting, because an Insights shot taken too early is a page of zeros
+  that looks like a rendering bug rather than a timing one:
 
   ```bash
-  git worktree add --detach <dir> 3b54e41 && (cd <dir> && go build -o agento-go .)
+  sqlite3 -readonly "$DEMO/.agento-desktop-dev/agento.db" \
+    "select (select count(*) from session_insights),
+            (select count(*) from claude_session_cache)"
   ```
-
-  `3b54e41` is pinned deliberately: it is the last commit whose worker upserts
-  on the `(session_id, project_path)` key this schema uses. Run it only with
-  Agento stopped.
 - **Hand edits after `seed_api.py`**, in the scratch DB (`sqlite3`):
   - `UPDATE integrations SET auth='{"validated":true,"username":"acme-platform-bot"}' WHERE type='github'`
     (and `team_name` / `display_name` / `bot_username` for slack / jira /

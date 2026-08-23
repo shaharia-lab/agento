@@ -5,11 +5,10 @@
 //! `*_processor.go`. Read them side by side — the Go comments carry the *why*
 //! for each metric and are not repeated except where the port needs a decision.
 //!
-//! **This writes nothing.** See the module docs in `insights/mod.rs`: porting
-//! the Go worker's *upsert* now would put two processes on one SQLite file. The
-//! processors are ported as what they are — a function from a transcript to a
-//! [`SessionInsight`] — which is the whole of the logic and is verifiable
-//! against the rows the Go worker already stored.
+//! **This writes nothing**, and that is a property of the passes rather than a
+//! deferral: a processor is a function from a transcript to a [`SessionInsight`]
+//! and nothing more. `insights/store.rs` stores one and `insights/worker.rs` is
+//! the loop that calls both (#408).
 //!
 //! ## Order is a dependency, not a style
 //!
