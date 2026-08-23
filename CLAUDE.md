@@ -311,6 +311,25 @@ Every state-changing `/api` request needs `Content-Type: application/json` —
 including on the payload-free endpoints. `GET`/`HEAD`/`OPTIONS` are untouched.
 `api.ts` does this for you.
 
+**And every `/api` request — reads included — needs
+`Authorization: Bearer <token>`** (#400). The token is minted per launch, held in
+memory, and delivered to the webview by `host_info` over Tauri IPC; `api.ts`
+attaches it at its two header sites, so nothing in a view changes. Note the
+scope difference from the rule above: the content-type guard is an allowlist over
+the state-changing four, while the token covers **every method**, because a `GET`
+is what returns chat transcripts and agent system prompts.
+
+Two consequences worth knowing before debugging anything:
+
+- **`curl` against `:8991` needs the header.** A debug build writes the token to
+  `<data dir>/api-token` (0600) precisely so it can:
+  `curl -H "Authorization: Bearer $(cat ~/.agento-desktop-dev/api-token)" …`.
+  A release build writes it nowhere.
+- **Opening the release URL in an ordinary browser no longer works.** There is no
+  IPC there, so no token; `api.ts` turns the resulting 401 into one honest
+  message rather than a wall of per-view errors. Chrome on `:1420` is unaffected
+  — Vite's proxy adds the header server-side.
+
 **Desktop, not web.** The UI deliberately diverges from the Agento web app:
 three resizable panes per section, 14px type, 28px rows, hairline borders,
 status bar, focus-aware selection (accent when the window is focused, grey
@@ -517,7 +536,21 @@ its `hooks` key and `POST /api/fs/mkdir`.
 
 `src-tauri/src/guards.rs` is `guards.go` at the proxy, applied in `dispatch`
 **before** the seam decides who answers, so a claimed route and a forwarded one
-are refused identically. Four things about it are load-bearing:
+are refused identically.
+
+**Since #400 it is no longer only `guards.go`.** A third check — this build's
+per-launch bearer token — sits between the two Go ones, and it is the answer to
+something they were never shaped for: both are *browser* defences, and neither
+inconveniences a local process at all. `curl` sends a loopback `Host` and sets
+its own `Content-Type`, so before the token, the whole API — which can create a
+`bypass`-permission agent and run it — was open to anything on the machine. That
+also settled a standing asymmetry: every in-process MCP server has required a
+token since #282, while the far more powerful API server did not. **Do not read
+"Agento ships without authentication on purpose" anywhere as current**; #246
+recorded that and #400 revised it, for the desktop app specifically. A **401 is a
+status Go never answers**, so it is a deliberate divergence, not a reproduction.
+
+Four things about it are load-bearing:
 
 - **It is scoped to `/api`, exactly as Go's is.** `POST /webhooks/telegram/{id}`
   is mounted at the root, arrives from Telegram's servers with a foreign `Host`
@@ -1995,7 +2028,9 @@ timeout included) are fine; the parity suites use those.
   message. Keep locally-produced turns in memory until a fresh server
   transcript for that chat loads.
 - **Secrets are stored in plaintext** in `integrations.credentials` / `.auth`.
-  Protection is perimeter-only (loopback bind + directory perms). Do not
+  Protection is perimeter-only (loopback bind + directory perms, plus the
+  `/api` bearer token since #400 — which stops another *process* reading them
+  back out through the API, but does nothing for the bytes at rest). Do not
   introduce a UI that echoes them back; the API scrubs them and the UI must not
   reintroduce them.
 

@@ -72,6 +72,7 @@ Startup order in `lib.rs`:
 | `/api` reaches Rust via | Vite proxy to `:8991` | same origin |
 | Server port | fixed `8991` | assigned by the OS |
 | Data directory | `~/.agento-desktop-dev` | `~/.agento` |
+| `/api` bearer token | minted per launch, **also** written to `<data dir>/api-token` (0600) so `curl` and Vite's proxy can reach the API | minted per launch, memory only |
 
 Dev uses its own data directory on purpose. Two Agento processes sharing
 `~/.agento` share one SQLite file and one scheduler, so scheduled tasks fire
@@ -93,11 +94,19 @@ HTTP on loopback because:
 Do not remove it to "simplify".
 
 Because the server is reachable by anything on the machine, `guards.rs` applies
-the same two protections the Go server does, before routing:
+three protections before routing — the first two are the Go server's, the third
+is this build's:
 
 - **`validateHost`** rejects a `Host` header the server is not served under. DNS
   rebinding otherwise makes an attacker's page same-origin, at which point CORS
   stops applying.
+- **A bearer token** rejects a request that does not carry this launch's
+  `Authorization: Bearer <token>`. The two guards either side of it are
+  *browser*-shaped and neither stops a local process: `curl` sends a loopback
+  `Host` and sets its own content type, and this API can create a
+  `bypass`-permission agent and run it. The token is minted per launch, held in
+  memory, and delivered to the webview over Tauri IPC — the one channel another
+  local process cannot reach.
 - **`requireJSONContentType`** rejects a state-changing request that does not
   declare `application/json`. Without it a cross-origin `POST` carrying
   `text/plain` is a CORS simple request, sent with no preflight, and the side
@@ -105,6 +114,16 @@ the same two protections the Go server does, before routing:
 
 A body-less request is not exempt: several state-changing endpoints take no body,
 and a `POST` with neither is itself a simple request.
+
+The order is load-bearing. A request failing both the `Host` check and the token
+reads **403**, not 401; an unauthenticated one is refused **401** before it is
+told the content-type rule.
+
+All three are scoped to `/api`, so the SPA document, `/health` and the Telegram
+webhook — which arrives with a foreign `Host` and authenticates with its own
+secret — are untouched. The token is defence in depth, not a new boundary: a
+process running as this user can read `agento.db` directly. Where it is a real
+boundary is a multi-user machine, since loopback is not user-scoped.
 
 ---
 

@@ -5,7 +5,13 @@
    the server: in development Vite proxies /api to the Rust proxy, and in
    release the Rust proxy serves this page itself. That is what keeps the
    browser out of CORS and leaves SSE working.
+
+   Every request also carries this launch's bearer token (#400) — see
+   `authHeaders`. There are exactly two places headers are built, and both are
+   below; a third would be a request that 401s.
    ========================================================================== */
+
+import { hostInfo } from "./tauri";
 
 export class ApiError extends Error {
   constructor(
@@ -20,18 +26,63 @@ export class ApiError extends Error {
 
 const BASE = "/api";
 
+/**
+ * What a 401 means when this page never had a token to send (#400).
+ *
+ * The server cannot tell our own SPA loaded in Chrome from an attacker's page,
+ * and must not try — so the explanation is produced here, where "did we have a
+ * token" is actually known.
+ */
+const NO_TOKEN_HINT =
+  "Agento's API is only reachable from the desktop app window. " +
+  "Opening this address in a browser will not work.";
+
+/**
+ * The headers every request carries.
+ *
+ * The bearer token (#400) is minted per launch by the Rust side and delivered
+ * over Tauri IPC, so this awaits `hostInfo()` — memoized, so it is one IPC round
+ * trip per page, not one per request. **Awaiting it inside the request is the
+ * point**: a token resolved into a module-level variable at import time would
+ * race every view that fetches from its first effect, and the symptom would be
+ * an occasional 401 on cold start that looks like a server bug.
+ *
+ * A missing token is **not** an error here. Outside Tauri there is none to have,
+ * and in `npm run dev` Chrome talks to the app through Vite's proxy, which adds
+ * the header server-side from the dev token file — so refusing to send the
+ * request would break the one workflow the dev token file exists for. Let the
+ * server decide; a genuine 401 is then explained below.
+ */
+async function authHeaders(accept: string): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {
+    Accept: accept,
+    // The server requires this on every request, not just those with a body —
+    // its requireJSONContentType guard runs before the handler.
+    "Content-Type": "application/json",
+  };
+  const info = await hostInfo();
+  if (info?.api_token) headers.Authorization = `Bearer ${info.api_token}`;
+  return headers;
+}
+
+/** A 401 we can explain, or the server's own message. */
+async function rejection(
+  res: Response,
+  headers: Record<string, string>
+): Promise<ApiError> {
+  if (res.status === 401 && !headers.Authorization) {
+    return new ApiError(res.status, NO_TOKEN_HINT);
+  }
+  return new ApiError(res.status, await errorMessage(res), await safeJson(res));
+}
+
 async function request<T>(
   method: string,
   path: string,
   body?: unknown,
   signal?: AbortSignal
 ): Promise<T> {
-  const headers: Record<string, string> = {
-    Accept: "application/json",
-    // The server requires this on every request, not just those with a body —
-    // its requireJSONContentType guard runs before the handler.
-    "Content-Type": "application/json",
-  };
+  const headers = await authHeaders("application/json");
 
   const res = await fetch(BASE + path, {
     method,
@@ -41,7 +92,7 @@ async function request<T>(
   });
 
   if (!res.ok) {
-    throw new ApiError(res.status, await errorMessage(res), await safeJson(res));
+    throw await rejection(res, headers);
   }
 
   if (res.status === 204) return undefined as T;
@@ -127,18 +178,21 @@ export function streamChatMessage(
 
   (async () => {
     try {
+      // The stream is a POST response, so this is `fetch` rather than
+      // `EventSource` — which is GET-only and cannot set headers. That is also
+      // what lets the turn carry the bearer token like any other request (#400);
+      // an EventSource-based stream would have needed a different scheme.
+      const headers = await authHeaders("text/event-stream");
+
       const res = await fetch(`${BASE}/chats/${chatId}/messages`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/event-stream",
-        },
+        headers,
         body: JSON.stringify({ content }),
         signal: controller.signal,
       });
 
       if (!res.ok) {
-        throw new ApiError(res.status, await errorMessage(res));
+        throw await rejection(res, headers);
       }
       if (!res.body) throw new Error("response has no body");
 

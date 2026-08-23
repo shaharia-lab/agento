@@ -54,6 +54,13 @@ pub struct HostInfo {
     /// Origin the frontend should send API requests to. Empty means "same
     /// origin as this page", which is the case once the proxy serves the UI.
     pub api_base: String,
+    /// This launch's bearer token for `/api` (#400).
+    ///
+    /// Tauri IPC is the whole delivery mechanism: it is the one channel a local
+    /// process cannot reach, which is what makes the token worth having. It is
+    /// minted per launch and held in memory, so there is nothing for a user to
+    /// configure and nothing on disk for a release build to leak.
+    pub api_token: String,
     /// Resolved path to the Claude Code CLI, or null when it is not installed.
     pub claude_cli: Option<String>,
     /// Whether this install can replace itself, which decides between offering
@@ -72,6 +79,9 @@ fn host_info(state: tauri::State<'_, AppPorts>) -> HostInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         controls_on_left: cfg!(target_os = "macos"),
         api_base: format!("http://127.0.0.1:{}", state.proxy),
+        // Read from `guards`, which owns it, rather than carried on `AppPorts`:
+        // one source of truth for the value the guard compares against.
+        api_token: guards::api_token().unwrap_or_default().to_string(),
         claude_cli: find_claude_cli(),
         can_self_update: install_kind() != "package",
         install_kind: install_kind().to_string(),
@@ -154,6 +164,56 @@ pub(crate) fn find_claude_cli() -> Option<String> {
 /// Ports resolved at startup, exposed to the frontend and to diagnostics.
 pub struct AppPorts {
     pub proxy: u16,
+}
+
+/// Where a debug build leaves this launch's `/api` token (#400).
+///
+/// **Debug only, and the whole function compiles out of a shipped binary.** The
+/// token is otherwise memory-only, and in release it must stay that way.
+///
+/// It exists because two developer workflows are load-bearing and neither can
+/// reach a token held only in this process's memory:
+///
+/// - `curl -H "Authorization: Bearer $(cat ~/.agento-desktop-dev/api-token)" …`,
+///   which is how a backend hop is bisected (`.claude/skills/local-verify/`).
+/// - Chrome on `localhost:1420`, where `vite.config.ts`'s proxy reads this file
+///   and adds the header server-side. A plain browser tab has no Tauri IPC, so
+///   the page itself can never hold a token.
+///
+/// The alternative was exempting debug builds from the guard entirely, which was
+/// rejected: the dev port is *fixed and well-known* (8991), which makes dev the
+/// easier target, and a guard never exercised where we develop is a guard whose
+/// regressions ship.
+///
+/// Rewritten on every launch because the token changes on every launch. A stale
+/// file after a crash is a 401 for whoever reads it next, which is the correct
+/// failure — it is a cache of a live value, never the source of one.
+#[cfg(debug_assertions)]
+fn write_dev_token_file(token: &str) {
+    let Some(dir) = paths::data_dir() else {
+        log::warn!("dev api token: no data dir to write it to");
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("dev api token: creating {}: {e}", dir.display());
+        return;
+    }
+    let path = dir.join("api-token");
+    if let Err(e) = std::fs::write(&path, token) {
+        log::warn!("dev api token: writing {}: {e}", path.display());
+        return;
+    }
+    // 0600 before anyone can read it. On a multi-user machine the default umask
+    // would leave it world-readable, which would hand the token to exactly the
+    // account this guard exists to keep out.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            log::warn!("dev api token: chmod {}: {e}", path.display());
+        }
+    }
+    log::info!("dev api token written to {}", path.display());
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -261,6 +321,21 @@ pub fn run() {
                         }
                     }
                 }
+
+                // The `/api` bearer token (#400), minted **before** the listener
+                // is spawned so no request can arrive while `API_TOKEN` is still
+                // empty — which the guard would fail closed on, but only by
+                // luck of ordering rather than by design.
+                //
+                // 122 bits from the OS CSPRNG, which is what `Uuid::new_v4` is,
+                // and the same generation `claude::mcp` uses for its listeners
+                // so there is one way to do this in the tree. It lives and dies
+                // with the process; nothing rotates it, because a window reload
+                // re-invokes `host_info` and gets the same value.
+                let api_token = guards::set_api_token(uuid::Uuid::new_v4().simple().to_string());
+
+                #[cfg(debug_assertions)]
+                write_dev_token_file(api_token);
 
                 #[cfg(debug_assertions)]
                 let proxy_port = DEV_PROXY_PORT;
@@ -377,4 +452,68 @@ pub fn run() {
     builder
         .run(tauri::generate_context!())
         .expect("error while running Agento");
+}
+
+#[cfg(all(test, debug_assertions))]
+mod tests {
+    use super::*;
+
+    /// The dev hatch is only worth having if it is actually written, actually
+    /// holds the live token, and is actually unreadable by other accounts.
+    ///
+    /// This is a unit test rather than a manual `npm run app` check on purpose:
+    /// the mode is the part that fails silently. A default umask would leave the
+    /// file world-readable, handing this launch's token to precisely the other
+    /// local account #400 exists to keep out — and nothing about the app's
+    /// behaviour would look different.
+    #[test]
+    fn the_dev_token_file_is_written_private_to_this_user() {
+        let _lock = crate::paths::tests::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = crate::paths::tests::EnvVar::set("HOME", home.path());
+
+        write_dev_token_file("a-token");
+
+        let path = crate::paths::data_dir()
+            .expect("data dir")
+            .join("api-token");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("token file"),
+            "a-token"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("metadata")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "the token must not be group/world readable"
+            );
+        }
+    }
+
+    /// Every launch mints a new token, so the file is a cache of a live value
+    /// and must be replaced rather than appended to or left stale.
+    #[test]
+    fn a_second_launch_overwrites_the_previous_launchs_token() {
+        let _lock = crate::paths::tests::env_lock();
+        let home = tempfile::tempdir().expect("tempdir");
+        let _home = crate::paths::tests::EnvVar::set("HOME", home.path());
+
+        write_dev_token_file("first-launch");
+        write_dev_token_file("second-launch");
+
+        let path = crate::paths::data_dir()
+            .expect("data dir")
+            .join("api-token");
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("token file"),
+            "second-launch"
+        );
+    }
 }

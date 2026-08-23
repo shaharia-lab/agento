@@ -488,18 +488,26 @@ mod tests {
         assert_eq!(Served::Rejected.label(), "rejected");
     }
 
+    /// Every `/api` request needs the bearer token since #400, so a test that
+    /// means to exercise anything *past* the guards has to carry one.
+    fn bearer() -> String {
+        format!("Bearer {}", crate::guards::tests::seeded_token())
+    }
+
     /// The guards run before routing is decided, so a claimed route and an
     /// unclaimed one are refused identically (#329).
     #[tokio::test]
     async fn a_guard_rejection_precedes_routing() {
         // A claimed write route, and the shape that made #329 exploitable: a
         // cross-origin `POST` carrying `text/plain` is a CORS simple request, so
-        // the browser sends it with no preflight.
+        // the browser sends it with no preflight. Authenticated, so what is
+        // under test is the content-type refusal rather than #400's 401.
         let path = "/api/agents".to_string();
         let req = Request::builder()
             .method(Method::POST)
             .uri(&path)
             .header(header::HOST, "localhost")
+            .header(header::AUTHORIZATION, bearer())
             .header(header::CONTENT_TYPE, "text/plain")
             .body(Body::from(r#"{"name":"pwned","slug":"pwned"}"#))
             .expect("request");
@@ -524,6 +532,32 @@ mod tests {
         assert_eq!(served, Served::Rejected);
     }
 
+    /// The whole of #400 at the seam: an unauthenticated `/api` write is
+    /// answered 401 *before routing is decided*, so no handler runs and nothing
+    /// is written.
+    ///
+    /// The "nothing is written" half needs no database to assert — it is a
+    /// consequence of `reject` running ahead of the `route_is_native` branch,
+    /// which `a_guard_rejection_precedes_routing` pins. `Served::Rejected` is
+    /// the observable proof that this request never reached a handler.
+    #[tokio::test]
+    async fn an_unauthenticated_api_request_is_refused_before_any_handler_runs() {
+        let path = "/api/agents".to_string();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(&path)
+            // Everything a local `curl` sends, and everything the pre-#400
+            // guards asked for: a loopback Host and the right content type.
+            .header(header::HOST, "127.0.0.1:8991")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"name":"pwned","slug":"pwned"}"#))
+            .expect("request");
+
+        let (response, served) = dispatch(req, path).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(served, Served::Rejected);
+    }
+
     /// A route nothing claims answers chi's own 404 — status, content type,
     /// nosniff and the exact body Go's router wrote.
     #[tokio::test]
@@ -533,6 +567,7 @@ mod tests {
             .method(Method::GET)
             .uri(&path)
             .header(header::HOST, "localhost")
+            .header(header::AUTHORIZATION, bearer())
             .body(Body::empty())
             .expect("request");
 
@@ -568,6 +603,7 @@ mod tests {
             .method(Method::GET)
             .uri("/api/agents/a%252") // uri parsing needs a valid target; dispatch takes the raw path separately
             .header(header::HOST, "localhost")
+            .header(header::AUTHORIZATION, bearer())
             .body(Body::empty())
             .expect("request");
 
@@ -609,6 +645,13 @@ mod tests {
             access_level(&Method::POST, StatusCode::CONFLICT),
             log::Level::Warn
         );
+        // #400's 401 needs no special case to be visible: an unauthenticated
+        // local hit is exactly the event worth having in a bug report, and the
+        // client-error arm already promotes it out of the read volume.
+        assert_eq!(
+            access_level(&Method::GET, StatusCode::UNAUTHORIZED),
+            log::Level::Warn
+        );
     }
 
     /// A claimed route whose body is over [`max_body_for`] is answered 400 by
@@ -619,10 +662,11 @@ mod tests {
         let req = Request::builder()
             .method(Method::POST)
             .uri(&path)
-            // Both headers are required since #329: the guards run ahead of
-            // routing, so a request without them never reaches the arm under
-            // test.
+            // All three headers are required — the two guards since #329 and
+            // the bearer token since #400. The guards run ahead of routing, so
+            // a request missing any of them never reaches the arm under test.
             .header(header::HOST, "localhost")
+            .header(header::AUTHORIZATION, bearer())
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(vec![0u8; MAX_NATIVE_BODY + 1]))
             .expect("request");
@@ -634,7 +678,13 @@ mod tests {
     }
 
     /// A logged path must never carry the query string: it holds search terms,
-    /// project paths and date ranges.
+    /// project paths and date ranges — and, since #400, it is the one place a
+    /// bearer token could plausibly end up in a plaintext file on disk.
+    ///
+    /// The access line carries no headers at all, so the *header* the token
+    /// really travels in cannot leak. What this pins is the other way in: a
+    /// `?token=` appended for debugging, which is precisely the shape somebody
+    /// adds without thinking about the log.
     #[test]
     fn logged_path_drops_the_query_string() {
         let uri: Uri = "/api/claude-sessions?search=my+secret+project&project=%2Fhome%2Fme%2Fwork"
@@ -644,6 +694,12 @@ mod tests {
 
         let uri: Uri = "/api/agents".parse().expect("uri");
         assert_eq!(log_path(&uri), "/api/agents");
+
+        let token = crate::guards::tests::seeded_token();
+        let uri: Uri = format!("/api/agents?token={token}").parse().expect("uri");
+        let logged = log_path(&uri);
+        assert_eq!(logged, "/api/agents");
+        assert!(!logged.contains(token), "the log line must never carry it");
     }
 
     /// `handle` returns before the access line for anything that is not an API
