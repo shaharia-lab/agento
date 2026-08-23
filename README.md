@@ -129,7 +129,12 @@ with the most tokens is often not the model taking your money.
 Cost is attributed to the model that spent it, including work done inside
 sub-agents, and to the project it was spent on.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![Cost by model and by project](docs/screenshots/light/cost-by-model.png)
+
+</details>
 
 ### Find out whether you are getting more effective
 
@@ -137,7 +142,12 @@ Insights goes past raw counts: turns per session, how far Claude got before it
 had to ask you something, cache hit rate and tool error rate, then every tool
 call attributed to the skill, plugin, MCP server or sub-agent responsible.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![Tool calls attributed to skills, plugins, MCP servers and reasoning effort](docs/screenshots/light/insights-breakdowns.png)
+
+</details>
 
 Durations mean active time, not wall clock. Idle gaps beyond a threshold you
 control are excluded everywhere a duration is shown.
@@ -147,7 +157,12 @@ control are excluded everywhere a duration is shown.
 Sessions per day, model mix, busiest days, and a weekly heatmap that counts a
 session in every hour it was running rather than only the hour it finished.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![Weekly rhythm heatmap and busiest sessions](docs/screenshots/light/activity-heatmap.png)
+
+</details>
 
 ### Browse and search every session you have ever run
 
@@ -156,7 +171,12 @@ Filtered and paged in SQL, so it stays fast whether you have 50 sessions or
 duration, and see permission mode, linked pull requests, tokens and cost on
 every row, with the inspector beside it.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![The Sessions list with the inspector](docs/screenshots/light/sessions-list.png)
+
+</details>
 
 ### Replay any session step by step
 
@@ -170,7 +190,12 @@ where.
 Each session carries its own metrics: messages, active duration, sub-agent time,
 tokens by type and cost.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![Session detail with the inspector's activity and token panels](docs/screenshots/light/session-detail.png)
+
+</details>
 
 ### Chat with your agents
 
@@ -178,7 +203,12 @@ Every chat runs through the Claude Code CLI you already have, with the agent's
 system prompt, model and tool allowlist applied. Tool calls and Markdown answers
 render inline; the inspector shows what the turn cost.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![A chat with the code-reviewer agent](docs/screenshots/light/chats.png)
+
+</details>
 
 ### Build agents without writing code
 
@@ -186,19 +216,34 @@ Give an agent a name, a system prompt, a model, a thinking mode and an explicit
 list of tools it may use. Template variables like `{{current_date}}` are filled
 in at runtime.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![The agents list and builder](docs/screenshots/light/agents.png)
+
+</details>
 
 Tools are an allowlist: built-in tools, Agento's local tools, and each connected
 integration's tools, ticked one by one.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![The agent builder's capabilities section](docs/screenshots/light/agent-builder.png)
+
+</details>
 
 ### Put your agents on a schedule
 
 Run any agent on a cron expression, a fixed interval, or once at a specific
 time. Every execution is recorded with its status, duration and full output.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![Scheduled tasks with recent runs](docs/screenshots/light/tasks.png)
+
+</details>
 
 ### Connect the tools you already use
 
@@ -207,7 +252,12 @@ extra daemon to operate. GitHub, Slack, Jira, Confluence, Telegram and Google
 (Calendar, Gmail, Drive) are built in; any other MCP server can be added through
 `~/.agento/mcps.yaml`.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![Integrations: GitHub connected, with its services and tools](docs/screenshots/light/integrations.png)
+
+</details>
 
 ### Keep the pricing catalog honest
 
@@ -215,7 +265,12 @@ Rates ship for Anthropic, Moonshot, Z.ai and Alibaba models and are
 effective-dated. A model with no published rate is reported as unknown instead
 of being quietly priced as something else.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![The model pricing catalog](docs/screenshots/light/settings-pricing.png)
+
+</details>
 
 ### Your data stays yours
 
@@ -224,7 +279,12 @@ is uploaded, there is no account, and there is no server component. Projects you
 would rather leave out of the numbers can be hidden from every report, and the
 idle threshold behind the duration metrics is yours to set.
 
+<details>
+<summary>Show screenshot</summary>
+
 ![Data settings: idle threshold and hidden projects](docs/screenshots/light/settings-data.png)
+
+</details>
 
 *Every screenshot above is taken from the app over a synthetic dataset; see
 [`docs/screenshots/README.md`](docs/screenshots/README.md).*
