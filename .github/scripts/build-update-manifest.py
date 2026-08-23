@@ -54,14 +54,16 @@ def platform_for(name: str) -> str | None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--artifacts", required=True, type=Path)
-    ap.add_argument("--tag", required=True, help="e.g. desktop-v0.1.0")
+    ap.add_argument("--tag", required=True, help="e.g. v1.0.0")
     ap.add_argument("--repo", required=True, help="owner/name")
     ap.add_argument("--output", required=True, type=Path)
     args = ap.parse_args()
 
-    version = args.tag.removeprefix("desktop-v")
+    # `removeprefix` returns the string unchanged when the prefix is absent, so
+    # the equality below is what rejects a tag that is not a version tag at all.
+    version = args.tag.removeprefix("v")
     if not version or version == args.tag:
-        print(f"error: tag {args.tag!r} is not of the form desktop-vX.Y.Z", file=sys.stderr)
+        print(f"error: tag {args.tag!r} is not of the form vX.Y.Z", file=sys.stderr)
         return 1
 
     base = f"https://github.com/{args.repo}/releases/download/{args.tag}"

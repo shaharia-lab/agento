@@ -9,7 +9,7 @@ cost analytics, productivity insights and a searchable, replayable history of ev
 It also lets you build agents, chat with them, schedule them, and connect them to the tools you use.
 **No API key, no account, no telemetry. Everything stays on your machine.**
 
-[![Release](https://img.shields.io/github/v/release/shaharia-lab/agento?filter=desktop-v*&style=flat-square&color=3fa045&label=release)](https://github.com/shaharia-lab/agento/releases?q=desktop-v&expanded=true)
+[![Release](https://img.shields.io/github/v/release/shaharia-lab/agento?filter=!v0.*&style=flat-square&color=3fa045&label=release)](https://github.com/shaharia-lab/agento/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/shaharia-lab/agento/ci.yml?branch=main&style=flat-square&label=CI&logo=github)](https://github.com/shaharia-lab/agento/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/github/downloads/shaharia-lab/agento/total?style=flat-square&color=blue)](https://github.com/shaharia-lab/agento/releases)
 [![Stars](https://img.shields.io/github/stars/shaharia-lab/agento?style=flat-square&color=f5c518)](https://github.com/shaharia-lab/agento/stargazers)
@@ -48,7 +48,7 @@ Anthropic API key to enter; the app tells you on launch if the CLI is missing.
 </details>
 
 <details open>
-<summary><b>2. Download</b> — pick your platform from the <a href="https://github.com/shaharia-lab/agento/releases?q=desktop-v&expanded=true">latest release</a></summary>
+<summary><b>2. Download</b> — pick your platform from the <a href="https://github.com/shaharia-lab/agento/releases/latest">latest release</a></summary>
 
 <br>
 

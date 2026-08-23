@@ -1,9 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Agento",
-  "version": "0.1.2",
+  "version": "1.0.0",
   "identifier": "com.shaharialab.agento",
-  "mainBinaryName": "agento-desktop",
+  "mainBinaryName": "agento",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

@@ -46,7 +46,7 @@ sudo apt install libfuse2      # Debian, Ubuntu
 or run without it:
 
 ```bash
-./Agento_0.1.0_amd64.AppImage --appimage-extract-and-run
+./Agento_1.0.0_amd64.AppImage --appimage-extract-and-run
 ```
 
 Also check the file is executable: `chmod +x Agento_*.AppImage`.
