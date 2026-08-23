@@ -332,13 +332,10 @@ pub fn run() {
                 // so there is one way to do this in the tree. It lives and dies
                 // with the process; nothing rotates it, because a window reload
                 // re-invokes `host_info` and gets the same value.
-                let api_token =
-                    guards::set_api_token(uuid::Uuid::new_v4().simple().to_string()).to_string();
+                let api_token = guards::set_api_token(uuid::Uuid::new_v4().simple().to_string());
 
                 #[cfg(debug_assertions)]
-                write_dev_token_file(&api_token);
-                #[cfg(not(debug_assertions))]
-                let _ = &api_token;
+                write_dev_token_file(api_token);
 
                 #[cfg(debug_assertions)]
                 let proxy_port = DEV_PROXY_PORT;

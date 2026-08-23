@@ -140,8 +140,20 @@ pub fn set_api_token(token: String) -> &'static str {
 }
 
 /// This launch's token, or `None` before `setup` has installed one.
+///
+/// **An empty token reads as "none installed", and that is a safety property
+/// rather than tidiness.** `token_rejection` strips the scheme and compares what
+/// is left, so a request carrying *no* `Authorization` header at all presents
+/// `""` — which against an empty expected token is an exact match, and every
+/// unauthenticated request would be served. Nothing can reach that today (a v4
+/// UUID is 32 hex characters), but the guard must not be one careless
+/// `set_api_token(String::new())` away from being open, and the failure would be
+/// silent in exactly the way this module exists to prevent.
 pub fn api_token() -> Option<&'static str> {
-    API_TOKEN.get().map(String::as_str)
+    API_TOKEN
+        .get()
+        .map(String::as_str)
+        .filter(|token| !token.is_empty())
 }
 
 /// Why a request must be refused, or `None` to let it through.
@@ -833,6 +845,47 @@ pub(crate) mod tests {
             "Bearer anything".parse().expect("hv"),
         );
         assert_eq!(token_rejection(&headers, None), Some(UNAUTHORIZED));
+    }
+
+    /// An **empty** installed token must not authenticate the request that sends
+    /// no credential at all.
+    ///
+    /// Both sides reduce to `""` — a header-less request presents `""` after the
+    /// scheme strip — so a constant-time compare of the two is a match, and the
+    /// guard would be wide open while looking installed. [`api_token`] maps
+    /// empty to `None` for this reason; without that filter this test fails,
+    /// which is the whole point of having it.
+    #[test]
+    fn an_empty_token_is_not_a_credential() {
+        assert_eq!(
+            token_rejection(&HeaderMap::new(), Some("")),
+            None,
+            "the raw comparison matches, which is exactly why api_token() must never return it"
+        );
+
+        // Seed **first**, and deliberately so. `set_api_token` is `get_or_init`
+        // over a process-wide static, so calling it with an empty string before
+        // anything else had installed a token would install one — poisoning
+        // every other test in this binary, whichever order they happen to run
+        // in. Seeding here makes the assertion about the accessor rather than
+        // about which test won the race.
+        let token = seeded_token();
+        assert_eq!(
+            set_api_token(String::new()),
+            token,
+            "a later set must not replace the installed token"
+        );
+        assert!(!api_token().unwrap_or_default().is_empty());
+        assert_eq!(
+            reject(&authed_request(
+                Method::GET,
+                "/api/agents",
+                "localhost",
+                "",
+                None
+            )),
+            Some(UNAUTHORIZED)
+        );
     }
 
     /// The scheme is matched exactly, as `mcp.rs` matches it. The only clients
