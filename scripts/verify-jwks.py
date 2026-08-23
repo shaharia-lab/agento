@@ -88,10 +88,10 @@ def main() -> int:
     try:
         jwks = fetch_jwks(args.base)
     except urllib.error.URLError as e:
-        return int(bool(sys.stderr.write(
-            f"could not reach {args.base}{JWKS_PATH}: {e}\n"
-            "Is the app running? A release build's port is in Settings → About.\n"
-        ))) or 1
+        print(f"could not reach {args.base}{JWKS_PATH}: {e}", file=sys.stderr)
+        print("Is the app running? A release build's port is in Settings → About.",
+              file=sys.stderr)
+        return 1
 
     print(f"✔ {args.base}{JWKS_PATH} served {len(jwks.get('keys', []))} key(s) "
           f"with no credential")

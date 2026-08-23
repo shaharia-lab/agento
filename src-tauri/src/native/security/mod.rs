@@ -153,6 +153,27 @@ fn token_id(path: &str) -> Option<&str> {
 /// key is stored. Handing that to a `read` token would let the narrower
 /// credential map the wider ones, which is the one place the two-level split
 /// would have been actively misleading.
+///
+/// # The prefix is matched against the *raw* target, and that is sound
+///
+/// `guards::reject` runs before `gourl::route_path` (#329's ordering, kept
+/// deliberately — a guard that needs no route to say no is the simpler property),
+/// so `path` here is the raw request target rather than the one chi routes on.
+/// Those are different strings, which raises the obvious question: can a request
+/// *route* to `/api/security/…` while its raw target does not start with that
+/// prefix, and so be served to a `read` token?
+///
+/// It cannot, and the reason is `gourl`'s rule rather than this function's. The
+/// two differ only where the escaping is canonical, and an escape inside the
+/// literal `security` is by definition **not** canonical — a letter needs no
+/// escaping — so chi routes on the raw target there and [`claims`], which
+/// compares literally, matches nothing. The prefix can therefore only be gained
+/// by decoding in cases that never reach a route at all: a miss is chi's 404,
+/// not a served request.
+///
+/// Written down because the argument is not visible from either file alone. If
+/// the guard is ever moved *after* `route_path`, this comment stops applying and
+/// the check should simply take the route path.
 pub fn required_scope(method: &Method, path: &str) -> Scope {
     if path.starts_with("/api/security/") || path == "/api/security" {
         return Scope::Write;
@@ -597,6 +618,50 @@ mod tests {
         // default must still not be `write`, or a future guard change would
         // lock out the one route that has to stay public.
         assert_eq!(required_scope(&Method::GET, JWKS_PATH), Scope::Read);
+    }
+
+    /// **A request cannot route into `/api/security/` while presenting a raw
+    /// target that escapes the `write` requirement.**
+    ///
+    /// The guard sees the raw target and `claims` sees chi's route path, so the
+    /// two could in principle disagree — and a disagreement here would serve the
+    /// credential list to a `read` token. Asserted rather than reasoned about:
+    /// for every spelling of the prefix, either the raw target already demands
+    /// `write`, or nothing claims the route at all.
+    #[test]
+    fn no_escaped_spelling_reaches_a_security_route_at_read_scope() {
+        for raw in [
+            // A letter escaped: not canonical, so chi routes on the raw target
+            // and `claims` matches nothing.
+            "/api/%73ecurity/tokens",
+            "/api/security/%74okens",
+            "/api/sec%75rity/keys",
+            // A separator escaped: canonical, so chi keeps it raw — one segment,
+            // and again unclaimed.
+            "/api/security%2Ftokens",
+            "/api%2Fsecurity/tokens",
+            // Upper-case escapes, the other canonical spelling.
+            "/api/%53ecurity/tokens",
+        ] {
+            let routed = crate::native::gourl::route_path(raw);
+            let claimed = routed
+                .as_deref()
+                .is_some_and(|p| claims(&Method::GET, p) || claims(&Method::POST, p));
+            let demands_write = required_scope(&Method::GET, raw) == Scope::Write;
+            assert!(
+                !claimed || demands_write,
+                "{raw:?} routes to {routed:?} and is claimed, but the guard would \
+                 have accepted a read token for it"
+            );
+        }
+
+        // ...and the plain spellings do demand write, so the loop above is not
+        // passing merely because nothing is ever claimed.
+        assert_eq!(
+            required_scope(&Method::GET, "/api/security/tokens"),
+            Scope::Write
+        );
+        assert!(claims(&Method::GET, "/api/security/tokens"));
     }
 
     /// RFC 8037's shape, which is what makes "a stock library on the other side"

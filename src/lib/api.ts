@@ -106,6 +106,15 @@ async function rejection(
  * A 401 with **no** `Authorization` header attached is not retried: the page
  * never had a token, so re-asking cannot produce one, and `rejection` turns it
  * into the one honest message instead.
+ *
+ * **Retrying is safe on every method, `POST` and `DELETE` included, and the
+ * reason is a property of the server rather than of this function.** A 401 is
+ * answered by `guards.rs::reject`, which runs *before* routing — so the handler
+ * never ran, no row was written, no subprocess was spawned, and there is nothing
+ * for the second attempt to duplicate. That is the whole argument, and it is
+ * written here rather than at a call site because it is what makes a blanket
+ * retry acceptable at all. If a 401 ever became something a handler could answer
+ * *after* doing work, this would have to become method-aware.
  */
 async function withAuth<T>(
   accept: string,
@@ -238,9 +247,7 @@ export function streamChatMessage(
       // It goes through `withAuth` for the same reason every other request does
       // (#405): a turn started just after a regenerate would otherwise be the
       // one request that cannot recover, and it is the longest and most
-      // expensive one to lose. Retrying is safe here because a 401 is refused by
-      // the guard **before** routing, so nothing was spawned and no message was
-      // persisted — there is no half-run turn to duplicate.
+      // expensive one to lose. See `withAuth` for why retrying a `POST` is safe.
       const body = await withAuth(
         "text/event-stream",
         (headers) =>
