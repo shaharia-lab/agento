@@ -54,13 +54,24 @@ jobs:
   # keeps reporting 0.1.0 and is re-offered the same update forever — so a
   # mismatched tag must never reach the build matrix.
   guard:
-    name: Tag matches tauri.conf.json
+    name: Tag matches every version string
     if: github.event_name != 'release'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
-      - name: Check the tag against the bundled version
+      - name: Check the tag against every version string
+        # `tauri.conf.json` is the one that decides what ships: the bundler
+        # bakes it into the installer and the updater compares it against the
+        # manifest, so a mismatch there makes every "updated" install re-offer
+        # itself forever. That is why it was checked first and alone.
+        #
+        # The other two are checked because nothing else ever looks at them.
+        # `package-lock.json` sat on 0.1.1 for the whole of 0.1.2 for exactly
+        # that reason, and a stale lockfile version is not merely untidy: npm
+        # repairs that field on almost any command, so every fresh checkout goes
+        # dirty on the first `npm run build` with a change nobody made — which
+        # reads as local work, invites a discard, and comes back immediately.
         run: |
           tag="${GITHUB_REF_NAME}"
           case "$tag" in
@@ -68,12 +79,33 @@ jobs:
             *) echo "not a desktop-v* tag build; nothing to check"; exit 0 ;;
           esac
           tag_version="${tag#desktop-v}"
+
           conf_version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
-          if [ "$tag_version" != "$conf_version" ]; then
-            echo "::error::tag ${tag} says ${tag_version} but src-tauri/tauri.conf.json says ${conf_version}. Bump the conf and re-tag, or the shipped app will re-offer itself as an update forever."
+          pkg_version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          lock_version="$(python3 -c 'import json; print(json.load(open("package-lock.json"))["version"])')"
+          lock_pkg_version="$(python3 -c 'import json; print(json.load(open("package-lock.json"))["packages"][""]["version"])')"
+
+          fail=0
+          check() {
+            if [ "$2" != "$tag_version" ]; then
+              echo "::error::tag ${tag} says ${tag_version} but $1 says $2"
+              fail=1
+            fi
+          }
+
+          # The lockfile carries the version twice and npm keeps both in step,
+          # so both are checked: a hand-edit that fixes only the top one leaves
+          # the tree still dirty on the next npm command.
+          check "src-tauri/tauri.conf.json"          "$conf_version"
+          check "package.json"                       "$pkg_version"
+          check "package-lock.json .version"         "$lock_version"
+          check "package-lock.json .packages[''] "   "$lock_pkg_version"
+
+          if [ "$fail" = 1 ]; then
+            echo "::error::Fix with: npm version ${tag_version} --no-git-tag-version   (package.json + lockfile), and set src-tauri/tauri.conf.json by hand. Then re-tag. See docs/releasing.md step 1."
             exit 1
           fi
-          echo "ok: ${tag_version}"
+          echo "ok: ${tag_version} in all four places"
 
   build:
     name: ${{ matrix.label }}

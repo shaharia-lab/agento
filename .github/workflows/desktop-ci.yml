@@ -34,6 +34,35 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
+      # Runs before the expensive steps because it costs milliseconds and its
+      # failure is unambiguous.
+      #
+      # The release workflow's guard checks these against the **tag**, which is
+      # the authoritative check — but it only fires at tag time, when a
+      # mismatch means deleting a tag and cutting the release again. This one
+      # asks the cheaper question on every PR: do the four strings agree with
+      # *each other*? That catches the drift while it is still an edit.
+      #
+      # It exists because `package-lock.json` sat on 0.1.1 for the whole of
+      # 0.1.2 with CI green throughout. Nothing looked at it, and the symptom
+      # surfaced as an unexplained dirty working tree: npm repairs that field
+      # on almost any command, so every fresh checkout went dirty on the first
+      # `npm run build` with a change nobody made.
+      - name: Version strings agree
+        run: |
+          conf="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
+          pkg="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          lock="$(python3 -c 'import json; print(json.load(open("package-lock.json"))["version"])')"
+          lock_pkg="$(python3 -c 'import json; print(json.load(open("package-lock.json"))["packages"][""]["version"])')"
+
+          if [ "$conf" = "$pkg" ] && [ "$conf" = "$lock" ] && [ "$conf" = "$lock_pkg" ]; then
+            echo "ok: ${conf}"
+            exit 0
+          fi
+
+          echo "::error::version strings disagree — tauri.conf.json=${conf} package.json=${pkg} package-lock.json=${lock} package-lock.json .packages['']=${lock_pkg}. Fix with: npm version ${conf} --no-git-tag-version (package.json + lockfile), and set src-tauri/tauri.conf.json by hand. See docs/releasing.md step 1."
+          exit 1
+
       - name: Install Linux build dependencies
         # Azure's mirror regularly fails over to archive.ubuntu.com, and a
         # stalled fetch there is the hang the timeouts above exist for — so
