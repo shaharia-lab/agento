@@ -343,14 +343,25 @@ Element, or the usual devtools shortcut.
 
 In `npm run app` the same lines go to the terminal.
 
-**Curling the API** works in dev, since the server is on a fixed port:
+**Curling the API** works in dev, since the server is on a fixed port — but
+`/api` requires a bearer token, so the header comes first:
 
 ```bash
-curl -s http://127.0.0.1:8991/api/agents | jq
+curl -s -H "Authorization: Bearer $(cat ~/.agento-desktop-dev/api-token)" \
+  http://127.0.0.1:8991/api/agents | jq
 ```
 
+The token is minted on every app launch and normally lives only in memory; a
+**debug build also writes it** to `~/.agento-desktop-dev/api-token` (0600) so
+`curl` can reach the API. A release build writes it nowhere — its API is
+reachable from the app window and nothing else. Without the header the guard
+answers **401** before the handler runs.
+
 Add `-H "Content-Type: application/json"` for anything that is not a `GET`, or
-the guard answers 415 before the handler runs.
+the guard answers 415 instead.
+
+Chrome on `:1420` needs no token of its own: Vite's proxy reads the same file and
+adds the header when it forwards.
 
 There is also a project skill, `local-verify`, describing how to reproduce a bug
 before fixing it and how to verify each hop separately: backend wire, browser

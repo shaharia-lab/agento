@@ -6,6 +6,50 @@
 export const IS_TAURI =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+/** Platform facts the Rust side resolves at startup. */
+export interface HostInfo {
+  os: string;
+  arch: string;
+  version: string;
+  controls_on_left: boolean;
+  api_base: string;
+  /** Path to the Claude Code CLI, or null when it is not installed. */
+  claude_cli: string | null;
+  /** Whether this install can replace itself, or only announce updates. */
+  can_self_update: boolean;
+  /** "appimage" | "package" | "dmg" | "installer" */
+  install_kind: string;
+  /** This launch's bearer token for /api. Empty outside Tauri. */
+  api_token: string;
+}
+
+let hostInfoPromise: Promise<HostInfo | null> | undefined;
+
+/**
+ * The `host_info` command, fetched at most once per page.
+ *
+ * Memoized here rather than in `host.ts` because `api.ts` needs it too and must
+ * not depend on React — and because two independent callers invoking the same
+ * command is two round trips for one immutable answer.
+ *
+ * **This is how the /api bearer token reaches the page (#400).** IPC is the one
+ * channel a local process cannot reach, which is the entire point: a token
+ * delivered over `/api` itself would be a token anything could ask for. That
+ * makes this call load-bearing where it used to be advisory, so a failure
+ * resolves to `null` rather than rejecting — every caller already has to handle
+ * "outside Tauri", and collapsing the two cases means one path to get right.
+ */
+export function hostInfo(): Promise<HostInfo | null> {
+  if (!hostInfoPromise) {
+    hostInfoPromise = !IS_TAURI
+      ? Promise.resolve(null)
+      : import("@tauri-apps/api/core")
+          .then(({ invoke }) => invoke<HostInfo>("host_info"))
+          .catch(() => null);
+  }
+  return hostInfoPromise;
+}
+
 type AppWindow = {
   setTheme(theme: "light" | "dark" | null): Promise<void>;
   onFocusChanged(

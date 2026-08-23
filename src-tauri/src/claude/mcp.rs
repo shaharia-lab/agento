@@ -123,7 +123,14 @@ fn server_config() -> StreamableHttpServerConfig {
 
 /// Compares two credentials without an early exit, so a wrong token leaks
 /// nothing about the right one through response timing.
-fn credentials_match(a: &str, b: &str) -> bool {
+///
+/// `pub(crate)` since #400: [`crate::guards`] authenticates the app's own API
+/// server with the same scheme and must not carry a second copy of this — one
+/// constant-time comparison in the tree is one to get right. The dependency runs
+/// that way round (app → SDK) and not the reverse, because this module is a port
+/// of an external SDK and deliberately imports nothing from the rest of the
+/// crate.
+pub(crate) fn credentials_match(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }

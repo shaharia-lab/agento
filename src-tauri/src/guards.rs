@@ -1,8 +1,8 @@
-//! `internal/server/guards.go`, applied at the proxy (#329).
+//! `internal/server/guards.go`, applied at the proxy (#329), **plus this
+//! build's own bearer token** (#400).
 //!
-//! Agento ships without authentication on purpose — it is a single-user desktop
-//! app — and that only holds if the browser cannot be used as a way in. Two
-//! middlewares are what makes it hold, and Go scopes both to `r.Route("/api")`:
+//! Three checks now, and only the first two are Go's. Go scopes both of those to
+//! `r.Route("/api")`, and the third is scoped identically:
 //!
 //! - **`requireJSONContentType`.** A cross-origin `POST` carrying `text/plain`
 //!   is a CORS *simple request*: the browser sends it with **no preflight**, and
@@ -14,6 +14,32 @@
 //!   as far as the browser is concerned, at which point CORS stops applying at
 //!   all. A loopback bind does not help, for the same reason: the browser is
 //!   already inside.
+//! - **The bearer token** (#400). Both of the above are *browser*-shaped, and
+//!   neither is an obstacle to a caller that simply speaks HTTP:
+//!   `curl -H 'Content-Type: application/json' http://127.0.0.1:<port>/api/agents`
+//!   passes both trivially, and this API can create an agent with
+//!   `permission_mode: bypass` and run it — arbitrary command execution. The
+//!   ephemeral port is obscurity only; `/proc/net/tcp` says which one.
+//!
+//! # This build **does** authenticate, and that is a change
+//!
+//! This module used to open "Agento ships without authentication on purpose —
+//! it is a single-user desktop app". #246 recorded the same decision and called
+//! it sound. It was, **for the Go server as a web app**, where the threat model
+//! was the browser and the LAN. It is not the whole story here: loopback
+//! separates *hosts*, not *processes* or *users*, so on a multi-user machine any
+//! other account reaches this port, as does any sandboxed or lower-privilege
+//! process that can open a socket but cannot read `~/.agento`.
+//!
+//! It is defence in depth rather than a new boundary — a process already running
+//! as this user can read `agento.db` and `~/.claude` directly — and its real
+//! value is that the two halves of this binary now agree: every in-process MCP
+//! server has required a token since #282 ([`crate::claude::mcp`]), for
+//! precisely this reason and in precisely these words, while the far more
+//! powerful API server did not.
+//!
+//! **A 401 is a status Go never answers**, so it is a deliberate divergence from
+//! the ported surface rather than a reproduction of anything.
 //!
 //! # Why the proxy, and why this is not belt-and-braces
 //!
@@ -39,8 +65,14 @@
 //! secret token; a global guard would break inbound triggers. `/health` and
 //! `/metrics` are likewise untouched, and the SPA is not an API path at all.
 //! Same scoping as Go's.
+//!
+//! The SPA document and its embedded assets are the reason the token needs no
+//! special case: a page cannot put a header on its own navigation request, and
+//! those bytes hold no secrets. Everything the *page then does* is `/api`, which
+//! its own `fetch` calls can and do authenticate.
 
 use std::net::IpAddr;
+use std::sync::OnceLock;
 
 use axum::body::Body;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode, Uri};
@@ -75,11 +107,55 @@ const CONTENT_TYPE_WRONG: Rejection = (
     "Content-Type must be application/json",
 );
 
+/// The 401 (#400). Go has no counterpart, so this wording is this build's own.
+///
+/// It names the scheme deliberately: the only clients are the app's own webview
+/// and a developer holding the dev token file, and both benefit from the answer
+/// saying what was missing.
+const UNAUTHORIZED: Rejection = (
+    StatusCode::UNAUTHORIZED,
+    "a valid Authorization: Bearer token is required",
+);
+
+/// The one credential scheme accepted, spelled exactly as
+/// [`crate::claude::mcp`] spells it.
+const BEARER_PREFIX: &str = "Bearer ";
+
+/// The token minted for this launch, set once during `lib.rs`'s `setup`.
+///
+/// A `OnceLock` rather than Tauri state because of who needs to read it:
+/// [`reject`] is called from `proxy::dispatch`, a plain router function with no
+/// state extractor, so there is no `tauri::State` to take. This is the shape
+/// `native::scan::state`, `native::chat::live` and `native::integrations::registry`
+/// already use for process-wide values.
+static API_TOKEN: OnceLock<String> = OnceLock::new();
+
+/// Install this launch's token, returning it.
+///
+/// Idempotent by construction: a second call returns the first token rather than
+/// replacing it, which is what lets the tests seed one without racing each other
+/// (a `cargo test` binary runs them in parallel against this one static).
+pub fn set_api_token(token: String) -> &'static str {
+    API_TOKEN.get_or_init(|| token).as_str()
+}
+
+/// This launch's token, or `None` before `setup` has installed one.
+pub fn api_token() -> Option<&'static str> {
+    API_TOKEN.get().map(String::as_str)
+}
+
 /// Why a request must be refused, or `None` to let it through.
 ///
 /// Order mirrors `server.go`'s `r.Use(s.validateHost)` then
 /// `r.Use(requireJSONContentType)`: chi runs them outermost-first, so a request
 /// that fails both is answered 403.
+///
+/// The token sits **between** them, and both halves of that placement are
+/// deliberate. After `Host`, so a request failing both still reads 403 — the
+/// rebinding answer outranks the credential one, and a browser that has been
+/// pointed here by DNS should learn nothing further. Before `Content-Type`, so
+/// an unauthenticated caller is not told the content-type rule; authentication
+/// precedes request-shape validation.
 pub fn reject(req: &Request<Body>) -> Option<Rejection> {
     // The **raw** request target, as `proxy::handle` uses for `is_api_path` and
     // for the same reason: reaching a divergence would need a percent-escape
@@ -95,7 +171,49 @@ pub fn reject(req: &Request<Body>) -> Option<Rejection> {
     if !host_allowed(&request_host(req.headers(), req.uri())) {
         return Some(HOST_REJECTION);
     }
+    if let Some(rejection) = token_rejection(req.headers(), api_token()) {
+        return Some(rejection);
+    }
     content_type_rejection(req.method(), path, req.headers())
+}
+
+/// The bearer check (#400).
+///
+/// **It applies to every method**, unlike `requireJSONContentType`, which is an
+/// allowlist over the state-changing four. A `GET` is what reads chat
+/// transcripts, agent system prompts and the integration list, so exempting
+/// reads would leave most of what is worth stealing reachable.
+///
+/// `expected` is a parameter rather than a read of [`API_TOKEN`] so the
+/// fail-closed branch is testable: a `OnceLock` cannot be un-set, so a test that
+/// wanted to observe "no token installed" could not arrange it otherwise.
+///
+/// **No token installed refuses everything.** That is the safe direction: the
+/// only way to reach it is a `setup` that failed before minting, and answering
+/// an unauthenticated request in that state would be a listener with no
+/// credential at all. The scheme match is exact, as `mcp.rs`'s is — the only
+/// clients are this app's own webview and the Vite dev proxy, and both spell it
+/// `Bearer `.
+fn token_rejection(headers: &HeaderMap, expected: Option<&str>) -> Option<Rejection> {
+    let Some(expected) = expected else {
+        return Some(UNAUTHORIZED);
+    };
+    let presented = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .strip_prefix(BEARER_PREFIX)
+        .unwrap_or_default();
+
+    // Shared with the MCP servers rather than reimplemented — one constant-time
+    // comparison in the tree is one to get right. The dependency runs app → SDK,
+    // which is the only direction available: `claude/` is a port of an external
+    // SDK and imports nothing from the rest of this crate.
+    if crate::claude::mcp::credentials_match(presented, expected) {
+        None
+    } else {
+        Some(UNAUTHORIZED)
+    }
 }
 
 /// Whether the guards apply to this path.
@@ -309,16 +427,39 @@ fn is_token(s: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
+    /// The token every test in this binary authenticates with.
+    ///
+    /// [`set_api_token`] is `get_or_init`, so the first caller wins and every
+    /// later one — in this module or in `proxy`'s tests, which share the
+    /// process — sees the same value. That is what makes a seeded token safe
+    /// under `cargo test`'s parallelism.
+    pub(crate) fn seeded_token() -> &'static str {
+        set_api_token("test-token".to_string())
+    }
+
     fn request(method: Method, path: &str, host: &str, content_type: &str) -> Request<Body> {
+        authed_request(method, path, host, content_type, Some(seeded_token()))
+    }
+
+    fn authed_request(
+        method: Method,
+        path: &str,
+        host: &str,
+        content_type: &str,
+        token: Option<&str>,
+    ) -> Request<Body> {
         let mut builder = Request::builder().method(method).uri(path);
         if !host.is_empty() {
             builder = builder.header(header::HOST, host);
         }
         if !content_type.is_empty() {
             builder = builder.header(header::CONTENT_TYPE, content_type);
+        }
+        if let Some(token) = token {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
         builder.body(Body::empty()).expect("request")
     }
@@ -515,10 +656,15 @@ mod tests {
         );
     }
 
-    /// Both guards are scoped to `/api` deliberately. The Telegram webhook is
-    /// mounted at the root, arrives with a foreign `Host` and is authenticated
-    /// by its own secret token; a global guard would break inbound triggers in
-    /// production.
+    /// All three guards are scoped to `/api` deliberately. The Telegram webhook
+    /// is mounted at the root, arrives with a foreign `Host` and is
+    /// authenticated by its own secret token; a global guard would break inbound
+    /// triggers in production.
+    ///
+    /// Deliberately sends **no** token, which is what makes this the token's
+    /// exemption test as well as the other two guards': the SPA document,
+    /// `/health` and the webhook all reach the server without one, and a token
+    /// check that had leaked outside `/api` would fail here.
     #[test]
     fn nothing_outside_api_is_guarded() {
         for path in [
@@ -530,11 +676,12 @@ mod tests {
             "/apiary",
         ] {
             assert_eq!(
-                reject(&request(
+                reject(&authed_request(
                     Method::POST,
                     path,
                     "api.telegram.org",
-                    "application/x-www-form-urlencoded"
+                    "application/x-www-form-urlencoded",
+                    None
                 )),
                 None,
                 "{path} should not be guarded"
@@ -545,5 +692,180 @@ mod tests {
             reject(&request(Method::POST, "/api", "attacker.example", "")),
             Some(HOST_REJECTION)
         );
+    }
+
+    /// The case #400 exists for, and the one every other guard passes: `curl`
+    /// sends a loopback `Host` and sets its own `Content-Type`, so before the
+    /// token the two Go guards admitted it — onto an API that can create a
+    /// `bypass`-permission agent and run it.
+    #[test]
+    fn an_api_request_without_a_token_is_refused() {
+        assert_eq!(
+            reject(&authed_request(
+                Method::POST,
+                "/api/agents",
+                "127.0.0.1:8991",
+                "application/json",
+                None
+            )),
+            Some(UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn a_wrong_token_is_refused_and_the_right_one_is_served() {
+        let token = seeded_token();
+        for wrong in [
+            "",
+            "not-the-token",
+            // A prefix and an extension of the real token: the comparison is
+            // length-checked before the byte fold, so neither is admitted.
+            &token[..token.len() - 1],
+            &format!("{token}x"),
+        ] {
+            assert_eq!(
+                reject(&authed_request(
+                    Method::GET,
+                    "/api/agents",
+                    "localhost",
+                    "",
+                    Some(wrong)
+                )),
+                Some(UNAUTHORIZED),
+                "{wrong:?} should be refused"
+            );
+        }
+        assert_eq!(
+            reject(&authed_request(
+                Method::GET,
+                "/api/agents",
+                "localhost",
+                "",
+                Some(token)
+            )),
+            None
+        );
+    }
+
+    /// **Reads are guarded too**, unlike `requireJSONContentType`, which is an
+    /// allowlist over the state-changing four. A `GET` is what returns chat
+    /// transcripts, agent system prompts and the integration list.
+    #[test]
+    fn every_method_needs_the_token_not_only_the_state_changing_ones() {
+        for method in [
+            Method::GET,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ] {
+            assert_eq!(
+                reject(&authed_request(
+                    method.clone(),
+                    "/api/agents",
+                    "localhost",
+                    "application/json",
+                    None
+                )),
+                Some(UNAUTHORIZED),
+                "{method} should require the token"
+            );
+        }
+    }
+
+    /// A request failing the `Host` check **and** carrying no token reads 403,
+    /// not 401: the rebinding answer outranks the credential one.
+    #[test]
+    fn the_host_check_still_runs_before_the_token_check() {
+        assert_eq!(
+            reject(&authed_request(
+                Method::POST,
+                "/api/agents",
+                "attacker.example.com",
+                "application/json",
+                None
+            )),
+            Some(HOST_REJECTION)
+        );
+    }
+
+    /// ...and the token check runs before the content-type one, so an
+    /// unauthenticated caller is not told the content-type rule.
+    #[test]
+    fn the_token_check_runs_before_the_content_type_check() {
+        assert_eq!(
+            reject(&authed_request(
+                Method::POST,
+                "/api/agents",
+                "localhost",
+                "text/plain",
+                None
+            )),
+            Some(UNAUTHORIZED)
+        );
+        // With a token, the same request is the 415 it was before #400.
+        assert_eq!(
+            reject(&request(
+                Method::POST,
+                "/api/agents",
+                "localhost",
+                "text/plain"
+            )),
+            Some(CONTENT_TYPE_WRONG)
+        );
+    }
+
+    /// No token installed refuses everything.
+    ///
+    /// Only reachable through a `setup` that failed before minting, and the safe
+    /// direction: the alternative is a listener with no credential at all.
+    /// Tested through the parameter because a `OnceLock` cannot be un-set.
+    #[test]
+    fn no_installed_token_fails_closed() {
+        let headers = HeaderMap::new();
+        assert_eq!(token_rejection(&headers, None), Some(UNAUTHORIZED));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer anything".parse().expect("hv"),
+        );
+        assert_eq!(token_rejection(&headers, None), Some(UNAUTHORIZED));
+    }
+
+    /// The scheme is matched exactly, as `mcp.rs` matches it. The only clients
+    /// are this app's webview and the Vite dev proxy, and both send `Bearer `.
+    #[test]
+    fn the_credential_must_carry_the_bearer_scheme() {
+        let token = seeded_token();
+        for value in [
+            token.to_string(),
+            format!("bearer {token}"),
+            format!("Basic {token}"),
+            format!("Bearer  {token}"),
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::AUTHORIZATION, value.parse().expect("hv"));
+            assert_eq!(
+                token_rejection(&headers, Some(token)),
+                Some(UNAUTHORIZED),
+                "{value:?} should be refused"
+            );
+        }
+    }
+
+    /// Two launches must not share a token — the `mcp.rs` property, applied to
+    /// the API server. `set_api_token` is `get_or_init` within one process, so
+    /// what is asserted is the generation: the value handed to it is fresh per
+    /// call, which is what makes each launch's token independent.
+    #[test]
+    fn a_freshly_minted_token_is_never_the_previous_one() {
+        let mint = || uuid::Uuid::new_v4().simple().to_string();
+        let first = mint();
+        let second = mint();
+        assert_ne!(first, second);
+        assert_eq!(first.len(), 32, "128 bits of hex, 122 of them random");
     }
 }

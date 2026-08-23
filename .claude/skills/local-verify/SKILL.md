@@ -71,15 +71,42 @@ Run it first and both failure modes disappear.
   `claude` subprocess holding the session id — the next send fails
   `Session ID … is already in use`; use a fresh chat.
 
-## Capturing the chat SSE stream
+## Reaching `/api` at all: the bearer token
 
-Every state-changing request needs `Content-Type: application/json`.
+Since #400 **every `/api` request needs `Authorization: Bearer <token>`** — reads
+included, unlike the `Content-Type` rule, which only covers the state-changing
+methods. The token is minted fresh on every app launch and held in memory, so
+there is nothing to configure and nothing to look up between runs.
+
+A debug build also writes it to `~/.agento-desktop-dev/api-token` (0600) purely
+so this playbook still works. Read it per command — it changes every launch:
 
 ```bash
-curl -s -X POST http://127.0.0.1:8991/api/chats -H "Content-Type: application/json" \
+TOKEN=$(cat ~/.agento-desktop-dev/api-token)
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8991/api/agents | jq
+```
+
+**Chrome on `:1420` needs nothing extra.** A plain browser tab has no Tauri IPC
+and so can never hold the token; `vite.config.ts`'s proxy reads the same file and
+adds the header server-side. That hop is unchanged.
+
+A **401** means one of: the app is not running (the file is last launch's token),
+the header is missing, or you are hitting a release build, which writes no file
+at all — use the app window.
+
+## Capturing the chat SSE stream
+
+Every state-changing request needs `Content-Type: application/json`, and every
+request needs the token above.
+
+```bash
+TOKEN=$(cat ~/.agento-desktop-dev/api-token)
+curl -s -X POST http://127.0.0.1:8991/api/chats \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"agent_slug":"","working_directory":"/tmp/x","model":"","settings_profile_id":""}'
 curl -sN -X POST http://127.0.0.1:8991/api/chats/<id>/messages \
-  -H "Content-Type: application/json" -d '{"content":"..."}' -o /tmp/sse.txt
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"content":"..."}' -o /tmp/sse.txt
 ```
 
 Read `/tmp/sse.txt` for the exact frames. Facts that save a loop (verified
