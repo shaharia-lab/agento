@@ -125,10 +125,17 @@ const WRITABLE_COLUMNS: &[&str] = &[
 /// promise about.
 const RESERVED_SESSION_TYPE: &str = "";
 
-fn upsert_sql() -> String {
+/// Built once for the process, not once per row.
+///
+/// It is a 30-column statement assembled from three joins over
+/// [`WRITABLE_COLUMNS`], and the caller writes one row per session over a whole
+/// corpus — 1,145 of them on the reference machine, per sweep. Rebuilding the
+/// string each time is invisible next to reading a transcript and is still work
+/// with no reason to happen twice.
+static UPSERT_SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     let columns = WRITABLE_COLUMNS.join(", ");
-    let placeholders = (1..=WRITABLE_COLUMNS.len() + 2)
-        .map(|_| "?")
+    // The two key columns, then one per writable column.
+    let placeholders = std::iter::repeat_n("?", WRITABLE_COLUMNS.len() + 2)
         .collect::<Vec<_>>()
         .join(",");
     let updates = WRITABLE_COLUMNS
@@ -141,7 +148,7 @@ fn upsert_sql() -> String {
          VALUES ({placeholders})
          ON CONFLICT(session_id, project_path) DO UPDATE SET {updates}"
     )
-}
+});
 
 /// Store one computed insight.
 ///
@@ -149,48 +156,52 @@ fn upsert_sql() -> String {
 /// in one batch carries the same instant — the column is only ever read as a
 /// timestamp, but a batch whose rows disagree by milliseconds is a batch whose
 /// tests cannot assert on it.
+///
+/// `prepare_cached` rather than `execute`, for the same reason [`UPSERT_SQL`] is
+/// a static: the caller runs this once per session over a whole corpus, so
+/// re-preparing a 30-column statement per row is the one avoidable cost in the
+/// write half.
 pub fn upsert(
     tx: &Transaction,
     insight: &SessionInsight,
     project_path: &str,
     scanned_at: &str,
 ) -> Result<(), String> {
-    let sql = upsert_sql();
-    tx.execute(
-        &sql,
-        params![
-            insight.session_id,
-            project_path,
-            super::processors::CURRENT_PROCESSOR_VERSION,
-            scanned_at,
-            insight.turn_count,
-            insight.steps_per_turn_avg,
-            insight.autonomy_score,
-            insight.tool_calls_total,
-            encode_breakdown(&insight.tool_breakdown)?,
-            insight.tool_error_rate,
-            insight.total_duration_ms,
-            insight.active_duration_ms,
-            insight.claude_working_time_ms,
-            insight.cache_hit_rate,
-            insight.tokens_per_turn_avg,
-            insight.cost_estimate_usd,
-            insight.tool_error_count,
-            insight.has_errors,
-            insight.max_consecutive_tool_calls,
-            insight.longest_autonomous_chain,
-            insight.avg_user_response_time_ms,
-            insight.avg_claude_response_time_ms,
-            RESERVED_SESSION_TYPE,
-            encode_breakdown(&insight.skill_breakdown)?,
-            encode_breakdown(&insight.plugin_breakdown)?,
-            encode_breakdown(&insight.mcp_server_breakdown)?,
-            encode_breakdown(&insight.mcp_tool_breakdown)?,
-            encode_breakdown(&insight.effort_breakdown)?,
-            insight.unattributed_calls,
-            encode_breakdown(&insight.agent_breakdown)?,
-        ],
-    )
+    let mut stmt = tx
+        .prepare_cached(&UPSERT_SQL)
+        .map_err(|e| format!("preparing the insight upsert: {e}"))?;
+    stmt.execute(params![
+        insight.session_id,
+        project_path,
+        super::processors::CURRENT_PROCESSOR_VERSION,
+        scanned_at,
+        insight.turn_count,
+        insight.steps_per_turn_avg,
+        insight.autonomy_score,
+        insight.tool_calls_total,
+        encode_breakdown(&insight.tool_breakdown)?,
+        insight.tool_error_rate,
+        insight.total_duration_ms,
+        insight.active_duration_ms,
+        insight.claude_working_time_ms,
+        insight.cache_hit_rate,
+        insight.tokens_per_turn_avg,
+        insight.cost_estimate_usd,
+        insight.tool_error_count,
+        insight.has_errors,
+        insight.max_consecutive_tool_calls,
+        insight.longest_autonomous_chain,
+        insight.avg_user_response_time_ms,
+        insight.avg_claude_response_time_ms,
+        RESERVED_SESSION_TYPE,
+        encode_breakdown(&insight.skill_breakdown)?,
+        encode_breakdown(&insight.plugin_breakdown)?,
+        encode_breakdown(&insight.mcp_server_breakdown)?,
+        encode_breakdown(&insight.mcp_tool_breakdown)?,
+        encode_breakdown(&insight.effort_breakdown)?,
+        insight.unattributed_calls,
+        encode_breakdown(&insight.agent_breakdown)?,
+    ])
     .map(|_| ())
     .map_err(|e| format!("upserting insight for {}: {e}", insight.session_id))
 }

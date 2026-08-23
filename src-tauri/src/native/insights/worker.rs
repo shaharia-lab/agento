@@ -280,6 +280,15 @@ struct Computed {
 /// The reader pool, in `scanner/apply.rs`'s shape and for its reasons: decoding
 /// a transcript is I/O plus JSON and parallelizes; the bound keeps the machine
 /// usable while the user is working.
+///
+/// It reuses `scan_readers()` rather than a bound of its own, which means a
+/// sweep overlapping a scan can put **twice** that many readers on the disk.
+/// Accepted rather than coordinated: the two only overlap on a boot that both
+/// finds a stale corpus and has outdated insights, the overlap is measured in
+/// seconds (11s for 1,145 sessions against ~2s for the scan on the reference
+/// machine), and a semaphore shared between two subsystems is real coupling for
+/// a transient. If it ever needs fixing, halve this pool rather than gating the
+/// scan — the scan is what the user is waiting for and this is not.
 fn read_in_parallel(
     items: &[Pending],
     idle_gap_ms: i64,
