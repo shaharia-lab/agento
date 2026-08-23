@@ -6,6 +6,8 @@ machine.
 
 One window, no browser tab, no server to start.
 
+![Agento Desktop's Insights view: cost, autonomy, cache-hit and tool-error cards over your Claude Code sessions, with tool calls attributed to skills, MCP servers and sub-agents](docs/screenshots/light/insights.png)
+
 > This is the **`desktop`** branch, and the app is the whole of it (#388).
 > [`main`](https://github.com/shaharia-lab/agento/tree/main) carries Agento's Go
 > web server, which is a separate download and has its own releases on `v*`
@@ -111,6 +113,121 @@ Your data lives in `~/.agento` (`%USERPROFILE%\.agento` on Windows) as a single
 SQLite file. Nothing is uploaded anywhere.
 
 Read the [User Guide](docs/user-guide.md) next.
+
+---
+
+## What you get
+
+### Every token type, priced properly
+
+Input, output, cache reads and cache writes bill at very different rates, so
+Agento keeps them apart instead of multiplying one total by one price. The model
+with the most tokens is often not the model taking your money.
+
+![Token Usage: token composition, tokens over time, cache efficiency](docs/screenshots/light/token-usage.png)
+
+Cost is attributed to the model that spent it, including work done inside
+sub-agents, and to the project it was spent on.
+
+![Cost by model and by project](docs/screenshots/light/cost-by-model.png)
+
+### Find out whether you are getting more effective
+
+Insights goes past raw counts: turns per session, how far Claude got before it
+had to ask you something, cache hit rate and tool error rate, then every tool
+call attributed to the skill, plugin, MCP server or sub-agent responsible.
+
+![Tool calls attributed to skills, plugins, MCP servers and reasoning effort](docs/screenshots/light/insights-breakdowns.png)
+
+Durations mean active time, not wall clock. Idle gaps beyond a threshold you
+control are excluded everywhere a duration is shown.
+
+### Understand your working patterns
+
+Sessions per day, model mix, busiest days, and a weekly heatmap that counts a
+session in every hour it was running rather than only the hour it finished.
+
+![Weekly rhythm heatmap and busiest sessions](docs/screenshots/light/activity-heatmap.png)
+
+### Browse and search every session you have ever run
+
+Filtered and paged in SQL, so it stays fast whether you have 50 sessions or
+5,000. Search titles and content, filter by project, model, date, cost or
+duration, and see permission mode, linked pull requests, tokens and cost on
+every row, with the inspector beside it.
+
+![The Sessions list with the inspector](docs/screenshots/light/sessions-list.png)
+
+### Replay any session step by step
+
+Open a session and read the whole run in order: every prompt, response, tool
+call and result, with sub-agent delegations and failing commands where they
+happened. When a long autonomous run goes wrong, this is where you find out
+where.
+
+![A session transcript with tool calls and a sub-agent delegation expanded](docs/screenshots/light/session-journey.png)
+
+Each session carries its own metrics: messages, active duration, sub-agent time,
+tokens by type and cost.
+
+![Session detail with the inspector's activity and token panels](docs/screenshots/light/session-detail.png)
+
+### Chat with your agents
+
+Every chat runs through the Claude Code CLI you already have, with the agent's
+system prompt, model and tool allowlist applied. Tool calls and Markdown answers
+render inline; the inspector shows what the turn cost.
+
+![A chat with the code-reviewer agent](docs/screenshots/light/chats.png)
+
+### Build agents without writing code
+
+Give an agent a name, a system prompt, a model, a thinking mode and an explicit
+list of tools it may use. Template variables like `{{current_date}}` are filled
+in at runtime.
+
+![The agents list and builder](docs/screenshots/light/agents.png)
+
+Tools are an allowlist: built-in tools, Agento's local tools, and each connected
+integration's tools, ticked one by one.
+
+![The agent builder's capabilities section](docs/screenshots/light/agent-builder.png)
+
+### Put your agents on a schedule
+
+Run any agent on a cron expression, a fixed interval, or once at a specific
+time. Every execution is recorded with its status, duration and full output.
+
+![Scheduled tasks with recent runs](docs/screenshots/light/tasks.png)
+
+### Connect the tools you already use
+
+Each integration runs as an in-process MCP server inside the app, so there is no
+extra daemon to operate. GitHub, Slack, Jira, Confluence, Telegram and Google
+(Calendar, Gmail, Drive) are built in; any other MCP server can be added through
+`~/.agento/mcps.yaml`.
+
+![Integrations: GitHub connected, with its services and tools](docs/screenshots/light/integrations.png)
+
+### Keep the pricing catalog honest
+
+Rates ship for Anthropic, Moonshot, Z.ai and Alibaba models and are
+effective-dated. A model with no published rate is reported as unknown instead
+of being quietly priced as something else.
+
+![The model pricing catalog](docs/screenshots/light/settings-pricing.png)
+
+### Your data stays yours
+
+Agento reads `~/.claude` and caches results in a local SQLite database. Nothing
+is uploaded, there is no account, and there is no server component. Projects you
+would rather leave out of the numbers can be hidden from every report, and the
+idle threshold behind the duration metrics is yours to set.
+
+![Data settings: idle threshold and hidden projects](docs/screenshots/light/settings-data.png)
+
+*Every screenshot above is taken from the app over a synthetic dataset; see
+[`docs/screenshots/README.md`](docs/screenshots/README.md).*
 
 ---
 
