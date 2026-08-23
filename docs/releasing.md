@@ -47,12 +47,28 @@ cannot download.
 
 ## Cutting a release
 
-1. **Bump the version** in `src-tauri/tauri.conf.json`. Commit it on
-   `desktop`.
+1. **Bump the version in all three files**, and commit them together on
+   `desktop`: `src-tauri/tauri.conf.json`, `package.json` and
+   `package-lock.json`.
 
-   ```json
-   { "version": "0.2.0" }
+   ```bash
+   npm version 0.2.0 --no-git-tag-version   # package.json + package-lock.json
+   # then, by hand:
+   # src-tauri/tauri.conf.json → { "version": "0.2.0" }
    ```
+
+   `npm version` is what keeps the lockfile in step; bumping `package.json`
+   alone leaves it behind.
+
+   **Only `tauri.conf.json` is enforced** — the guard job in step 2 compares it
+   against the tag, and the bundler bakes it into the installer. The other two
+   have nothing checking them, which is exactly why `package-lock.json` was
+   still on `0.1.1` for the whole of `0.1.2` (fixed in `1f5cc9a`). That drift is
+   not cosmetic in one specific way: npm silently repairs the lockfile's version
+   field on almost any command, so the first `npm run build` or `tauri dev`
+   after a checkout leaves the working tree dirty with a change nobody made.
+   It reads as local work, invites someone to discard it, and comes straight
+   back on the next npm command.
 
 2. **Tag that commit** and push the tag.
 

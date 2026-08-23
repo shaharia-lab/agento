@@ -57,6 +57,14 @@ server and is left alone until the two converge.
   The updater compares the version baked into the app against the manifest's
   (taken from the tag), so a mismatch makes every "updated" install re-offer
   itself forever. Bump the conf in the release commit, then tag it.
+- **The release commit bumps three files, not one**: `tauri.conf.json`,
+  `package.json` and `package-lock.json` (`npm version X.Y.Z
+  --no-git-tag-version` does the last two together). Only the conf is enforced,
+  by the guard job — which is why `package-lock.json` sat on `0.1.1` for the
+  whole of `0.1.2`. A stale lockfile version is not merely untidy: npm repairs
+  that field on almost any command, so every checkout goes dirty on the first
+  `npm run build` with a change nobody made, which reads as local work and
+  comes back as soon as it is discarded. See `docs/releasing.md` step 1.
 - Tagging builds a **draft** release with `latest.json` staged as an asset.
   Nothing has shipped at that point — draft assets are not publicly
   downloadable. **Publishing the draft is the release act**: the
