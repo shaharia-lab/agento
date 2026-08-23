@@ -28,9 +28,15 @@ export type UpdateState =
   | { kind: "installed" }
   | { kind: "error"; message: string };
 
-/** Where to send someone whose install cannot update itself. */
+/**
+ * Where to send someone whose install cannot update itself.
+ *
+ * `/releases/latest`, not a filtered search: releases are tagged `v*` since
+ * v1.0.0 and that tag is the newest in the repository, so the plain link is
+ * both correct and the one a user would guess.
+ */
 export const RELEASES_URL =
-  "https://github.com/shaharia-lab/agento/releases?q=desktop&expanded=true";
+  "https://github.com/shaharia-lab/agento/releases/latest";
 
 /**
  * Ask the update server whether a newer version exists.

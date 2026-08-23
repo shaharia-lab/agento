@@ -56,13 +56,18 @@ jobs:
           pkg="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
           lock="$(python3 -c 'import json; print(json.load(open("package-lock.json"))["version"])')"
           lock_pkg="$(python3 -c 'import json; print(json.load(open("package-lock.json"))["packages"][""]["version"])')"
+          # grep rather than a TOML parser: `tomllib` is Python 3.11 and this
+          # runner is 3.10. `[package]` opens the file, so the first `version =`
+          # is the crate's own and not a dependency's.
+          cargo_toml="$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)"
 
-          if [ "$conf" = "$pkg" ] && [ "$conf" = "$lock" ] && [ "$conf" = "$lock_pkg" ]; then
+          if [ "$conf" = "$pkg" ] && [ "$conf" = "$lock" ] && [ "$conf" = "$lock_pkg" ] \
+             && [ "$conf" = "$cargo_toml" ]; then
             echo "ok: ${conf}"
             exit 0
           fi
 
-          echo "::error::version strings disagree — tauri.conf.json=${conf} package.json=${pkg} package-lock.json=${lock} package-lock.json .packages['']=${lock_pkg}. Fix with: npm version ${conf} --no-git-tag-version (package.json + lockfile), and set src-tauri/tauri.conf.json by hand. See docs/releasing.md step 1."
+          echo "::error::version strings disagree — tauri.conf.json=${conf} package.json=${pkg} package-lock.json=${lock} package-lock.json .packages['']=${lock_pkg} src-tauri/Cargo.toml=${cargo_toml}. Fix with: npm version ${conf} --no-git-tag-version (package.json + lockfile), and set src-tauri/tauri.conf.json and src-tauri/Cargo.toml by hand (then \`cargo update -p agento --offline\` for Cargo.lock). See docs/releasing.md step 1."
           exit 1
 
       - name: Install Linux build dependencies

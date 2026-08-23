@@ -2,11 +2,25 @@
 
 How a release is cut, and the two things that break it.
 
-Releases are tagged `desktop-v*` from `main`. The `desktop-` prefix is
-historical and is kept deliberately: every installed app polls the fixed
-`desktop-latest` tag, and the guard job, the manifest script and the `promote`
-job all key off the prefix. Renaming it is a release-infrastructure change to
-make on its own, never as a side effect of something else.
+Releases are tagged `v*` from `main`.
+
+**Two tag names matter here and they are not the same thing.** Release tags are
+`v1.0.0`, `v1.1.0` and so on — the guard job, the manifest script and the
+`promote` job all key off that `v` prefix. The *update manifest* is published to
+a separate, fixed tag called **`desktop-latest`**, and that name is frozen: its
+download URL is compiled into every installer that has ever shipped
+(`plugins.updater.endpoints` in `src-tauri/tauri.conf.json`). Rename it and every
+existing install polls a URL that 404s — they are never offered another update
+and never report a problem, because "no update available" and "cannot reach the
+manifest" look identical from the outside. Change the release tags freely; leave
+`desktop-latest` alone.
+
+Two legacy tag namespaces are still in the repository and neither is ever built
+again: `desktop-v0.1.x` is what this app's releases were called before `v1.0.0`,
+and `v0.1.0` … `v0.11.2` are the retired Agento server's. The second is why
+`promote` checks that a release actually carries a `latest.json` before doing
+anything — re-publishing one of those old server releases would otherwise reach
+it with nothing to promote.
 
 - [The flow](#the-flow)
 - [Cutting a release](#cutting-a-release)
@@ -22,7 +36,7 @@ make on its own, never as a side effect of something else.
 ## The flow
 
 ```
-  bump tauri.conf.json  ──>  tag desktop-vX.Y.Z  ──>  guard + build matrix
+  bump tauri.conf.json  ──>  tag vX.Y.Z  ──────────>  guard + build matrix
                                                             │
                                                             v
                                               DRAFT release, installers
@@ -49,34 +63,38 @@ cannot download.
 
 ## Cutting a release
 
-1. **Bump the version in all three files**, and commit them together on
-   `desktop`: `src-tauri/tauri.conf.json`, `package.json` and
-   `package-lock.json`.
+1. **Bump the version in all five places**, and commit them together on `main`:
+   `src-tauri/tauri.conf.json`, `package.json`, `package-lock.json` (which
+   carries it twice), `src-tauri/Cargo.toml` and `src-tauri/Cargo.lock`.
 
    ```bash
-   npm version 0.2.0 --no-git-tag-version   # package.json + package-lock.json
+   npm version 1.1.0 --no-git-tag-version   # package.json + package-lock.json
    # then, by hand:
-   # src-tauri/tauri.conf.json → { "version": "0.2.0" }
+   # src-tauri/tauri.conf.json → { "version": "1.1.0" }
+   # src-tauri/Cargo.toml      → version = "1.1.0"
+   cd src-tauri && cargo update -p agento --offline   # Cargo.lock
    ```
 
    `npm version` is what keeps the lockfile in step; bumping `package.json`
-   alone leaves it behind.
+   alone leaves it behind. `cargo update -p agento --offline` does the same job
+   for `Cargo.lock` without touching any dependency.
 
-   **Only `tauri.conf.json` is enforced** — the guard job in step 2 compares it
-   against the tag, and the bundler bakes it into the installer. The other two
-   have nothing checking them, which is exactly why `package-lock.json` was
-   still on `0.1.1` for the whole of `0.1.2` (fixed in `1f5cc9a`). That drift is
-   not cosmetic in one specific way: npm silently repairs the lockfile's version
-   field on almost any command, so the first `npm run build` or `tauri dev`
-   after a checkout leaves the working tree dirty with a change nobody made.
-   It reads as local work, invites someone to discard it, and comes straight
-   back on the next npm command.
+   **All five are enforced now**, by the guard job in step 2 and by CI on every
+   PR. `tauri.conf.json` is the one that decides what ships — the bundler bakes
+   it into the installer and the updater compares against it — and the rest are
+   checked because nothing else ever looks at them. That is not hypothetical:
+   `package-lock.json` sat on `0.1.1` for the whole of `0.1.2` (fixed in
+   `1f5cc9a`), and `src-tauri/Cargo.toml` sat on `0.1.2` right up to `1.0.0`.
+   The lockfile drift is the one with teeth — npm silently repairs that field on
+   almost any command, so the first `npm run build` after a checkout leaves the
+   tree dirty with a change nobody made, which reads as local work, invites
+   someone to discard it, and comes straight back.
 
 2. **Tag that commit** and push the tag.
 
    ```bash
-   git tag desktop-v0.2.0
-   git push origin desktop-v0.2.0
+   git tag v1.1.0
+   git push origin v1.1.0
    ```
 
 3. **Wait for the build.** Five runners, one per target: Linux x86_64, Linux
@@ -95,13 +113,14 @@ cannot download.
 
 ## The two guards
 
-**The tag must equal `desktop-v` plus the version in `tauri.conf.json`.** A guard
-job fails the build otherwise, before anything is built.
+**The tag must equal `v` plus the version in `tauri.conf.json`** (and in the four
+other files listed in step 1). A guard job fails the build otherwise, before
+anything is built.
 
 This is not tidiness. The installed app compares the version baked into it at
 build time against the manifest's version, which comes from the tag. If the tag
-says `0.2.0` and the conf still says `0.1.0`, every "updated" install keeps
-reporting `0.1.0` and is offered the same update forever.
+says `1.1.0` and the conf still says `1.0.0`, every "updated" install keeps
+reporting `1.0.0` and is offered the same update forever.
 
 **Every platform must produce a signature.** The manifest script aborts the
 release if a payload has no `.sig`, or if a platform produced nothing at all. A
@@ -116,8 +135,8 @@ running it, and their app would keep reporting "up to date" indefinitely.
 is **never promoted**:
 
 ```bash
-git tag desktop-v0.2.0-rc.1
-git push origin desktop-v0.2.0-rc.1
+git tag v1.1.0-rc.1
+git push origin v1.1.0-rc.1
 ```
 
 Share the release page with testers. No installed app is offered it. The promote
@@ -172,6 +191,10 @@ The manifest is served from a fixed tag, `desktop-latest`, so the updater has a
 stable URL that does not move with each release. That tag is itself marked
 prerelease so it never displaces the real latest release on the repository page.
 
+Its name outlived the `desktop-v*` release tags on purpose. The URL is baked
+into every shipped installer, so the tag has to keep answering for as long as
+any of those installs exist — see the note at the top of this file.
+
 ---
 
 ## Signing keys
@@ -203,8 +226,8 @@ therefore needs a Gatekeeper or SmartScreen bypass, which the release notes and
 `tauri.conf.json`, commit, and re-tag.
 
 ```bash
-git tag -d desktop-v0.2.0
-git push origin :refs/tags/desktop-v0.2.0
+git tag -d v1.1.0
+git push origin :refs/tags/v1.1.0
 ```
 
 **One runner failed.** `fail-fast` is off, so the others still finish, but the

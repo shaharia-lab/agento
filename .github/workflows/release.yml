@@ -6,11 +6,26 @@ name: Release
 # Tauri cannot cross-compile its bundles: a .dmg needs macOS, an .exe needs
 # Windows, a .deb needs Linux. So the matrix is one runner per target OS.
 #
-# Tag with `desktop-v0.1.0` on `main` to build. The `desktop-` prefix is
-# retained deliberately: every installed app polls the fixed `desktop-latest`
-# tag, and the guard job, the manifest script and `promote` all key off the
-# prefix. Renaming it is a release-infrastructure change to make on its own,
-# never as a side effect of something else.
+# Tag with `v1.0.0` on `main` to build.
+#
+# The `desktop-v*` prefix this used to require is gone: Agento is the desktop
+# app and there is no second thing to disambiguate it from. The Go server that
+# owned the plain `v*` namespace was sunset at `v0.11.2`, so `v1.0.0` and
+# everything after it is unambiguously this app — and being greater than every
+# legacy tag, it also takes over the repo's "Latest release" link.
+#
+# `desktop-latest` is a DIFFERENT thing and does NOT move. It is the fixed tag
+# the update manifest is published to, and its URL is baked into every
+# installer ever shipped (`plugins.updater.endpoints` in tauri.conf.json).
+# Renaming it would silently strand every existing install: they would go on
+# polling a URL that 404s and simply never be offered another update. The
+# release tags are free to change; this one is not.
+#
+# One consequence of the shorter prefix, since `promote` keys off it: the 15
+# legacy Go releases (`v0.1.0` … `v0.11.2`) now match it too. Re-publishing one
+# of those would run `promote` against a release that has no manifest, which is
+# why the download step names that case explicitly rather than failing on a
+# bare 404.
 #
 # The flow has a deliberate human gate in the middle:
 #
@@ -27,12 +42,12 @@ name: Release
 # draft asset URLs that 404 until someone remembers to publish the draft —
 # every installed app would see "update available" and fail the download.
 #
-# A prerelease tag (`desktop-v0.1.0-rc.1`) builds and drafts identically and
-# is auto-marked prerelease, but is never promoted: release candidates are
+# A prerelease tag (`v1.0.0-rc.1`) builds and drafts identically and is
+# auto-marked prerelease, but is never promoted: release candidates are
 # shareable from the versioned release page without being pushed to updaters.
 on:
   push:
-    tags: ["desktop-v*"]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -45,7 +60,7 @@ on:
 # The event name is part of the group so publishing a draft (a `release`
 # event carrying the same tag ref) can never cancel a build run in flight.
 concurrency:
-  group: desktop-release-${{ github.event_name }}-${{ github.ref }}
+  group: release-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -70,24 +85,41 @@ jobs:
         # manifest, so a mismatch there makes every "updated" install re-offer
         # itself forever. That is why it was checked first and alone.
         #
-        # The other two are checked because nothing else ever looks at them.
+        # The others are checked because nothing else ever looks at them.
         # `package-lock.json` sat on 0.1.1 for the whole of 0.1.2 for exactly
         # that reason, and a stale lockfile version is not merely untidy: npm
         # repairs that field on almost any command, so every fresh checkout goes
         # dirty on the first `npm run build` with a change nobody made — which
         # reads as local work, invites a discard, and comes back immediately.
+        # `src-tauri/Cargo.toml` was the next one nobody was looking at: it sat
+        # on 0.1.2 while the release became 1.0.0, and cargo never repairs it,
+        # so the drift is silent rather than merely annoying.
+        env:
+          # `ref_type`, not the name's prefix. A `workflow_dispatch` run carries
+          # the branch in GITHUB_REF_NAME, and now that the prefix is one letter
+          # a branch called `validate-something` would be read as the tag
+          # `alidate-something`. Asking what the ref *is* cannot be fooled that
+          # way; the `v*` case below is then belt-and-braces.
+          REF_TYPE: ${{ github.ref_type }}
         run: |
+          if [ "$REF_TYPE" != "tag" ]; then
+            echo "not a tag build; nothing to check"
+            exit 0
+          fi
+
           tag="${GITHUB_REF_NAME}"
           case "$tag" in
-            desktop-v*) ;;
-            *) echo "not a desktop-v* tag build; nothing to check"; exit 0 ;;
+            v*) ;;
+            *) echo "not a v* tag build; nothing to check"; exit 0 ;;
           esac
-          tag_version="${tag#desktop-v}"
+          tag_version="${tag#v}"
 
           conf_version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
           pkg_version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
           lock_version="$(python3 -c 'import json; print(json.load(open("package-lock.json"))["version"])')"
           lock_pkg_version="$(python3 -c 'import json; print(json.load(open("package-lock.json"))["packages"][""]["version"])')"
+          # See ci.yml for why this is grep and not a TOML parser.
+          cargo_toml_version="$(grep -m1 '^version = ' src-tauri/Cargo.toml | cut -d'"' -f2)"
 
           fail=0
           check() {
@@ -104,12 +136,13 @@ jobs:
           check "package.json"                       "$pkg_version"
           check "package-lock.json .version"         "$lock_version"
           check "package-lock.json .packages[''] "   "$lock_pkg_version"
+          check "src-tauri/Cargo.toml"               "$cargo_toml_version"
 
           if [ "$fail" = 1 ]; then
-            echo "::error::Fix with: npm version ${tag_version} --no-git-tag-version   (package.json + lockfile), and set src-tauri/tauri.conf.json by hand. Then re-tag. See docs/releasing.md step 1."
+            echo "::error::Fix with: npm version ${tag_version} --no-git-tag-version (package.json + lockfile), set src-tauri/tauri.conf.json and src-tauri/Cargo.toml by hand, then \`cargo update -p agento --offline\` for Cargo.lock. Then re-tag. See docs/releasing.md step 1."
             exit 1
           fi
-          echo "ok: ${tag_version} in all four places"
+          echo "ok: ${tag_version} in all five places"
 
   build:
     name: ${{ matrix.label }}
@@ -198,9 +231,15 @@ jobs:
       - name: Compute the build stamp
         id: stamp
         shell: bash
+        env:
+          # Same reasoning as the guard job: ask what the ref is, rather than
+          # what its name starts with. Getting this wrong here is quieter —
+          # a dispatch build from a `v…` branch would stamp itself as a
+          # release version instead of `-dev`, and nothing would say so.
+          REF_TYPE: ${{ github.ref_type }}
         run: |
-          case "${GITHUB_REF_NAME}" in
-            desktop-v*) version="${GITHUB_REF_NAME#desktop-v}" ;;
+          case "${REF_TYPE}:${GITHUB_REF_NAME}" in
+            tag:v*) version="${GITHUB_REF_NAME#v}" ;;
             *) version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')-dev" ;;
           esac
           echo "version=${version}" >>"$GITHUB_OUTPUT"
@@ -264,7 +303,7 @@ jobs:
   release:
     name: Draft release
     needs: build
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
@@ -277,10 +316,10 @@ jobs:
       - name: Release metadata
         id: meta
         run: |
-          version="${GITHUB_REF_NAME#desktop-v}"
-          # A prerelease suffix (desktop-v0.1.0-rc.1) marks the draft as a
-          # prerelease, which is one of the two things keeping `promote` from
-          # ever pushing it to updaters.
+          version="${GITHUB_REF_NAME#v}"
+          # A prerelease suffix (v1.0.0-rc.1) marks the draft as a prerelease,
+          # which is one of the two things keeping `promote` from ever pushing
+          # it to updaters.
           case "$version" in
             *-*) echo "prerelease=true" >>"$GITHUB_OUTPUT" ;;
             *)   echo "prerelease=false" >>"$GITHUB_OUTPUT" ;;
@@ -338,15 +377,15 @@ jobs:
   # manifest was built and signed beside the artifacts it points at, and this
   # job only copies it to the fixed URL the updater polls. The `if` filters
   # out everything else that flows through `release: published` —
-  # desktop-latest's own publication, and any release marked prerelease; the
-  # version check below catches an rc tag even if someone unticked the
-  # prerelease box before publishing.
+  # desktop-latest's own publication (which does not start with `v`), and any
+  # release marked prerelease; the version check below catches an rc tag even
+  # if someone unticked the prerelease box before publishing.
   promote:
     name: Promote update manifest
     if: >-
       github.event_name == 'release' &&
       !github.event.release.prerelease &&
-      startsWith(github.event.release.tag_name, 'desktop-v')
+      startsWith(github.event.release.tag_name, 'v')
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -354,13 +393,25 @@ jobs:
     steps:
       - name: Download the staged manifest
         run: |
-          version="${TAG#desktop-v}"
+          version="${TAG#v}"
           case "$version" in
             *-*)
               echo "::error::${TAG} is a prerelease tag published without the prerelease flag; refusing to promote it to desktop-latest."
               exit 1
               ;;
           esac
+
+          # The `v*` prefix also matches the 15 releases the sunset Go server
+          # left behind (v0.1.0 … v0.11.2). Re-publishing one of those reaches
+          # this job, and it has no manifest to promote — say so, rather than
+          # letting `gh release download` fail on a bare "asset not found" that
+          # reads like the build broke.
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+                 --json assets --jq '.assets[].name' | grep -qx latest.json; then
+            echo "::error::${TAG} carries no latest.json, so there is nothing to promote. Every release built by this workflow stages one; a tag without it is either a legacy Go-server release (v0.1.0 through v0.11.2) or a release whose assets were edited by hand."
+            exit 1
+          fi
+
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
             --pattern latest.json --output latest.json
           python3 - "$version" <<'EOF'
@@ -375,12 +426,17 @@ jobs:
       # A fixed tag so the updater has a stable manifest URL. Marked as a
       # prerelease so it never displaces the real "Latest release" on the repo
       # page — asset download URLs work for prereleases just the same.
+      #
+      # The name is `desktop-latest` and must stay that way even though the
+      # release tags dropped the prefix: this exact URL is compiled into every
+      # installer that has ever shipped, and an app polling a 404 is never
+      # offered an update and never reports a problem.
       - name: Publish to desktop-latest
         run: |
           if ! gh release view desktop-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create desktop-latest --repo "$GITHUB_REPOSITORY" \
               --prerelease --title "Desktop update manifest" \
               --notes "Machine-readable manifest the Agento desktop updater polls.
-          Not a download — see the \`desktop-v*\` releases for installers."
+          Not a download — see the \`v*\` releases for installers."
           fi
           gh release upload desktop-latest latest.json --clobber --repo "$GITHUB_REPOSITORY"

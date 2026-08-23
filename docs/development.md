@@ -94,9 +94,13 @@ from the identifier. On Linux you can watch both claims coexist:
 
 ```
 $ busctl --user list | grep shaharialab
-com.shaharialab.agento.SingleInstance       …  agento-desktop
+com.shaharialab.agento.SingleInstance       …  agento
 com.shaharialab.agento.dev.SingleInstance   …  agento
 ```
+
+The two process names are identical — both binaries are `agento` since `v1.0.0`
+— so it is the bus name that tells them apart, which is the whole point of the
+override.
 
 **It does not help you test anything origin-dependent.** A dev build loads the
 configured `devUrl`, which Tauri's ACL treats as a *local* origin, so the whole
@@ -360,9 +364,8 @@ Chrome but not in the app".
 ## Branches and pull requests
 
 - Work happens on a feature branch. PRs target **`main`**.
-- Releases are tagged `desktop-v*` from `main`. The prefix is retained because
-  every installed app polls the fixed `desktop-latest` tag — see
-  [Releasing](releasing.md).
+- Releases are tagged `v*` from `main`. The update manifest keeps its own fixed
+  tag, `desktop-latest`, which does **not** move — see [Releasing](releasing.md).
 
 Before opening a PR, from the repository root:
 

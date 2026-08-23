@@ -39,9 +39,13 @@ Operating systems:
 ## Which file do I download
 
 Downloads are on the
-[releases page](https://github.com/shaharia-lab/agento/releases?q=desktop&expanded=true).
-Desktop releases are tagged `desktop-v<version>`. The Agento server has its own
-`v<version>` tags, so make sure you are looking at a `desktop-` one.
+[releases page](https://github.com/shaharia-lab/agento/releases/latest). Releases
+are tagged `v<version>`.
+
+Two older tag shapes are still visible in the repository's release list and
+neither is something to download today: `desktop-v0.1.x` was Agento Desktop
+before it took over the plain `v*` tags, and `v0.1.0` through `v0.11.2` were the
+Agento server, which is retired. Anything from `v1.0.0` onward is this app.
 
 | Platform | File | Auto-update |
 | --- | --- | --- |
@@ -115,8 +119,8 @@ during setup.
 Works on any distribution and updates itself.
 
 ```bash
-chmod +x Agento_0.1.0_amd64.AppImage
-./Agento_0.1.0_amd64.AppImage
+chmod +x Agento_1.0.0_amd64.AppImage
+./Agento_1.0.0_amd64.AppImage
 ```
 
 Keep the file anywhere you like, for example `~/Applications`. There is no
@@ -130,25 +134,33 @@ If your desktop does not show a launcher for it, install
 ### Debian and Ubuntu
 
 ```bash
-sudo apt install ./Agento_0.1.0_amd64.deb
+sudo apt install ./Agento_1.0.0_amd64.deb
 ```
 
 ### Fedora, RHEL, openSUSE
 
 ```bash
-sudo dnf install ./Agento-0.1.0-1.x86_64.rpm
+sudo dnf install ./Agento-1.0.0-1.x86_64.rpm
 ```
 
 Both packages declare `libwebkit2gtk-4.1` and `gtk3` as dependencies, so your
 package manager installs whatever is missing. If a dependency cannot be resolved,
 your distribution is likely older than WebKitGTK 4.1: use the AppImage instead.
 
-### The binary is called `agento-desktop`
+### The binary is called `agento`
 
-The package is named `agento`, but the executable it installs is
-`/usr/bin/agento-desktop`. That is deliberate. The Agento server CLI installs a
-binary called `agento`, and a package dropping a second `agento` onto your `PATH`
-would shadow it.
+The package and the executable it installs are both `agento`, at
+`/usr/bin/agento`.
+
+Before `v1.0.0` the executable was `/usr/bin/agento-desktop`: the Agento server
+CLI installed a binary called `agento`, and a package dropping a second one onto
+your `PATH` would have shadowed it. That CLI is retired, so the name came back.
+
+Upgrading a `.deb` or `.rpm` across that change needs nothing from you — the
+package name never changed, so it is an ordinary file replacement within the same
+package and your package manager removes `agento-desktop` as it adds `agento`.
+The application launcher is regenerated too. Only your own scripts or shortcuts
+naming `agento-desktop` need updating.
 
 ---
 

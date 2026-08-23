@@ -47,30 +47,42 @@ process, one SQLite file, and the Claude Code CLI spawned per agent run.
 ## Branch and release model
 
 - PRs target **`main`**.
-- Releases are tagged **`desktop-v*`** from `main`
-  (`.github/workflows/release.yml`). The `desktop-` prefix is historical and
-  deliberately retained: installed apps poll the fixed `desktop-latest` tag, and
-  the guard job, the manifest script and `promote` all key off the prefix.
-  Renaming it is its own change, never a side effect of another.
-- The tag must equal `desktop-v` + the `version` in
-  `src-tauri/tauri.conf.json`; a guard job fails the build otherwise.
-  The updater compares the version baked into the app against the manifest's
-  (taken from the tag), so a mismatch makes every "updated" install re-offer
-  itself forever. Bump the conf in the release commit, then tag it.
-- **The release commit bumps three files, not one**: `tauri.conf.json`,
-  `package.json` and `package-lock.json` (`npm version X.Y.Z
-  --no-git-tag-version` does the last two together). Only the conf is enforced,
-  by the guard job — which is why `package-lock.json` sat on `0.1.1` for the
-  whole of `0.1.2`. A stale lockfile version is not merely untidy: npm repairs
-  that field on almost any command, so every checkout goes dirty on the first
-  `npm run build` with a change nobody made, which reads as local work and
-  comes back as soon as it is discarded. See `docs/releasing.md` step 1.
+- Releases are tagged **`v*`** from `main` (`.github/workflows/release.yml`).
+  The `desktop-v*` prefix was dropped at `v1.0.0`: Agento is the desktop app,
+  and the Go server that owned the plain `v*` namespace was sunset at `v0.11.2`,
+  so `v1.0.0` and everything after it is unambiguously this app.
+- **`desktop-latest` is a different tag and it did *not* move.** It is the fixed
+  tag the update manifest is published to, and its URL is compiled into every
+  installer ever shipped (`plugins.updater.endpoints`). Renaming it strands every
+  existing install silently — they poll a URL that 404s, are never offered an
+  update, and report nothing, because "up to date" and "cannot reach the
+  manifest" are indistinguishable from outside. Release tags are free; this one
+  is not.
+- One consequence of the shorter prefix: the 15 legacy `v0.*` server releases
+  now match `promote`'s filter too, so it checks that a release actually carries
+  a `latest.json` before promoting and says so by name when one does not.
+- The tag must equal `v` + the `version` in `src-tauri/tauri.conf.json`; a guard
+  job fails the build otherwise. The updater compares the version baked into the
+  app against the manifest's (taken from the tag), so a mismatch makes every
+  "updated" install re-offer itself forever. Bump the conf in the release commit,
+  then tag it.
+- **The release commit bumps five places, not one**: `tauri.conf.json`,
+  `package.json`, `package-lock.json` (which carries it twice, and `npm version
+  X.Y.Z --no-git-tag-version` does both), `src-tauri/Cargo.toml` and
+  `src-tauri/Cargo.lock` (`cargo update -p agento --offline`). **All five are
+  enforced** — by the release guard and by CI on every PR. They were not always:
+  only the conf was checked, which is why `package-lock.json` sat on `0.1.1` for
+  the whole of `0.1.2` and `Cargo.toml` sat on `0.1.2` until `1.0.0`. The
+  lockfile is the one with teeth — npm repairs that field on almost any command,
+  so every checkout goes dirty on the first `npm run build` with a change nobody
+  made, which reads as local work and comes back as soon as it is discarded. See
+  `docs/releasing.md` step 1.
 - Tagging builds a **draft** release with `latest.json` staged as an asset.
   Nothing has shipped at that point — draft assets are not publicly
   downloadable. **Publishing the draft is the release act**: the
   `release: published` event runs the `promote` job, which copies the staged
   manifest to the fixed `desktop-latest` tag every installed app polls.
-- A prerelease tag (`desktop-v0.1.0-rc.1`) builds and drafts identically, is
+- A prerelease tag (`v1.0.0-rc.1`) builds and drafts identically, is
   auto-marked prerelease, and is **never promoted** — a shareable release
   candidate no installed app is offered. For private smoke-test builds, run
   the workflow manually with `dry_run` instead: installers land as CI
@@ -777,9 +789,13 @@ The hook was there and nothing set the variables. Two halves fix it, and
 **neither works alone**:
 
 - `release.yml`'s **"Compute the build stamp"** step derives the version from
-  the tag (`desktop-v0.1.2` → `0.1.2`), or from `tauri.conf.json` with a `-dev`
-  suffix for a `workflow_dispatch` dry run, which has no tag to read. Together
-  with `github.sha` and an RFC 3339 date it goes into "Build installers"' `env:`.
+  the tag (`v1.0.0` → `1.0.0`), or from `tauri.conf.json` with a `-dev` suffix
+  for a `workflow_dispatch` dry run, which has no tag to read. Together with
+  `github.sha` and an RFC 3339 date it goes into "Build installers"' `env:`.
+  It branches on `github.ref_type == 'tag'`, **not** on the ref name's prefix:
+  since `v1.0.0` that prefix is one letter, and a dispatch run from a branch
+  called `validate-…` would otherwise be read as a tag and stamped as a release
+  rather than `-dev`. The guard job branches the same way for the same reason.
 - `src-tauri/build.rs`'s **`stamp_build_info`** re-emits each set variable as
   `cargo:rustc-env` and declares `cargo:rerun-if-env-changed` for it. The
   release job restores a `Swatinem/rust-cache` target dir from an earlier tag's
@@ -3104,10 +3120,14 @@ the updater swapped in.
 - Public key: `plugins.updater.pubkey` in `tauri.conf.json`.
 - Manifest: `.github/scripts/build-update-manifest.py` assembles `latest.json`
   and publishes it to the fixed `desktop-latest` tag, so the updater has a
-  stable URL. `releases/latest` could not be used — it would point at the Go
-  server's `v*` releases. The script *fails the release* if any platform is
-  missing a signature, because a manifest that silently omits a platform
-  strands exactly the users already running it, and they would never be told.
+  stable URL. `releases/latest` was originally unusable because it pointed at
+  the Go server's `v*` releases; that is no longer true — `v1.0.0` outranks
+  every `v0.*` — but the tag **still must not be renamed**, because its URL is
+  compiled into every installer already in the field. A stable manifest URL was
+  always the point; which release is "latest" never was. The script *fails the
+  release* if any platform is missing a signature, because a manifest that
+  silently omits a platform strands exactly the users already running it, and
+  they would never be told.
 
 `.deb`/`.rpm` installs are **notify-only**: dpkg and rpm own their files, so
 `install_kind()` in `lib.rs` detects them at runtime (the AppImage runtime is
@@ -3128,31 +3148,40 @@ dependencies — apt/dnf resolve them, which is the correct native behaviour;
 statically bundling them is not a thing Debian packaging does. The `.AppImage`
 bundles them for distro-independent use.
 
-### Binary naming, and renaming it back later
+### Binary naming
 
-The Debian/RPM package is named **`agento`** (from `productName`), but the GUI
-binary inside it is **`agento-desktop`** (`mainBinaryName`). That split exists
-only because the Go CLI currently installs an `agento` onto `PATH`; a package
-dropping `/usr/bin/agento` would shadow it depending on PATH order.
+The Debian/RPM package and the GUI binary inside it are both **`agento`** — the
+package name from `productName`, the binary from `mainBinaryName`.
 
-When the CLI is retired and the desktop app becomes *the* Agento, renaming is
-one line: set `mainBinaryName` back to `agento` (or delete the field). Nothing
-else has to change, and specifically:
+They were not always the same. Until `v1.0.0` the binary was `agento-desktop`,
+because the Go CLI installed an `agento` onto `PATH` and a package dropping
+`/usr/bin/agento` would have shadowed it depending on PATH order. That CLI is
+retired, so the split had nothing left to protect and the name came back. It was
+one line, and this is why nothing else had to move with it:
 
-- **dpkg/rpm handle it themselves.** The package name is unchanged, so an
+- **dpkg/rpm handle it themselves.** The package name never changed, so the
   upgrade is an ordinary file change within the same package — the old
   `/usr/bin/agento-desktop` is removed and `/usr/bin/agento` added. No
   `Conflicts:`/`Replaces:` needed, because no *package* ever owned that path
-  (the CLI is installed by hand into `~/.local/bin`).
+  (the CLI was installed by hand into `~/.local/bin`).
 - **The `.desktop` launcher is regenerated** by Tauri with the new `Exec=`.
 - **The updater is unaffected.** Every format replaces the whole artifact — the
   AppImage file, the `.app` bundle, the NSIS install — so a binary rename
   crosses an update boundary cleanly.
 - **macOS and Windows never cared**: the binary name is internal to the bundle
   and the installer.
+- **No bundle filename moved.** Artifact names come from `productName`, not
+  `mainBinaryName` — `desktop-v0.1.1` shipped `Agento_0.1.1_amd64.AppImage`
+  while the binary was `agento-desktop`. That is what keeps
+  `build-update-manifest.py`'s suffix table and the `Agento.app.tar.gz` rename
+  in `release.yml` valid across the change; verify it against a real release's
+  asset list before assuming otherwise.
 
-The one leftover is users who still have `~/.local/bin/agento` from the CLI;
-that is the CLI's uninstall to handle, not the package's.
+Two leftovers. Users who still have `~/.local/bin/agento` from the CLI — that is
+the CLI's uninstall to handle, not the package's. And `~/.agento-desktop-dev`,
+the **debug data directory** (`paths.rs`), which is unrelated to the binary name
+and deliberately unchanged: renaming it would orphan every developer's local
+database for no gain.
 
 ### The one external dependency
 
