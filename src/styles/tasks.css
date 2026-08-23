@@ -1,0 +1,126 @@
+/* ============================================================================
+   Tasks & Jobs — the few controls the shared sheet does not cover: a real
+   <select>, inline confirmations, run-history rows and paged-table
+   affordances. Everything else reuses the existing classes.
+   ========================================================================== */
+
+/* --- Field sizing for the schedule editor -------------------------------- */
+.inline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}
+
+.field--num {
+  width: 84px;
+  flex: none;
+}
+.field--time {
+  width: 118px;
+  flex: none;
+}
+.field--stamp {
+  width: 200px;
+  flex: none;
+}
+
+/* Native date/time pickers keep their own glyph; keep it on the text colour. */
+.field input[type="date"],
+.field input[type="time"],
+.field input[type="datetime-local"] {
+  color-scheme: inherit;
+}
+
+.inline__label {
+  font-size: var(--text-base);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+
+/* --- Inline confirmation (a modal dialog would freeze the webview) -------- */
+.confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.confirm__text {
+  font-size: var(--text-base);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+
+/* --- Loading / transient pane state -------------------------------------- */
+.statepane {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-9);
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+.formerror {
+  font-size: var(--text-sm);
+  color: var(--red);
+}
+
+/* --- Monospace output / error block -------------------------------------- */
+.logblock {
+  padding: var(--sp-4);
+  background: var(--bg-inset);
+  border-radius: var(--r-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow: auto;
+}
+.logblock--error {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+/* --- Run history rows (task inspector) ----------------------------------- */
+.runlist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.runrow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+  min-height: 18px;
+}
+
+.runrow__when {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runrow__val {
+  flex: none;
+  color: var(--fg-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Paged table footer --------------------------------------------------- */
+.loadmore {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  padding: var(--sp-6) 0 var(--sp-9);
+}

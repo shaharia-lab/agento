@@ -1,0 +1,877 @@
+/* ============================================================================
+   Views — list rows, transcript, composer, tables, forms, empty states.
+   ========================================================================== */
+
+/* --- List pane header ---------------------------------------------------- */
+.listhead {
+  flex: none;
+  padding: var(--sp-5) var(--sp-5) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  border-bottom: var(--hairline) solid var(--line);
+}
+
+.listhead__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.listgroup {
+  padding: var(--sp-6) var(--sp-5) var(--sp-2);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--fg-tertiary);
+  position: sticky;
+  top: 0;
+  background: var(--bg-list);
+  backdrop-filter: blur(12px);
+  z-index: 2;
+}
+
+/* --- Generic list row (2-line, mail-style) ------------------------------- */
+.listrow {
+  display: flex;
+  gap: var(--sp-4);
+  width: 100%;
+  padding: var(--sp-4) var(--sp-5);
+  text-align: left;
+  border-radius: var(--r-md);
+  position: relative;
+  transition: background var(--dur-fast);
+}
+.listrow:hover {
+  background: var(--bg-hover);
+}
+.listrow--active {
+  background: var(--bg-select);
+}
+.window--focused .listrow--active {
+  background: var(--bg-select-focus);
+  color: var(--fg-select-focus);
+}
+.window--focused .listrow--active .listrow__preview,
+.window--focused .listrow--active .listrow__meta,
+.window--focused .listrow--active .listrow__time {
+  color: rgba(255, 255, 255, 0.78);
+}
+.window--focused .listrow--active .badge {
+  background: rgba(255, 255, 255, 0.2);
+  color: #fff;
+}
+
+.listrow__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.listrow__top {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+}
+
+.listrow__title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1;
+}
+
+.listrow__time {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+.listrow__preview {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+  line-height: var(--leading-normal);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.listrow__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  margin-top: var(--sp-2);
+  /* Meta must stay on one line — a wrapping row changes height on selection. */
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  overflow: hidden;
+  min-width: 0;
+}
+.listrow__meta > * {
+  flex: none;
+}
+
+.listrow__unread {
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-full);
+  background: var(--accent);
+}
+
+.list__scroll {
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-3);
+}
+
+/* --- Avatar / glyph tile ------------------------------------------------- */
+.avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-md);
+  display: grid;
+  place-items: center;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+  flex: none;
+  background: var(--bg-inset);
+  color: var(--fg-secondary);
+}
+.avatar--lg {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-lg);
+  font-size: var(--text-md);
+}
+.avatar--accent {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.avatar--green {
+  background: var(--green-soft);
+  color: var(--green);
+}
+.avatar--amber {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.avatar--purple {
+  background: var(--purple-soft);
+  color: var(--purple);
+}
+.avatar--teal {
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+.avatar--red {
+  background: var(--red-soft);
+  color: var(--red);
+}
+
+/* --- Transcript ---------------------------------------------------------- */
+.transcript {
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-8) 0 var(--sp-9);
+}
+
+.transcript__inner {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 0 var(--sp-9);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-8);
+}
+
+.msg {
+  display: flex;
+  gap: var(--sp-5);
+}
+
+.msg__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.msg__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+}
+
+.msg__author {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.msg__time {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.msg__text {
+  font-size: var(--text-md);
+  line-height: var(--leading-relaxed);
+  color: var(--fg);
+  user-select: text;
+}
+/* Paragraph spacing and inline code live in markdown.css, with the rest of the
+   rendered tree — a message's body is markdown now (`.md`), and two files
+   styling one element resolves by import order rather than by intent. */
+
+/* The user's own turn reads as a quiet inset card, not a chat bubble. */
+.msg--user .msg__text {
+  background: var(--bg-inset);
+  padding: var(--sp-5) var(--sp-6);
+  border-radius: var(--r-lg);
+  border-left: 2px solid var(--line-strong);
+}
+
+/* Tool call — a disclosure strip, the way a dev tool shows work. */
+.toolcall {
+  border: var(--hairline) solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.toolcall__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  width: 100%;
+  height: 30px;
+  padding: 0 var(--sp-5);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+  text-align: left;
+  transition: background var(--dur-fast);
+}
+.toolcall__head:hover {
+  background: var(--bg-hover);
+}
+
+.toolcall__name {
+  font-family: var(--font-mono);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+}
+
+.toolcall__body {
+  padding: var(--sp-5);
+  border-top: var(--hairline) solid var(--line);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg-secondary);
+  white-space: pre-wrap;
+  user-select: text;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.chev {
+  transition: transform var(--dur-med) var(--ease-out);
+  color: var(--fg-tertiary);
+  flex: none;
+}
+.chev--open {
+  transform: rotate(90deg);
+}
+
+/* --- Composer ------------------------------------------------------------ */
+.composer {
+  flex: none;
+  padding: var(--sp-5) var(--sp-9) var(--sp-6);
+  background: var(--bg-content);
+  border-top: var(--hairline) solid var(--line);
+}
+
+.composer__inner {
+  max-width: 760px;
+  margin: 0 auto;
+  background: var(--bg-content);
+  border-radius: var(--r-xl);
+  box-shadow: 0 0 0 var(--hairline) var(--line-strong), var(--shadow-sm);
+  transition: box-shadow var(--dur-fast);
+}
+.composer__inner:focus-within {
+  box-shadow: 0 0 0 1px var(--accent), 0 0 0 4px var(--accent-soft);
+}
+
+.composer__input {
+  width: 100%;
+  padding: var(--sp-5) var(--sp-6) var(--sp-2);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  resize: none;
+  max-height: 200px;
+  min-height: 42px;
+}
+.composer__input::placeholder {
+  color: var(--fg-quaternary);
+}
+
+.composer__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-2) var(--sp-4) var(--sp-4);
+}
+
+.composer__hint {
+  font-size: var(--text-sm);
+  color: var(--fg-quaternary);
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.sendbtn {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-md);
+  display: grid;
+  place-items: center;
+  background: var(--accent);
+  color: var(--accent-fg);
+  flex: none;
+  transition: background var(--dur-fast), opacity var(--dur-fast);
+}
+.sendbtn:hover {
+  background: var(--accent-hover);
+}
+.sendbtn:disabled {
+  background: var(--bg-inset);
+  color: var(--fg-quaternary);
+  pointer-events: none;
+}
+
+/* --- Data table (Sessions / Jobs) ---------------------------------------- */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-base);
+}
+
+.table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--bg-content);
+  text-align: left;
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-tertiary);
+  padding: var(--sp-3) var(--sp-5);
+  height: 26px;
+  border-bottom: var(--hairline) solid var(--line);
+  white-space: nowrap;
+  user-select: none;
+}
+.table thead th:hover {
+  color: var(--fg-secondary);
+}
+
+/* Column separators, like a native list view. */
+.table thead th + th {
+  box-shadow: inset 1px 0 0 var(--line-soft);
+}
+
+.table tbody tr {
+  height: var(--row-h);
+  transition: background var(--dur-fast);
+}
+.table tbody tr:hover {
+  background: var(--bg-hover);
+}
+.table tbody tr.is-selected {
+  background: var(--bg-select);
+}
+.window--focused .table tbody tr.is-selected,
+.window--focused .table tbody tr.is-selected td {
+  background: var(--bg-select-focus);
+  color: var(--fg-select-focus);
+}
+/* Cells set their own colours for de-emphasis; selection has to win over them. */
+.window--focused .table tbody tr.is-selected td * {
+  color: inherit !important;
+}
+.window--focused .table tbody tr.is-selected .badge {
+  background: rgba(255, 255, 255, 0.22);
+}
+.window--focused .table tbody tr.is-selected .meter {
+  background: rgba(255, 255, 255, 0.28);
+}
+.window--focused .table tbody tr.is-selected .meter__fill {
+  background: #fff;
+}
+
+.table tbody td {
+  padding: var(--sp-2) var(--sp-5);
+  border-bottom: var(--hairline) solid var(--line-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Alternating rows — a genuinely native list-view detail. */
+.table--striped tbody tr:nth-child(even of :not(.rowgroup)) {
+  background: var(--bg-list);
+}
+.table--striped tbody tr:nth-child(even of :not(.rowgroup)):hover {
+  background: var(--bg-hover);
+}
+
+.table .rowgroup td {
+  background: var(--bg-inset);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--fg-tertiary);
+  height: 22px;
+  padding: 0 var(--sp-5);
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Inline usage meter inside a table cell. */
+.meter {
+  width: 60px;
+  height: 4px;
+  border-radius: var(--r-full);
+  background: var(--bg-active);
+  overflow: hidden;
+  display: inline-block;
+  vertical-align: middle;
+}
+.meter__fill {
+  height: 100%;
+  border-radius: var(--r-full);
+  background: var(--accent);
+}
+
+/* --- Analytics ----------------------------------------------------------- */
+.dash {
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-7);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: var(--sp-5);
+}
+
+.tile {
+  padding: var(--sp-6);
+  background: var(--bg-list);
+  border: var(--hairline) solid var(--line);
+  border-radius: var(--r-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.tile__label {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+.tile__value {
+  font-size: var(--text-2xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.tile__delta {
+  font-size: var(--text-sm);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.tile__delta--up {
+  color: var(--green);
+}
+.tile__delta--down {
+  color: var(--red);
+}
+
+.card {
+  background: var(--bg-list);
+  border: var(--hairline) solid var(--line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.card__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-5) var(--sp-6);
+  border-bottom: var(--hairline) solid var(--line);
+}
+
+.card__title {
+  font-size: var(--text-base);
+  font-weight: var(--weight-semibold);
+}
+
+.card__body {
+  padding: var(--sp-6);
+}
+
+/* Stacked composition bar. */
+.stackbar {
+  display: flex;
+  height: 8px;
+  border-radius: var(--r-full);
+  overflow: hidden;
+  background: var(--bg-active);
+}
+.stackbar__seg {
+  height: 100%;
+}
+
+.legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: var(--sp-5);
+  margin-top: var(--sp-6);
+}
+.legend__item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.legend__key {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+.legend__swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+}
+.legend__val {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+.legend__sub {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+/* --- Inspector ----------------------------------------------------------- */
+.inspector__head {
+  flex: none;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--sp-5);
+  border-bottom: var(--hairline) solid var(--line);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--fg-tertiary);
+}
+
+.inspector__scroll {
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-7);
+}
+
+.insp-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+
+.insp-group__title {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--fg-tertiary);
+  margin-bottom: var(--sp-2);
+}
+
+/* Label/value pairs — right-aligned labels, the inspector convention. */
+.insp-row {
+  display: grid;
+  grid-template-columns: 84px 1fr;
+  gap: var(--sp-5);
+  align-items: center;
+  min-height: 20px;
+}
+
+.insp-row__label {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  text-align: right;
+}
+
+.insp-row__value {
+  font-size: var(--text-base);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Forms (Settings / editors) ------------------------------------------ */
+.form {
+  max-width: 620px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-8);
+}
+
+.formsec {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-5);
+}
+
+.formsec__title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.005em;
+}
+
+/* Right-aligned labels in a two-column grid — a native preferences pane. */
+.formrow {
+  display: grid;
+  grid-template-columns: 168px 1fr;
+  gap: var(--sp-6);
+  align-items: start;
+}
+
+.formrow__label {
+  font-size: var(--text-base);
+  color: var(--fg-secondary);
+  text-align: right;
+  padding-top: 6px;
+}
+
+.formrow__control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.formrow__help {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  line-height: var(--leading-normal);
+}
+
+.divider {
+  height: var(--hairline);
+  background: var(--line);
+}
+
+/* Grouped inset list — the modern settings idiom. */
+.grouplist {
+  background: var(--bg-list);
+  border: var(--hairline) solid var(--line);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+.grouplist__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: var(--sp-5) var(--sp-6);
+  width: 100%;
+  text-align: left;
+}
+.grouplist__row + .grouplist__row {
+  border-top: var(--hairline) solid var(--line);
+}
+.grouplist__row--button:hover {
+  background: var(--bg-hover);
+}
+
+/* --- Empty state --------------------------------------------------------- */
+.empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  padding: var(--sp-10);
+  text-align: center;
+}
+
+.empty__icon {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-xl);
+  display: grid;
+  place-items: center;
+  background: var(--bg-inset);
+  color: var(--fg-quaternary);
+  margin-bottom: var(--sp-2);
+}
+
+.empty__title {
+  font-size: var(--text-md);
+  font-weight: var(--weight-semibold);
+  color: var(--fg-secondary);
+}
+
+.empty__text {
+  font-size: var(--text-base);
+  color: var(--fg-tertiary);
+  max-width: 320px;
+  line-height: var(--leading-normal);
+}
+
+/* --- Command palette ----------------------------------------------------- */
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  display: flex;
+  justify-content: center;
+  padding-top: 12vh;
+  background: rgba(0, 0, 0, 0.24);
+  animation: fade-in var(--dur-med) var(--ease-out);
+}
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.palette {
+  width: 560px;
+  max-height: 420px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-raised);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: palette-in var(--dur-med) var(--ease-out);
+}
+@keyframes palette-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+  }
+}
+
+.palette__input {
+  height: 46px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: 0 var(--sp-6);
+  border-bottom: var(--hairline) solid var(--line);
+}
+.palette__input input {
+  flex: 1;
+  font-size: var(--text-lg);
+}
+.palette__input input::placeholder {
+  color: var(--fg-quaternary);
+}
+
+.palette__list {
+  flex: 1;
+  min-height: 0;
+  padding: var(--sp-3);
+}
+
+.palette__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  width: 100%;
+  height: 32px;
+  padding: 0 var(--sp-5);
+  border-radius: var(--r-md);
+  font-size: var(--text-base);
+  text-align: left;
+  color: var(--fg);
+}
+.palette__item--active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+.palette__item--active .palette__group,
+.palette__item--active .kbd {
+  color: rgba(255, 255, 255, 0.8);
+  background: rgba(255, 255, 255, 0.16);
+  box-shadow: none;
+}
+.palette__group {
+  margin-left: auto;
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+
+/* --- Banner (in-app notice) ---------------------------------------------- */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--amber-soft);
+  border-bottom: var(--hairline) solid var(--line);
+  font-size: var(--text-base);
+  color: var(--fg);
+  flex: none;
+}

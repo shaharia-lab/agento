@@ -3,8 +3,15 @@ repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # The email skeleton is a frozen artifact, asserted byte for byte against
+      # the golden in parity/. Its trailing whitespace is load-bearing — the
+      # spaces either side of six elided HTML comments — so stripping it
+      # silently changes the mail the app sends. Byte-exact is the point of the
+      # file, and nothing can regenerate it.
       - id: trailing-whitespace
+        exclude: ^src-tauri/src/native/notifications/email\.html$
       - id: end-of-file-fixer
+        exclude: ^src-tauri/src/native/notifications/email\.html$
       - id: check-yaml
       - id: check-json
       - id: check-merge-conflict
@@ -15,43 +22,8 @@ repos:
         args: [--branch, main]
         stages: [pre-push]
 
-  # ── Go — golangci-lint ───────────────────────────────────────────────────────
-  - repo: https://github.com/dnephin/pre-commit-golang
-    rev: v0.5.1
-    hooks:
-      - id: golangci-lint
-        args: [--config=.golangci.yml]
-
-  # ── Frontend — ESLint ────────────────────────────────────────────────────────
-  - repo: local
-    hooks:
-      - id: frontend-eslint
-        name: Frontend ESLint
-        language: node
-        entry: sh -c 'cd frontend && npm run lint'
-        files: ^frontend/src/.*\.(ts|tsx)$
-        pass_filenames: false
-
-      # ── Frontend — Prettier ──────────────────────────────────────────────────
-      - id: frontend-prettier
-        name: Frontend Prettier
-        language: node
-        entry: sh -c 'cd frontend && npm run format:check'
-        files: ^frontend/src/.*\.(ts|tsx|css)$
-        pass_filenames: false
-
-      # ── Frontend — TypeScript type check ────────────────────────────────────
-      - id: frontend-typecheck
-        name: Frontend TypeScript type check
-        language: node
-        entry: sh -c 'cd frontend && npm run typecheck'
-        files: ^frontend/src/.*\.(ts|tsx)$
-        pass_filenames: false
-
-      # ── Frontend — Production build ──────────────────────────────────────────
-      - id: frontend-build
-        name: Frontend build
-        language: node
-        entry: sh -c 'cd frontend && npm run build'
-        files: ^frontend/src/.*\.(ts|tsx|css)$
-        pass_filenames: false
+# The real checks live in `.github/workflows/ci.yml`: `cargo fmt --check`,
+# `cargo clippy -D warnings`, `cargo test`, and `npm run build` (which
+# typechecks). They are deliberately not mirrored here — a `cargo clippy
+# --all-targets` on every commit is a minute-plus, and CI is where the gate
+# belongs.

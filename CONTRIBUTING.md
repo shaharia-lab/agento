@@ -26,59 +26,66 @@ Opening an issue first gives the community the opportunity to discuss the proble
 
 Before making code changes, read the developer documentation in the [`docs/`](docs/) directory:
 
-- [Getting Started](docs/getting-started.md)
-- [Development](docs/development.md) — layout, tests, and the conventions that bite (migrations, cache version constants, metrics defined in two languages)
-- [Agents](docs/agents.md)
-- [Claude Sessions](docs/claude-sessions.md)
-- [Integrations](docs/integrations.md)
-- [Security](docs/security.md)
+- [Development](docs/development.md) — setup, running locally, tests, conventions, debugging
+- [Architecture](docs/architecture.md) — stack, process model, the native backend, the Claude SDK
+- [Releasing](docs/releasing.md) — cutting a release, the guards, the update manifest
+
+[`CLAUDE.md`](CLAUDE.md) is the full working notes behind those guides: every
+decision, with the reasoning and the failures behind it.
 
 ### Prerequisites
 
-- Go 1.25+
-- Node.js and npm
+- Node.js 22+ and npm
+- Rust (stable)
+- The [Claude Code CLI](https://claude.ai/code), installed and signed in
 - [pre-commit](https://pre-commit.com/)
+- On Linux: `libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
 
 ### Install Pre-commit Hooks
 
-We strongly encourage you to install pre-commit hooks during local development. They automatically catch many issues before you commit:
+We strongly encourage you to install pre-commit hooks during local development:
 
 ```bash
 pre-commit install
 ```
 
-The hooks enforce:
+The hooks enforce trailing-whitespace and end-of-file fixes, YAML/JSON
+validation, and no direct commits to `main`. The Rust and TypeScript gates run
+in CI rather than here — `cargo clippy --all-targets` is a minute-plus and does
+not belong on every commit.
 
-- Trailing whitespace and end-of-file fixes
-- YAML/JSON validation
-- No direct commits to `main`
-- Go linting via `golangci-lint` (errcheck, govet, staticcheck, gosec, revive, and more)
-- Frontend ESLint, Prettier formatting, and TypeScript type checking
+One exclusion is load-bearing:
+`src-tauri/src/native/notifications/email.html` is exempt from the whitespace
+hooks. It is a frozen artifact, asserted byte for byte against
+`parity/notification_template_golden.json`, and its trailing whitespace is the
+spaces either side of six elided HTML comments. Nothing can regenerate it.
 
 ### Running the Project
 
-Two terminals are needed for development:
+From the repository root:
 
 ```bash
-# Terminal 1 — Go API server on :8990
-make dev-backend
-
-# Terminal 2 — Vite dev server on :5173 (proxies API to :8990)
-make dev-frontend
+npm install
+npm run app          # the desktop window, with hot reload
 ```
+
+`npm run app` runs against `~/.agento-desktop-dev`, **not** your real
+`~/.agento`. Use `npm run app:alongside` to run it beside an installed Agento.
 
 ### Running Tests
 
 ```bash
-make test          # Run all Go tests
-make lint          # Run Go linters
-cd frontend && npm run test       # Vitest
-cd frontend && npm run lint       # Frontend linting
-cd frontend && npm run typecheck  # TypeScript checks
+cd src-tauri
+cargo test                              # unit and integration tests
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+
+cd .. && npm run build                  # tsc --noEmit plus the Vite build
 ```
 
-End-to-end tests (`make e2e-setup` once, then `make e2e`) and the scale harness
-(`make bench-scale`) are local-only — see [Development](docs/development.md#run-tests).
+CI runs exactly those four. Several suites are `#[ignore]`d because they need a
+real Claude corpus or the Claude Code CLI — see
+[Development](docs/development.md#tests-that-need-something).
 
 ## Pull Request Guidelines
 
@@ -87,9 +94,9 @@ End-to-end tests (`make e2e-setup` once, then `make e2e`) and the scale harness
 - [ ] Your PR is linked to a GitHub issue.
 - [ ] You have read the relevant developer documentation in `docs/`.
 - [ ] All pre-commit hooks pass locally.
-- [ ] Tests pass (`make test`).
-- [ ] Go linting passes (`make lint`).
-- [ ] Frontend checks pass (lint, typecheck, format).
+- [ ] `cargo test` passes.
+- [ ] `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` pass.
+- [ ] `npm run build` passes (it typechecks).
 - [ ] You have checked whether your changes require a documentation update — if so, include the documentation changes in the same PR.
 
 ### Code Quality Standards
@@ -99,7 +106,8 @@ End-to-end tests (`make e2e-setup` once, then `make e2e`) and the scale harness
 - Add tests for new functionality and bug fixes.
 - Do not introduce security vulnerabilities (see OWASP top 10).
 - Avoid over-engineering — solve the problem at hand without unnecessary abstractions.
-- Respect the existing architecture and import rules (see `CLAUDE.md` for details).
+- Respect the existing architecture (see `CLAUDE.md` for details).
+- `parity/` holds frozen goldens that specify Agento's wire format. Change one by deliberate edit with a reason, never by refreshing until green — read [`parity/README.md`](parity/README.md) first.
 
 ### Documentation
 

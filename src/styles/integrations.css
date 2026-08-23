@@ -1,0 +1,216 @@
+/* ============================================================================
+   Integrations — the provider catalog, service/tool blocks and trigger rules.
+   Layers on controls.css / views.css rather than restating it.
+   ========================================================================== */
+
+/* --- Provider catalog ---------------------------------------------------- */
+
+.provgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(168px, 1fr));
+  gap: var(--sp-4);
+}
+
+.provcard {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  border-radius: var(--r-lg);
+  background: var(--bg-list);
+  box-shadow: inset 0 0 0 var(--hairline) var(--line);
+  text-align: left;
+  transition: background var(--dur-fast), box-shadow var(--dur-fast);
+}
+.provcard:hover {
+  background: var(--bg-hover);
+  box-shadow: inset 0 0 0 var(--hairline) var(--line-strong);
+}
+.provcard__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.provcard__name {
+  font-size: var(--text-base);
+  font-weight: var(--weight-medium);
+}
+.provcard__blurb {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Service and tool toggles -------------------------------------------- */
+
+.svcblock {
+  border-radius: var(--r-lg);
+  background: var(--bg-list);
+  box-shadow: inset 0 0 0 var(--hairline) var(--line);
+  overflow: hidden;
+}
+.svcblock + .svcblock {
+  margin-top: var(--sp-4);
+}
+.svcblock__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-5) var(--sp-6);
+}
+.svcblock__title {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1;
+  min-width: 0;
+}
+.svcblock__desc {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+}
+.svcblock__tools {
+  border-top: var(--hairline) solid var(--line);
+  padding: var(--sp-4) var(--sp-6) var(--sp-5);
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--sp-3) var(--sp-6);
+}
+.svcblock--off .svcblock__head {
+  opacity: 0.5;
+}
+
+.svctool {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.svctool__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+.svctool__name {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--fg-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.svctool__desc {
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codebox {
+  width: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  color: var(--fg-secondary);
+  background: var(--bg-inset);
+  border-radius: var(--r-md);
+  padding: var(--sp-4);
+  max-height: 90px;
+  overflow: auto;
+  word-break: break-all;
+  user-select: text;
+  cursor: text;
+}
+
+/* --- Trigger rules ------------------------------------------------------- */
+
+.rulerow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: var(--sp-5) var(--sp-6);
+}
+.rulerow + .rulerow {
+  border-top: var(--hairline) solid var(--line);
+}
+.rulerow__body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rulerow__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  font-size: var(--text-xs);
+  color: var(--fg-tertiary);
+}
+
+/* --- Shared bits --------------------------------------------------------- */
+
+.msgline {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  border-radius: var(--r-md);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  background: var(--bg-inset);
+  color: var(--fg-secondary);
+}
+.msgline--error {
+  background: var(--red-soft);
+  color: var(--red);
+}
+.msgline--ok {
+  background: var(--green-soft);
+  color: var(--green);
+}
+.msgline--warn {
+  background: var(--amber-soft);
+  color: var(--amber);
+}
+.msgline__icon {
+  margin-top: 1px;
+  flex: none;
+}
+
+.confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 0 var(--sp-3) 0 var(--sp-5);
+  height: var(--control-h-lg);
+  border-radius: var(--r-md);
+  background: var(--red-soft);
+  font-size: var(--text-sm);
+  color: var(--red);
+  white-space: nowrap;
+}
+
+.savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-top: var(--sp-6);
+  padding: var(--sp-4) var(--sp-6);
+  border-radius: var(--r-lg);
+  background: var(--bg-raised);
+  box-shadow: 0 0 0 var(--hairline) var(--line-strong), var(--shadow-md);
+}
+.savebar__text {
+  flex: 1;
+  font-size: var(--text-base);
+  color: var(--fg-secondary);
+}

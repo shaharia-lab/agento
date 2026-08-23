@@ -1,8 +1,13 @@
 version: 2
 updates:
-  # Backend: Go modules — patch updates only, single grouped PR
-  - package-ecosystem: gomod
-    directory: /
+  # Rust: the app's backend. Patch updates only, single grouped PR.
+  #
+  # This entry replaces the `gomod` one, which pointed at a `go.mod` deleted
+  # with the Go server (#391) and had been resolving to nothing since. Cargo
+  # went uncovered for that whole period — the backend is Rust, so this is the
+  # entry that actually keeps it current.
+  - package-ecosystem: cargo
+    directory: /src-tauri
     schedule:
       interval: weekly
       day: monday
@@ -19,9 +24,12 @@ updates:
         patterns:
           - "*"
 
-  # Frontend: npm packages — patch updates only, single grouped PR
+  # Frontend: npm packages — patch updates only, single grouped PR.
+  #
+  # `/`, not `/frontend`: the app moved to the repository root (#392) and the
+  # old path stopped matching anything.
   - package-ecosystem: npm
-    directory: /frontend
+    directory: /
     schedule:
       interval: weekly
       day: monday

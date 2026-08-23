@@ -1,0 +1,206 @@
+/* ============================================================================
+   Sessions view — the few things the shared table/inspector idiom does not
+   already cover. Everything here is prefixed so it cannot collide with the
+   shared sheets.
+   ========================================================================== */
+
+/* Toolbar dropdown sizing — the control itself is the shared Dropdown. */
+.sess-select {
+  max-width: 230px;
+}
+
+/* --- Session detail (read-only transcript) -------------------------------- */
+.sess-detail__meta {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-7);
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-7);
+  border-bottom: var(--hairline) solid var(--line);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+  white-space: nowrap;
+}
+.sess-detail__meta > * {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.sess-detail__meta > .mono {
+  flex: 0 1 auto;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sess-todos {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  font-family: var(--font-ui);
+  white-space: normal;
+}
+.sess-todo {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+}
+.sess-todo > svg {
+  flex: none;
+  align-self: center;
+}
+.sess-todo--completed {
+  color: var(--fg-tertiary);
+}
+.sess-todo--completed > svg {
+  color: var(--green);
+}
+.sess-todo--in_progress {
+  color: var(--fg);
+}
+
+/* --- Table cells --------------------------------------------------------- */
+
+/* Real session titles are long enough to blow past their column: a fixed
+   layout is what makes the declared widths — and the cells' ellipsis — hold. */
+.sess-table {
+  table-layout: fixed;
+}
+.sess-title {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.sess-title__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sess-star {
+  color: var(--amber);
+  flex: none;
+}
+.sess-dim {
+  color: var(--fg-quaternary);
+  font-size: var(--text-sm);
+}
+.sess-tokens {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+/* Paging footer sits inside the table so it scrolls with the rows. */
+.sess-more td {
+  background: var(--bg-content);
+  text-align: center;
+  padding: var(--sp-5);
+}
+
+/* --- Transient states ---------------------------------------------------- */
+.sess-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  color: var(--fg-tertiary);
+}
+
+.sess-spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: var(--r-full);
+  border: 1.5px solid var(--line-strong);
+  border-top-color: var(--accent);
+  animation: sess-spin 0.7s linear infinite;
+  flex: none;
+}
+@keyframes sess-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.sess-scan {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.sess-err {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: var(--text-sm);
+  border-top: var(--hairline) solid var(--line);
+}
+.sess-err__msg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- Inspector ----------------------------------------------------------- */
+.sess-heading {
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  margin-bottom: var(--sp-2);
+}
+
+.sess-preview {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  line-height: var(--leading-normal);
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: var(--sp-3);
+}
+
+.sess-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.sess-actions .btn {
+  justify-content: flex-start;
+}
+.sess-fav--on {
+  color: var(--amber);
+}
+
+.sess-note {
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  line-height: var(--leading-normal);
+}
+.sess-note--error {
+  color: var(--red);
+}
+
+.sess-prs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.sess-pr {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  font-size: var(--text-sm);
+  min-width: 0;
+}
+.sess-pr__repo {
+  color: var(--fg-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -1,364 +1,388 @@
+<div align="center">
+
 # Agento
 
-> ## 🌇 Agento (web) is being retired — move to Agento Desktop
->
-> **This is the final release of the Go/web build.** Support ends **1 September 2026**;
-> after that date `agento update` stops offering updates. The app itself keeps
-> working indefinitely — nothing shuts off, nothing expires, and staying on it is
-> your call.
->
-> **[Agento Desktop](https://github.com/shaharia-lab/agento/releases)** is where
-> development continues. It reads the **same `~/.agento/agento.db`**, so there is
-> no export and no migration: install it and your history, agents and analytics
-> are already there.
->
-> ```bash
-> brew install --cask shaharia-lab/tap/agento     # macOS
-> ```
->
-> Or grab the `.dmg`, `.deb`, `.rpm`, `.AppImage` or `.exe` from
-> [Releases](https://github.com/shaharia-lab/agento/releases).
->
-> **One thing to do after installing:** if you ran `agento service install`, remove
-> the old background service with `agento service uninstall`. Left in place it runs
-> a second scheduler, so every scheduled task fires twice. `agento update` offers to
-> do this for you.
+### See what Claude Code really costs you, replay any session, and put agents to work — from one desktop app.
 
-[![Release](https://img.shields.io/github/v/release/shaharia-lab/agento)](https://github.com/shaharia-lab/agento/releases)
-[![Stars](https://img.shields.io/github/stars/shaharia-lab/agento?style=flat)](https://github.com/shaharia-lab/agento/stargazers)
-[![License](https://img.shields.io/github/license/shaharia-lab/agento)](https://github.com/shaharia-lab/agento/blob/main/LICENSE)
-[![Maintainability Rating](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=sqale_rating)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
-[![Reliability Rating](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=reliability_rating)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
-[![Security Rating](https://sonarcloud.io/api/project_badges/measure?project=shaharia-lab_agento&metric=security_rating)](https://sonarcloud.io/summary/new_code?id=shaharia-lab_agento)
+Agento reads the session files Claude Code already writes to your disk and turns them into
+cost analytics, productivity insights and a searchable, replayable history of every run.
+It also lets you build agents, chat with them, schedule them, and connect them to the tools you use.
+**No API key, no account, no telemetry. Everything stays on your machine.**
 
-### The missing dashboard for Claude Code.
+[![Release](https://img.shields.io/github/v/release/shaharia-lab/agento?filter=desktop-v*&style=flat-square&color=3fa045&label=release)](https://github.com/shaharia-lab/agento/releases?q=desktop-v&expanded=true)
+[![CI](https://img.shields.io/github/actions/workflow/status/shaharia-lab/agento/ci.yml?branch=main&style=flat-square&label=CI&logo=github)](https://github.com/shaharia-lab/agento/actions/workflows/ci.yml)
+[![Downloads](https://img.shields.io/github/downloads/shaharia-lab/agento/total?style=flat-square&color=blue)](https://github.com/shaharia-lab/agento/releases)
+[![Stars](https://img.shields.io/github/stars/shaharia-lab/agento?style=flat-square&color=f5c518)](https://github.com/shaharia-lab/agento/stargazers)
+[![License](https://img.shields.io/github/license/shaharia-lab/agento?style=flat-square)](LICENSE)
+[![Last commit](https://img.shields.io/github/last-commit/shaharia-lab/agento/main?style=flat-square)](https://github.com/shaharia-lab/agento/commits/main)
 
-Claude Code forgets everything the moment it exits. Agento reads the session files it already writes to your disk and turns them into cost analytics, productivity insights and a searchable history of every run. It also gives you a browser UI for building agents, scheduling them, and connecting them to the tools you use.
-
-**One Go binary. No API key, no account, no telemetry. Your history, your agents and your analytics stay on your machine.**
-
-![Agento Insights dashboard showing cost cards and productivity metrics](docs/images/insights.png)
-
-```bash
-brew install --cask shaharia-lab/tap/agento
-```
-
-That is the whole setup. Agento finds your Claude Code history and starts building your dashboards.
-
-> ### ⭐ Star this repository
->
-> If Agento saves you money or time, a star is the single most useful thing you can do for the project. It takes a second and it is how other Claude Code users find it.
+**[Install](#-install) · [What you get](#-what-you-get) · [Shortcuts](#%EF%B8%8F-keyboard-shortcuts) · [Docs](docs/README.md) · [Contributing](#-contributing)**
 
 <br>
 
-## Install
+### ⭐ Like the idea? [Star the repo.](https://github.com/shaharia-lab/agento)
 
-**Requirements:** the [Claude Code CLI](https://claude.ai/code), installed and authenticated. If `claude` runs in your terminal, Agento works. No Anthropic API key is needed, because Agento uses the authentication Claude Code already has.
+It takes two seconds, and it is how the next Claude Code user finds Agento.
 
-<table>
-<tr><td width="50%">
+</div>
 
-**Homebrew (macOS)**
+---
 
-```bash
-brew install --cask shaharia-lab/tap/agento
-```
+![Agento's Insights view: cost, autonomy, cache-hit and tool-error cards over your Claude Code sessions, with every tool call attributed to a skill, MCP server or sub-agent](docs/screenshots/light/insights.png)
 
-</td><td width="50%">
+---
 
-**Direct download**
+## ⚡ Install
 
-Grab the installer for your platform from
-[Releases](https://github.com/shaharia-lab/agento/releases):
-`.dmg` (macOS), `.deb` / `.rpm` / `.AppImage` (Linux),
-`-setup.exe` (Windows).
+Three steps, about a minute. Agento runs on macOS, Windows and Linux.
 
-</td></tr>
-</table>
+<details open>
+<summary><b>1. Have Claude Code</b> — installed and signed in</summary>
 
-Installers for Linux (x86_64, arm64), macOS (Intel, Apple Silicon) and Windows are on the [Releases page](https://github.com/shaharia-lab/agento/releases).
+<br>
 
-<details>
-<summary><b>Legacy: the Go/web build (unsupported after 1 September 2026)</b></summary>
-
-The single Go binary that serves the browser UI on `localhost:8990`. It still
-installs and still runs, but it receives no further releases — see the notice at
-the top of this file.
-
-```bash
-brew install shaharia-lab/tap/agento     # the formula, not the cask
-agento web
-```
-
-```bash
-# or grab the archive for your platform from Releases
-tar -xzf agento_Linux_x86_64.tar.gz
-sudo mv agento /usr/local/bin/
-agento web
-```
-
-Everything below this point describes both builds unless it says otherwise.
+Agento runs every agent through the **[Claude Code CLI](https://claude.ai/code)** you already
+have and reuses its sign-in. If `claude` works in your terminal, you are ready. There is no
+Anthropic API key to enter; the app tells you on launch if the CLI is missing.
 
 </details>
 
-Useful flags: `agento web --port 3000` to change the port, `--no-browser` to skip opening a tab. To keep it running in the background across reboots:
-
-```bash
-agento service install     # then: status | stop | start | restart | logs | uninstall
-```
+<details open>
+<summary><b>2. Download</b> — pick your platform from the <a href="https://github.com/shaharia-lab/agento/releases?q=desktop-v&expanded=true">latest release</a></summary>
 
 <br>
 
-## What you get
+| Platform | File | Updates |
+| --- | --- | --- |
+| **macOS** Apple Silicon / Intel | `Agento_<version>_aarch64.dmg` / `_x64.dmg` | In-app |
+| **Windows** x64 | `Agento_<version>_x64-setup.exe` | In-app |
+| **Linux** any distro | `Agento_<version>_amd64.AppImage` / `_aarch64.AppImage` | In-app |
+| **Linux** Debian / Ubuntu | `Agento_<version>_amd64.deb` / `_arm64.deb` | Notify only |
+| **Linux** Fedora / RHEL / openSUSE | `Agento-<version>-1.x86_64.rpm` / `.aarch64.rpm` | Notify only |
+
+**In-app** means Agento downloads, verifies and installs the next version itself. `.deb`
+and `.rpm` are owned by your package manager, so Agento only tells you when one exists.
+Want in-app updates on Linux? Take the AppImage. Every file ships with a `.sig` from
+Agento's own update key.
+
+<details>
+<summary>macOS — first launch</summary>
+
+<br>
+
+Drag **Agento** into Applications and open it. macOS blocks it once, because the app is
+not signed with an Apple Developer certificate: go to **System Settings → Privacy &
+Security**, scroll down, click **Open Anyway**. Updates installed by the app never ask again.
+
+</details>
+
+<details>
+<summary>Windows — first launch</summary>
+
+<br>
+
+Run the installer. SmartScreen warns about an unrecognised publisher: click **More info**,
+then **Run anyway**. It asks for administrator rights because it installs for all users,
+and brings its own WebView2 runtime if your machine has none.
+
+</details>
+
+<details>
+<summary>Linux — AppImage, deb, rpm</summary>
+
+<br>
+
+```bash
+chmod +x Agento_*.AppImage && ./Agento_*.AppImage     # no install, no root, updates in place
+sudo apt install ./Agento_*_amd64.deb                   # Debian, Ubuntu
+sudo dnf install ./Agento-*.x86_64.rpm                  # Fedora, RHEL, openSUSE
+```
+
+The packages declare their GTK and WebKitGTK dependencies; your package manager resolves them.
+
+</details>
+
+Full details, including building from source, in the [installation guide](docs/installation.md).
+
+</details>
+
+<details open>
+<summary><b>3. Launch</b> — your history is already there</summary>
+
+<br>
+
+Agento opens on **Chats** and starts indexing the Claude Code history on your disk. A large
+history takes a few minutes the first time; the Sessions view shows progress and everything
+else works meanwhile. Your data lives in `~/.agento` (`%USERPROFILE%\.agento` on Windows)
+as one SQLite file. Nothing is uploaded anywhere.
+
+</details>
+
+> [!TIP]
+> `Ctrl K` (`⌘ K` on macOS) opens the command palette from anywhere — every view, action
+> and setting is one keystroke away. The rest of the [shortcuts](#%EF%B8%8F-keyboard-shortcuts) are below.
+
+---
+
+## 🧭 What you get
 
 ### Every token type, priced properly
 
-Input, output, cache reads and cache writes bill at very different rates, so Agento keeps them apart instead of multiplying one total by one price. The result is the chart most people find surprising: the model with the most tokens is often not the model taking your money.
+Input, output, cache reads and cache writes bill at very different rates, so Agento keeps
+them apart instead of multiplying one total by one price. The model with the most tokens
+is often not the model taking your money.
 
-![Token composition and cost by model](docs/images/token-usage.png)
+![Token Usage: token composition, tokens over time, cache efficiency](docs/screenshots/light/token-usage.png)
 
-Cost is attributed to the model that spent it, including work done inside sub-agents, so delegating to a cheaper model shows up as an actual saving.
+Cost is attributed to the model that spent it — sub-agents included — and to the project.
 
-![Cost by model and by provider](docs/images/cost-by-model.png)
+<details>
+<summary>Show screenshot</summary>
+
+![Cost by model and by project](docs/screenshots/light/cost-by-model.png)
+
+</details>
 
 ### Find out whether you are getting more effective
 
-The Insights page goes past raw counts. It tracks how many turns a session needed, how far Claude got before it had to ask you something, how long you kept it waiting, cache hit rate and tool error rate, all compared against the previous period so you can see the direction. It then attributes every tool call to the skill, plugin, MCP server or sub-agent responsible, which is how you find the skill quietly burning a third of your calls.
+Insights goes past raw counts: turns per session, how far Claude got before it had to ask
+you something, cache hit rate, tool error rate — then every tool call attributed to the
+skill, plugin, MCP server or sub-agent responsible. Durations mean **active** time; idle
+gaps beyond a threshold you set are excluded everywhere.
 
-![Tool calls attributed to skills and plugins](docs/images/insights-breakdowns.png)
+<details>
+<summary>Show screenshot</summary>
 
-Durations mean active time, not wall clock. Claude Code sessions are resumable, so one picked up a week later would otherwise report a week of work. Idle gaps beyond a threshold you control are excluded everywhere a duration is shown.
+![Tool calls attributed to skills, plugins, MCP servers and reasoning effort](docs/screenshots/light/insights-breakdowns.png)
+
+</details>
 
 ### Understand your working patterns
 
-Sessions per day, model mix, busiest days, cost per project, and an activity heatmap that counts a session in every hour it was running rather than only the hour it finished.
+Sessions per day, model mix, busiest days, and a weekly heatmap that counts a session in
+every hour it was running, not only the hour it finished.
 
-![Activity heatmap and hourly breakdown](docs/images/activity-heatmap.png)
+<details>
+<summary>Show screenshot</summary>
+
+![Weekly rhythm heatmap and busiest sessions](docs/screenshots/light/activity-heatmap.png)
+
+</details>
 
 ### Browse and search every session you have ever run
 
-Filtered and paged in SQL, so it stays fast whether you have 50 sessions or 5,000. Search across titles and content, filter by project, model, date, cost or duration, and see linked pull requests, git branch and permission mode on every row.
+Filtered and paged in SQL, so it stays fast at 5,000 sessions. Search titles and content;
+filter by project, model, date, cost or duration; see permission mode, linked pull
+requests, tokens and cost on every row, with the inspector beside it.
 
-![The Claude Sessions list](docs/images/sessions-list.png)
+<details>
+<summary>Show screenshot</summary>
+
+![The Sessions list with the inspector](docs/screenshots/light/sessions-list.png)
+
+</details>
 
 ### Replay any session step by step
 
-The journey view reconstructs the full timeline of a run: every prompt, response, tool call and result in order, with each sub-agent's steps nested under the delegation that spawned it. When a long autonomous run goes wrong, this is where you find out where.
+Open a session and read the whole run in order — every prompt, response, tool call and
+result, with sub-agent delegations and failing commands where they happened. When a long
+autonomous run goes wrong, this is where you find out where.
 
-![Session journey timeline with nested sub-agent steps](docs/images/session-journey.png)
+![A session transcript with tool calls and a sub-agent delegation expanded](docs/screenshots/light/session-journey.png)
 
-Each session also carries its own metrics: turns, steps per turn, longest autonomous chain, active duration, time Claude spent working, your own average reply time, and tool error rate.
+<details>
+<summary>Show the session's own metrics</summary>
 
-![Per session metrics panel](docs/images/session-detail.png)
+![Session detail with the inspector's activity and token panels](docs/screenshots/light/session-detail.png)
 
-### Build agents without writing code
+</details>
 
-Give an agent a name, a system prompt, a model, a thinking mode and an explicit list of tools it may use. Save it once and reuse it from the browser, the scheduler or the CLI. Template variables like `{{current_date}}` are filled in at runtime.
+### Chat with agents you built yourself
 
-![Saved agents](docs/images/agents.png)
+Give an agent a name, a system prompt, a model, a thinking mode and an explicit allowlist
+of tools; `{{current_date}}`-style variables are filled in at runtime. Then chat with it
+in the app — every turn runs through your own Claude Code CLI, tool calls and Markdown
+render inline, and the inspector shows what it cost.
 
-Permission modes matter here: an agent can be set to plan first and act only after you approve, which is what you want the moment it can write files or run commands.
+<details>
+<summary>Show screenshots</summary>
 
-![The agent builder](docs/images/agent-builder.png)
+![A chat with the code-reviewer agent](docs/screenshots/light/chats.png)
 
-### Put your agents on a schedule
+![The agents list and builder](docs/screenshots/light/agents.png)
 
-Run any agent on a cron expression, a fixed interval, or once at a specific time. Every execution is recorded with its status, duration and full output, so you can see exactly what ran while you were away.
+![The agent builder's capabilities section](docs/screenshots/light/agent-builder.png)
 
-![Scheduled tasks](docs/images/tasks.png)
+</details>
+
+### Put agents on a schedule
+
+Cron, fixed interval, or once at a given time. Every run is recorded with status, duration
+and full output, so you can see exactly what happened while you were away.
+
+<details>
+<summary>Show screenshot</summary>
+
+![Scheduled tasks with recent runs](docs/screenshots/light/tasks.png)
+
+</details>
 
 ### Connect the tools you already use
 
-Each integration runs as an in-process MCP server, so there is no extra daemon to operate. Configure it once and any agent can use it.
-
-![Available integrations](docs/images/integrations.png)
-
-Google (Calendar, Gmail, Drive), GitHub, Slack, Jira, Confluence, Telegram and WhatsApp are built in. Any other MCP server can be added through `~/.agento/mcps.yaml` over stdio, streamable HTTP or SSE.
-
-### Keep the pricing catalog honest
-
-Rates ship for Anthropic, Moonshot, Z.ai and Alibaba models, and they are effective-dated: adding a rate leaves past usage priced at what it was charged, while correcting one rewrites it. A model with no published rate is reported as unknown instead of being quietly priced as something else.
-
-![The model pricing catalog](docs/images/settings-pricing.png)
-
-### Your data stays yours
-
-Agento reads `~/.claude` and caches results in a local SQLite database at `~/.agento/agento.db`. Nothing is uploaded, there is no account, and there is no server component. Projects you would rather leave out of the numbers can be hidden from every report, and the idle threshold behind the duration metrics is yours to set.
-
-![Data and analytics settings](docs/images/settings-data.png)
-
-<br>
-
-## Also in the box
+GitHub, Slack, Jira, Confluence, Telegram and Google (Calendar, Gmail, Drive) are built in,
+each running as an MCP server inside the app — no extra daemon. Any other MCP server can be
+added through `~/.agento/mcps.yaml`.
 
 <details>
-<summary><strong>💬 Chats and a tabbed multi-chat workspace</strong></summary>
-<br>
+<summary>Show screenshot</summary>
 
-Hold multi-turn conversations with any agent you have built. Responses stream live over Server-Sent Events, sessions persist locally, and you can favourite or rename them. Drag and drop files or paste images straight into the input.
-
-The multi-chat workspace runs several conversations in parallel, each tab with its own agent and session state, and it survives a page reload.
-
-[▶ Watch: chat with an agent](https://github.com/user-attachments/assets/1fa2b716-cbb8-459e-b2e1-f6c252c086c2)
-
-[▶ Watch: the multi-chat workspace](https://github.com/user-attachments/assets/91794133-9f90-4eb0-a62c-885be70b3c39)
+![Integrations: GitHub connected, with its services and tools](docs/screenshots/light/integrations.png)
 
 </details>
 
+### Honest pricing, your data
+
+Rates for Anthropic, Moonshot, Z.ai and Alibaba models ship with the app and are
+effective-dated; a model with no published rate is reported as unknown rather than priced
+as something else. Agento reads `~/.claude` and caches into a local SQLite file — there is
+no account and no server. Hide projects from every report, set the idle threshold yourself.
+
 <details>
-<summary><strong>💻 CLI: run agents from the terminal</strong></summary>
-<br>
+<summary>Show screenshots</summary>
 
-```bash
-agento ask "What changed in the repo today?"
-agento ask --agent code-reviewer "Review the staged diff"
-agento ask --agent code-reviewer "Follow up" <session-id>
-```
+![The model pricing catalog](docs/screenshots/light/settings-pricing.png)
 
-Pass a session ID to continue a conversation. Useful for scripts and shell pipelines.
+![Data settings: idle threshold and hidden projects](docs/screenshots/light/settings-data.png)
 
 </details>
 
-<details>
-<summary><strong>📡 Observability: OpenTelemetry traces, metrics and logs</strong></summary>
-<br>
+*Screenshots are taken from the app over a synthetic dataset — see
+[`docs/screenshots/README.md`](docs/screenshots/README.md).*
 
-Every HTTP request, agent run, tool call and storage operation is instrumented. Configure an OTLP gRPC exporter or a Prometheus pull endpoint from the Monitoring settings tab and it hot-reloads, no restart and no config file. Structured logs are written to `~/.agento/logs/system.log`, with per-session logs beside them.
+---
 
-See [docs/monitoring.md](docs/monitoring.md).
+## ⌨️ Keyboard shortcuts
 
-</details>
+`Ctrl` on Windows and Linux, `⌘` on macOS.
 
-<details>
-<summary><strong>🔔 Notifications and job history</strong></summary>
-<br>
+| Shortcut | Action | Shortcut | Action |
+| --- | --- | --- | --- |
+| `Ctrl K` | Command palette | `Ctrl B` | Show / hide the sidebar |
+| `Ctrl N` | New chat | `Ctrl I` | Show / hide the inspector |
+| `Ctrl ,` | Settings | `Ctrl [` / `Ctrl ]` | Back / forward |
+| `Ctrl 1` … `Ctrl 7` | Jump to a section | | |
 
-Configure SMTP delivery for task completion and agent events, send a test message from the UI, and browse the notification log. Every scheduled run is kept in job history with its start time, duration, exit status and full output.
+---
 
-</details>
+## ⭐ Spread the word
 
-<details>
-<summary><strong>🎨 Claude settings profiles and appearance</strong></summary>
-<br>
-
-Keep several named Claude settings profiles (stored as `~/.claude/settings_<slug>.json`) and switch between them per agent or per chat. A default profile is created from your existing `~/.claude/settings.json` on first launch. Dark and light themes, font size and font family apply instantly across the UI.
-
-</details>
-
-<details>
-<summary><strong>🔄 Auto-update</strong></summary>
-<br>
-
-Agento checks for new releases on startup and shows a banner when one is available. Run `agento update` to upgrade in place. If it is installed as a background service, the service is restarted for you.
-
-</details>
-
-<br>
-
-## Configuration
-
-Nothing needs configuring. Everything below is optional, and environment variables win over the Settings UI.
-
-<details>
-<summary><strong>Environment variables</strong></summary>
-<br>
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `8990` | HTTP server port |
-| `AGENTO_BIND` | `127.0.0.1` | Interface to listen on (both loopback families). Set `0.0.0.0` to reach Agento from another device — see below |
-| `AGENTO_PUBLIC_URL` | none | Externally reachable URL, for a reverse proxy, a tunnel, or Telegram webhooks |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | Which Claude Code account agents run as. Claude Code's own variable |
-| `AGENTO_DATA_DIR` | `~/.agento` | Root directory for agents, chats, and logs. Supports `~` expansion |
-| `LOG_LEVEL` | `info` | Log verbosity: `debug`, `info`, `warn`, `error` |
-| `ANTHROPIC_API_KEY` | none | Use the Anthropic API directly instead of Claude Code CLI authentication |
-| `AGENTO_DEFAULT_MODEL` | Claude default | Lock the model used for direct chat sessions |
-| `AGENTO_WORKING_DIR` | `/tmp/agento/work` | Default working directory for agent sessions |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | OTLP gRPC collector endpoint, for example `localhost:4317` |
-| `OTEL_METRICS_EXPORTER` | none | `otlp` to push, or `prometheus` to expose `/metrics` |
-| `OTEL_LOGS_EXPORTER` | none | `otlp` |
-
-</details>
-
-<details>
-<summary><strong>CLI reference</strong></summary>
-<br>
-
-```
-agento web [--port int] [--no-browser]      Start the web UI
-agento ask [--agent slug] [--no-thinking]   Ask an agent a one-off question
-           <question> [session-id]
-agento update [-y] [--no-restart]           Update to the latest release
-agento service <install|uninstall|start|stop|restart|status|logs>
-```
-
-`agento service` installs a LaunchAgent on macOS (`~/Library/LaunchAgents/com.shaharialab.agento.plist`) or a systemd user unit on Linux (`~/.config/systemd/user/agento.service`), so Agento survives logout and reboot.
-
-</details>
-
-<details>
-<summary><strong>Build from source</strong></summary>
-<br>
-
-Requires Go 1.25+ and Node.js.
-
-```bash
-git clone https://github.com/shaharia-lab/agento.git
-cd agento
-make build
-```
-
-See [docs/development.md](docs/development.md) for the architecture overview and the development workflow.
-
-</details>
-
-<br>
-
-### Reaching Agento from another device
-
-Agento listens on **loopback only** by default, and has **no authentication** — it is meant to run on the machine you are working at. The API can create an agent and run it, so anything that can reach it can run commands on that machine.
-
-To use it from a phone, tablet or another computer:
-
-```bash
-AGENTO_BIND=0.0.0.0 agento web
-```
-
-Only do that on a network you trust, or put a proxy that authenticates in front of it. If you reach Agento under a hostname rather than an IP — through a reverse proxy or a tunnel — set **Public URL** in Settings (or `AGENTO_PUBLIC_URL`) to that address, or requests will be refused.
-
-> **Upgrading?** This used to listen on every interface. If you reach Agento from another device and it stopped working, set `AGENTO_BIND=0.0.0.0`. The startup log names the interface it bound.
-
-## Documentation
-
-- [Getting started](docs/getting-started.md): setup and a first-run walkthrough
-- [Claude sessions](docs/claude-sessions.md): what is scanned, how cost and duration are measured, and the analytics built on top
-- [Agents](docs/agents.md): system prompts, models, tools and template variables
-- [Tasks](docs/tasks.md): running agents on a schedule, and job history
-- [Integrations](docs/integrations.md): connecting Google, GitHub, Slack, Jira, Confluence, Telegram and WhatsApp
-- [Pricing](docs/pricing.md): how cost is calculated and how to maintain the catalog
-- [Security](docs/security.md): network exposure, the API guards, and where your data lives
-- [Monitoring](docs/monitoring.md): OpenTelemetry traces, metrics and logs
-- [Development](docs/development.md): architecture and contribution guidelines
-
-<br>
-
-## Contributing
-
-Issues and pull requests are welcome. Missing a feature? [Open an issue](https://github.com/shaharia-lab/agento/issues/new) and tell us what you would use it for.
-
-<br>
-
-## License
-
-MIT. Maintained by [Shaharia Lab](https://github.com/shaharia-lab).
-
-<br>
+Made it this far? Then Agento is probably useful to you — and the fastest way to keep it
+alive is to make it easier for the next person to find.
 
 <div align="center">
 
-**Agento is free and open source.**
-If it is useful to you, [star the repository](https://github.com/shaharia-lab/agento) so more Claude Code users find it.
+**[⭐ Star Agento](https://github.com/shaharia-lab/agento)** ·
+**[💬 Say hello in Discussions](https://github.com/shaharia-lab/agento/discussions)** ·
+**[🐛 Report something broken](https://github.com/shaharia-lab/agento/issues)**
 
-[⭐ Star Agento](https://github.com/shaharia-lab/agento) · [Download](https://github.com/shaharia-lab/agento/releases) · [Report an issue](https://github.com/shaharia-lab/agento/issues/new)
+<br>
+
+**Share it with one person who uses Claude Code**
+
+[![X](https://img.shields.io/badge/X-000000?style=for-the-badge&logo=x&logoColor=white)](https://twitter.com/intent/tweet?text=Agento%20%E2%80%94%20see%20what%20Claude%20Code%20really%20costs%20you%2C%20replay%20any%20session%2C%20and%20put%20agents%20to%20work.%20Local%2C%20no%20API%20key.&url=https%3A%2F%2Fgithub.com%2Fshaharia-lab%2Fagento)
+[![LinkedIn](https://img.shields.io/badge/LinkedIn-0A66C2?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/sharing/share-offsite/?url=https%3A%2F%2Fgithub.com%2Fshaharia-lab%2Fagento)
+[![Bluesky](https://img.shields.io/badge/Bluesky-0285FF?style=for-the-badge&logo=bluesky&logoColor=white)](https://bsky.app/intent/compose?text=Agento%20%E2%80%94%20see%20what%20Claude%20Code%20really%20costs%20you%2C%20replay%20any%20session%2C%20and%20put%20agents%20to%20work.%20Local%2C%20no%20API%20key.%20https%3A%2F%2Fgithub.com%2Fshaharia-lab%2Fagento)
+[![Reddit](https://img.shields.io/badge/Reddit-FF4500?style=for-the-badge&logo=reddit&logoColor=white)](https://www.reddit.com/submit?url=https%3A%2F%2Fgithub.com%2Fshaharia-lab%2Fagento&title=Agento%20%E2%80%94%20see%20what%20Claude%20Code%20really%20costs%20you%2C%20replay%20any%20session%2C%20and%20put%20agents%20to%20work)
+[![Hacker News](https://img.shields.io/badge/Hacker_News-FF6600?style=for-the-badge&logo=ycombinator&logoColor=white)](https://news.ycombinator.com/submitlink?u=https%3A%2F%2Fgithub.com%2Fshaharia-lab%2Fagento&t=Agento%20%E2%80%94%20see%20what%20Claude%20Code%20really%20costs%20you%2C%20replay%20any%20session%2C%20and%20put%20agents%20to%20work)
+
+</div>
+
+In rough order of usefulness:
+
+- ⭐ **Star the repo** — the single highest-leverage thing.
+- 🐛 **Open an issue** when something breaks or a view feels wrong.
+- 💬 **Tell one person** who uses Claude Code every day.
+- ✍️ **Write about it** — a blog post, a work Slack message, a comment on HN or Reddit.
+- 🛠️ **Send a PR** — see [Contributing](#-contributing) below.
+
+<details>
+<summary>Star history</summary>
+
+<br>
+
+<a href="https://star-history.com/#shaharia-lab/agento&Date">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=shaharia-lab/agento&type=Date&theme=dark" />
+    <img alt="Star history chart for shaharia-lab/agento" src="https://api.star-history.com/svg?repos=shaharia-lab/agento&type=Date" />
+  </picture>
+</a>
+
+</details>
+
+---
+
+## 📚 Documentation
+
+Everything lives in [`docs/`](docs/README.md).
+
+<table>
+<tr>
+<td valign="top" width="50%">
+
+**User guide** — how to *use* it
+
+- [Installation](docs/installation.md)
+- [User guide](docs/user-guide.md): chats, agents, integrations, scheduled tasks, sessions, analytics, settings
+- [Troubleshooting](docs/troubleshooting.md)
+
+</td>
+<td valign="top" width="50%">
+
+**Developer docs** — how to *work on* it
+
+- [Development](docs/development.md)
+- [Architecture](docs/architecture.md)
+- [Releasing](docs/releasing.md)
+
+<br>
+
+```bash
+npm install
+npm run app          # dev window, hot reload
+npm run app:build    # installers for this platform
+```
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🤝 Contributing
+
+Contributions are very welcome. Open an issue first describing **what** and **why**, wait
+for triage, then send a PR that links it. Start with
+[`good first issue`](https://github.com/shaharia-lab/agento/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22)
+or [`help wanted`](https://github.com/shaharia-lab/agento/issues?q=is%3Aissue+is%3Aopen+label%3A%22help+wanted%22).
+The full policy is in [CONTRIBUTING.md](CONTRIBUTING.md); security issues go through
+[SECURITY.md](SECURITY.md), never a public issue.
+
+<a href="https://github.com/shaharia-lab/agento/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=shaharia-lab/agento" alt="Contributors" />
+</a>
+
+## 📄 License
+
+[MIT](LICENSE) — do what you like, no warranty.
+
+Built with [Tauri](https://tauri.app) and [Rust](https://www.rust-lang.org) · runs on the
+[Claude Code CLI](https://claude.ai/code) you already have.
+
+<div align="center">
+<br>
+
+**Made with ❤️ by [Shaharia Lab](https://github.com/shaharia-lab)**
+
+⭐ [Star Agento](https://github.com/shaharia-lab/agento) if it saved you money or time.
 
 </div>

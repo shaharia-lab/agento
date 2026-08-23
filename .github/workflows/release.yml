@@ -1,42 +1,386 @@
 name: Release
 
+# Builds the native installers for Agento and publishes the update manifest
+# the in-app updater reads.
+#
+# Tauri cannot cross-compile its bundles: a .dmg needs macOS, an .exe needs
+# Windows, a .deb needs Linux. So the matrix is one runner per target OS.
+#
+# Tag with `desktop-v0.1.0` on `main` to build. The `desktop-` prefix is
+# retained deliberately: every installed app polls the fixed `desktop-latest`
+# tag, and the guard job, the manifest script and `promote` all key off the
+# prefix. Renaming it is a release-infrastructure change to make on its own,
+# never as a side effect of something else.
+#
+# The flow has a deliberate human gate in the middle:
+#
+#   tag push        -> guard + build matrix -> DRAFT release with installers
+#                      and `latest.json` staged as one of its assets. Draft
+#                      assets are not publicly downloadable, so nothing has
+#                      shipped yet — installed apps cannot even fetch it.
+#   publish draft   -> the `release: published` event runs `promote`, which
+#                      copies the staged `latest.json` to the fixed
+#                      `desktop-latest` tag. That URL is what every installed
+#                      app polls, so THIS is the moment a release goes live.
+#
+# Publishing the manifest immediately at build time would point updaters at
+# draft asset URLs that 404 until someone remembers to publish the draft —
+# every installed app would see "update available" and fail the download.
+#
+# A prerelease tag (`desktop-v0.1.0-rc.1`) builds and drafts identically and
+# is auto-marked prerelease, but is never promoted: release candidates are
+# shareable from the versioned release page without being pushed to updaters.
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build installers without creating a release"
+        type: boolean
+        default: true
+  release:
+    types: [published]
+
+# The event name is part of the group so publishing a draft (a `release`
+# event carrying the same tag ref) can never cancel a build run in flight.
+concurrency:
+  group: desktop-release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
 
 jobs:
-  release:
-    name: Release
+  # The installed app compares the version baked into it at build time (from
+  # tauri.conf.json) against the manifest's version (taken from the tag). If
+  # the tag says 0.1.1 but the conf still says 0.1.0, every "updated" install
+  # keeps reporting 0.1.0 and is re-offered the same update forever — so a
+  # mismatched tag must never reach the build matrix.
+  guard:
+    name: Tag matches every version string
+    if: github.event_name != 'release'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write   # required to create GitHub Releases
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - name: Check the tag against every version string
+        # `tauri.conf.json` is the one that decides what ships: the bundler
+        # bakes it into the installer and the updater compares it against the
+        # manifest, so a mismatch there makes every "updated" install re-offer
+        # itself forever. That is why it was checked first and alone.
+        #
+        # The other two are checked because nothing else ever looks at them.
+        # `package-lock.json` sat on 0.1.1 for the whole of 0.1.2 for exactly
+        # that reason, and a stale lockfile version is not merely untidy: npm
+        # repairs that field on almost any command, so every fresh checkout goes
+        # dirty on the first `npm run build` with a change nobody made — which
+        # reads as local work, invites a discard, and comes back immediately.
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          case "$tag" in
+            desktop-v*) ;;
+            *) echo "not a desktop-v* tag build; nothing to check"; exit 0 ;;
+          esac
+          tag_version="${tag#desktop-v}"
+
+          conf_version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')"
+          pkg_version="$(python3 -c 'import json; print(json.load(open("package.json"))["version"])')"
+          lock_version="$(python3 -c 'import json; print(json.load(open("package-lock.json"))["version"])')"
+          lock_pkg_version="$(python3 -c 'import json; print(json.load(open("package-lock.json"))["packages"][""]["version"])')"
+
+          fail=0
+          check() {
+            if [ "$2" != "$tag_version" ]; then
+              echo "::error::tag ${tag} says ${tag_version} but $1 says $2"
+              fail=1
+            fi
+          }
+
+          # The lockfile carries the version twice and npm keeps both in step,
+          # so both are checked: a hand-edit that fixes only the top one leaves
+          # the tree still dirty on the next npm command.
+          check "src-tauri/tauri.conf.json"          "$conf_version"
+          check "package.json"                       "$pkg_version"
+          check "package-lock.json .version"         "$lock_version"
+          check "package-lock.json .packages[''] "   "$lock_pkg_version"
+
+          if [ "$fail" = 1 ]; then
+            echo "::error::Fix with: npm version ${tag_version} --no-git-tag-version   (package.json + lockfile), and set src-tauri/tauri.conf.json by hand. Then re-tag. See docs/releasing.md step 1."
+            exit 1
+          fi
+          echo "ok: ${tag_version} in all four places"
+
+  build:
+    name: ${{ matrix.label }}
+    needs: guard
+    if: github.event_name != 'release'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          # Native ARM runners are free for public repositories, so this needs
+          # no cross-compilation or emulation.
+          - label: linux-aarch64
+            os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          # macos-15 is Apple Silicon, macos-15-intel is Intel. Both ship: a
+          # universal binary would be simpler but doubles every download.
+          # A job naming a retired image (macos-13 was one) queues forever
+          # rather than erroring — check actions/runner-images before bumping.
+          - label: macos-aarch64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - label: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - label: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0   # goreleaser needs full git history for changelog
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
 
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: true
+      # Ubuntu 22.04 carries webkit2gtk-4.1, which Tauri 2 requires. The .deb
+      # links against whatever the build host has, so building on the oldest
+      # supported LTS is what keeps the package installable on newer ones.
+      # runner.os, not a matrix.os comparison: the arm64 runner is
+      # `ubuntu-22.04-arm`, which a string equality on `ubuntu-22.04` silently
+      # skipped — gdk-sys then failed against a runner with no GTK headers.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          # The Azure apt mirror has outages long enough to eat a whole step
+          # timeout in retries; drop it so apt goes straight to the canonical
+          # archive (or ports, on arm64).
+          sudo sed -i -E 's|https?://azure\.archive\.ubuntu\.com|https://archive.ubuntu.com|g; s|https?://azure\.ports\.ubuntu\.com|http://ports.ubuntu.com|g' \
+            /etc/apt/apt-mirrors.txt /etc/apt/sources.list 2>/dev/null || true
+          sudo apt-get update
+          # xdg-utils: the AppImage bundler copies /usr/bin/xdg-open into the
+          # bundle; the x86_64 runner image ships it, the arm64 one does not.
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            build-essential patchelf file xdg-utils
 
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
-          node-version: "22"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v4
+        with:
+          node-version: 22
           cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
-        with:
-          distribution: goreleaser
-          version: "~> v2"
-          args: release --clean
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # What `GET /api/version` reports, and so what the About screen shows.
+      # It is NOT what the updater compares — that reads the version baked
+      # into tauri.conf.json by the bundler, which the guard job already pins
+      # to the tag. These three are a separate, purely informational stamp
+      # that nothing set until now, which is why every release through
+      # desktop-v0.1.1 displayed "dev · unknown".
+      #
+      # Kept out of the `env:` block below so a dry run can name itself: a
+      # workflow_dispatch has no tag, and stamping a dispatch build with the
+      # conf version would make it indistinguishable from the real release.
+      - name: Compute the build stamp
+        id: stamp
+        shell: bash
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            desktop-v*) version="${GITHUB_REF_NAME#desktop-v}" ;;
+            *) version="$(python3 -c 'import json; print(json.load(open("src-tauri/tauri.conf.json"))["version"])')-dev" ;;
+          esac
+          echo "version=${version}" >>"$GITHUB_OUTPUT"
+          # RFC 3339, which is what the About screen's dateTime() parses.
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$GITHUB_OUTPUT"
+          echo "stamping ${version}"
+
+      # bundle.targets in tauri.conf.json lists exactly what ships — notably
+      # NSIS and not MSI on Windows, since the updater manifest expects the
+      # -setup.exe and a built-but-dropped .msi only wasted CI time.
+      - name: Build installers
+        run: npx tauri build --target ${{ matrix.target }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          # Read by src-tauri/build.rs, which re-emits them as rustc-env so a
+          # restored rust-cache cannot ship the previous tag's stamp.
+          AGENTO_BUILD_VERSION: ${{ steps.stamp.outputs.version }}
+          AGENTO_BUILD_COMMIT: ${{ github.sha }}
+          AGENTO_BUILD_DATE: ${{ steps.stamp.outputs.date }}
+          # Signs the updater artifacts. This is Tauri's own minisign key, not
+          # an Apple or Microsoft certificate — it only proves an update came
+          # from us. Without it the build still succeeds but produces no .sig,
+          # and the manifest job will fail loudly rather than ship unverifiable
+          # updates.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p out
+          base="src-tauri/target/${{ matrix.target }}/release/bundle"
+          # Installers users download, plus the updater payloads and their
+          # signatures. macOS updates ship as .app.tar.gz, not as the .dmg.
+          find "$base" -type f \
+            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
+               -o -name '*.dmg' -o -name '*-setup.exe' \
+               -o -name '*.app.tar.gz' -o -name '*.sig' \) \
+            -exec cp {} out/ \;
+          # Tauri names the macOS updater tarball Agento.app.tar.gz with no
+          # arch — identical on both macOS legs, so the release job's merged
+          # artifact download would silently overwrite one arch's payload
+          # with the other's. Rename to the arch-suffixed form the manifest
+          # script keys platforms by.
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) suffix=aarch64 ;;
+            x86_64-apple-darwin)  suffix=x64 ;;
+            *)                    suffix= ;;
+          esac
+          if [ -n "$suffix" ] && [ -f out/Agento.app.tar.gz ]; then
+            mv out/Agento.app.tar.gz "out/Agento_${suffix}.app.tar.gz"
+            mv out/Agento.app.tar.gz.sig "out/Agento_${suffix}.app.tar.gz.sig"
+          fi
+          ls -lh out
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: agento-desktop-${{ matrix.label }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/desktop-v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Release metadata
+        id: meta
+        run: |
+          version="${GITHUB_REF_NAME#desktop-v}"
+          # A prerelease suffix (desktop-v0.1.0-rc.1) marks the draft as a
+          # prerelease, which is one of the two things keeping `promote` from
+          # ever pushing it to updaters.
+          case "$version" in
+            *-*) echo "prerelease=true" >>"$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=false" >>"$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Build update manifest
+        run: |
+          python3 .github/scripts/build-update-manifest.py \
+            --artifacts artifacts \
+            --tag "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --output artifacts/latest.json
+          cat artifacts/latest.json
+
+      # The versioned release: what people download. It is a DRAFT — a human
+      # vets the installers before anything ships, and draft assets are not
+      # publicly downloadable. That is also why latest.json is only STAGED
+      # here rather than published to desktop-latest now: a live manifest
+      # pointing at draft asset URLs would make every installed app report an
+      # update it cannot download. Publishing this draft fires `promote`.
+      - name: Publish draft release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: |
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*.AppImage
+            artifacts/*.dmg
+            artifacts/*-setup.exe
+            artifacts/*.app.tar.gz
+            artifacts/*.sig
+            artifacts/latest.json
+          draft: true
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          generate_release_notes: true
+          body: |
+            Desktop builds of Agento.
+
+            | Platform | File | Updates |
+            |---|---|---|
+            | Linux (any distro) | `.AppImage` | automatic, in-app |
+            | Debian / Ubuntu | `.deb` | via apt — the app notifies |
+            | Fedora / RHEL | `.rpm` | via dnf — the app notifies |
+            | macOS | `.dmg` (Apple Silicon and Intel) | automatic, in-app |
+            | Windows | `-setup.exe` | automatic, in-app |
+
+            macOS builds are not notarised. On first launch macOS will say it
+            cannot verify the developer: open **System Settings → Privacy &
+            Security** and choose **Open Anyway**. Installing via Homebrew
+            (`brew install --cask --no-quarantine …`) skips this.
+
+            Requires the Claude Code CLI to be installed and signed in.
+
+  # Runs when a human publishes the draft. Promotion, not regeneration: the
+  # manifest was built and signed beside the artifacts it points at, and this
+  # job only copies it to the fixed URL the updater polls. The `if` filters
+  # out everything else that flows through `release: published` —
+  # desktop-latest's own publication, and any release marked prerelease; the
+  # version check below catches an rc tag even if someone unticked the
+  # prerelease box before publishing.
+  promote:
+    name: Promote update manifest
+    if: >-
+      github.event_name == 'release' &&
+      !github.event.release.prerelease &&
+      startsWith(github.event.release.tag_name, 'desktop-v')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Download the staged manifest
+        run: |
+          version="${TAG#desktop-v}"
+          case "$version" in
+            *-*)
+              echo "::error::${TAG} is a prerelease tag published without the prerelease flag; refusing to promote it to desktop-latest."
+              exit 1
+              ;;
+          esac
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern latest.json --output latest.json
+          python3 - "$version" <<'EOF'
+          import json, sys
+          version = sys.argv[1]
+          manifest = json.load(open("latest.json"))
+          if manifest["version"] != version:
+              sys.exit(f"staged manifest says {manifest['version']!r}, tag says {version!r}")
+          print(f"promoting {version}: {', '.join(sorted(manifest['platforms']))}")
+          EOF
+
+      # A fixed tag so the updater has a stable manifest URL. Marked as a
+      # prerelease so it never displaces the real "Latest release" on the repo
+      # page — asset download URLs work for prereleases just the same.
+      - name: Publish to desktop-latest
+        run: |
+          if ! gh release view desktop-latest --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create desktop-latest --repo "$GITHUB_REPOSITORY" \
+              --prerelease --title "Desktop update manifest" \
+              --notes "Machine-readable manifest the Agento desktop updater polls.
+          Not a download — see the \`desktop-v*\` releases for installers."
+          fi
+          gh release upload desktop-latest latest.json --clobber --repo "$GITHUB_REPOSITORY"

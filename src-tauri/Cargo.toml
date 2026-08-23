@@ -1,0 +1,311 @@
+[package]
+name = "agento"
+version = "0.1.2"
+description = "Personal AI agent platform for Claude Code"
+authors = ["Shaharia Lab"]
+edition = "2021"
+# 1.88 rather than 1.77 because `rmcp` 3.x declares that MSRV and cargo refuses
+# to resolve it otherwise — it silently picks `rmcp` 2.x instead, which is a
+# superseded major. Both CI workflows install `stable`, so nothing here was
+# holding the floor at 1.77; it was the value Tauri's template shipped with.
+#
+# This is a **declaration, not a gate**: both workflows install `stable` and
+# there is no `rust-toolchain.toml`, so nothing in CI ever builds at 1.88 and a
+# 1.89-only API would land green. What the value does buy is real — it is what
+# makes cargo resolve `rmcp` 3.x — and clippy reads it for its MSRV-gated lints.
+# Treat a bump here as documentation until something pins a toolchain.
+rust-version = "1.88"
+
+[lib]
+name = "agento_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-log = "2"
+serde = { version = "1", features = ["derive"] }
+# `float_roundtrip` is not optional here. Without it serde_json's float parser
+# is not bit-exact: `0.36238800000000004` in a stored JSON column decodes to a
+# *different* double, which re-encodes as `0.362388` and breaks byte parity
+# with Go on any endpoint that reads one (per-model costs today, analytics
+# next). Rust's own `str::parse` was always correct; only serde_json's fast
+# path was not.
+#
+# `raw_value` is likewise load-bearing. A chat message's `tool_use` block stores
+# its arguments as a Go `json.RawMessage`, which Go re-emits through `compact` —
+# preserving the stored key order and number spelling. Decoding that into a
+# `serde_json::Value` and re-encoding would sort the keys and respell the
+# numbers (`{"z":1.50,"a":1}` → `{"a":1,"z":1.5}`), so the value is carried as a
+# `RawValue` and written back as a raw fragment.
+serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
+log = "0.4"
+
+# Local reverse proxy in front of the Go sidecar. No TLS backend: every hop is
+# loopback, and pulling in rustls here would cost build time for nothing.
+axum = "0.8"
+# The SSE body is a channel of frames; `ReceiverStream` is what turns that into
+# the `Stream` `Body::from_stream` wants. Added with #276.
+tokio-stream = "0.1"
+# `process` and `io-util` are for the Claude Agent SDK port (`src/claude/`),
+# which spawns the `claude` CLI — an arbitrary executable resolved on PATH, so
+# it needs a real process API rather than Tauri's sidecar mechanism (which only
+# launched binaries declared as sidecars, and left with the Go server in #278).
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "process",
+    "io-util",
+    "io-std",
+    "sync",
+] }
+# `stream` is for the proxy's SSE pass-through and for the byte-capped reads the
+# ported integrations do — Go's `io.LimitReader(resp.Body, 2*1024*1024)` stops
+# *reading* at the cap, which a `bytes()` that buffers the whole body first
+# would not.
+#
+# **A TLS backend, added with #312.** Until the integrations landed, every hop
+# this client made was loopback (the Go sidecar, an in-process MCP server), so
+# none was configured at all and a `https://api.github.com` request would have
+# failed at runtime with "URL scheme is not allowed". The reasoning for *which*
+# stack is the one already written on `lettre` below and it has not changed:
+# `native-tls` links the platform's OpenSSL/Schannel, the release workflow
+# builds five target triples, and the whole reason `rusqlite` is `bundled` is
+# that there is no C toolchain to arrange.
+#
+# **The root store is `rustls-tls-native-roots`, and that is a parity decision
+# rather than a build-system one.** `rustls-tls` is an alias for
+# `rustls-tls-webpki-roots` — a Mozilla snapshot compiled into the binary — and
+# Go's `net/http` reads the **platform** trust store on every OS. The
+# difference is not theoretical: a TLS-inspecting corporate proxy intercepts
+# `api.github.com` like anything else, and its CA exists only in the system
+# store, so bundled roots would give a user whose web UI integration works a
+# desktop one that answers `request failed` with nothing to point at the cause.
+# #313–#317 would each inherit that. `rustls-tls-native-roots` is equally pure
+# Rust and equally toolchain-free — `rustls-native-certs` reads files on Linux,
+# Security.framework on macOS and CryptoAPI on Windows, all through crates that
+# cross-compile the way everything else here does — so the `native-tls`
+# reasoning below (five triples, no C toolchain) is untouched by it, and it
+# still resolves to `ring`, so no second crypto provider enters the tree.
+# `lettre`'s bundled roots below are #307's decision and are left alone; SMTP to
+# a configured relay is not the same exposure as an API call through whatever
+# the machine's network does to it.
+#
+# `gzip` because Go's transport adds `Accept-Encoding: gzip` and decompresses
+# transparently, so every Go-side integration call is compressed and every
+# uncompressed one here was a silent bandwidth divergence — most visibly
+# `get_pull_diff`, whose 10 MB cap is 10 MB of highly compressible text. The
+# fakes never compress, so the vectors cannot see this either way. Note the cap
+# semantics do **not** move: reqwest decompresses in its service stack, so
+# `bytes_stream()` yields decompressed bytes and `read_capped` caps the same
+# thing Go's `io.LimitReader` over a gunzipped `resp.Body` does.
+reqwest = { version = "0.12", default-features = false, features = [
+    "stream",
+    "gzip",
+    "rustls-tls-native-roots",
+] }
+
+# Control requests are correlated by a v4 UUID, and hook callbacks are
+# registered under one. Go generates them from crypto/rand by hand; the format
+# on the wire is the standard lowercase hyphenated one either way.
+uuid = { version = "1", features = ["v4"] }
+
+# Release builds serve the frontend from the proxy so the page is same-origin
+# with the API.
+rust-embed = "8"
+mime_guess = "2"
+tauri-plugin-opener = "2.5.4"
+tauri-plugin-updater = "2.0.0-rc.4"
+tauri-plugin-process = "2.0.0-rc.1"
+# Native window behaviors the web app cannot have: OS folder pickers for the
+# working-directory fields, window size/position remembered across launches,
+# and a second launch focusing the first instance instead of putting a second
+# scheduler and a second writer on one ~/.agento/agento.db.
+tauri-plugin-dialog = "2"
+tauri-plugin-window-state = "2"
+tauri-plugin-single-instance = "2"
+
+# Ported endpoints (phase 2 onward) read the same SQLite file the Go server
+# owns. `bundled` compiles SQLite from source rather than linking the system
+# library: Windows has none, and every release target builds on its own native
+# runner, so there is no C cross-toolchain to arrange.
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+# Effective-dated rates are timestamps, and their wire format has to match Go's
+# byte for byte. `clock` is only for "which rate is in force now".
+chrono = { version = "0.4.45", default-features = false, features = ["std", "clock", "serde"] }
+# Gmail's `send_email`/`read_email` are `base64.URLEncoding` — the **padded**
+# URL-safe alphabet — and reproducing the padding requirement is what keeps
+# `extractBody`'s part selection identical (#313). Already in the lock through
+# `rmcp`, so this is a direct name for a crate that was compiling anyway.
+base64 = "0.22"
+# Analytics buckets days, hours and weekdays in the *request's* timezone, so an
+# IANA name has to resolve to real offsets and real DST transitions. Go reaches
+# its own embedded tzdata through `time.LoadLocation`; this is the equivalent.
+chrono-tz = "0.10"
+# Which IANA zone Go's `time.Local` is, for the scheduler port: a default
+# `gocron.Scheduler` runs in `time.Local` and prepends `CRON_TZ=Local`, so the
+# port has to resolve that name the way Go's `initLocal` does. Already in the
+# tree as a chrono `clock` dependency; named here because the code calls it.
+iana-time-zone = "0.1"
+form_urlencoded = "1.2.2"
+
+# SMTP, for the notification sender (#307). `POST /api/notifications/test` and
+# the task-completion emails behind it are the one thing in this shell that
+# talks to a server we do not run, so this is the one place a TLS stack is
+# unavoidable — the note on `reqwest` above is about *loopback* hops, not about
+# TLS being unwelcome.
+#
+# **rustls, not native-tls.** `native-tls` links the platform's OpenSSL/Schannel,
+# and the release workflow builds five target triples; the whole reason
+# `rusqlite` is `bundled` is that there is no C toolchain to arrange. rustls is
+# pure Rust and cross-compiles the same way everything else here does.
+#
+# `hostname` is on because it is what lettre greets the server with. Go's
+# go-mail sends `os.Hostname()`; without this feature lettre says `localhost`,
+# which some relays reject outright.
+#
+# `pool` is off deliberately: a transport is built per send, exactly as
+# `NewSMTPProvider` is constructed per event on the Go side, so a connection
+# pool would hold sockets open against a server for a message every few hours.
+lettre = { version = "0.11.19", default-features = false, features = [
+    "smtp-transport",
+    "builder",
+    "rustls-tls",
+    "ring",
+    "webpki-roots",
+    "hostname",
+] }
+
+# The MCP protocol itself, for `src/claude/mcp.rs` and `src/claude/tool.rs`.
+# Go's SDK hands `modelcontextprotocol/go-sdk`'s `*mcp.Server` to that SDK's
+# streamable-HTTP handler; `rmcp` is the same project's Rust SDK and this port
+# does the same thing with it. See `desktop/CLAUDE.md` → "Hosting a tool" for
+# why it was taken over the hand-rolled JSON-RPC trait #281 left behind.
+#
+# `default-features = false` drops `macros`: `#[tool_router]` derives a tool set
+# at compile time, and every one of Agento's seven in-process servers picks its
+# tools at **runtime** from the integration's allowlist (six integrations —
+# google, github, slack, jira, confluence, telegram — plus `internal/tools`;
+# WhatsApp went in #273/#292). Two ways to declare a tool is exactly what issue
+# #282 exists to prevent, so the macros stay off and `claude::new_tool` is the
+# only one.
+#
+# `transport-io` is deliberately absent: it exists only to host a server over
+# this process's stdin/stdout, which nothing in Agento does. See
+# `src/claude/mcp.rs` for why Go's `ServeStdioMCP` is not ported.
+#
+# The transitive cost is small because the async and HTTP halves are already
+# here. Nine crates enter the lockfile, 569 → 578 packages: `rmcp` itself,
+# `sse-stream`, `futures`, `pastey`, `rand`, `rand_core`, `chacha20`, and —
+# from turning on `schemars`'s derive — `schemars_derive` and
+# `serde_derive_internals`. `tokio`, `http`, `http-body(-util)`, `tokio-stream`,
+# `tokio-util`, `chrono`, `uuid`, `serde_json`, `thiserror`, `base64`,
+# `schemars` and `tracing` were all in the tree already.
+rmcp = { version = "3.1.2", default-features = false, features = [
+    "server",
+    "transport-streamable-http-server",
+] }
+# `rmcp` hands a tool handler the call's `CancellationToken`, so its type is in
+# `claude::new_tool`'s public signature and every ported tool names it. Direct
+# rather than reached through `rmcp`, which does not re-export it. Already in
+# the tree via `tokio-stream` and `rmcp`; adds no package.
+tokio-util = { version = "0.7", default-features = false }
+# Not used directly — declared so the feature is. `rmcp` instruments itself with
+# `tracing`, this app logs through `tauri-plugin-log` over the `log` crate, and
+# nothing installs a `tracing` subscriber, so every protocol-layer event was
+# being dropped on the floor: "rejected request with disallowed Host header
+# (possible DNS rebinding attempt)" among them. The `log` feature makes
+# `tracing`'s macros fall back to `log::log!` whenever no subscriber has been
+# installed, which here is always. Also already in the tree; adds no package.
+tracing = { version = "0.1", features = ["log"] }
+# Reflection-derived JSON Schema — the whole of what the typed-tool layer buys,
+# and what `jsonschema:` struct tags do on the Go side. It must stay on the same
+# major `rmcp` uses (1.x today), or `#[derive(JsonSchema)]` would implement a
+# different trait than `ToolRoute::parameters` wants and fail to compile. It is
+# a direct dependency rather than a re-export so a tool's input struct can write
+# a plain `#[derive(JsonSchema)]`; cargo unifies it with rmcp's copy, so the
+# library itself adds no package — only the two derive crates counted above.
+schemars = "1"
+# The `/api` credential, since #405: an EdDSA (Ed25519) JWT signed by a
+# per-install keypair, replacing #400's opaque per-launch string.
+#
+# **Version 9, deliberately, and it is the one dependency decision here that a
+# `cargo add` gets wrong.** `jsonwebtoken` 9 signs and verifies through `ring`,
+# which this tree already carries (rustls, and `lettre`'s `ring` feature), so
+# the whole change adds **one** package to `Cargo.lock` and no crypto stack at
+# all. Version 11 dropped `ring` for a choice between `aws_lc_rs` and
+# `rust_crypto`: the first links AWS-LC through a C build, which is precisely
+# what the `rusqlite = bundled` and `rustls`-over-`native-tls` notes above exist
+# to keep out of a workflow that cross-builds five release triples, and the
+# second would put a second, differently-audited Ed25519 implementation beside
+# `ring` for no caller's benefit. #405's own scoping named "≥9" for this reason;
+# do not "upgrade" it without re-reading those two notes.
+#
+# `default-features = false` drops `use_pem`, and with it `pem` and
+# `simple_asn1`. Nothing here handles PEM: the private key is stored as the
+# PKCS#8 DER `ring` generates, and the public key travels as JWKS, which is
+# exactly the format that lets an external verifier use a stock library with no
+# PEM handling of its own.
+jsonwebtoken = { version = "9", default-features = false }
+# Key *generation* and the `kid` digest, which `jsonwebtoken` does not provide —
+# it consumes keys and never mints them. Default features on purpose: `alloc` is
+# what `Ed25519KeyPair::generate_pkcs8` needs, and relying on cargo's feature
+# unification with rustls's copy to supply it would make this build depend on
+# another crate's feature flags. Adds no package; `ring` 0.17 was already in the
+# lock.
+ring = "0.17"
+
+# Graceful shutdown of the `claude` subprocess is close stdin → SIGTERM →
+# SIGKILL after 5s, mirroring the TypeScript SDK's close(). Tokio's own
+# `Child::kill` is SIGKILL only, so the SIGTERM step needs raw kill(2).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# macOS traffic-light positioning (src/macos_window.rs). The config's
+# `trafficLightPosition` is applied by tao inside the content view's
+# `drawRect:`, which the WKWebView covers and so rarely repaints — the shell
+# repositions the buttons directly instead. Versions and features mirror what
+# tao 0.35 already has in the lockfile, so nothing new compiles.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSButton",
+    "NSControl",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSGeometry",
+] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+# Unwind, not abort, and this is load-bearing rather than a default.
+#
+# The seam's whole safety story is that a native failure falls back to the Go
+# sidecar — "a ported route can only be as broken as an unported one". Two
+# mechanisms implement it and **both need unwinding**: `proxy.rs` turns a
+# panicking native handler into an `Err` that forwards, and `native/scan.rs`
+# clears its in-progress flag from a `Drop` guard. Under `panic = "abort"`
+# neither runs, so in the build users actually install, a panic anywhere in the
+# ported code takes the whole desktop app down instead of degrading — with no
+# window, no message, and a sidecar right there that could have answered.
+#
+# The cost is a slightly larger binary. That is the right trade for a shell
+# whose entire design premise is that the Rust half may be wrong.
+panic = "unwind"
+strip = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+# Collecting a streamed SSE body in the turn tests.
+http-body-util = "0.1"

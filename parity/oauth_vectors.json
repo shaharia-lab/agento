@@ -1,0 +1,125 @@
+{
+  "cases": [
+    {
+      "name": "google/all-three-services",
+      "note": "the full scope union, in Scopes's calendar-gmail-drive order",
+      "type": "google",
+      "credentials": {
+        "client_id": "cid-123.apps.googleusercontent.com",
+        "client_secret": "secret-456"
+      },
+      "services": {
+        "calendar": {
+          "enabled": true,
+          "tools": null
+        },
+        "drive": {
+          "enabled": true,
+          "tools": null
+        },
+        "gmail": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "port": 43117,
+      "auth_url": "https://accounts.google.com/o/oauth2/auth?access_type=offline\u0026client_id=cid-123.apps.googleusercontent.com\u0026prompt=consent\u0026redirect_uri=http%3A%2F%2Flocalhost%3A43117%2Fcallback\u0026response_type=code\u0026scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.send+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.readonly+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive\u0026state=state"
+    },
+    {
+      "name": "google/one-service",
+      "note": "only the enabled service's scopes are requested",
+      "type": "google",
+      "credentials": {
+        "client_id": "cid-123.apps.googleusercontent.com",
+        "client_secret": "secret-456"
+      },
+      "services": {
+        "gmail": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "port": 43117,
+      "auth_url": "https://accounts.google.com/o/oauth2/auth?access_type=offline\u0026client_id=cid-123.apps.googleusercontent.com\u0026prompt=consent\u0026redirect_uri=http%3A%2F%2Flocalhost%3A43117%2Fcallback\u0026response_type=code\u0026scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.send+https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.readonly\u0026state=state"
+    },
+    {
+      "name": "google/disabled-service-is-not-a-scope",
+      "note": "presence in the map is not enough; Enabled is what counts",
+      "type": "google",
+      "credentials": {
+        "client_id": "cid-123.apps.googleusercontent.com",
+        "client_secret": "secret-456"
+      },
+      "services": {
+        "calendar": {
+          "enabled": true,
+          "tools": null
+        },
+        "gmail": {
+          "enabled": false,
+          "tools": null
+        }
+      },
+      "port": 43117,
+      "auth_url": "https://accounts.google.com/o/oauth2/auth?access_type=offline\u0026client_id=cid-123.apps.googleusercontent.com\u0026prompt=consent\u0026redirect_uri=http%3A%2F%2Flocalhost%3A43117%2Fcallback\u0026response_type=code\u0026scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar\u0026state=state"
+    },
+    {
+      "name": "google/no-services",
+      "note": "an empty scope set still builds a URL — with scope absent, not empty",
+      "type": "google",
+      "credentials": {
+        "client_id": "cid-123.apps.googleusercontent.com",
+        "client_secret": "secret-456"
+      },
+      "services": {},
+      "port": 43117,
+      "auth_url": "https://accounts.google.com/o/oauth2/auth?access_type=offline\u0026client_id=cid-123.apps.googleusercontent.com\u0026prompt=consent\u0026redirect_uri=http%3A%2F%2Flocalhost%3A43117%2Fcallback\u0026response_type=code\u0026state=state"
+    },
+    {
+      "name": "google/credentials-needing-escapes",
+      "note": "url.Values.Encode is Go's QueryEscape: a space is +, not %20",
+      "type": "google",
+      "credentials": {
+        "client_id": "a b\u0026c=d",
+        "client_secret": "s"
+      },
+      "services": {
+        "drive": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "port": 1,
+      "auth_url": "https://accounts.google.com/o/oauth2/auth?access_type=offline\u0026client_id=a+b%26c%3Dd\u0026prompt=consent\u0026redirect_uri=http%3A%2F%2Flocalhost%3A1%2Fcallback\u0026response_type=code\u0026scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive\u0026state=state"
+    },
+    {
+      "name": "slack/bot-scopes",
+      "note": "the v2 authorize endpoint, and no access-type or approval-prompt",
+      "type": "slack",
+      "credentials": {
+        "client_id": "9876.5432",
+        "client_secret": "slack-secret"
+      },
+      "services": {
+        "messaging": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "port": 43118,
+      "auth_url": "https://slack.com/oauth/v2/authorize?client_id=9876.5432\u0026redirect_uri=http%3A%2F%2Flocalhost%3A43118%2Fcallback\u0026response_type=code\u0026scope=channels%3Aread+channels%3Ahistory+chat%3Awrite+users%3Aread+search%3Aread+groups%3Aread+groups%3Ahistory\u0026state=state"
+    },
+    {
+      "name": "slack/services-are-ignored",
+      "note": "Slack's scopes are fixed, so the same URL as above with no services",
+      "type": "slack",
+      "credentials": {
+        "client_id": "9876.5432",
+        "client_secret": "slack-secret"
+      },
+      "services": {},
+      "port": 43118,
+      "auth_url": "https://slack.com/oauth/v2/authorize?client_id=9876.5432\u0026redirect_uri=http%3A%2F%2Flocalhost%3A43118%2Fcallback\u0026response_type=code\u0026scope=channels%3Aread+channels%3Ahistory+chat%3Awrite+users%3Aread+search%3Aread+groups%3Aread+groups%3Ahistory\u0026state=state"
+    }
+  ]
+}

@@ -1,239 +1,374 @@
-# Development Guide
+# Development
 
-## Requirements
+Setting up, running and testing Agento Desktop locally.
 
-- Go 1.25+
-- Node.js 22+
-- npm
+Read [Architecture](architecture.md) first if you have not. The full working
+notes, with the reasoning behind individual decisions, are in
+[`CLAUDE.md`](../CLAUDE.md).
+
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Running it](#running-it)
+- [Project layout](#project-layout)
+- [Tests](#tests)
+- [Parity testing](#parity-testing)
+- [Conventions](#conventions)
+- [Debugging](#debugging)
+- [Branches and pull requests](#branches-and-pull-requests)
 
 ---
 
-## Local setup
+## Prerequisites
+
+| Tool | Version |
+| --- | --- |
+| Rust | stable, 1.88 or newer |
+| Node.js | 22 |
+| Claude Code CLI | any recent version, for running agents |
+
+**Linux system packages**, once:
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+Fedora and openSUSE have the same libraries under their own names. macOS needs
+Xcode command line tools; Windows needs the MSVC build tools.
+
+The crate declares Rust 1.88 as its minimum. That floor is what makes cargo
+resolve `rmcp` 3.x rather than silently falling back to a superseded major, and
+it turns on clippy's version-gated lints.
+
+---
+
+## Setup
 
 ```bash
 git clone https://github.com/shaharia-lab/agento.git
 cd agento
-```
-
-Install frontend dependencies:
-
-```bash
-cd frontend && npm ci --legacy-peer-deps
+npm install
 ```
 
 ---
 
-## Run in development mode
+## Running it
 
-Open two terminals.
+All commands run from the repository root.
 
-**Terminal 1 — backend**
+| Command | What it does |
+| --- | --- |
+| `npm run app` | The real desktop window, with hot reload |
+| `npm run app:alongside` | The same, but without taking over an installed Agento's window |
+| `npm run dev` | Vite only, in a browser tab. Fastest loop for pure layout work |
+| `npm run build` | Typecheck and build the frontend alone |
+| `npm run app:build` | Native installers for the current platform |
+| `cd src-tauri && cargo build` | Backend only |
 
-```bash
-make dev-backend
-```
+`npm run app` runs against `~/.agento-desktop-dev`, **not** your real `~/.agento`.
+That is deliberate: two Agento processes on one data directory share a scheduler,
+so every scheduled task would fire twice. Release builds use the real directory.
 
-**Terminal 2 — frontend (with hot reload)**
+To seed the dev instance with data, copy your real database into it, or create
+rows through the UI.
 
-```bash
-make dev-frontend
-```
+### Running beside an installed Agento
 
-The backend serves the API on `:8990`. The frontend dev server proxies API calls to it.
+`npm run app` **cannot** run while an installed Agento is open. It will exit
+immediately with no output and focus the installed window instead — which looks
+like the command silently failing.
 
----
-
-## Build a production binary
-
-```bash
-make build
-```
-
-This builds the frontend first, embeds the static files, then compiles the Go binary at `./agento`.
-
-The binary includes version info from the current git state:
-
-```bash
-./agento --version
-# agento version v0.1.0 (commit abc1234, built 2026-02-26T10:00:00Z)
-```
-
----
-
-## Run tests
+Nothing is wrong and nothing is shared: `tauri-plugin-single-instance` derives
+its identity from the app identifier, and dev and release have the same one, so
+the dev launch finds the installed app's claim and hands off to it.
 
 ```bash
-make test                                        # all Go tests
-go test ./internal/service/... -run TestChatService   # a single Go test
-
-cd frontend && npm run test                      # Vitest, run once
-cd frontend && npm run test:watch                # the watcher
-
-make e2e-setup                                   # first time: Playwright + Chromium
-make e2e                                         # Playwright against the built binary
+npm run app:alongside
 ```
 
-Two suites need a word of explanation:
+merges a one-key config override (`src-tauri/tauri.alongside.conf.json`) that
+changes the identifier to `com.shaharialab.agento.dev`. That is the only lever
+that works on every platform: the plugin accepts an explicit `dbus_id` on Linux
+alone, while Windows uses a named mutex and macOS a socket path, both derived
+from the identifier. On Linux you can watch both claims coexist:
 
-- **`make bench-scale`** runs the scale harness against a generated `~/.claude`
-  corpus and asserts the scan, sessions-list and analytics budgets against it.
-  `SCALE=medium` (default) is ~800 sessions; `SCALE=large` is 5,000 sessions
-  across 500 projects and writes about a gigabyte. It sits behind the `scale`
-  build tag, so `make test` never runs it.
-- **The Claude Sessions e2e specs read the machine's real `~/.claude`** and skip
-  when it is too small to exercise what they check. They exist because two
-  behaviours cannot be verified through a CDP-driven Chrome tab, which reports
-  `visibilityState: "hidden"`: the list's infinite-scroll sentinel
-  (IntersectionObserver stops delivering) and the transcript's timeline jump
-  (smooth scrolling does not animate).
+```
+$ busctl --user list | grep shaharialab
+com.shaharialab.agento.SingleInstance       …  agento-desktop
+com.shaharialab.agento.dev.SingleInstance   …  agento
+```
 
-Frontend tests run under jsdom with `src/test/setup.ts` loaded for every suite,
-which registers jest-dom's matchers and an `afterEach(cleanup)` — a break there
-breaks every file at once, not just the one you edited.
+**It does not help you test anything origin-dependent.** A dev build loads the
+configured `devUrl`, which Tauri's ACL treats as a *local* origin, so the whole
+class of permission bug that only affects release builds is invisible in dev by
+construction. That needs `npm run app:build`.
 
-Regenerate mocks after changing an interface:
+### Pointing at a different Claude CLI
 
 ```bash
-make generate    # mockery, reads .mockery.yaml
+AGENTO_CLAUDE_EXECUTABLE=/path/to/claude npm run app
 ```
 
----
-
-## Lint
-
-```bash
-make lint                          # golangci-lint over ./...
-cd frontend && npm run lint        # ESLint
-cd frontend && npm run typecheck   # tsc -b
-cd frontend && npm run format      # Prettier
-```
-
-`npm run typecheck` uses `tsc -b` deliberately: the root `tsconfig.json` is a
-solution file with `"files": []`, so a plain `tsc --noEmit` checks nothing and
-exits 0.
-
-Pre-commit hooks enforce all of the above on every commit.
+This is also how the turn tests point the runner at a scripted fake CLI.
 
 ---
 
 ## Project layout
 
 ```
-agento/
-├── cmd/              # Cobra commands (web, ask, update, service)
-├── frontend/         # React + TypeScript UI
-├── internal/
-│   ├── agent/          # SDK integration, RunOptions, session execution
-│   ├── api/            # HTTP handlers
-│   ├── build/          # Build-time version variables
-│   ├── claudesessions/ # Claude session scanner, analytics, processor pipeline, journey
-│   ├── config/         # AppConfig, AgentConfig, MCP config, Claude config dirs, settings
-│   ├── daemon/         # `agento service` — launchd / systemd user units
-│   ├── eventbus/       # In-process event bus
-│   ├── integrations/   # Integration registry + in-process MCP servers
-│   │                   #   (Google, GitHub, Slack, Jira, Confluence, Telegram, WhatsApp)
-│   ├── logger/         # Structured slog loggers (system + per-session), log rotation
-│   ├── notification/   # Notification system (SMTP email)
-│   ├── pricing/        # Effective-dated model pricing catalog and resolver
-│   ├── scheduler/      # Task scheduler and job executor
-│   ├── server/         # HTTP server wiring, router, API guards
-│   ├── service/        # Business logic (AgentService, ChatService, TaskService, …)
-│   ├── storage/        # SQLite persistence (~/.agento/agento.db) and migrations
-│   ├── telemetry/      # OpenTelemetry traces, metrics, logs (config, providers, hot-reload)
-│   ├── tools/          # Local MCP tool server
-│   ├── trigger/        # Inbound-message dispatcher (Telegram triggers)
-│   └── updater/        # Release check and in-place self-update
-├── e2e/              # Playwright end-to-end tests
-├── docs/             # Documentation
-├── .goreleaser.yaml  # Release configuration
-└── Makefile
+src/                 the React frontend
+src-tauri/
+  src/lib.rs         startup: database, migrations, pricing seed, window, menu
+  src/proxy.rs       the axum server; routes every request into native/
+  src/guards.rs      the Host and Content-Type guards, applied before routing
+  src/menu.rs        the native macOS menu
+  src/paths.rs       data directory and database path
+  src/claude/        the Claude Agent SDK
+  src/native/        the backend, one module per API area
+  tests/             integration tests
+parity/              the frozen wire-format spec; see parity/README.md
+docs/                this documentation
+CLAUDE.md            the full working notes
 ```
 
-**Import rule:** `config` ← `service` ← `api`, never the reverse.
-
 ---
 
-## Conventions worth knowing before you change things
-
-**Database migrations** are appended to the migrations slice in
-`internal/storage/`; each one must also bump the hardcoded expected version in
-`sqlite_test.go`. Migrations are forward-only.
-
-**Cached-figure version constants.** Anything the scanner or the insight
-pipeline *stores* per session is only recomputed when the data looks stale.
-Changing how a stored figure is derived therefore means bumping the matching
-constant — `CurrentScannerVersion` for scanner output, `CurrentProcessorVersion`
-for insight output — to force a re-read. Some predicates are shared by both
-sides (turn segmentation is the notable one), and a change there needs **both**
-bumped, or the two halves drift apart.
-
-User-caused staleness works the same way but cannot be a constant: the pricing
-catalog revision and the idle threshold are recorded alongside the cache, and a
-drift in either invalidates it.
-
-**Per-session metrics are defined twice, deliberately** — in SQL
-(`internal/claudesessions/session_query.go`, which the list filters and sorts on)
-and in TypeScript (`frontend/src/lib/sessionMetrics.ts`, which renders the row).
-They must agree, or a row showing $36.30 gets hidden by "cost at most $40".
-`internal/claudesessions/testdata/session_metric_vectors.json` is read by both
-languages' tests so a change to one definition fails the other's.
-
-**API types are mirrored** in `frontend/src/types.ts`; keep them in step when
-changing a response shape.
-
----
-
-## Release process
-
-Releases are created automatically when a `v*` tag is pushed:
+## Tests
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+cd src-tauri
+
+cargo test                    # unit tests and the non-ignored integration tests
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
 ```
 
-The release workflow builds cross-platform binaries, pushes a Homebrew formula to the tap, and creates a GitHub Release with a changelog.
-
-To verify the release config locally (no publish):
+From the repository root:
 
 ```bash
-goreleaser release --snapshot --clean
+npm run build                 # tsc --noEmit plus the Vite build
 ```
+
+CI runs exactly those four, on every push and pull request, unfiltered — with
+one tree there is no change that cannot affect the app.
+
+### Tests that need something
+
+Several suites are `#[ignore]`d because they need a corpus or a database that CI
+does not have.
+
+```bash
+# The scan, against a copy of your real corpus.
+cargo test --test scan_live -- --ignored --nocapture
+
+# The MCP server, dialled by the real Claude Code CLI.
+cargo test --test claude_mcp_live -- --ignored --nocapture
+```
+
+Verify scanner changes against real data, not a fixture. The failure that matters
+is a scan that runs, reports success and writes nothing, and a three-file fixture
+cannot tell that apart from a healthy one.
+
+### The fake CLI
+
+`tests/claude_sdk.rs`, `tests/chat_turn.rs` and `tests/scheduled_run.rs` drive a
+scripted fake `claude` CLI: a Python program that logs every line it receives on
+stdin and replies to order. It is the only way to test things that are properties
+of a **sequence** rather than of a function, such as the handshake order or a
+disconnect while a permission prompt is pending.
+
+Two traps in writing those tests:
+
+- **The fake must not exit after the result.** A real CLI in session mode stays
+  alive. A fake that exits closes stdout, ends the stream for free, and passes
+  against a drain that would never terminate on its own.
+- **Assert the revert fails.** A disconnect test that passes with and without the
+  fix is testing nothing.
 
 ---
 
-## Timezones
+## The wire format is exact
 
-**Storage and transport are UTC, end to end.** Session timestamps are parsed
-from the JSONL `Z` values, cached as UTC, and serialized as UTC on every API
-response. Nothing below the presentation layer knows about the user's zone.
+Agento's JSON is specified down to the byte: field names, key order, escaping,
+float spelling. `parity/` is that specification, and CI asserts it on every run.
 
-**Aggregation and display follow the browser.** A day, an hour and a weekday
-only mean something once you say whose they are — so the analytics and insights
-endpoints take a `tz` query parameter (an IANA name such as `Europe/Berlin`),
-which the frontend fills in from
-`Intl.DateTimeFormat().resolvedOptions().timeZone`. The backend resolves it and
-applies `.In(loc)` before deriving any bucket key, and interprets a bare
-`YYYY-MM-DD` `from`/`to` as a local day boundary rather than a UTC one.
+**Read [`parity/README.md`](../parity/README.md) before touching one of those
+files.** It records which of them are *audits* rather than fixtures and what
+that costs, and how each is read — `include_str!` with a relative path, or
+anchored to `CARGO_MANIFEST_DIR`.
 
-A missing or unrecognized `tz` falls back to UTC rather than erroring: analytics
-is a read-only dashboard, and refusing to render it over a bad zone string is
-worse than rendering what every caller got before the parameter existed.
+A golden changes by deliberate edit with a reason in the commit message, never
+by "refresh until green". Nothing regenerates them, and that is deliberate: a
+golden re-recorded to match new behaviour does not prove the new behaviour is
+right, it only removes the thing that would have told you it changed.
 
-Two consequences worth knowing:
+One shape you will meet and should not tidy: `parity/claude_analytics_golden.json`'s
+fixture is built with **no ties on any sort key**. A tie makes the expected
+ordering ambiguous, and an ambiguous golden is a flaky test.
 
-- **The zone database is embedded** (`_ "time/tzdata"` in `main.go`). Without
-  it `time.LoadLocation` depends on the host's `/usr/share/zoneinfo`, which a
-  distroless or scratch container does not have — every lookup would fail and
-  silently fall the whole dashboard back to UTC. Costs about 450KB.
-- **Daily bucket walks step the calendar day, not 24 hours.** A local day is 23
-  or 25 hours long across a DST transition, so a fixed step drifts off the wall
-  clock and duplicates one day key while skipping another. The heatmap grid
-  stays a fixed 24 columns: a spring-forward day has one empty cell and a
-  fall-back day has one doubled, which is the honest answer for a "when do I
-  work?" chart.
+---
 
-Non-analytics timestamps already render locally through `toLocale*` helpers and
-need nothing special. One deliberate exception: `formatRateDate`
-(`frontend/src/lib/pricing.ts`) pins UTC, because a pricing rate is keyed to a
-day rather than an instant — see `docs/pricing.md`.
+## Conventions
+
+### Adding an endpoint
+
+1. **Read `native/gojson.rs` first.** Rust's natural JSON is not Agento's.
+   Encode through `gojson::to_vec`, keep struct fields in the order they should
+   appear on the wire, and use `skip_serializing_if` to omit empty values.
+2. Ordering and grouping are part of the answer, including anything hashed — a
+   fingerprint over rows in a different order is a different fingerprint for
+   identical data.
+3. Add it to the endpoint registry in `native/mod.rs`, record it in
+   `parity/read_routes.json` or `write_routes.json`, and cover it with a test
+   beside the module.
+
+### JSON decoding
+
+`null` has to decode as a zero value rather than a type error, and serde rejects
+it by default. Three helper types exist for that, and they are **types rather
+than `deserialize_with` functions** for a reason recorded in `gojson.rs`: a
+function makes the field required, which forces `#[serde(default)]` on every
+call site, which in turn widens the struct into accepting short positional
+arrays that must be refused.
+
+| Helper | Covers |
+| --- | --- |
+| `null_is_zero_value` | A `null` scalar field |
+| `GoList<T>` / `GoMap<V>` | A `null` element or map value |
+| `GoStruct<T>` | A struct built positionally from a JSON array |
+
+The direction matters. An over-**reject** is visible and loud. An
+over-**accept** writes a row that should have been refused, with nothing to
+report it.
+
+### Wire types
+
+`src/lib/types.ts` mirrors the API's field names verbatim, snake_case included.
+Every array field is `T[] | null`, because an empty slice serialises as `null`.
+
+Every state-changing `/api` request needs `Content-Type: application/json`,
+including the ones with no body. `api.ts` does this for you.
+
+### UI
+
+- Reuse the existing CSS classes. New CSS goes in a per-view file imported by
+  that view.
+- **No `window.confirm`, `alert` or `prompt`.** They block the WebView and can
+  wedge the app. Render inline confirmation UI.
+- External links must go through `openExternal` in `lib/tauri.ts`.
+  `window.open` and `target="_blank"` do not leave a Tauri webview.
+- Directory fields use the native picker via `pickDirectory`. The in-app browser
+  is the plain-browser fallback only.
+- Charts are inline SVG using the theme tokens. No chart libraries.
+- `.card` sets `overflow: hidden`, so as a flex child of a scrolling column its
+  min-content height collapses to zero. Dashboard containers need
+  `> * { flex: 0 0 auto; }`.
+
+### Database access off the request path
+
+Anything reached from a timer, a webhook or a stream must hand its database work
+to `db::blocking(label, f)`. The label is per call site so the log says which
+section panicked. See
+[Architecture](architecture.md#threading).
+
+### Logging
+
+`message key=value`, every string value with `{:?}`, at `info`, and **after** the
+effect. Failures at `warn`, writes at `info`, successful reads at `debug`.
+
+Never log a body, a header or a query string. Bodies here are chat prompts,
+system prompts and integration credentials; query strings carry search terms and
+project paths.
+
+Every write log line has a test asserting it is emitted. A line with no test is a
+line that quietly stops being emitted.
+
+---
+
+## Debugging
+
+**The webview inspector** is available in dev builds: right-click, Inspect
+Element, or the usual devtools shortcut.
+
+**The log file** is where backend problems land:
+
+| Platform | Path |
+| --- | --- |
+| Linux | `~/.local/share/com.shaharialab.agento/logs/Agento.log` |
+| macOS | `~/Library/Logs/com.shaharialab.agento/Agento.log` |
+| Windows | `%LOCALAPPDATA%\com.shaharialab.agento\logs\Agento.log` |
+
+In `npm run app` the same lines go to the terminal.
+
+**Curling the API** works in dev, since the server is on a fixed port — but
+`/api` requires a bearer token, so the header comes first:
+
+```bash
+curl -s -H "Authorization: Bearer $(cat ~/.agento-desktop-dev/api-token)" \
+  http://127.0.0.1:8991/api/agents | jq
+```
+
+The token is a **JWT signed by the install's Ed25519 key** (#405). A debug build
+writes a freshly minted one to `~/.agento-desktop-dev/api-token` (0600) on every
+launch so `curl` can reach the API; a release build writes it nowhere — its API
+is reachable from the app window and nothing else. Without the header the guard
+answers **401** before the handler runs.
+
+Add `-H "Content-Type: application/json"` for anything that is not a `GET`, or
+the guard answers 415 instead.
+
+Chrome on `:1420` needs no token of its own: Vite's proxy reads the same file and
+adds the header when it forwards.
+
+**A token for something that is not the app** — a script, a CI job, another
+local service — comes from **Settings → Security**, where you choose `read` or
+`write` and can revoke it again. It is shown once and stored nowhere, so copy it
+then. Note what `write` means before issuing one: `POST /api/agents` can create
+an agent with bypassed permissions and `POST /api/chats/{id}/messages` can run
+it, so a `write` token is arbitrary command execution on the machine.
+
+Anything holding the public key can **verify** an Agento token without asking
+Agento — that is what `GET /.well-known/jwks.json` is for, and it needs no
+credential:
+
+```bash
+curl -s http://127.0.0.1:8991/.well-known/jwks.json | jq
+scripts/verify-jwks.py --token "$(cat ~/.agento-desktop-dev/api-token)"
+```
+
+The second line is an independent check (PyJWT over OpenSSL rather than the
+`ring` the app signs with). Run it after changing anything about the token
+format, the JWKS document or the signing key.
+
+**Two 4xx to tell apart.** A **401** is "you have not proved who you are" —
+missing, expired, revoked, or signed by a key this install no longer uses. A
+**403** with `this token's scope does not permit this request` is "you have, and
+a `read` token cannot do that"; retrying will not help, and the fix is a `write`
+token or a different request.
+
+**Regenerating the key in Settings → Security invalidates every token at once**,
+the dev file's included, which is exactly what it is for. The app window recovers
+on its own; a shell holding an old token needs to re-read the file.
+
+There is also a project skill, `local-verify`, describing how to reproduce a bug
+before fixing it and how to verify each hop separately: backend wire, browser
+engine, real Tauri webview, then the UI flow. Use it for anything that "works in
+Chrome but not in the app".
+
+---
+
+## Branches and pull requests
+
+- Work happens on a feature branch. PRs target **`main`**.
+- Releases are tagged `desktop-v*` from `main`. The prefix is retained because
+  every installed app polls the fixed `desktop-latest` tag — see
+  [Releasing](releasing.md).
+
+Before opening a PR, from the repository root:
+
+```bash
+npm run build
+cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+```
+
+Releasing is documented separately in [Releasing](releasing.md).

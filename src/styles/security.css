@@ -1,0 +1,69 @@
+/* ============================================================================
+   Settings → Security (#405).
+
+   Almost everything here reuses the settings form's own classes — `.formsec`,
+   `.formrow`, `.kvtable`, `.badge`, `.confirm`. What is left is the one thing
+   this pane has that nothing else does: a credential shown exactly once, which
+   has to look like something you act on rather than something you scroll past.
+
+   Colours are the semantic tokens, declared on bare `:root` and re-declared in
+   both dark blocks, so nothing here needs a media query.
+   ========================================================================== */
+
+/* The created-token banner.
+
+   Deliberately loud, and deliberately not a toast: nothing stores the token, so
+   a notification that faded on a timer would destroy the only copy that will
+   ever exist. It stays until dismissed. */
+.secnew {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-5) var(--sp-6);
+  margin-bottom: var(--sp-6);
+  border: 1px solid var(--green);
+  border-radius: var(--r-md);
+  background: var(--green-soft);
+}
+
+.secnew__head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--fg);
+}
+
+.secnew__head > span {
+  flex: 1;
+}
+
+.secnew__token {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--bg-inset);
+}
+
+/* A JWT is ~300 characters with no spaces in it, so it has to be allowed to
+   wrap — `truncate` would hide most of the credential, and a horizontal
+   scroller inside a settings form is worse than three short lines. */
+.secnew__token code {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  word-break: break-all;
+  color: var(--fg);
+}
+
+/* A revoked token stays in the list — the list is a record of what was issued,
+   and a row vanishing would read as a deletion the user did not perform — so it
+   is dimmed rather than removed. */
+.secrow--revoked td {
+  color: var(--fg-tertiary);
+}

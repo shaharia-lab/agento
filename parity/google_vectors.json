@@ -1,0 +1,2369 @@
+{
+  "_comment": [
+    "Cross-language parity vectors for internal/integrations/google, the Google",
+    "integration's in-process MCP server. Generated from Go, then frozen. Read by",
+    "desktop/parity/google_parity_test.go (Go) and by",
+    "desktop/src-tauri/src/native/integrations/google/ (Rust).",
+    "Unlike the other five integrations, Google's requests are built by generated",
+    "client libraries rather than by the handlers, so these recordings are the only",
+    "written specification of what goes on the wire — see the test file's header.",
+    "'tools' and 'hosting' come from live tools/list calls against servers built by",
+    "google.Start; 'calls' and 'refreshes' from live tools/call calls against a",
+    "scripted fake Google that records every request each tool built.",
+    "The client secret, refresh token and access token are fixtures, not secrets:",
+    "they are recorded because the refresh request body is a parity surface.",
+    "X-Goog-Api-Client and User-Agent are deliberately not recorded (they embed the",
+    "Go toolchain version) and neither is the random multipart boundary.",
+    "Regenerate with: go test ./desktop/parity/ -run TestGoogleVectors -update-google-vectors"
+  ],
+  "integration_id": "goog-parity",
+  "server_name": "google-goog-parity",
+  "version": "1.0.0",
+  "client_id": "parity-client-id.apps.googleusercontent.com",
+  "client_secret": "GOCSPX-parity-client-secret",
+  "refresh_token": "1//parity-refresh-token",
+  "access_token": "ya29.parity-access-token",
+  "now_placeholder": "«now»",
+  "tools": [
+    {
+      "name": "create_event",
+      "description": "Creates a new event on the user's primary Google Calendar.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "description": "Optional description of the event",
+            "type": "string"
+          },
+          "end": {
+            "description": "required,End time in RFC3339 format",
+            "type": "string"
+          },
+          "start": {
+            "description": "required,Start time in RFC3339 format (e.g. 2026-03-01T10:00:00-07:00)",
+            "type": "string"
+          },
+          "summary": {
+            "description": "required,The title of the event",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary",
+          "start",
+          "end",
+          "description"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "create_file",
+      "description": "Creates a new file in Google Drive with the provided content.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "description": "required,Text content of the file",
+            "type": "string"
+          },
+          "mime_type": {
+            "description": "MIME type (default: text/plain)",
+            "type": "string"
+          },
+          "name": {
+            "description": "required,Name of the file to create",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "content",
+          "mime_type"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "download_file",
+      "description": "Downloads and returns the text content of a Google Drive file by its ID.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "file_id": {
+            "description": "required,The Google Drive file ID to download",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "list_files",
+      "description": "Lists files and folders in Google Drive.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "description": "Maximum number of files to return (default 10, max 100)",
+            "type": "integer"
+          },
+          "query": {
+            "description": "Optional Drive query string (e.g. \"name contains 'report'\")",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "max_results"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "read_email",
+      "description": "Reads the full content of a Gmail message by its ID.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "description": "required,The Gmail message ID to read",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "search_email",
+      "description": "Searches Gmail messages using Gmail query syntax (e.g. 'from:alice@example.com is:unread').",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "description": "Maximum number of messages to return (default 10, max 50)",
+            "type": "integer"
+          },
+          "query": {
+            "description": "required,Gmail search query (e.g. 'from:alice@example.com is:unread')",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "max_results"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "send_email",
+      "description": "Sends an email via Gmail.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "description": "required,Plain text body of the email",
+            "type": "string"
+          },
+          "subject": {
+            "description": "required,Email subject line",
+            "type": "string"
+          },
+          "to": {
+            "description": "required,Recipient email address(es), comma-separated",
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "subject",
+          "body"
+        ],
+        "type": "object"
+      }
+    },
+    {
+      "name": "view_events",
+      "description": "Lists events from the user's primary Google Calendar within an optional time range.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "max_results": {
+            "description": "Maximum number of events to return (default 10, max 100)",
+            "type": "integer"
+          },
+          "time_max": {
+            "description": "Upper bound for event start time in RFC3339 format.",
+            "type": "string"
+          },
+          "time_min": {
+            "description": "Lower bound for event end time in RFC3339 format. Defaults to now.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "time_min",
+          "time_max",
+          "max_results"
+        ],
+        "type": "object"
+      }
+    }
+  ],
+  "hosting": [
+    {
+      "case": "every service enabled with no tool list — an empty allowed set hosts everything",
+      "services": {
+        "calendar": {
+          "enabled": true,
+          "tools": null
+        },
+        "drive": {
+          "enabled": true,
+          "tools": null
+        },
+        "gmail": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "tools": [
+        "create_event",
+        "create_file",
+        "download_file",
+        "list_files",
+        "read_email",
+        "search_email",
+        "send_email",
+        "view_events"
+      ]
+    },
+    {
+      "case": "no services at all",
+      "services": {},
+      "tools": []
+    },
+    {
+      "case": "one service enabled hosts only its tools",
+      "services": {
+        "calendar": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "tools": [
+        "create_event",
+        "view_events"
+      ]
+    },
+    {
+      "case": "a disabled service contributes neither its gate nor its names",
+      "services": {
+        "calendar": {
+          "enabled": true,
+          "tools": null
+        },
+        "drive": {
+          "enabled": false,
+          "tools": [
+            "create_event"
+          ]
+        },
+        "gmail": {
+          "enabled": true,
+          "tools": null
+        }
+      },
+      "tools": [
+        "create_event",
+        "read_email",
+        "search_email",
+        "send_email",
+        "view_events"
+      ]
+    },
+    {
+      "case": "one tool named under one service narrows every enabled service",
+      "services": {
+        "calendar": {
+          "enabled": true,
+          "tools": null
+        },
+        "drive": {
+          "enabled": true,
+          "tools": null
+        },
+        "gmail": {
+          "enabled": true,
+          "tools": [
+            "send_email"
+          ]
+        }
+      },
+      "tools": [
+        "send_email"
+      ]
+    },
+    {
+      "case": "a name contributed by one service admits a tool belonging to another",
+      "services": {
+        "calendar": {
+          "enabled": true,
+          "tools": null
+        },
+        "drive": {
+          "enabled": true,
+          "tools": null
+        },
+        "gmail": {
+          "enabled": true,
+          "tools": [
+            "send_email",
+            "list_files"
+          ]
+        }
+      },
+      "tools": [
+        "list_files",
+        "send_email"
+      ]
+    },
+    {
+      "case": "an enabled but unknown service still narrows the ones that exist",
+      "services": {
+        "calendar": {
+          "enabled": true,
+          "tools": null
+        },
+        "other": {
+          "enabled": true,
+          "tools": [
+            "view_events"
+          ]
+        }
+      },
+      "tools": [
+        "view_events"
+      ]
+    },
+    {
+      "case": "a tool named by a disabled service is not allowed anywhere",
+      "services": {
+        "calendar": {
+          "enabled": false,
+          "tools": [
+            "create_event"
+          ]
+        },
+        "drive": {
+          "enabled": true,
+          "tools": [
+            "list_files"
+          ]
+        }
+      },
+      "tools": [
+        "list_files"
+      ]
+    }
+  ],
+  "starting": [
+    {
+      "case": "the ordinary shape",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": ""
+    },
+    {
+      "case": "an empty auth column is unauthenticated",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "",
+      "error": "integration \"goog-parity\" has no auth token"
+    },
+    {
+      "case": "a literal null auth column is unauthenticated",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "null",
+      "error": "integration \"goog-parity\" has no auth token"
+    },
+    {
+      "case": "an empty auth object is authenticated and hosts",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{}",
+      "error": ""
+    },
+    {
+      "case": "no expiry at all is Go's zero time, which never expires",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"refresh_token\":\"1//y\"}",
+      "error": ""
+    },
+    {
+      "case": "a malformed expiry fails the auth parse",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"not a time\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"not a time\" as \"2006-01-02T15:04:05Z07:00\": cannot parse \"not a time\" as \"2006\"",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"not a time\""
+    },
+    {
+      "case": "an expiry without a zone fails too",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T00:00:00\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01T00:00:00\" as \"2006-01-02T15:04:05Z07:00\": cannot parse \"\" as \"Z07:00\"",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01T00:00:00\""
+    },
+    {
+      "case": "a date-only expiry fails too",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01\" as \"2006-01-02T15:04:05Z07:00\": cannot parse \"\" as \"T\"",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01\""
+    },
+    {
+      "case": "an offset expiry is accepted",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T00:00:00+05:30\"}",
+      "error": ""
+    },
+    {
+      "case": "a numeric expiry is a type error",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":1893456000}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: Time.UnmarshalJSON: input is not a JSON string"
+    },
+    {
+      "case": "a null expiry is the zero time",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":null}",
+      "error": ""
+    },
+    {
+      "case": "an empty string expiry fails",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"\" as \"2006-01-02T15:04:05Z07:00\": cannot parse \"\" as \"2006\"",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"\""
+    },
+    {
+      "case": "a lowercase t and z separator",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01t00:00:00z\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01t00:00:00z\" as \"2006-01-02T15:04:05Z07:00\": cannot parse \"t00:00:00z\" as \"T\"",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01t00:00:00z\""
+    },
+    {
+      "case": "a one-digit fractional second",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T00:00:00.5Z\"}",
+      "error": ""
+    },
+    {
+      "case": "a trailing space after the zone fails",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T00:00:00Z \"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01T00:00:00Z \": extra text: \" \"",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-01-01T00:00:00Z \""
+    },
+    {
+      "case": "a leap second",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-06-30T23:59:60Z\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-06-30T23:59:60Z\": second out of range",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-06-30T23:59:60Z\""
+    },
+    {
+      "case": "an out-of-range month",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-13-01T00:00:00Z\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-13-01T00:00:00Z\": month out of range",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: parsing time \"2030-13-01T00:00:00Z\""
+    },
+    {
+      "case": "Go's zero time is the sentinel its writer emits, and never expires",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"refresh_token\":\"1//y\",\"expiry\":\"0001-01-01T00:00:00Z\"}",
+      "error": ""
+    },
+    {
+      "case": "a comma decimal separator",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T00:00:00,5Z\"}",
+      "error": ""
+    },
+    {
+      "case": "a one-digit hour",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T5:04:05Z\"}",
+      "error": ""
+    },
+    {
+      "case": "an offset hour of 24",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"2030-01-01T00:00:00+24:00\"}",
+      "error": ""
+    },
+    {
+      "case": "a numeric token_type is a type error",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":5}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: json: cannot unmarshal number into Go struct field Token.token_type of type string",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: does not decode at line 1 column 39"
+    },
+    {
+      "case": "a string expires_in is a type error",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"expires_in\":\"soon\"}",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: json: cannot unmarshal string into Go struct field Token.expires_in of type int64",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: does not decode at line 1 column 44"
+    },
+    {
+      "case": "an auth array is not a struct",
+      "credentials": "{\"client_id\":\"parity-client-id.apps.googleusercontent.com\",\"client_secret\":\"GOCSPX-parity-client-secret\"}",
+      "auth": "[\"ya29.x\"]",
+      "error": "parsing auth token for \"goog-parity\": parsing oauth token: json: cannot unmarshal array into Go value of type oauth2.Token",
+      "rust_error": "parsing auth token for \"goog-parity\": parsing oauth token: does not decode at line 1 column 0"
+    },
+    {
+      "case": "an empty auth beats a broken credentials blob",
+      "credentials": "nope",
+      "auth": "",
+      "error": "integration \"goog-parity\" has no auth token"
+    },
+    {
+      "case": "a broken credentials blob beats a broken auth blob",
+      "credentials": "nope",
+      "auth": "{\"access_token\":\"ya29.x\",\"expiry\":\"not a time\"}",
+      "error": "parsing google credentials for \"goog-parity\": invalid character 'o' in literal null (expecting 'u')",
+      "rust_error": "parsing google credentials for \"goog-parity\": does not decode at line 1 column 2"
+    },
+    {
+      "case": "a truncated credentials blob carrying the secret",
+      "credentials": "{\"client_secret\":\"GOCSPX-parity-client-secret\",",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": "parsing google credentials for \"goog-parity\": unexpected end of JSON input",
+      "rust_error": "parsing google credentials for \"goog-parity\": does not decode at line 1 column 47"
+    },
+    {
+      "case": "empty credentials fail the credentials parse",
+      "credentials": "",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": "parsing google credentials for \"goog-parity\": credentials are empty"
+    },
+    {
+      "case": "a null credentials blob is a no-op, so the client id is empty",
+      "credentials": "null",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": ""
+    },
+    {
+      "case": "a credentials array is not a struct",
+      "credentials": "[\"cid\",\"secret\"]",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": "parsing google credentials for \"goog-parity\": json: cannot unmarshal array into Go value of type config.GoogleCredentials",
+      "rust_error": "parsing google credentials for \"goog-parity\": does not decode at line 1 column 0"
+    },
+    {
+      "case": "credentials that are not JSON at all",
+      "credentials": "nope",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": "parsing google credentials for \"goog-parity\": invalid character 'o' in literal null (expecting 'u')",
+      "rust_error": "parsing google credentials for \"goog-parity\": does not decode at line 1 column 2"
+    },
+    {
+      "case": "empty credentials fields still host",
+      "credentials": "{\"client_id\":\"\",\"client_secret\":\"\"}",
+      "auth": "{\"access_token\":\"ya29.x\",\"token_type\":\"Bearer\",\"refresh_token\":\"1//y\",\"expiry\":\"2030-01-01T00:00:00.123456789Z\"}",
+      "error": ""
+    }
+  ],
+  "calls": [
+    {
+      "case": "create_event/a full event, with encoding/json's HTML escaping",
+      "tool": "create_event",
+      "arguments": {
+        "description": "notes \u0026 more",
+        "end": "2026-03-01T10:30:00-07:00",
+        "start": "2026-03-01T10:00:00-07:00",
+        "summary": "Standup \u003cdaily\u003e \u0026 sync"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"ev1\",\"summary\":\"Standup\",\"htmlLink\":\"https://cal/ev1\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"description\":\"notes \\u0026 more\",\"end\":{\"dateTime\":\"2026-03-01T10:30:00-07:00\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00-07:00\",\"timeZone\":\"UTC\"},\"summary\":\"Standup \\u003cdaily\\u003e \\u0026 sync\"}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Event created: Standup\nID: ev1\nLink: https://cal/ev1"
+    },
+    {
+      "case": "create_event/an empty description sends no key",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "Standup"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"ev1\",\"summary\":\"Standup\",\"htmlLink\":\"https://cal/ev1\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"Standup\"}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Event created: Standup\nID: ev1\nLink: https://cal/ev1"
+    },
+    {
+      "case": "create_event/the result reads the response and not the request",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "sent"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"ev2\",\"summary\":\"renamed by the server\",\"htmlLink\":\"https://cal/ev2\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"sent\"}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Event created: renamed by the server\nID: ev2\nLink: https://cal/ev2"
+    },
+    {
+      "case": "create_event/null fields decode as zero values",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":null,\"summary\":null,\"htmlLink\":null}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Event created: \nID: \nLink: "
+    },
+    {
+      "case": "create_event/a JSON array is not a struct",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "[true]"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: json: cannot unmarshal array into Go value of type calendar.Event",
+      "rust_text": "creating calendar event: decoding response: invalid type: sequence, expected a JSON object at line 1 column 0"
+    },
+    {
+      "case": "create_event/an error with one reason",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "{\"error\":{\"code\":403,\"message\":\"Insufficient Permission\",\"errors\":[{\"message\":\"Insufficient Permission\",\"domain\":\"global\",\"reason\":\"insufficientPermissions\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 403: Insufficient Permission, insufficientPermissions"
+    },
+    {
+      "case": "create_event/an error with no errors array",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 404,
+          "body": "{\"error\":{\"code\":404,\"message\":\"Not Found\"}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 404: Not Found"
+    },
+    {
+      "case": "create_event/an error with several reasons",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 400,
+          "body": "{\"error\":{\"code\":400,\"message\":\"Bad Request\",\"errors\":[{\"message\":\"m1\",\"reason\":\"r1\"},{\"message\":\"m2\",\"reason\":\"r2\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 400: Bad Request\nMore details:\nReason: r1, Message: m1\nReason: r2, Message: m2\n"
+    },
+    {
+      "case": "create_event/a body that is not a Google error document",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "{\"error\":\"invalid_grant\",\"error_description\":\"Token has been expired or revoked.\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: got HTTP response code 403 with body: {\"error\":\"invalid_grant\",\"error_description\":\"Token has been expired or revoked.\"}"
+    },
+    {
+      "case": "create_event/an error body that is not JSON at all",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 502,
+          "body": "\u003chtml\u003enope\u003c/html\u003e"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: got HTTP response code 502 with body: \u003chtml\u003enope\u003c/html\u003e"
+    },
+    {
+      "case": "view_events/an explicit range, with both bounds",
+      "tool": "view_events",
+      "arguments": {
+        "max_results": 25,
+        "time_max": "2026-03-08T00:00:00Z",
+        "time_min": "2026-03-01T00:00:00Z"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"items\":[{\"id\":\"e1\",\"summary\":\"One\",\"htmlLink\":\"https://cal/e1\",\"start\":{\"dateTime\":\"2026-03-02T09:00:00Z\"}}]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/calendars/primary/events?alt=json\u0026maxResults=25\u0026orderBy=startTime\u0026prettyPrint=false\u0026singleEvents=true\u0026timeMax=2026-03-08T00%3A00%3A00Z\u0026timeMin=2026-03-01T00%3A00%3A00Z",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Found 1 event(s):\n\n- One\n  Start: 2026-03-02T09:00:00Z\n  ID: e1\n  Link: https://cal/e1\n"
+    },
+    {
+      "case": "view_events/an empty time_min defaults to now and no time_max key is sent",
+      "tool": "view_events",
+      "arguments": {
+        "max_results": 0,
+        "time_max": "",
+        "time_min": ""
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"items\":[]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/calendars/primary/events?alt=json\u0026maxResults=10\u0026orderBy=startTime\u0026prettyPrint=false\u0026singleEvents=true\u0026timeMin=%C2%ABnow%C2%BB",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "No events found in the specified range."
+    },
+    {
+      "case": "view_events/max_results above the maximum falls back to the default",
+      "tool": "view_events",
+      "arguments": {
+        "max_results": 101,
+        "time_max": "",
+        "time_min": "2026-03-01T00:00:00Z"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"items\":[]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/calendars/primary/events?alt=json\u0026maxResults=10\u0026orderBy=startTime\u0026prettyPrint=false\u0026singleEvents=true\u0026timeMin=2026-03-01T00%3A00%3A00Z",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "No events found in the specified range."
+    },
+    {
+      "case": "view_events/the maximum itself is sent",
+      "tool": "view_events",
+      "arguments": {
+        "max_results": 100,
+        "time_max": "",
+        "time_min": "2026-03-01T00:00:00Z"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"items\":[]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/calendars/primary/events?alt=json\u0026maxResults=100\u0026orderBy=startTime\u0026prettyPrint=false\u0026singleEvents=true\u0026timeMin=2026-03-01T00%3A00%3A00Z",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "No events found in the specified range."
+    },
+    {
+      "case": "view_events/an all-day event falls back to date",
+      "tool": "view_events",
+      "arguments": {
+        "max_results": 10,
+        "time_max": "",
+        "time_min": "2026-03-01T00:00:00Z"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"items\":[{\"id\":\"e2\",\"summary\":\"Holiday\",\"htmlLink\":\"https://cal/e2\",\"start\":{\"date\":\"2026-03-03\"}},{\"id\":\"e3\",\"summary\":\"Timed\",\"htmlLink\":\"https://cal/e3\",\"start\":{\"dateTime\":\"2026-03-04T09:00:00Z\",\"date\":\"ignored\"}}]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/calendars/primary/events?alt=json\u0026maxResults=10\u0026orderBy=startTime\u0026prettyPrint=false\u0026singleEvents=true\u0026timeMin=2026-03-01T00%3A00%3A00Z",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Found 2 event(s):\n\n- Holiday\n  Start: 2026-03-03\n  ID: e2\n  Link: https://cal/e2\n\n- Timed\n  Start: 2026-03-04T09:00:00Z\n  ID: e3\n  Link: https://cal/e3\n"
+    },
+    {
+      "case": "view_events/no items at all",
+      "tool": "view_events",
+      "arguments": {
+        "max_results": 10,
+        "time_max": "",
+        "time_min": "2026-03-01T00:00:00Z"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"items\":null}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/calendars/primary/events?alt=json\u0026maxResults=10\u0026orderBy=startTime\u0026prettyPrint=false\u0026singleEvents=true\u0026timeMin=2026-03-01T00%3A00%3A00Z",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "No events found in the specified range."
+    },
+    {
+      "case": "send_email/the RFC822 message is padded base64url in the body",
+      "tool": "send_email",
+      "arguments": {
+        "body": "Line one\nLine two",
+        "subject": "Hello \u0026 \u003chi\u003e",
+        "to": "alice@example.com, bob@example.com"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"m1\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/gmail/v1/users/me/messages/send?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"raw\":\"VG86IGFsaWNlQGV4YW1wbGUuY29tLCBib2JAZXhhbXBsZS5jb20NClN1YmplY3Q6IEhlbGxvICYgPGhpPg0KQ29udGVudC1UeXBlOiB0ZXh0L3BsYWluOyBjaGFyc2V0PVVURi04DQoNCkxpbmUgb25lCkxpbmUgdHdv\"}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Email sent successfully. Message ID: m1"
+    },
+    {
+      "case": "send_email/an empty body still produces a message",
+      "tool": "send_email",
+      "arguments": {
+        "body": "",
+        "subject": "",
+        "to": "a@b"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"m2\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/gmail/v1/users/me/messages/send?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"raw\":\"VG86IGFAYg0KU3ViamVjdDogDQpDb250ZW50LVR5cGU6IHRleHQvcGxhaW47IGNoYXJzZXQ9VVRGLTgNCg0K\"}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Email sent successfully. Message ID: m2"
+    },
+    {
+      "case": "send_email/non-ASCII is encoded as UTF-8 bytes before base64",
+      "tool": "send_email",
+      "arguments": {
+        "body": "héllo",
+        "subject": "naïve — ☕",
+        "to": "a@b"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"m3\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/gmail/v1/users/me/messages/send?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"raw\":\"VG86IGFAYg0KU3ViamVjdDogbmHDr3ZlIOKAlCDimJUNCkNvbnRlbnQtVHlwZTogdGV4dC9wbGFpbjsgY2hhcnNldD1VVEYtOA0KDQpow6lsbG8=\"}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Email sent successfully. Message ID: m3"
+    },
+    {
+      "case": "read_email/headers and a text/plain body",
+      "tool": "read_email",
+      "arguments": {
+        "message_id": "18c0f0a1b2c3d4e5"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"18c0f0a1b2c3d4e5\",\"payload\":{\"mimeType\":\"text/plain\",\"body\":{\"data\":\"aGVsbG8gdGhlcmU=\"},\"headers\":[{\"name\":\"Subject\",\"value\":\"Re: lunch\"},{\"name\":\"From\",\"value\":\"alice@example.com\"},{\"name\":\"Date\",\"value\":\"Mon, 2 Mar 2026 09:00:00 +0000\"},{\"name\":\"X-Other\",\"value\":\"ignored\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/18c0f0a1b2c3d4e5?alt=json\u0026format=full\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Subject: Re: lunch\nFrom: alice@example.com\nDate: Mon, 2 Mar 2026 09:00:00 +0000\n\nhello there"
+    },
+    {
+      "case": "read_email/a later header of the same name wins",
+      "tool": "read_email",
+      "arguments": {
+        "message_id": "m"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"payload\":{\"headers\":[{\"name\":\"Subject\",\"value\":\"first\"},{\"name\":\"Subject\",\"value\":\"second\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/m?alt=json\u0026format=full\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Subject: second\nFrom: \nDate: \n\n"
+    },
+    {
+      "case": "read_email/an unpadded part is skipped and the next one is used",
+      "tool": "read_email",
+      "arguments": {
+        "message_id": "m"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"payload\":{\"mimeType\":\"multipart/mixed\",\"headers\":[],\"parts\":[{\"mimeType\":\"text/plain\",\"body\":{\"data\":\"aGk\"}},{\"mimeType\":\"text/plain\",\"body\":{\"data\":\"Ynll\"}}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/m?alt=json\u0026format=full\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Subject: \nFrom: \nDate: \n\nbye"
+    },
+    {
+      "case": "read_email/only text/plain is decoded, depth first",
+      "tool": "read_email",
+      "arguments": {
+        "message_id": "m"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"payload\":{\"mimeType\":\"multipart/alternative\",\"headers\":[],\"parts\":[{\"mimeType\":\"text/html\",\"body\":{\"data\":\"PGI-PC9iPg==\"}},{\"mimeType\":\"text/plain\",\"body\":{\"data\":\"aGk=\"}}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/m?alt=json\u0026format=full\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Subject: \nFrom: \nDate: \n\nhi"
+    },
+    {
+      "case": "read_email/a message id needing escaping",
+      "tool": "read_email",
+      "arguments": {
+        "message_id": "a/b c?d\u0026e"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"payload\":{\"headers\":[]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/a%2Fb%20c%3Fd%26e?alt=json\u0026format=full\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Subject: \nFrom: \nDate: \n\n"
+    },
+    {
+      "case": "read_email/a 404 quotes the id with %q",
+      "tool": "read_email",
+      "arguments": {
+        "message_id": "missing\"quoted"
+      },
+      "responses": [
+        {
+          "status": 404,
+          "body": "{\"error\":{\"code\":404,\"message\":\"Requested entity was not found.\"}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/missing%22quoted?alt=json\u0026format=full\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": true,
+      "text": "reading email \"missing\\\"quoted\": googleapi: Error 404: Requested entity was not found."
+    },
+    {
+      "case": "search_email/one list and one fetch per message, with repeated query keys",
+      "tool": "search_email",
+      "arguments": {
+        "max_results": 2,
+        "query": "from:alice@example.com is:unread"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"messages\":[{\"id\":\"m1\"},{\"id\":\"m2\"}]}"
+        },
+        {
+          "status": 200,
+          "body": "{\"payload\":{\"headers\":[{\"name\":\"Subject\",\"value\":\"One\"},{\"name\":\"From\",\"value\":\"a@b\"},{\"name\":\"Date\",\"value\":\"D1\"}]}}"
+        },
+        {
+          "status": 200,
+          "body": "{\"payload\":{\"headers\":[{\"name\":\"Subject\",\"value\":\"Two\"},{\"name\":\"From\",\"value\":\"c@d\"},{\"name\":\"Date\",\"value\":\"D2\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages?alt=json\u0026maxResults=2\u0026prettyPrint=false\u0026q=from%3Aalice%40example.com+is%3Aunread",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/m1?alt=json\u0026format=metadata\u0026metadataHeaders=Subject\u0026metadataHeaders=From\u0026metadataHeaders=Date\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/m2?alt=json\u0026format=metadata\u0026metadataHeaders=Subject\u0026metadataHeaders=From\u0026metadataHeaders=Date\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Found 2 message(s):\n\nID: m1\nSubject: One\nFrom: a@b\nDate: D1\n\n---\n\nID: m2\nSubject: Two\nFrom: c@d\nDate: D2"
+    },
+    {
+      "case": "search_email/a failed fetch is skipped and the count still counts it",
+      "tool": "search_email",
+      "arguments": {
+        "max_results": 3,
+        "query": "x"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"messages\":[{\"id\":\"m1\"},{\"id\":\"m2\"},{\"id\":\"m3\"}]}"
+        },
+        {
+          "status": 200,
+          "body": "{\"payload\":{\"headers\":[{\"name\":\"Subject\",\"value\":\"One\"}]}}"
+        },
+        {
+          "status": 403,
+          "body": "{\"error\":{\"code\":403,\"message\":\"nope\"}}"
+        },
+        {
+          "status": 200,
+          "body": "{\"payload\":{\"headers\":[{\"name\":\"Subject\",\"value\":\"Three\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages?alt=json\u0026maxResults=3\u0026prettyPrint=false\u0026q=x",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/m1?alt=json\u0026format=metadata\u0026metadataHeaders=Subject\u0026metadataHeaders=From\u0026metadataHeaders=Date\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/m2?alt=json\u0026format=metadata\u0026metadataHeaders=Subject\u0026metadataHeaders=From\u0026metadataHeaders=Date\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        },
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/m3?alt=json\u0026format=metadata\u0026metadataHeaders=Subject\u0026metadataHeaders=From\u0026metadataHeaders=Date\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Found 3 message(s):\n\nID: m1\nSubject: One\nFrom: \nDate: \n\n---\n\nID: m3\nSubject: Three\nFrom: \nDate: "
+    },
+    {
+      "case": "search_email/an empty query still sends the q key",
+      "tool": "search_email",
+      "arguments": {
+        "max_results": 0,
+        "query": ""
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"messages\":[]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages?alt=json\u0026maxResults=10\u0026prettyPrint=false\u0026q=",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "No messages found matching the query."
+    },
+    {
+      "case": "search_email/max_results above 50 falls back to the default",
+      "tool": "search_email",
+      "arguments": {
+        "max_results": 51,
+        "query": "x"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"messages\":null}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages?alt=json\u0026maxResults=10\u0026prettyPrint=false\u0026q=x",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "No messages found matching the query."
+    },
+    {
+      "case": "search_email/50 itself is sent",
+      "tool": "search_email",
+      "arguments": {
+        "max_results": 50,
+        "query": "x"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"messages\":[]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages?alt=json\u0026maxResults=50\u0026prettyPrint=false\u0026q=x",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "No messages found matching the query."
+    },
+    {
+      "case": "list_files/a query is sent when set",
+      "tool": "list_files",
+      "arguments": {
+        "max_results": 3,
+        "query": "name contains 'report' and trashed = false"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"files\":[{\"id\":\"f1\",\"name\":\"Report.pdf\",\"mimeType\":\"application/pdf\",\"modifiedTime\":\"2026-03-01T09:00:00Z\",\"webViewLink\":\"https://drive/f1\"}]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=3\u0026prettyPrint=false\u0026q=name+contains+%27report%27+and+trashed+%3D+false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Found 1 file(s):\n\nName: Report.pdf\nID: f1\nType: application/pdf\nModified: 2026-03-01T09:00:00Z\nLink: https://drive/f1"
+    },
+    {
+      "case": "list_files/an empty query sends no q key at all",
+      "tool": "list_files",
+      "arguments": {
+        "max_results": 0,
+        "query": ""
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"files\":[]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=10\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "No files found."
+    },
+    {
+      "case": "list_files/max_results above the maximum falls back to the default",
+      "tool": "list_files",
+      "arguments": {
+        "max_results": 101,
+        "query": ""
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"files\":null}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=10\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "No files found."
+    },
+    {
+      "case": "list_files/several files are joined by a rule",
+      "tool": "list_files",
+      "arguments": {
+        "max_results": 2,
+        "query": ""
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"files\":[{\"id\":\"f1\",\"name\":\"A\",\"mimeType\":\"text/plain\",\"modifiedTime\":\"t1\",\"webViewLink\":\"l1\"},{\"id\":\"f2\",\"name\":\"B\",\"mimeType\":null,\"modifiedTime\":null,\"webViewLink\":null}]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=2\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Found 2 file(s):\n\nName: A\nID: f1\nType: text/plain\nModified: t1\nLink: l1\n\n---\n\nName: B\nID: f2\nType: \nModified: \nLink: "
+    },
+    {
+      "case": "create_file/the media type is sniffed and the mime_type argument is metadata only",
+      "tool": "create_file",
+      "arguments": {
+        "content": "# Notes\n\nplain text",
+        "mime_type": "text/markdown",
+        "name": "notes.md"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f9\",\"name\":\"notes.md\",\"webViewLink\":\"https://drive/f9\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/markdown\",\"name\":\"notes.md\"}\n"
+            },
+            {
+              "content_type": "text/plain; charset=utf-8",
+              "body": "# Notes\n\nplain text"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: notes.md\nID: f9\nLink: https://drive/f9"
+    },
+    {
+      "case": "create_file/an empty mime_type defaults to text/plain in the metadata",
+      "tool": "create_file",
+      "arguments": {
+        "content": "hello",
+        "mime_type": "",
+        "name": "a.txt"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f10\",\"name\":\"a.txt\",\"webViewLink\":\"https://drive/f10\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a.txt\"}\n"
+            },
+            {
+              "content_type": "text/plain; charset=utf-8",
+              "body": "hello"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a.txt\nID: f10\nLink: https://drive/f10"
+    },
+    {
+      "case": "create_file/HTML content sniffs as text/html regardless of mime_type",
+      "tool": "create_file",
+      "arguments": {
+        "content": "\u003chtml\u003e\u003cbody\u003ehi\u003c/body\u003e\u003c/html\u003e",
+        "mime_type": "application/json",
+        "name": "page.html"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f11\",\"name\":\"page.html\",\"webViewLink\":\"https://drive/f11\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"application/json\",\"name\":\"page.html\"}\n"
+            },
+            {
+              "content_type": "text/html; charset=utf-8",
+              "body": "\u003chtml\u003e\u003cbody\u003ehi\u003c/body\u003e\u003c/html\u003e"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: page.html\nID: f11\nLink: https://drive/f11"
+    },
+    {
+      "case": "create_file/an empty content still uploads a media part",
+      "tool": "create_file",
+      "arguments": {
+        "content": "",
+        "mime_type": "",
+        "name": "empty"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f12\",\"name\":\"empty\",\"webViewLink\":\"https://drive/f12\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"empty\"}\n"
+            },
+            {
+              "content_type": "text/plain; charset=utf-8",
+              "body": ""
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: empty\nID: f12\nLink: https://drive/f12"
+    },
+    {
+      "case": "download_file/the body is returned verbatim",
+      "tool": "download_file",
+      "arguments": {
+        "file_id": "f1"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "line one\nline two\n"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/files/f1?alt=media\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "line one\nline two\n"
+    },
+    {
+      "case": "download_file/a file id needing escaping",
+      "tool": "download_file",
+      "arguments": {
+        "file_id": "a/b c?d"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "x"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/files/a%2Fb%20c%3Fd?alt=media\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "x"
+    },
+    {
+      "case": "download_file/an empty file is an empty result",
+      "tool": "download_file",
+      "arguments": {
+        "file_id": "f2"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": ""
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/files/f2?alt=media\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": ""
+    },
+    {
+      "case": "download_file/a 403 quotes the id with %q",
+      "tool": "download_file",
+      "arguments": {
+        "file_id": "f3"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "{\"error\":{\"code\":403,\"message\":\"Insufficient Permission\",\"errors\":[{\"reason\":\"insufficientPermissions\",\"message\":\"Insufficient Permission\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/files/f3?alt=media\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": true,
+      "text": "downloading drive file \"f3\": googleapi: Error 403: Insufficient Permission, insufficientPermissions"
+    },
+    {
+      "case": "create_event/one error whose message differs takes the More details branch",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "{\"error\":{\"code\":403,\"message\":\"Insufficient Permission\",\"errors\":[{\"message\":\"a different message\",\"reason\":\"insufficientPermissions\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 403: Insufficient Permission\nMore details:\nReason: insufficientPermissions, Message: a different message\n"
+    },
+    {
+      "case": "create_event/an error carrying details renders them as an indented block",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 429,
+          "body": "{\"error\":{\"code\":429,\"message\":\"Quota exceeded\",\"details\":[{\"@type\":\"type.googleapis.com/google.rpc.ErrorInfo\",\"reason\":\"RATE_LIMIT_EXCEEDED\",\"domain\":\"googleapis.com\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 429: Quota exceeded\nDetails:\n[\n  {\n    \"@type\": \"type.googleapis.com/google.rpc.ErrorInfo\",\n    \"domain\": \"googleapis.com\",\n    \"reason\": \"RATE_LIMIT_EXCEEDED\"\n  }\n]"
+    },
+    {
+      "case": "create_event/details and errors together",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 400,
+          "body": "{\"error\":{\"code\":400,\"message\":\"Bad\",\"details\":[{\"a\":1}],\"errors\":[{\"reason\":\"r1\",\"message\":\"m1\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 400: Bad\nDetails:\n[\n  {\n    \"a\": 1\n  }\n]\n\nMore details:\nReason: r1, Message: m1\n"
+    },
+    {
+      "case": "create_event/an error with neither code nor message but an errors array",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "{\"error\":{\"errors\":[{\"reason\":\"r\",\"message\":\"m\"}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 403: \nMore details:\nReason: r, Message: m\n"
+    },
+    {
+      "case": "create_event/a top-level array error body is unwrapped",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "[{\"error\":{\"code\":403,\"message\":\"from an array\"}}]"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 403: from an array"
+    },
+    {
+      "case": "create_event/a null element in the errors array is a zero value",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 403,
+          "body": "{\"error\":{\"code\":403,\"message\":\"Denied\",\"errors\":[null]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": true,
+      "text": "creating calendar event: googleapi: Error 403: Denied\nMore details:\nReason: , Message: \n"
+    },
+    {
+      "case": "create_event/omitempty applies to summary and dateTime, not only description",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-01-01T00:00:00Z",
+        "start": "",
+        "summary": ""
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"ev1\",\"summary\":\"Standup\",\"htmlLink\":\"https://cal/ev1\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-01-01T00:00:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"timeZone\":\"UTC\"}}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Event created: Standup\nID: ev1\nLink: https://cal/ev1"
+    },
+    {
+      "case": "create_file/an empty name sends no name key in the metadata",
+      "tool": "create_file",
+      "arguments": {
+        "content": "x",
+        "mime_type": "",
+        "name": ""
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f13\",\"name\":\"\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\"}\n"
+            },
+            {
+              "content_type": "text/plain; charset=utf-8",
+              "body": "x"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: \nID: f13\nLink: l"
+    },
+    {
+      "case": "create_file/content beginning BM sniffs as image/bmp",
+      "tool": "create_file",
+      "arguments": {
+        "content": "BMI calculator results",
+        "mime_type": "",
+        "name": "bmi.txt"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f14\",\"name\":\"bmi.txt\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"bmi.txt\"}\n"
+            },
+            {
+              "content_type": "image/bmp",
+              "body": "BMI calculator results"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: bmi.txt\nID: f14\nLink: l"
+    },
+    {
+      "case": "create_file/content beginning %PDF- sniffs as application/pdf",
+      "tool": "create_file",
+      "arguments": {
+        "content": "%PDF-1.4 not really",
+        "mime_type": "",
+        "name": "a"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f15\",\"name\":\"a\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a\"}\n"
+            },
+            {
+              "content_type": "application/pdf",
+              "body": "%PDF-1.4 not really"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a\nID: f15\nLink: l"
+    },
+    {
+      "case": "create_file/content beginning GIF89a sniffs as image/gif",
+      "tool": "create_file",
+      "arguments": {
+        "content": "GIF89a still text",
+        "mime_type": "",
+        "name": "a"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f16\",\"name\":\"a\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a\"}\n"
+            },
+            {
+              "content_type": "image/gif",
+              "body": "GIF89a still text"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a\nID: f16\nLink: l"
+    },
+    {
+      "case": "create_file/content beginning ID3 sniffs as audio/mpeg",
+      "tool": "create_file",
+      "arguments": {
+        "content": "ID3 v2 notes",
+        "mime_type": "",
+        "name": "a"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f17\",\"name\":\"a\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a\"}\n"
+            },
+            {
+              "content_type": "audio/mpeg",
+              "body": "ID3 v2 notes"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a\nID: f17\nLink: l"
+    },
+    {
+      "case": "create_file/a control byte past 512 bytes does not reach the sniff",
+      "tool": "create_file",
+      "arguments": {
+        "content": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u0000",
+        "mime_type": "",
+        "name": "a"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f18\",\"name\":\"a\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a\"}\n"
+            },
+            {
+              "content_type": "text/plain; charset=utf-8",
+              "body": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u0000"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a\nID: f18\nLink: l"
+    },
+    {
+      "case": "create_file/a control byte inside 512 bytes does",
+      "tool": "create_file",
+      "arguments": {
+        "content": "aaaaaaaaaa\u0000",
+        "mime_type": "",
+        "name": "a"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"id\":\"f19\",\"name\":\"a\",\"webViewLink\":\"l\"}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/upload/drive/v3/files?alt=json\u0026fields=id%2Cname%2CwebViewLink\u0026prettyPrint=false\u0026uploadType=multipart",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "multipart/related",
+          "parts": [
+            {
+              "content_type": "application/json",
+              "body": "{\"mimeType\":\"text/plain\",\"name\":\"a\"}\n"
+            },
+            {
+              "content_type": "application/octet-stream",
+              "body": "aaaaaaaaaa\u0000"
+            }
+          ]
+        }
+      ],
+      "is_error": false,
+      "text": "File created: a\nID: f19\nLink: l"
+    },
+    {
+      "case": "read_email/a null element in parts is skipped, not a decode failure",
+      "tool": "read_email",
+      "arguments": {
+        "message_id": "m"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"payload\":{\"mimeType\":\"multipart/mixed\",\"headers\":[],\"parts\":[null,{\"mimeType\":\"text/plain\",\"body\":{\"data\":\"aGk=\"}}]}}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/gmail/v1/users/me/messages/m?alt=json\u0026format=full\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "Subject: \nFrom: \nDate: \n\nhi"
+    },
+    {
+      "case": "create_event/a 204 renders zero values rather than failing to decode",
+      "tool": "create_event",
+      "arguments": {
+        "description": "",
+        "end": "2026-03-01T10:30:00Z",
+        "start": "2026-03-01T10:00:00Z",
+        "summary": "s"
+      },
+      "responses": [
+        {
+          "status": 204,
+          "body": ""
+        }
+      ],
+      "requests": [
+        {
+          "method": "POST",
+          "target": "/calendars/primary/events?alt=json\u0026prettyPrint=false",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": "application/json",
+          "body": "{\"end\":{\"dateTime\":\"2026-03-01T10:30:00Z\",\"timeZone\":\"UTC\"},\"start\":{\"dateTime\":\"2026-03-01T10:00:00Z\",\"timeZone\":\"UTC\"},\"summary\":\"s\"}\n"
+        }
+      ],
+      "is_error": false,
+      "text": "Event created: \nID: \nLink: "
+    },
+    {
+      "case": "view_events/a zero-fraction float is an integer to Go and not to serde",
+      "tool": "view_events",
+      "arguments": {
+        "max_results": 10.0,
+        "time_max": "",
+        "time_min": "2026-03-01T00:00:00Z"
+      },
+      "responses": [
+        {
+          "status": 200,
+          "body": "{\"items\":[]}"
+        }
+      ],
+      "requests": [
+        {
+          "method": "GET",
+          "target": "/calendars/primary/events?alt=json\u0026maxResults=10\u0026orderBy=startTime\u0026prettyPrint=false\u0026singleEvents=true\u0026timeMin=2026-03-01T00%3A00%3A00Z",
+          "authorization": "Bearer ya29.parity-access-token",
+          "content_type": ""
+        }
+      ],
+      "is_error": false,
+      "text": "No events found in the specified range.",
+      "rust_text": "failed to deserialize parameters: invalid type: floating point `10.0`, expected i64",
+      "rust_no_request": true
+    }
+  ],
+  "refreshes": [
+    {
+      "case": "a token an hour from expiry is reused without a refresh",
+      "expires_in": 3600,
+      "no_refresh_token": false,
+      "token_response": null,
+      "api_response": {
+        "status": 200,
+        "body": "{\"files\":[]}"
+      },
+      "refresh_request": null,
+      "api_request": {
+        "method": "GET",
+        "target": "/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=1\u0026prettyPrint=false",
+        "authorization": "Bearer ya29.parity-access-token",
+        "content_type": ""
+      },
+      "is_error": false,
+      "text": "No files found."
+    },
+    {
+      "case": "a token with no expiry never refreshes",
+      "expires_in": null,
+      "no_refresh_token": false,
+      "token_response": null,
+      "api_response": {
+        "status": 200,
+        "body": "{\"files\":[]}"
+      },
+      "refresh_request": null,
+      "api_request": {
+        "method": "GET",
+        "target": "/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=1\u0026prettyPrint=false",
+        "authorization": "Bearer ya29.parity-access-token",
+        "content_type": ""
+      },
+      "is_error": false,
+      "text": "No files found."
+    },
+    {
+      "case": "a token five seconds from expiry refreshes inside the delta",
+      "expires_in": 5,
+      "no_refresh_token": false,
+      "token_response": {
+        "status": 200,
+        "body": "{\"access_token\":\"ya29.refreshed\",\"token_type\":\"Bearer\",\"expires_in\":3599}"
+      },
+      "api_response": {
+        "status": 200,
+        "body": "{\"files\":[]}"
+      },
+      "refresh_request": {
+        "method": "POST",
+        "target": "/token",
+        "authorization": "",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "client_id=parity-client-id.apps.googleusercontent.com\u0026client_secret=GOCSPX-parity-client-secret\u0026grant_type=refresh_token\u0026refresh_token=1%2F%2Fparity-refresh-token"
+      },
+      "api_request": {
+        "method": "GET",
+        "target": "/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=1\u0026prettyPrint=false",
+        "authorization": "Bearer ya29.refreshed",
+        "content_type": ""
+      },
+      "is_error": false,
+      "text": "No files found."
+    },
+    {
+      "case": "an expired token refreshes and the new access token reaches the request",
+      "expires_in": -60,
+      "no_refresh_token": false,
+      "token_response": {
+        "status": 200,
+        "body": "{\"access_token\":\"ya29.refreshed-2\",\"token_type\":\"Bearer\",\"expires_in\":3599}"
+      },
+      "api_response": {
+        "status": 200,
+        "body": "{\"files\":[]}"
+      },
+      "refresh_request": {
+        "method": "POST",
+        "target": "/token",
+        "authorization": "",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "client_id=parity-client-id.apps.googleusercontent.com\u0026client_secret=GOCSPX-parity-client-secret\u0026grant_type=refresh_token\u0026refresh_token=1%2F%2Fparity-refresh-token"
+      },
+      "api_request": {
+        "method": "GET",
+        "target": "/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=1\u0026prettyPrint=false",
+        "authorization": "Bearer ya29.refreshed-2",
+        "content_type": ""
+      },
+      "is_error": false,
+      "text": "No files found."
+    },
+    {
+      "case": "an expired token with no refresh token is refused before any request",
+      "expires_in": -60,
+      "no_refresh_token": true,
+      "token_response": null,
+      "api_response": {
+        "status": 200,
+        "body": "{\"files\":[]}"
+      },
+      "refresh_request": null,
+      "api_request": null,
+      "is_error": true,
+      "text": "listing drive files: Get \"«api»/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=1\u0026prettyPrint=false\": oauth2: token expired and refresh token is not set",
+      "rust_text": "listing drive files: oauth2: token expired and refresh token is not set"
+    },
+    {
+      "case": "a refused refresh surfaces as the tool's own failure",
+      "expires_in": -60,
+      "no_refresh_token": false,
+      "token_response": {
+        "status": 400,
+        "body": "{\"error\":\"invalid_grant\",\"error_description\":\"Token has been expired or revoked.\"}"
+      },
+      "api_response": {
+        "status": 200,
+        "body": "{\"files\":[]}"
+      },
+      "refresh_request": {
+        "method": "POST",
+        "target": "/token",
+        "authorization": "",
+        "content_type": "application/x-www-form-urlencoded",
+        "body": "client_id=parity-client-id.apps.googleusercontent.com\u0026client_secret=GOCSPX-parity-client-secret\u0026grant_type=refresh_token\u0026refresh_token=1%2F%2Fparity-refresh-token"
+      },
+      "api_request": null,
+      "is_error": true,
+      "text": "listing drive files: Get \"«api»/files?alt=json\u0026fields=files%28id%2Cname%2CmimeType%2Csize%2CmodifiedTime%2CwebViewLink%29\u0026pageSize=1\u0026prettyPrint=false\": oauth2: \"invalid_grant\" \"Token has been expired or revoked.\"",
+      "rust_text": "listing drive files: oauth2: \"invalid_grant\" \"Token has been expired or revoked.\""
+    }
+  ]
+}
