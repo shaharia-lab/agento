@@ -19,6 +19,7 @@ dependencies = [
  "form_urlencoded",
  "http-body-util",
  "iana-time-zone",
+ "jsonwebtoken",
  "lettre",
  "libc",
  "log",
@@ -27,6 +28,7 @@ dependencies = [
  "objc2-app-kit",
  "objc2-foundation",
  "reqwest 0.12.28",
+ "ring",
  "rmcp",
  "rusqlite",
  "rust-embed",
@@ -2316,6 +2318,19 @@ version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5dea2b27dd239b2556ed7a25ba842fe47fd602e7fc7433c2a8d6106d4d9edd70"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "jsonwebtoken"
+version = "9.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a87cc7a48537badeae96744432de36f4be2b4a34a05a5ef32e9dd8a1c169dde"
+dependencies = [
+ "base64 0.22.1",
+ "js-sys",
+ "ring",
  "serde",
  "serde_json",
 ]

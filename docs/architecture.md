@@ -72,7 +72,8 @@ Startup order in `lib.rs`:
 | `/api` reaches Rust via | Vite proxy to `:8991` | same origin |
 | Server port | fixed `8991` | assigned by the OS |
 | Data directory | `~/.agento-desktop-dev` | `~/.agento` |
-| `/api` bearer token | minted per launch, **also** written to `<data dir>/api-token` (0600) so `curl` and Vite's proxy can reach the API | minted per launch, memory only |
+| `/api` credential | a JWT signed by the install's key, **also** written to `<data dir>/api-token` (0600) so `curl` and Vite's proxy can reach the API | a JWT, delivered over IPC only |
+| Signing key | `~/.agento-desktop-dev/api-signing-key.pk8` — its own, so a dev launch can never mint a token the release install honours | `<data dir>/api-signing-key.pk8` |
 
 Dev uses its own data directory on purpose. Two Agento processes sharing
 `~/.agento` share one SQLite file and one scheduler, so scheduled tasks fire
@@ -100,13 +101,34 @@ is this build's:
 - **`validateHost`** rejects a `Host` header the server is not served under. DNS
   rebinding otherwise makes an attacker's page same-origin, at which point CORS
   stops applying.
-- **A bearer token** rejects a request that does not carry this launch's
-  `Authorization: Bearer <token>`. The two guards either side of it are
+- **A signed bearer token** rejects a request that does not carry a valid
+  `Authorization: Bearer <jwt>`. The two guards either side of it are
   *browser*-shaped and neither stops a local process: `curl` sends a loopback
   `Host` and sets its own content type, and this API can create a
-  `bypass`-permission agent and run it. The token is minted per launch, held in
-  memory, and delivered to the webview over Tauri IPC — the one channel another
-  local process cannot reach.
+  `bypass`-permission agent and run it. The app's own credential is delivered to
+  the webview over Tauri IPC — the one channel another local process cannot
+  reach.
+
+  Since #405 the credential is an **EdDSA (Ed25519) JWT signed by a per-install
+  keypair** rather than #400's opaque per-launch string, which is what lets the
+  user hand out access deliberately instead of copying the app's own token out
+  of a debug file. Three properties follow, and they are why the design is
+  asymmetric rather than a table of hashed opaque keys:
+
+  - **Scopes.** `read` serves `GET`/`HEAD`/`OPTIONS`; `write` serves everything,
+    and *is* arbitrary command execution, so the creation UI says so. The split
+    is `is_state_changing`, reused, so there is one definition of it in the tree.
+  - **Offline verification.** `GET /.well-known/jwks.json` publishes the public
+    key, unauthenticated, so another local service can verify a token with a
+    stock JWT library and no Agento code — which opaque keys cannot do at all.
+  - **Regenerate invalidates everything**, with no denylist and no per-token
+    bookkeeping: every previously issued signature simply stops verifying. Single
+    tokens are revoked individually by `jti`.
+
+  A **401** means the caller has not proved who it is (absent, malformed, signed
+  by another key, expired, wrong `aud`, revoked); a **403** means it has, and
+  the token's scope does not cover this request. Both are statuses the Go server
+  never answers, so both are deliberate divergences rather than reproductions.
 - **`requireJSONContentType`** rejects a state-changing request that does not
   declare `application/json`. Without it a cross-origin `POST` carrying
   `text/plain` is a CORS simple request, sent with no preflight, and the side

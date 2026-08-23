@@ -8,6 +8,25 @@
 //! `internal/storage/migrations_vector_test.go`. Adding migration 28 without
 //! regenerating fails Go's own test suite.
 //!
+//! # ...but migration 31 onward is this branch's own (#405)
+//!
+//! That paragraph describes migrations 1–30, and they are still exactly Go's
+//! bytes. It stopped being the whole story with #405, which needs an
+//! `api_tokens` table `main`'s server has never heard of. There is no generator
+//! left to run — #388 deleted the Go tree — so migration 31 is **authored**
+//! here, and the vector file's own `_comment` says so at the top.
+//!
+//! Two rules follow, and both are asserted below:
+//!
+//! - **Do not edit 1–30.** They are a frozen record of what Go produced, and
+//!   the only thing that still makes the "not transcribed" argument above true.
+//! - **Anything appended must be additive.** `main` still ships the Go server
+//!   and it opens the same `~/.agento/agento.db`. `applyMigrations` runs only
+//!   migrations *newer* than the recorded version, so a database at 31 makes an
+//!   `agento web` apply nothing and carry on — it simply never reads the new
+//!   table. A migration that *altered* something Go reads would break that
+//!   process instead, silently, on a user's machine.
+//!
 //! Twenty-seven migrations of hand-copied DDL is precisely the kind of thing
 //! that agrees on every table anyone happens to check and differs on one column
 //! default nobody does — and the failure would surface as a write succeeding
@@ -217,8 +236,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 30, "expected 30 migrations");
-        assert_eq!(expected_version(), 30);
+        assert_eq!(all.len(), 31, "expected 31 migrations");
+        assert_eq!(expected_version(), 31);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -228,6 +247,54 @@ mod tests {
             assert!(!m.sql.is_empty(), "migration {} has no SQL", m.version);
         }
     }
+
+    /// **The boundary between Go's migrations and this branch's** (#405).
+    ///
+    /// 1–30 are the frozen record of what `internal/storage` applied and must
+    /// never be edited; 31 onward is authored here, because #388 deleted the
+    /// generator. Pinned as a number rather than left implicit so that appending
+    /// a migration is a deliberate act with a line to change, and so that a
+    /// *rewrite* of one of Go's — the thing that would quietly destroy the "not
+    /// transcribed" property — shows up as a failing hash rather than as
+    /// nothing at all.
+    #[test]
+    fn the_migrations_go_generated_are_unchanged() {
+        const LAST_GO_MIGRATION: i64 = 30;
+
+        let all = migrations();
+        let go: Vec<&Migration> = all
+            .iter()
+            .filter(|m| m.version <= LAST_GO_MIGRATION)
+            .collect();
+        assert_eq!(go.len(), LAST_GO_MIGRATION as usize);
+
+        // A digest over the whole Go half, so editing any one of them fails
+        // here with a message that says which rule was broken. Update this
+        // constant only if the Go tree is restored and regenerates the file.
+        let mut hasher = ring::digest::Context::new(&ring::digest::SHA256);
+        for m in &go {
+            hasher.update(m.version.to_string().as_bytes());
+            hasher.update(b"\0");
+            hasher.update(m.sql.as_bytes());
+            hasher.update(b"\0");
+        }
+        let digest: String = hasher
+            .finish()
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            digest, GO_MIGRATIONS_SHA256,
+            "migrations 1-{LAST_GO_MIGRATION} are Go's frozen output and must not be \
+             edited; append a new version instead"
+        );
+    }
+
+    /// The digest of migrations 1–30, recorded when #405 appended the first
+    /// non-Go migration.
+    const GO_MIGRATIONS_SHA256: &str =
+        "fb4ae3ab30711f1532444af09913c643a1a662564750fbb81a1b841e333c6da3";
 
     /// The point of embedding rather than transcribing: the SQL must be Go's,
     /// unreformatted. Spot-check a few things a prettifier would silently
@@ -264,7 +331,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 30);
+        assert_eq!(current_version(&conn).expect("version"), 31);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -303,7 +370,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 30);
+        assert_eq!(current_version(&conn).expect("version"), 31);
     }
 
     /// The property this whole function exists for, and the one sequential
@@ -352,7 +419,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 30);
+        assert_eq!(current_version(&conn).expect("version"), 31);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -361,7 +428,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 30);
+        assert_eq!(recorded, 31);
     }
 
     #[test]

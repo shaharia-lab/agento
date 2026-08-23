@@ -27,6 +27,32 @@ The Rust-side assertions all still run — `native/mod.rs` still fails if a rout
 applies and verifies. What is gone is the other half telling us the file is
 complete.
 
+## One file here is not a Go golden
+
+`desktop_routes.json` (#405) records routes that exist **only** in the desktop
+build — `/api/security/*` and `/.well-known/jwks.json`, which no Go router ever
+had. It is the exception to the first sentence of this README, and it is
+deliberate rather than an oversight.
+
+The alternative was to add those routes to `read_routes.json` and
+`write_routes.json`, which would have made both files stop being what they are:
+a record of Go's surface, traceable to a `chi.Walk`. The other alternative was
+to record them nowhere, which #405's own scoping flagged — those files exist so
+the route surface cannot drift silently, and a whole family recorded in neither
+would quietly weaken exactly that.
+
+It also carries the property the two frozen ones lost. Their assertion runs in
+**one direction**: `native/mod.rs` iterates their rows, so a route that is
+claimed and never recorded passes. `desktop_routes.json` is compared for **set
+equality** against `native::security::ROUTES`, a single enumerable const that
+`claims` also matches against — so a route there cannot be added, removed or
+renamed without this file moving. That is what a router walk used to buy,
+recovered the only way available without a router.
+
+Anything added here later must do the same: expose its routes as one const, and
+assert equality both ways. A hand-maintained list asserted in one direction is a
+list that goes stale.
+
 ## Regeneration commands, for the record
 
 These no longer work. They are kept so that anyone reading a golden can see how
@@ -52,6 +78,7 @@ All ran against `main`'s Go tree.
 | `oauth_vectors.json` | `go test ./desktop/parity/ -run TestOAuthVectors -update-oauth-vectors` |
 | `pricing_catalog_golden.json` | `go test ./desktop/parity/ -update-golden` |
 | `pricing_seed_vectors.json` | `go test ./desktop/parity/ -run TestPricingSeed -update-pricing-seed` |
+| `desktop_routes.json` | **no generator** — desktop-only routes, hand-written beside the code and asserted in both directions by `native/mod.rs` |
 | `read_routes.json` | `go test ./desktop/parity/ -run TestReadRoutes -update-read-routes` |
 | `scheduler_vectors.json` | `go test ./internal/scheduler/ -run TestScheduleVectors -update-scheduler-vectors` |
 | `session_metric_vectors.json` | hand-written under `internal/claudesessions/testdata/`, asserted by Go and TypeScript |

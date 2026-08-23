@@ -15,6 +15,7 @@ import { openExternal } from "../lib/tauri";
 import { DirField, useDirPicker } from "../components/DirField";
 import { useHostInfo } from "../lib/host";
 import { LogsPane } from "./settings/LogsPane";
+import { SecurityPane } from "./settings/SecurityPane";
 import {
   UPDATE_PREF_OPTIONS,
   loadUpdatePref,
@@ -114,6 +115,7 @@ type Pane =
   | "notifications"
   | "data"
   | "pricing"
+  | "security"
   | "logs"
   | "advanced";
 
@@ -124,6 +126,7 @@ const PANES: { id: Pane; label: string; icon: IconName }[] = [
   { id: "notifications", label: "Notifications", icon: "bell" },
   { id: "data", label: "Data", icon: "database" },
   { id: "pricing", label: "Pricing", icon: "dollar" },
+  { id: "security", label: "Security", icon: "shield" },
   { id: "logs", label: "Logs", icon: "terminal" },
   { id: "advanced", label: "Advanced", icon: "cpu" },
 ];
@@ -315,6 +318,17 @@ export function SettingsView({
         {pane === "logs" ? (
           <div className="logs__host">
             <LogsPane />
+          </div>
+        ) : pane === "security" ? (
+          /* Security sits outside the settings form's gates for the same
+             reason Logs does, and a sharper version of it: this pane reads and
+             writes `/api/security/*` only, and the one thing that would make
+             `GET /api/settings` fail — a credential this window can no longer
+             present — is exactly what Regenerate is here to fix. Rendering it
+             inside would replace it with "Settings unavailable" at the moment
+             it is the only page worth being on. */
+          <div className="scroll" style={{ flex: 1, padding: "var(--sp-9)" }}>
+            <SecurityPane />
           </div>
         ) : (
         <div className="scroll" style={{ flex: 1, padding: "var(--sp-9)" }}>

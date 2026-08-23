@@ -49,6 +49,7 @@ pub mod query;
 pub mod scan;
 pub mod scanner;
 pub mod schedule;
+pub mod security;
 pub mod sessions;
 pub mod settings;
 pub mod tasks;
@@ -291,7 +292,11 @@ const ENDPOINTS: &[Endpoint] = &[
     integrations::ENDPOINT,
     scan::ENDPOINT,
     uploads::ENDPOINT,
-    // The two entries that are not under `/api`; see their `claims`.
+    // Mostly `/api`, but it also claims `/.well-known/jwks.json` (#405) — the
+    // one route that must stay reachable with no credential, because it is what
+    // a credential is verified against.
+    security::ENDPOINT,
+    // The two entries that are not under `/api` at all; see their `claims`.
     trigger::ENDPOINT,
     health::ENDPOINT,
 ];
@@ -724,6 +729,103 @@ mod tests {
         }
     }
 
+    /// The desktop-only surface, asserted **in both directions** against
+    /// `parity/desktop_routes.json` (#405).
+    ///
+    /// The two Go tables below and above this one are one-directional by
+    /// construction: they iterate their own rows, so a route that is claimed and
+    /// never recorded passes. That is tolerable for them — the Go half of each
+    /// pair walked chi and failed on an unclassified route, so completeness was
+    /// somebody else's job — and it stopped being tolerable when #388 deleted
+    /// that half.
+    ///
+    /// `/api/security/*` and `/.well-known/jwks.json` exist in no Go router at
+    /// all, so they could go in neither file without destroying what those files
+    /// are. This is the third table, and it recovers the missing direction the
+    /// only way available without a router to walk: the module exposes its routes
+    /// as one enumerable const, and this asserts **set equality** with the file.
+    /// So a route here cannot be added, removed or renamed without the file
+    /// moving — which is what the Go pair was for.
+    #[test]
+    fn the_desktop_only_routes_are_recorded_in_both_directions() {
+        use serde::Deserialize;
+        use std::collections::BTreeSet;
+
+        #[derive(Deserialize)]
+        struct Row {
+            method: String,
+            route: String,
+            status: String,
+            owner: String,
+            reason: String,
+        }
+
+        #[derive(Deserialize)]
+        struct Table {
+            routes: Vec<Row>,
+        }
+
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../parity/desktop_routes.json");
+        let raw = std::fs::read_to_string(path).unwrap_or_else(|e| panic!("reading {path}: {e}"));
+        let table: Table = serde_json::from_str(&raw).expect("parsing desktop routes");
+        assert!(!table.routes.is_empty(), "no desktop routes in {path}");
+
+        // Direction one, as the Go tables do it: every recorded route's real
+        // disposition matches what the file says.
+        for row in &table.routes {
+            assert!(
+                matches!(row.status.as_str(), "native" | "dropped"),
+                "{} {} has status {:?}; want native or dropped",
+                row.method,
+                row.route,
+                row.status,
+            );
+            let method = Method::from_bytes(row.method.as_bytes())
+                .unwrap_or_else(|_| panic!("bad method {:?}", row.method));
+            let concrete = row
+                .route
+                .split('/')
+                .map(|segment| {
+                    if segment.starts_with('{') && segment.ends_with('}') {
+                        "sample"
+                    } else {
+                        segment
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("/");
+            assert_eq!(
+                claims(&method, &concrete),
+                row.status == "native",
+                "{} {} — the table says status={:?} ({}, {})",
+                row.method,
+                row.route,
+                row.status,
+                row.owner,
+                row.reason,
+            );
+        }
+
+        // Direction two, which the Go tables cannot have: nothing the module
+        // claims is missing from the file. Compared as patterns rather than
+        // concrete paths, so `{id}` has to be spelled the same on both sides.
+        let recorded: BTreeSet<(String, String)> = table
+            .routes
+            .iter()
+            .map(|row| (row.method.clone(), row.route.clone()))
+            .collect();
+        let claimed: BTreeSet<(String, String)> = security::ROUTES
+            .iter()
+            .map(|(method, route)| (method.to_string(), route.to_string()))
+            .collect();
+        assert_eq!(
+            claimed, recorded,
+            "security::ROUTES and {path} disagree. Every desktop-only route must \
+             be recorded with an owner and a reason; add or remove the row in the \
+             same change as the route."
+        );
+    }
+
     /// The read surface, asserted route by route against
     /// `desktop/parity/read_routes.json` — the write audit's twin, added at
     /// the cut-over (#278). The write file was writes-only by design, which
@@ -916,6 +1018,10 @@ mod tests {
             "/api/integrations/available-tools",
             "/api/integrations/abc",
             "/api/integrations/abc/triggers",
+            "/api/security/keys",
+            "/api/security/tokens",
+            // Outside `/api`, and reached with no credential by design (#405).
+            security::JWKS_PATH,
         ];
         // Paired with a method, because not every area has a read: `uploads`
         // claims a POST and nothing else, and a GET-only probe list would
