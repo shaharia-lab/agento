@@ -215,9 +215,10 @@ Check, in order:
 
 ### Every task fires twice
 
-Two Agento processes are sharing one data directory, most likely the desktop app
-and `agento web`. Close one, or give one its own directory with
-`AGENTO_DATA_DIR`.
+Two Agento processes are sharing one data directory. Agento normally prevents a
+second copy from starting, so this means one of them was pointed at the same
+directory deliberately with `AGENTO_DATA_DIR`. Close one, or give it its own
+directory.
 
 ### A run failed with a timeout
 
@@ -246,8 +247,8 @@ enabled inside it, and the tool is ticked on the agent.
 
 ### WhatsApp is listed but unusable
 
-The desktop app does not support WhatsApp. An existing integration is listed and
-its data is safe, but it cannot be edited or used here.
+Agento does not support WhatsApp. An integration created by an older version is
+still listed and its data is safe, but it cannot be edited or used.
 
 ---
 
@@ -265,8 +266,7 @@ Not below 0.1.1. That release added a database column, and Agento refuses to
 write to a database newer than itself rather than corrupting it — so an older
 build would appear to fail on every action.
 
-Your data is not damaged by this and `agento web` is unaffected; it simply
-ignores schema it does not know. If you need an older desktop build, restore the
+Your data is not damaged by this. If you need an older build, restore the
 `~/.agento` backup you took before upgrading.
 
 ### The update download fails

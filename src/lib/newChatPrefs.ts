@@ -5,9 +5,8 @@
    server already stores a *default* working directory and model, and those mean
    "what a chat should start from"; this means "what I picked last", which is a
    different claim and belongs to this install rather than to the account. Two
-   consequences follow: an `agento web` on the same data dir is unaffected, and
-   clearing site data resets the memory to the server defaults rather than to
-   nothing.
+   The consequence: clearing site data resets the memory to the defaults rather
+   than to nothing.
 
    Every field is optional on read, because the shape will grow and a stored
    blob written by an older build must not throw away the fields it does have.

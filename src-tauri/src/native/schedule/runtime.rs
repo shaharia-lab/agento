@@ -29,11 +29,10 @@
 //!
 //! # What has no analogue here
 //!
-//! Go's `scheduleTaskOnStartup` exists to `recover()` from a panic in
-//! `robfig/cron`'s parser: an expression of exactly `CRON_TZ=UTC` slices out of
-//! range and, on the startup goroutine, takes `agento web` down on every boot
-//! (issue #330). [`super::cron::parse`] returns a `Result` for that input rather
-//! than panicking, so the recover has nothing to catch and is not reproduced —
+//! A cron expression of exactly `CRON_TZ=UTC` slices out of range in the
+//! reference parser, which historically took the whole process down on every
+//! boot (issue #330). [`super::cron::parse`] returns a `Result` for that input
+//! rather than panicking, so there is nothing to recover from here —
 //! the row is skipped with a warning either way. #330 is still a real bug in the
 //! Go server, and validating at save time is still its fix.
 

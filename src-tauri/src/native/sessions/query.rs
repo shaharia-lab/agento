@@ -7,7 +7,7 @@
 //! The metric expressions below are the load-bearing part: a row showing $36.30
 //! must not be hidden by "cost at most $40". That used to be a three-language
 //! agreement — this SQL, `session_query.go` and
-//! `frontend/src/lib/sessionMetrics.ts`, all asserting the same fixture. #388
+//! `frontend/src/lib/sessionMetrics.ts`, all asserting the same fixture. #391
 //! deleted the other two, so this is the only implementation left and
 //! `parity/session_metric_vectors.json` is a frozen record of the figures Go
 //! produced. `tests_db.rs` is its one reader.

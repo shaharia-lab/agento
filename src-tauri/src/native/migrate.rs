@@ -13,7 +13,7 @@
 //! That paragraph describes migrations 1–30, and they are still exactly Go's
 //! bytes. It stopped being the whole story with #405, which needs an
 //! `api_tokens` table `main`'s server has never heard of. There is no generator
-//! left to run — #388 deleted the Go tree — so migration 31 is **authored**
+//! left to run — #391 deleted the Go tree — so migration 31 is **authored**
 //! here, and the vector file's own `_comment` says so at the top.
 //!
 //! Two rules follow, and both are asserted below:
@@ -23,8 +23,8 @@
 //! - **Anything appended must be additive.** `main` still ships the Go server
 //!   and it opens the same `~/.agento/agento.db`. `applyMigrations` runs only
 //!   migrations *newer* than the recorded version, so a database at 31 makes an
-//!   `agento web` apply nothing and carry on — it simply never reads the new
-//!   table. A migration that *altered* something Go reads would break that
+//!   older build apply nothing and carry on — it simply never reads the new
+//!   table. A migration that *altered* an existing column would break such a
 //!   process instead, silently, on a user's machine.
 //!
 //! Twenty-seven migrations of hand-copied DDL is precisely the kind of thing
@@ -251,7 +251,7 @@ mod tests {
     /// **The boundary between Go's migrations and this branch's** (#405).
     ///
     /// 1–30 are the frozen record of what `internal/storage` applied and must
-    /// never be edited; 31 onward is authored here, because #388 deleted the
+    /// never be edited; 31 onward is authored here, because #391 deleted the
     /// generator. Pinned as a number rather than left implicit so that appending
     /// a migration is a deliberate act with a line to change, and so that a
     /// *rewrite* of one of Go's — the thing that would quietly destroy the "not

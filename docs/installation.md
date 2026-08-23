@@ -203,9 +203,6 @@ is a single directory, so a copy is the whole backup:
 cp -r ~/.agento ~/.agento.backup
 ```
 
-`agento web` is not affected either way: it ignores schema it does not
-recognise.
-
 ---
 
 ## Where your data lives
@@ -232,13 +229,6 @@ Application logs:
 | Linux | `~/.local/share/com.shaharialab.agento/logs/Agento.log` |
 | macOS | `~/Library/Logs/com.shaharialab.agento/Agento.log` |
 | Windows | `%LOCALAPPDATA%\com.shaharialab.agento\logs\Agento.log` |
-
-### Running the desktop app and `agento web` together
-
-Do not point both at the same data directory at the same time. Two processes
-sharing one database also share one scheduler, so every scheduled task fires
-twice. Run one or the other, or give one of them its own directory with
-`AGENTO_DATA_DIR`.
 
 ---
 

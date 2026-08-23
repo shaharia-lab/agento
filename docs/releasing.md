@@ -1,10 +1,12 @@
 # Releasing
 
-How a desktop release is cut, and the two things that break it.
+How a release is cut, and the two things that break it.
 
-Desktop releases are tagged `desktop-v*` from the `desktop` branch. The Agento
-server keeps its own `v*` tags on `main`. The patterns do not overlap, so both
-ship independently from one repository.
+Releases are tagged `desktop-v*` from `main`. The `desktop-` prefix is
+historical and is kept deliberately: every installed app polls the fixed
+`desktop-latest` tag, and the guard job, the manifest script and the `promote`
+job all key off the prefix. Renaming it is a release-infrastructure change to
+make on its own, never as a side effect of something else.
 
 - [The flow](#the-flow)
 - [Cutting a release](#cutting-a-release)
@@ -167,9 +169,8 @@ strands that platform's users silently.
 macOS updates ship as `.app.tar.gz`. The `.dmg` is only for the first install.
 
 The manifest is served from a fixed tag, `desktop-latest`, so the updater has a
-stable URL. `releases/latest` could not be used: it would point at the Go
-server's `v*` releases. That tag is itself marked prerelease so it never
-displaces the real latest release on the repository page.
+stable URL that does not move with each release. That tag is itself marked
+prerelease so it never displaces the real latest release on the repository page.
 
 ---
 

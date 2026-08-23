@@ -11,12 +11,12 @@
 //!
 //! That file was `internal/pricing/catalog.json`, `include_str!`d across the two
 //! trees — one file, two consumers, no second copy to drift. It is vendored here
-//! because the Go tree is being deleted (#388) and this is not a test fixture: a
+//! because the Go tree is being deleted (#391) and this is not a test fixture: a
 //! missing catalog fails `cargo build`, not one test. Maintain it here now; there
 //! is no other copy left to keep it in step with.
 //!
 //! The normalization rules are `catalog.go`'s, pinned cross-language by
-//! `parity/pricing_seed_vectors.json` — a **frozen** golden since #388, taken from
+//! `parity/pricing_seed_vectors.json` — a **frozen** golden since #391, taken from
 //! Go's `BuiltinCatalog` by a generator that no longer exists: absent cache rates
 //! derive from input × the
 //! Anthropic TTL multipliers (5m 1.25×, 1h 2×, read 0.1×), an absent

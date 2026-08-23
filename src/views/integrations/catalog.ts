@@ -4,15 +4,14 @@
    The API has no endpoint describing what a provider needs or what tools a
    service grants — /integrations/available-tools only reports tools already
    turned on, so it cannot drive a connect form for something not yet created.
-   The shapes therefore live here, mirroring internal/config/integration.go for
-   the credentials and each provider's MCP server for the tool names.
+   The shapes therefore live here: the credential fields each provider needs,
+   and the tool names its MCP server hosts.
 
-   WhatsApp is deliberately absent, and this is the list that decides it. The
-   Go server still carries the integration and `type` is a free-form string on
-   the wire, so nothing upstream stops one appearing; leaving the entry here is
-   what would offer a pairing flow the desktop app cannot complete, because
-   `whatsmeow` has no Rust equivalent and is not being ported (issue #273).
-   A row paired under the Go server is still listed — see providerFor.
+   WhatsApp is deliberately absent, and this is the list that decides it.
+   `type` is a free-form string on the wire, so nothing upstream stops one
+   appearing; leaving the entry here is what would offer a pairing flow the app
+   cannot complete, because `whatsmeow` has no Rust equivalent and is not being
+   ported (issue #273). An older row is still listed — see providerFor.
    ========================================================================== */
 
 import type { IconName } from "../../lib/icons";
@@ -393,8 +392,9 @@ export const PROVIDERS: Provider[] = [
  * The catalog entry for a stored integration's type, if this app has one.
  *
  * `undefined` is a normal answer, not a failure: the `type` column is free-form
- * and the Go server knows types this app deliberately does not — WhatsApp above
- * all. Callers render the row from the stored fields instead of dropping it.
+ * and a database may hold types this app deliberately does not know — WhatsApp
+ * above all. Callers render the row from the stored fields instead of dropping
+ * it.
  */
 export function providerFor(type: string): Provider | undefined {
   return PROVIDERS.find((p) => p.type === type);
@@ -405,7 +405,7 @@ export function providerFor(type: string): Provider | undefined {
    whole point: a type from a newer Agento is something to upgrade into, while
    WhatsApp is one this app will never gain — `whatsmeow` has no Rust equivalent
    and is not being ported (#273). Saying "newer version" to someone who paired a
-   phone under the Go server sends them looking for an update that will never
+   phone in an older Agento sends them looking for an update that will never
    ship.
 
    Either way the row is listed and readable. It cannot be removed, renamed or
@@ -413,10 +413,10 @@ export function providerFor(type: string): Provider | undefined {
    renders for a known provider. That dead end is deliberate for now — see #273's
    scope note — so do not describe the row as deletable.
 
-   A `Map`, not an object literal: `type` is server-controlled and free-form
-   (Go's create path accepts any non-empty string), and a stored type of
-   `constructor` or `toString` would hit `Object.prototype` and render a title
-   built from `undefined`.
+   A `Map`, not an object literal: `type` is free-form on the wire (the create
+   path accepts any non-empty string), and a stored type of `constructor` or
+   `toString` would hit `Object.prototype` and render a title built from
+   `undefined`.
    ------------------------------------------------------------------------ */
 
 const RETIRED_TYPES = new Map<string, { label: string; reason: string }>([
@@ -425,7 +425,7 @@ const RETIRED_TYPES = new Map<string, { label: string; reason: string }>([
     {
       label: "WhatsApp",
       reason:
-        "WhatsApp is not available in the desktop app, so this connection cannot be paired or edited here. It is left untouched — its tools keep working wherever the Agento server runs, and nothing about it has been deleted.",
+        "Agento does not support WhatsApp, so this connection cannot be paired, edited or used. Nothing has been deleted — the connection and its settings are listed here exactly as they were stored.",
     },
   ],
 ]);

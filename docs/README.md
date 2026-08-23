@@ -14,7 +14,7 @@ Start with [Installation](installation.md).
 
 | Guide | What it covers |
 | --- | --- |
-| [Architecture](architecture.md) | Stack, process model, the native backend, the Claude SDK, design principles, and what remains of parity with the Go server |
+| [Architecture](architecture.md) | Stack, process model, the native backend, the Claude SDK, design principles, and the frozen wire-format spec |
 | [Development](development.md) | Setup, running locally, tests, parity testing, conventions, debugging |
 | [Releasing](releasing.md) | Cutting a release, the guards, the update manifest, signing keys |
 

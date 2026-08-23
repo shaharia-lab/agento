@@ -33,8 +33,6 @@ Before making code changes, read the developer documentation in the [`docs/`](do
 [`CLAUDE.md`](CLAUDE.md) is the full working notes behind those guides: every
 decision, with the reasoning and the failures behind it.
 
-Note the branch: desktop work happens on **`desktop`**, not `main`.
-
 ### Prerequisites
 
 - Node.js 22+ and npm
@@ -58,10 +56,9 @@ not belong on every commit.
 
 One exclusion is load-bearing:
 `src-tauri/src/native/notifications/email.html` is exempt from the whitespace
-hooks. It is Go's `html/template` **output**, asserted byte for byte against
+hooks. It is a frozen artifact, asserted byte for byte against
 `parity/notification_template_golden.json`, and its trailing whitespace is the
-spaces either side of the six HTML comments the template elides. Nothing can
-regenerate it.
+spaces either side of six elided HTML comments. Nothing can regenerate it.
 
 ### Running the Project
 
@@ -94,7 +91,6 @@ real Claude corpus or the Claude Code CLI — see
 
 ### Before Submitting
 
-- [ ] Your PR targets **`desktop`**, not `main`.
 - [ ] Your PR is linked to a GitHub issue.
 - [ ] You have read the relevant developer documentation in `docs/`.
 - [ ] All pre-commit hooks pass locally.
@@ -111,7 +107,7 @@ real Claude corpus or the Claude Code CLI — see
 - Do not introduce security vulnerabilities (see OWASP top 10).
 - Avoid over-engineering — solve the problem at hand without unnecessary abstractions.
 - Respect the existing architecture (see `CLAUDE.md` for details).
-- `parity/` holds frozen goldens taken from the Go server that no longer exists here. Change one by deliberate edit with a reason, never by refreshing until green — read [`parity/README.md`](parity/README.md) first.
+- `parity/` holds frozen goldens that specify Agento's wire format. Change one by deliberate edit with a reason, never by refreshing until green — read [`parity/README.md`](parity/README.md) first.
 
 ### Documentation
 

@@ -40,7 +40,7 @@
 //! The first is #400's 401, which Go never answers. These routes are the second:
 //! `/api/security/*` and `/.well-known/jwks.json` exist in **no** Go router, so
 //! `parity/read_routes.json` and `parity/write_routes.json` — both frozen since
-//! #388, both generated from a `chi.Walk` — cannot record them without ceasing
+//! #391, both generated from a `chi.Walk` — cannot record them without ceasing
 //! to be what they are.
 //!
 //! Leaving them unrecorded was the other option and it was rejected: those files

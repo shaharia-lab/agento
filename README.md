@@ -10,11 +10,11 @@ It also lets you build agents, chat with them, schedule them, and connect them t
 **No API key, no account, no telemetry. Everything stays on your machine.**
 
 [![Release](https://img.shields.io/github/v/release/shaharia-lab/agento?filter=desktop-v*&style=flat-square&color=3fa045&label=release)](https://github.com/shaharia-lab/agento/releases?q=desktop-v&expanded=true)
-[![CI](https://img.shields.io/github/actions/workflow/status/shaharia-lab/agento/desktop-ci.yml?branch=desktop&style=flat-square&label=CI&logo=github)](https://github.com/shaharia-lab/agento/actions/workflows/desktop-ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/shaharia-lab/agento/ci.yml?branch=main&style=flat-square&label=CI&logo=github)](https://github.com/shaharia-lab/agento/actions/workflows/ci.yml)
 [![Downloads](https://img.shields.io/github/downloads/shaharia-lab/agento/total?style=flat-square&color=blue)](https://github.com/shaharia-lab/agento/releases)
 [![Stars](https://img.shields.io/github/stars/shaharia-lab/agento?style=flat-square&color=f5c518)](https://github.com/shaharia-lab/agento/stargazers)
 [![License](https://img.shields.io/github/license/shaharia-lab/agento?style=flat-square)](LICENSE)
-[![Last commit](https://img.shields.io/github/last-commit/shaharia-lab/agento/desktop?style=flat-square)](https://github.com/shaharia-lab/agento/commits/desktop)
+[![Last commit](https://img.shields.io/github/last-commit/shaharia-lab/agento/main?style=flat-square)](https://github.com/shaharia-lab/agento/commits/main)
 
 **[Install](#-install) · [What you get](#-what-you-get) · [Shortcuts](#%EF%B8%8F-keyboard-shortcuts) · [Docs](docs/README.md) · [Contributing](#-contributing)**
 

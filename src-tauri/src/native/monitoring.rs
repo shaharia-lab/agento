@@ -1,39 +1,24 @@
 //! `GET /api/monitoring` — the OpenTelemetry configuration the settings page
 //! renders, and which of its fields the environment has pinned.
 //!
-//! Mirrors `getMonitoring` (`internal/api/monitoring.go`) over
-//! `telemetry.MonitoringManager` (`internal/telemetry/manager.go`).
-//!
-//! **This ports the read, not the telemetry.** The desktop app does not run OTel
-//! providers and is not going to — the handover records that OTel/Prometheus is
-//! replaced rather than reimplemented. What it does have is a settings page that
-//! shows the stored configuration, so the endpoint behind that page has to
-//! answer. Everything here is `monitoring.json` plus `OTEL_*`; nothing here
-//! exports anything.
+//! **This serves the read, not the telemetry.** Agento does not run OTel
+//! providers and is not going to: OpenTelemetry and Prometheus are
+//! infrastructure concerns, and this is a local desktop app. What it does have
+//! is a settings page that shows the stored configuration, so the endpoint
+//! behind that page has to answer. Everything here is `monitoring.json` plus
+//! `OTEL_*`; nothing here exports anything.
 //!
 //! # The two writes answer 501, and that is the decision (#309)
 //!
-//! `PUT /api/monitoring` and `POST /api/monitoring/test` used to forward. After
-//! the cut-over there is nothing to forward *to*, so "out of scope" would have
-//! become "the settings page 404s", and the issue asked for one of three
-//! answers: port the config surface, port the exporters too, or decline the
-//! feature. This declines it.
-//!
-//! The reason is that the other two are worse, not that this one is cheap:
+//! `PUT /api/monitoring` and `POST /api/monitoring/test` decline. The
+//! alternatives are worse, not that this one is cheap:
 //!
 //! - **Persisting the config without exporters is a save that changes nothing.**
-//!   `Manager.Update` writes `monitoring.json` *and* rebuilds the providers, and
-//!   the providers are the half this build does not have. A 200 on that PUT
-//!   would tell the user telemetry is on while nothing is emitted — and a
-//!   ported PUT would go stale a second way before the cut-over even arrives,
-//!   since the sidecar's providers are built once at `Update` and a native write
-//!   cannot reach them. #289 and #311 both got past that wall by switching the
-//!   Go half off (`AGENTO_SCANNER`, `AGENTO_INTEGRATIONS`); there is no such
-//!   switch for a provider set the sidecar has already built, which is the same
-//!   wall #305 hit on `PUT /api/settings`.
-//! - **Porting the exporters** is the largest option in the plan and reverses a
-//!   decision the handover already records: OTel and Prometheus are server
-//!   concerns, and this app is not the server.
+//!   Writing `monitoring.json` is only half of it; the other half is rebuilding
+//!   the providers, which this build does not have. A 200 would tell the user
+//!   telemetry is on while nothing is emitted.
+//! - **Implementing the exporters** is a large piece of work that reverses the
+//!   decision above.
 //!
 //! So the honest answer is the one that does not claim a reload happened. `501`
 //! rather than `404`, because the route exists and this build declines it —
@@ -42,18 +27,9 @@
 //! WhatsApp.
 //!
 //! **`GET /api/monitoring` stays.** It reports what `monitoring.json` holds and
-//! which `OTEL_*` variables are pinning fields, both of which are still true and
-//! still useful to someone running `agento web` against the same data dir. The
+//! which `OTEL_*` variables are pinning fields, both of which are still true:
+//! the file is read at startup and the variables still lock fields. The
 //! settings page renders it read-only and says why.
-//!
-//! One thing worth recording before it is lost with the sidecar: Go's
-//! `POST /test` is close to a no-op. It calls `grpc.Dial` (lazy, so it almost
-//! never errors), `Connect()`, then `WaitForStateChange(ctx, Idle)` — which
-//! returns as soon as the state leaves `Idle`, i.e. immediately, at `Connecting`
-//! — and `Connecting` counts as success. So it answers `ok: true` for an
-//! endpoint nothing is listening on, unless the failure happens to land inside
-//! the microseconds before the state is read. Reproducing that would have meant
-//! reproducing a race.
 //!
 //! The two env-override mechanisms in Agento are not the same shape and this is
 //! the one that returns 409: monitoring answers a conflicting write with an
@@ -303,11 +279,15 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
     serve,
 };
 
-/// What both declined routes say. One sentence, and it names the alternative
-/// rather than only the refusal — a message that says "not supported" and stops
-/// leaves the reader with nowhere to go.
-const DECLINED: &str = "the desktop build exports no telemetry; \
-run the agento server if you need OpenTelemetry or Prometheus";
+/// What both declined routes say. One sentence, and it says what *is* true
+/// rather than only refusing — the stored configuration is still readable, so
+/// the reader is not left thinking the settings page is broken.
+///
+/// It used to name a second Agento to go and run instead. There isn't one: the
+/// server was deleted (#391) and Agento is this app. A refusal that points at
+/// something that does not exist is worse than a plain refusal.
+const DECLINED: &str = "Agento does not export telemetry; \
+the stored configuration is shown read-only and cannot be changed here";
 
 fn claims(method: &Method, path: &str) -> bool {
     match path {

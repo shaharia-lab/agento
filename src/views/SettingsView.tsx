@@ -208,10 +208,9 @@ export function SettingsView({
     (signal) => api.get<SettingsEnvelope>("/settings", signal),
     []
   );
-  // Read-only since #309: this build exports no telemetry, so there is nothing
-  // for a save here to take effect on. The stored config is still worth showing
-  // — an `agento web` on the same data dir uses it, and `locked` says which
-  // OTEL_* variables have pinned a field.
+  // Read-only since #309: Agento exports no telemetry, so there is nothing for
+  // a save here to take effect on. The stored config is still worth showing —
+  // `locked` says which OTEL_* variables have pinned a field.
   const monitoring = useResource<MonitoringEnvelope>(
     (signal) => api.get<MonitoringEnvelope>("/monitoring", signal),
     []
@@ -1576,15 +1575,14 @@ function AdvancedPane({
 /**
  * Telemetry, read-only.
  *
- * The desktop app exports no OpenTelemetry and no Prometheus — that is a
- * decision the port records rather than a gap it is working through, and
- * `PUT /api/monitoring` answers 501 to match. Editable controls here would be a
- * save that changes nothing, which is worse than no controls at all.
+ * Agento exports no OpenTelemetry and no Prometheus — a settled decision
+ * rather than a gap being worked through, and `PUT /api/monitoring` answers 501
+ * to match. Editable controls here would be a save that changes nothing, which
+ * is worse than no controls at all.
  *
- * The stored configuration is still shown, for two reasons: an `agento web`
- * sharing this data dir reads the same `monitoring.json`, and `locked` reports
- * which `OTEL_*` variables have pinned a field — which is the kind of thing
- * someone debugging a missing trace comes here to find out.
+ * The stored configuration is still shown, because `locked` reports which
+ * `OTEL_*` variables have pinned a field — the kind of thing someone debugging
+ * a missing trace comes here to find out.
  */
 function MonitoringSection({
   mon,

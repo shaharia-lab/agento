@@ -123,7 +123,7 @@ For EVERY finding, use this exact format:
 
 ### [Category] — [Short description]
 
-- **Location:** `file/path.go:42` (or line range)
+- **Location:** `file/path.rs:42` (or line range)
 - **Impact:** Critical / High / Medium / Low
 - **Current code:**
   ```

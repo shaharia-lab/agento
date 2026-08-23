@@ -13,10 +13,10 @@
     "newline several of them carry. Do not reformat it: Rust compares the",
     "bytes, and prettifying this file is a divergence.",
     "",
-    "Migration 31 onward is authored on the `desktop` branch and has NO Go",
-    "counterpart: #388 deleted the Go tree, so there is no generator left to",
-    "run and no Go suite left to assert against. Migrations 1-30 remain",
-    "exactly what Go produced -- do not edit them. Anything appended here is",
+    "Migration 31 onward is authored here and has NO generated counterpart:",
+    "#391 deleted the tree that produced 1-30, so there is nothing left to",
+    "run and nothing left to cross-check. Migrations 1-30 are frozen and",
+    "hash-pinned -- do not edit them. Anything appended here is",
     "this build's own, must say so in its leading SQL comment, and must be",
     "additive, because main's server still opens the same ~/.agento/agento.db."
   ],
@@ -143,7 +143,7 @@
     },
     {
       "version": 31,
-      "sql": "\n-- Per-install API tokens (#405), the first migration on the `desktop` branch\n-- with no Go counterpart.\n--\n-- Migrations 1-30 were generated from `internal/storage`'s slice and asserted by\n-- Go's own test suite. The Go tree was deleted from this branch by #388, so this\n-- one is authored here instead, and `native/migrate.rs` says so in as many\n-- words. It is additive and Go tolerates it: `applyMigrations` only runs\n-- migrations newer than the recorded version, so an `agento web` from `main`\n-- opening this database applies nothing and carries on -- it simply never reads\n-- this table.\n--\n-- The token itself is NEVER stored, not even hashed. It is a JWT signed by the\n-- install's Ed25519 key, so verification needs no stored copy: the signature\n-- plus the claims are the whole check. What is stored is the `jti`, which is\n-- the revocation handle, and the metadata the Security tab lists. Storing the\n-- token would create a durable secret this design specifically avoids, and one\n-- nothing would ever read.\n--\n-- `revoked_at` is why a DELETE from the API is an UPDATE here: the row is what\n-- refuses the token, so removing it would un-revoke the credential.\nCREATE TABLE IF NOT EXISTS api_tokens (\n    id           TEXT PRIMARY KEY,\n    name         TEXT NOT NULL,\n    scope        TEXT NOT NULL,\n    jti          TEXT NOT NULL UNIQUE,\n    created_at   DATETIME NOT NULL,\n    expires_at   DATETIME,\n    last_used_at DATETIME,\n    revoked_at   DATETIME\n);\n\nCREATE INDEX IF NOT EXISTS idx_api_tokens_created_at ON api_tokens(created_at);\n"
+      "sql": "\n-- Per-install API tokens (#405), the first migration with no generated\n-- counterpart.\n--\n-- Migrations 1-30 were generated and are hash-pinned; the tree that produced\n-- them was deleted by #391, so this one is authored here instead and\n-- `native/migrate.rs` says so in as many words. It is additive: migrations run\n-- only when newer than the recorded version, so an older build opening this\n-- database applies nothing and carries on, never reading this table.\n--\n-- The token itself is NEVER stored, not even hashed. It is a JWT signed by the\n-- install's Ed25519 key, so verification needs no stored copy: the signature\n-- plus the claims are the whole check. What is stored is the `jti`, which is\n-- the revocation handle, and the metadata the Security tab lists. Storing the\n-- token would create a durable secret this design specifically avoids, and one\n-- nothing would ever read.\n--\n-- `revoked_at` is why a DELETE from the API is an UPDATE here: the row is what\n-- refuses the token, so removing it would un-revoke the credential.\nCREATE TABLE IF NOT EXISTS api_tokens (\n    id           TEXT PRIMARY KEY,\n    name         TEXT NOT NULL,\n    scope        TEXT NOT NULL,\n    jti          TEXT NOT NULL UNIQUE,\n    created_at   DATETIME NOT NULL,\n    expires_at   DATETIME,\n    last_used_at DATETIME,\n    revoked_at   DATETIME\n);\n\nCREATE INDEX IF NOT EXISTS idx_api_tokens_created_at ON api_tokens(created_at);\n"
     }
   ]
 }
