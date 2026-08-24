@@ -183,6 +183,19 @@ pub fn go_string_from_millis(ms: i64) -> String {
     }
 }
 
+/// A `DateTime<Utc>` this process is already holding, in the rendering a
+/// DATETIME column stores.
+///
+/// The third sibling of [`now_go_text`] and [`go_text_at`], added for #425:
+/// a gateway usage row stamps one instant and then uses **the same one** to
+/// resolve the request's price against the catalog, which takes a
+/// `DateTime<Utc>`. Formatting at the call site would work, and would also be
+/// the third place this format lives; stamping the clock twice instead would
+/// let the stored time and the priced time disagree across a rate change.
+pub fn go_text(t: &DateTime<Utc>) -> String {
+    format_go_string(t)
+}
+
 /// An instant given as seconds since the epoch, in the rendering a DATETIME
 /// column stores.
 ///

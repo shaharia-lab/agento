@@ -3,6 +3,13 @@
 // all build on it — and because its tests drive it against a scripted CLI from
 // outside the crate.
 pub mod claude;
+// The embedded LLM gateway (#421). Public for `claude`'s reason and one of its
+// own: #422 is the settings model and storage alone, so until the engine (#424)
+// lands nothing inside the crate reads it, and a private module of entirely
+// unused items is a wall of dead-code warnings under `-D warnings`. Its surface
+// is deliberately the whole config API rather than an `allow(dead_code)`, which
+// would also silence a genuinely unreachable item added later.
+pub mod gateway;
 mod guards;
 // Reading back the log file the plugin below writes, for Settings → Logs.
 // Commands rather than `/api` routes: see the module header.
@@ -413,6 +420,34 @@ pub fn run() {
                             crate::native::integrations::registry::start_all(&integrations_db).await
                         {
                             log::warn!("some integrations failed to start: {e}");
+                        }
+                    });
+
+                    // The LLM gateway (#424). Spawned beside the integration
+                    // servers and for the same reasons — it binds a listener,
+                    // and the window must not wait on it.
+                    //
+                    // **The placement is load-bearing, not incidental.** This
+                    // must stay below `keys::install` and
+                    // `tokens::load_revoked` above: the gateway's auth
+                    // middleware reads both process-wide statics per request,
+                    // and a listener bound before the revoked set is loaded
+                    // would *accept a revoked token* for the length of that
+                    // window. `gateway::registry::start_if_enabled`'s doc
+                    // carries the argument, and
+                    // `a_gateway_start_requires_an_installed_keypair` in
+                    // `tests/gateway_engine.rs` is what fails if this call ever
+                    // moves above them.
+                    //
+                    // It reads one row and returns when the gateway is
+                    // disabled, which is the default — so an install that never
+                    // configures one pays a single `SELECT` at boot.
+                    let gateway_db = db.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) =
+                            crate::gateway::registry::start_if_enabled(&gateway_db).await
+                        {
+                            log::warn!("the llm gateway failed to start: {e}");
                         }
                     });
 

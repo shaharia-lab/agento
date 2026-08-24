@@ -262,6 +262,31 @@ ring = "0.17"
 # Graceful shutdown of the `claude` subprocess is close stdin → SIGTERM →
 # SIGKILL after 5s, mirroring the TypeScript SDK's close(). Tokio's own
 # `Child::kill` is SIGKILL only, so the SIGTERM step needs raw kill(2).
+# ── The LLM gateway (#421) ────────────────────────────────────────────────────
+#
+# `ferrox-providers` was extracted from ferrox (shaharia-lab/ferrox#142) with
+# this app as the intended desktop consumer — its MSRV 1.88 floor was chosen to
+# match ours. #422 uses only its `config` types, so that a provider row maps onto
+# the same struct the adapters are built from rather than onto a parallel shape
+# the engine (#424) would have to translate.
+#
+# **`default-features = false` is load-bearing.** The default `axum` feature
+# pins **axum 0.7** and this crate is on **0.8**; enabling it compiles two axums
+# or fails outright. `bedrock` stays off for a separate reason — its AWS SDK
+# pins Rust 1.94.1 against our declared 1.88 — which is also why
+# `gateway_providers.type` accepts four provider types and not five.
+#
+# Pinned to the `providers-v0.1.0` **tag**, which ferrox#150/#153 made real; the
+# design document predates it and says to pin a SHA. A tag can be moved where a
+# SHA cannot — accepted because ferrox is our own repository and its README now
+# documents this tag as the reference point. Revisit at the crates.io publish
+# decision, before the first shipping release.
+ferrox-providers = { git = "https://github.com/shaharia-lab/ferrox", tag = "providers-v0.1.0", default-features = false, features = [
+    "anthropic",
+    "openai",
+    "gemini",
+] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
@@ -284,6 +309,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
     "NSGeometry",
 ] }
+
 
 [profile.release]
 codegen-units = 1

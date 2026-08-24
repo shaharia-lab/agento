@@ -62,7 +62,12 @@ pub fn list_page(
     q: &SessionQuery,
 ) -> Result<SessionPage, String> {
     let (expr, is_time) = q.sort.expr();
-    let mut filter = build_filter(q, &settings.hidden_projects, &settings.indexed_config_dirs)?;
+    let mut filter = build_filter(
+        conn,
+        q,
+        &settings.hidden_projects,
+        &settings.indexed_config_dirs,
+    )?;
 
     if let Some(cur) = Cursor::decode(&q.cursor, q.sort)? {
         let bound = cur.bind(is_time)?;
@@ -142,7 +147,12 @@ pub fn facets(
     settings: &DataSettings,
     q: &SessionQuery,
 ) -> Result<SessionFacets, String> {
-    let filter = build_filter(q, &settings.hidden_projects, &settings.indexed_config_dirs)?;
+    let filter = build_filter(
+        conn,
+        q,
+        &settings.hidden_projects,
+        &settings.indexed_config_dirs,
+    )?;
     let where_clause = filter.where_clause();
 
     let totals_sql = format!(

@@ -80,10 +80,11 @@ pub const WEBVIEW_SUBJECT: &str = "desktop-webview";
 
 /// What a credential is allowed to do.
 ///
-/// Two levels on purpose (#405): they map exactly onto the split
-/// `guards::is_state_changing` already encodes, so the guard has one definition
-/// of read-versus-write rather than a second permission table that can drift
-/// from the first.
+/// `read` and `write` are a **hierarchy** and map exactly onto the split
+/// `guards::is_state_changing` already encodes (#405), so the guard has one
+/// definition of read-versus-write rather than a second permission table that
+/// can drift from the first. [`Llm`](Self::Llm) is not part of that hierarchy —
+/// see its own note, and [`covers`](Self::covers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     /// Every safe method. **Not "harmless"** — a `read` token returns chat
@@ -94,6 +95,24 @@ pub enum Scope {
     /// Everything, including creating a `bypass`-permission agent and running
     /// it — i.e. arbitrary command execution on this machine.
     Write,
+    /// The LLM gateway's data plane, and **nothing else** (#423).
+    ///
+    /// Deliberately disjoint from the pair above rather than sitting under
+    /// `write`, because the two directions are both wrong:
+    ///
+    /// - A gateway token is what gets pasted into `OPENAI_API_KEY`,
+    ///   `ANTHROPIC_AUTH_TOKEN` and a Claude Code base-URL setup — plaintext on
+    ///   disk, in files other tools read. A `write` token in that position is
+    ///   arbitrary command execution; a `read` token in that position returns
+    ///   every chat transcript on the machine. Neither is an acceptable price
+    ///   for spending provider credits.
+    /// - Conversely, a credential whose job is to spend provider credits has no
+    ///   business reading chat history, so `llm` grants nothing on `/api`.
+    ///
+    /// The `aud` claim is still `agento-api` for all three: scope is the
+    /// capability axis, and a second audience would mean a parallel validation
+    /// path for no gain.
+    Llm,
 }
 
 impl Scope {
@@ -102,6 +121,7 @@ impl Scope {
         match self {
             Self::Read => "read",
             Self::Write => "write",
+            Self::Llm => "llm",
         }
     }
 
@@ -112,16 +132,29 @@ impl Scope {
         match raw {
             "read" => Some(Self::Read),
             "write" => Some(Self::Write),
+            "llm" => Some(Self::Llm),
             _ => None,
         }
     }
 
     /// Whether a credential carrying `self` may serve a request needing
-    /// `required`. `write` covers `read`; nothing covers `write`.
+    /// `required`. `write` covers `read`; nothing covers `write`; and `llm`
+    /// covers only itself, in both directions.
+    ///
+    /// **The arms are enumerated, and that is load-bearing.** This was
+    /// `(Self::Write, _) | (Self::Read, Scope::Read)` until #423, and the
+    /// wildcard was correct only while `Write` was the top of a two-element
+    /// lattice. Adding [`Llm`](Self::Llm) under that wildcard would have made a
+    /// `write` token a gateway credential — silently, with every existing test
+    /// still green, and defeating the one property the scope exists for. Do not
+    /// reintroduce a wildcard here: a new variant must be a deliberate line.
     pub fn covers(self, required: Scope) -> bool {
         matches!(
             (self, required),
-            (Self::Write, _) | (Self::Read, Scope::Read)
+            (Self::Write, Scope::Write)
+                | (Self::Write, Scope::Read)
+                | (Self::Read, Scope::Read)
+                | (Self::Llm, Scope::Llm)
         )
     }
 }
@@ -498,16 +531,57 @@ mod tests {
         );
         assert_eq!(Scope::parse("admin"), None);
         assert_eq!(Scope::parse("READ"), None, "the spelling is exact");
+        assert_eq!(Scope::parse("LLM"), None, "the spelling is exact");
     }
 
+    /// The whole lattice, stated as a 3×3 matrix rather than spot-checked.
+    ///
+    /// Exhaustive because the interesting cases are the *false* ones, and a
+    /// spot-check of the true ones is exactly what would have passed against the
+    /// `(Write, _)` wildcard this replaced (#423): `Write.covers(Llm)` is the
+    /// assertion that fails if a wildcard ever comes back.
     #[test]
     fn scope_covering_is_the_split_the_guard_needs() {
+        // write: the top of the /api hierarchy, and nothing more.
         assert!(Scope::Write.covers(Scope::Write));
         assert!(Scope::Write.covers(Scope::Read));
+        assert!(
+            !Scope::Write.covers(Scope::Llm),
+            "write must not reach the gateway: a token pasted into a tool config \
+             would carry arbitrary command execution"
+        );
+
+        // read: itself only.
         assert!(Scope::Read.covers(Scope::Read));
         assert!(!Scope::Read.covers(Scope::Write));
+        assert!(!Scope::Read.covers(Scope::Llm));
+
+        // llm: itself only, in both directions.
+        assert!(Scope::Llm.covers(Scope::Llm));
+        assert!(
+            !Scope::Llm.covers(Scope::Read),
+            "a gateway credential must not read chat transcripts"
+        );
+        assert!(!Scope::Llm.covers(Scope::Write));
+
         assert_eq!(Scope::Read.as_str(), "read");
         assert_eq!(Scope::Write.as_str(), "write");
+        assert_eq!(Scope::Llm.as_str(), "llm");
+    }
+
+    /// Every scope survives the wire, because the row stores the spelling and
+    /// the guard parses it back. A variant added to one match arm and not the
+    /// other is a token that mints and then never verifies.
+    #[test]
+    fn a_round_trip_through_the_wire_spelling_is_identity() {
+        for scope in [Scope::Read, Scope::Write, Scope::Llm] {
+            assert_eq!(
+                Scope::parse(scope.as_str()),
+                Some(scope),
+                "{:?} must survive the wire",
+                scope
+            );
+        }
     }
 
     /// Two mints are two tokens, so revoking one cannot touch the other.
