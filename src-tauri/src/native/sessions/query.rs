@@ -456,8 +456,16 @@ fn add_search(conn: &Connection, f: &mut Filter, text: &str) {
 /// session_search LIMIT 0` existence check, because the two failures it has to
 /// catch surface at different points: a missing table fails the *prepare*, while
 /// an expression FTS5 refuses fails on the *first step* — and an unstepped
-/// statement never parses the MATCH argument at all. Stepping once against the
-/// inverted index is what a hit costs anyway.
+/// statement never parses the MATCH argument at all — including against an
+/// **empty** index, which is what a fresh install has and where a probe that
+/// short-circuited would accept anything
+/// (`the_probe_still_rejects_a_bad_expression_against_an_empty_index`).
+///
+/// The cost is one extra inverted-index lookup per `build_filter`, i.e. one per
+/// call of `GET /api/claude-sessions` and one per `…/facets` — the same lookup
+/// the clause itself then performs, stopped at the first row. Worth knowing
+/// before #437, which composes this as a ranked join and may want to fold the
+/// two together.
 ///
 /// The two failures are logged differently on purpose, and neither line carries
 /// the user's search text — `proxy.rs` keeps query strings out of this file, and
@@ -522,7 +530,8 @@ const MIN_PREFIX_LEN: usize = 2;
 ///   unterminated quote is a phrase too — it is what half-typing one looks like.
 /// * **The final token becomes a prefix term** (`"efficien"*`) so the list
 ///   narrows as the user types, unless the user closed a quote — which says the
-///   word is finished — or the token is shorter than [`MIN_PREFIX_LEN`].
+///   word is finished — or the token carries fewer than [`MIN_PREFIX_LEN`]
+///   alphanumerics.
 /// * **Control characters are separators.** They are separators to `unicode61`
 ///   anyway, so this changes no result — but a NUL reaching FTS5's parser is an
 ///   error (`unterminated string`), and `%00` in a query string decodes to one.
@@ -576,8 +585,10 @@ pub fn build_fts_query(text: &str) -> String {
         // because of how the loop above happens to be written.
         out.push_str(&text.replace('"', "\"\""));
         out.push('"');
-        let terms = text.chars().filter(|c| c.is_alphanumeric()).count();
-        if i == last && !closed && terms >= MIN_PREFIX_LEN {
+        if i == last
+            && !closed
+            && text.chars().filter(|c| c.is_alphanumeric()).count() >= MIN_PREFIX_LEN
+        {
             out.push('*');
         }
     }

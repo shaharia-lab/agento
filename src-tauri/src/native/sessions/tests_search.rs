@@ -491,3 +491,33 @@ fn the_search_clause_keys_on_the_pair_not_the_session_id() {
         "the other project's row shares the id but not the content"
     );
 }
+
+/// The availability probe has to reject a bad expression against an **empty**
+/// index, not just a populated one.
+///
+/// `usable_fts_query` learns that an expression is invalid by stepping the
+/// statement, and it would be sound to imagine SQLite short-circuiting a query
+/// over a table with no rows without ever asking FTS5 to parse the MATCH
+/// argument. If it did, the probe would accept anything on a fresh install —
+/// which is exactly the machine where the index is empty — and the *real* query
+/// would then error, turning the fallback this issue is built on into a 500 for
+/// the one user it most needs to protect. It does not; pinned here rather than
+/// assumed, because it is a property of SQLite rather than of this code.
+#[test]
+fn the_probe_still_rejects_a_bad_expression_against_an_empty_index() {
+    let conn = migrated();
+    let mut stmt = conn
+        .prepare("SELECT 1 FROM session_search WHERE session_search MATCH ?1 LIMIT 1")
+        .expect("prepare");
+
+    assert!(
+        stmt.exists(params!["\"unterminated"]).is_err(),
+        "an empty index must still parse the MATCH argument"
+    );
+    assert!(
+        !stmt
+            .exists(params!["\"auth\""])
+            .expect("a valid expression answers"),
+        "and a valid one is simply a miss"
+    );
+}
