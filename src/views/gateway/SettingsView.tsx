@@ -28,6 +28,15 @@ import "../../styles/gateway.css";
 const MIN_PORT = 1024;
 const MAX_PORT = 65535;
 
+/**
+ * The server's ceiling on the retention horizon (`MAX_RETENTION_DAYS`).
+ *
+ * A typo bound rather than a correctness one — `9000000` reads as "keep
+ * everything" while meaning something nobody can check, and `0` is the
+ * supported way to say that.
+ */
+const MAX_RETENTION_DAYS = 3650;
+
 export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   const settings = useResource<GatewaySettings>(
     (signal) => api.get("/gateway/settings", signal),
@@ -42,6 +51,7 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
   const [enabled, setEnabled] = useState(false);
   const [startWithApp, setStartWithApp] = useState(true);
   const [port, setPort] = useState("");
+  const [retention, setRetention] = useState("");
   const [loaded, setLoaded] = useState(false);
 
   const [busy, setBusy] = useState(false);
@@ -55,6 +65,7 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
     setEnabled(settings.data.enabled);
     setStartWithApp(settings.data.start_with_app);
     setPort(String(settings.data.port));
+    setRetention(String(settings.data.usage_retention_days));
     setLoaded(true);
   }, [settings.data, loaded]);
 
@@ -62,25 +73,47 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
   const portValid =
     /^\d+$/.test(port.trim()) && portNumber >= MIN_PORT && portNumber <= MAX_PORT;
 
+  const retentionNumber = Number(retention);
+  const retentionValid =
+    /^\d+$/.test(retention.trim()) && retentionNumber <= MAX_RETENTION_DAYS;
+
   const changed =
     !!settings.data &&
     (enabled !== settings.data.enabled ||
       startWithApp !== settings.data.start_with_app ||
-      portNumber !== settings.data.port);
+      portNumber !== settings.data.port ||
+      retentionNumber !== settings.data.usage_retention_days);
 
   const portChanged = !!settings.data && portNumber !== settings.data.port;
-  const canSave = changed && portValid;
+
+  // Shortening the horizon deletes rows on the next prune, and the prune is the
+  // only delete on that table — so it is the one change on this form that
+  // changing the value back does not undo. `0` is *keep everything*, so it is
+  // the longest horizon rather than the shortest: moving off it always
+  // shortens, and moving onto it never does.
+  const retentionShortened = (() => {
+    if (!settings.data || !retentionValid) return false;
+    const stored = settings.data.usage_retention_days;
+    if (retentionNumber === 0) return false;
+    return stored === 0 || retentionNumber < stored;
+  })();
+
+  const canSave = changed && portValid && retentionValid;
 
   async function save() {
     setBusy(true);
     setError(undefined);
     try {
-      // All three keys every time: the request struct has no serde defaults, so
-      // an omitted field is a 400 rather than "leave it alone".
+      // Every key every time. Three of the four have no serde default, so an
+      // omitted one is a 400 rather than "leave it alone"; `usage_retention_days`
+      // *does* have one — for the sake of clients written against the pre-#428
+      // shape — which makes sending it the difference between preserving the
+      // stored horizon and silently resetting it to 90.
       const saved = await api.put<GatewaySettings>("/gateway/settings", {
         enabled,
         port: portNumber,
         start_with_app: startWithApp,
+        usage_retention_days: retentionNumber,
       });
       setNotice(
         saved.enabled
@@ -181,6 +214,48 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
             <div className="divider" />
 
             <div className="formsec">
+              <div className="formsec__title">Usage log</div>
+
+              <FormRow
+                label="Keep usage rows for"
+                help={`Days. 0 keeps everything. One row is written per served request, and the prune that enforces this is the only thing that ever deletes them. Up to ${MAX_RETENTION_DAYS}.`}
+              >
+                <input
+                  className="field field--sm tnum"
+                  type="number"
+                  min={0}
+                  max={MAX_RETENTION_DAYS}
+                  value={retention}
+                  onChange={(e) => setRetention(e.target.value)}
+                />
+              </FormRow>
+
+              {!retentionValid && retention !== "" && (
+                <div className="msgline msgline--error">
+                  <Icon name="alert" size={13} className="msgline__icon" />
+                  <span>
+                    Keep usage rows for a whole number of days, up to{" "}
+                    {MAX_RETENTION_DAYS}. Use 0 to keep everything.
+                  </span>
+                </div>
+              )}
+
+              {retentionShortened && (
+                <div className="msgline msgline--warn">
+                  <Icon name="alert" size={13} className="msgline__icon" />
+                  <span>
+                    Shortening the horizon deletes anything already older than
+                    it, the next time the log is pruned. Usage rows are not
+                    recoverable, and the Usage view will report the shortened
+                    window as a floor.
+                  </span>
+                </div>
+              )}
+            </div>
+
+            <div className="divider" />
+
+            <div className="formsec">
               <div className="formsec__title">Current state</div>
               <div className="gw-statusline">
                 <span className={`dot ${dotFor(status.data)}`} />
@@ -198,7 +273,11 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
         {changed && (
           <div className="savebar">
             <span className="savebar__text">
-              {canSave ? "You have unsaved changes." : "Fix the port to save."}
+              {canSave
+                ? "You have unsaved changes."
+                : portValid
+                  ? "Fix the retention horizon to save."
+                  : "Fix the port to save."}
             </span>
             <button
               className="btn"
@@ -208,6 +287,7 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
                 setEnabled(settings.data.enabled);
                 setStartWithApp(settings.data.start_with_app);
                 setPort(String(settings.data.port));
+                setRetention(String(settings.data.usage_retention_days));
               }}
             >
               Revert

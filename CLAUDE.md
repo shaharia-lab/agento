@@ -186,6 +186,14 @@ src/
                  DirField (native picker + the /api/fs fallback), CopyButton,
                  TokenReveal (the show-once minted token, #427 — shared by
                  SecurityPane and the gateway Overview)
+    charts.tsx   the inline-SVG chart primitives — AreaChart, BarChart,
+                 RateChart, Heatmap, CardEmpty — lifted out of views/analytics/
+                 by #428 when the gateway's Usage view needed the same ones.
+                 Pure presentation over `{label, value, hint}[]`: it imports
+                 nothing from views/ and no Claude type, and it carries its own
+                 stylesheet (styles/charts.css) so a consumer outside the
+                 analytics section does not have to import that section's sheet.
+                 The `.a-` class prefix is history, not scope
   views/         one file per section
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
@@ -195,7 +203,11 @@ src/
       OverviewView.tsx  status, the mint-once `llm` token, and the env snippets
       snippets.ts       the two base URLs and the type-level pin on them:
                         OpenAI is `/v1`, Anthropic is `/anthropic` with no `/v1`
-      ProvidersView.tsx / ModelsView.tsx / SettingsView.tsx
+      UsageView.tsx     the gateway's own dashboard (#428) over
+                        GET /api/gateway/usage — and the two places a total is
+                        labelled a *floor* rather than reported as a fact
+      ProvidersView.tsx / ModelsView.tsx / SettingsView.tsx (which owns the
+                        `usage_retention_days` control, #428)
   styles/        tokens → base → shell → controls → views (+ per-view files)
 
 src-tauri/src/
@@ -230,7 +242,9 @@ src-tauri/src/
                  is_retryable/should_failover copied from ferrox/src/retry.rs
     stream.rs    the SSE bytes of both surfaces, and the anthropic-beta merge
     usage.rs     one row per served request (#425) — the accumulator a stream
-                 reports through, and the cost resolved at write time
+                 reports through, and the cost resolved at write time; plus the
+                 retention prune (#428) and the once-a-day gate that rides the
+                 write rather than owning a timer
   native/        ported endpoints (phase 2+)
     active_time.rs the capped-gap rule, shared by the scanner and the pipeline
     scanner/     the Claude session scanner (issue #270) — computes, never writes
@@ -245,7 +259,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   34 migrations, embedded from parity/ — applied at startup
+    migrate.rs   35 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -3146,6 +3160,57 @@ comma-separated header value, header first, with `raw_anthropic_body` forwarding
 the client's document verbatim — both copied from
 `ferrox/src/handlers/anthropic_messages.rs`, and Claude Code compatibility
 depends on them.
+
+**Retention is a horizon, a prune, and a disclosure — and the third is what
+makes the first two honest** (#428, migration 35). `gateway_usage_log` was
+append-only: at ~100 bytes a row, 5k requests a day reaches ~180 MB in a year.
+`gateway_settings.usage_retention_days` bounds it, default 90, ceiling 3650.
+
+Four things about it are decisions rather than details:
+
+- **`0` means keep everything, and it is therefore the *longest* horizon rather
+  than the shortest.** Every comparison over this value has to read that way: the
+  prune returns before opening a connection, the UI's "you are shortening this"
+  warning fires on moving *off* zero and never onto it. Read as a horizon of zero
+  days it would mean "delete immediately", which is the exact inverse.
+- **The field carries `#[serde(default)]` where every sibling request struct
+  deliberately carries none.** `GatewaySettings` *is* the
+  `PUT /api/gateway/settings` body, so a required field would 400 every client
+  written against #426's three-key shape. The default is the column's — an
+  omitted key must not silently mean `0`, which is *keep forever*. The Settings
+  view still sends it on every save, because with a default present, omitting it
+  is the difference between preserving the stored horizon and resetting it to 90.
+- **The prune rides the write; it owns no timer.** It runs inside
+  `Accounting::finish`'s spawned `db::blocking` section — already off the request
+  path — behind a once-a-day gate shaped like `tokens::due`, plus a launch sweep
+  in `lib.rs` because a desktop app open ten minutes a week would never reach the
+  daily interval on traffic alone. Both claim the same slot. `<` not `<=`, so the
+  boundary row is kept. A failed prune is a `warn` and is dropped, as a failed
+  insert is.
+- **A pruned window says so.** An under-reported total that looks complete is the
+  failure a prune introduces, and it is silent without this — so the Usage view
+  labels the window a **floor** whenever it reaches past the horizon, in the same
+  wording as the unpriced-cost note, so the two read as one idea rather than two
+  warnings.
+
+**The Usage view is #426's endpoint plus the three aggregates it did not ship.**
+`by_surface`, `by_token` and a `latency` block (nearest-rank p50/p95/max) were in
+#428's acceptance criteria and not in #426's `UsageBody`; they are computed over
+columns migration 34 already stores, so the addition is additive and no existing
+field moved. `by_token` groups on the token's `sub` — an `api_tokens` row id,
+never a secret — and an unattributable row is grouped under `""` rather than
+dropped, so the breakdown's total cannot disagree with the window's.
+
+**The chart primitives are shared; nothing else is.** `src/components/charts.tsx`
+is `views/analytics/charts.tsx` moved, with its stylesheet
+(`styles/charts.css`). The locked decision that gateway traffic is never mixed
+into Claude analytics is about **data and sections**, not React components —
+`charts.tsx` is presentation over `{label, value, hint}[]` and holds no Claude
+type. What stayed unshared is everything typed: `analytics/shared.tsx`'s
+`entryLabel`/`projectLabel`/`RankList`, `stats.ts`, the wire types, and the
+ranked-list CSS (the gateway has its own `.gw-rank`). Prove a move like this
+rather than asserting it: building both sides and comparing the emitted CSS as a
+sorted set of rules gave 578 identical rules.
 
 ### Not implemented, on purpose
 

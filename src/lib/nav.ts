@@ -13,6 +13,7 @@ export type ViewId =
   | "gateway"
   | "gateway-providers"
   | "gateway-models"
+  | "gateway-usage"
   | "gateway-settings"
   | "settings"
   | "about";
@@ -66,6 +67,7 @@ export const SECTIONS: NavSection[] = [
       { id: "gateway", label: "Overview", icon: "zap" },
       { id: "gateway-providers", label: "Providers", icon: "database" },
       { id: "gateway-models", label: "Models", icon: "layers" },
+      { id: "gateway-usage", label: "Usage", icon: "chart" },
       { id: "gateway-settings", label: "Gateway Settings", icon: "gear" },
     ],
   },
@@ -84,6 +86,7 @@ export const VIEW_TITLES: Record<ViewId, string> = {
   gateway: "LLM Gateway",
   "gateway-providers": "Gateway Providers",
   "gateway-models": "Gateway Models",
+  "gateway-usage": "Gateway Usage",
   "gateway-settings": "Gateway Settings",
   settings: "Settings",
   about: "About Agento",
