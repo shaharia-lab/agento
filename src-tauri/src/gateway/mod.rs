@@ -42,3 +42,4 @@ pub mod dispatch;
 pub mod registry;
 pub mod server;
 pub mod stream;
+pub mod usage;

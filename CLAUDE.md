@@ -221,6 +221,8 @@ src-tauri/src/
     dispatch.rs  alias → ordered targets, retry, and the fallback walk;
                  is_retryable/should_failover copied from ferrox/src/retry.rs
     stream.rs    the SSE bytes of both surfaces, and the anthropic-beta merge
+    usage.rs     one row per served request (#425) — the accumulator a stream
+                 reports through, and the cost resolved at write time
   native/        ported endpoints (phase 2+)
     active_time.rs the capped-gap rule, shared by the scanner and the pipeline
     scanner/     the Claude session scanner (issue #270) — computes, never writes
@@ -235,7 +237,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   33 migrations, embedded from parity/ — applied at startup
+    migrate.rs   34 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -3036,6 +3038,47 @@ it. `a_gateway_start_requires_an_installed_keypair` asserts the order of the
 three calls in `lib.rs` against its source, deliberately: the consequence is a
 *window* rather than a state, so a test that asked the running app would have to
 win that race to see anything.
+
+**Usage recording is one row per served request, written off the request path**
+(#425, `gateway/usage.rs`, migration 34). Four things about it are decisions:
+
+- **A usage row may never fail a request.** The tokens are already spent by the
+  time there is anything to record, so `Accounting::finish` spawns and is never
+  awaited, the insert goes through `db::blocking` (#366 — this listener is not
+  on `proxy.rs`'s blocking pool at all, so an inline insert parks a *runtime
+  worker* for up to the five-second `busy_timeout`), and every failure below it
+  is a `warn`. `a_contended_write_lock_does_not_stall_the_runtime` is the third
+  copy of that regression test; without the hand-off the runtime stalls 1541 ms
+  against a 1500 ms hold.
+- **Exactly one row, enforced rather than hoped for.** Both surfaces have three
+  terminal arms and the Anthropic one reaches them through a translation layer
+  with its own state machine. A missed arm writes none; a doubled arm writes
+  two, and a log that sometimes double-counts is worse than one that sometimes
+  misses because nothing in the numbers says which. `finish` is a
+  compare-exchange on a `done` flag, and the status defaults to `Interrupted`
+  so the arm most easily missed is the default rather than the special case.
+- **Provider usage is a running total, so the counters are replaced, not
+  summed.** Accumulating would multiply a 200-chunk stream's prompt tokens by
+  200. A chunk carrying no usage leaves them alone, which is what lets an
+  **interrupted** stream record the tokens it saw rather than zeros — the arm
+  that matters most, since an abandoned stream still spent them. On the
+  Anthropic surface the metering happens **before** the translation
+  (`usage::meter`), because the emitter consumes the provider stream and a
+  frame carries no `usage`.
+- **Cost is stored, not derived** — the rule the scanner already enforces. A
+  rate correction must not retroactively rewrite past spend, and joining the
+  catalog at read time reproduces the list-versus-dashboard disagreement the
+  Claude side refuses. An unpriced model stores `NULL` with `unpriced = 1`,
+  **never `0.0`**; that is the common case here, not an edge one, since the
+  catalog is seeded for Claude models and OpenAI/Gemini/GLM aliases miss.
+
+Two rows are deliberately *not* written: a body that will not decode (no alias,
+no provider, nothing spent — four empty columns diluting every average) and a
+request refused by **auth** (no attributable token; logging unauthenticated
+attempts is a different feature). A refused *dispatch* does get one, because it
+names an alias the user configured — and it carries the **last target
+attempted**, so an empty `provider` means specifically "resolution failed"
+rather than "unknown".
 
 Two smaller notes. `tokens::touch` already throttles to one write a minute and
 spawns its own `db::blocking`, so calling it from the middleware is not a

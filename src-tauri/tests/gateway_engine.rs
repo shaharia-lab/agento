@@ -1567,3 +1567,566 @@ async fn a_reload_during_a_stream_rebinds_the_same_port() {
     drop(streaming);
     registry::stop();
 }
+
+// ── Usage recording (#425) ───────────────────────────────────────────────────
+
+/// Every row in the log, oldest first, as the columns a test cares about.
+#[derive(Debug, Clone, PartialEq)]
+struct UsageRow {
+    alias: String,
+    provider: String,
+    model_id: String,
+    prompt: i64,
+    completion: i64,
+    cache_read: i64,
+    cache_write: i64,
+    status: String,
+    streamed: bool,
+    surface: String,
+    token_sub: String,
+    cost_usd: Option<f64>,
+    unpriced: bool,
+}
+
+fn usage_rows(db: &NamedTempFile) -> Vec<UsageRow> {
+    let conn = agento_lib::native::db::open_read_only(db.path()).expect("open");
+    let mut stmt = conn
+        .prepare(
+            "SELECT alias, provider, model_id, prompt_tokens, completion_tokens, \
+             cache_read_tokens, cache_write_tokens, status, streamed, surface, token_sub, \
+             cost_usd, unpriced FROM gateway_usage_log ORDER BY created_at, rowid",
+        )
+        .expect("prepare");
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(UsageRow {
+                alias: r.get(0)?,
+                provider: r.get(1)?,
+                model_id: r.get(2)?,
+                prompt: r.get(3)?,
+                completion: r.get(4)?,
+                cache_read: r.get(5)?,
+                cache_write: r.get(6)?,
+                status: r.get(7)?,
+                streamed: r.get(8)?,
+                surface: r.get(9)?,
+                token_sub: r.get(10)?,
+                cost_usd: r.get(11)?,
+                unpriced: r.get(12)?,
+            })
+        })
+        .expect("query")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("rows");
+    rows
+}
+
+/// Wait for the log to reach `want` rows, then return them.
+///
+/// The write is spawned and deliberately not awaited by the request, so a test
+/// that read immediately would race it. Polling rather than sleeping a fixed
+/// amount keeps it fast when it is fast and non-flaky when the box is loaded —
+/// and it settles on `want` rather than "at least one", so a **doubled** write
+/// is caught by the assertion after it rather than hidden by an early return.
+async fn wait_for_rows(db: &NamedTempFile, want: usize) -> Vec<UsageRow> {
+    for _ in 0..200 {
+        if usage_rows(db).len() >= want {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    // A moment for a second, wrong write to land if one is coming — otherwise
+    // "exactly one" would only ever be testing "at least one".
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    usage_rows(db)
+}
+
+/// The four ordinary outcomes, each producing **exactly one** row.
+///
+/// Asserted by count rather than by "a row exists", because both failure modes
+/// are silent: a missed terminal arm writes none, and a doubled one writes two,
+/// and a usage log that sometimes double-counts is worse than one that
+/// sometimes misses — nothing in the numbers says which happened.
+#[tokio::test]
+async fn each_outcome_produces_exactly_one_row() {
+    // Four requests over one gateway: streamed ok, non-streamed ok, streamed
+    // upstream failure, non-streamed upstream failure. The 400s are terminal,
+    // so each costs exactly one upstream call.
+    let upstream = fake_upstream(vec![
+        Reply::Sse {
+            chunks: vec![chunk("Hi"), final_chunk()],
+        },
+        Reply::ok(&completion_body()),
+        Reply::status(400),
+        Reply::status(400),
+    ])
+    .await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let gateway = gateway_for(&db).await;
+    let token = token_with(Scope::Llm);
+
+    for (streaming, path) in [
+        (true, "/v1/chat/completions"),
+        (false, "/v1/chat/completions"),
+        (true, "/v1/chat/completions"),
+        (false, "/v1/chat/completions"),
+    ] {
+        let response = client()
+            .post(gateway.url(path))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({
+                "model": "my-alias",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "stream": streaming,
+            }))
+            .send()
+            .await
+            .expect("send");
+        // Drain the body so a streamed response actually finishes before the
+        // next request goes out — otherwise the terminal arm has not run.
+        let _ = body_text(response).await;
+    }
+
+    let rows = wait_for_rows(&db, 4).await;
+    assert_eq!(rows.len(), 4, "four requests, four rows — got {rows:#?}");
+
+    let statuses: Vec<&str> = rows.iter().map(|r| r.status.as_str()).collect();
+    assert_eq!(
+        statuses.iter().filter(|s| **s == "ok").count(),
+        2,
+        "the two successes; got {statuses:?}"
+    );
+    assert_eq!(
+        statuses.iter().filter(|s| **s == "upstream_error").count(),
+        2,
+        "a 400 from every target is an upstream error, not a refusal; got {statuses:?}"
+    );
+
+    for row in &rows {
+        assert_eq!(row.alias, "my-alias");
+        assert_eq!(row.surface, "openai");
+        assert_eq!(
+            row.provider, "p1",
+            "the target that answered is named, even on a failure"
+        );
+        assert_eq!(row.model_id, "upstream-model");
+    }
+    assert_eq!(
+        rows.iter().filter(|r| r.streamed).count(),
+        2,
+        "the streamed flag has to distinguish the two shapes"
+    );
+
+    // The successful ones carry the provider's own numbers.
+    let ok: Vec<&UsageRow> = rows.iter().filter(|r| r.status == "ok").collect();
+    assert!(
+        ok.iter().all(|r| r.prompt == 15),
+        "prompt tokens come from the provider's usage field; got {ok:#?}"
+    );
+}
+
+/// An unknown alias is `refused`, not an upstream error, and never reaches a
+/// provider.
+///
+/// The distinction is what stops a misconfigured alias from reading as a
+/// failing provider in every aggregate built on this table.
+#[tokio::test]
+async fn an_unroutable_request_is_recorded_as_refused() {
+    let upstream = fake_upstream(vec![]).await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let gateway = gateway_for(&db).await;
+
+    let response = client()
+        .post(gateway.url("/v1/chat/completions"))
+        .bearer_auth(token_with(Scope::Llm))
+        .json(&serde_json::json!({
+            "model": "no-such-alias",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), 404);
+
+    let rows = wait_for_rows(&db, 1).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, "refused");
+    assert_eq!(rows[0].alias, "no-such-alias");
+    assert_eq!(
+        (rows[0].prompt, rows[0].completion),
+        (0, 0),
+        "nothing was sent, so nothing was spent"
+    );
+    assert_eq!(
+        rows[0].provider, "",
+        "no target was chosen, so none is named"
+    );
+    assert_eq!(upstream.calls().len(), 0);
+}
+
+/// A body that will not decode records nothing.
+///
+/// There is no alias, no provider and no model to attribute it to, and nothing
+/// was spent — a row here would be four empty columns diluting every average.
+/// This is the deliberate companion to the `refused` case above, which *does*
+/// get a row because it names an alias the user configured.
+#[tokio::test]
+async fn a_malformed_body_records_nothing() {
+    let upstream = fake_upstream(vec![]).await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let gateway = gateway_for(&db).await;
+
+    let response = client()
+        .post(gateway.url("/v1/chat/completions"))
+        .bearer_auth(token_with(Scope::Llm))
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("{not json")
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), 400);
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(usage_rows(&db).is_empty(), "got {:#?}", usage_rows(&db));
+}
+
+/// A refused *credential* records nothing either — there is no token to
+/// attribute it to, and logging unauthenticated attempts is a different feature
+/// from recording spend.
+#[tokio::test]
+async fn an_unauthenticated_request_records_nothing() {
+    let upstream = fake_upstream(vec![]).await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let gateway = gateway_for(&db).await;
+
+    for auth in [None, Some(token_with(Scope::Write))] {
+        let mut request =
+            client()
+                .post(gateway.url("/v1/chat/completions"))
+                .json(&serde_json::json!({
+                    "model": "my-alias",
+                    "messages": [{"role": "user", "content": "Hello"}],
+                }));
+        if let Some(token) = auth {
+            request = request.bearer_auth(token);
+        }
+        let status = request.send().await.expect("send").status();
+        assert!(status == 401 || status == 403, "got {status}");
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    assert!(usage_rows(&db).is_empty(), "got {:#?}", usage_rows(&db));
+}
+
+/// A stream the client abandons still records what it saw.
+///
+/// This is the arm most easily missed — it is not the protocol's ending, it is
+/// the absence of one — and missing it loses exactly the requests a user is
+/// most likely to ask about, since an abandoned stream still spent tokens.
+#[tokio::test]
+async fn an_interrupted_stream_records_the_tokens_it_saw() {
+    // A chunk carrying usage, then silence: the client disconnects with
+    // counters populated but no terminal frame.
+    let upstream = fake_upstream(vec![Reply::SseThenHang {
+        chunks: vec![final_chunk()],
+    }])
+    .await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let gateway = gateway_for(&db).await;
+
+    let mut response = client()
+        .post(gateway.url("/v1/chat/completions"))
+        .bearer_auth(token_with(Scope::Llm))
+        .json(&serde_json::json!({
+            "model": "my-alias",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), 200);
+
+    // Read the usage-bearing frame, *then* disconnect — otherwise the counters
+    // would legitimately be zero and the test would pass without proving the
+    // accumulator survives the interruption.
+    tokio::time::timeout(std::time::Duration::from_secs(10), response.chunk())
+        .await
+        .expect("a first frame")
+        .expect("chunk")
+        .expect("some bytes");
+    drop(response);
+
+    let rows = wait_for_rows(&db, 1).await;
+    assert_eq!(rows.len(), 1, "an abandoned stream still owes a row");
+    assert_eq!(rows[0].status, "interrupted");
+    assert!(rows[0].streamed);
+    assert_eq!(
+        (rows[0].prompt, rows[0].completion),
+        (15, 2),
+        "the tokens observed before the client left, not zeros"
+    );
+}
+
+/// The row names the token that served the request, and two tokens are
+/// distinguishable.
+///
+/// This is what makes revoking a credential an informed decision rather than a
+/// guess — without it the log says money was spent but not by which tool.
+#[tokio::test]
+async fn each_row_names_the_token_that_served_it() {
+    let upstream = fake_upstream(vec![Reply::ok(&completion_body()); 2]).await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let gateway = gateway_for(&db).await;
+
+    // Two distinct tokens, minted with different subjects.
+    let first =
+        agento_lib::native::security::token::mint(installed_keypair(), "tool-a", Scope::Llm, 3600)
+            .expect("mint")
+            .token;
+    let second =
+        agento_lib::native::security::token::mint(installed_keypair(), "tool-b", Scope::Llm, 3600)
+            .expect("mint")
+            .token;
+
+    for token in [&first, &second] {
+        let response = client()
+            .post(gateway.url("/v1/chat/completions"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({
+                "model": "my-alias",
+                "messages": [{"role": "user", "content": "Hello"}],
+            }))
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(response.status(), 200);
+    }
+
+    let rows = wait_for_rows(&db, 2).await;
+    assert_eq!(rows.len(), 2);
+    let subs: std::collections::BTreeSet<&str> =
+        rows.iter().map(|r| r.token_sub.as_str()).collect();
+    assert_eq!(
+        subs,
+        ["tool-a", "tool-b"].into_iter().collect(),
+        "each row must name its own token; got {subs:?}"
+    );
+}
+
+/// The Anthropic surface records too, and its tokens survive the translation.
+///
+/// Its frames are produced by consuming the provider stream, so a naive reading
+/// of `usage` from the emitted frames would find none — the metering has to
+/// happen a layer down, and this is what says it does.
+#[tokio::test]
+async fn the_anthropic_surface_records_its_own_rows() {
+    let upstream = fake_upstream(vec![Reply::Sse {
+        chunks: vec![chunk("Hi"), final_chunk()],
+    }])
+    .await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let gateway = gateway_for(&db).await;
+
+    let response = client()
+        .post(gateway.url("/anthropic/v1/messages"))
+        .header("x-api-key", token_with(Scope::Llm))
+        .json(&serde_json::json!({
+            "model": "my-alias",
+            "max_tokens": 1024,
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), 200);
+    let _ = body_text(response).await;
+
+    let rows = wait_for_rows(&db, 1).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].surface, "anthropic");
+    assert_eq!(rows[0].status, "ok");
+    assert!(rows[0].streamed);
+    assert_eq!(
+        (rows[0].prompt, rows[0].completion),
+        (15, 2),
+        "metering happens before the translation, or these are zero"
+    );
+}
+
+/// A model the pricing catalog does not know is disclosed, never zeroed.
+///
+/// The catalog is seeded for Claude models, so an OpenAI or Gemini alias missing
+/// is the *ordinary* case here rather than an edge one — and `$0.00` would read
+/// as "this request was free" on every dashboard built over this table.
+#[tokio::test]
+async fn an_unpriced_model_is_recorded_as_unpriced_rather_than_free() {
+    let upstream = fake_upstream(vec![Reply::ok(&completion_body())]).await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "definitely-not-a-real-model-xyz")],
+    );
+    let gateway = gateway_for(&db).await;
+
+    let response = client()
+        .post(gateway.url("/v1/chat/completions"))
+        .bearer_auth(token_with(Scope::Llm))
+        .json(&serde_json::json!({
+            "model": "my-alias",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), 200);
+
+    let rows = wait_for_rows(&db, 1).await;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].unpriced, "got {:#?}", rows[0]);
+    assert_eq!(
+        rows[0].cost_usd, None,
+        "NULL, not 0.0 — a total has to read as a floor"
+    );
+}
+
+/// A contended write lock must not stall the runtime (#366, #425).
+///
+/// The defect this guards is the one `chat_turn.rs` and `scheduled_run.rs`
+/// already carry a copy of, reaching a third caller: `db::open_read_write` sets
+/// a five-second `busy_timeout`, so a usage insert meeting a lock held by the
+/// session scanner's batch writer parks its thread for up to that long. This
+/// listener is not on `proxy.rs`'s blocking pool at all, so an inline insert
+/// would park a *runtime worker* — and on a four-core box the gateway shares
+/// that runtime with the proxy, every SSE stream and the scheduler.
+///
+/// The shape is the established one, and each part is load-bearing:
+///
+/// - **one worker thread**, so a single parked worker is the whole runtime;
+/// - **a plain OS thread** holds the lock, so the contention comes from outside
+///   the runtime exactly as the scanner's batch writer does;
+/// - **`last` is seeded before the spawn**, because a starved ticker is never
+///   *polled* — seeding it on the first poll would start the clock after the
+///   stall and measure nothing, which is how the first version of the sibling
+///   test passed against the unfixed code.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_contended_write_lock_does_not_stall_the_runtime() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    let upstream = fake_upstream(vec![Reply::ok(&completion_body())]).await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let gateway = gateway_for(&db).await;
+
+    /// Long enough that a parked worker is unmistakable, short enough to stay
+    /// well inside the 5 s `busy_timeout` so the insert itself still succeeds.
+    const HOLD: Duration = Duration::from_millis(1_500);
+
+    // The file must already be WAL. Left in the default rollback journal,
+    // `open_read_write`'s own `PRAGMA journal_mode=WAL` is a *mode change*
+    // needing an exclusive lock and fails in about a millisecond instead of
+    // waiting on `busy_timeout` — which would make this measure the wrong thing.
+    agento_lib::native::db::open_read_write(db.path()).expect("convert to WAL");
+
+    let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+    let lock_db = db.path().to_path_buf();
+    let holder = std::thread::spawn(move || {
+        let mut conn = rusqlite::Connection::open(&lock_db).expect("open");
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("begin immediate");
+        holding_tx.send(()).expect("signal");
+        std::thread::sleep(HOLD);
+        tx.rollback().expect("rollback");
+    });
+    holding_rx.recv().expect("the writer took the lock");
+
+    let worst_gap_ms = Arc::new(AtomicU64::new(0));
+    let ticks = Arc::new(AtomicU64::new(0));
+    let ticker = {
+        let (worst_gap_ms, ticks, mut last) = (
+            Arc::clone(&worst_gap_ms),
+            Arc::clone(&ticks),
+            Instant::now(),
+        );
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                let now = Instant::now();
+                let gap = u64::try_from(now.duration_since(last).as_millis()).unwrap_or(u64::MAX);
+                worst_gap_ms.fetch_max(gap, Ordering::Relaxed);
+                ticks.fetch_add(1, Ordering::Relaxed);
+                last = now;
+            }
+        })
+    };
+
+    let response = client()
+        .post(gateway.url("/v1/chat/completions"))
+        .bearer_auth(token_with(Scope::Llm))
+        .json(&serde_json::json!({
+            "model": "my-alias",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(response.status(), 200, "the request is answered regardless");
+
+    holder.join().expect("the writer finished");
+    ticker.abort();
+
+    let worst = worst_gap_ms.load(Ordering::Relaxed);
+    assert!(
+        worst < 500,
+        "the runtime stalled for {worst} ms while the write lock was held \
+         (the hold is {} ms; anything near it means the usage insert blocked a worker)",
+        HOLD.as_millis()
+    );
+    // The gap alone would also read as healthy if the ticker had simply been
+    // cancelled early, so assert it really ran throughout.
+    let ticks = ticks.load(Ordering::Relaxed);
+    assert!(
+        ticks > 50,
+        "the ticker only advanced {ticks} times across a {} ms hold",
+        HOLD.as_millis()
+    );
+
+    // ...and the row still landed once the lock was released, so this is not
+    // passing because nothing happened.
+    let rows = wait_for_rows(&db, 1).await;
+    assert_eq!(rows.len(), 1, "the insert still completed: {rows:#?}");
+}
