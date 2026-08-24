@@ -240,6 +240,14 @@ added through `~/.agento/mcps.yaml`.
 
 </details>
 
+### Route your other tools through Agento
+
+Turn on the built-in **LLM Gateway** and Agento serves an OpenAI-compatible and an
+Anthropic-native endpoint on `127.0.0.1`, forwarding to providers you configure with your
+own keys. Point the OpenAI SDK, the Anthropic SDK or Claude Code at it and get ordered
+fallback between providers plus a record of what every tool spent. **Off by default** — a
+fresh install binds no port.
+
 ### Honest pricing, your data
 
 Rates for Anthropic, Moonshot, Z.ai and Alibaba models ship with the app and are
@@ -332,7 +340,7 @@ Everything lives in [`docs/`](docs/README.md).
 **User guide** — how to *use* it
 
 - [Installation](docs/installation.md)
-- [User guide](docs/user-guide.md): chats, agents, integrations, scheduled tasks, sessions, analytics, settings
+- [User guide](docs/user-guide.md): chats, agents, integrations, scheduled tasks, sessions, analytics, the LLM gateway, settings
 - [Troubleshooting](docs/troubleshooting.md)
 
 </td>

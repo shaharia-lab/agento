@@ -8,6 +8,7 @@ Common problems and what to do about them.
 - [History and analytics](#history-and-analytics)
 - [Scheduled tasks](#scheduled-tasks)
 - [Integrations](#integrations)
+- [LLM Gateway](#llm-gateway)
 - [Updates](#updates)
 - [Reading the logs](#reading-the-logs)
 - [Still stuck](#still-stuck)
@@ -249,6 +250,110 @@ enabled inside it, and the tool is ticked on the agent.
 
 Agento does not support WhatsApp. An integration created by an older version is
 still listed and its data is safe, but it cannot be edited or used.
+
+---
+
+## LLM Gateway
+
+### Overview says "Port unavailable"
+
+Something else already holds that port. Change it in **LLM Gateway → Gateway
+Settings → Port** and save; the listener rebinds immediately.
+
+The usual culprit is a second Agento. A development build and an installed one
+read different databases but share the machine's ports, so both can be configured
+for 8880 and only the first to start gets it. The status carries the exact reason,
+and the same line is in the log:
+
+```
+binding the llm gateway on 127.0.0.1:8880: Address already in use (os error 98)
+```
+
+### The gateway answers 401
+
+The token is absent, malformed, expired, revoked, or was signed by a key this
+install no longer uses — regenerating the signing key does that to every token at
+once. Mint a new one from **LLM Gateway → Overview** and paste it into the tool
+again.
+
+Check the tool is actually sending it: the gateway accepts either
+`Authorization: Bearer <token>` or `x-api-key: <token>`, and an `Authorization`
+header that is present but not a `Bearer` is ignored in favour of `x-api-key`.
+
+### The gateway answers 403
+
+You used a `read` or `write` token. Those reach the Agento API and are refused
+here on purpose. Mint one with the **`llm`** scope — Overview's **Create gateway
+token** button does exactly that — and use it instead.
+
+A bigger Agento token is not the fix. The scopes are disjoint rather than ranked,
+so `write` does not include `llm`.
+
+### The Agento API answers 403 for a token that works on the gateway
+
+The same rule the other way round. An `llm` token reaches the gateway and nothing
+under `/api`; there is no Agento API route that accepts one. Use a `read` or
+`write` token for the API.
+
+### The tool connects but every request fails with a model error
+
+The name your tool sends as `model` has to be an alias you defined, exactly.
+There is no prefix parsing and no fuzzy matching, so an unconfigured name is a
+404:
+
+```
+model alias 'claude-opus-5' is not configured on this gateway
+```
+
+For Claude Code this is the default first experience, because it asks for its own
+default model unless told otherwise and stops with *"There's an issue with the
+selected model"*. Either `export ANTHROPIC_MODEL=<your alias>`, or name an alias
+after the model Claude Code asks for.
+
+### Claude Code cannot reach it at all
+
+Check the base URL has no `/v1`. Claude Code and the Anthropic SDK append
+`/v1/messages` themselves, so `ANTHROPIC_BASE_URL` ends at `/anthropic`:
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8880/anthropic   # right
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8880/anthropic/v1 # 404 on every call
+```
+
+The OpenAI-shaped base URL is the opposite and does end in `/v1`.
+
+### Nothing appears in Usage
+
+A row is written per request the gateway *served*, so a request refused before it
+got that far — a bad token, a 404 on the base URL — records nothing on purpose.
+Confirm the listener is up and the request is arriving:
+
+```bash
+curl http://127.0.0.1:8880/healthz
+curl http://127.0.0.1:8880/v1/models -H "Authorization: Bearer <your gateway token>"
+```
+
+`/healthz` needs no credential. `/v1/models` lists your aliases; if the alias you
+expect is missing or disabled, that is why traffic is not reaching it.
+
+### Usage shows requests but no cost
+
+Cost is computed from the price catalog, which ships filled in for Anthropic,
+Moonshot, Z.ai and Alibaba models — so OpenAI and Gemini traffic has no rate.
+Anything unpriced is recorded as such rather than as free, which is why the total
+is labelled a floor. Add rates under **Settings → Pricing** for the models you
+actually use.
+
+### The gateway's log lines
+
+The same `Agento.log` as everything else — see [Reading the
+logs](#reading-the-logs). Gateway lines are prefixed `llm gateway` or `gateway`:
+
+```
+llm gateway listening on http://127.0.0.1:8880
+gateway completion streaming alias=fast provider=my-openai model_id=gpt-4o-mini
+gateway usage pruned rows=1204 older_than_days=90
+```
 
 ---
 
