@@ -9,16 +9,19 @@
 //! half: they build their database with `migrate::apply`, so the FTS5 table is
 //! migration 33's own DDL rather than a second spelling of it that could drift.
 //!
-//! What is deliberately *not* here: anything about ranking. #436 composes a
-//! membership test; the score is #437's, and `native::search`'s own tests
-//! already pin it.
+//! Ranking arrived with #437 and lives at the bottom of this file: the
+//! `relevance` sort, its keyset cursor and the `match_snippet` field. The score
+//! itself is still `native::search`'s to pin; what these assert is what the list
+//! does with it.
 
 use rusqlite::{params, Connection};
 
 use super::page::{facets, list_page};
-use super::query::{build_fts_query, SessionQuery};
+use super::query::{
+    build_fts_query, Cursor, SessionQuery, Sort, ERR_CURSOR_MISMATCH, RELEVANCE_UNRANKED,
+};
 use crate::native::migrate;
-use crate::native::search::{self, SearchDoc};
+use crate::native::search::{self, SearchDoc, SNIPPET_MARK_END, SNIPPET_MARK_START};
 use crate::native::settings::DataSettings;
 
 /// A migrated database — the schema the app actually runs on.
@@ -520,4 +523,510 @@ fn the_probe_still_rejects_a_bad_expression_against_an_empty_index() {
             .expect("a valid expression answers"),
         "and a valid one is simply a miss"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #437 — the match on the wire: `match_snippet`, and the `relevance` sort.
+// ---------------------------------------------------------------------------
+
+/// Index one session with text in a chosen column, so a fixture can put the
+/// same word under different bm25 weights (title 8.0 … tool_text 0.5).
+fn index_doc(conn: &Connection, session_id: &str, project_path: &str, doc: SearchDoc) {
+    search::replace(
+        conn,
+        &SearchDoc {
+            session_id: session_id.to_string(),
+            project_path: project_path.to_string(),
+            ..doc
+        },
+    )
+    .expect("index");
+}
+
+/// One session per column, all containing the same word — so the only thing
+/// separating them is the weight of the column it landed in.
+fn weighted_corpus() -> Connection {
+    let conn = migrated();
+    for (id, doc) in [
+        (
+            "in-title",
+            SearchDoc {
+                title: "quasarflux".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "in-user",
+            SearchDoc {
+                user_text: "quasarflux".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "in-tool",
+            SearchDoc {
+                tool_text: "quasarflux".into(),
+                ..Default::default()
+            },
+        ),
+    ] {
+        session(&conn, id, "/p", "", "");
+        index_doc(&conn, id, "/p", doc);
+    }
+    conn
+}
+
+/// Typing a search asks for the best match first, and picking a sort keeps it.
+///
+/// The order is the whole assertion, so the fixture is built with the word in
+/// three differently-weighted columns: title (8.0) beats user text (4.0) beats
+/// tool text (0.5). Reverse the sign in `SQL_RELEVANCE` and this comes back
+/// exactly inverted — every row still a genuine hit, which is why the ordering
+/// has to be asserted rather than the membership.
+#[test]
+fn a_search_with_no_sort_is_ranked_best_first_and_an_explicit_sort_wins() {
+    let conn = weighted_corpus();
+
+    assert_eq!(
+        found(&conn, "q=quasarflux"),
+        vec!["in-title", "in-user", "in-tool"],
+        "no explicit sort under a search is relevance"
+    );
+    assert_eq!(
+        found(&conn, "q=quasarflux&sort=relevance"),
+        vec!["in-title", "in-user", "in-tool"],
+        "asking for it explicitly is the same order"
+    );
+
+    // `recent` is a total tie here — every fixture row shares one
+    // `last_activity` — so the tiebreak decides, and it is the row key
+    // descending. That is a different order from the ranking, which is the
+    // point: an explicit sort is not overridden by the search term.
+    assert_eq!(
+        found(&conn, "q=quasarflux&sort=recent"),
+        vec!["in-user", "in-tool", "in-title"],
+        "an explicit sort=recent is respected under a search"
+    );
+}
+
+/// `relevance` with nothing to rank is the unknown-sort fallback, not an error
+/// and not an ordering over a `MATCH` that was never run.
+#[test]
+fn relevance_without_a_search_term_falls_back_to_recent() {
+    for raw in ["sort=relevance", "sort=relevance&q=", "sort=relevance&q=+"] {
+        assert_eq!(
+            SessionQuery::parse(raw).expect("parse").sort,
+            Sort::Recent,
+            "{raw}"
+        );
+    }
+    // ...and with a term it is honoured, while no `sort` at all defaults to it.
+    assert_eq!(
+        SessionQuery::parse("sort=relevance&q=auth")
+            .expect("parse")
+            .sort,
+        Sort::Relevance
+    );
+    assert_eq!(
+        SessionQuery::parse("q=auth").expect("parse").sort,
+        Sort::Relevance
+    );
+    // No search term and no sort is still the list's own default.
+    assert_eq!(SessionQuery::parse("").expect("parse").sort, Sort::Recent);
+}
+
+/// The snippet is the answer to "why did this row match", so it exists exactly
+/// where there is an index hit to point at — and carries the markers #438 splits
+/// on rather than markup.
+#[test]
+fn a_content_match_carries_a_snippet_and_a_metadata_match_does_not() {
+    let conn = corpus();
+    let page = list_page(&conn, &DataSettings::default(), &query("q=auth")).expect("page");
+
+    let snippets: std::collections::BTreeMap<String, String> = page
+        .items
+        .iter()
+        .map(|s| (s.session_id.clone(), s.match_snippet.clone()))
+        .collect();
+
+    let hit = &snippets["content-only"];
+    assert!(
+        hit.contains(&format!("{SNIPPET_MARK_START}auth{SNIPPET_MARK_END}")),
+        "the matched term is wrapped in the sentinels: {hit:?}"
+    );
+    assert!(
+        hit.contains("login handler"),
+        "and the surrounding text is the session's own: {hit:?}"
+    );
+    assert!(
+        !hit.contains('<') && !hit.contains("[MATCH]"),
+        "never markup: {hit:?}"
+    );
+
+    // `metadata-only` matched on its preview and `unindexed` on its title —
+    // neither is an index hit, so neither has anything to snippet.
+    assert_eq!(snippets["metadata-only"], "");
+    assert_eq!(snippets["unindexed"], "");
+}
+
+/// A row with no search carries no snippet at all, and the field leaves the
+/// wire — which is what keeps every frozen golden byte-identical.
+#[test]
+fn a_response_that_is_not_a_search_carries_no_match_snippet_key() {
+    let conn = corpus();
+    for q in ["", "sort=cost", "project=%2Fhome%2Fu%2Falpha"] {
+        let page = list_page(&conn, &DataSettings::default(), &query(q)).expect("page");
+        let json = String::from_utf8(crate::native::gojson::to_vec(&page).expect("encode"))
+            .expect("utf-8");
+        assert!(
+            !json.contains("match_snippet"),
+            "{q:?} must not introduce the key: {json}"
+        );
+    }
+}
+
+/// A session id under two project paths is two rows (#362 family), and only one
+/// of them holds the matched text — so the snippet must follow the pair.
+///
+/// Keyed on the session id alone, the other project's row would carry a
+/// highlight quoting text it does not contain, which reads as a correct answer.
+#[test]
+fn a_snippet_belongs_to_the_pair_not_to_the_session_id() {
+    let conn = migrated();
+    session(&conn, "shared", "/home/u/alpha", "", "");
+    session(&conn, "shared", "/home/u/beta", "", "");
+    index(&conn, "shared", "/home/u/alpha", "the quasarflux incident");
+    // The other project matches through its *path*, so it is on the page with
+    // no index hit of its own.
+    index(&conn, "shared", "/home/u/beta", "something else entirely");
+
+    let page = list_page(&conn, &DataSettings::default(), &query("q=quasarflux")).expect("page");
+    let by_path: std::collections::BTreeMap<String, String> = page
+        .items
+        .iter()
+        .map(|s| (s.project_path.clone(), s.match_snippet.clone()))
+        .collect();
+
+    assert!(by_path["/home/u/alpha"].contains("incident"), "{by_path:?}");
+    assert!(
+        !by_path.contains_key("/home/u/beta"),
+        "the other project's row does not match at all here: {by_path:?}"
+    );
+}
+
+/// Relevance pages the whole result set exactly once **under deliberate ties**.
+///
+/// Every session holds identical text, so every bm25 score is identical and the
+/// sort key alone cannot order them: the `(session_id, project_path)` tiebreak
+/// is the only thing making the order total. Without it a tied page repeats one
+/// row and drops another, and both pages still look plausible.
+#[test]
+fn relevance_pages_through_tied_ranks_exactly_once() {
+    let conn = migrated();
+    // Same id under two paths, twice over — so the ties run to the *pair*, not
+    // just to the rank, which is the #364 rule this shares.
+    for i in 0..4 {
+        for project in ["/home/u/alpha", "/home/u/beta"] {
+            let id = format!("s{i}");
+            session(&conn, &id, project, "", "");
+            index(&conn, &id, project, "the quasarflux incident recurred");
+        }
+    }
+
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let mut cursor = String::new();
+    for _ in 0..20 {
+        let q = query(&format!("q=quasarflux&limit=3&cursor={cursor}"));
+        assert_eq!(q.sort, Sort::Relevance);
+        let page = list_page(&conn, &DataSettings::default(), &q).expect("page");
+        seen.extend(
+            page.items
+                .into_iter()
+                .map(|s| (s.session_id, s.project_path)),
+        );
+        cursor = page.next_cursor.clone();
+        if !page.has_more {
+            break;
+        }
+    }
+
+    let total = seen.len();
+    seen.sort();
+    seen.dedup();
+    assert_eq!(seen.len(), 8, "every match paged exactly once: {seen:?}");
+    assert_eq!(total, 8, "and none of them twice");
+}
+
+/// The cursor carries the sort, so a relevance position cannot be replayed
+/// against another ordering — the existing 400, unchanged.
+#[test]
+fn a_relevance_cursor_round_trips_and_another_sort_refuses_it() {
+    let conn = migrated();
+    for i in 0..4 {
+        let id = format!("s{i}");
+        session(&conn, &id, "/p", "", "");
+        index(&conn, &id, "/p", "the quasarflux incident");
+    }
+
+    let first = list_page(
+        &conn,
+        &DataSettings::default(),
+        &query("q=quasarflux&limit=2"),
+    )
+    .expect("page");
+    assert!(first.has_more);
+
+    let minted = Cursor::decode(&first.next_cursor, Sort::Relevance)
+        .expect("decode")
+        .expect("some");
+    assert_eq!(minted.sort, "relevance");
+    // The value is the negated bm25 — a decimal, in the same `v` field every
+    // non-time sort already pages on rather than a second field beside it.
+    assert!(
+        minted.value.parse::<f64>().is_ok(),
+        "value {:?} is a decimal",
+        minted.value
+    );
+
+    assert_eq!(
+        Cursor::decode(&first.next_cursor, Sort::Recent).expect_err("mismatch"),
+        ERR_CURSOR_MISMATCH
+    );
+    // ...and through the handler's own path, which is where the 400 comes from.
+    let replayed = query(&format!(
+        "q=quasarflux&sort=cost&cursor={}",
+        first.next_cursor
+    ));
+    assert_eq!(
+        list_page(&conn, &DataSettings::default(), &replayed).expect_err("mismatch"),
+        ERR_CURSOR_MISMATCH
+    );
+}
+
+/// A cursor minted before `p` existed decodes with it empty and pages as it
+/// used to — the Go missing-field rule, asserted for the new sort too because a
+/// relevance cursor is the one a bookmark is most likely to be carrying.
+#[test]
+fn a_relevance_cursor_without_the_project_field_still_decodes() {
+    let raw = super::query::base64_url_nopad(br#"{"s":"relevance","v":"0.0001","id":"s1"}"#);
+    let c = Cursor::decode(&raw, Sort::Relevance)
+        .expect("decode")
+        .expect("some");
+    assert_eq!(c.id, "s1");
+    assert_eq!(c.project, "");
+}
+
+/// A row that matched only through the six metadata columns has no bm25 score,
+/// and must still page.
+///
+/// It is the `COALESCE` in `SQL_RELEVANCE` that makes this work. Left as SQL
+/// NULL those rows would sort last correctly on the *first* page and then
+/// vanish, because `NULL < ?` is NULL and the keyset predicate drops them —
+/// which is the silent half, visible only from page two.
+///
+/// Measured on the revert rather than argued: dropping the `COALESCE` fails
+/// this test *earlier* than that, at `Invalid column type Null at index 54`,
+/// because the sort key is scanned as an `f64`. That is deliberate and worth
+/// keeping — the alternative, reading it as `Option<f64>` and defaulting in
+/// Rust, would fix the cursor's value and leave the `ORDER BY` and the keyset
+/// predicate still comparing against NULL, which is exactly the silent failure.
+/// The sentinel belongs in the SQL, where all three read it.
+#[test]
+fn a_metadata_only_match_still_pages_under_relevance() {
+    let conn = migrated();
+    // Two content matches, so the first page is entirely ranked rows.
+    for id in ["ranked-a", "ranked-b"] {
+        session(&conn, id, "/p", "", "");
+        index(&conn, id, "/p", "the quasarflux incident");
+    }
+    // Two that match only on their title, with no index row at all.
+    for id in ["plain-a", "plain-b"] {
+        session(&conn, id, "/p", "", "quasarflux in the title");
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor = String::new();
+    for _ in 0..10 {
+        let page = list_page(
+            &conn,
+            &DataSettings::default(),
+            &query(&format!("q=quasarflux&limit=2&cursor={cursor}")),
+        )
+        .expect("page");
+        seen.extend(page.items.into_iter().map(|s| s.session_id));
+        cursor = page.next_cursor.clone();
+        if !page.has_more {
+            break;
+        }
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec!["plain-a", "plain-b", "ranked-a", "ranked-b"],
+        "the unranked rows survive past the first page"
+    );
+
+    // And they sort after every ranked row, which is what the sentinel is for.
+    // The two ranked rows hold identical text and so tie on bm25, as do the two
+    // unranked ones on the sentinel; within each pair the row-key tiebreak
+    // decides, descending.
+    let all = found(&conn, "q=quasarflux&limit=10");
+    assert_eq!(&all[..2], ["ranked-b", "ranked-a"], "{all:?}");
+    assert_eq!(&all[2..], ["plain-b", "plain-a"], "{all:?}");
+}
+
+/// The sentinel has to be below every score bm25 can produce, or an unranked
+/// row would sort *above* a real match.
+///
+/// `bm25()` is non-positive, so its negation is non-negative and -1 is strictly
+/// below all of it. Asserted against real scores rather than argued from the
+/// documentation.
+#[test]
+fn the_unranked_sentinel_is_below_every_real_score() {
+    let conn = weighted_corpus();
+    let hits = search::search(&conn, r#""quasarflux""#, 10).expect("search");
+    assert_eq!(hits.len(), 3);
+    for hit in &hits {
+        assert!(hit.rank <= 0.0, "bm25 is non-positive: {hit:?}");
+        assert!(
+            -hit.rank > RELEVANCE_UNRANKED,
+            "the negated score outranks the sentinel: {hit:?}"
+        );
+    }
+}
+
+/// With no `session_search` table there is no rank to sort by, and relevance
+/// must still answer — as an unranked total order over the row key rather than
+/// as an error.
+#[test]
+fn relevance_degrades_to_an_unranked_order_with_no_index_table() {
+    let conn = corpus();
+    conn.execute("DROP TABLE session_search", [])
+        .expect("drop the index");
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor = String::new();
+    for _ in 0..10 {
+        let page = list_page(
+            &conn,
+            &DataSettings::default(),
+            &query(&format!("q=auth&limit=1&cursor={cursor}")),
+        )
+        .expect("page");
+        seen.extend(page.items.into_iter().map(|s| s.session_id));
+        cursor = page.next_cursor.clone();
+        if !page.has_more {
+            break;
+        }
+    }
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec!["metadata-only", "unindexed"],
+        "the metadata half still pages, one row at a time"
+    );
+}
+
+/// The toolbar's counters and the rows below them are one predicate, and the
+/// sort must not move either — `facets` never joins the index, so a search that
+/// composed the ranked join into the *filter* rather than beside it would show
+/// up here as a disagreement.
+#[test]
+fn facets_agree_with_the_rows_under_relevance() {
+    let conn = corpus();
+    for q in [
+        "q=auth",
+        "q=handler",
+        "q=auth&sort=relevance",
+        "q=nothing-at-all",
+    ] {
+        let page = list_page(&conn, &DataSettings::default(), &query(q)).expect("page");
+        let f = facets(&conn, &DataSettings::default(), &query(q)).expect("facets");
+        assert_eq!(
+            f.total,
+            page.items.len() as i64,
+            "{q}: facets counted {} against {} rows",
+            f.total,
+            page.items.len()
+        );
+    }
+}
+
+/// The fixture the search golden is built from.
+///
+/// Three sessions holding the same word in three differently-weighted columns,
+/// so **no two rows tie on the sort key** — the golden can record only one
+/// ordering, so the fixture must only be able to produce one. Their ids and
+/// project paths differ too, so the row-key tiebreak is never what decides.
+///
+/// The page is deliberately larger than the result set: an exhausted page mints
+/// no cursor, which keeps the raw bm25 doubles out of the recorded bytes. What
+/// this golden pins is the *shape* — where `match_snippet` sits, that it is
+/// omitted where there is no index hit, and the ranked order — not SQLite's
+/// scoring, which `native::search`'s own tests own.
+fn golden_corpus() -> Connection {
+    let conn = migrated();
+    for (id, project, doc) in [
+        (
+            "aaa-title",
+            "/work/alpha",
+            SearchDoc {
+                title: "the quasarflux rollout".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "bbb-user",
+            "/work/beta",
+            SearchDoc {
+                user_text: "can you explain the quasarflux failure in staging".into(),
+                ..Default::default()
+            },
+        ),
+        (
+            "ccc-tool",
+            "/work/gamma",
+            SearchDoc {
+                tool_text: "warning: quasarflux limit exceeded on shard 3".into(),
+                ..Default::default()
+            },
+        ),
+    ] {
+        session(&conn, id, project, "", "");
+        index_doc(&conn, id, project, doc);
+    }
+    // Matches through its project path alone, so it is on the page with no
+    // snippet — which is what pins the omit-when-empty half of the field.
+    session(&conn, "ddd-path", "/work/quasarflux-notes", "", "");
+    conn
+}
+
+/// The whole search response, byte for byte.
+///
+/// This is the one golden in `parity/` that has no Go ancestor —
+/// `match_snippet` and `relevance` are Agento's own, so it is hand-written
+/// beside the code the way `desktop_routes.json` and
+/// `session_metric_vectors.json` are. **A change here is a change to the
+/// contract**: edit it deliberately, never by re-recording until the test
+/// passes.
+///
+/// What it pins that no unit test can: the field's *position* — last, after
+/// `unpriced_tokens` — the sentinel spellings on the wire
+/// (`\u0001` / `\u0002`, which is what a consumer splits on), the ranked order, and that
+/// `ddd-path` carries **no `match_snippet` key at all** rather than an empty
+/// string, which is the whole reason every frozen golden survived this change.
+#[test]
+fn the_search_response_matches_the_golden_bytes() {
+    let conn = golden_corpus();
+    let page = list_page(
+        &conn,
+        &DataSettings::default(),
+        &query("q=quasarflux&limit=10"),
+    )
+    .expect("page");
+    let got =
+        String::from_utf8(crate::native::gojson::to_vec(&page).expect("encode")).expect("utf-8");
+
+    let want = include_str!("../../../../parity/claude_sessions_search_golden.json");
+    assert_eq!(got, want, "the search response drifted from its golden");
 }

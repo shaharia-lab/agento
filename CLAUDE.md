@@ -340,6 +340,10 @@ src-tauri/src/
       detail.rs  one session re-read from its transcript, patched from the cache
       projects.rs the project picker's list, derived from the same walk a scan is
       corpus.rs  loads the lot
+      query.rs   the filter, the sort and the cursor — including `add_search`
+                 (#436) and the `relevance` arm over negated bm25 (#437)
+      page.rs    the page and the facets; the ranked FTS join and the per-page
+                 `match_snippet` read hang off `list_page` alone
     analytics/   GET /api/claude-analytics
       buckets.rs Go's time.Date/AddDate and the bucket walks, in the request's tz
       params.rs  from/to/project/tz, and the granularity the window picks
@@ -2008,6 +2012,25 @@ busy timeout.
   it (#364). A cursor minted before the `p` field decodes with it empty and
   pages exactly as it used to, which is Go's missing-field behaviour and why the
   Rust field carries `#[serde(default)]`.
+- **`sort=relevance` is the default when `q` is set, and bm25 reaches it
+  negated** (#437). `q` with no explicit `sort` resolves to `relevance`; an
+  explicit one always wins; `relevance` with no `q` is the unknown-sort fallback
+  to `recent`, because there is no `MATCH` to rank. The sort key is
+  `COALESCE(-fts.rank, -1.0)` and both halves are load-bearing: SQLite's `bm25()`
+  is *negative* — smaller is better — so negating it is what lets "best first"
+  stay `DESC` like every other sort, and the `COALESCE` is what keeps the LIKE
+  half pageable. A search is an `OR`, so a row can match on its id, its path or a
+  title with no index hit at all; left as SQL NULL those rows sort last correctly
+  on the **first** page and then vanish, because `NULL < ?` is NULL and the
+  keyset predicate drops them. The sentinel is safely below every real value
+  because `-bm25` is never negative. The cursor needed no new field — the rank
+  goes in `v`, which already carries a decimal for every non-time sort.
+- **`match_snippet` is present only on a search response, and only where the
+  index matched.** `skip_serializing_if` on an empty string is what kept every
+  frozen golden byte-identical; a metadata-only match honestly carries nothing.
+  Its markers are **U+0001/U+0002**, unambiguous because `search::normalize`
+  strips every control character from the indexed text — never HTML, and never a
+  printable sentinel a transcript could contain.
 - **Cache invalidation is multi-dimensional**: TTL (1h), `scanner_version`,
   pricing revision fingerprint, and idle-threshold drift each force a re-read.
 - **Chat SSE is a POST response**, so `EventSource` cannot be used. Events are

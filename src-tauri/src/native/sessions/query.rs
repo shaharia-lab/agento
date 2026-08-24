@@ -35,6 +35,38 @@ pub const SQL_ACTIVE_DURATION_MS: &str = "(c.active_duration_ms + COALESCE(sa.ad
 /// Message count stays main-thread, matching the column beside it.
 pub const SQL_MESSAGE_COUNT: &str = "c.message_count";
 
+/// The relevance sort's key, over the FTS join `page::list_page` adds (#437).
+///
+/// **Negated, so that "best first" is `DESC` like every other sort.** SQLite's
+/// `bm25()` is already negative — more negative is a better match — so `-rank`
+/// is non-negative and larger is better, which is exactly the direction the
+/// existing keyset predicate and `ORDER BY … DESC` are written for. Negating
+/// here rather than special-casing the comparison is what keeps relevance one
+/// more arm of the machinery instead of a second ordering to keep in step.
+///
+/// The `COALESCE` is the LIKE half. A search is an `OR` (#436): a row can match
+/// on its session id, its project path or a title and have no index hit at all,
+/// which the `LEFT JOIN` leaves NULL. Left as NULL those rows sort last under
+/// `DESC` — correct — but `NULL < ?` is NULL, so the keyset predicate would
+/// exclude every one of them from the second page onwards and they would
+/// silently vanish mid-scroll. [`RELEVANCE_UNRANKED`] is strictly below every
+/// real value because `-bm25` is never negative.
+pub const SQL_RELEVANCE: &str = "COALESCE(-fts.rank, -1.0)";
+
+/// The sort value a row with no index hit takes, and the whole sort key when the
+/// index cannot answer at all — see [`SQL_RELEVANCE`].
+pub const RELEVANCE_UNRANKED: f64 = -1.0;
+
+/// The relevance key when there is no FTS join to read: every row unranked.
+///
+/// `usable_fts_query` degrades to the metadata-only clause on a database with no
+/// `session_search` table or an expression FTS5 refuses, and then there is no
+/// `fts` alias for [`SQL_RELEVANCE`] to name. Every row ties at
+/// [`RELEVANCE_UNRANKED`], the `(session_id, project_path)` tiebreak makes the
+/// order total anyway, and the cursor round-trips through the same constant —
+/// so a degraded relevance sort pages correctly rather than erroring.
+pub const SQL_RELEVANCE_UNRANKED: &str = "-1.0";
+
 /// The order a page is returned in. A closed set, because keyset pagination
 /// needs the sort column indexed and the tiebreak stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -45,18 +77,26 @@ pub enum Sort {
     Tokens,
     Duration,
     Messages,
+    /// Best match first, over the weighted bm25 of the content index (#437).
+    /// Only meaningful with a search term — see [`resolve_sort`].
+    Relevance,
 }
 
 impl Sort {
     /// Parse the `sort` parameter. An unknown value falls back to `Recent`
     /// rather than erroring: the list is a read-only view, and a stale bookmark
     /// is better rendered in the default order than refused.
+    ///
+    /// `relevance` without a search term is one of those unknown values — the
+    /// rule is applied by [`resolve_sort`], which is the only caller that knows
+    /// whether `q` is set.
     pub fn parse(raw: &str) -> Self {
         match raw {
             "cost" => Sort::Cost,
             "tokens" => Sort::Tokens,
             "duration" => Sort::Duration,
             "messages" => Sort::Messages,
+            "relevance" => Sort::Relevance,
             _ => Sort::Recent,
         }
     }
@@ -69,11 +109,16 @@ impl Sort {
             Sort::Tokens => "tokens",
             Sort::Duration => "duration",
             Sort::Messages => "messages",
+            Sort::Relevance => "relevance",
         }
     }
 
     /// The SQL the sort orders and pages on, and whether its values are
     /// timestamps (which page through a time cursor rather than a float).
+    ///
+    /// The relevance arm names the `fts` alias, which only `page::list_page`
+    /// joins in — and only when the index can answer. That is why it takes the
+    /// expression from [`page_sort_expr`] rather than from here.
     pub fn expr(self) -> (&'static str, bool) {
         match self {
             Sort::Cost => (SQL_COST_USD, false),
@@ -81,7 +126,53 @@ impl Sort {
             Sort::Duration => (SQL_ACTIVE_DURATION_MS, false),
             Sort::Messages => (SQL_MESSAGE_COUNT, false),
             Sort::Recent => ("c.last_activity", true),
+            Sort::Relevance => (SQL_RELEVANCE, false),
         }
+    }
+}
+
+/// The sort a page actually orders by, given whether the FTS join is present.
+///
+/// One function rather than a branch at the call site, because the *cursor* has
+/// to agree with it: a degraded relevance page mints
+/// [`RELEVANCE_UNRANKED`] as its value and reads it back through the same
+/// constant, so the two spellings cannot drift into paging one ordering with
+/// another's position.
+pub fn page_sort_expr(sort: Sort, ranked: bool) -> (&'static str, bool) {
+    match (sort, ranked) {
+        (Sort::Relevance, false) => (SQL_RELEVANCE_UNRANKED, false),
+        (other, _) => other.expr(),
+    }
+}
+
+/// Resolve the `sort` parameter against the search term.
+///
+/// Two rules, and both are the existing fallback rather than new behaviour:
+///
+/// * **`q` set with no explicit `sort` is `relevance`.** Somebody who typed a
+///   search wants the best match first; somebody who did not has no ranking to
+///   sort by. An explicit `sort` always wins, so a user who picked "most recent"
+///   keeps it while typing.
+/// * **`relevance` with no `q` is `recent`**, which is exactly what
+///   [`Sort::parse`] already does with any value it does not recognise. Without
+///   a search term there is no `MATCH`, so there is no rank — and a stale
+///   bookmark carrying `sort=relevance` renders in the default order rather
+///   than being refused.
+///
+/// The term is trimmed because [`add_search`] trims it: `q=%20` adds no clause
+/// at all, so it must not select an ordering that depends on one.
+pub fn resolve_sort(raw_sort: &str, search: &str) -> Sort {
+    let searching = !search.trim().is_empty();
+    if raw_sort.is_empty() {
+        return if searching {
+            Sort::Relevance
+        } else {
+            Sort::Recent
+        };
+    }
+    match Sort::parse(raw_sort) {
+        Sort::Relevance if !searching => Sort::Recent,
+        other => other,
     }
 }
 
@@ -168,6 +259,7 @@ impl SessionQuery {
     pub fn parse(raw_query: &str) -> Result<Self, String> {
         let params = parse_params(raw_query);
         let get = |k: &str| params.get(k).cloned().unwrap_or_default();
+        let search = get("q");
 
         let links = match get("links").as_str() {
             "" => Links::Any,
@@ -186,7 +278,6 @@ impl SessionQuery {
         Ok(SessionQuery {
             project: get("project"),
             config_dir: get("config_dir"),
-            search: get("q"),
             favorites_only: get("favorites") == "true",
             links,
             permission_mode: get("permission_mode"),
@@ -199,7 +290,8 @@ impl SessionQuery {
             from: optional_time(&get("from")),
             to: optional_time(&get("to")),
             windows: parse_windows(&get("windows"))?,
-            sort: Sort::parse(&get("sort")),
+            sort: resolve_sort(&get("sort"), &search),
+            search,
             limit,
             cursor: get("cursor"),
         })
@@ -265,6 +357,20 @@ fn parse_windows(raw: &str) -> Result<Vec<TimeWindow>, String> {
 pub struct Filter {
     sql: Vec<String>,
     pub args: Vec<Value>,
+    /// The FTS5 expression the search clause matched on, when there was one and
+    /// the index could answer it (#437).
+    ///
+    /// Carried out of [`add_search`] rather than rebuilt by the caller, because
+    /// deciding it costs a real prepare-and-step against the index — see
+    /// [`usable_fts_query`] — and `page::list_page` needs the same answer twice
+    /// more: once for the ranked join and once for the snippet read. Asking
+    /// again would pay that probe three times per page and, worse, could answer
+    /// differently if the index changed underneath, leaving a join whose rows
+    /// the filter did not select.
+    ///
+    /// `None` means the metadata-only clause: no search term, nothing left after
+    /// tokenizing, no `session_search` table, or an expression FTS5 refused.
+    pub fts: Option<String>,
 }
 
 /// A bound parameter. Timestamps are bound as the text the column holds, so the
@@ -294,6 +400,11 @@ impl Filter {
 
     /// Copy another filter's terms and arguments in, for the facet queries
     /// that start from the visible-session scope and add one term.
+    ///
+    /// `fts` is deliberately **not** copied: it is not a predicate but a handle
+    /// for the ranked join, every caller here starts from a filter that has no
+    /// search clause, and a copy would advertise a join the copy's SQL does not
+    /// select through.
     pub fn add_all(&mut self, other: &Filter) {
         self.sql.extend(other.sql.iter().cloned());
         self.args.extend(other.args.iter().cloned());
@@ -434,9 +545,12 @@ fn add_search(conn: &Connection, f: &mut Filter, text: &str) {
     };
 
     // The subquery is re-projected to two columns: `match_sql()` also selects
-    // `rank`, which #437 orders by and a row-value `IN` cannot accept.
-    let mut args = vec![Value::Text(fts)];
+    // `rank`, which #437 orders by and a row-value `IN` cannot accept — so the
+    // rank reaches the ORDER BY through a second, joined copy of the same
+    // subquery instead, over the expression recorded here.
+    let mut args = vec![Value::Text(fts.clone())];
     args.extend(like_args);
+    f.fts = Some(fts);
     f.add(
         format!(
             "((c.session_id, c.project_path) IN (
@@ -752,13 +866,18 @@ impl Cursor {
 /// Render a row's sort value for the next cursor, in the spelling Go uses:
 /// `strconv.FormatFloat(_, 'g', -1, 64)` for the cost, plain integers for the
 /// counts, and RFC3339Nano for the timestamp.
-pub fn cursor_value(s: &super::summary::SessionSummary, sort: Sort) -> String {
+/// `relevance` is the one value that is not a function of the row: it is the
+/// negated bm25 the page's own query computed, so the caller reads it off the
+/// result set and hands it in. Rows on a non-relevance page pass
+/// [`RELEVANCE_UNRANKED`], which is never looked at.
+pub fn cursor_value(s: &super::summary::SessionSummary, sort: Sort, relevance: f64) -> String {
     match sort {
         Sort::Cost => gojson::format_g(s.total_cost_usd()),
         Sort::Tokens => s.total_conversation_tokens().to_string(),
         Sort::Duration => s.total_active_duration_ms().to_string(),
         Sort::Messages => s.message_count.to_string(),
         Sort::Recent => s.last_activity.to_rfc3339_nano(),
+        Sort::Relevance => gojson::format_g(relevance),
     }
 }
 
