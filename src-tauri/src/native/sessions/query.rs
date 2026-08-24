@@ -14,10 +14,12 @@
 
 use std::collections::HashMap;
 
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::native::gojson;
 use crate::native::gotime::GoTime;
+use crate::native::search;
 
 /// Per-session figures as SQL over the summary select's `c` (session) and `sa`
 /// (sub-agent roll-up) aliases. Every one but `messages` sums the main thread
@@ -310,7 +312,12 @@ impl Filter {
 /// Turn a query into its WHERE clause, excluding pagination — the same
 /// predicate serves the page, the facet aggregate and the total count, so the
 /// counter in the toolbar and the rows below it cannot disagree.
+///
+/// `conn` is read only to decide whether the search term can go through the
+/// full-text index — see [`add_search`]. Every other term is a pure function of
+/// `q`.
 pub fn build_filter(
+    conn: &Connection,
     q: &SessionQuery,
     hidden_projects: &[String],
     indexed_dirs: &[String],
@@ -340,7 +347,7 @@ pub fn build_filter(
     if !q.model.is_empty() {
         f.add("c.model = ?", vec![Value::Text(q.model.clone())]);
     }
-    add_search(&mut f, &q.search);
+    add_search(conn, &mut f, &q.search);
     add_links(&mut f, q.links);
 
     add_range(&mut f, SQL_MESSAGE_COUNT, q.messages, 1.0);
@@ -371,26 +378,221 @@ pub fn add_config_dir_scope(f: &mut Filter, dirs: &[String]) {
     );
 }
 
-/// Match the same fields the client-side predicate did, case-insensitively.
+/// The six metadata columns the list has always matched, case-insensitively.
 ///
 /// `LOWER` on both sides rather than `COLLATE NOCASE`, because NOCASE is
-/// ASCII-only in SQLite and project paths and titles are not.
-fn add_search(f: &mut Filter, search: &str) {
-    let q = search.trim().to_lowercase();
-    if q.is_empty() {
-        return;
-    }
-    // Bound, not interpolated, so % and _ typed by the user match literally.
-    let pattern = format!("%{}%", escape_like(&q));
-    f.add(
-        r"(LOWER(c.session_id) LIKE ? ESCAPE '\'
+/// ASCII-only in SQLite and project paths and titles are not. Six `?`, in this
+/// order, all bound to the same pattern.
+const LIKE_COLUMNS: &str = r"LOWER(c.session_id) LIKE ? ESCAPE '\'
     OR LOWER(c.preview) LIKE ? ESCAPE '\'
     OR LOWER(c.custom_title) LIKE ? ESCAPE '\'
     OR LOWER(c.native_title) LIKE ? ESCAPE '\'
     OR LOWER(c.ai_title) LIKE ? ESCAPE '\'
-    OR LOWER(c.project_path) LIKE ? ESCAPE '\')",
-        vec![Value::Text(pattern); 6],
+    OR LOWER(c.project_path) LIKE ? ESCAPE '\'";
+
+/// Match the search term against the full-text index **or** the six metadata
+/// columns.
+///
+/// One `Filter` clause, deliberately: facets, the config-dir scope, every
+/// numeric and time bound and the keyset predicate all compose through the same
+/// funnel, so adding a term here is the whole change and nothing downstream has
+/// to know a content index exists.
+///
+/// The two halves are OR'd rather than one replacing the other, because they
+/// answer different questions and neither is a superset:
+///
+/// * the index holds a session's **content**, which the cache row never has —
+///   only a 120-char `preview` is stored;
+/// * the LIKE clause matches the **session id**, the **project path** and the
+///   titles, which are UNINDEXED in `session_search` and so can never be a
+///   content hit — and it matches sessions the worker has not indexed yet, which
+///   on a fresh install is all of them.
+///
+/// # The FTS half degrades rather than failing
+///
+/// A user's text reaches FTS5's own query grammar, where `-`, `OR`, `NOT`, `^`,
+/// `*`, `:` and `"` are operators. [`build_fts_query`] neutralizes them by
+/// quoting each token, which is a construction rule and not a sanitization one —
+/// but "the builder can never produce a syntax error" is a claim about a parser
+/// this code does not own, so it is *checked* rather than trusted: the built
+/// expression is run against the index once, and anything that errors (a missing
+/// table on a database that has not migrated, a query FTS5 refuses) falls back to
+/// the LIKE-only clause this route answered with before #436. Search must never
+/// answer 500 because of a character somebody typed.
+fn add_search(conn: &Connection, f: &mut Filter, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    // Bound, not interpolated, so % and _ typed by the user match literally.
+    let pattern = format!("%{}%", escape_like(&trimmed.to_lowercase()));
+    let like_args = vec![Value::Text(pattern); 6];
+
+    let Some(fts) = usable_fts_query(conn, trimmed) else {
+        f.add(format!("({LIKE_COLUMNS})"), like_args);
+        return;
+    };
+
+    // The subquery is re-projected to two columns: `match_sql()` also selects
+    // `rank`, which #437 orders by and a row-value `IN` cannot accept.
+    let mut args = vec![Value::Text(fts)];
+    args.extend(like_args);
+    f.add(
+        format!(
+            "((c.session_id, c.project_path) IN (
+      SELECT session_id, project_path FROM (
+{}
+      ))
+    OR {LIKE_COLUMNS})",
+            search::match_sql()
+        ),
+        args,
     );
+}
+
+/// The FTS expression for `search`, or `None` when the index cannot answer it.
+///
+/// The probe is a real prepare-and-step rather than a `SELECT 1 FROM
+/// session_search LIMIT 0` existence check, because the two failures it has to
+/// catch surface at different points: a missing table fails the *prepare*, while
+/// an expression FTS5 refuses fails on the *first step* — and an unstepped
+/// statement never parses the MATCH argument at all — including against an
+/// **empty** index, which is what a fresh install has and where a probe that
+/// short-circuited would accept anything
+/// (`the_probe_still_rejects_a_bad_expression_against_an_empty_index`).
+///
+/// The cost is one extra inverted-index lookup per `build_filter`, i.e. one per
+/// call of `GET /api/claude-sessions` and one per `…/facets` — the same lookup
+/// the clause itself then performs, stopped at the first row. Worth knowing
+/// before #437, which composes this as a ranked join and may want to fold the
+/// two together.
+///
+/// The two failures are logged differently on purpose, and neither line carries
+/// the user's search text — `proxy.rs` keeps query strings out of this file, and
+/// FTS5's own syntax-error message quotes the text it choked on.
+fn usable_fts_query(conn: &Connection, text: &str) -> Option<String> {
+    let query = build_fts_query(text);
+    if query.is_empty() {
+        return None;
+    }
+    let mut stmt =
+        match conn.prepare("SELECT 1 FROM session_search WHERE session_search MATCH ?1 LIMIT 1") {
+            Ok(stmt) => stmt,
+            // Debug, and with the cause: on a database that has not migrated
+            // this is the ordinary answer for every keystroke, and a warning per
+            // keystroke is how a log stops being read. The message names the
+            // missing table, nothing the user typed.
+            Err(e) => {
+                log::debug!("claude sessions: no search index, matching metadata only: {e}");
+                return None;
+            }
+        };
+    if stmt.exists(rusqlite::params![&query]).is_err() {
+        // Warn, and *without* the cause: `build_fts_query` is meant to make this
+        // unreachable, so reaching it is a defect worth seeing rather than
+        // routine degradation — and the one thing rusqlite would tell us here is
+        // the FTS5 message, which quotes the search term back.
+        log::warn!(
+            "claude sessions: the search index refused a built query, matching metadata only"
+        );
+        return None;
+    }
+    Some(query)
+}
+
+/// How many *alphanumeric* characters a trailing token needs before it is
+/// extended into a prefix term.
+///
+/// `"a"*` matches roughly every session on the machine, so the first keystroke
+/// of a query would flash the whole corpus in and out. Counted over the
+/// alphanumerics rather than the whole token because those are what `unicode61`
+/// keeps: on the raw length, `-a` would clear the bar and still produce `a*`.
+const MIN_PREFIX_LEN: usize = 2;
+
+/// Turn what a user typed into an FTS5 query that can only ever be a conjunction
+/// of literal terms.
+///
+/// **Safe by construction, not by sanitization.** Nothing typed is ever passed
+/// through: the input is split into tokens and each token is *re-emitted* inside
+/// a double-quoted FTS5 string, where the grammar has no operators at all. So
+/// `-foo`, `a OR b`, `NOT`, `^x`, `a*b`, `(a)` and `a:b` are terms rather than
+/// syntax, and the function has no notion of "a character to escape" that a
+/// future FTS5 could add to.
+///
+/// The rules, in the order a user meets them:
+///
+/// * **Whitespace separates tokens, and tokens are AND'd** — FTS5's implicit
+///   operator between two phrases. `fix auth bug` finds a session containing all
+///   three words in any order, which is what the old single `LIKE '%fix auth
+///   bug%'` substring could not do.
+/// * **A user-typed `"…"` span is kept as one phrase**, so quoting is the one
+///   piece of query syntax that still means what people expect it to. An
+///   unterminated quote is a phrase too — it is what half-typing one looks like.
+/// * **The final token becomes a prefix term** (`"efficien"*`) so the list
+///   narrows as the user types, unless the user closed a quote — which says the
+///   word is finished — or the token carries fewer than [`MIN_PREFIX_LEN`]
+///   alphanumerics.
+/// * **Control characters are separators.** They are separators to `unicode61`
+///   anyway, so this changes no result — but a NUL reaching FTS5's parser is an
+///   error (`unterminated string`), and `%00` in a query string decodes to one.
+/// * **A token with no alphanumeric character is dropped.** `unicode61` indexes
+///   alphanumerics and treats everything else as a separator, so `"-"` is a
+///   phrase of *zero* terms — which matches no document, and AND'd with the rest
+///   empties the whole result. Without this, one stray dash in `fix auth -` costs
+///   the user every hit. Dropping can only widen the FTS half, and it discards
+///   nothing that could ever have matched; the LIKE half still sees the raw
+///   text, so a search for `---` is unaffected.
+///
+/// Returns an empty string when nothing survives — an input of only separators.
+/// An empty MATCH argument is itself a syntax error, so the caller reads that as
+/// "no FTS half" rather than passing it on.
+pub fn build_fts_query(text: &str) -> String {
+    // (text, the user closed a quote around it)
+    let mut tokens: Vec<(String, bool)> = Vec::new();
+    let mut buf = String::new();
+    let mut in_quote = false;
+
+    for raw in text.chars() {
+        let ch = if raw.is_control() { ' ' } else { raw };
+        if in_quote {
+            if ch == '"' {
+                tokens.push((std::mem::take(&mut buf), true));
+                in_quote = false;
+            } else {
+                buf.push(ch);
+            }
+        } else if ch == '"' {
+            tokens.push((std::mem::take(&mut buf), false));
+            in_quote = true;
+        } else if ch.is_whitespace() {
+            tokens.push((std::mem::take(&mut buf), false));
+        } else {
+            buf.push(ch);
+        }
+    }
+    tokens.push((buf, false));
+    tokens.retain(|(text, _)| text.chars().any(char::is_alphanumeric));
+
+    let last = tokens.len().saturating_sub(1);
+    let mut out = String::new();
+    for (i, (text, closed)) in tokens.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push('"');
+        // A `"` cannot reach here — one opens or closes a span — but the escape
+        // is what makes the emitter safe on its own terms rather than safe
+        // because of how the loop above happens to be written.
+        out.push_str(&text.replace('"', "\"\""));
+        out.push('"');
+        if i == last
+            && !closed
+            && text.chars().filter(|c| c.is_alphanumeric()).count() >= MIN_PREFIX_LEN
+        {
+            out.push('*');
+        }
+    }
+    out
 }
 
 /// Neutralize LIKE's wildcards so a search for "100%" does not match
@@ -745,5 +947,101 @@ mod tests {
         assert_eq!(escape_like("100%"), r"100\%");
         assert_eq!(escape_like("a_b"), r"a\_b");
         assert_eq!(escape_like(r"back\slash"), r"back\\slash");
+    }
+
+    /// Whitespace separates, tokens are AND'd, and the last one is a prefix.
+    #[test]
+    fn an_fts_query_ands_one_quoted_term_per_word() {
+        assert_eq!(build_fts_query("fix auth bug"), r#""fix" "auth" "bug"*"#);
+        assert_eq!(build_fts_query("  spaced   out  "), r#""spaced" "out"*"#);
+        assert_eq!(build_fts_query("single"), r#""single"*"#);
+    }
+
+    /// Every character FTS5 treats as syntax is re-emitted inside a quoted
+    /// string, so it reaches the tokenizer as text.
+    ///
+    /// The table is the acceptance criterion written out: `- * ^ ( ) : "` and
+    /// the bare boolean keywords. What each *matches* is the tokenizer's
+    /// business — what matters here is that none of them can still be an
+    /// operator, and none of them can end a string early.
+    #[test]
+    fn every_fts_metacharacter_is_emitted_as_a_literal_term() {
+        for (input, want) in [
+            ("-foo", r#""-foo"*"#),
+            ("foo -bar", r#""foo" "-bar"*"#),
+            ("a OR b", r#""a" "OR" "b""#),
+            ("NOT auth", r#""NOT" "auth"*"#),
+            ("a AND b", r#""a" "AND" "b""#),
+            ("^start", r#""^start"*"#),
+            ("wild*card", r#""wild*card"*"#),
+            ("(group)", r#""(group)"*"#),
+            ("col:val", r#""col:val"*"#),
+            // `b)` is two characters and one term, so it stays below the
+            // prefix bar — see `MIN_PREFIX_LEN`.
+            ("NEAR(a b)", r#""NEAR(a" "b)""#),
+            // A lone quote opens a span that never closes and holds nothing.
+            ("\"", ""),
+            ("a\"", r#""a""#),
+            // A token of pure punctuation is a phrase of zero terms, which
+            // would AND the whole query down to nothing.
+            ("auth *", r#""auth"*"#),
+            ("-", ""),
+            ("fix auth ---", r#""fix" "auth"*"#),
+        ] {
+            assert_eq!(build_fts_query(input), want, "input {input:?}");
+        }
+    }
+
+    /// A user-typed phrase is the one piece of query syntax kept, because it is
+    /// the one people mean.
+    #[test]
+    fn a_user_typed_phrase_stays_one_phrase() {
+        assert_eq!(
+            build_fts_query("\"auth failed\" retry"),
+            r#""auth failed" "retry"*"#
+        );
+        // Closing the quote says the word is finished, so no prefix is added.
+        assert_eq!(build_fts_query("\"auth failed\""), r#""auth failed""#);
+        // Half-typed, though, is still as-you-type.
+        assert_eq!(build_fts_query("\"auth fail"), r#""auth fail"*"#);
+        // A doubled quote in the *input* is not read as FTS5's escape — every
+        // `"` opens or closes a span, so this is two phrases. That is the point
+        // of quoting on the way out rather than interpreting on the way in:
+        // there is no input spelling that reaches the grammar.
+        assert_eq!(build_fts_query("\"say \"\"hi\""), r#""say " "hi""#);
+    }
+
+    /// `"a"*` matches most of a corpus, so the first keystroke must not flash
+    /// every session into the list.
+    #[test]
+    fn a_one_character_final_token_is_not_extended_into_a_prefix() {
+        assert_eq!(build_fts_query("a"), r#""a""#);
+        assert_eq!(build_fts_query("ab"), r#""ab"*"#);
+        assert_eq!(build_fts_query("auth a"), r#""auth" "a""#);
+        // The bar is the alphanumerics, not the token's length: `-a` is two
+        // characters and one term, and `"-a"*` is the `a*` this rule exists to
+        // prevent.
+        assert_eq!(build_fts_query("-a"), r#""-a""#);
+        assert_eq!(build_fts_query("-ab"), r#""-ab"*"#);
+    }
+
+    /// A NUL reaching FTS5's parser is an error, and `%00` in a query string
+    /// decodes to one — so control characters are separators here, which is
+    /// what they already are to `unicode61`.
+    #[test]
+    fn control_characters_are_separators_rather_than_text() {
+        assert_eq!(build_fts_query("fix\u{0}auth"), r#""fix" "auth"*"#);
+        assert_eq!(build_fts_query("line\nbreak"), r#""line" "break"*"#);
+        assert_eq!(build_fts_query("\u{0}"), "");
+        assert_eq!(build_fts_query("tab\tsep"), r#""tab" "sep"*"#);
+    }
+
+    /// Nothing left to search for is not an empty query — an empty MATCH
+    /// argument is a syntax error, so it has to read as "no FTS half".
+    #[test]
+    fn an_input_of_only_separators_produces_no_expression() {
+        for input in ["\"\"", "\"\"\"\"", " ", "\u{0}\u{1}", "-", "***", "()", ":"] {
+            assert_eq!(build_fts_query(input), "", "input {input:?}");
+        }
     }
 }

@@ -213,7 +213,16 @@ src-tauri/src/
                  formats, so no /api seam and no parity machinery applies
     config.rs    the settings model, its three tables and the mapping onto
                  ferrox-providers' own config types (#422). Two projections:
-                 the public one never selects api_key. No listener yet (#424)
+                 the public one never selects api_key
+    registry.rs  the listener's lifecycle (#424) — integrations/registry.rs's
+                 shape, and the *stored* Status a bind failure leaves behind
+    server.rs    the five routes, the Host allowlist, the llm-scope auth layer
+                 (both header spellings), and the per-surface error dialect
+    dispatch.rs  alias → ordered targets, retry, and the fallback walk;
+                 is_retryable/should_failover copied from ferrox/src/retry.rs
+    stream.rs    the SSE bytes of both surfaces, and the anthropic-beta merge
+    usage.rs     one row per served request (#425) — the accumulator a stream
+                 reports through, and the cost resolved at write time
   native/        ported endpoints (phase 2+)
     active_time.rs the capped-gap rule, shared by the scanner and the pipeline
     scanner/     the Claude session scanner (issue #270) — computes, never writes
@@ -228,7 +237,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   31 migrations, embedded from parity/ — applied at startup
+    migrate.rs   34 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -288,6 +297,9 @@ src-tauri/src/
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
+    gateway_api.rs the LLM gateway's control plane (#426) — twelve
+                 /api/gateway/* routes; under native/ because it IS the /api
+                 seam, where gateway/'s listener is not
     security/    what `/api` accepts as proof of identity (#405)
       keys.rs    the per-install Ed25519 keypair: create-if-absent, 0600, and
                  the one path that replaces it
@@ -2925,6 +2937,207 @@ inverse of how an ordinary timestamp would read. `google_oauth_token` maps it to
 **500 with a body produced here**. A failed OAuth flow must not answer from the
 stored token, because `authenticated: false` would be a plausible lie about a
 flow that actually errored.
+
+### The LLM gateway's engine (`src-tauri/src/gateway/`, #424)
+
+The second listener. It is **not** `proxy.rs` and **not** part of the `/api`
+seam: its own user-configured port, two third-party wire formats, no parity
+machinery, and — since every request it accepts spends the user's provider
+credits — a different threat model from anything else in the shell.
+
+`ferrox-providers` supplies every translation and every adapter. What is here is
+the listener, the auth, the routing table and the framing:
+`registry.rs` (lifecycle), `server.rs` (five routes, two layers),
+`dispatch.rs` (alias → targets, retry, failover), `stream.rs` (SSE bytes).
+It is **disabled by default** and costs one `SELECT` at boot when off.
+
+**Three rules that keep a permissive listener from being one:**
+
+- **`Scope::Llm`, verified with `token::verify_against`** — the pure
+  four-argument function, **not** `security::verify_request`, which derives a
+  required scope from an `/api` method and path. A `read` or `write` token is a
+  **403** here and an `llm` token is a 403 on `/api`: that disjointness (#423) is
+  the whole reason a third scope exists, and the *false* cells are what the tests
+  assert.
+- **No CORS layer, ever.** ferrox's own server mounts `CorsLayer::permissive()`,
+  which is right behind a network boundary and catastrophic on loopback — it
+  would let any page the user has open spend their provider credits *and read
+  the response*. The **`Host` allowlist** is the other half: preflight already
+  shuts a browser out of a `POST` carrying `Authorization`, but a DNS-rebinding
+  page reaches a loopback port with a *simple* request. `guards.rs::host_allowed`
+  is `pub(crate)` and shared rather than copied — an allowlist that exists twice
+  is one that gets widened once. `/healthz` is outside the auth layer and
+  **inside** this one.
+- **Errors in the client's dialect, never Agento's.** `error::openai_error_body`
+  on `/v1/*`, `error::anthropic_error_body` on `/anthropic/*`, picked by path
+  prefix so a route added under `/anthropic/` cannot forget. SDKs *branch* on
+  `error.type` — `authentication_error` versus `permission_error` drives real
+  retry behaviour — so this is behaviour, not wording.
+
+**Both header spellings.** OpenAI SDKs send `Authorization: Bearer`; the
+Anthropic SDK and Claude Code send `x-api-key`. Bearer wins a tie, and a useless
+`Authorization` (`Basic …`, an empty `Bearer `) must fall *through* to
+`x-api-key` rather than shadow it with `""`.
+
+**A bind failure is a stored value, not a log line.** `registry::Status` has a
+`BindFailed { port, error }` variant and is stored rather than derived from
+whether a handle exists, because that is what #426's status route reads. The
+collision is routine rather than exotic — a `~/.agento-desktop-dev` instance and
+an installed one read different databases but share the machine's ports — and
+without a stored status the second reports "not running" and offers a Start
+button that silently does nothing forever. It logs once at `warn` and does
+**not** retry another port: a gateway on a port the user did not configure is one
+every tool they set up is pointed away from.
+
+**Graceful shutdown comes from `claude/mcp.rs`, not from `proxy.rs`.** `proxy.rs`
+never stops — it is spawned once and process exit is its shutdown, so it has no
+`with_graceful_shutdown` to copy. This listener is torn down on every settings
+write, so a request in flight across a reload is ordinary. Same shape as #311's:
+a oneshot fired by `Drop`, awaited as `axum::serve`'s shutdown future. The
+generation counter is `integrations/registry.rs`' verbatim, for the same race — a
+`stop` landing mid-start must **drop** the handle, and dropping it is what closes
+a socket that would otherwise hold provider credentials for the life of the
+process.
+
+**`is_retryable` and `should_failover` differ by exactly one status, and they
+live in ferrox's *binary* crate** (`ferrox/src/retry.rs`), so they are copied
+rather than imported. An upstream **403** fails over *without* retrying: some
+providers report quota exhaustion with 403 rather than 429, and the same
+provider will keep answering 403 — while this gateway's own `ProxyError::Forbidden`
+must **not** fail over, or a client's bad token burns the next provider's quota.
+Only the *handshake* of a stream is retried; once chunks are flowing the head is
+committed and failing over would replay tokens the client has seen.
+
+**Every unbounded wait races the client's departure — `turn.rs`'s rule, one level
+down.** A failed `send` catches a client that left while a frame was being
+written, which is what happens when tokens are flowing; it is *not* what happens
+when the client leaves while the model is thinking, which is most of a request.
+There the loop is parked on `stream.next()`, nothing is being sent, and the
+disconnect is invisible — the task parks forever holding the upstream connection,
+one leak per abandoned request. `stream::next_or_disconnect` is the
+`tokio::select!` against `Sender::closed`, and
+`a_disconnect_mid_stream_tears_down_the_upstream_request` is what fails on the
+revert. It asserts on the **upstream** side, because that is the only place the
+leak is observable.
+
+**`Next::Ended` and `Next::Disconnected` are separate variants deliberately.**
+Collapsing them into one `None` loses `data: [DONE]` on a clean stream — and,
+worse in the other direction, would *send* one on an abandoned stream, where
+`[DONE]` means "the completion finished" and a client would record a truncated
+answer as a whole one. Both halves were caught by the suite, in both directions.
+
+**The frames are bytes, not `axum::response::sse::Event`.** The plan was
+`impl From<SseFrame> for Event`; both types are foreign, so the orphan rule
+refuses it. Bytes are the better answer anyway — the acceptance criteria are byte
+properties, and `axum` writes `event:name` with no space where every Anthropic
+fixture and ferrox's own API reference show `event: name`. Both parse; this emits
+the documented spelling.
+
+**Ordering: the listener starts strictly after `keys::install` and
+`tokens::load_revoked`.** Bound before the first, every client gets a 401 until
+the key lands — visible, and merely broken. Bound before the second, a token the
+user **revoked is honoured** for the length of that window, and nothing reports
+it. `a_gateway_start_requires_an_installed_keypair` asserts the order of the
+three calls in `lib.rs` against its source, deliberately: the consequence is a
+*window* rather than a state, so a test that asked the running app would have to
+win that race to see anything.
+
+**The control plane is `/api/gateway/*` and lives under `native/`, not under
+`gateway/`** (#426, `native/gateway_api.rs`). The split is the seam, not the
+feature: `gateway/` speaks somebody else's wire formats on its own port, this
+speaks Agento's, behind Agento's guard with ordinary `read`/`write` scoping —
+and `Scope::Llm` opens none of its twelve routes, which is the disjointness
+#423 built seen from the other side (a credential issued to *spend* through the
+gateway must not be able to reconfigure which provider it spends with).
+
+Three things about it are decisions:
+
+- **The route table is `parity/desktop_routes.json`, and it now has two
+  owners.** #405 created that file for `/api/security/*` — routes with no Go
+  ancestor, which could go in neither frozen Go table without destroying what
+  those are. Its guarantee is *stronger* than theirs: they assert in one
+  direction, so a route claimed and never recorded passes, while this is **set
+  equality** against the modules' `ROUTES` consts. The claimed set is now the
+  **union** of `security::ROUTES` and `gateway_api::ROUTES`; a third owner
+  appends there, and forgetting to would quietly weaken the assertion back to
+  one direction. The issue's "resolve at implementation time" question — grow
+  the Go tables, or fall back to Tauri commands — is answered by this file
+  existing. A command would have been wrong anyway: `logs.rs` is a command
+  because the app log belongs to the *process*; gateway config is API surface.
+- **An omitted `api_key` preserves the stored one, and that is the whole point
+  of `config::update_provider`.** `PUT /api/integrations/{id}` wipes
+  credentials the caller omits while `GET` scrubs them, so a read-then-write
+  round trip — exactly what an edit form does — destroys the secret. That is
+  reproduced there deliberately because it was Go's behaviour, and it must not
+  be inherited here. `api_key` is `Option<String>` with three meanings: absent
+  leaves the column out of the `SET` list entirely, `Some("")` is a deliberate
+  clear, `Some(k)` replaces. `a_scrubbed_read_written_straight_back_preserves_the_stored_key`
+  drives the **real** `GET` body back through the `PUT`, and fails with `""` on
+  the revert. No response carries the key either — asserted over the *bytes*,
+  because a struct-level check only proves the field the test knows about is
+  absent.
+- **Referential integrity is checked in code, from both sides.** Routing names
+  providers by **name**, inside a JSON column, so nothing in SQL can enforce it:
+  deleting a referenced provider is a 409 naming the aliases, and an alias whose
+  target names no configured provider is refused. Without both, an alias
+  resolves to nothing and fails at *request* time, far from the action that
+  caused it.
+
+Every write ends with a spawned `registry::reload` — the write and its effect in
+one place — and a `#335`-convention log line with a test. `reload` is not
+awaited: it is stop-then-start over a socket bind, and a save that blocked on it
+would feel like a hang. `a_provider_save_reloads_without_cutting_an_in_flight_stream`
+pins both halves at once, which is where they pull against each other.
+
+**Usage recording is one row per served request, written off the request path**
+(#425, `gateway/usage.rs`, migration 34). Four things about it are decisions:
+
+- **A usage row may never fail a request.** The tokens are already spent by the
+  time there is anything to record, so `Accounting::finish` spawns and is never
+  awaited, the insert goes through `db::blocking` (#366 — this listener is not
+  on `proxy.rs`'s blocking pool at all, so an inline insert parks a *runtime
+  worker* for up to the five-second `busy_timeout`), and every failure below it
+  is a `warn`. `a_contended_write_lock_does_not_stall_the_runtime` is the third
+  copy of that regression test; without the hand-off the runtime stalls 1541 ms
+  against a 1500 ms hold.
+- **Exactly one row, enforced rather than hoped for.** Both surfaces have three
+  terminal arms and the Anthropic one reaches them through a translation layer
+  with its own state machine. A missed arm writes none; a doubled arm writes
+  two, and a log that sometimes double-counts is worse than one that sometimes
+  misses because nothing in the numbers says which. `finish` is a
+  compare-exchange on a `done` flag, and the status defaults to `Interrupted`
+  so the arm most easily missed is the default rather than the special case.
+- **Provider usage is a running total, so the counters are replaced, not
+  summed.** Accumulating would multiply a 200-chunk stream's prompt tokens by
+  200. A chunk carrying no usage leaves them alone, which is what lets an
+  **interrupted** stream record the tokens it saw rather than zeros — the arm
+  that matters most, since an abandoned stream still spent them. On the
+  Anthropic surface the metering happens **before** the translation
+  (`usage::meter`), because the emitter consumes the provider stream and a
+  frame carries no `usage`.
+- **Cost is stored, not derived** — the rule the scanner already enforces. A
+  rate correction must not retroactively rewrite past spend, and joining the
+  catalog at read time reproduces the list-versus-dashboard disagreement the
+  Claude side refuses. An unpriced model stores `NULL` with `unpriced = 1`,
+  **never `0.0`**; that is the common case here, not an edge one, since the
+  catalog is seeded for Claude models and OpenAI/Gemini/GLM aliases miss.
+
+Two rows are deliberately *not* written: a body that will not decode (no alias,
+no provider, nothing spent — four empty columns diluting every average) and a
+request refused by **auth** (no attributable token; logging unauthenticated
+attempts is a different feature). A refused *dispatch* does get one, because it
+names an alias the user configured — and it carries the **last target
+attempted**, so an empty `provider` means specifically "resolution failed"
+rather than "unknown".
+
+Two smaller notes. `tokens::touch` already throttles to one write a minute and
+spawns its own `db::blocking`, so calling it from the middleware is not a
+database call on the request path and must **not** be wrapped a second time. And
+the `anthropic-beta` header and the body's `betas` array are merged into one
+comma-separated header value, header first, with `raw_anthropic_body` forwarding
+the client's document verbatim — both copied from
+`ferrox/src/handlers/anthropic_messages.rs`, and Claude Code compatibility
+depends on them.
 
 ### Not implemented, on purpose
 

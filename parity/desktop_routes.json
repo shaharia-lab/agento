@@ -66,6 +66,90 @@
       "status": "native",
       "owner": "#405",
       "reason": "the public key in JWKS form, UNAUTHENTICATED by design -- it is what a credential is verified against, so requiring one would be a bootstrap problem with no answer"
+    },
+    {
+      "method": "GET",
+      "route": "/api/gateway/settings",
+      "status": "native",
+      "owner": "#426",
+      "reason": "the enable toggle, the port and start-with-app; read-scoped, because it names no secret"
+    },
+    {
+      "method": "PUT",
+      "route": "/api/gateway/settings",
+      "status": "native",
+      "owner": "#426",
+      "reason": "stores the three and reloads the listener; a port below 1024 is refused before anything is written"
+    },
+    {
+      "method": "GET",
+      "route": "/api/gateway/providers",
+      "status": "native",
+      "owner": "#426",
+      "reason": "the configured providers through the PUBLIC projection -- api_key is a boolean computed in SQL, never a value"
+    },
+    {
+      "method": "POST",
+      "route": "/api/gateway/providers",
+      "status": "native",
+      "owner": "#426",
+      "reason": "creates a provider with its API key; answers through the public projection, so the key it just stored is not echoed"
+    },
+    {
+      "method": "PUT",
+      "route": "/api/gateway/providers/{id}",
+      "status": "native",
+      "owner": "#426",
+      "reason": "updates a provider; an OMITTED api_key preserves the stored one, which is what stops the PUT /api/integrations/{id} credential-wipe being reproduced here"
+    },
+    {
+      "method": "DELETE",
+      "route": "/api/gateway/providers/{id}",
+      "status": "native",
+      "owner": "#426",
+      "reason": "deletes a provider, or 409s naming the aliases still routed to it -- routing refers to providers by name inside a JSON column, so no foreign key can catch this"
+    },
+    {
+      "method": "GET",
+      "route": "/api/gateway/models",
+      "status": "native",
+      "owner": "#426",
+      "reason": "the model aliases and their ordered targets and fallbacks"
+    },
+    {
+      "method": "POST",
+      "route": "/api/gateway/models",
+      "status": "native",
+      "owner": "#426",
+      "reason": "creates an alias; a target naming no configured provider is refused rather than stored to fail at request time"
+    },
+    {
+      "method": "PUT",
+      "route": "/api/gateway/models/{id}",
+      "status": "native",
+      "owner": "#426",
+      "reason": "updates an alias; checks the row exists first, because store_alias upserts and would otherwise create silently on a PUT"
+    },
+    {
+      "method": "DELETE",
+      "route": "/api/gateway/models/{id}",
+      "status": "native",
+      "owner": "#426",
+      "reason": "deletes an alias by row id, not by alias string -- nothing stops two rows sharing an alias"
+    },
+    {
+      "method": "GET",
+      "route": "/api/gateway/status",
+      "status": "native",
+      "owner": "#426",
+      "reason": "running / stopped / bind_failed / start_failed plus the port and the reason; a STORED value, so a port collision is distinguishable from a gateway that is simply off"
+    },
+    {
+      "method": "GET",
+      "route": "/api/gateway/usage",
+      "status": "native",
+      "owner": "#426",
+      "reason": "windowed aggregates over gateway_usage_log, bucketed in the request's timezone; unpriced requests are surfaced as a count, never folded into the cost total as zero"
     }
   ]
 }

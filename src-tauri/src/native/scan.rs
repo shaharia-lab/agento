@@ -540,6 +540,21 @@ fn run_scan(db_path: &Path) -> Result<(), String> {
         // scan costs the corpus.
         Err(e) => log::warn!("claude sessions: {e}"),
     }
+    // The search index's reconcile, on exactly the same terms and for the same
+    // reasons (#435): keyed on "no cache row for this pair remains" rather than
+    // on a path, and run **here** — after the delete pass — so it inherits the
+    // unreadable-config-dir protection instead of emptying an account's index
+    // when a drive is unmounted.
+    //
+    // A separate statement rather than a shared one: the two tables are
+    // reconciled against the same condition but a failure of one must not stop
+    // the other, and `session_search` is an FTS5 table whose delete scans, so
+    // the costs are not comparable either.
+    match super::search::delete_orphans(&conn) {
+        Ok(n) if n > 0 => log::info!("search: reconciled {n} orphaned index rows"),
+        Ok(_) => {}
+        Err(e) => log::warn!("claude sessions: {e}"),
+    }
     super::insights::worker::enqueue(outcome.notifications.iter().map(|n| {
         super::insights::store::Pending {
             session_id: n.session_id.clone(),

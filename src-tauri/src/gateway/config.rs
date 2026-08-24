@@ -485,6 +485,153 @@ pub fn store_provider(db_path: &Path, input: &ProviderInput<'_>) -> Result<(), S
         .map_err(|e| format!("committing gateway provider: {e}"))
 }
 
+/// Everything a provider *update* needs — [`ProviderInput`]'s sibling, with one
+/// field deliberately different.
+///
+/// `api_key` is an `Option` here where `ProviderInput`'s is required, and the
+/// asymmetry is the design rather than an inconsistency. A **create** must say
+/// what the key is; there is nothing to preserve, and making it required is what
+/// stops "field absent" and "field empty" collapsing into one meaning the way
+/// they do on `PUT /api/integrations/{id}`. An **update** has a third thing to
+/// express — *leave the stored one alone* — and an `Option` is how it says so.
+///
+/// Derives neither `Serialize` nor `Debug`, for [`ProviderRow`]'s reason: it can
+/// carry the same secret.
+pub struct ProviderUpdate<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub provider_type: ProviderType,
+    /// `None` leaves the column out of the `SET` list; `Some("")` clears it;
+    /// `Some(k)` replaces it.
+    pub api_key: Option<&'a str>,
+    pub base_url: &'a str,
+    pub timeouts: Timeouts,
+    pub enabled: bool,
+}
+
+/// Update a provider **without touching its API key unless a new one is given**.
+///
+/// This is the one function on this surface whose *absence* would be a data-loss
+/// bug, and it exists because the sibling surface has that bug: `Update` on an
+/// integration replaces `credentials` wholesale while `GET` scrubs it, so a
+/// read-then-write round trip — which is exactly what an edit form does —
+/// destroys the stored secret. It is reproduced there deliberately (Go's
+/// behaviour) and must **not** be reproduced here.
+///
+/// `api_key` is three-valued and each value means something different:
+///
+/// - `None` — the caller did not send the field. The column is left out of the
+///   `SET` list entirely, so the stored key survives. This is what a scrubbed
+///   `GET` round-trips to.
+/// - `Some("")` — the caller sent an explicit empty string. The key is cleared.
+/// - `Some(k)` — replaced.
+///
+/// The `None` arm never reads the stored key into this process, which is the
+/// same discipline `integrations::update` uses when it rewrites `auth` from
+/// itself in SQL.
+///
+/// Returns whether a row was updated, so a caller can answer 404.
+pub fn update_provider(db_path: &Path, input: &ProviderUpdate<'_>) -> Result<bool, String> {
+    let ProviderUpdate {
+        id,
+        name,
+        provider_type,
+        api_key,
+        base_url,
+        timeouts,
+        enabled,
+    } = *input;
+    if name.trim().is_empty() {
+        return Err("provider name is required".to_string());
+    }
+    let mut conn = db::open_read_write(db_path)?;
+    crate::native::migrate::verify(&conn)?;
+    let now = gotime::now_go_text();
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("beginning gateway provider update: {e}"))?;
+
+    // Two statements rather than one with a CASE, because the difference is
+    // *which columns are assigned* rather than what they are assigned to — and
+    // a `CASE WHEN ?4 IS NULL THEN api_key ELSE ?4 END` would still bind the
+    // key's parameter slot on the path that must not have one.
+    let changed = match api_key {
+        Some(key) => tx.execute(
+            "UPDATE gateway_providers SET \
+                 name = ?2, type = ?3, api_key = ?4, base_url = ?5, \
+                 connect_secs = ?6, ttfb_secs = ?7, idle_secs = ?8, enabled = ?9, updated_at = ?10 \
+             WHERE id = ?1",
+            rusqlite::params![
+                id,
+                name,
+                provider_type.as_str(),
+                key,
+                base_url,
+                timeouts.connect_secs as i64,
+                timeouts.ttfb_secs as i64,
+                timeouts.idle_secs as i64,
+                enabled as i64,
+                now,
+            ],
+        ),
+        None => tx.execute(
+            "UPDATE gateway_providers SET \
+                 name = ?2, type = ?3, base_url = ?4, \
+                 connect_secs = ?5, ttfb_secs = ?6, idle_secs = ?7, enabled = ?8, updated_at = ?9 \
+             WHERE id = ?1",
+            rusqlite::params![
+                id,
+                name,
+                provider_type.as_str(),
+                base_url,
+                timeouts.connect_secs as i64,
+                timeouts.ttfb_secs as i64,
+                timeouts.idle_secs as i64,
+                enabled as i64,
+                now,
+            ],
+        ),
+    }
+    .map_err(|e| format!("updating gateway provider: {e}"))?;
+
+    tx.commit()
+        .map_err(|e| format!("committing gateway provider update: {e}"))?;
+    Ok(changed > 0)
+}
+
+/// Delete a provider. Returns whether a row went.
+pub fn delete_provider(db_path: &Path, id: &str) -> Result<bool, String> {
+    let conn = db::open_read_write(db_path)?;
+    crate::native::migrate::verify(&conn)?;
+    let changed = conn
+        .execute("DELETE FROM gateway_providers WHERE id = ?1", [id])
+        .map_err(|e| format!("deleting gateway provider: {e}"))?;
+    Ok(changed > 0)
+}
+
+/// The aliases whose routing names `provider_name`, in alias order.
+///
+/// A routing target refers to a provider by **name**, stored inside a JSON
+/// column, so no foreign key can enforce this and a delete would silently
+/// orphan every target pointing at it — the alias would keep resolving to
+/// nothing and answer a config error at request time, far from the action that
+/// caused it. The caller refuses the delete with the list instead.
+pub fn aliases_using_provider(db_path: &Path, provider_name: &str) -> Result<Vec<String>, String> {
+    let mut used = Vec::new();
+    for alias in load_aliases(db_path)? {
+        let names = alias
+            .routing
+            .targets
+            .iter()
+            .chain(alias.routing.fallbacks.iter())
+            .any(|t| t.provider == provider_name);
+        if names {
+            used.push(alias.alias);
+        }
+    }
+    Ok(used)
+}
+
 // ─── Model aliases ────────────────────────────────────────────────────────────
 
 /// One upstream a request can be sent to.
@@ -612,6 +759,21 @@ pub fn store_alias(db_path: &Path, alias: &ModelAlias) -> Result<(), String> {
 /// object. This build sets neither — v1 policy is retries plus per-alias
 /// fallback chains implemented in #424's own dispatch, and circuit breakers are
 /// explicitly out of v1 — so their `Default` is what ships.
+/// Delete a model alias by id. Returns whether a row went.
+///
+/// Keyed on `id` rather than on the alias string, matching [`store_alias`]'s
+/// `ON CONFLICT(id)` — two rows may not share an id, but nothing stops two
+/// sharing an alias, and deleting "the one with this alias" would be
+/// ambiguous where deleting "this row" is not.
+pub fn delete_alias(db_path: &Path, id: &str) -> Result<bool, String> {
+    let conn = db::open_read_write(db_path)?;
+    crate::native::migrate::verify(&conn)?;
+    let changed = conn
+        .execute("DELETE FROM gateway_model_aliases WHERE id = ?1", [id])
+        .map_err(|e| format!("deleting gateway model alias: {e}"))?;
+    Ok(changed > 0)
+}
+
 pub fn defaults() -> DefaultsConfig {
     DefaultsConfig::default()
 }
