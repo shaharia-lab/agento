@@ -16,11 +16,11 @@
 //! function #405 built for a second caller — requiring the disjoint
 //! [`Scope::Llm`](crate::native::security::token::Scope::Llm) added by #423.
 //!
-//! # What exists so far
+//! # What is here
 //!
-//! **The engine, as of #424.** [`config`] is #422's settings model and its
-//! SQLite storage; [`registry`], [`server`], [`dispatch`] and [`stream`] are
-//! the listener that reads it:
+//! [`config`] is #422's settings model and its SQLite storage; [`registry`],
+//! [`server`], [`dispatch`] and [`stream`] are #424's listener that reads it;
+//! [`usage`] is #425's row per served request, plus #428's retention prune.
 //!
 //! | module | what it owns |
 //! |---|---|
@@ -29,13 +29,18 @@
 //! | [`server`] | the five routes, the `Host` allowlist, the `llm`-scope auth layer, and the per-surface error dialect |
 //! | [`dispatch`] | alias → ordered targets, retry on the same target, and the fallback walk |
 //! | [`stream`] | the SSE bytes of both surfaces, and the `anthropic-beta` merge |
+//! | [`usage`] | one row per served request, the cost resolved at write time, and the retention prune |
 //!
-//! What is still absent: **usage recording** (#425 — `server`'s handlers log a
-//! line where the row will go), the **`/api/gateway/*` control API** (#426 —
-//! which is what will read [`registry::status`] and call
-//! [`registry::reload`]), and any **UI** (#427/#428). The gateway is disabled
-//! by default and costs nothing when off: `start_if_enabled` reads one row and
-//! returns.
+//! **Nothing of the epic is absent any more.** The control plane is not here but
+//! it does exist: `/api/gateway/*` is twelve routes in
+//! [`crate::native::gateway_api`] (#426), under `native/` because it *is* the
+//! `/api` seam where this listener is not, and the **LLM Gateway** section in
+//! `src/views/gateway/` (#427) with its Usage dashboard (#428) is what drives
+//! them. See `docs/development.md` for that split and the `ferrox-providers`
+//! dependency policy, and `docs/user-guide.md` for the user-facing flow.
+//!
+//! The gateway is disabled by default and costs nothing when off:
+//! `start_if_enabled` reads one row and returns.
 
 pub mod config;
 pub mod dispatch;

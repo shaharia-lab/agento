@@ -24,6 +24,7 @@ it with nothing to promote.
 
 - [The flow](#the-flow)
 - [Cutting a release](#cutting-a-release)
+- [Release notes](#release-notes)
 - [The two guards](#the-two-guards)
 - [Release candidates and dry runs](#release-candidates-and-dry-runs)
 - [What gets built](#what-gets-built)
@@ -105,9 +106,59 @@ cannot download.
    and `latest.json` is there. Download one and launch it if the change was
    risky.
 
-5. **Publish the draft.** That fires `promote`, which copies the staged manifest
+5. **Write the release notes** into the draft's body, before publishing. See
+   [Release notes](#release-notes) below.
+
+6. **Publish the draft.** That fires `promote`, which copies the staged manifest
    to `desktop-latest`. Installed apps start seeing the update within their next
    check.
+
+---
+
+## Release notes
+
+The workflow does not generate them — the draft release's body is empty until
+somebody writes it, and once the draft is published that text is what every user
+sees in the in-app update prompt. Two rules:
+
+- **Say what changes for someone who does nothing.** Most releases change
+  behaviour for everyone; a release whose headline feature is off by default does
+  not, and the notes should say so plainly rather than leaving a reader to guess
+  whether they have just been given a new listening port.
+- **Anything needing a Gatekeeper or SmartScreen bypass gets a line**, with the
+  link to [Installation](installation.md) — builds are neither Apple notarised
+  nor Windows code signed.
+
+### Drafted: the first release carrying the LLM Gateway
+
+Ready to paste into that release's draft body, and the reason this section
+exists:
+
+> **LLM Gateway (new, and off by default).**
+>
+> Agento can now serve as a local LLM endpoint for your other tools. Enable it
+> and it listens on `127.0.0.1` speaking both the OpenAI and the Anthropic wire
+> formats, forwarding to providers you configure with your own API keys — so the
+> OpenAI SDK, the Anthropic SDK, Claude Code, LiteLLM or Aider can all be pointed
+> at one place. You get ordered fallback between providers when one fails, and a
+> Usage dashboard showing what each tool, alias and token spent.
+>
+> **If you do not turn it on, nothing changes.** No port is bound, no listener
+> starts, and the feature costs one database read at launch. It is off on a fresh
+> install and off after upgrading.
+>
+> To turn it on: **LLM Gateway → Gateway Settings**, then add a provider, define
+> a model alias, and mint a gateway token from **Overview**. The two base URLs
+> are not the same shape — `…:8880/v1` for OpenAI-style clients, `…:8880/anthropic`
+> with **no** `/v1` for the Anthropic SDK and Claude Code, which append it
+> themselves.
+>
+> This adds a third token scope, **`llm`**, which reaches the gateway and nothing
+> else; existing `read` and `write` tokens are unaffected and are refused by the
+> gateway by design. It also adds two database tables and a usage-retention
+> setting (90 days by default; `0` keeps everything).
+>
+> Full walkthrough: [LLM Gateway in the user guide](https://github.com/shaharia-lab/agento/blob/main/docs/user-guide.md#llm-gateway).
 
 ---
 

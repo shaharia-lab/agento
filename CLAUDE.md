@@ -370,8 +370,24 @@ as `null`, so every array field is `T[] | null` — handle it.
 `http://127.0.0.1:8990` with the user's real history and credentials.
 `curl -H "Content-Type: application/json" http://127.0.0.1:8990/api/...` is the
 ground truth for wire formats — better than reading Go structs. **GET only.**
-Never write to it. For write-path testing, start your own instance with
-`AGENTO_DATA_DIR` pointed at a scratch directory.
+Never write to it. For write-path testing, start your own instance against a
+scratch data directory.
+
+**`AGENTO_DATA_DIR` is not how you do that in a debug build**, and this file said
+it was until #429's cold-start test followed its own advice and wrote to the
+developer's real dev database. `paths.rs::data_dir` is `cfg`-split: the release
+arm reads the variable, and **the debug arm ignores the environment entirely**
+and always answers `~/.agento-desktop-dev` — deliberately, so that a shell
+exporting `AGENTO_DATA_DIR=~/.agento` cannot make `npm run app` collide with an
+installed Agento over one SQLite file and one scheduler. The lever a debug build
+*does* obey is `HOME`, since that is what `data_dir` joins onto:
+
+```bash
+HOME=/tmp/scratch-home ./target/debug/agento    # its own db, keypair and corpus
+```
+
+That also gives the instance an empty `~/.claude`, which is what makes it a cold
+install rather than a copy of yours.
 
 Every state-changing `/api` request needs `Content-Type: application/json` —
 `POST`, `PUT`, `PATCH`, `DELETE`; the server's guard (`isStateChanging` in
@@ -3253,6 +3269,41 @@ type. What stayed unshared is everything typed: `analytics/shared.tsx`'s
 ranked-list CSS (the gateway has its own `.gw-rank`). Prove a move like this
 rather than asserting it: building both sides and comparing the emitted CSS as a
 sorted set of rules gave 578 identical rules.
+
+### The gateway is documented, and where (#429)
+
+The epic closes with the docs, so the user-facing account of this feature lives
+outside this file and must not be duplicated back into it:
+
+| where | what it carries |
+|---|---|
+| `docs/user-guide.md` → **LLM Gateway** | the whole flow — enable, provider, alias, mint, point a tool, watch usage, and the retention horizon |
+| `docs/troubleshooting.md` → **LLM Gateway** | bind failure, 401 vs 403 in both directions, the model-name mismatch, empty Usage, the log lines |
+| `docs/development.md` → **The LLM gateway** | the `/api`-versus-listener split, the `ferrox-providers` feature policy, and the two curl commands |
+| `README.md` → *Route your other tools through Agento* | one bullet, flagged off by default |
+
+**Three claims a doc must keep making, because each is the inverse of what a
+reader assumes.** `0` retention days is *keep everything*, the **longest**
+horizon and not the shortest. The Anthropic base URL has **no** `/v1` while the
+OpenAI one does, because the Anthropic SDK appends its own — the measured failure
+is a 404 on `/anthropic/v1/v1/messages`. And the three scopes are **disjoint, not
+ranked**: `write` is not a superset of `llm`, so "use a bigger token" is never
+the fix for a gateway 403.
+
+**A cold-start test is the acceptance bar for this feature's docs, and it found
+things reading the code did not.** The one worth keeping: Claude Code pointed at
+the gateway with only `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` asks for
+*its own* default model, which is not a configured alias, and stops with "There's
+an issue with the selected model". The alias name is the whole routing key, so
+either `ANTHROPIC_MODEL` names an alias or an alias is named after what the
+client sends. The env snippets in `views/gateway/snippets.ts` show two variables
+and the user guide shows three, deliberately.
+
+**The `ferrox-providers` pin is a tag, and the crates.io question is open.**
+`Cargo.toml`'s comment defers "tag vs crates.io publish" to before the first
+shipping release; #429 records it as a release-gate item rather than deciding it,
+because a docs change must not settle a supply-chain choice. See
+[#453](https://github.com/shaharia-lab/agento/issues/453).
 
 ### Not implemented, on purpose
 
