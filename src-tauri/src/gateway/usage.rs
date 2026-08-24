@@ -110,6 +110,20 @@ pub struct Observed {
     pub cache_write: u64,
 }
 
+/// # Why four separate atomics rather than one `Mutex<Observed>`
+///
+/// Four independent stores are not an atomic group, so in general a reader
+/// could see three fields from one chunk and one from the next. That cannot
+/// happen here, and the reason is worth writing down because it is a property
+/// of the *callers* rather than of this type: the counters are written only by
+/// [`meter`], which runs inside the stream, and a stream advances only when
+/// something polls it — which is the single frame loop that also calls
+/// [`Accounting::finish`]. One task, so a write is never in flight while that
+/// task reads.
+///
+/// If a second poller is ever introduced, this stops being true and a `Mutex`
+/// becomes the honest answer. `done` is genuinely concurrent by contrast, which
+/// is why it is a compare-exchange and not a `bool`.
 struct Inner {
     db_path: PathBuf,
     seed: Seed,

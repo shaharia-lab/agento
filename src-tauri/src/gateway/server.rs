@@ -364,6 +364,12 @@ async fn openai_chat(
                 );
                 let accounting =
                     usage::Accounting::new(state.db_path.clone(), served.into_seed(seed));
+                // Metered the same way as the Anthropic surface below, rather
+                // than read inside `openai_sse`'s own loop. One surface *can*
+                // read usage off its own frames and the other cannot, so two
+                // mechanisms would work — and would be two places for the
+                // definition of "what a chunk reports" to drift apart.
+                let upstream = usage::meter(upstream, accounting.clone());
                 sse_response(stream::openai_sse(upstream, accounting))
             }
             Err(f) => {

@@ -66,11 +66,16 @@ pub type FrameStream = tokio_stream::wrappers::ReceiverStream<Result<Bytes, Infa
 /// with no `[DONE]` — see the module header for why that asymmetry is
 /// deliberate.
 ///
-/// `accounting` (#425) is finished on **every** exit — all three protocol
-/// endings plus the failed-send path — with the status that ending means. Each
-/// is a separate `return` in the original shape, which is exactly how an arm
-/// gets missed, so they are funnelled through one `status` variable and a
-/// single `finish` at the bottom.
+/// `accounting` (#425) decides the **status** here and nothing else — the token
+/// counts arrive through `usage::meter`, wrapped around the provider stream one
+/// layer out, which is the only way the Anthropic surface can get them and so
+/// is the one way both surfaces do.
+///
+/// It is finished on **every** exit — all three protocol endings plus the
+/// failed-send path — with the status that ending means. Each is a separate
+/// `return` in the original shape, which is exactly how an arm gets missed, so
+/// they are funnelled through one `status` variable and a single `finish` at
+/// the bottom.
 pub fn openai_sse(stream: ProviderStream, accounting: usage::Accounting) -> FrameStream {
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
@@ -98,7 +103,6 @@ pub fn openai_sse(stream: ProviderStream, accounting: usage::Accounting) -> Fram
             };
             match item {
                 Ok(chunk) => {
-                    accounting.observe(chunk.usage.as_ref());
                     if tx
                         .send(Ok(data_frame(&serialize_chunk(&chunk))))
                         .await
