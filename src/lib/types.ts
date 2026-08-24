@@ -653,3 +653,117 @@ export interface ClaudeSettingsProfile {
   file_path: string;
   is_default: boolean;
 }
+
+/* --- Security tokens (#405) ---------------------------------------------- */
+
+export interface ApiTokenRow {
+  id: string;
+  name: string;
+  scope: string;
+  created_at: string;
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+/**
+ * The creation response, and the **only** copy of the token that will ever
+ * exist — nothing stores it, so a second read is impossible rather than
+ * refused. Never put one of these anywhere but component state.
+ */
+export interface CreatedApiToken extends ApiTokenRow {
+  token: string;
+}
+
+/* --- LLM Gateway (#421) — the control plane, /api/gateway/* --------------- */
+
+/**
+ * Four, not five: `bedrock` is a real ferrox provider type this build cannot
+ * serve, so the server refuses it and the picker must not offer it.
+ */
+export type GatewayProviderType = "anthropic" | "openai" | "gemini" | "glm";
+
+export interface GatewayTimeouts {
+  connect_secs: number;
+  ttfb_secs: number;
+  idle_secs: number;
+}
+
+export interface GatewaySettings {
+  enabled: boolean;
+  port: number;
+  start_with_app: boolean;
+}
+
+/**
+ * Four states, and `start_failed` is the one a three-state UI drops.
+ *
+ * `bind_failed` carries the port it could not bind (something else has it);
+ * `start_failed` reached no port at all (a provider row this build could not
+ * turn into an adapter). They send the user to different places, which is why
+ * the server keeps them apart.
+ */
+export type GatewayState =
+  | "stopped"
+  | "running"
+  | "bind_failed"
+  | "start_failed";
+
+/**
+ * `port` and `error` are **omitted**, not null, on the states that have no such
+ * value — branch on presence.
+ */
+export interface GatewayStatus {
+  state: GatewayState;
+  port?: number;
+  error?: string;
+}
+
+/** A provider row as a read answers it: `has_api_key`, never the key. */
+export interface GatewayProviderSummary {
+  id: string;
+  name: string;
+  type: GatewayProviderType;
+  has_api_key: boolean;
+  base_url: string;
+  timeouts: GatewayTimeouts;
+  enabled: boolean;
+}
+
+/**
+ * A provider write.
+ *
+ * `api_key` is three-valued and this is the field the whole surface is built
+ * around: **absent** preserves the stored key, `""` clears it, a value replaces
+ * it. Every other field is overwritten from what the body carries, so a `PUT`
+ * has to send them all.
+ */
+export interface GatewayProviderRequest {
+  id?: string;
+  name: string;
+  type: GatewayProviderType;
+  api_key?: string;
+  base_url: string;
+  timeouts: GatewayTimeouts;
+  enabled: boolean;
+}
+
+export interface GatewayRouteTarget {
+  /** The provider's **name**, not its id — that is what routing refers to. */
+  provider: string;
+  /** The model id sent upstream, which is not the alias the client asked for. */
+  model_id: string;
+}
+
+/** `targets` is ordered and the order is the meaning; `fallbacks` follows it. */
+export interface GatewayRouting {
+  targets: GatewayRouteTarget[] | null;
+  fallbacks: GatewayRouteTarget[] | null;
+}
+
+export interface GatewayModelAlias {
+  id: string;
+  alias: string;
+  routing: GatewayRouting;
+  enabled: boolean;
+}

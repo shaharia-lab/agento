@@ -1,11 +1,13 @@
 import { useCallback, useState } from "react";
 import { api } from "../../lib/api";
 import { CopyButton } from "../../components/CopyButton";
+import { TokenReveal } from "../../components/TokenReveal";
 import { Dropdown, Empty, FormRow } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
 import { dateTime, relativeTime, tildePath } from "../../lib/format";
 import { useHostInfo } from "../../lib/host";
+import type { ApiTokenRow, CreatedApiToken } from "../../lib/types";
 import "../../styles/security.css";
 
 /* ============================================================================
@@ -41,19 +43,10 @@ interface KeyInfo {
   public_key_path: string;
 }
 
-interface TokenRow {
-  id: string;
-  name: string;
-  scope: string;
-  created_at: string;
-  expires_at: string | null;
-  last_used_at: string | null;
-  revoked_at: string | null;
-}
-
-interface CreatedToken extends TokenRow {
-  token: string;
-}
+/* The two token shapes moved to `lib/types.ts` when the LLM Gateway Overview
+   (#427) became a second consumer of `POST /api/security/tokens`. */
+type TokenRow = ApiTokenRow;
+type CreatedToken = CreatedApiToken;
 
 const SCOPES = [
   { value: "read", label: "Read only" },
@@ -314,31 +307,11 @@ export function SecurityPane() {
             banner stays until dismissed for that reason: a toast that faded
             would lose the credential. */}
         {created && (
-          <div className="secnew">
-            <div className="secnew__head">
-              <Icon name="shield" size={14} />
-              <span>
-                <strong>{created.name}</strong> created. Copy it now — this is
-                the only time it is shown, and it is not stored anywhere.
-              </span>
-              <button
-                className="iconbtn"
-                title="Dismiss"
-                onClick={() => setCreated(undefined)}
-              >
-                <Icon name="close" size={12} />
-              </button>
-            </div>
-            <div className="secnew__token">
-              <code className="mono selectable">{created.token}</code>
-              <CopyButton
-                text={created.token}
-                title="Copy token"
-                className="btn"
-                label="Copy"
-              />
-            </div>
-          </div>
+          <TokenReveal
+            name={created.name}
+            token={created.token}
+            onDismiss={() => setCreated(undefined)}
+          />
         )}
 
         <FormRow label="Name" help="What this token is for. Shown in the list below.">
