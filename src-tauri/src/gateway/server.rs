@@ -97,17 +97,41 @@ impl Surface {
     }
 }
 
-/// The five routes, the two layers, and which of them each covers.
+/// The largest request body this gateway accepts.
+///
+/// **`axum`'s default is 2 MiB, and that default is wrong here.** It is sized
+/// for APIs whose bodies are forms and small documents; this endpoint's body is
+/// an entire conversation, resent in full on every turn, by clients that were
+/// pointed here precisely so they would not have to think about it. A long
+/// coding session crosses 2 MiB on its own, and one pasted screenshot does it
+/// immediately at base64's 4/3 expansion. Worse than the refusal is its shape:
+/// `axum` answers a bare `413` in neither surface's dialect, so an SDK reports
+/// a transport failure and the user has nothing to go on.
+///
+/// 32 MiB is Anthropic's own documented request ceiling, so a body this refuses
+/// is one the upstream would refuse anyway — with a message the client can
+/// read. It is a real bound rather than a formality: the body is buffered whole
+/// (and the Anthropic surface parses it twice, once typed and once raw, to
+/// forward the client's own document verbatim), so this caps what a single
+/// local request can make the app allocate.
+const MAX_BODY: usize = 32 * 1024 * 1024;
+
+/// The five routes, the three layers, and which of them each covers.
 ///
 /// `/healthz` is outside the auth layer and inside the `Host` one: liveness is
 /// not a secret (the same call `/health` and the JWKS document already make),
-/// but it is still not something a foreign `Host` should reach.
+/// but it is still not something a foreign `Host` should reach. It is outside
+/// the body limit too, having no body to limit.
 pub fn router(state: GatewayState) -> Router {
     let authenticated = Router::new()
         .route("/v1/chat/completions", post(openai_chat))
         .route("/v1/models", get(openai_models))
         .route("/anthropic/v1/messages", post(anthropic_messages))
         .route("/anthropic/v1/models", get(anthropic_models))
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY))
+        // Below the body limit, so an oversized body is refused before a
+        // credential is verified — and above nothing else, because the `Host`
+        // check outranks both.
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             authenticate,

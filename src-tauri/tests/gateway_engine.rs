@@ -128,6 +128,13 @@ async fn fake_upstream(script: Vec<Reply>) -> Fake {
 
     let app = axum::Router::new()
         .route("/v1/chat/completions", post(fake_handler))
+        // A real provider accepts bodies far larger than `axum`'s 2 MiB
+        // default, and this fixture has to as well — otherwise the fake
+        // refuses a large request the gateway correctly forwarded, and the
+        // resulting `413` reads exactly like the gateway's own limit. It is
+        // distinguishable only by the error body's `"type":"provider_error"`,
+        // which is how this was diagnosed.
+        .layer(axum::extract::DefaultBodyLimit::disable())
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
@@ -199,7 +206,11 @@ fn sse(chunks: Vec<String>, hang_until_dropped: Option<Arc<tokio::sync::Notify>>
             // disconnect must cause all the way up the chain — and the notify
             // is the signal that it did.
             tx.closed().await;
-            hung_up.notify_waiters();
+            // `notify_one`, not `notify_waiters`: the latter wakes only waiters
+            // already registered, so a test that has not yet reached its await
+            // loses the notification and times out. `notify_one` stores a
+            // permit instead, which removes the race rather than narrowing it.
+            hung_up.notify_one();
             return;
         }
         let _ = tx.send(Ok("data: [DONE]\n\n".to_string())).await;
@@ -766,6 +777,43 @@ async fn only_an_llm_scoped_token_opens_either_surface() {
             assert_eq!(response.status(), 200, "{path} with an llm token");
         }
     }
+
+    // The two completion routes, which are the ones that actually spend money —
+    // the layer covers all four, but asserting only on the `GET`s would leave
+    // the expensive pair resting on that being true rather than checked.
+    for (path, body) in [
+        (
+            "/v1/chat/completions",
+            serde_json::json!({"model": "my-alias", "messages": [{"role": "user", "content": "hi"}]}),
+        ),
+        (
+            "/anthropic/v1/messages",
+            serde_json::json!({"model": "my-alias", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}),
+        ),
+    ] {
+        let response = client
+            .post(gateway.url(path))
+            .json(&body)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(response.status(), 401, "{path} with no credential");
+
+        let response = client
+            .post(gateway.url(path))
+            .bearer_auth(token_with(Scope::Write))
+            .json(&body)
+            .send()
+            .await
+            .expect("send");
+        assert_eq!(response.status(), 403, "{path} with a write token");
+    }
+
+    assert_eq!(
+        upstream.calls().len(),
+        0,
+        "a refused request must never reach the provider"
+    );
 }
 
 /// A denial is written in the dialect the client's SDK parses.
@@ -1019,13 +1067,7 @@ async fn a_disconnect_mid_stream_tears_down_the_upstream_request() {
     );
     let gateway = gateway_for(&db).await;
 
-    // Armed *before* the disconnect: `Notify::notified()` only observes
-    // notifications issued after the future is created, so registering after
-    // the drop would race the teardown it is meant to observe.
     let hung_up = Arc::clone(&upstream.hung_up);
-    let observed = tokio::spawn(async move { hung_up.notified().await });
-    // Let the spawned task reach the await point before anything can fire it.
-    tokio::task::yield_now().await;
 
     let mut response = client()
         .post(gateway.url("/v1/chat/completions"))
@@ -1058,10 +1100,12 @@ async fn a_disconnect_mid_stream_tears_down_the_upstream_request() {
     // propagated from the client, through the gateway's frame loop, into the
     // upstream response it was holding. If any link in that chain leaks, this
     // never fires and the timeout reports it as a failure rather than a hang.
-    tokio::time::timeout(std::time::Duration::from_secs(10), observed)
+    //
+    // No arming is needed before the drop: the fake signals with `notify_one`,
+    // which stores a permit when nobody is waiting yet.
+    tokio::time::timeout(std::time::Duration::from_secs(10), hung_up.notified())
         .await
-        .expect("the client disconnect must reach the upstream request")
-        .expect("the observer task must not panic");
+        .expect("the client disconnect must reach the upstream request");
 
     assert_eq!(
         upstream.calls().len(),
@@ -1162,6 +1206,46 @@ async fn a_port_already_in_use_is_a_readable_status_rather_than_silence() {
 
     registry::stop();
     drop(squatter);
+}
+
+/// A provider this build cannot turn into an adapter is `StartFailed`, not
+/// `BindFailed`.
+///
+/// Reachable from a typo, which is why the two are separate variants: ferrox's
+/// OpenAI adapter refuses a `base_url` ending in `/chat/completions` (it would
+/// build `…/chat/completions/chat/completions`), and reporting that as a bind
+/// failure would send the user to look at a port nothing tried to bind.
+#[tokio::test]
+async fn a_provider_that_cannot_be_built_is_not_reported_as_a_port_collision() {
+    let _guard = registry_lock().lock().await;
+    let db = seeded_db(
+        &[("p1", "http://127.0.0.1:9/v1/chat/completions")],
+        "a",
+        &[("p1", "m")],
+    );
+    config::store_settings(
+        db.path(),
+        &GatewaySettings {
+            enabled: true,
+            port: free_port().await,
+            start_with_app: true,
+        },
+    )
+    .expect("store settings");
+
+    registry::start_if_enabled(db.path())
+        .await
+        .expect("a misconfigured provider is an answer, not an Err");
+
+    match registry::status() {
+        registry::Status::StartFailed { error } => assert!(
+            error.contains("p1"),
+            "the status must name the provider to fix; got {error:?}"
+        ),
+        other => panic!("expected StartFailed, got {other:?}"),
+    }
+
+    registry::stop();
 }
 
 /// The whole lifecycle: start from settings, serve, reload, stop.
@@ -1277,4 +1361,49 @@ fn a_gateway_start_requires_an_installed_keypair() {
         "the gateway must not be started before the revoked-token set is loaded, \
          or it accepts a revoked token for the length of that window"
     );
+}
+
+/// A large request body must reach the upstream rather than being refused.
+///
+/// `axum` applies a **2 MiB default body limit** to `Bytes` and `Json`
+/// extractors. That is a sensible default for an API whose bodies are forms;
+/// it is the wrong one for the endpoint Claude Code and the OpenAI SDKs are
+/// pointed at, where the body is an entire conversation resent on every turn.
+/// A long coding session, or one pasted screenshot at base64's 4/3 expansion,
+/// crosses it — and the refusal is `axum`'s own bare `413`, in neither
+/// surface's dialect, so the client reports nothing useful.
+#[tokio::test]
+async fn a_large_request_body_is_not_refused() {
+    let upstream = fake_upstream(vec![Reply::ok(&completion_body())]).await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let gateway = gateway_for(&db).await;
+
+    // ~3 MiB of conversation: over axum's default, well under anything a real
+    // client would consider unusual.
+    let big = "x".repeat(3 * 1024 * 1024);
+    let response = client()
+        .post(gateway.url("/v1/chat/completions"))
+        .bearer_auth(token_with(Scope::Llm))
+        .json(&serde_json::json!({
+            "model": "my-alias",
+            "messages": [{"role": "user", "content": big}],
+        }))
+        .send()
+        .await
+        .expect("send");
+
+    // The body is printed on failure because the two limits that could produce
+    // a 413 here — this gateway's and the fake upstream's — are otherwise
+    // indistinguishable, and only the error body's `type` tells them apart.
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    assert_eq!(
+        status, 200,
+        "a 3 MiB conversation is an ordinary request, not an oversized one; body={body}"
+    );
+    assert_eq!(upstream.calls().len(), 1, "and it reached the provider");
 }

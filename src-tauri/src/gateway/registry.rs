@@ -54,6 +54,18 @@ pub enum Status {
         port: u16,
         error: String,
     },
+    /// The gateway could not be built at all — a provider row this build cannot
+    /// turn into an adapter.
+    ///
+    /// **Separate from [`Status::BindFailed`] because the two send the user to
+    /// different places**, and it is reachable from an ordinary typo: a
+    /// `base_url` ending in `/chat/completions` is refused by ferrox's OpenAI
+    /// adapter, so folding it into `BindFailed` would have the UI say "port
+    /// 8880 is already in use" about a port nothing ever tried to bind. There
+    /// is no port here on purpose — none was reached.
+    StartFailed {
+        error: String,
+    },
 }
 
 /// A live listener. Dropping it shuts the listener down gracefully.
@@ -191,18 +203,13 @@ pub async fn start_if_enabled(db_path: &Path) -> Result<(), String> {
     let dispatcher = match Dispatcher::build(db_path).await {
         Ok(d) => std::sync::Arc::new(d),
         Err(e) => {
-            // A provider whose adapter will not build is the same class of
-            // problem as a taken port — the user configured something the
-            // gateway cannot serve — so it is reported the same way rather than
-            // failing the boot task silently.
+            // Reported rather than returned, for the same reason a taken port
+            // is: the user configured something this build cannot serve, and
+            // that is an answer they need to see rather than a boot task that
+            // failed quietly. It is `StartFailed` and not `BindFailed` because
+            // no port was reached — see the variant's doc.
             log::warn!("llm gateway not started: {e}");
-            registry().record_if_current(
-                generation,
-                Status::BindFailed {
-                    port: settings.port,
-                    error: e,
-                },
-            );
+            registry().record_if_current(generation, Status::StartFailed { error: e });
             return Ok(());
         }
     };
