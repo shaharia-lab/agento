@@ -95,12 +95,22 @@ const LLM_WARNING =
   "no spending limit of its own. It cannot read or change anything in Agento.";
 
 /**
+ * Shown when a scope has no copy of its own — i.e. a value was added to
+ * `SCOPES` and not to `SCOPE_WARNINGS`.
+ *
+ * Deliberately *not* one of the three real warnings. Each of those makes a
+ * positive claim about what the scope does and does not reach, and asserting any
+ * of them about a scope this file knows nothing about would be a guess shown to
+ * the person deciding whether to hand the token out.
+ */
+const UNKNOWN_SCOPE_WARNING =
+  "This build does not describe what this scope grants. Do not issue it.";
+
+/**
  * The capability note shown under the scope picker.
  *
  * A lookup rather than a ternary: at two scopes a ternary read fine, at three it
- * would nest, and the next scope would nest it again. An unknown value falls
- * back to the narrowest copy rather than to nothing, so a scope this build does
- * not know is never described as harmless.
+ * would nest, and the next scope would nest it again.
  */
 const SCOPE_WARNINGS: Record<string, string> = {
   read: READ_WARNING,
@@ -342,7 +352,7 @@ export function SecurityPane() {
 
         <FormRow
           label="Scope"
-          help={SCOPE_WARNINGS[scope] ?? READ_WARNING}
+          help={SCOPE_WARNINGS[scope] ?? UNKNOWN_SCOPE_WARNING}
         >
           <Dropdown value={scope} options={SCOPES} onChange={setScope} />
         </FormRow>

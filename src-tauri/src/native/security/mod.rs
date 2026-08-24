@@ -607,6 +607,55 @@ mod tests {
         assert_eq!(token_id("/api/security/keys"), None);
     }
 
+    /// **The create route accepts exactly the three scopes, and says so** (#423).
+    ///
+    /// `Scope::parse` is unit-tested next door, but the *route* is what a
+    /// request reaches, and its message is what a caller reads. Without this, a
+    /// change that dropped `llm` from the accepted set — or that left the old
+    /// two-scope wording behind — passes the whole suite.
+    ///
+    /// **Installs no keypair**, which is what keeps this out of the
+    /// cross-module static hazard: `create_token` validates the name, the scope
+    /// and the TTL *before* it reads `keys::current()`, so every case here is
+    /// decided without touching process-wide state. The `llm` arm therefore
+    /// asserts only that the scope is not what the request was rejected for.
+    #[test]
+    fn the_create_route_takes_read_write_and_llm_and_nothing_else() {
+        let db = std::path::Path::new("/nonexistent/agento-create-token-test.db");
+        let scope_error = |scope: &str| -> Option<String> {
+            let body = format!(r#"{{"name":"tool config","scope":"{scope}"}}"#);
+            match create_token(db, body.as_bytes()) {
+                Err(e) => {
+                    let message = e.message();
+                    message.contains("scope must be").then_some(message)
+                }
+                Ok(_) => None,
+            }
+        };
+
+        for unknown in ["admin", "READ", "LLM", "llm ", "gateway"] {
+            let message = scope_error(unknown)
+                .unwrap_or_else(|| panic!("{unknown:?} must be refused as a scope"));
+            for spelling in ["read", "write", "llm"] {
+                assert!(
+                    message.contains(spelling),
+                    "the refusal must name every accepted scope, missing {spelling:?}: {message}"
+                );
+            }
+        }
+
+        // ...and the three real ones are never what the request is refused for.
+        // They get no further than this either — there is no signing key
+        // installed — but they fail for that reason rather than this one.
+        for accepted in ["read", "write", "llm"] {
+            assert_eq!(
+                scope_error(accepted),
+                None,
+                "{accepted:?} must pass scope validation"
+            );
+        }
+    }
+
     /// The one exception to the method-based scope map, and the reason for it:
     /// these reads *are* the credential system, so a `read` token must not be
     /// able to enumerate every credential on the machine.
