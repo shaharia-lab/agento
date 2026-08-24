@@ -181,6 +181,11 @@ fn load_settings_from(conn: &Connection) -> Result<GatewaySettings, String> {
 pub fn store_settings(db_path: &Path, settings: &GatewaySettings) -> Result<(), String> {
     settings.validate()?;
     let mut conn = db::open_read_write(db_path)?;
+    // The guard every native write applies: refuse a database whose schema is
+    // not the one this build compiled against, in either direction. These three
+    // writes are not on the `/api` seam, but the reason for the check is the
+    // schema rather than the route.
+    crate::native::migrate::verify(&conn)?;
     let now = gotime::now_go_text();
     let tx = conn
         .transaction()
@@ -455,6 +460,7 @@ pub fn store_provider(db_path: &Path, input: &ProviderInput<'_>) -> Result<(), S
         return Err("provider name is required".to_string());
     }
     let mut conn = db::open_read_write(db_path)?;
+    crate::native::migrate::verify(&conn)?;
     let now = gotime::now_go_text();
     let tx = conn
         .transaction()
@@ -583,6 +589,7 @@ pub fn store_alias(db_path: &Path, alias: &ModelAlias) -> Result<(), String> {
     let routing = serde_json::to_string(&alias.routing)
         .map_err(|e| format!("encoding routing configuration: {e}"))?;
     let mut conn = db::open_read_write(db_path)?;
+    crate::native::migrate::verify(&conn)?;
     let now = gotime::now_go_text();
     let tx = conn
         .transaction()
@@ -701,23 +708,27 @@ mod tests {
 
     #[test]
     fn a_provider_round_trips_through_the_secret_projection() {
-        let conn = schema();
-        store_provider_in(
-            &conn,
-            "p1",
-            "prod-anthropic",
-            ProviderType::Anthropic,
-            "sk-secret",
-            "",
-            Timeouts {
-                connect_secs: 5,
-                ttfb_secs: 90,
-                idle_secs: 15,
+        let db = scratch_db();
+        let timeouts = Timeouts {
+            connect_secs: 5,
+            ttfb_secs: 90,
+            idle_secs: 15,
+        };
+        store_provider(
+            db.path(),
+            &ProviderInput {
+                id: "p1",
+                name: "prod-anthropic",
+                provider_type: ProviderType::Anthropic,
+                api_key: "sk-secret",
+                base_url: "",
+                timeouts,
+                enabled: true,
             },
-            true,
-        );
+        )
+        .expect("store");
 
-        let rows = load_providers_from(&conn).expect("load");
+        let rows = load_providers(db.path()).expect("load");
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row.name, "prod-anthropic");
@@ -730,6 +741,54 @@ mod tests {
         let cfg = row.to_ferrox();
         assert_eq!(cfg.api_key.as_deref(), Some("sk-secret"));
         assert_eq!(cfg.timeouts.expect("timeouts").ttfb_secs, 90);
+
+        // ...and a second write with the same id **updates**, rather than
+        // failing on the primary key or leaving two rows. This is the
+        // `ON CONFLICT` clause, which no test reached while these went through
+        // a hand-written copy of the statement.
+        store_provider(
+            db.path(),
+            &ProviderInput {
+                id: "p1",
+                name: "prod-anthropic",
+                provider_type: ProviderType::Anthropic,
+                api_key: "sk-rotated",
+                base_url: "https://example.invalid/v1",
+                timeouts,
+                enabled: false,
+            },
+        )
+        .expect("second store");
+
+        let rows = load_providers(db.path()).expect("reload");
+        assert_eq!(rows.len(), 1, "the upsert must not insert a second row");
+        assert_eq!(rows[0].to_ferrox().api_key.as_deref(), Some("sk-rotated"));
+        assert_eq!(rows[0].base_url, "https://example.invalid/v1");
+        assert!(!rows[0].enabled);
+    }
+
+    /// An empty name is refused **before** anything is written.
+    #[test]
+    fn a_provider_with_no_name_is_refused_and_writes_nothing() {
+        let db = scratch_db();
+        let err = store_provider(
+            db.path(),
+            &ProviderInput {
+                id: "p1",
+                name: "   ",
+                provider_type: ProviderType::Anthropic,
+                api_key: "sk-secret",
+                base_url: "",
+                timeouts: Timeouts::default(),
+                enabled: true,
+            },
+        )
+        .expect_err("an empty name must be refused");
+        assert!(err.contains("name"), "{err}");
+        assert!(
+            load_providers(db.path()).is_ok_and(|rows| rows.is_empty()),
+            "a refused write must leave the table empty"
+        );
     }
 
     /// **The public projection cannot return the key**, asserted against the SQL
@@ -776,19 +835,22 @@ mod tests {
     /// reaches a log line.
     #[test]
     fn a_summary_carries_no_key_in_any_encoding() {
-        let conn = schema();
-        store_provider_in(
-            &conn,
-            "p1",
-            "prod",
-            ProviderType::Openai,
-            "sk-do-not-leak",
-            "",
-            Timeouts::default(),
-            true,
-        );
+        let db = scratch_db();
+        store_provider(
+            db.path(),
+            &ProviderInput {
+                id: "p1",
+                name: "prod",
+                provider_type: ProviderType::Openai,
+                api_key: "sk-do-not-leak",
+                base_url: "",
+                timeouts: Timeouts::default(),
+                enabled: true,
+            },
+        )
+        .expect("store");
 
-        let summaries = load_provider_summaries_from(&conn).expect("load");
+        let summaries = load_provider_summaries(db.path()).expect("load");
         assert_eq!(summaries.len(), 1);
         assert!(summaries[0].has_api_key);
 
@@ -828,7 +890,7 @@ mod tests {
 
     #[test]
     fn routing_preserves_target_order_and_the_fallback_chain() {
-        let conn = schema();
+        let db = scratch_db();
         let alias = ModelAlias {
             id: "a1".into(),
             alias: "claude-sonnet".into(),
@@ -850,9 +912,9 @@ mod tests {
             },
             enabled: true,
         };
-        store_alias_in(&conn, &alias);
+        store_alias(db.path(), &alias).expect("store");
 
-        let loaded = load_aliases_from(&conn).expect("load");
+        let loaded = load_aliases(db.path()).expect("load");
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0], alias, "order is the meaning; it must survive");
         assert_eq!(loaded[0].routing.targets[0].provider, "primary");
@@ -890,33 +952,43 @@ mod tests {
 
     #[test]
     fn settings_round_trip_and_port_zero_is_refused() {
-        let conn = schema();
+        let db = scratch_db();
         let settings = GatewaySettings {
             enabled: true,
             port: 9099,
             start_with_app: false,
         };
-        store_settings_in(&conn, &settings);
-        assert_eq!(load_settings_from(&conn).expect("load"), settings);
+        store_settings(db.path(), &settings).expect("store");
+        assert_eq!(load_settings(db.path()).expect("load"), settings);
 
         // ...and a second write updates rather than inserting a second row.
         let settings = GatewaySettings {
             port: 9100,
             ..settings
         };
-        store_settings_in(&conn, &settings);
-        assert_eq!(load_settings_from(&conn).expect("load"), settings);
+        store_settings(db.path(), &settings).expect("second store");
+        assert_eq!(load_settings(db.path()).expect("load"), settings);
+
+        let conn = Connection::open(db.path()).expect("open");
         let rows: i64 = conn
             .query_row("SELECT count(*) FROM gateway_settings", [], |r| r.get(0))
             .expect("count");
         assert_eq!(rows, 1, "the settings table holds exactly one row");
 
-        assert!(GatewaySettings {
+        // Port 0 is refused by the write, not merely by `validate` in isolation
+        // — the check has to be wired in, which is the half a unit test of
+        // `validate` alone would miss.
+        let zero = GatewaySettings {
             port: 0,
             ..Default::default()
-        }
-        .validate()
-        .is_err());
+        };
+        assert!(zero.validate().is_err());
+        assert!(store_settings(db.path(), &zero).is_err());
+        assert_eq!(
+            load_settings(db.path()).expect("reload"),
+            settings,
+            "a refused write must not have changed the stored row"
+        );
     }
 
     /// The defaults handed to a registry are ferrox's own, unmodified: v1 sets
@@ -932,89 +1004,19 @@ mod tests {
         assert_eq!(d.timeouts.idle_secs, TimeoutsConfig::default().idle_secs);
     }
 
-    // ── connection-taking siblings, so the tests need no temp file ────────────
-    //
-    // The public functions take a `&Path` because that is what a caller has;
-    // these are the same statements against a connection the test already owns.
-
-    fn load_provider_summaries_from(conn: &Connection) -> Result<Vec<ProviderSummary>, String> {
-        let sql = format!("{PROVIDER_COLUMNS_PUBLIC}\n     ORDER BY name ASC");
-        let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map([], |row| {
-                let raw_type: String = row.get(2)?;
-                Ok(ProviderSummary {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    provider_type: ProviderType::parse(&raw_type).expect("known type"),
-                    has_api_key: row.get::<_, i64>(3)? != 0,
-                    base_url: row.get(4)?,
-                    timeouts: Timeouts {
-                        connect_secs: row.get::<_, i64>(5)?.max(0) as u64,
-                        ttfb_secs: row.get::<_, i64>(6)?.max(0) as u64,
-                        idle_secs: row.get::<_, i64>(7)?.max(0) as u64,
-                    },
-                    enabled: row.get::<_, i64>(8)? != 0,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        rows.collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(|e| e.to_string())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn store_provider_in(
-        conn: &Connection,
-        id: &str,
-        name: &str,
-        provider_type: ProviderType,
-        api_key: &str,
-        base_url: &str,
-        timeouts: Timeouts,
-        enabled: bool,
-    ) {
-        conn.execute(
-            "INSERT INTO gateway_providers\n                 (id, name, type, api_key, base_url, connect_secs, ttfb_secs, idle_secs, enabled, created_at, updated_at)\n             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
-            rusqlite::params![
-                id,
-                name,
-                provider_type.as_str(),
-                api_key,
-                base_url,
-                timeouts.connect_secs as i64,
-                timeouts.ttfb_secs as i64,
-                timeouts.idle_secs as i64,
-                enabled as i64,
-                gotime::now_go_text(),
-            ],
-        )
-        .expect("insert provider");
-    }
-
-    fn store_alias_in(conn: &Connection, alias: &ModelAlias) {
-        conn.execute(
-            "INSERT INTO gateway_model_aliases (id, alias, routing, enabled, created_at, updated_at)\n             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-            rusqlite::params![
-                alias.id,
-                alias.alias,
-                serde_json::to_string(&alias.routing).expect("encode"),
-                alias.enabled as i64,
-                gotime::now_go_text(),
-            ],
-        )
-        .expect("insert alias");
-    }
-
-    fn store_settings_in(conn: &Connection, settings: &GatewaySettings) {
-        conn.execute(
-            "INSERT INTO gateway_settings (id, enabled, port, start_with_app, created_at, updated_at)\n             VALUES (1, ?1, ?2, ?3, ?4, ?4)\n             ON CONFLICT(id) DO UPDATE SET\n                 enabled = excluded.enabled,\n                 port = excluded.port,\n                 start_with_app = excluded.start_with_app,\n                 updated_at = excluded.updated_at",
-            rusqlite::params![
-                settings.enabled as i64,
-                settings.port as i64,
-                settings.start_with_app as i64,
-                gotime::now_go_text(),
-            ],
-        )
-        .expect("insert settings");
+    /// A temp-file database with the schema applied.
+    ///
+    /// A **file**, not `:memory:`, and that is the point: the public write
+    /// functions take a `&Path` and open their own connection, so a test that
+    /// wants to exercise the real statements has to give them a real path. The
+    /// tests used to insert through hand-written copies of the production SQL
+    /// instead, which verified the copy rather than the code — the upsert's
+    /// `ON CONFLICT` clause, the part most likely to be wrong, was executed by
+    /// nothing.
+    fn scratch_db() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        file
     }
 }
