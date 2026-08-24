@@ -498,10 +498,16 @@ function Breakdown({
       {ranked.map((row) => {
         const text = label(row.key, row);
         const tone = badge?.(row.key);
+        // Token names are not unique — `api_tokens` has no constraint on `name`
+        // and the create route only checks it is non-empty — so two credentials
+        // called "Zed" would otherwise be two indistinguishable rows in the one
+        // panel whose job is picking which of them to revoke. The id
+        // disambiguates on hover without putting a UUID on screen.
+        const hint = row.label && row.label !== row.key ? `${text} · ${row.key}` : text;
         return (
           <div className="gw-rank__row" key={row.key}>
             <div className="gw-rank__name">
-              <div className="truncate" title={text}>
+              <div className="truncate" title={hint}>
                 {tone ? <span className={`badge ${tone}`}>{text}</span> : text}
               </div>
               <div className="gw-rank__bar">

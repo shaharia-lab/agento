@@ -3218,7 +3218,20 @@ resolves the names itself rather than leaving the view to fetch them, because
 dashboard has no business holding one. Revoked tokens keep their names, since a
 revoked credential's spending history is most of what made the revocation
 informed. `label` is `skip_serializing_if = "Option::is_none"` and only
-`by_token` ever sets it.
+`by_token` ever sets it. **It widens what a `read` token can see, and that is
+argued at the site rather than left implicit:** `required_scope` forces `write`
+on `/api/security/*` so a `read` token cannot enumerate every credential, and
+what this returns is not an enumeration — only tokens with traffic in the
+window, only `(id, name)`, with the scope, `jti`, expiry and revocation state
+left where they were.
+
+**The launch sweep asks a reader before it asks for a write lock.** It runs on
+every boot, and an install that never switched the gateway on has an empty
+`gateway_usage_log` forever — so `prune_since` short-circuits on
+`SELECT EXISTS(...)` through a WAL reader, which never waits on a writer. That is
+what keeps "an install that never configures one pays a single `SELECT` at boot"
+true. An *unreadable* database is not an empty one: it falls through, so the
+write path reports the real error rather than a silent no-op.
 
 **`validate` returns the field it refused, and must keep doing so.** It is
 `Result<(), SettingsError>` with `field` and `message`, not a bare `String`: the

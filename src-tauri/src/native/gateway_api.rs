@@ -709,14 +709,35 @@ struct UsageGroup {
 ///
 /// Best-effort — the names are a label, and a usage window that cannot read them
 /// is still a correct usage window.
+///
+/// **This widens what a `read` token can see, and that is accepted rather than
+/// overlooked.** `required_scope` forces `write` on `/api/security/*` precisely
+/// so a `read` token cannot enumerate every credential on the machine; this is a
+/// `read` route and it now returns token *names*. What it does not return is the
+/// enumeration: only tokens with traffic in the requested window appear, only
+/// `(id, name)` is selected, and the scope, `jti`, expiry, revocation state and
+/// the token itself stay where they were. A credential's *name* beside its spend
+/// is the whole content of the panel, and a dashboard that must hold a `write`
+/// token to render is a worse trade than this one.
 fn token_names(conn: &rusqlite::Connection) -> std::collections::BTreeMap<String, String> {
     let mut names = std::collections::BTreeMap::new();
-    let Ok(mut stmt) = conn.prepare("SELECT id, name FROM api_tokens") else {
-        return names;
+    // Logged rather than dropped silently, the way `usage.rs`'s "pricing catalog
+    // unavailable" line is: the fallback is visible (rows keep their ids), so
+    // this is `debug` rather than `warn`, but a panel quietly degrading with no
+    // trace at all is how a degradation becomes permanent.
+    let mut stmt = match conn.prepare("SELECT id, name FROM api_tokens") {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            log::debug!("gateway usage: token names unavailable, showing ids: {e}");
+            return names;
+        }
     };
-    let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-    else {
-        return names;
+    let rows = match stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+        Ok(rows) => rows,
+        Err(e) => {
+            log::debug!("gateway usage: token names unavailable, showing ids: {e}");
+            return names;
+        }
     };
     for row in rows.flatten() {
         names.insert(row.0, row.1);
@@ -863,11 +884,14 @@ fn read_usage(db_path: &std::path::Path, query: &str) -> Result<Answer, String> 
     // One read for the whole breakdown, and only when there is something to
     // label — a window with no traffic must not open a connection for nothing.
     if !by_token.is_empty() {
-        if let Ok(conn) = super::db::open_read_only(db_path) {
-            let names = token_names(&conn);
-            for (id, group) in by_token.iter_mut() {
-                group.label = names.get(id).cloned();
+        match super::db::open_read_only(db_path) {
+            Ok(conn) => {
+                let names = token_names(&conn);
+                for (id, group) in by_token.iter_mut() {
+                    group.label = names.get(id).cloned();
+                }
             }
+            Err(e) => log::debug!("gateway usage: token names unavailable, showing ids: {e}"),
         }
     }
 

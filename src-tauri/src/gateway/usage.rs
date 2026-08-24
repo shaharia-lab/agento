@@ -808,6 +808,24 @@ fn prune_since(db_path: &std::path::Path, days: u32, now: DateTime<Utc>) -> Resu
         // against a cutoff that saturated.
         return Err(format!("retention horizon of {days} days is out of range"));
     };
+
+    // An empty log is the ordinary state of an install that has never switched
+    // the gateway on, and the launch sweep runs on **every** boot — so asking a
+    // WAL reader (which never waits on a writer) whether there is anything at
+    // all is what keeps `CLAUDE.md`'s "an install that never configures one pays
+    // a single `SELECT` at boot" true, rather than a write-lock acquisition
+    // against an empty table. Unreadable is not "empty": fall through and let
+    // the write path report the real error.
+    if let Ok(conn) = db::open_read_only(db_path) {
+        let any: Result<i64, _> =
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM gateway_usage_log)", [], |r| {
+                r.get(0)
+            });
+        if matches!(any, Ok(0)) {
+            return Ok(0);
+        }
+    }
+
     let conn = db::open_read_write(db_path)?;
     conn.execute(
         "DELETE FROM gateway_usage_log WHERE created_at < ?1",
@@ -976,6 +994,37 @@ mod retention_tests {
         // future, so the difference is negative and stays below the interval.
         assert!(!prune_due(t0 + 60), "a clock that went backwards defers");
         last_pruned().store(0, Ordering::SeqCst);
+    }
+
+    /// An empty log costs a read, not a write lock.
+    ///
+    /// The launch sweep runs on every boot, and an install that never switched
+    /// the gateway on has an empty table forever — so the sweep must not be a
+    /// write-lock acquisition per launch. Asserted by making the *write* path
+    /// impossible: a read-only database file. An empty log still answers `Ok(0)`
+    /// because it never gets that far; remove the short-circuit and this fails
+    /// with `attempt to write a readonly database`.
+    ///
+    /// That the write path *is* still reached when there are rows is
+    /// `a_prune_deletes_strictly_older_rows_and_keeps_the_boundary`'s job, so
+    /// this cannot pass by the short-circuit swallowing every prune.
+    #[test]
+    fn an_empty_log_is_pruned_without_opening_a_write_connection() {
+        let file = migrated();
+        let mut perms = std::fs::metadata(file.path()).expect("stat").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(file.path(), perms).expect("chmod");
+
+        let pruned = prune(file.path(), 90);
+
+        // Restored before the assertion, so a failing assert does not also leave
+        // an undeletable tempfile behind and turn one red test into two.
+        let mut perms = std::fs::metadata(file.path()).expect("stat").permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(file.path(), perms).expect("chmod");
+
+        assert_eq!(pruned.expect("an empty log needs no write lock"), 0);
     }
 
     /// A horizon this build cannot honour must not become a cutoff that

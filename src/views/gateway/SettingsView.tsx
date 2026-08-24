@@ -230,7 +230,12 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
                 />
               </FormRow>
 
-              {!retentionValid && retention !== "" && (
+              {/* No `retention !== ""` guard, unlike the port field above: an
+                  emptied box is exactly the state that needs the message. With a
+                  stored 90 the savebar says "Fix the retention horizon to save."
+                  and nothing was highlighted; with a stored 0, `Number("")` is 0
+                  so `changed` is false and there was no feedback at all. */}
+              {!retentionValid && (
                 <div className="msgline msgline--error">
                   <Icon name="alert" size={13} className="msgline__icon" />
                   <span>
