@@ -208,6 +208,12 @@ src-tauri/src/
     schema_vectors.rs  tests only: which Go shapes schemars reproduces, and what
                  a port must write for the ones it does not (#312)
     lenient.rs   Go's partial-decode semantics, which serde does not have
+  gateway/       the embedded LLM gateway (#421) — beside native/, not inside it:
+                 it is a second listener speaking OpenAI's and Anthropic's wire
+                 formats, so no /api seam and no parity machinery applies
+    config.rs    the settings model, its three tables and the mapping onto
+                 ferrox-providers' own config types (#422). Two projections:
+                 the public one never selects api_key. No listener yet (#424)
   native/        ported endpoints (phase 2+)
     active_time.rs the capped-gap rule, shared by the scanner and the pipeline
     scanner/     the Claude session scanner (issue #270) — computes, never writes
