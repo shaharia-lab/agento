@@ -1463,3 +1463,107 @@ async fn a_large_request_body_is_not_refused() {
     );
     assert_eq!(upstream.calls().len(), 1, "and it reached the provider");
 }
+
+/// A reload while a stream is in flight must still come back on the same port.
+///
+/// This is the interaction between the two properties this module wants at
+/// once, and they pull against each other. Shutdown is **graceful**, so a
+/// client mid-completion when the user saves the settings form keeps its
+/// stream — that is the whole reason the oneshot exists. But `reload` then
+/// rebinds the **same, user-configured** port, and if the draining listener
+/// still owns that socket the new bind gets `EADDRINUSE`.
+///
+/// The failure that would cause is the worst one this module has: the status
+/// reads `BindFailed` while the *old* listener — holding the API key the user
+/// just rotated away — goes on serving until its stream ends. A reload that
+/// cannot rebind is a reload that did not revoke anything.
+///
+/// A quiet reload cannot catch it: with nothing in flight the drain completes
+/// in microseconds and the rebind always wins the race. The stream has to be
+/// open across the reload.
+#[tokio::test]
+async fn a_reload_during_a_stream_rebinds_the_same_port() {
+    let _guard = registry_lock().lock().await;
+    let upstream = fake_upstream(vec![Reply::SseThenHang {
+        chunks: vec![chunk("Hello")],
+    }])
+    .await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let port = free_port().await;
+    config::store_settings(
+        db.path(),
+        &GatewaySettings {
+            enabled: true,
+            port,
+            start_with_app: true,
+        },
+    )
+    .expect("store settings");
+
+    registry::start_if_enabled(db.path())
+        .await
+        .expect("start_if_enabled");
+    assert_eq!(registry::status(), registry::Status::Running { port });
+
+    // Open a stream and read a frame, so the listener is genuinely draining
+    // rather than idle when the reload lands.
+    let mut streaming = client()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth(token_with(Scope::Llm))
+        .json(&serde_json::json!({
+            "model": "my-alias",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(streaming.status(), 200);
+    tokio::time::timeout(std::time::Duration::from_secs(10), streaming.chunk())
+        .await
+        .expect("a first frame")
+        .expect("chunk")
+        .expect("some bytes");
+
+    registry::reload(db.path()).await.expect("reload");
+
+    assert_eq!(
+        registry::status(),
+        registry::Status::Running { port },
+        "a reload across an open stream must rebind, or the old listener keeps \
+         serving with the credential the reload was meant to replace"
+    );
+    assert_eq!(
+        client()
+            .get(format!("http://127.0.0.1:{port}/healthz"))
+            .send()
+            .await
+            .expect("send")
+            .status(),
+        200,
+        "and the new listener must actually be answering"
+    );
+
+    // The other half, and the reason the shutdown is graceful at all: the
+    // in-flight stream must have *survived* the reload rather than being cut.
+    // The fake is still parked holding its connection open, so its hang-up
+    // signal firing would mean the teardown reached through and killed a
+    // client's completion mid-answer — which is what firing the cancellation
+    // token *as* the shutdown signal does, the bug `claude/mcp.rs` records.
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            upstream.hung_up.notified()
+        )
+        .await
+        .is_err(),
+        "a reload must not tear down a stream that was already in flight"
+    );
+
+    drop(streaming);
+    registry::stop();
+}
