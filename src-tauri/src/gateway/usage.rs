@@ -594,3 +594,110 @@ mod tests {
         );
     }
 }
+
+// ── Reading the log back (#426's `GET /api/gateway/usage`) ───────────────────
+
+/// One recorded request, as a read sees it.
+///
+/// Deliberately not [`UsageRow`]: that type is what a *write* assembles and
+/// carries a `&'static str` surface and a not-yet-resolved cost. This is what
+/// came back out, cost included.
+#[derive(Debug, Clone)]
+pub struct Record {
+    pub at: DateTime<Utc>,
+    pub alias: String,
+    pub provider: String,
+    pub model_id: String,
+    pub observed: Observed,
+    pub duration_ms: i64,
+    pub status: String,
+    pub streamed: bool,
+    pub surface: String,
+    pub cost_usd: Option<f64>,
+    pub unpriced: bool,
+}
+
+/// Every row in `[from, to]`, optionally narrowed to one alias.
+///
+/// # Why the window is compared as text
+///
+/// `created_at` holds Go's `time.Time.String()`, and every DATETIME column in
+/// this schema is compared **as text** — that is the whole reason
+/// `gotime::go_text` exists rather than each writer formatting its own. The
+/// format is fixed-width down to the seconds and lexicographically ordered
+/// within a single zone, and every row here is written `+0000 UTC`, so a string
+/// `BETWEEN` is the same comparison an instant one would be. Parsing every row
+/// to filter in Rust would read the whole table to answer a one-day question.
+///
+/// The fractional part is variable-width (trailing zeros are trimmed), which
+/// does not matter for the lower bound and *does* for the upper: a row at
+/// exactly `to` with no fraction sorts before one with a fraction, so the bound
+/// is padded past any fraction rather than compared to the bare instant.
+pub fn load_window(
+    db_path: &std::path::Path,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    alias: &str,
+) -> Result<Vec<Record>, String> {
+    let conn = db::open_read_only(db_path)?;
+    let lower = gotime::go_text(&from);
+    // `~` sorts above every character `go_text` can produce, so this is "at or
+    // before `to`, whatever fraction the row carries".
+    let upper = format!("{}~", gotime::go_text(&to));
+
+    let sql = "SELECT created_at, alias, provider, model_id, prompt_tokens, completion_tokens, \
+               cache_read_tokens, cache_write_tokens, duration_ms, status, streamed, surface, \
+               cost_usd, unpriced \
+               FROM gateway_usage_log \
+               WHERE created_at >= ?1 AND created_at <= ?2 \
+               AND (?3 = '' OR alias = ?3) \
+               ORDER BY created_at";
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("preparing gateway usage read: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![lower, upper, alias], |r| {
+            let created_at: String = r.get(0)?;
+            Ok((
+                created_at,
+                Record {
+                    // Replaced below; a parse failure decides the row's fate
+                    // outside the closure, where an error can be reported.
+                    at: from,
+                    alias: r.get(1)?,
+                    provider: r.get(2)?,
+                    model_id: r.get(3)?,
+                    observed: Observed {
+                        prompt: r.get::<_, i64>(4)?.max(0) as u64,
+                        completion: r.get::<_, i64>(5)?.max(0) as u64,
+                        cache_read: r.get::<_, i64>(6)?.max(0) as u64,
+                        cache_write: r.get::<_, i64>(7)?.max(0) as u64,
+                    },
+                    duration_ms: r.get(8)?,
+                    status: r.get(9)?,
+                    streamed: r.get(10)?,
+                    surface: r.get(11)?,
+                    cost_usd: r.get(12)?,
+                    unpriced: r.get(13)?,
+                },
+            ))
+        })
+        .map_err(|e| format!("reading gateway usage: {e}"))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (created_at, mut record) = row.map_err(|e| format!("reading gateway usage: {e}"))?;
+        // A row this process cannot place in time is **skipped**, not defaulted:
+        // it can only come from a hand-edited database, and folding it into the
+        // window's first bucket would put spend on a day it did not happen.
+        match gotime::GoTime::parse_go_string(&created_at) {
+            Ok(t) => record.at = t.instant(),
+            Err(e) => {
+                log::warn!("gateway usage row has an unreadable created_at, skipping it: {e}");
+                continue;
+            }
+        }
+        out.push(record);
+    }
+    Ok(out)
+}

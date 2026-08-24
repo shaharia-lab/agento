@@ -2130,3 +2130,128 @@ async fn a_contended_write_lock_does_not_stall_the_runtime() {
     let rows = wait_for_rows(&db, 1).await;
     assert_eq!(rows.len(), 1, "the insert still completed: {rows:#?}");
 }
+
+// ── The control API's reload (#426) ──────────────────────────────────────────
+
+/// Saving a provider through `PUT /api/gateway/providers/{id}` reloads the
+/// listener **without breaking a stream that is already in flight**.
+///
+/// This is where reloads originate, so it is where the property is worth
+/// pinning. The two halves pull against each other: an unconditional reload is
+/// what makes a rotated API key stop being used — the whole point — while
+/// graceful shutdown is what stops it cutting a completion the user is
+/// currently reading. Getting either wrong is silent.
+///
+/// It is driven through the real handler rather than through
+/// `config::update_provider` + `registry::reload`, because "the write and its
+/// effect are in one place" is precisely the thing under test: calling the two
+/// halves by hand would pass even if the handler had forgotten the second.
+#[tokio::test]
+async fn a_provider_save_reloads_without_cutting_an_in_flight_stream() {
+    let _guard = registry_lock().lock().await;
+    let upstream = fake_upstream(vec![Reply::SseThenHang {
+        chunks: vec![chunk("Hello")],
+    }])
+    .await;
+    let db = seeded_db(
+        &[("p1", &upstream.base_url())],
+        "my-alias",
+        &[("p1", "upstream-model")],
+    );
+    let port = free_port().await;
+    config::store_settings(
+        db.path(),
+        &GatewaySettings {
+            enabled: true,
+            port,
+            start_with_app: true,
+        },
+    )
+    .expect("store settings");
+
+    registry::start_if_enabled(db.path())
+        .await
+        .expect("start_if_enabled");
+    assert_eq!(registry::status(), registry::Status::Running { port });
+
+    let mut streaming = client()
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth(token_with(Scope::Llm))
+        .json(&serde_json::json!({
+            "model": "my-alias",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(streaming.status(), 200);
+    tokio::time::timeout(std::time::Duration::from_secs(10), streaming.chunk())
+        .await
+        .expect("a first frame")
+        .expect("chunk")
+        .expect("some bytes");
+
+    // The save, through the endpoint the UI calls. `api_key` is omitted, which
+    // is the round trip a scrubbed read produces — so this also exercises the
+    // credential-preserving path on a live gateway.
+    let method = axum::http::Method::PUT;
+    let body =
+        br#"{"name":"p1","type":"openai","base_url":"http://127.0.0.1:1/v1","enabled":true}"#;
+    let ctx = agento_lib::native::Ctx {
+        db_path: db.path().to_path_buf(),
+    };
+    let answer = (agento_lib::native::gateway_api::ENDPOINT.serve)(
+        &ctx,
+        &agento_lib::native::Request {
+            method: &method,
+            path: "/api/gateway/providers/p1",
+            query: "",
+            content_type: "application/json",
+            secret_token: "",
+            body,
+        },
+    )
+    .expect("the save answered");
+    assert_eq!(answer.status.as_u16(), 200, "the save succeeded");
+
+    // The reload is spawned, so poll for the listener to come back rather than
+    // sleeping a fixed amount.
+    let health = format!("http://127.0.0.1:{port}/healthz");
+    let mut back = false;
+    for _ in 0..200 {
+        if registry::status() == (registry::Status::Running { port })
+            && client()
+                .get(&health)
+                .send()
+                .await
+                .is_ok_and(|r| r.status() == 200)
+        {
+            back = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        back,
+        "the listener must come back after a config save, or every later \
+         request goes nowhere; status was {:?}",
+        registry::status()
+    );
+
+    // And the stream that was already running was not cut. The fake is still
+    // parked holding its connection, so its hang-up signal firing would mean
+    // the reload reached through and killed a completion mid-answer.
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            upstream.hung_up.notified()
+        )
+        .await
+        .is_err(),
+        "a config save must not cut a stream that was already in flight"
+    );
+
+    drop(streaming);
+    registry::stop();
+}

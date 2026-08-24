@@ -30,6 +30,7 @@ pub mod chats;
 pub mod claude_settings;
 pub mod db;
 pub mod fs;
+pub mod gateway_api;
 pub mod gojson;
 pub mod gopath;
 pub mod goquote;
@@ -297,6 +298,7 @@ const ENDPOINTS: &[Endpoint] = &[
     // one route that must stay reachable with no credential, because it is what
     // a credential is verified against.
     security::ENDPOINT,
+    gateway_api::ENDPOINT,
     // The two entries that are not under `/api` at all; see their `claims`.
     trigger::ENDPOINT,
     health::ENDPOINT,
@@ -815,15 +817,22 @@ mod tests {
             .iter()
             .map(|row| (row.method.clone(), row.route.clone()))
             .collect();
+        //
+        // The file has **two owners** since #426, so the claimed set is the
+        // union of both modules' consts. A third owner appends here; leaving it
+        // out would silently weaken the assertion from set equality to "the
+        // owners I remembered", which is the one-directional property this test
+        // exists to escape.
         let claimed: BTreeSet<(String, String)> = security::ROUTES
             .iter()
+            .chain(gateway_api::ROUTES.iter())
             .map(|(method, route)| (method.to_string(), route.to_string()))
             .collect();
         assert_eq!(
             claimed, recorded,
-            "security::ROUTES and {path} disagree. Every desktop-only route must \
-             be recorded with an owner and a reason; add or remove the row in the \
-             same change as the route."
+            "the desktop-only ROUTES consts and {path} disagree. Every desktop-only \
+             route must be recorded with an owner and a reason; add or remove the \
+             row in the same change as the route."
         );
     }
 
@@ -1021,6 +1030,9 @@ mod tests {
             "/api/integrations/abc/triggers",
             "/api/security/keys",
             "/api/security/tokens",
+            "/api/gateway/settings",
+            "/api/gateway/providers",
+            "/api/gateway/status",
             // Outside `/api`, and reached with no credential by design (#405).
             security::JWKS_PATH,
         ];
