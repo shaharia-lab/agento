@@ -183,11 +183,19 @@ src/
     newChatPrefs.ts  what the New Chat bar was last set to (localStorage)
     logs.ts      the log commands, and the line parser (target before level)
   components/    TitleBar, Sidebar, StatusBar, CommandPalette, ui.tsx,
-                 DirField (native picker + the /api/fs fallback), CopyButton
+                 DirField (native picker + the /api/fs fallback), CopyButton,
+                 TokenReveal (the show-once minted token, #427 — shared by
+                 SecurityPane and the gateway Overview)
   views/         one file per section
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
                  and revoking scoped API tokens (#405)
+    gateway/     the LLM Gateway section (#427) — its own sidebar section,
+                 sharing nothing with Claude analytics or stats.ts
+      OverviewView.tsx  status, the mint-once `llm` token, and the env snippets
+      snippets.ts       the two base URLs and the type-level pin on them:
+                        OpenAI is `/v1`, Anthropic is `/anthropic` with no `/v1`
+      ProvidersView.tsx / ModelsView.tsx / SettingsView.tsx
   styles/        tokens → base → shell → controls → views (+ per-view files)
 
 src-tauri/src/

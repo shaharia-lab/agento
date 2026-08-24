@@ -1,0 +1,171 @@
+/* ============================================================================
+   LLM Gateway (#427) — Overview, Providers, Models, Gateway Settings.
+
+   Almost everything here reuses what already exists: `.panes`/`.pane-*`,
+   `.toolbar`, `.listrow*`, `.form`/`.formsec`/`.formrow`, `.msgline`,
+   `.savebar`, `.confirm`, `.codebox`, `.badge`, `.dot`. Only the pieces no
+   other view has are defined below.
+
+   Note where four of those come from: `.msgline*`, `.savebar*`, `.confirm` and
+   `.codebox` are declared in `integrations.css` and `settings.css` rather than
+   in a global sheet. Both are loaded unconditionally — `App.tsx` imports
+   `IntegrationsView` and `SettingsView` statically, so their stylesheets are in
+   the bundle whichever view is on screen — which is why this file does not
+   restate them for a third time.
+
+   Every colour is a token, so light and dark both come from `tokens.css` and
+   nothing here needs a media query — a colour whose only definition sat inside
+   one would have no light-mode value at all.
+   ========================================================================== */
+
+/* --- The status card on the Overview ------------------------------------- */
+
+.gw-status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  border: var(--hairline) solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+}
+
+/* The two failure states get a visible left edge: a bind failure is the one
+   state a user has to act on, and a badge alone reads as decoration. */
+.gw-status--bind_failed,
+.gw-status--start_failed {
+  border-left: 2px solid var(--red);
+}
+
+.gw-status--running {
+  border-left: 2px solid var(--green);
+}
+
+.gw-status__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.gw-status__port {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.gw-status__text {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--fg-secondary);
+}
+
+/* The OS error, verbatim. It wraps rather than truncating: "Address already in
+   use (os error 98)" is the whole content, and an ellipsis would hide the half
+   that names the cause. */
+.gw-status__error {
+  display: block;
+  padding: var(--sp-4);
+  border-radius: var(--r-sm);
+  background: var(--red-soft);
+  color: var(--fg);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.gw-statusline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+/* --- Copyable env snippets ------------------------------------------------ */
+
+.gw-snippet + .gw-snippet {
+  margin-top: var(--sp-5);
+}
+
+.gw-snippet__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-3);
+}
+
+.gw-snippet__title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+}
+
+.gw-snippet__note {
+  font-size: var(--text-xs);
+  color: var(--fg-tertiary);
+}
+
+/* `.codebox` comes from integrations.css and already sets the mono face and
+   the inset background; it does not preserve newlines, and these snippets are
+   two lines of shell. */
+.gw-snippet .codebox {
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* --- The ordered target rows on Models ------------------------------------ */
+
+.gw-target {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0;
+}
+
+.gw-target + .gw-target {
+  border-top: var(--hairline) solid var(--line);
+}
+
+/* The position, stated rather than implied — the order *is* the fallback
+   chain, so a list that only looked ordered would be hiding the meaning. */
+.gw-target__ord {
+  flex: 0 0 auto;
+  width: 18px;
+  text-align: right;
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+}
+
+.gw-target__provider {
+  flex: 0 0 40%;
+  min-width: 0;
+}
+
+.gw-target__model {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* --- Explanatory prose ---------------------------------------------------- */
+
+.gw-help {
+  margin: 0 0 var(--sp-4);
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  color: var(--fg-tertiary);
+}
+
+.gw-help--muted {
+  color: var(--fg-quaternary);
+}
+
+/* --- Overview scrolling --------------------------------------------------- */
+
+/* `.card` sets `overflow: hidden`, so a flex child of a scrolling column
+   collapses to zero min-content height and everything below the fold becomes a
+   sliver. Nothing here is a `.card`, but the same rule applies to the sections
+   inside this pane's scroller. */
+.gw-overview .form > * {
+  flex: 0 0 auto;
+}

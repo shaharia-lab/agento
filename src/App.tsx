@@ -12,6 +12,10 @@ import { SessionsView } from "./views/SessionsView";
 import { AnalyticsView } from "./views/AnalyticsView";
 import { SettingsView } from "./views/SettingsView";
 import { AboutView } from "./views/AboutView";
+import { GatewayOverviewView } from "./views/gateway/OverviewView";
+import { GatewayProvidersView } from "./views/gateway/ProvidersView";
+import { GatewayModelsView } from "./views/gateway/ModelsView";
+import { GatewaySettingsView } from "./views/gateway/SettingsView";
 import { SECTIONS, VIEW_TITLES, type ViewId } from "./lib/nav";
 import { useAppStats } from "./lib/stats";
 import { useHostInfo } from "./lib/host";
@@ -368,6 +372,24 @@ export default function App() {
           {view === "sessions" && <SessionsView inspectorOpen={inspectorOpen} />}
           {(view === "tokens" || view === "usage" || view === "insights") && (
             <AnalyticsView mode={view} inspectorOpen={inspectorOpen} />
+          )}
+          {/* The Overview takes `navigate` because its bind-failure card has
+              exactly one useful action — change the port — and that lives in a
+              sibling view rather than a pane of its own. */}
+          {view === "gateway" && (
+            <GatewayOverviewView
+              inspectorOpen={inspectorOpen}
+              onNavigate={navigate}
+            />
+          )}
+          {view === "gateway-providers" && (
+            <GatewayProvidersView inspectorOpen={inspectorOpen} />
+          )}
+          {view === "gateway-models" && (
+            <GatewayModelsView inspectorOpen={inspectorOpen} />
+          )}
+          {view === "gateway-settings" && (
+            <GatewaySettingsView inspectorOpen={inspectorOpen} />
           )}
           {view === "settings" && (
             <SettingsView theme={theme} onThemeChange={setTheme} />
