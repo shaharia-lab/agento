@@ -693,6 +693,12 @@ export interface GatewaySettings {
   enabled: boolean;
   port: number;
   start_with_app: boolean;
+  /**
+   * How long a `gateway_usage_log` row is kept, in days. **`0` keeps
+   * everything** — it is an opt-out, not a horizon of zero days, and treating it
+   * as one would read as "delete immediately". Ceiling 3650.
+   */
+  usage_retention_days: number;
 }
 
 /**
@@ -766,4 +772,93 @@ export interface GatewayModelAlias {
   alias: string;
   routing: GatewayRouting;
   enabled: boolean;
+}
+
+/* --- The gateway's own usage dashboard (#428), GET /api/gateway/usage ----- */
+
+/**
+ * Totals over the window.
+ *
+ * `unpriced_models` is `skip_serializing_if = "Vec::is_empty"` on the server, so
+ * it is genuinely **absent** rather than `null` when nothing was unpriced —
+ * which is why it is optional here and every other array is not.
+ *
+ * `cost_usd` is a **floor** whenever `unpriced_requests > 0`: the catalog is
+ * seeded for Claude models, so OpenAI, Gemini and GLM aliases miss routinely,
+ * and an unpriced request stores `NULL` rather than `0.0`. Rendering the total
+ * without saying so is the one number on this view that would be confidently
+ * wrong.
+ */
+export interface GatewayUsageTotals {
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  unpriced_requests: number;
+  unpriced_models?: string[] | null;
+}
+
+/** Milliseconds. Nearest-rank percentiles — every value is a real request's. */
+export interface GatewayUsageLatency {
+  p50_ms: number;
+  p95_ms: number;
+  max_ms: number;
+}
+
+/** One bucket. The series is **dense**: a quiet day is a zero, not a gap. */
+export interface GatewayUsagePoint {
+  date: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+}
+
+/** One row of a breakdown. `key` is the alias, provider, status, surface or token. */
+export interface GatewayUsageGroup {
+  key: string;
+  /**
+   * What to show instead of `key`, **omitted** (not null) when there is nothing
+   * better. Only `by_token` sets it: its key is an `api_tokens` row id, which
+   * appears nowhere else in the UI — the Security tab lists tokens by name.
+   */
+  label?: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost_usd: number;
+}
+
+/**
+ * `by_status`'s keys are #425's four stored spellings, and `interrupted` is
+ * deliberately not merged into `upstream_error`: a closed tab and a provider
+ * outage call for opposite reactions.
+ */
+export type GatewayUsageStatus =
+  | "ok"
+  | "upstream_error"
+  | "interrupted"
+  | "refused";
+
+export interface GatewayUsage {
+  /**
+   * The same five values `AnalyticsReport.granularity` carries — the two
+   * endpoints share `AnalyticsParams`, so a window of a given span buckets the
+   * same way on both. Spelled out rather than imported from that interface so
+   * this block stays readable as the gateway's own wire contract.
+   */
+  granularity: "hourly" | "daily" | "weekly" | "monthly" | "yearly";
+  totals: GatewayUsageTotals;
+  latency: GatewayUsageLatency;
+  series: GatewayUsagePoint[] | null;
+  by_alias: GatewayUsageGroup[] | null;
+  by_provider: GatewayUsageGroup[] | null;
+  by_status: GatewayUsageGroup[] | null;
+  by_surface: GatewayUsageGroup[] | null;
+  /** Keyed on the token's `sub` — an `api_tokens` row id. `""` when the row could not name one. */
+  by_token: GatewayUsageGroup[] | null;
 }

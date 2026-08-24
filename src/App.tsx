@@ -15,6 +15,7 @@ import { AboutView } from "./views/AboutView";
 import { GatewayOverviewView } from "./views/gateway/OverviewView";
 import { GatewayProvidersView } from "./views/gateway/ProvidersView";
 import { GatewayModelsView } from "./views/gateway/ModelsView";
+import { GatewayUsageView } from "./views/gateway/UsageView";
 import { GatewaySettingsView } from "./views/gateway/SettingsView";
 import { SECTIONS, VIEW_TITLES, type ViewId } from "./lib/nav";
 import { useAppStats } from "./lib/stats";
@@ -387,6 +388,9 @@ export default function App() {
           )}
           {view === "gateway-models" && (
             <GatewayModelsView inspectorOpen={inspectorOpen} />
+          )}
+          {view === "gateway-usage" && (
+            <GatewayUsageView inspectorOpen={inspectorOpen} />
           )}
           {view === "gateway-settings" && (
             <GatewaySettingsView inspectorOpen={inspectorOpen} />
