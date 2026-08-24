@@ -55,6 +55,8 @@
 //! `the_returned_rank_is_the_weighted_bm25` compares the value against both
 //! spellings rather than trusting the resolution rule.
 
+pub mod normalize;
+
 use rusqlite::{params, Connection};
 
 /// The bm25 column weights, in the FTS table's column order.
