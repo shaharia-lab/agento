@@ -1203,6 +1203,7 @@ async fn a_disabled_gateway_binds_nothing() {
             enabled: false,
             port: free_port().await,
             start_with_app: true,
+            ..Default::default()
         },
     )
     .expect("store settings");
@@ -1238,6 +1239,7 @@ async fn a_port_already_in_use_is_a_readable_status_rather_than_silence() {
             enabled: true,
             port,
             start_with_app: true,
+            ..Default::default()
         },
     )
     .expect("store settings");
@@ -1285,6 +1287,7 @@ async fn a_provider_that_cannot_be_built_is_not_reported_as_a_port_collision() {
             enabled: true,
             port: free_port().await,
             start_with_app: true,
+            ..Default::default()
         },
     )
     .expect("store settings");
@@ -1325,6 +1328,7 @@ async fn the_listener_starts_reloads_and_stops() {
             enabled: true,
             port,
             start_with_app: true,
+            ..Default::default()
         },
     )
     .expect("store settings");
@@ -1500,6 +1504,7 @@ async fn a_reload_during_a_stream_rebinds_the_same_port() {
             enabled: true,
             port,
             start_with_app: true,
+            ..Default::default()
         },
     )
     .expect("store settings");
@@ -2165,6 +2170,7 @@ async fn a_provider_save_reloads_without_cutting_an_in_flight_stream() {
             enabled: true,
             port,
             start_with_app: true,
+            ..Default::default()
         },
     )
     .expect("store settings");

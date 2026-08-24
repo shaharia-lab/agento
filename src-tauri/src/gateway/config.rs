@@ -108,12 +108,39 @@ impl ProviderType {
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
+/// The longest retention horizon this build will store, in days.
+///
+/// Ten years. Not a correctness bound — the prune is a `DELETE` over an indexed
+/// column and would happily take any number — but a typo bound: the field is a
+/// free-typed integer in a form, and `9000000` reads as "keep everything" while
+/// meaning something a user cannot check. `0` is the *supported* way to say
+/// that, so the ceiling costs nothing anybody wants.
+pub const MAX_RETENTION_DAYS: u32 = 3650;
+
+/// The default horizon, matching migration 35's column default.
+pub const DEFAULT_RETENTION_DAYS: u32 = 90;
+
 /// The single-row `gateway_settings` table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GatewaySettings {
     pub enabled: bool,
     pub port: u16,
     pub start_with_app: bool,
+    /// How long a `gateway_usage_log` row is kept, in days; `0` keeps everything.
+    ///
+    /// `#[serde(default)]` rather than required, and that is deliberate in a
+    /// module whose sibling request structs have none: this struct **is** the
+    /// `PUT /api/gateway/settings` body, so a required field would turn every
+    /// client written against #426's three-key shape into a `400`. The default
+    /// is the one that matches the column's, so an omitted key round-trips to
+    /// the same value a fresh install has rather than silently to `0` — which
+    /// here means *keep forever*, the opposite of a safe default to fall into.
+    #[serde(default = "default_retention_days")]
+    pub usage_retention_days: u32,
+}
+
+fn default_retention_days() -> u32 {
+    DEFAULT_RETENTION_DAYS
 }
 
 impl Default for GatewaySettings {
@@ -127,6 +154,7 @@ impl Default for GatewaySettings {
             enabled: false,
             port: DEFAULT_PORT,
             start_with_app: true,
+            usage_retention_days: DEFAULT_RETENTION_DAYS,
         }
     }
 }
@@ -141,6 +169,11 @@ impl GatewaySettings {
     pub fn validate(&self) -> Result<(), String> {
         if self.port == 0 {
             return Err("port must be between 1 and 65535".to_string());
+        }
+        if self.usage_retention_days > MAX_RETENTION_DAYS {
+            return Err(format!(
+                "usage_retention_days must be {MAX_RETENTION_DAYS} or fewer; 0 keeps everything"
+            ));
         }
         Ok(())
     }
@@ -158,10 +191,11 @@ pub fn load_settings(db_path: &Path) -> Result<GatewaySettings, String> {
 
 fn load_settings_from(conn: &Connection) -> Result<GatewaySettings, String> {
     conn.query_row(
-        "SELECT enabled, port, start_with_app FROM gateway_settings WHERE id = 1",
+        "SELECT enabled, port, start_with_app, usage_retention_days FROM gateway_settings WHERE id = 1",
         [],
         |row| {
             let port: i64 = row.get(1)?;
+            let retention: i64 = row.get(3)?;
             Ok(GatewaySettings {
                 enabled: row.get::<_, i64>(0)? != 0,
                 // Clamped rather than cast: the column is INTEGER and SQLite
@@ -169,6 +203,13 @@ fn load_settings_from(conn: &Connection) -> Result<GatewaySettings, String> {
                 // `u16` has to become something rather than wrap silently.
                 port: u16::try_from(port).unwrap_or(DEFAULT_PORT),
                 start_with_app: row.get::<_, i64>(2)? != 0,
+                // Same reasoning, with one extra consequence: a negative value
+                // in the column must not become a gigantic horizon through a
+                // wrapping cast, and it must not become `0` either, since `0`
+                // is the deliberate *keep everything* opt-out. The default is
+                // the honest answer to a value this build cannot interpret.
+                usage_retention_days: u32::try_from(retention)
+                    .unwrap_or(DEFAULT_RETENTION_DAYS),
             })
         },
     )
@@ -191,12 +232,13 @@ pub fn store_settings(db_path: &Path, settings: &GatewaySettings) -> Result<(), 
         .transaction()
         .map_err(|e| format!("beginning gateway settings write: {e}"))?;
     tx.execute(
-        "INSERT INTO gateway_settings (id, enabled, port, start_with_app, created_at, updated_at)\n         VALUES (1, ?1, ?2, ?3, ?4, ?4)\n         ON CONFLICT(id) DO UPDATE SET\n             enabled = excluded.enabled,\n             port = excluded.port,\n             start_with_app = excluded.start_with_app,\n             updated_at = excluded.updated_at",
+        "INSERT INTO gateway_settings (id, enabled, port, start_with_app, usage_retention_days, created_at, updated_at)\n         VALUES (1, ?1, ?2, ?3, ?5, ?4, ?4)\n         ON CONFLICT(id) DO UPDATE SET\n             enabled = excluded.enabled,\n             port = excluded.port,\n             start_with_app = excluded.start_with_app,\n             usage_retention_days = excluded.usage_retention_days,\n             updated_at = excluded.updated_at",
         rusqlite::params![
             settings.enabled as i64,
             settings.port as i64,
             settings.start_with_app as i64,
             now,
+            settings.usage_retention_days as i64,
         ],
     )
     .map_err(|e| format!("writing gateway settings: {e}"))?;
@@ -1119,6 +1161,7 @@ mod tests {
             enabled: true,
             port: 9099,
             start_with_app: false,
+            usage_retention_days: 30,
         };
         store_settings(db.path(), &settings).expect("store");
         assert_eq!(load_settings(db.path()).expect("load"), settings);
@@ -1151,6 +1194,65 @@ mod tests {
             settings,
             "a refused write must not have changed the stored row"
         );
+    }
+
+    /// The retention horizon is stored, not merely accepted (#428).
+    ///
+    /// The interesting value is `0`: it is the *keep everything* opt-out, so it
+    /// has to survive a round trip as `0` rather than being re-defaulted to 90
+    /// by the same "an absent value means the default" reasoning that governs
+    /// the decode.
+    #[test]
+    fn the_retention_horizon_round_trips_including_the_keep_everything_zero() {
+        let db = scratch_db();
+
+        assert_eq!(
+            load_settings(db.path()).expect("load").usage_retention_days,
+            DEFAULT_RETENTION_DAYS,
+            "a fresh install reads the column's own default"
+        );
+
+        for days in [0_u32, 1, 365, MAX_RETENTION_DAYS] {
+            let settings = GatewaySettings {
+                usage_retention_days: days,
+                ..Default::default()
+            };
+            store_settings(db.path(), &settings).expect("store");
+            assert_eq!(
+                load_settings(db.path()).expect("load").usage_retention_days,
+                days
+            );
+        }
+
+        // Above the ceiling is refused by the *write*, not only by `validate` in
+        // isolation — the same half a unit test of the validator would miss.
+        let absurd = GatewaySettings {
+            usage_retention_days: MAX_RETENTION_DAYS + 1,
+            ..Default::default()
+        };
+        assert!(absurd.validate().is_err());
+        assert!(store_settings(db.path(), &absurd).is_err());
+        assert_eq!(
+            load_settings(db.path())
+                .expect("reload")
+                .usage_retention_days,
+            MAX_RETENTION_DAYS,
+            "a refused write must not have changed the stored horizon"
+        );
+    }
+
+    /// A body written against #426's three-key shape must keep working.
+    ///
+    /// This struct **is** the `PUT /api/gateway/settings` body, so a required
+    /// new field would turn every such client into a `400` — and defaulting it
+    /// to `0` would be worse than that, because `0` means *keep forever*: the
+    /// silent outcome would be a table that never prunes.
+    #[test]
+    fn a_settings_body_without_the_retention_key_decodes_to_the_default() {
+        let decoded: GatewaySettings =
+            serde_json::from_str(r#"{"enabled":true,"port":9099,"start_with_app":false}"#)
+                .expect("decode");
+        assert_eq!(decoded.usage_retention_days, DEFAULT_RETENTION_DAYS);
     }
 
     /// The defaults handed to a registry are ferrox's own, unmodified: v1 sets

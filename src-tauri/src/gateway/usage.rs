@@ -39,13 +39,14 @@
 //! seeded for Claude models, so OpenAI, Gemini and GLM aliases routinely miss.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use ferrox_providers::providers::ProviderStream;
 use ferrox_providers::types::{cache_tokens, Usage};
 
+use crate::gateway::config;
 use crate::native::{db, gotime, pricing};
 
 /// How a request ended, as the `status` column stores it.
@@ -231,7 +232,18 @@ impl Accounting {
             return;
         };
         handle.spawn(async move {
-            let Some(result) = db::blocking("gateway usage", move || insert(&db_path, &row)).await
+            let Some(result) = db::blocking("gateway usage", move || {
+                let inserted = insert(&db_path, &row);
+                // Retention rides the write that is already off the request
+                // path and already on the blocking pool (#428), behind a
+                // once-a-day gate — no new thread, no new timer, and nothing
+                // added to the latency of a served request. It runs *after* the
+                // insert so a failing prune can never cost the row it was meant
+                // to make room for.
+                prune_if_due(&db_path);
+                inserted
+            })
+            .await
             else {
                 return;
             };
@@ -613,6 +625,12 @@ pub struct Record {
     pub status: String,
     pub streamed: bool,
     pub surface: String,
+    /// The `sub` of the token that served the request — an `api_tokens` row id.
+    ///
+    /// Empty for a row written before a token could be attributed. It is the key
+    /// the per-client breakdown groups on, which is what turns "revoke this
+    /// credential" from a guess into a decision (#428).
+    pub token_sub: String,
     pub cost_usd: Option<f64>,
     pub unpriced: bool,
 }
@@ -654,7 +672,7 @@ pub fn load_window(
 
     let sql = "SELECT created_at, alias, provider, model_id, prompt_tokens, completion_tokens, \
                cache_read_tokens, cache_write_tokens, duration_ms, status, streamed, surface, \
-               cost_usd, unpriced \
+               token_sub, cost_usd, unpriced \
                FROM gateway_usage_log \
                WHERE created_at >= ?1 AND created_at <= ?2 \
                AND (?3 = '' OR alias = ?3) \
@@ -684,8 +702,9 @@ pub fn load_window(
                     status: r.get(9)?,
                     streamed: r.get(10)?,
                     surface: r.get(11)?,
-                    cost_usd: r.get(12)?,
-                    unpriced: r.get(13)?,
+                    token_sub: r.get(12)?,
+                    cost_usd: r.get(13)?,
+                    unpriced: r.get(14)?,
                 },
             ))
         })
@@ -707,6 +726,245 @@ pub fn load_window(
         out.push(record);
     }
     Ok(out)
+}
+
+// ── Retention (#428) ─────────────────────────────────────────────────────────
+
+/// How often the prune is allowed to run, in seconds.
+///
+/// A day. The horizon is measured in days, so running more often deletes the
+/// same rows a second time for nothing, and `Accounting::finish` calls the gate
+/// on **every served request** — an ungated prune would be a full `DELETE`
+/// statement per request against a table the request is already writing to.
+/// `tokens::touch`'s minute throttle is the precedent and the shape.
+const PRUNE_INTERVAL_SECS: i64 = 86_400;
+
+/// When the prune last ran, as a Unix second. `0` means "not this process yet",
+/// which is why the first call after launch always passes.
+fn last_pruned() -> &'static AtomicI64 {
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    &LAST
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// Whether a prune is due, and — if it is — claiming the slot.
+///
+/// A pure function of the two clocks, tested as one: the prune itself is
+/// spawned, so a test of *that* would race. This is `tokens::due`'s reasoning
+/// applied to a longer interval, with one difference: the claim is a
+/// compare-exchange rather than a `Mutex` insert, because there is a single slot
+/// rather than one per token and two concurrent requests must not both win it.
+///
+/// A clock that jumps **backwards** (an NTP correction, a user setting the
+/// date) leaves `last` in the future and simply defers the prune until the wall
+/// clock catches up. That is the right failure: a prune deferred is a table that
+/// grows for a while, and the alternative — treating any surprise as "due" —
+/// would delete on every request for as long as the skew lasted.
+fn prune_due(now: i64) -> bool {
+    let last = last_pruned();
+    let seen = last.load(Ordering::SeqCst);
+    if seen != 0 && now - seen < PRUNE_INTERVAL_SECS {
+        return false;
+    }
+    last.compare_exchange(seen, now, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// Delete every usage row older than `days`, returning how many went.
+///
+/// `days == 0` is the supported "keep everything" and returns immediately
+/// without opening a connection — it is not a degenerate horizon of zero days,
+/// which would delete the entire table.
+///
+/// The cutoff is `gotime::go_text`, for [`load_window`]'s reason: `created_at`
+/// holds Go's `time.Time.String()` and is compared as text, which is sound
+/// because that rendering is lexicographically ordered. `<` rather than `<=`,
+/// so a row landing exactly on the horizon is kept — the boundary belongs to the
+/// window the user asked to retain.
+pub fn prune(db_path: &std::path::Path, days: u32) -> Result<usize, String> {
+    if days == 0 {
+        return Ok(0);
+    }
+    let Some(cutoff) = Utc::now().checked_sub_signed(chrono::Duration::days(days as i64)) else {
+        // Unreachable for any value `validate` admits; refusing beats deleting
+        // against a cutoff that saturated.
+        return Err(format!("retention horizon of {days} days is out of range"));
+    };
+    let conn = db::open_read_write(db_path)?;
+    conn.execute(
+        "DELETE FROM gateway_usage_log WHERE created_at < ?1",
+        rusqlite::params![gotime::go_text(&cutoff)],
+    )
+    .map_err(|e| format!("pruning gateway usage: {e}"))
+}
+
+/// Read the configured horizon and prune, logging the outcome. Blocking.
+///
+/// Reads the horizon itself rather than taking it as an argument, so the two
+/// callers — the once-a-day gate on the write path and the launch sweep — cannot
+/// disagree about which value is in force.
+fn prune_now(db_path: &std::path::Path) {
+    let days = match config::load_settings(db_path) {
+        Ok(settings) => settings.usage_retention_days,
+        Err(e) => {
+            log::warn!("gateway usage prune: settings unavailable, skipping: {e}");
+            return;
+        }
+    };
+    match prune(db_path, days) {
+        // Only a prune that did something is worth a line; a daily no-op on a
+        // quiet install would be pure noise in a 5 MiB log.
+        Ok(rows) if rows > 0 => {
+            log::info!("gateway usage pruned rows={rows} older_than_days={days}")
+        }
+        Ok(_) => {}
+        // Dropped exactly as a failed insert is: nothing downstream can act on
+        // it, and a retention sweep must never be able to fail a request.
+        Err(e) => log::warn!("gateway usage not pruned: {e}"),
+    }
+}
+
+/// Prune off the request path, at most once a day.
+///
+/// Called from [`Accounting::finish`]'s spawned write, which is already off the
+/// request path and already on the blocking pool — so this costs one relaxed
+/// atomic load per served request and nothing else on the 86 399 seconds out of
+/// 86 400 when it is not due.
+fn prune_if_due(db_path: &std::path::Path) {
+    if !prune_due(unix_now()) {
+        return;
+    }
+    prune_now(db_path);
+}
+
+/// The launch sweep, spawned by `lib.rs`.
+///
+/// Without it an app that is opened for ten minutes a week — which is the
+/// ordinary way a desktop app is used — would only ever prune if a gateway
+/// request happened to land more than a day after the last one. It claims the
+/// same daily slot, so a launch immediately followed by traffic prunes once
+/// rather than twice.
+pub async fn prune_at_startup(db_path: std::path::PathBuf) {
+    if !prune_due(unix_now()) {
+        return;
+    }
+    // #366: a `DELETE` meeting a lock held by the session scanner's batch writer
+    // parks its thread for up to the five-second `busy_timeout`, and this is
+    // spawned onto a runtime worker rather than reached from `proxy.rs`'s
+    // blocking pool — so the hand-off is required, not decorative.
+    db::blocking("gateway usage prune", move || prune_now(&db_path)).await;
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn migrated() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let mut conn = db::ensure_database(file.path()).expect("create");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        file
+    }
+
+    /// Insert a row at an exact instant, bypassing `insert`'s pricing lookup —
+    /// the point here is `created_at` and nothing else.
+    fn row_at(db_path: &std::path::Path, id: &str, at: DateTime<Utc>) {
+        let conn = db::open_read_write(db_path).expect("open");
+        conn.execute(
+            "INSERT INTO gateway_usage_log (id, created_at, alias, provider, model_id, status, surface) \
+             VALUES (?1, ?2, 'a', 'p', 'm', 'ok', 'openai')",
+            rusqlite::params![id, gotime::go_text(&at)],
+        )
+        .expect("insert");
+    }
+
+    fn ids(db_path: &std::path::Path) -> Vec<String> {
+        let conn = db::open_read_only(db_path).expect("open");
+        let mut stmt = conn
+            .prepare("SELECT id FROM gateway_usage_log ORDER BY id")
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        rows
+    }
+
+    /// The horizon is a cut, and which side of it the boundary row falls on is
+    /// the whole question a `<` versus `<=` gets wrong.
+    #[test]
+    fn a_prune_deletes_strictly_older_rows_and_keeps_the_boundary() {
+        let file = migrated();
+        let now = Utc::now();
+        row_at(file.path(), "ancient", now - chrono::Duration::days(400));
+        // A second either side of the 90-day cut, plus the cut itself.
+        row_at(
+            file.path(),
+            "just-past",
+            now - chrono::Duration::days(90) - chrono::Duration::seconds(5),
+        );
+        row_at(
+            file.path(),
+            "boundary",
+            now - chrono::Duration::days(90) + chrono::Duration::seconds(5),
+        );
+        row_at(file.path(), "fresh", now - chrono::Duration::days(1));
+
+        let deleted = prune(file.path(), 90).expect("prune");
+        assert_eq!(deleted, 2, "both rows past the horizon go");
+        assert_eq!(ids(file.path()), vec!["boundary", "fresh"]);
+    }
+
+    /// `0` is an opt-out, not a horizon of zero days. Getting this backwards
+    /// deletes the entire table on the first save of "keep everything".
+    #[test]
+    fn a_retention_of_zero_deletes_nothing() {
+        let file = migrated();
+        row_at(file.path(), "ancient", Utc.timestamp_opt(0, 0).unwrap());
+        assert_eq!(prune(file.path(), 0).expect("prune"), 0);
+        assert_eq!(ids(file.path()), vec!["ancient"]);
+    }
+
+    /// The gate, as a pure function of the two clocks — the prune it guards is
+    /// spawned, so asserting on the write itself would race.
+    #[test]
+    fn the_gate_fires_once_a_day_however_often_it_is_asked() {
+        // A fresh process has never pruned, so the first ask always wins.
+        last_pruned().store(0, Ordering::SeqCst);
+        let t0 = 1_800_000_000;
+        assert!(prune_due(t0), "the first call after launch is always due");
+        assert!(!prune_due(t0), "a second call in the same instant is not");
+        assert!(
+            !prune_due(t0 + PRUNE_INTERVAL_SECS - 1),
+            "nor is one a second short of the interval"
+        );
+        assert!(
+            prune_due(t0 + PRUNE_INTERVAL_SECS),
+            "the interval elapsing makes it due again"
+        );
+        // A backwards clock jump defers rather than re-firing: `last` is in the
+        // future, so the difference is negative and stays below the interval.
+        assert!(!prune_due(t0 + 60), "a clock that went backwards defers");
+        last_pruned().store(0, Ordering::SeqCst);
+    }
+
+    /// A horizon this build cannot honour must not become a cutoff that
+    /// saturated — that would delete either everything or nothing, silently.
+    #[test]
+    fn an_absurd_horizon_is_refused_rather_than_saturated() {
+        let file = migrated();
+        row_at(file.path(), "fresh", Utc::now());
+        assert!(prune(file.path(), u32::MAX).is_err());
+        assert_eq!(ids(file.path()), vec!["fresh"]);
+    }
 }
 
 #[cfg(test)]

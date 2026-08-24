@@ -198,9 +198,17 @@ fn put_settings(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteE
     // already refuses port 0; the range check is this route's, because a port
     // the process cannot bind is a setting that can only ever produce a
     // `BindFailed` status.
-    settings
-        .validate()
-        .map_err(|e| WriteError::validation("port", e))?;
+    // `validate` covers two fields now, so the reported one is chosen from what
+    // actually failed rather than always being `port` — a form that highlights
+    // the wrong input is worse than one that highlights none.
+    settings.validate().map_err(|e| {
+        let field = if e.starts_with("usage_retention_days") {
+            "usage_retention_days"
+        } else {
+            "port"
+        };
+        WriteError::validation(field, e)
+    })?;
     if settings.port < MIN_PORT {
         return Err(WriteError::validation(
             "port",
@@ -212,10 +220,11 @@ fn put_settings(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteE
     reload_after_write(db_path);
 
     log::info!(
-        "gateway settings saved enabled={} port={} start_with_app={}",
+        "gateway settings saved enabled={} port={} start_with_app={} usage_retention_days={}",
         settings.enabled,
         settings.port,
-        settings.start_with_app
+        settings.start_with_app,
+        settings.usage_retention_days
     );
 
     let body = super::gojson::to_vec(&settings)
@@ -683,14 +692,44 @@ struct UsageGroup {
     cost_usd: f64,
 }
 
+/// Latency over the window, in milliseconds.
+///
+/// Percentiles rather than a mean: one 90-second cold start moves an average
+/// over a hundred requests by a second, so a mean answers neither "is it usually
+/// fast" nor "how bad does it get" (#428).
+#[derive(Debug, Default, Serialize)]
+struct UsageLatency {
+    p50_ms: u64,
+    p95_ms: u64,
+    max_ms: u64,
+}
+
 #[derive(Debug, Serialize)]
 struct UsageBody {
     granularity: &'static str,
     totals: UsageTotals,
+    latency: UsageLatency,
     series: Vec<UsagePoint>,
     by_alias: Vec<UsageGroup>,
     by_provider: Vec<UsageGroup>,
     by_status: Vec<UsageGroup>,
+    by_surface: Vec<UsageGroup>,
+    by_token: Vec<UsageGroup>,
+}
+
+/// The nearest-rank percentile of an ascending slice, in milliseconds.
+///
+/// `ceil(p/100 * n)`-th value, one-based — the definition with no interpolation,
+/// so every answer is a duration that a request actually took rather than a
+/// number between two of them. An empty window is `0`, and the division is
+/// guarded here rather than at the encoder: `serde_json` renders a NaN as
+/// `null`, which is a wrong number rather than an error.
+fn percentile(sorted: &[i64], p: u64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let rank = (sorted.len() as u64 * p).div_ceil(100).max(1) as usize;
+    sorted[rank.min(sorted.len()) - 1].max(0) as u64
 }
 
 fn read_usage(db_path: &std::path::Path, query: &str) -> Result<Answer, String> {
@@ -713,6 +752,9 @@ fn read_usage(db_path: &std::path::Path, query: &str) -> Result<Answer, String> 
     let mut by_alias: BTreeMap<String, UsageGroup> = BTreeMap::new();
     let mut by_provider: BTreeMap<String, UsageGroup> = BTreeMap::new();
     let mut by_status: BTreeMap<String, UsageGroup> = BTreeMap::new();
+    let mut by_surface: BTreeMap<String, UsageGroup> = BTreeMap::new();
+    let mut by_token: BTreeMap<String, UsageGroup> = BTreeMap::new();
+    let mut durations: Vec<i64> = Vec::with_capacity(records.len());
 
     for record in &records {
         let cost = record.cost_usd.unwrap_or(0.0);
@@ -744,10 +786,20 @@ fn read_usage(db_path: &std::path::Path, query: &str) -> Result<Answer, String> 
         point.cache_write_tokens += record.observed.cache_write;
         point.cost_usd += cost;
 
+        durations.push(record.duration_ms);
+
         for (map, key) in [
             (&mut by_alias, record.alias.clone()),
             (&mut by_provider, record.provider.clone()),
             (&mut by_status, record.status.clone()),
+            (&mut by_surface, record.surface.clone()),
+            // The token's `sub` — an `api_tokens` row id, not its secret, which
+            // this process could not produce if it wanted to. A row written
+            // before a token could be attributed carries `""`, and it is grouped
+            // under that rather than dropped: an unattributable request still
+            // spent money, and hiding it would make the breakdown's total
+            // disagree with the window's.
+            (&mut by_token, record.token_sub.clone()),
         ] {
             let group = map.entry(key.clone()).or_insert_with(|| UsageGroup {
                 key,
@@ -775,13 +827,23 @@ fn read_usage(db_path: &std::path::Path, query: &str) -> Result<Answer, String> 
         }));
     });
 
+    durations.sort_unstable();
+    let latency = UsageLatency {
+        p50_ms: percentile(&durations, 50),
+        p95_ms: percentile(&durations, 95),
+        max_ms: durations.last().copied().unwrap_or(0).max(0) as u64,
+    };
+
     let body = UsageBody {
         granularity: granularity.as_str(),
         totals,
+        latency,
         series: dense,
         by_alias: by_alias.into_values().collect(),
         by_provider: by_provider.into_values().collect(),
         by_status: by_status.into_values().collect(),
+        by_surface: by_surface.into_values().collect(),
+        by_token: by_token.into_values().collect(),
     };
     let encoded =
         super::gojson::to_vec(&body).map_err(|e| format!("encoding gateway usage: {e}"))?;
@@ -1399,6 +1461,344 @@ mod tests {
             body["series"]
         );
         assert!(series.iter().all(|p| p["requests"] == 0));
+
+        // Zero traffic must produce zeros, not `null`s: `serde_json` renders a
+        // NaN as `null`, so an unguarded `part / total` reaches the dashboard as
+        // a missing number rather than as an error. #428's whole first
+        // acceptance criterion is that this window renders.
+        for key in ["p50_ms", "p95_ms", "max_ms"] {
+            assert_eq!(
+                body["latency"][key], 0,
+                "latency.{key} over an empty window"
+            );
+        }
+        for key in [
+            "by_alias",
+            "by_provider",
+            "by_status",
+            "by_surface",
+            "by_token",
+        ] {
+            assert_eq!(
+                body[key].as_array().expect(key).len(),
+                0,
+                "{key} over an empty window"
+            );
+        }
+    }
+
+    /// One hand-written usage row.
+    ///
+    /// A named struct rather than a tuple because the fixture below is a table
+    /// of sixteen columns, and a positional row of that width is one transposed
+    /// pair away from a test that asserts the wrong thing while still passing.
+    struct Fixture {
+        id: &'static str,
+        /// `gotime::go_text`'s rendering — what the column actually holds.
+        at: &'static str,
+        alias: &'static str,
+        provider: &'static str,
+        surface: &'static str,
+        token: &'static str,
+        status: &'static str,
+        prompt: i64,
+        completion: i64,
+        cache_read: i64,
+        cache_write: i64,
+        ms: i64,
+        cost: Option<f64>,
+        unpriced: bool,
+        model: &'static str,
+    }
+
+    /// Insert one usage row directly, so the fixture below is a table of numbers
+    /// rather than a simulated gateway run.
+    fn insert_fixture(file: &NamedTempFile, row: &Fixture) {
+        let Fixture {
+            id,
+            at,
+            alias,
+            provider,
+            surface,
+            token: token_sub,
+            status,
+            prompt,
+            completion,
+            cache_read,
+            cache_write,
+            ms: duration_ms,
+            cost: cost_usd,
+            unpriced,
+            model: model_id,
+        } = row;
+        let conn = super::super::db::open_read_write(file.path()).expect("open");
+        conn.execute(
+            "INSERT INTO gateway_usage_log (id, created_at, alias, provider, model_id, \
+             prompt_tokens, completion_tokens, cache_read_tokens, cache_write_tokens, \
+             duration_ms, status, streamed, surface, token_sub, cost_usd, unpriced) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?14, ?15)",
+            rusqlite::params![
+                id,
+                at,
+                alias,
+                provider,
+                model_id,
+                prompt,
+                completion,
+                cache_read,
+                cache_write,
+                duration_ms,
+                status,
+                surface,
+                token_sub,
+                cost_usd,
+                *unpriced as i64,
+            ],
+        )
+        .expect("insert usage row");
+    }
+
+    /// **Every aggregate against a hand-counted fixture** — #428's second
+    /// acceptance criterion, and the one that is arithmetic rather than shape.
+    ///
+    /// Five rows, chosen so no two aggregates share an answer: a test where the
+    /// expected numbers coincide cannot tell a correct sum from a mislabelled
+    /// one. The timestamps are `gotime::go_text`'s rendering, which is what the
+    /// column holds and what the window compares against.
+    #[test]
+    fn every_usage_aggregate_matches_a_hand_counted_fixture() {
+        let file = migrated();
+        let ctx = ctx(&file);
+
+        // id      alias  provider  surface     token  status          p    c   cr  cw   ms   cost
+        // r1      fast   openai    openai      t-a    ok             10    1    2    3  100  0.10
+        // r2      fast   openai    anthropic   t-a    ok             20    2    0    0  200  0.20
+        // r3      fast   azure     openai      t-b    upstream_error 40    4    0    0  900  0.40
+        // r4      slow   openai    openai      t-b    interrupted     80    8    0    0  400  NULL (unpriced)
+        // r5      slow   azure     anthropic   t-b    refused        160   16    0    0  300  0.05
+        #[rustfmt::skip]
+        let rows = &[
+            Fixture { id: "r1", at: "2026-08-03 09:00:00 +0000 UTC", alias: "fast", provider: "openai", surface: "openai",    token: "t-a", status: "ok",             prompt:  10, completion:  1, cache_read: 2, cache_write: 3, ms: 100, cost: Some(0.10), unpriced: false, model: "gpt-x" },
+            Fixture { id: "r2", at: "2026-08-03 10:00:00 +0000 UTC", alias: "fast", provider: "openai", surface: "anthropic", token: "t-a", status: "ok",             prompt:  20, completion:  2, cache_read: 0, cache_write: 0, ms: 200, cost: Some(0.20), unpriced: false, model: "gpt-x" },
+            Fixture { id: "r3", at: "2026-08-04 09:00:00 +0000 UTC", alias: "fast", provider: "azure",  surface: "openai",    token: "t-b", status: "upstream_error", prompt:  40, completion:  4, cache_read: 0, cache_write: 0, ms: 900, cost: Some(0.40), unpriced: false, model: "gpt-x" },
+            Fixture { id: "r4", at: "2026-08-04 10:00:00 +0000 UTC", alias: "slow", provider: "openai", surface: "openai",    token: "t-b", status: "interrupted",    prompt:  80, completion:  8, cache_read: 0, cache_write: 0, ms: 400, cost: None,       unpriced: true,  model: "mystery-model" },
+            Fixture { id: "r5", at: "2026-08-05 09:00:00 +0000 UTC", alias: "slow", provider: "azure",  surface: "anthropic", token: "t-b", status: "refused",        prompt: 160, completion: 16, cache_read: 0, cache_write: 0, ms: 300, cost: Some(0.05), unpriced: false, model: "gpt-x" },
+        ];
+        for row in rows {
+            insert_fixture(&file, row);
+        }
+
+        let answer = call_query(
+            &ctx,
+            "/api/gateway/usage",
+            "from=2026-08-01T00:00:00Z&to=2026-08-15T00:00:00Z&tz=UTC",
+        )
+        .expect("usage");
+        let body: serde_json::Value = serde_json::from_str(&body_of(&answer)).expect("json");
+
+        // Totals: 10+20+40+80+160 = 310 prompt, 1+2+4+8+16 = 31 completion.
+        let totals = &body["totals"];
+        assert_eq!(totals["requests"], 5);
+        assert_eq!(totals["prompt_tokens"], 310);
+        assert_eq!(totals["completion_tokens"], 31);
+        assert_eq!(totals["cache_read_tokens"], 2);
+        assert_eq!(totals["cache_write_tokens"], 3);
+        // 0.10 + 0.20 + 0.40 + 0.05, with r4 contributing nothing because it is
+        // unpriced — disclosed beside the total, never folded in as 0.0.
+        assert!(
+            (totals["cost_usd"].as_f64().expect("cost") - 0.75).abs() < 1e-9,
+            "cost total: {}",
+            totals["cost_usd"]
+        );
+        assert_eq!(totals["unpriced_requests"], 1);
+        assert_eq!(
+            totals["unpriced_models"],
+            serde_json::json!(["mystery-model"])
+        );
+
+        // Latency over [100, 200, 300, 400, 900]: nearest-rank p50 is the
+        // ceil(0.5*5) = 3rd value, p95 the ceil(0.95*5) = 5th.
+        assert_eq!(body["latency"]["p50_ms"], 300);
+        assert_eq!(body["latency"]["p95_ms"], 900);
+        assert_eq!(body["latency"]["max_ms"], 900);
+
+        // Each breakdown, keyed and summed. `by_status` keeps `interrupted`
+        // apart from `upstream_error` — a closed tab must never read as a
+        // provider outage, which is why #425 stored them separately.
+        let group = |key: &str, want_key: &str| -> serde_json::Value {
+            body[key]
+                .as_array()
+                .expect(key)
+                .iter()
+                .find(|g| g["key"] == want_key)
+                .unwrap_or_else(|| panic!("{key} has no {want_key}: {}", body[key]))
+                .clone()
+        };
+
+        assert_eq!(group("by_alias", "fast")["requests"], 3);
+        assert_eq!(group("by_alias", "fast")["prompt_tokens"], 70);
+        assert_eq!(group("by_alias", "slow")["requests"], 2);
+        assert_eq!(group("by_alias", "slow")["prompt_tokens"], 240);
+
+        assert_eq!(group("by_provider", "openai")["requests"], 3);
+        assert_eq!(group("by_provider", "openai")["prompt_tokens"], 110);
+        assert_eq!(group("by_provider", "azure")["requests"], 2);
+        assert_eq!(group("by_provider", "azure")["prompt_tokens"], 200);
+
+        assert_eq!(group("by_status", "ok")["requests"], 2);
+        assert_eq!(group("by_status", "upstream_error")["requests"], 1);
+        assert_eq!(group("by_status", "interrupted")["requests"], 1);
+        assert_eq!(group("by_status", "refused")["requests"], 1);
+
+        assert_eq!(group("by_surface", "openai")["requests"], 3);
+        assert_eq!(group("by_surface", "anthropic")["requests"], 2);
+        assert_eq!(group("by_surface", "anthropic")["prompt_tokens"], 180);
+
+        assert_eq!(group("by_token", "t-a")["requests"], 2);
+        assert_eq!(group("by_token", "t-a")["prompt_tokens"], 30);
+        assert_eq!(group("by_token", "t-b")["requests"], 3);
+        assert_eq!(group("by_token", "t-b")["prompt_tokens"], 280);
+
+        // The series is bucketed daily in the request's zone: three active days
+        // inside a dense fourteen-day window. Fourteen and not seven because
+        // `AnalyticsParams::granularity` picks **hourly** for a span of seven
+        // days or less, which is a shared rule with the Claude dashboard rather
+        // than anything this endpoint chose — asserting day keys over a
+        // seven-day window tests the wrong thing.
+        let series = body["series"].as_array().expect("series");
+        let active: Vec<&serde_json::Value> =
+            series.iter().filter(|p| p["requests"] != 0).collect();
+        assert_eq!(
+            active.len(),
+            3,
+            "three days saw traffic: {}",
+            body["series"]
+        );
+        assert_eq!(active[0]["date"], "2026-08-03");
+        assert_eq!(active[0]["requests"], 2);
+        assert_eq!(active[0]["prompt_tokens"], 30);
+        assert_eq!(active[1]["date"], "2026-08-04");
+        assert_eq!(active[1]["requests"], 2);
+        assert_eq!(active[2]["date"], "2026-08-05");
+        assert_eq!(active[2]["requests"], 1);
+    }
+
+    /// The bucket boundary is the *request's* timezone, not UTC.
+    ///
+    /// A row at 23:30 UTC is the next day in Berlin, so the same fixture read
+    /// twice must move a request from one bucket to another. Sending no `tz`
+    /// silently falls the whole dashboard back to UTC, and this is what makes
+    /// that visible rather than a plausible-looking wrong chart.
+    #[test]
+    fn a_bucket_belongs_to_the_day_it_was_in_the_requests_timezone() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        insert_fixture(
+            &file,
+            &Fixture {
+                id: "late",
+                at: "2026-08-03 23:30:00 +0000 UTC",
+                alias: "a",
+                provider: "p",
+                surface: "openai",
+                token: "t",
+                status: "ok",
+                prompt: 1,
+                completion: 1,
+                cache_read: 0,
+                cache_write: 0,
+                ms: 10,
+                cost: Some(0.01),
+                unpriced: false,
+                model: "m",
+            },
+        );
+
+        let day_of = |tz: &str| -> String {
+            let answer = call_query(
+                &ctx,
+                "/api/gateway/usage",
+                &format!("from=2026-08-01T00:00:00Z&to=2026-08-15T00:00:00Z&tz={tz}"),
+            )
+            .expect("usage");
+            let body: serde_json::Value = serde_json::from_str(&body_of(&answer)).expect("json");
+            body["series"]
+                .as_array()
+                .expect("series")
+                .iter()
+                .find(|p| p["requests"] != 0)
+                .expect("one active bucket")["date"]
+                .as_str()
+                .expect("date")
+                .to_string()
+        };
+
+        assert_eq!(day_of("UTC"), "2026-08-03");
+        assert_eq!(day_of("Europe/Berlin"), "2026-08-04");
+    }
+
+    /// The horizon is refused before it is stored, and the refusal names the
+    /// field that failed rather than always naming `port`.
+    #[test]
+    fn an_absurd_retention_horizon_is_refused_before_it_is_stored() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let err = call(
+            &ctx,
+            "PUT",
+            "/api/gateway/settings",
+            r#"{"enabled":true,"port":9099,"start_with_app":true,"usage_retention_days":99999}"#,
+        )
+        .expect("answered");
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_of(&err);
+        assert!(
+            body.contains("usage_retention_days"),
+            "the refusal must name the field that failed: {body}"
+        );
+
+        // Nothing stored, so the read still answers the default.
+        let read = body_of(&call(&ctx, "GET", "/api/gateway/settings", "").expect("read"));
+        let settings: serde_json::Value = serde_json::from_str(&read).expect("json");
+        assert_eq!(settings["usage_retention_days"], 90);
+        assert_eq!(settings["enabled"], false);
+    }
+
+    /// A read written straight back preserves the horizon.
+    ///
+    /// The same round trip `a_scrubbed_read_written_straight_back_preserves_the_stored_key`
+    /// drives for the API key, for the same reason: an edit form reads, mutates
+    /// one field and writes the whole body back, and a field the read omits is a
+    /// field the write destroys.
+    #[test]
+    fn a_settings_read_written_straight_back_preserves_the_retention_horizon() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        call(
+            &ctx,
+            "PUT",
+            "/api/gateway/settings",
+            r#"{"enabled":true,"port":9099,"start_with_app":true,"usage_retention_days":7}"#,
+        )
+        .expect("stored");
+
+        let read = body_of(&call(&ctx, "GET", "/api/gateway/settings", "").expect("read"));
+        let mut settings: serde_json::Value = serde_json::from_str(&read).expect("json");
+        assert_eq!(settings["usage_retention_days"], 7);
+
+        settings["port"] = serde_json::json!(9100);
+        call(
+            &ctx,
+            "PUT",
+            "/api/gateway/settings",
+            &serde_json::to_string(&settings).expect("encode"),
+        )
+        .expect("stored again");
+
+        let back = body_of(&call(&ctx, "GET", "/api/gateway/settings", "").expect("read"));
+        let settings: serde_json::Value = serde_json::from_str(&back).expect("json");
+        assert_eq!(settings["usage_retention_days"], 7);
+        assert_eq!(settings["port"], 9100);
     }
 
     // ── Scope, and the log lines ──────────────────────────────────────────
