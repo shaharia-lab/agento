@@ -380,8 +380,10 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Hit>, 
 /// filter (#436) has already reduced the corpus to the rows on the page; this
 /// re-runs the same `MATCH` and keeps only the page's ids, so the cost is one
 /// more walk of the inverted index — the same walk the filter's membership test
-/// performs — rather than a snippet computed for every hit in the corpus or a
-/// correlated subquery per row. The page cap (200) bounds the `IN` list.
+/// performs — rather than a correlated subquery per row. `snippet()` itself is
+/// the expensive half and it is evaluated **only for rows that survive the
+/// `IN`**, so the highlighting is bounded by the page rather than by the match
+/// set. The page cap (200) bounds the `IN` list.
 ///
 /// Filtering on `session_id` alone rather than on the pair is deliberate: FTS5
 /// accepts no index on either UNINDEXED column, so neither form narrows the

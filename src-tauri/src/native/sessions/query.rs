@@ -65,6 +65,13 @@ pub const RELEVANCE_UNRANKED: f64 = -1.0;
 /// [`RELEVANCE_UNRANKED`], the `(session_id, project_path)` tiebreak makes the
 /// order total anyway, and the cursor round-trips through the same constant —
 /// so a degraded relevance sort pages correctly rather than erroring.
+///
+/// **It must stay an expression rather than becoming a bare integer.** This
+/// string is interpolated into an `ORDER BY`, where SQLite reads a bare positive
+/// integer literal as a **column ordinal**: spelling it `1` would silently order
+/// by `session_id` — a plausible order over the wrong key — and `0` would be an
+/// out-of-range error. `-1.0` is unary minus applied to a literal, which SQLite
+/// parses as an expression, so it means the value and not the column.
 pub const SQL_RELEVANCE_UNRANKED: &str = "-1.0";
 
 /// The order a page is returned in. A closed set, because keyset pagination

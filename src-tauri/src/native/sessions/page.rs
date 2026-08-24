@@ -76,7 +76,17 @@ pub fn list_page(
     //
     // Only for the relevance sort: every other ordering pays nothing, and the
     // snippet below is its own read.
-    let ranked = q.sort == Sort::Relevance && filter.fts.is_some();
+    //
+    // A join where the membership test was an `IN` also stops collapsing
+    // duplicates, so an index holding two rows for one pair would put that
+    // session on the page twice. That is not a new defect — `search::insert`'s
+    // doc calls such a row "a silent duplicate, not a refusal" — and a visibly
+    // doubled row is the better symptom of it than a hidden one.
+    let ranked_fts = match q.sort {
+        Sort::Relevance => filter.fts.clone(),
+        _ => None,
+    };
+    let ranked = ranked_fts.is_some();
     let (expr, is_time) = page_sort_expr(q.sort, ranked);
     let rank_join = if ranked {
         format!(
@@ -137,10 +147,8 @@ pub fn list_page(
     // every filter argument — `rusqlite` binds positionally, so a parameter
     // appended instead would silently shift the whole predicate by one.
     let mut args: Vec<Value> = Vec::with_capacity(filter.args.len() + 1);
-    if ranked {
-        args.push(Value::Text(
-            filter.fts.clone().expect("ranked implies an fts query"),
-        ));
+    if let Some(fts) = ranked_fts {
+        args.push(Value::Text(fts));
     }
     args.extend(filter.args.iter().cloned());
 
