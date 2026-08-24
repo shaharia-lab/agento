@@ -155,7 +155,7 @@ exists:
 >
 > This adds a third token scope, **`llm`**, which reaches the gateway and nothing
 > else; existing `read` and `write` tokens are unaffected and are refused by the
-> gateway by design. It also adds two database tables and a usage-retention
+> gateway by design. It also adds four database tables and a usage-retention
 > setting (90 days by default; `0` keeps everything).
 >
 > Full walkthrough: [LLM Gateway in the user guide](https://github.com/shaharia-lab/agento/blob/main/docs/user-guide.md#llm-gateway).

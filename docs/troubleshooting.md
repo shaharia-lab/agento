@@ -338,10 +338,11 @@ expect is missing or disabled, that is why traffic is not reaching it.
 
 ### Usage shows requests but no cost
 
-Cost is computed from the price catalog, which ships filled in for Claude models
-only. Anything else is recorded as unpriced rather than as free, which is why the
-total is labelled a floor. Add rates under **Settings → Pricing** for the models
-you actually use.
+Cost is computed from the price catalog, which ships filled in for Anthropic,
+Moonshot, Z.ai and Alibaba models — so OpenAI and Gemini traffic has no rate.
+Anything unpriced is recorded as such rather than as free, which is why the total
+is labelled a floor. Add rates under **Settings → Pricing** for the models you
+actually use.
 
 ### The gateway's log lines
 

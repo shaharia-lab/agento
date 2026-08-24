@@ -403,8 +403,9 @@ feature costs one database read at launch until you turn it on.
 **LLM Gateway → Gateway Settings**, under **Listener**:
 
 - **Enable the gateway.** Off by default. When off, no port is bound.
-- **Port**, 8880 by default. This is the number you paste into tool configs, so
-  Agento will not take an OS-assigned one. Ports below 1024 need root.
+- **Port**, 8880 by default, and between 1024 and 65535. This is the number you
+  paste into tool configs, so Agento will not accept `0` and take an OS-assigned
+  one, and it will not accept a port below 1024, which would need root.
 - **Start with the app.** On by default, and only meaningful while the gateway is
   enabled. Without it the port dies with every restart, which is not much of a
   gateway.
@@ -525,9 +526,9 @@ provider, surface, status and which token was used, with p50/p95/max latency.
 Two numbers are labelled as **floors** rather than reported as facts:
 
 - A model with no entry in the pricing catalogue is recorded as unpriced rather
-  than as free, so a cost total that is missing something says so. Provider
-  models are not in the shipped catalogue, so this is the usual case, not an edge
-  one — add rates under **Settings → Pricing** if you want real figures.
+  than as free, so a cost total that is missing something says so. The shipped
+  catalogue covers Anthropic, Moonshot, Z.ai and Alibaba models, so OpenAI and
+  Gemini traffic is unpriced until you add rates under **Settings → Pricing**.
 - A window reaching further back than the retention horizon reports what
   survives, which is not everything that happened.
 

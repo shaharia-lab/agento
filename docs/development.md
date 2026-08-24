@@ -301,7 +301,7 @@ straight before changing anything in it is that it is not part of `/api`.
 | Port | the app's own | the user's, 8880 by default |
 | Wire format | Agento's | OpenAI's and Anthropic's |
 | Credential | `read` / `write` | `llm`, and only `llm` |
-| Guards | `guards.rs`, before routing | its own Host and auth layers |
+| Guards | `guards.rs`, before routing | its own auth layer, and `guards::host_allowed` **shared** rather than copied |
 | Route tables | `parity/read_routes.json`, `write_routes.json` | **none — they say nothing about it** |
 
 So the parity machinery does not apply to the five routes it serves
