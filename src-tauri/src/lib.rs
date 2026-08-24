@@ -3,6 +3,13 @@
 // all build on it — and because its tests drive it against a scripted CLI from
 // outside the crate.
 pub mod claude;
+// The embedded LLM gateway (#421). Public for `claude`'s reason and one of its
+// own: #422 is the settings model and storage alone, so until the engine (#424)
+// lands nothing inside the crate reads it, and a private module of entirely
+// unused items is a wall of dead-code warnings under `-D warnings`. Its surface
+// is deliberately the whole config API rather than an `allow(dead_code)`, which
+// would also silence a genuinely unreachable item added later.
+pub mod gateway;
 mod guards;
 // Reading back the log file the plugin below writes, for Settings → Logs.
 // Commands rather than `/api` routes: see the module header.
