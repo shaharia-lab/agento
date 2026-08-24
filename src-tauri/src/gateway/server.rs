@@ -37,6 +37,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
@@ -45,6 +46,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use chrono::Utc;
 use ferrox_providers::anthropic_types::{
     self, AnthropicMessagesRequest, AnthropicModelObject, AnthropicModelsResponse,
 };
@@ -52,12 +54,66 @@ use ferrox_providers::error::{anthropic_error_body, openai_error_body, ProxyErro
 use ferrox_providers::types::{ChatCompletionRequest, ModelObject, ModelsResponse};
 use serde_json::Value;
 
-use super::{dispatch::Dispatcher, stream};
+use super::dispatch::{self, Dispatcher};
+use super::{stream, usage};
 use crate::native::security::token::{self, Denied, Scope};
 use crate::native::security::{keys, tokens};
 
 /// The Anthropic SDK's credential header, alongside `Authorization: Bearer`.
 const X_API_KEY: &str = "x-api-key";
+
+/// When the request's own work began, put on the extensions by [`authenticate`].
+///
+/// A newtype rather than a bare `Instant`, because request extensions are keyed
+/// by type: a second `Instant` inserted by anything else would silently replace
+/// this one.
+#[derive(Clone, Copy)]
+struct Started(Instant);
+
+/// Everything a usage row needs that only the request knows.
+///
+/// Built once per handler from the extensions, so the two surfaces cannot drift
+/// on which token or clock they attribute a row to.
+fn seed_from(request: &RequestParts, alias: &str, surface: Surface, streamed: bool) -> usage::Seed {
+    usage::Seed {
+        alias: alias.to_string(),
+        // Filled in once dispatch has chosen a target; a refused request keeps
+        // them empty, which is what distinguishes it in the table.
+        provider: String::new(),
+        model_id: String::new(),
+        surface: surface.as_str(),
+        streamed,
+        token_sub: request.token_sub.clone(),
+        started: request.started,
+        at: Utc::now(),
+    }
+}
+
+/// The two extension values every handler reads, extracted once.
+struct RequestParts {
+    token_sub: String,
+    started: Instant,
+}
+
+impl RequestParts {
+    /// Both values are inserted by [`authenticate`], which every one of these
+    /// handlers is behind — but a handler must not panic if that ever stops
+    /// being true, so both have a defined absent case: no attributable token,
+    /// and a duration measured from now (which reads as ~0 rather than as a
+    /// wrong large number).
+    fn of(extensions: &axum::http::Extensions) -> Self {
+        Self {
+            token_sub: extensions
+                .get::<token::Verified>()
+                .map(|v| v.subject.clone())
+                .unwrap_or_default(),
+            started: extensions
+                .get::<Started>()
+                .map(|s| s.0)
+                .unwrap_or_else(Instant::now),
+        }
+    }
+}
 
 /// Everything a handler needs, cloned per request as an `Arc`.
 #[derive(Clone)]
@@ -83,6 +139,15 @@ impl Surface {
             Self::Anthropic
         } else {
             Self::OpenAi
+        }
+    }
+
+    /// The `surface` column's value. Stored rather than derived because it
+    /// cannot be reconstructed from a row after the fact.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
         }
     }
 
@@ -219,6 +284,11 @@ async fn authenticate(
             // second `db::blocking`.
             tokens::touch(&state.db_path, &verified.jti);
             request.extensions_mut().insert(verified);
+            // The clock starts **after** the credential verifies, so
+            // `duration_ms` measures dispatch and upstream rather than the 401
+            // path — a wall of refused requests would otherwise drag the
+            // latency figure toward zero and hide a slow provider.
+            request.extensions_mut().insert(Started(Instant::now()));
             next.run(request).await
         }
         Err(Denied::Unauthenticated) => surface.error(&ProxyError::Unauthorized(
@@ -258,14 +328,25 @@ fn presented_credential(headers: &HeaderMap) -> String {
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 /// `POST /v1/chat/completions`.
-async fn openai_chat(State(state): State<GatewayState>, body: axum::body::Bytes) -> Response {
+async fn openai_chat(
+    State(state): State<GatewayState>,
+    extensions: axum::http::Extensions,
+    body: axum::body::Bytes,
+) -> Response {
     let surface = Surface::OpenAi;
+    let parts = RequestParts::of(&extensions);
 
     let request: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         // The decode error names the offending field and offset, which is what
         // a client debugging its own request needs. It quotes no credential —
         // the body is a prompt, not a secret this module holds.
+        //
+        // **No usage row.** A body that will not decode has no alias, no
+        // provider and no model — there is nothing to attribute and nothing was
+        // spent, so a row here would be four empty columns diluting every
+        // average. A *refused dispatch* below does get one, because it names an
+        // alias the user configured and is therefore worth seeing.
         Err(e) => {
             return surface.error(&ProxyError::SerializationError(e));
         }
@@ -273,6 +354,7 @@ async fn openai_chat(State(state): State<GatewayState>, body: axum::body::Bytes)
 
     let alias = request.model.clone();
     if request.is_streaming() {
+        let seed = seed_from(&parts, &alias, surface, true);
         match state.dispatcher.chat_stream(&alias, &request).await {
             Ok((upstream, served)) => {
                 log::info!(
@@ -280,11 +362,17 @@ async fn openai_chat(State(state): State<GatewayState>, body: axum::body::Bytes)
                     served.provider,
                     served.model_id
                 );
-                sse_response(stream::openai_sse(upstream))
+                let accounting =
+                    usage::Accounting::new(state.db_path.clone(), served.into_seed(seed));
+                sse_response(stream::openai_sse(upstream, accounting))
             }
-            Err(e) => surface.error(&e),
+            Err(f) => {
+                record_failure(&state, seed, &f);
+                surface.error(&f.error)
+            }
         }
     } else {
+        let seed = seed_from(&parts, &alias, surface, false);
         match state.dispatcher.chat(&alias, &request).await {
             Ok((response, served)) => {
                 log::info!(
@@ -292,11 +380,40 @@ async fn openai_chat(State(state): State<GatewayState>, body: axum::body::Bytes)
                     served.provider,
                     served.model_id
                 );
+                let accounting =
+                    usage::Accounting::new(state.db_path.clone(), served.into_seed(seed));
+                accounting.observe(response.usage.as_ref());
+                accounting.finish(usage::Status::Ok);
                 axum::Json(response).into_response()
             }
-            Err(e) => surface.error(&e),
+            Err(f) => {
+                record_failure(&state, seed, &f);
+                surface.error(&f.error)
+            }
         }
     }
+}
+
+/// Record a request that never produced a response.
+///
+/// Zero tokens by construction — nothing was sent upstream, or every target
+/// failed before answering — with the status distinguishing "this alias is
+/// misconfigured" (`refused`) from "the provider is down" (`upstream_error`).
+///
+/// The row names the **last target attempted** when there was one. An empty
+/// `provider` therefore means something specific rather than "unknown": no
+/// target was ever chosen, because resolution itself failed.
+fn record_failure(state: &GatewayState, seed: usage::Seed, failure: &dispatch::Failure) {
+    let seed = match &failure.attempted {
+        Some(target) => usage::Seed {
+            provider: target.provider.clone(),
+            model_id: target.model_id.clone(),
+            ..seed
+        },
+        None => seed,
+    };
+    usage::Accounting::new(state.db_path.clone(), seed)
+        .finish(usage::Status::for_dispatch_error(&failure.error));
 }
 
 /// `GET /v1/models` — the configured aliases, in OpenAI's list shape.
@@ -328,9 +445,11 @@ async fn openai_models(State(state): State<GatewayState>) -> Response {
 async fn anthropic_messages(
     State(state): State<GatewayState>,
     headers: HeaderMap,
+    extensions: axum::http::Extensions,
     body: axum::body::Bytes,
 ) -> Response {
     let surface = Surface::Anthropic;
+    let parts = RequestParts::of(&extensions);
 
     // Decoded twice on purpose: once into the typed request the translation
     // needs, and once as the raw document, which is forwarded verbatim so every
@@ -363,6 +482,7 @@ async fn anthropic_messages(
     }
 
     if streaming {
+        let seed = seed_from(&parts, &alias, surface, true);
         match state.dispatcher.chat_stream(&alias, &internal).await {
             Ok((upstream, served)) => {
                 log::info!(
@@ -370,17 +490,27 @@ async fn anthropic_messages(
                     served.provider,
                     served.model_id
                 );
+                let accounting =
+                    usage::Accounting::new(state.db_path.clone(), served.into_seed(seed));
+                // Metered **before** the translation, not after: the emitter
+                // consumes the provider stream to build protocol frames, so a
+                // frame carries no `usage` for this surface's own loop to read.
+                let upstream = usage::meter(upstream, accounting.clone());
                 // The message id is minted here rather than taken from
                 // upstream: the Anthropic protocol puts it in `message_start`,
                 // which is emitted before the first upstream chunk arrives.
                 let msg_id = format!("msg_{}", uuid::Uuid::new_v4().simple());
                 let frames =
                     anthropic_types::openai_stream_to_anthropic_frames(alias, msg_id, upstream);
-                sse_response(stream::anthropic_sse(frames))
+                sse_response(stream::anthropic_sse(frames, accounting))
             }
-            Err(e) => surface.error(&e),
+            Err(f) => {
+                record_failure(&state, seed, &f);
+                surface.error(&f.error)
+            }
         }
     } else {
+        let seed = seed_from(&parts, &alias, surface, false);
         match state.dispatcher.chat(&alias, &internal).await {
             Ok((response, served)) => {
                 log::info!(
@@ -388,9 +518,16 @@ async fn anthropic_messages(
                     served.provider,
                     served.model_id
                 );
+                let accounting =
+                    usage::Accounting::new(state.db_path.clone(), served.into_seed(seed));
+                accounting.observe(response.usage.as_ref());
+                accounting.finish(usage::Status::Ok);
                 axum::Json(anthropic_types::to_anthropic_response(response)).into_response()
             }
-            Err(e) => surface.error(&e),
+            Err(f) => {
+                record_failure(&state, seed, &f);
+                surface.error(&f.error)
+            }
         }
     }
 }

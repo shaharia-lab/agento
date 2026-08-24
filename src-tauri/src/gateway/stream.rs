@@ -36,6 +36,8 @@ use ferrox_providers::types::ChatCompletionChunk;
 use serde_json::Value;
 use tokio_stream::{Stream, StreamExt};
 
+use super::usage;
+
 /// `data: {payload}\n\n` — one unnamed SSE frame, the OpenAI surface's only shape.
 pub fn data_frame(payload: &str) -> Bytes {
     Bytes::from(format!("data: {payload}\n\n"))
@@ -63,41 +65,61 @@ pub type FrameStream = tokio_stream::wrappers::ReceiverStream<Result<Bytes, Infa
 /// mid-stream error emits the OpenAI error body as its own frame and stops,
 /// with no `[DONE]` — see the module header for why that asymmetry is
 /// deliberate.
-pub fn openai_sse(stream: ProviderStream) -> FrameStream {
+///
+/// `accounting` (#425) is finished on **every** exit — all three protocol
+/// endings plus the failed-send path — with the status that ending means. Each
+/// is a separate `return` in the original shape, which is exactly how an arm
+/// gets missed, so they are funnelled through one `status` variable and a
+/// single `finish` at the bottom.
+pub fn openai_sse(stream: ProviderStream, accounting: usage::Accounting) -> FrameStream {
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
         let mut stream = stream;
+        // `Interrupted` until something says otherwise: the arm most easily
+        // missed is the one where the client vanished, so it is the default
+        // rather than the special case.
+        let mut status = usage::Status::Interrupted;
+        let mut terminate = false;
         loop {
             let item = match next_or_disconnect(&tx, &mut stream).await {
                 Next::Item(item) => item,
                 // The upstream said everything it had — this is the only path
                 // that earns a terminator.
-                Next::Ended => break,
-                // The client left. Returning drops `stream`, which cancels the
+                Next::Ended => {
+                    status = usage::Status::Ok;
+                    terminate = true;
+                    break;
+                }
+                // The client left. Breaking drops `stream`, which cancels the
                 // upstream request; sending `[DONE]` into a channel nobody
                 // holds would be pointless, and *reaching* the terminator on
                 // this path is precisely the bug the two variants prevent.
-                Next::Disconnected => return,
+                Next::Disconnected => break,
             };
             match item {
                 Ok(chunk) => {
+                    accounting.observe(chunk.usage.as_ref());
                     if tx
                         .send(Ok(data_frame(&serialize_chunk(&chunk))))
                         .await
                         .is_err()
                     {
-                        return;
+                        break;
                     }
                 }
                 Err(e) => {
                     log::warn!("gateway openai stream failed mid-flight: {e}");
                     let (_, body) = openai_error_body(&e);
                     let _ = tx.send(Ok(data_frame(&body.to_string()))).await;
-                    return;
+                    status = usage::Status::UpstreamError;
+                    break;
                 }
             }
         }
-        let _ = tx.send(Ok(data_frame(DONE))).await;
+        if terminate {
+            let _ = tx.send(Ok(data_frame(DONE))).await;
+        }
+        accounting.finish(status);
     });
     tokio_stream::wrappers::ReceiverStream::new(rx)
 }
@@ -164,13 +186,22 @@ where
 /// writes them. A mid-stream error becomes an `event: error` frame carrying the
 /// Anthropic error body, which is the shape Anthropic's own API uses — there is
 /// no `[DONE]` analogue here, so the sequence simply ends.
-pub fn anthropic_sse<S>(frames: S) -> FrameStream
+///
+/// The token counts (#425) do **not** come from this loop: the emitter consumes
+/// the provider stream to produce these frames, so per-chunk `usage` is gone by
+/// the time a frame is visible. `usage::meter` wraps the provider stream one
+/// layer down, before the translation, and this loop only decides the status
+/// and fires `finish`.
+pub fn anthropic_sse<S>(frames: S, accounting: usage::Accounting) -> FrameStream
 where
     S: Stream<Item = Result<SseFrame, ProxyError>> + Send + 'static,
 {
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     tokio::spawn(async move {
         let mut frames = Box::pin(frames);
+        // As on the OpenAI surface: `Interrupted` unless something says
+        // otherwise, so the arm most easily missed is the default.
+        let mut status = usage::Status::Interrupted;
         // Raced against the client's departure for the reason
         // `next_or_disconnect` documents — and it matters more here, not less:
         // the Anthropic emitter buffers upstream chunks into protocol frames,
@@ -181,7 +212,15 @@ where
         // above: there is no `[DONE]` analogue in the Anthropic protocol —
         // `message_stop` is a frame the emitter produces — so an ended stream
         // and a departed client both simply stop.
-        while let Next::Item(item) = next_or_disconnect(&tx, &mut frames).await {
+        loop {
+            let item = match next_or_disconnect(&tx, &mut frames).await {
+                Next::Item(item) => item,
+                Next::Ended => {
+                    status = usage::Status::Ok;
+                    break;
+                }
+                Next::Disconnected => break,
+            };
             let bytes = match item {
                 Ok(frame) => named_frame(&frame),
                 Err(e) => {
@@ -190,14 +229,16 @@ where
                     let _ = tx
                         .send(Ok(named_frame(&SseFrame::new("error", body.to_string()))))
                         .await;
-                    return;
+                    status = usage::Status::UpstreamError;
+                    break;
                 }
             };
             if tx.send(Ok(bytes)).await.is_err() {
-                // Client gone; returning drops `frames`, which cancels upstream.
-                return;
+                // Client gone; breaking drops `frames`, which cancels upstream.
+                break;
             }
         }
+        accounting.finish(status);
     });
     tokio_stream::wrappers::ReceiverStream::new(rx)
 }

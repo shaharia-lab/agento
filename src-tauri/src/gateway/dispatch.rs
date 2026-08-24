@@ -57,6 +57,40 @@ pub struct Served {
     pub model_id: String,
 }
 
+/// A dispatch that produced no response, and the target it died on.
+///
+/// `attempted` exists so a usage row can name the provider that failed. Without
+/// it every failure row carries an empty `provider`, which makes the column
+/// useless for the one question a failure row is asked — *which provider is
+/// erroring* — and it cannot be reconstructed afterwards. It is `None` only
+/// when resolution itself failed (an unknown alias, or one with no enabled
+/// target), where there genuinely was no provider.
+///
+/// It names the **last** target tried, not the first: the walk gives up on the
+/// last one, and on a chain whose earlier links merely failed over, the last is
+/// the one whose failure is the answer.
+pub struct Failure {
+    pub error: ProxyError,
+    pub attempted: Option<Served>,
+}
+
+impl Served {
+    /// Fill in the two fields only dispatch knows.
+    ///
+    /// A seed is built before dispatch (it needs the request's clock and token,
+    /// which are gone by the time a target is chosen) and completed after, so
+    /// the row names the target that actually answered rather than the first
+    /// one tried — which matters precisely when a fallback served it, since
+    /// that is the request whose provider a bill will not match.
+    pub fn into_seed(self, seed: super::usage::Seed) -> super::usage::Seed {
+        super::usage::Seed {
+            provider: self.provider,
+            model_id: self.model_id,
+            ..seed
+        }
+    }
+}
+
 /// The routing table and the adapters behind it, built once per listener start.
 pub struct Dispatcher {
     registry: ProviderRegistry,
@@ -180,7 +214,7 @@ impl Dispatcher {
         &self,
         alias: &str,
         req: &ChatCompletionRequest,
-    ) -> Result<(ChatCompletionResponse, Served), ProxyError> {
+    ) -> Result<(ChatCompletionResponse, Served), Failure> {
         self.walk(alias, |adapter, model_id| async move {
             adapter.chat(req, &model_id).await
         })
@@ -195,7 +229,7 @@ impl Dispatcher {
         &self,
         alias: &str,
         req: &ChatCompletionRequest,
-    ) -> Result<(ProviderStream, Served), ProxyError> {
+    ) -> Result<(ProviderStream, Served), Failure> {
         self.walk(alias, |adapter, model_id| async move {
             adapter.chat_stream(req, &model_id).await
         })
@@ -209,14 +243,21 @@ impl Dispatcher {
     /// (leaking the slice, or an `Arc<Vec<Target>>` threaded through every
     /// closure) each cost more than cloning an `Arc` and a short `String` once
     /// per attempt.
-    async fn walk<T, F, Fut>(&self, alias: &str, call: F) -> Result<(T, Served), ProxyError>
+    async fn walk<T, F, Fut>(&self, alias: &str, call: F) -> Result<(T, Served), Failure>
     where
         F: Fn(Arc<dyn ProviderAdapter>, String) -> Fut,
         Fut: std::future::Future<Output = Result<T, ProxyError>>,
     {
-        let targets = self.resolve(alias)?;
+        let targets = self.resolve(alias).map_err(|error| Failure {
+            error,
+            // Resolution failed, so no provider was ever chosen. This is the
+            // only `None`, and it is what a `refused` row's empty provider
+            // column truthfully means.
+            attempted: None,
+        })?;
 
         let mut last: Option<ProxyError> = None;
+        let mut attempted: Option<Served> = None;
         for target in &targets {
             let attempt = || call(Arc::clone(&target.adapter), target.model_id.clone());
             match execute_with_retry(&self.retry, attempt).await {
@@ -230,8 +271,15 @@ impl Dispatcher {
                     ))
                 }
                 Err(e) => {
+                    attempted = Some(Served {
+                        provider: target.provider.clone(),
+                        model_id: target.model_id.clone(),
+                    });
                     if !should_failover(&e) {
-                        return Err(e);
+                        return Err(Failure {
+                            error: e,
+                            attempted,
+                        });
                     }
                     log::warn!(
                         "gateway target failed, walking the chain: alias={alias:?} \
@@ -244,9 +292,12 @@ impl Dispatcher {
             }
         }
 
-        Err(last.unwrap_or_else(|| {
-            ProxyError::ConfigError(format!("model alias '{alias}' produced no target to try"))
-        }))
+        Err(Failure {
+            error: last.unwrap_or_else(|| {
+                ProxyError::ConfigError(format!("model alias '{alias}' produced no target to try"))
+            }),
+            attempted,
+        })
     }
 }
 
