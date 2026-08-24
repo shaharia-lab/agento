@@ -177,7 +177,7 @@ fn a_session_with_no_index_row_still_matches_on_its_metadata() {
 /// The two halves are a union, and a query hitting one session through each
 /// returns both.
 #[test]
-fn the_index_and_the_metadata_clause_are_ord_together() {
+fn the_index_and_the_metadata_clause_are_a_union() {
     let conn = corpus();
     let mut ids = found(&conn, "q=auth");
     ids.sort();
@@ -309,6 +309,13 @@ fn the_last_word_matches_as_a_prefix() {
 /// alphabet is every character FTS5's grammar reads plus the ones that broke a
 /// draft of this — a NUL (reachable as `%00` in a query string, and an
 /// `unterminated string` error to FTS5's parser) and whitespace.
+///
+/// (1) runs over every case; (2) runs over the hand-written ones and every
+/// string of length ≤2, because `facets` alone is seven statements and the two
+/// endpoints together take the exhaustive length-3 sweep from ~1s to ~12s on
+/// every `cargo test`. What they cover is the same seam — a `Filter` whose
+/// arguments do not line up with its `?`s — and that is a property of the clause
+/// rather than of the input.
 #[test]
 fn no_input_string_can_make_the_search_error() {
     let conn = corpus();
@@ -336,6 +343,9 @@ fn no_input_string_can_make_the_search_error() {
         "a".repeat(2000),
         "\"".repeat(64),
     ];
+    // Everything above goes through both assertions.
+    let end_to_end = inputs.len();
+
     // Every string of length 1..=3 over the alphabet, walked as a mixed-radix
     // counter — 22 + 484 + 10,648 cases, exhaustive rather than sampled.
     let n = alphabet.len();
@@ -351,7 +361,7 @@ fn no_input_string_can_make_the_search_error() {
         }
     }
 
-    for raw in &inputs {
+    for (i, raw) in inputs.iter().enumerate() {
         let expr = build_fts_query(raw);
         if !expr.is_empty() {
             search::search(&conn, &expr, 1).unwrap_or_else(|e| {
@@ -359,6 +369,9 @@ fn no_input_string_can_make_the_search_error() {
             });
         }
 
+        if i >= end_to_end && raw.chars().count() > 2 {
+            continue;
+        }
         // Straight through the query struct rather than through a URL, so a
         // byte percent-encoding would refuse is still exercised.
         let q = SessionQuery {

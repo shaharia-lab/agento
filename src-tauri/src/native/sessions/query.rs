@@ -458,30 +458,47 @@ fn add_search(conn: &Connection, f: &mut Filter, text: &str) {
 /// an expression FTS5 refuses fails on the *first step* — and an unstepped
 /// statement never parses the MATCH argument at all. Stepping once against the
 /// inverted index is what a hit costs anyway.
+///
+/// The two failures are logged differently on purpose, and neither line carries
+/// the user's search text — `proxy.rs` keeps query strings out of this file, and
+/// FTS5's own syntax-error message quotes the text it choked on.
 fn usable_fts_query(conn: &Connection, text: &str) -> Option<String> {
     let query = build_fts_query(text);
     if query.is_empty() {
         return None;
     }
-    let probe = conn
-        .prepare("SELECT 1 FROM session_search WHERE session_search MATCH ?1 LIMIT 1")
-        .and_then(|mut stmt| stmt.exists(rusqlite::params![query]));
-    match probe {
-        Ok(_) => Some(query),
-        // Debug rather than warn: on a database with no index this is the
-        // ordinary answer for every keystroke, and a warning per keystroke is
-        // how a log stops being read.
-        Err(e) => {
-            log::debug!("claude sessions: search index unavailable, matching metadata only: {e}");
-            None
-        }
+    let mut stmt =
+        match conn.prepare("SELECT 1 FROM session_search WHERE session_search MATCH ?1 LIMIT 1") {
+            Ok(stmt) => stmt,
+            // Debug, and with the cause: on a database that has not migrated
+            // this is the ordinary answer for every keystroke, and a warning per
+            // keystroke is how a log stops being read. The message names the
+            // missing table, nothing the user typed.
+            Err(e) => {
+                log::debug!("claude sessions: no search index, matching metadata only: {e}");
+                return None;
+            }
+        };
+    if stmt.exists(rusqlite::params![&query]).is_err() {
+        // Warn, and *without* the cause: `build_fts_query` is meant to make this
+        // unreachable, so reaching it is a defect worth seeing rather than
+        // routine degradation — and the one thing rusqlite would tell us here is
+        // the FTS5 message, which quotes the search term back.
+        log::warn!(
+            "claude sessions: the search index refused a built query, matching metadata only"
+        );
+        return None;
     }
+    Some(query)
 }
 
-/// Below this, a trailing token is not extended into a prefix term.
+/// How many *alphanumeric* characters a trailing token needs before it is
+/// extended into a prefix term.
 ///
 /// `"a"*` matches roughly every session on the machine, so the first keystroke
-/// of a query would flash the whole corpus in and out.
+/// of a query would flash the whole corpus in and out. Counted over the
+/// alphanumerics rather than the whole token because those are what `unicode61`
+/// keeps: on the raw length, `-a` would clear the bar and still produce `a*`.
 const MIN_PREFIX_LEN: usize = 2;
 
 /// Turn what a user typed into an FTS5 query that can only ever be a conjunction
@@ -559,7 +576,8 @@ pub fn build_fts_query(text: &str) -> String {
         // because of how the loop above happens to be written.
         out.push_str(&text.replace('"', "\"\""));
         out.push('"');
-        if i == last && !closed && text.chars().count() >= MIN_PREFIX_LEN {
+        let terms = text.chars().filter(|c| c.is_alphanumeric()).count();
+        if i == last && !closed && terms >= MIN_PREFIX_LEN {
             out.push('*');
         }
     }
@@ -947,7 +965,9 @@ mod tests {
             ("wild*card", r#""wild*card"*"#),
             ("(group)", r#""(group)"*"#),
             ("col:val", r#""col:val"*"#),
-            ("NEAR(a b)", r#""NEAR(a" "b)"*"#),
+            // `b)` is two characters and one term, so it stays below the
+            // prefix bar — see `MIN_PREFIX_LEN`.
+            ("NEAR(a b)", r#""NEAR(a" "b)""#),
             // A lone quote opens a span that never closes and holds nothing.
             ("\"", ""),
             ("a\"", r#""a""#),
@@ -987,6 +1007,11 @@ mod tests {
         assert_eq!(build_fts_query("a"), r#""a""#);
         assert_eq!(build_fts_query("ab"), r#""ab"*"#);
         assert_eq!(build_fts_query("auth a"), r#""auth" "a""#);
+        // The bar is the alphanumerics, not the token's length: `-a` is two
+        // characters and one term, and `"-a"*` is the `a*` this rule exists to
+        // prevent.
+        assert_eq!(build_fts_query("-a"), r#""-a""#);
+        assert_eq!(build_fts_query("-ab"), r#""-ab"*"#);
     }
 
     /// A NUL reaching FTS5's parser is an error, and `%00` in a query string
