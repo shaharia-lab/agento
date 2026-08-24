@@ -51,9 +51,10 @@ use std::time::Duration;
 
 use rusqlite::Connection;
 
+use super::index::DocAccumulator;
 use super::processors::{self, SessionInsight, CURRENT_PROCESSOR_VERSION};
-use super::store::{self, Pending};
-use crate::native::{db, pricing::Resolver, settings};
+use super::store::{self, Pending, Scope};
+use crate::native::{db, pricing::Resolver, search, settings};
 
 /// How often the worker looks for rows a version bump or an idle-threshold
 /// change left behind. Go's `insightWorkerRescanInterval`.
@@ -186,13 +187,29 @@ fn run(db_path: &Path, rx: Receiver<Pending>) {
     }
 }
 
-/// `rescanOutdated`: everything with no insight row or an outdated one.
+/// `rescanOutdated`: everything with no insight row or an outdated one — **or
+/// the whole corpus, when the search index needs rebuilding** (#435).
 ///
 /// Processed directly rather than pushed through the queue, which Go does and
 /// this deliberately does not: a corpus of 2,000 unprocessed sessions against a
 /// 100-slot channel would drop 1,900 of them and report each drop, then find
 /// them again five minutes later. The queue is for the scan's incremental
 /// announcements; the sweep already has the whole list in hand.
+///
+/// ## The two versions are separate, and only one of them widens the scope
+///
+/// `CURRENT_PROCESSOR_VERSION` selects rows whose *insight* is stale;
+/// [`search::SEARCH_INDEX_VERSION`] selects rows whose *index text* is, which is
+/// every row at once because the constant is not stored per row. A bump to the
+/// second therefore reads every transcript again — through **this** thread, and
+/// **not** through the scanner: no staleness marker is touched, so
+/// `claude_session_cache.file_mtime` is left exactly as it was and the scan does
+/// not re-read a thing. That is `CURRENT_PROCESSOR_VERSION`'s own separation,
+/// applied to the second version constant.
+///
+/// The new version is stamped **after** the rebuild, and only if every batch in
+/// it committed. Stamping first would leave a partially indexed corpus that
+/// nothing ever finishes, because the mismatch driving the work would be gone.
 fn sweep(db_path: &Path) {
     let conn = match db::open_read_only(db_path) {
         Ok(conn) => conn,
@@ -201,7 +218,20 @@ fn sweep(db_path: &Path) {
             return;
         }
     };
-    let pending = match store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION) {
+    let indexed_version = search::stored_version(&conn).unwrap_or_else(|e| {
+        // Treated as current rather than as 0: a read failure that answered
+        // "nothing indexed" would rebuild the entire corpus on every sweep for
+        // as long as the failure lasts.
+        log::warn!("insights: cannot read search_index_version: {e}");
+        search::SEARCH_INDEX_VERSION
+    });
+    let rebuild = indexed_version != search::SEARCH_INDEX_VERSION;
+    let scope = if rebuild {
+        Scope::Everything
+    } else {
+        Scope::Outdated
+    };
+    let pending = match store::select_pending(&conn, CURRENT_PROCESSOR_VERSION, scope) {
         Ok(pending) => pending,
         Err(e) => {
             log::warn!("insights: failed to list sessions needing processing: {e}");
@@ -211,18 +241,72 @@ fn sweep(db_path: &Path) {
     drop(conn);
 
     if pending.is_empty() {
+        // Nothing to index, so the version is trivially reached. Recording it
+        // here is what stops an empty corpus rebuilding on every five-minute
+        // tick for the life of the process.
+        if rebuild {
+            record_index_version(db_path);
+        }
         return;
     }
-    log::info!("insights: reprocessing {} outdated sessions", pending.len());
+    if rebuild {
+        log::info!(
+            "search: rebuilding the index for {} sessions (stored version {indexed_version}, \
+             this build writes {})",
+            pending.len(),
+            search::SEARCH_INDEX_VERSION,
+        );
+    } else {
+        log::info!("insights: reprocessing {} outdated sessions", pending.len());
+    }
 
+    let mut every_batch_committed = true;
     for chunk in pending.chunks(BATCH_SIZE) {
-        process_batch(db_path, chunk.iter().cloned().collect());
+        every_batch_committed &= process_batch(db_path, chunk.iter().cloned().collect());
+    }
+
+    if rebuild && every_batch_committed {
+        record_index_version(db_path);
+    }
+}
+
+/// Stamp `claude_cache_metadata.search_index_version`.
+///
+/// Best-effort, like every marker `scan.rs` records: losing it costs one
+/// redundant rebuild at the next sweep, where failing the sweep costs the
+/// corpus its insights too.
+fn record_index_version(db_path: &Path) {
+    let result = db::open_read_write(db_path)
+        .and_then(|conn| search::record_version(&conn, search::SEARCH_INDEX_VERSION));
+    match result {
+        Ok(()) => log::info!(
+            "search: index rebuilt at version {}",
+            search::SEARCH_INDEX_VERSION
+        ),
+        Err(e) => log::warn!("search: failed to record search_index_version: {e}"),
     }
 }
 
 /// Read every session in the batch in parallel, then write the results in one
 /// transaction.
-fn process_batch(db_path: &Path, batch: BTreeSet<Pending>) {
+///
+/// Answers whether the batch got as far as the database agreeing with it, which
+/// [`sweep`] needs in order to decide whether a rebuild may stamp its version.
+///
+/// **`false` means a *database* failure, never an unreadable transcript.** That
+/// distinction is the whole value of the return: a real corpus always contains
+/// some session whose file has been deleted, truncated or replaced since it was
+/// cached, and `read_in_parallel` skips those by design. Counting a skip as
+/// failure would mean the version is never recorded on any real machine, so
+/// every five-minute sweep would rebuild the entire index again — for ever, at
+/// full corpus cost, with nothing in the log to say why. A batch with nothing
+/// readable in it is therefore `true`: nothing was committed because there was
+/// nothing to commit.
+///
+/// What is left blocking a stamp is exactly the set of things that would make
+/// the rebuild genuinely incomplete and are worth retrying: the settings read,
+/// opening the database for writing, and the batch transaction itself.
+fn process_batch(db_path: &Path, batch: BTreeSet<Pending>) -> bool {
     let items: Vec<Pending> = batch
         .into_iter()
         // `rescanOutdated` skips a row with no file path, and so does this:
@@ -231,7 +315,7 @@ fn process_batch(db_path: &Path, batch: BTreeSet<Pending>) {
         .filter(|item| !item.file_path.is_empty())
         .collect();
     if items.is_empty() {
-        return;
+        return true;
     }
 
     // Read once per batch rather than once per session: a settings save landing
@@ -245,36 +329,50 @@ fn process_batch(db_path: &Path, batch: BTreeSet<Pending>) {
         ),
         Err(e) => {
             log::warn!("insights: cannot read settings, skipping a batch: {e}");
-            return;
+            return false;
         }
     };
 
-    let computed = read_in_parallel(&items, idle_gap_ms, resolver.as_ref());
+    let mut computed = read_in_parallel(&items, idle_gap_ms, resolver.as_ref());
     if computed.is_empty() {
-        return;
+        // Every transcript in this batch was unreadable. Nothing to commit, and
+        // **not a failure** — see the note on the return value: an unreadable
+        // transcript is a skip by design, not an error to block a rebuild on.
+        return true;
     }
 
     let mut conn = match db::open_read_write(db_path) {
         Ok(conn) => conn,
         Err(e) => {
             log::warn!("insights: cannot open the database to store a batch: {e}");
-            return;
+            return false;
         }
     };
-    match write_batch(&mut conn, &computed) {
-        Ok(n) => log::debug!("insights: stored {n} session insights"),
+    match write_batch(&mut conn, &mut computed) {
+        Ok(n) => {
+            log::debug!("insights: stored {n} session insights and search rows");
+            true
+        }
         // Dropped rather than retried, for `apply.rs`'s reason: the rows keep
         // their old `processor_version` (or none), so they still look
         // unprocessed to the next sweep and are recomputed then. Retrying here
         // risks looping on a persistent error.
-        Err(e) => log::warn!("insights: failed to store a batch, dropping it: {e}"),
+        Err(e) => {
+            log::warn!("insights: failed to store a batch, dropping it: {e}");
+            false
+        }
     }
 }
 
-/// One computed insight and the project path it belongs to.
+/// One computed insight, its search document, and the project path both belong
+/// to.
+///
+/// The two travel together from the read to the write because they are written
+/// together — see [`write_batch`].
 struct Computed {
     project_path: String,
     insight: SessionInsight,
+    doc: search::SearchDoc,
 }
 
 /// The reader pool, in `scanner/apply.rs`'s shape and for its reasons: decoding
@@ -313,12 +411,17 @@ fn read_in_parallel(
                     idle_gap_ms,
                     resolver,
                 };
-                match processors::run(&item.session_id, &files, &ctx) {
+                // The search document is built from the very same decode the
+                // processors consume — that is what makes indexing cost no
+                // additional file I/O. See `insights::index`.
+                let mut doc = DocAccumulator::new();
+                match processors::run(&item.session_id, &files, &ctx, &mut doc) {
                     Ok(insight) => out
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .push(Computed {
                             project_path: item.project_path.clone(),
+                            doc: doc.into_doc(&item.session_id, &item.project_path),
                             insight,
                         }),
                     // One unreadable transcript must not cost the batch, which
@@ -337,11 +440,37 @@ fn read_in_parallel(
     out.into_inner().unwrap_or_else(|e| e.into_inner())
 }
 
-fn write_batch(conn: &mut Connection, computed: &[Computed]) -> Result<usize, String> {
+/// One transaction covering both writes, for every session in the batch.
+///
+/// **The `session_insights` row and the `session_search` row commit or fail
+/// together**, which is the acceptance criterion and also the only arrangement
+/// that stays consistent: `processor_version` is what tells the next sweep a
+/// session is done, so an index write that failed after the insight row landed
+/// would leave that session permanently unindexed with nothing reporting it.
+/// `search::replace` is itself a delete followed by an insert and is *not*
+/// atomic on its own — this transaction is what makes it so, which is exactly
+/// why `search/mod.rs` opens no connection of its own.
+///
+/// The title is read here rather than carried from the read pass because it
+/// lives in the cache row, not the transcript. Inside the transaction, so it
+/// cannot be a value from before a concurrent rename.
+///
+/// `?` on either write aborts the whole batch, and the `Transaction`'s `Drop`
+/// rolls it back — so a failure leaves neither table changed for any session in
+/// it, and every one of them still looks unprocessed to the next sweep.
+///
+/// `computed` is taken by `&mut` so the title can be filled **in place**. A
+/// `SearchDoc` carries up to `normalize::SESSION_CAP` of text, and a batch is a
+/// hundred of them, so building a titled copy per row would clone tens of
+/// megabytes per batch to add a few dozen bytes to each.
+fn write_batch(conn: &mut Connection, computed: &mut [Computed]) -> Result<usize, String> {
     let scanned_at = store::scanned_at_now();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
-    for item in computed {
+    for item in computed.iter_mut() {
         store::upsert(&tx, &item.insight, &item.project_path, &scanned_at)?;
+        let title = store::display_title(&tx, &item.doc.session_id, &item.doc.project_path);
+        item.doc.title = super::index::normalize_title(&title);
+        search::replace(&tx, &item.doc)?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(computed.len())
@@ -430,5 +559,579 @@ mod tests {
     fn a_queue_with_room_reports_no_overflow() {
         let (tx, _rx) = mpsc::sync_channel::<Pending>(4);
         assert_eq!(offer(&tx, (0..3).map(|i| pending(&format!("s{i}")))), 0);
+    }
+
+    // ─── the indexing pipeline (#435) ────────────────────────────────────────
+    //
+    // These drive `process_batch` and `sweep` against a real database and real
+    // transcript files, because every property below is about what the *rows*
+    // say after a pass — which is the same reason `scanner/` is verified against
+    // stored rows rather than a response.
+
+    use rusqlite::Connection;
+
+    /// A migrated database in `dir`, plus its path.
+    ///
+    /// `ensure_database` rather than `open_read_write`, which does **not** carry
+    /// `SQLITE_OPEN_CREATE` — the app's startup path is the only thing that
+    /// creates the file, and these tests take the same route it does.
+    fn fixture_db(dir: &tempfile::TempDir) -> PathBuf {
+        let db_path = dir.path().join("agento.db");
+        let mut conn = db::ensure_database(&db_path).expect("create");
+        crate::native::migrate::apply(&mut conn).expect("migrations");
+        db_path
+    }
+
+    /// Write a two-message transcript and register it as a cache row.
+    ///
+    /// The text is the fixture's whole point, so each session gets its own
+    /// distinctive word to search for.
+    fn seed_session(
+        dir: &tempfile::TempDir,
+        db_path: &Path,
+        session_id: &str,
+        project_path: &str,
+        word: &str,
+    ) -> PathBuf {
+        let file = dir.path().join(format!(
+            "{session_id}-{}.jsonl",
+            project_path.replace('/', "_")
+        ));
+        let lines = [
+            serde_json::json!({
+                "type": "user",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "message": {"role": "user", "content": format!("please fix the {word} problem")},
+            }),
+            serde_json::json!({
+                "type": "assistant",
+                "timestamp": "2026-01-01T00:01:00Z",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "looking at it now"}],
+                },
+            }),
+        ];
+        let body: String = lines.iter().map(|l| format!("{l}\n")).collect();
+        std::fs::write(&file, body).expect("write transcript");
+
+        let conn = db::open_read_write(db_path).expect("open");
+        conn.execute(
+            "INSERT INTO claude_session_cache
+                 (session_id, project_path, file_path, file_mtime, start_time, last_activity)
+             VALUES (?1, ?2, ?3, '2026-01-01 00:00:00+00:00', '2026-01-01 00:00:00+00:00',
+                     '2026-01-01 00:00:00+00:00')",
+            rusqlite::params![session_id, project_path, file.to_string_lossy()],
+        )
+        .expect("cache row");
+        file
+    }
+
+    fn pending_for(session_id: &str, project_path: &str, file: &Path) -> Pending {
+        Pending {
+            session_id: session_id.into(),
+            project_path: project_path.into(),
+            file_path: file.to_string_lossy().into_owned(),
+        }
+    }
+
+    fn indexed_pairs(conn: &Connection) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare("SELECT session_id, project_path FROM session_search ORDER BY 1, 2")
+            .expect("prepare");
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+    }
+
+    fn mtimes(conn: &Connection) -> Vec<(String, String, String)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, project_path, file_mtime
+                   FROM claude_session_cache ORDER BY 1, 2",
+            )
+            .expect("prepare");
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+    }
+
+    /// The headline acceptance criterion: one pass over an announced session
+    /// leaves a *searchable* row, not merely a row.
+    ///
+    /// Asserted through `search::search` rather than by counting rows, because a
+    /// row holding the wrong columns — a title in `user_text`, or empty text —
+    /// counts exactly the same and answers nothing.
+    #[test]
+    fn one_pass_over_an_announced_session_leaves_a_searchable_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let file = seed_session(&dir, &db_path, "s1", "/a", "pagination");
+
+        assert!(process_batch(
+            &db_path,
+            [pending_for("s1", "/a", &file)].into_iter().collect(),
+        ));
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        let hits = search::search(&conn, "\"pagination\"", 10).expect("search");
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.session_id.as_str(), h.project_path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("s1", "/a")],
+        );
+        // The assistant's side of the conversation is indexed too, in its own
+        // column — a document built from user turns alone would pass the check
+        // above.
+        assert_eq!(
+            search::search(&conn, "\"looking at it now\"", 10)
+                .expect("search")
+                .len(),
+            1,
+        );
+    }
+
+    /// The title comes from the cache row, and follows the display precedence
+    /// the UI uses — the user's own rename first.
+    #[test]
+    fn the_indexed_title_is_the_cache_rows_display_title() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let file = seed_session(&dir, &db_path, "s1", "/a", "pagination");
+        let conn = db::open_read_write(&db_path).expect("open");
+        conn.execute(
+            "UPDATE claude_session_cache
+                SET custom_title = 'quarterly rollup', native_title = 'ignored'",
+            [],
+        )
+        .expect("rename");
+        drop(conn);
+
+        assert!(process_batch(
+            &db_path,
+            [pending_for("s1", "/a", &file)].into_iter().collect(),
+        ));
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        let title: String = conn
+            .query_row("SELECT title FROM session_search", [], |r| r.get(0))
+            .expect("title");
+        assert_eq!(title, "quarterly rollup");
+    }
+
+    /// The #362-family assertion, in its fifth form: one session id under two
+    /// project paths is two transcripts and must be two independent index rows.
+    ///
+    /// Keyed on the id alone, `search::replace`'s delete would remove both and
+    /// the batch would end with one row holding the second transcript's text —
+    /// a session silently missing from the index with nothing to report it.
+    #[test]
+    fn one_session_id_under_two_projects_gets_two_index_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let a = seed_session(&dir, &db_path, "s1", "/a", "kestrel");
+        let b = seed_session(&dir, &db_path, "s1", "/b", "petrel");
+
+        assert!(process_batch(
+            &db_path,
+            [pending_for("s1", "/a", &a), pending_for("s1", "/b", &b)]
+                .into_iter()
+                .collect(),
+        ));
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(
+            indexed_pairs(&conn),
+            vec![("s1".into(), "/a".into()), ("s1".into(), "/b".into())],
+        );
+        // …and each carries its own transcript's text, which a shared row could
+        // not.
+        for (word, project) in [("kestrel", "/a"), ("petrel", "/b")] {
+            let hits = search::search(&conn, &format!("\"{word}\""), 10).expect("search");
+            assert_eq!(
+                hits.iter()
+                    .map(|h| h.project_path.as_str())
+                    .collect::<Vec<_>>(),
+                vec![project],
+                "{word} must belong to {project} alone",
+            );
+        }
+    }
+
+    /// Bumping `SEARCH_INDEX_VERSION` rebuilds every row **without** the scanner
+    /// re-reading anything.
+    ///
+    /// The `file_mtime` assertion is the whole point and is easy to lose: a
+    /// rebuild driven by the scanner's staleness markers would also produce a
+    /// correct index, and would additionally re-read the entire corpus from
+    /// disk. Zeroed mtimes are what that looks like, so they are compared before
+    /// and after.
+    ///
+    /// The stored version is set to a value that is not `SEARCH_INDEX_VERSION`
+    /// rather than to a literal, so bumping the constant does not turn this into
+    /// a test of nothing.
+    #[test]
+    fn a_version_bump_reindexes_without_touching_the_scanners_mtimes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let file = seed_session(&dir, &db_path, "s1", "/a", "pagination");
+
+        // A first pass, at the current version.
+        sweep(&db_path);
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(indexed_pairs(&conn).len(), 1);
+        assert_eq!(
+            search::stored_version(&conn).expect("version"),
+            search::SEARCH_INDEX_VERSION,
+            "a completed sweep stamps the version it indexed at",
+        );
+        let before = mtimes(&conn);
+        drop(conn);
+
+        // Now pretend this build's indexer disagrees with what is stored, and
+        // empty the index the way a rebuild's first act would not: if the sweep
+        // does nothing, the rows stay gone and the assertion below fails.
+        let conn = db::open_read_write(&db_path).expect("open");
+        search::record_version(&conn, search::SEARCH_INDEX_VERSION - 1).expect("age the version");
+        search::delete_all(&conn).expect("empty the index");
+        drop(conn);
+
+        sweep(&db_path);
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(
+            indexed_pairs(&conn),
+            vec![("s1".into(), "/a".into())],
+            "a version mismatch must reindex every session",
+        );
+        assert_eq!(
+            search::stored_version(&conn).expect("version"),
+            search::SEARCH_INDEX_VERSION,
+            "and stamp the new version once the rebuild covered the corpus",
+        );
+        assert_eq!(
+            mtimes(&conn),
+            before,
+            "a search rebuild must not make the scanner re-read a transcript",
+        );
+        // The insight row is current throughout, which is what makes the
+        // ordinary `needs_processing` scope unable to express this rebuild.
+        let stale: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_insights WHERE processor_version < ?1",
+                rusqlite::params![CURRENT_PROCESSOR_VERSION],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(stale, 0);
+        let _ = file;
+    }
+
+    /// An ordinary sweep, with the version already current, must not rebuild.
+    ///
+    /// Without the equality check this would re-index the whole corpus every
+    /// five minutes forever — correct output, and a permanent full-corpus read
+    /// nothing would ever report.
+    #[test]
+    fn a_sweep_at_the_current_version_reindexes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        seed_session(&dir, &db_path, "s1", "/a", "pagination");
+
+        sweep(&db_path);
+        // Emptying the index without moving the version is how "did the second
+        // sweep decide to rebuild?" becomes observable at all.
+        let conn = db::open_read_write(&db_path).expect("open");
+        search::delete_all(&conn).expect("empty the index");
+        drop(conn);
+
+        sweep(&db_path);
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert!(
+            indexed_pairs(&conn).is_empty(),
+            "nothing was stale, so nothing should have been re-read",
+        );
+    }
+
+    /// An empty corpus still reaches the new version, rather than asking for a
+    /// rebuild on every five-minute tick for the life of the process.
+    #[test]
+    fn a_rebuild_over_an_empty_corpus_still_records_the_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let conn = db::open_read_write(&db_path).expect("open");
+        search::record_version(&conn, search::SEARCH_INDEX_VERSION - 1).expect("age");
+        drop(conn);
+
+        sweep(&db_path);
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(
+            search::stored_version(&conn).expect("version"),
+            search::SEARCH_INDEX_VERSION,
+        );
+    }
+
+    /// The two writes are one transaction: if the index write fails, the insight
+    /// row must not survive either.
+    ///
+    /// Injected by dropping `session_search` before the batch, which makes
+    /// `search::replace` fail on a real `no such table` rather than on a
+    /// test-only hook — so this exercises the same `?` a genuine FTS5 error
+    /// would take.
+    ///
+    /// The consequence being pinned is not tidiness: `processor_version` is what
+    /// tells the next sweep a session is done, so an insight row that outlived a
+    /// failed index write would mark that session complete and it would never be
+    /// indexed again.
+    #[test]
+    fn a_failed_index_write_rolls_back_the_insight_row_with_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let file = seed_session(&dir, &db_path, "s1", "/a", "pagination");
+
+        let conn = db::open_read_write(&db_path).expect("open");
+        conn.execute("DROP TABLE session_search", [])
+            .expect("drop the index");
+        drop(conn);
+
+        assert!(
+            !process_batch(
+                &db_path,
+                [pending_for("s1", "/a", &file)].into_iter().collect()
+            ),
+            "a batch that could not commit must report so",
+        );
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        let insights: i64 = conn
+            .query_row("SELECT COUNT(*) FROM session_insights", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(
+            insights, 0,
+            "the insight row committed without its index row",
+        );
+        // …and the session is therefore still pending, which is what makes the
+        // failure recoverable rather than permanent.
+        assert_eq!(
+            store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION)
+                .expect("needs_processing")
+                .len(),
+            1,
+        );
+    }
+
+    /// An unreadable transcript is a **skip, not a failure**, and the batch says
+    /// so.
+    ///
+    /// This looks like the lenient answer and is the strict one. Every real
+    /// corpus holds a session whose file has since been deleted or truncated —
+    /// `insights_live.rs` allows a 10% shortfall for exactly that — so if a skip
+    /// counted as failure, [`sweep`] would never stamp the version on any real
+    /// machine and would rebuild the whole index every five minutes for the life
+    /// of the process. Correct output, unbounded cost, and nothing in the log
+    /// naming the cause.
+    #[test]
+    fn an_unreadable_transcript_is_a_skip_rather_than_a_batch_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let missing = dir.path().join("absent.jsonl");
+
+        assert!(process_batch(
+            &db_path,
+            [pending_for("s1", "/a", &missing)].into_iter().collect(),
+        ));
+    }
+
+    /// …and the consequence, end to end: a corpus containing an unreadable
+    /// transcript still finishes its rebuild.
+    ///
+    /// The second sweep is what makes this an assertion about *termination*
+    /// rather than about one pass: with the skip counted as a failure the
+    /// version stays behind, so the second sweep rebuilds all over again.
+    #[test]
+    fn a_rebuild_completes_over_a_corpus_with_an_unreadable_transcript() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        seed_session(&dir, &db_path, "good", "/a", "pagination");
+        // A cache row whose transcript does not exist — the ordinary shape of a
+        // session deleted from disk since it was scanned.
+        let conn = db::open_read_write(&db_path).expect("open");
+        conn.execute(
+            "INSERT INTO claude_session_cache
+                 (session_id, project_path, file_path, file_mtime, start_time, last_activity)
+             VALUES ('gone', '/a', ?1, '2026-01-01 00:00:00+00:00',
+                     '2026-01-01 00:00:00+00:00', '2026-01-01 00:00:00+00:00')",
+            rusqlite::params![dir.path().join("absent.jsonl").to_string_lossy()],
+        )
+        .expect("cache row");
+        search::record_version(&conn, search::SEARCH_INDEX_VERSION - 1).expect("age");
+        drop(conn);
+
+        sweep(&db_path);
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(
+            search::stored_version(&conn).expect("version"),
+            search::SEARCH_INDEX_VERSION,
+            "one unreadable transcript must not stop the rebuild concluding",
+        );
+        assert_eq!(indexed_pairs(&conn), vec![("good".into(), "/a".into())]);
+        drop(conn);
+
+        // Termination: with the version stamped, a second sweep has nothing to
+        // rebuild. Emptying the index first is what makes that observable.
+        let conn = db::open_read_write(&db_path).expect("open");
+        search::delete_all(&conn).expect("empty");
+        drop(conn);
+
+        sweep(&db_path);
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert!(
+            indexed_pairs(&conn).is_empty(),
+            "the rebuild repeated, so it would repeat every five minutes for ever",
+        );
+    }
+
+    /// A batch that could not open the database for writing **is** a failure,
+    /// so the two arms of the return value are pinned against each other rather
+    /// than only the lenient one being asserted.
+    #[test]
+    fn a_database_failure_is_a_batch_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let file = seed_session(&dir, &db_path, "s1", "/a", "pagination");
+        std::fs::remove_file(&db_path).expect("remove the database");
+
+        assert!(!process_batch(
+            &db_path,
+            [pending_for("s1", "/a", &file)].into_iter().collect(),
+        ));
+    }
+
+    /// The #366 pattern (`tests/scheduled_run.rs`, `tests/chat_turn.rs`), with
+    /// indexing active.
+    ///
+    /// The worker is a plain OS thread and deliberately holds no runtime handle
+    /// — its header says so — so what this pins is that the property survives
+    /// the extra database work #435 puts inside the batch transaction. A batch
+    /// now writes `session_insights` *and* an FTS5 row per session while holding
+    /// one write lock for longer, so "the worker's writes are off the runtime"
+    /// is a claim worth re-asserting rather than inheriting.
+    ///
+    /// The shape is the original's: **one** worker thread so a single parked
+    /// worker is the whole runtime; a plain OS thread holding the lock, so the
+    /// contention comes from outside exactly as the session scanner's batch
+    /// writer does; and `last` seeded **before** the spawn, because a starved
+    /// ticker is never polled and seeding on the first poll would start the
+    /// clock after the stall and measure nothing.
+    ///
+    /// **Calibrated rather than assumed.** Replacing the `std::thread::spawn`
+    /// below with `tokio::spawn` — i.e. putting the batch's rusqlite work on the
+    /// single worker, which is the defect this shape exists to catch — takes the
+    /// ticker from ~150 advances to **0** and fails the assertion. Note it must
+    /// be `tokio::spawn` to falsify it: calling `process_batch` inline in this
+    /// async body blocks the *calling* thread, which `block_on` runs the test
+    /// future on, and the ticker on the worker keeps going regardless. That
+    /// version of the test passes against the defect, which is the trap the
+    /// scheduler's copy documents too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_contended_write_lock_does_not_stall_the_runtime() {
+        use std::sync::atomic::AtomicU64;
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        /// Long enough that a parked worker is unmistakable, short enough to
+        /// stay well inside `open_read_write`'s 5s `busy_timeout` so the batch
+        /// itself still commits.
+        const HOLD: Duration = Duration::from_millis(1_500);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let file = seed_session(&dir, &db_path, "s1", "/a", "pagination");
+
+        // The file must already be WAL. Left in the default rollback journal,
+        // `open_read_write`'s own `PRAGMA journal_mode=WAL` is a *mode change*
+        // needing an exclusive lock and fails outright in about a millisecond
+        // instead of waiting on `busy_timeout` — which would make this measure
+        // the wrong thing entirely.
+        db::open_read_write(&db_path).expect("convert the fixture to WAL");
+
+        let (holding_tx, holding_rx) = mpsc::channel();
+        let lock_db = db_path.clone();
+        let holder = std::thread::spawn(move || {
+            let mut conn = rusqlite::Connection::open(&lock_db).expect("open");
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .expect("begin immediate");
+            holding_tx.send(()).expect("signal");
+            std::thread::sleep(HOLD);
+            tx.rollback().expect("rollback");
+        });
+        holding_rx.recv().expect("the writer took the lock");
+
+        let worst_gap_ms = Arc::new(AtomicU64::new(0));
+        let ticks = Arc::new(AtomicU64::new(0));
+        let ticker = {
+            let (worst_gap_ms, ticks, mut last) = (
+                Arc::clone(&worst_gap_ms),
+                Arc::clone(&ticks),
+                Instant::now(),
+            );
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    let now = Instant::now();
+                    let gap =
+                        u64::try_from(now.duration_since(last).as_millis()).unwrap_or(u64::MAX);
+                    worst_gap_ms.fetch_max(gap, Ordering::Relaxed);
+                    ticks.fetch_add(1, Ordering::Relaxed);
+                    last = now;
+                }
+            })
+        };
+
+        // Exactly how production runs it: a plain thread, never a tokio task.
+        let batch_db = db_path.clone();
+        let batch = std::thread::spawn(move || {
+            process_batch(
+                &batch_db,
+                [pending_for("s1", "/a", &file)].into_iter().collect(),
+            )
+        });
+
+        let committed = tokio::task::spawn_blocking(move || batch.join().expect("batch"))
+            .await
+            .expect("join");
+        ticker.abort();
+        holder.join().expect("the writer finished");
+
+        assert!(committed, "the batch did not commit");
+
+        let worst = worst_gap_ms.load(Ordering::Relaxed);
+        assert!(
+            worst < 500,
+            "the runtime stalled for {worst} ms while the write lock was held \
+             (the hold is {} ms; anything near it means indexing blocked a worker)",
+            HOLD.as_millis(),
+        );
+        // The gap alone would read as healthy if the ticker had simply been
+        // cancelled early, so assert it really ran throughout.
+        let ticks = ticks.load(Ordering::Relaxed);
+        assert!(
+            ticks > 50,
+            "the ticker only advanced {ticks} times across a {} ms hold",
+            HOLD.as_millis(),
+        );
+
+        // …and both rows landed, so this is not passing because nothing
+        // happened.
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(indexed_pairs(&conn), vec![("s1".into(), "/a".into())]);
     }
 }

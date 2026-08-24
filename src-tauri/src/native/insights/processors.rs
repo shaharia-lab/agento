@@ -31,6 +31,7 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
+use super::index;
 use super::transcript::{self, is_turn_start, parse_content_blocks, Event};
 use crate::native::active_time::ActiveTimeTracker;
 use crate::native::pricing::{Cost, PricedUsage, Resolver};
@@ -139,19 +140,28 @@ pub struct Ctx<'a> {
 ///
 /// A sub-agent transcript that cannot be read is skipped; only a failure on the
 /// parent is fatal.
+///
+/// `doc` accumulates the session's `session_search` document from **this same
+/// read** (#435). It is a parameter rather than a tenth processor because a
+/// `Processor` finalizes into a `SessionInsight`, which has nowhere to put three
+/// text columns — and because passing it makes the extra work visible at the one
+/// call site rather than hidden in `PIPELINE`, whose order is load-bearing for
+/// the numbers. A caller that wants no document passes one and drops it; the
+/// accumulator is inert once its budget is spent, so that costs a struct.
 pub fn run(
     session_id: &str,
     files: &[std::path::PathBuf],
     ctx: &Ctx,
+    doc: &mut index::DocAccumulator,
 ) -> Result<SessionInsight, String> {
     let Some((parent, subagents)) = files.split_first() else {
         return Err(format!("no session files given for {session_id:?}"));
     };
 
     let mut processors = pipeline(ctx);
-    feed(parent, &mut processors)?;
+    feed(parent, &mut processors, doc)?;
     for file in subagents {
-        if let Err(e) = feed(file, &mut processors) {
+        if let Err(e) = feed(file, &mut processors, doc) {
             log::warn!("skipping unreadable sub-agent transcript: {e}");
         }
     }
@@ -166,15 +176,21 @@ pub fn run(
     Ok(insight)
 }
 
-fn feed(path: &std::path::Path, processors: &mut [Box<dyn Processor + '_>]) -> Result<(), String> {
+fn feed(
+    path: &std::path::Path,
+    processors: &mut [Box<dyn Processor + '_>],
+    doc: &mut index::DocAccumulator,
+) -> Result<(), String> {
     for ev in transcript::read(path)? {
         // Not a conversation event; Go skips it before any processor sees it.
+        // The indexer inherits the skip by sitting inside the same guard.
         if ev.event_type == "file-history-snapshot" {
             continue;
         }
         for p in processors.iter_mut() {
             p.process(&ev);
         }
+        doc.observe(&ev);
     }
     Ok(())
 }
@@ -775,6 +791,7 @@ mod tests {
                 idle_gap_ms: 600_000,
                 resolver: None,
             },
+            &mut index::DocAccumulator::new(),
         )
         .expect("run")
     }

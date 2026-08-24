@@ -74,6 +74,25 @@ use rusqlite::{params, Connection};
 /// weight they carry.
 pub const BM25_WEIGHTS: [f64; 4] = [8.0, 4.0, 2.0, 0.5];
 
+/// What this build's indexer produces, compared against
+/// `claude_cache_metadata.search_index_version` (#435).
+///
+/// Bump it whenever the *stored text* changes — a different column routing, a
+/// changed cap, a normalizer rule that keeps or drops different words. The
+/// worker's sweep then rebuilds every row (see
+/// [`crate::native::insights::worker`]).
+///
+/// **It is deliberately not one of the scanner's staleness markers**, which is
+/// the same separation `CURRENT_PROCESSOR_VERSION` has: rebuilding the index
+/// re-reads transcripts *through the worker*, and must not make the scanner
+/// re-read `claude_session_cache` — those rows are a function of the transcript
+/// and the pricing catalog, neither of which a search-text change touches.
+///
+/// 0 is reserved for "nothing indexed": migration 33 defaults the column to it,
+/// so an upgraded database and a fresh install are the same case, and both
+/// trigger a full first index.
+pub const SEARCH_INDEX_VERSION: i64 = 1;
+
 /// The ranking expression, spelled once so #436 and #437 cannot drift from the
 /// indexer or from each other.
 ///
@@ -187,6 +206,72 @@ pub fn delete_all(conn: &Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Drop index rows whose session is no longer in the cache.
+///
+/// The exact shape of `insights::store::delete_orphans`, and for exactly its
+/// reasons: **keyed on "no cache row for this pair remains", never on a path.**
+/// A claim shift moves a transcript to a new `file_path` and is an *update*
+/// (#245), so a path-keyed delete would drop a session that is still there.
+/// `session_search` carries no `file_path` at all, so path is not even available
+/// as a wrong answer.
+///
+/// It follows that this must run **after** the cache's own delete pass, which is
+/// where it inherits that pass's protection for free: a config dir that could
+/// not be listed keeps its cache rows, so its index rows are not orphans and are
+/// left alone. That is what stops an unmounted drive emptying an account's
+/// search index.
+///
+/// Note the cost, which is [`delete`]'s: FTS5 accepts no index on the UNINDEXED
+/// key columns, so the `NOT EXISTS` runs over the backing `%_content` table.
+/// One pass per scan, and #439 owns measuring it.
+pub fn delete_orphans(conn: &Connection) -> Result<usize, String> {
+    conn.execute(
+        "DELETE FROM session_search
+         WHERE NOT EXISTS (
+             SELECT 1 FROM claude_session_cache c
+              WHERE c.session_id = session_search.session_id
+                AND c.project_path = session_search.project_path
+         )",
+        [],
+    )
+    .map_err(|e| format!("reconciling orphaned search rows: {e}"))
+}
+
+/// The `search_index_version` the stored rows were produced by.
+///
+/// Missing metadata row reads as 0 — "nothing indexed" — which is the same
+/// answer migration 33's column default gives an upgraded database, and is what
+/// makes a first index and a rebuild one code path.
+pub fn stored_version(conn: &Connection) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COALESCE(search_index_version, 0) FROM claude_cache_metadata WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(0),
+        other => Err(format!("reading search_index_version: {other}")),
+    })
+}
+
+/// Stamp the version the index now holds.
+///
+/// Written **only after** a rebuild has covered the whole corpus, never before:
+/// a version recorded ahead of the work leaves a partial index that nothing will
+/// ever finish, because the mismatch that would have driven it is gone. Uses the
+/// same insert-or-update as `scan.rs`'s `last_scanned_at` so it also works on a
+/// database whose singleton metadata row does not exist yet.
+pub fn record_version(conn: &Connection, version: i64) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO claude_cache_metadata (id, last_scanned_at, search_index_version)
+              VALUES (1, '', ?1)
+         ON CONFLICT(id) DO UPDATE SET search_index_version = excluded.search_index_version",
+        params![version],
+    )
+    .map_err(|e| format!("recording search_index_version: {e}"))?;
+    Ok(())
+}
+
 /// Run one FTS query and return its hits, best first.
 ///
 /// `query` is FTS5 query syntax, already built and quoted by the caller. The
@@ -242,6 +327,128 @@ mod tests {
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .expect("query");
         rows.collect::<Result<Vec<_>, _>>().expect("collect")
+    }
+
+    fn cache_row(conn: &Connection, session_id: &str, project_path: &str, file_path: &str) {
+        conn.execute(
+            "INSERT INTO claude_session_cache
+                 (session_id, project_path, file_path, file_mtime, start_time, last_activity)
+             VALUES (?1, ?2, ?3, '2026-01-01 00:00:00+00:00', '2026-01-01 00:00:00+00:00',
+                     '2026-01-01 00:00:00+00:00')",
+            params![session_id, project_path, file_path],
+        )
+        .expect("cache row");
+    }
+
+    /// The reconcile keys on the **pair**, so a session id that also exists
+    /// under another project keeps the row for the project still cached.
+    ///
+    /// Keyed on the id alone this would empty both, and the surviving session
+    /// would simply stop being findable — with the cache row, the insight row
+    /// and every count still intact, so nothing looks wrong anywhere.
+    #[test]
+    fn the_reconcile_drops_only_rows_with_no_cache_row() {
+        let (_file, conn) = migrated();
+        for (session, project) in [("s1", "/a"), ("s1", "/b"), ("gone", "/a")] {
+            cache_row(
+                &conn,
+                session,
+                project,
+                &format!("{project}/{session}.jsonl"),
+            );
+            replace(&conn, &doc(session, project)).expect("index");
+        }
+
+        conn.execute(
+            "DELETE FROM claude_session_cache WHERE session_id = 'gone' OR project_path = '/b'",
+            [],
+        )
+        .expect("reconcile the cache");
+
+        assert_eq!(delete_orphans(&conn).expect("delete_orphans"), 2);
+        assert_eq!(indexed_pairs(&conn), vec![("s1".into(), "/a".into())]);
+    }
+
+    /// A claim shift moves a transcript and is an **update**, not a deletion
+    /// (#245). The cache row survives under its new `file_path`, so the index
+    /// row must be left exactly where it is.
+    ///
+    /// `session_search` carries no `file_path` at all, which is what makes the
+    /// wrong formulation unavailable rather than merely unused — but the rule is
+    /// worth pinning, because the obvious way to add a path column later would
+    /// reintroduce it.
+    #[test]
+    fn a_moved_transcript_keeps_its_index_row() {
+        let (_file, conn) = migrated();
+        cache_row(&conn, "s1", "/a", "/old/s1.jsonl");
+        replace(&conn, &doc("s1", "/a")).expect("index");
+
+        conn.execute(
+            "UPDATE claude_session_cache SET file_path = '/new/s1.jsonl'",
+            [],
+        )
+        .expect("move the file");
+
+        assert_eq!(delete_orphans(&conn).expect("delete_orphans"), 0);
+        assert_eq!(indexed_pairs(&conn), vec![("s1".into(), "/a".into())]);
+    }
+
+    /// The version round trip, including the case that decides the upgrade
+    /// path: a database whose singleton metadata row does not exist yet reads 0
+    /// and can still be stamped.
+    ///
+    /// A bare `UPDATE … WHERE id = 1` — which is how `scan.rs` records its own
+    /// markers, after `record_last_scanned` has inserted the row — would affect
+    /// nothing here and the rebuild would repeat forever.
+    #[test]
+    fn the_index_version_round_trips_even_with_no_metadata_row() {
+        let (_file, conn) = migrated();
+
+        assert_eq!(
+            stored_version(&conn).expect("version"),
+            0,
+            "no metadata row means nothing indexed",
+        );
+
+        record_version(&conn, SEARCH_INDEX_VERSION).expect("record");
+        assert_eq!(
+            stored_version(&conn).expect("version"),
+            SEARCH_INDEX_VERSION
+        );
+
+        record_version(&conn, SEARCH_INDEX_VERSION + 1).expect("record again");
+        assert_eq!(
+            stored_version(&conn).expect("version"),
+            SEARCH_INDEX_VERSION + 1,
+        );
+    }
+
+    /// Stamping the version must not disturb the row's other columns — it shares
+    /// `claude_cache_metadata` with the scanner's three staleness markers, and
+    /// an `INSERT … ON CONFLICT` that named them would reset a marker and force
+    /// a full transcript re-read.
+    #[test]
+    fn recording_the_version_leaves_the_scanners_markers_alone() {
+        let (_file, conn) = migrated();
+        conn.execute(
+            "INSERT INTO claude_cache_metadata
+                 (id, last_scanned_at, scanner_version, pricing_rev, idle_threshold_ms)
+             VALUES (1, 'when', 7, 42, 900000)",
+            [],
+        )
+        .expect("seed");
+
+        record_version(&conn, SEARCH_INDEX_VERSION).expect("record");
+
+        let row: (String, i64, i64, i64) = conn
+            .query_row(
+                "SELECT last_scanned_at, scanner_version, pricing_rev, idle_threshold_ms
+                   FROM claude_cache_metadata WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .expect("row");
+        assert_eq!(row, ("when".to_string(), 7, 42, 900_000));
     }
 
     /// The table has to exist after a plain migrate, and it has to be the FTS5
