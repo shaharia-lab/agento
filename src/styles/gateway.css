@@ -18,6 +18,16 @@
    one would have no light-mode value at all.
    ========================================================================== */
 
+/* --- Stacked read errors -------------------------------------------------- */
+
+/* Two failed reads produce two rows. `.msgline` carries no margin of its own —
+   it is normally a `.form` child, and `.form`'s gap does the spacing — so a
+   pane that renders them outside a form has to say so, or they read as one
+   block with a rule through it. */
+.gw-errors > .msgline + .msgline {
+  margin-top: var(--sp-4);
+}
+
 /* --- The status card on the Overview ------------------------------------- */
 
 .gw-status {

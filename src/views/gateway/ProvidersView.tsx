@@ -139,7 +139,10 @@ export function GatewayProvidersView({ inspectorOpen }: { inspectorOpen: boolean
               </div>
             </button>
           ))}
-          {!providers.loading && filtered.length === 0 && (
+          {/* Not shown when the read failed: "No providers" is a claim about
+              the stored rows, and a failed request knows nothing about them.
+              The detail pane carries the error. */}
+          {!providers.loading && !providers.error && filtered.length === 0 && (
             <Empty
               icon="database"
               title={rows.length === 0 ? "No providers" : "No matches"}

@@ -109,7 +109,13 @@ export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean })
               </div>
             </button>
           ))}
-          {!aliases.loading && filtered.length === 0 && (
+          {/* Not shown when either read failed: "No aliases" and "add a
+              provider first" are both claims about stored rows, and a failed
+              request knows nothing about them. */}
+          {!aliases.loading &&
+            !aliases.error &&
+            !providers.error &&
+            filtered.length === 0 && (
             <Empty
               icon="layers"
               title={rows.length === 0 ? "No aliases" : "No matches"}
@@ -133,7 +139,7 @@ export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean })
             which disables "Add alias" and every provider picker with nothing on
             screen to say why. */}
         {(aliases.error || providers.error) && (
-          <div className="scroll" style={{ padding: "var(--sp-8)" }}>
+          <div className="scroll gw-errors" style={{ padding: "var(--sp-8)" }}>
             {(
               [
                 ["aliases", aliases.error],
