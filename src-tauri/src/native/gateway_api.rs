@@ -284,6 +284,29 @@ fn create_provider(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, Wri
     } else {
         req.id.trim().to_string()
     };
+
+    // `store_provider` upserts, so a POST naming an id that already exists
+    // would **overwrite another provider** — replacing its key and its base URL
+    // — while answering `201 Created`. A caller-chosen id is worth keeping (it
+    // makes seeding idempotent to write), so the answer is to refuse the
+    // collision rather than to ignore the field.
+    let existing = config::load_provider_summaries(db_path).map_err(WriteError::Fallback)?;
+    if existing.iter().any(|p| p.id == id) {
+        return Err(WriteError::Conflict {
+            resource: "gateway provider".to_string(),
+            id,
+        });
+    }
+    // Two providers sharing a name is the same failure one level along: routing
+    // targets refer to providers *by name*, so an alias pointing at a duplicate
+    // resolves to whichever the registry happened to keep.
+    let name_taken = existing.iter().any(|p| p.name == name);
+    if name_taken {
+        return Err(WriteError::Conflict {
+            resource: "gateway provider name".to_string(),
+            id: name,
+        });
+    }
     let api_key = req.api_key.unwrap_or_default();
 
     config::store_provider(
@@ -433,10 +456,32 @@ struct AliasRequest {
 }
 
 impl AliasRequest {
-    fn validated(&self, db_path: &std::path::Path) -> Result<String, WriteError> {
+    /// `own_id` is the row being updated, or `None` on a create — an update
+    /// must not collide with itself.
+    fn validated(
+        &self,
+        db_path: &std::path::Path,
+        own_id: Option<&str>,
+    ) -> Result<String, WriteError> {
         let alias = self.alias.trim().to_string();
         if alias.is_empty() {
             return Err(WriteError::validation("alias", "alias is required"));
+        }
+
+        // The alias **is** the routing key a client sends as `model`, and
+        // `Dispatcher` collects aliases into a map keyed by it — so two rows
+        // sharing one silently disable whichever the map does not keep, with
+        // nothing anywhere to say which. Refusing the second is the only answer
+        // that leaves the table meaning what it looks like it means.
+        let taken = config::load_aliases(db_path)
+            .map_err(WriteError::Fallback)?
+            .into_iter()
+            .any(|a| a.alias == alias && Some(a.id.as_str()) != own_id);
+        if taken {
+            return Err(WriteError::Conflict {
+                resource: "gateway model alias".to_string(),
+                id: alias,
+            });
         }
         if self.routing.targets.is_empty() {
             return Err(WriteError::validation(
@@ -471,7 +516,7 @@ impl AliasRequest {
 
 fn create_alias(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteError> {
     let req: AliasRequest = writes::decode_body(body)?;
-    let alias = req.validated(db_path)?;
+    let alias = req.validated(db_path, None)?;
     let id = if req.id.trim().is_empty() {
         uuid::Uuid::new_v4().to_string()
     } else {
@@ -495,7 +540,7 @@ fn create_alias(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteE
 
 fn update_alias(db_path: &std::path::Path, id: &str, body: &[u8]) -> Result<Answer, WriteError> {
     let req: AliasRequest = writes::decode_body(body)?;
-    let alias = req.validated(db_path)?;
+    let alias = req.validated(db_path, Some(id))?;
 
     // `store_alias` upserts, so it would happily create a row for an id that
     // does not exist — which on a `PUT /{id}` is a silent create where the
@@ -1162,6 +1207,108 @@ mod tests {
         )
         .expect("answered");
         assert_eq!(answer.status, StatusCode::NOT_FOUND);
+    }
+
+    /// A `POST` naming an id that exists must not overwrite it.
+    ///
+    /// `store_provider` upserts, so without this check a create would replace
+    /// another provider's key and base URL while answering `201 Created` —
+    /// a silent credential swap dressed as a creation.
+    #[test]
+    fn creating_over_an_existing_id_is_refused_rather_than_overwriting() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        create_a_provider(&ctx);
+
+        let answer = call(
+            &ctx,
+            "POST",
+            "/api/gateway/providers",
+            r#"{"id":"p1","name":"different","type":"gemini","api_key":"sk-attacker","base_url":"","enabled":true}"#,
+        )
+        .expect("answered");
+        assert_eq!(answer.status, StatusCode::CONFLICT);
+        assert_eq!(
+            stored_key(&file, "p1"),
+            "sk-secret-value",
+            "the refused create must not have touched the stored key"
+        );
+        assert_eq!(
+            config::load_provider_summaries(file.path()).expect("providers")[0].name,
+            "openai"
+        );
+    }
+
+    /// Two providers may not share a **name**, because routing refers to them
+    /// by name — an alias pointing at a duplicate resolves to whichever the
+    /// registry happened to keep.
+    #[test]
+    fn two_providers_may_not_share_a_name() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        create_a_provider(&ctx);
+
+        let answer = call(
+            &ctx,
+            "POST",
+            "/api/gateway/providers",
+            r#"{"name":"openai","type":"gemini","api_key":"k","base_url":"","enabled":true}"#,
+        )
+        .expect("answered");
+        assert_eq!(answer.status, StatusCode::CONFLICT);
+        assert_eq!(
+            config::load_provider_summaries(file.path())
+                .expect("providers")
+                .len(),
+            1
+        );
+    }
+
+    /// Two aliases may not share an alias string.
+    ///
+    /// The alias is the routing key a client sends as `model`, and the
+    /// dispatcher collects them into a map keyed by it — so a duplicate
+    /// silently disables one of the two rows, with nothing to say which.
+    #[test]
+    fn two_rows_may_not_share_an_alias() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        create_a_provider(&ctx);
+        let alias = r#"{"alias":"my-alias","routing":{"targets":[{"provider":"openai","model_id":"m"}]},"enabled":true}"#;
+        call(&ctx, "POST", "/api/gateway/models", alias).expect("first");
+
+        let answer = call(&ctx, "POST", "/api/gateway/models", alias).expect("answered");
+        assert_eq!(answer.status, StatusCode::CONFLICT);
+        assert_eq!(config::load_aliases(file.path()).expect("aliases").len(), 1);
+    }
+
+    /// ...but an update must not collide with **itself**, which is what the
+    /// `own_id` exception is for — otherwise saving an alias without renaming
+    /// it would be a 409.
+    #[test]
+    fn updating_an_alias_without_renaming_it_is_not_a_self_collision() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        create_a_provider(&ctx);
+        call(
+            &ctx,
+            "POST",
+            "/api/gateway/models",
+            r#"{"id":"a1","alias":"my-alias","routing":{"targets":[{"provider":"openai","model_id":"m"}]},"enabled":true}"#,
+        )
+        .expect("created");
+
+        let answer = call(
+            &ctx,
+            "PUT",
+            "/api/gateway/models/a1",
+            r#"{"alias":"my-alias","routing":{"targets":[{"provider":"openai","model_id":"m2"}]},"enabled":false}"#,
+        )
+        .expect("answered");
+        assert_eq!(answer.status, StatusCode::OK, "{}", body_of(&answer));
+        let aliases = config::load_aliases(file.path()).expect("aliases");
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].routing.targets[0].model_id, "m2");
     }
 
     #[test]

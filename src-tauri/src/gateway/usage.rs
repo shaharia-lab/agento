@@ -623,16 +623,25 @@ pub struct Record {
 ///
 /// `created_at` holds Go's `time.Time.String()`, and every DATETIME column in
 /// this schema is compared **as text** — that is the whole reason
-/// `gotime::go_text` exists rather than each writer formatting its own. The
-/// format is fixed-width down to the seconds and lexicographically ordered
-/// within a single zone, and every row here is written `+0000 UTC`, so a string
-/// `BETWEEN` is the same comparison an instant one would be. Parsing every row
-/// to filter in Rust would read the whole table to answer a one-day question.
+/// `gotime::go_text` exists rather than each writer formatting its own.
+/// Parsing every row to filter in Rust would read the whole table to answer a
+/// one-day question.
 ///
-/// The fractional part is variable-width (trailing zeros are trimmed), which
-/// does not matter for the lower bound and *does* for the upper: a row at
-/// exactly `to` with no fraction sorts before one with a fraction, so the bound
-/// is padded past any fraction rather than compared to the bare instant.
+/// That is sound because **`go_text` is lexicographically ordered**, and the
+/// non-obvious part is the fraction, which is variable-width because trailing
+/// zeros are trimmed. It still sorts right: the character after the seconds is
+/// `.` for a row that has one and `' '` for a row that does not, and `'.' >
+/// ' '`, so an unfractioned instant sorts before every fractioned one in the
+/// same second — which is exactly its chronological place, since no fraction
+/// means `.0`. Within a fraction the digits compare left to right and a shorter
+/// one ends at the space, which is below every digit. Every row is written
+/// `+0000 UTC`, so there is no second zone to break the ordering.
+/// `the_stored_timestamp_sorts_as_text_the_way_it_sorts_in_time` pins it.
+///
+/// The bound is therefore the plain rendering of `to`. An earlier version
+/// appended a sentinel to "reach past any fraction"; that was reasoning about a
+/// problem that does not exist — a fractioned row in `to`'s second is *after*
+/// `to` and is correctly excluded — and the sentinel changed no answer.
 pub fn load_window(
     db_path: &std::path::Path,
     from: DateTime<Utc>,
@@ -641,9 +650,7 @@ pub fn load_window(
 ) -> Result<Vec<Record>, String> {
     let conn = db::open_read_only(db_path)?;
     let lower = gotime::go_text(&from);
-    // `~` sorts above every character `go_text` can produce, so this is "at or
-    // before `to`, whatever fraction the row carries".
-    let upper = format!("{}~", gotime::go_text(&to));
+    let upper = gotime::go_text(&to);
 
     let sql = "SELECT created_at, alias, provider, model_id, prompt_tokens, completion_tokens, \
                cache_read_tokens, cache_write_tokens, duration_ms, status, streamed, surface, \
@@ -700,4 +707,40 @@ pub fn load_window(
         out.push(record);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    /// The property [`load_window`]'s `WHERE` clause rests on.
+    ///
+    /// If text order ever stopped matching time order, the window would return
+    /// the wrong rows — silently, and only near a boundary, which is the
+    /// hardest kind of wrong to notice on a chart.
+    #[test]
+    fn the_stored_timestamp_sorts_as_text_the_way_it_sorts_in_time() {
+        use chrono::TimeZone;
+        let base = Utc.with_ymd_and_hms(2026, 8, 7, 23, 59, 59).unwrap();
+        // Deliberately includes the no-fraction case beside fractioned ones in
+        // the same second, which is where a naive format breaks.
+        let instants = [
+            Utc.with_ymd_and_hms(2026, 8, 7, 23, 59, 58).unwrap(),
+            base,
+            base + chrono::Duration::nanoseconds(250_000_000),
+            base + chrono::Duration::nanoseconds(500_000_000),
+            base + chrono::Duration::nanoseconds(510_000_000),
+            base + chrono::Duration::nanoseconds(999_999_999),
+            Utc.with_ymd_and_hms(2026, 8, 8, 0, 0, 0).unwrap(),
+        ];
+        let texts: Vec<String> = instants.iter().map(gotime::go_text).collect();
+
+        let mut sorted = texts.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted, texts,
+            "chronological order and text order must agree, or a windowed query \
+             returns the wrong rows near its bounds"
+        );
+    }
 }
