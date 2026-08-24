@@ -59,6 +59,25 @@ export function duration(ms: number | undefined | null): string {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
+/**
+ * Milliseconds → "450ms", "1.9s", "4m 12s". For latency, where `duration`'s
+ * whole-second floor loses the whole measurement.
+ *
+ * `duration` exists for Claude session lengths, which are minutes to hours, and
+ * it answers `"0s"` for anything under a second and `"—"` for zero. A gateway
+ * request is routinely sub-second — a refusal never leaves the process — so a
+ * p95 tile built on it reads `0s` for a real, correctly measured window. Below a
+ * second the figure is milliseconds; below a minute it keeps one decimal, since
+ * the difference between 1.2s and 1.9s is the point of a percentile; above that
+ * `duration`'s own shape takes over.
+ */
+export function latency(ms: number | undefined | null): string {
+  if (ms === undefined || ms === null || !isFinite(ms) || ms < 0) return "—";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return duration(ms);
+}
+
 /** "3 m ago", "2 h ago", "Yesterday", "12 Aug". */
 export function relativeTime(iso: string | undefined | null): string {
   if (!iso) return "—";

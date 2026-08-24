@@ -3187,6 +3187,15 @@ Four things about it are decisions rather than details:
   daily interval on traffic alone. Both claim the same slot. `<` not `<=`, so the
   boundary row is kept. A failed prune is a `warn` and is dropped, as a failed
   insert is.
+
+  **`prune_since` exists so that last sentence is testable.** With `Utc::now()`
+  read inside the function there is no way to write a row landing *exactly* on
+  the cut, and the first version of the boundary test put its row five seconds
+  late — on the keep side of both `<` and `<=`, so it passed against the very
+  flip it was named for. A review caught it. The general form is worth keeping:
+  **a test named for a boundary has to construct the boundary**, which usually
+  means the value being compared against cannot be read from the clock inside
+  the function under test.
 - **A pruned window says so.** An under-reported total that looks complete is the
   failure a prune introduces, and it is silent without this — so the Usage view
   labels the window a **floor** whenever it reaches past the horizon, in the same
@@ -3200,6 +3209,26 @@ columns migration 34 already stores, so the addition is additive and no existing
 field moved. `by_token` groups on the token's `sub` — an `api_tokens` row id,
 never a secret — and an unattributable row is grouped under `""` rather than
 dropped, so the breakdown's total cannot disagree with the window's.
+
+**That id is not a label, and `UsageGroup.label` is why.** The row id appears
+nowhere else in the product: the Security tab lists tokens by *name*, so a panel
+printing `3f2a…` cannot answer the one question it exists for. `read_usage`
+resolves the names itself rather than leaving the view to fetch them, because
+`/api/security/*` needs a **`write`** scope whatever the method — a read-only
+dashboard has no business holding one. Revoked tokens keep their names, since a
+revoked credential's spending history is most of what made the revocation
+informed. `label` is `skip_serializing_if = "Option::is_none"` and only
+`by_token` ever sets it.
+
+**`validate` returns the field it refused, and must keep doing so.** It is
+`Result<(), SettingsError>` with `field` and `message`, not a bare `String`: the
+first version had the route recover the field by `starts_with`-ing the message,
+a prose coupling that would mislabel the input a form highlights the moment
+either string was reworded — and the test written for it asserted
+`contains("usage_retention_days")`, which the *message* also satisfies, so it
+passed with the field hardcoded. Assert the whole
+`validation error for \"<field>\"` prefix, which is the only part of that body
+the field actually decides.
 
 **The chart primitives are shared; nothing else is.** `src/components/charts.tsx`
 is `views/analytics/charts.tsx` moved, with its stylesheet

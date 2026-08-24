@@ -198,17 +198,12 @@ fn put_settings(db_path: &std::path::Path, body: &[u8]) -> Result<Answer, WriteE
     // already refuses port 0; the range check is this route's, because a port
     // the process cannot bind is a setting that can only ever produce a
     // `BindFailed` status.
-    // `validate` covers two fields now, so the reported one is chosen from what
-    // actually failed rather than always being `port` — a form that highlights
-    // the wrong input is worse than one that highlights none.
-    settings.validate().map_err(|e| {
-        let field = if e.starts_with("usage_retention_days") {
-            "usage_retention_days"
-        } else {
-            "port"
-        };
-        WriteError::validation(field, e)
-    })?;
+    // `validate` covers two fields now, so it names the one that failed rather
+    // than the route inferring it — a form that highlights the wrong input is
+    // worse than one that highlights none.
+    settings
+        .validate()
+        .map_err(|e| WriteError::validation(e.field, e.message))?;
     if settings.port < MIN_PORT {
         return Err(WriteError::validation(
             "port",
@@ -686,10 +681,47 @@ struct UsagePoint {
 #[derive(Debug, Serialize)]
 struct UsageGroup {
     key: String,
+    /// What to show instead of `key`, when the key is not itself readable.
+    ///
+    /// Only `by_token` sets it: its key is an `api_tokens` row id, and that id
+    /// appears nowhere else in the UI — the Security tab lists tokens by *name*.
+    /// A breakdown whose stated purpose is informing a revocation decision has
+    /// to name the credential, so the name is resolved here rather than left to
+    /// a second request the view would have to make with a `write`-scoped token
+    /// (`/api/security/*` needs `write` whatever the method).
+    ///
+    /// Absent rather than null when there is nothing better than the key, which
+    /// is `skip_serializing_if`'s usual role on this surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label: Option<String>,
     requests: u64,
     prompt_tokens: u64,
     completion_tokens: u64,
     cost_usd: f64,
+}
+
+/// `api_tokens.id` → `name`, for the `by_token` breakdown's labels.
+///
+/// Every token ever issued, revoked ones included: a revoked credential's
+/// spending history is most of what made the revocation an informed decision, so
+/// dropping its name would empty the panel of exactly the rows worth reading.
+/// A row whose token was deleted outright has no name and keeps its id.
+///
+/// Best-effort — the names are a label, and a usage window that cannot read them
+/// is still a correct usage window.
+fn token_names(conn: &rusqlite::Connection) -> std::collections::BTreeMap<String, String> {
+    let mut names = std::collections::BTreeMap::new();
+    let Ok(mut stmt) = conn.prepare("SELECT id, name FROM api_tokens") else {
+        return names;
+    };
+    let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+    else {
+        return names;
+    };
+    for row in rows.flatten() {
+        names.insert(row.0, row.1);
+    }
+    names
 }
 
 /// Latency over the window, in milliseconds.
@@ -803,6 +835,7 @@ fn read_usage(db_path: &std::path::Path, query: &str) -> Result<Answer, String> 
         ] {
             let group = map.entry(key.clone()).or_insert_with(|| UsageGroup {
                 key,
+                label: None,
                 requests: 0,
                 prompt_tokens: 0,
                 completion_tokens: 0,
@@ -826,6 +859,17 @@ fn read_usage(db_path: &std::path::Path, query: &str) -> Result<Answer, String> 
             ..Default::default()
         }));
     });
+
+    // One read for the whole breakdown, and only when there is something to
+    // label — a window with no traffic must not open a connection for nothing.
+    if !by_token.is_empty() {
+        if let Ok(conn) = super::db::open_read_only(db_path) {
+            let names = token_names(&conn);
+            for (id, group) in by_token.iter_mut() {
+                group.label = names.get(id).cloned();
+            }
+        }
+    }
 
     durations.sort_unstable();
     let latency = UsageLatency {
@@ -1683,6 +1727,98 @@ mod tests {
         assert_eq!(active[2]["requests"], 1);
     }
 
+    /// The per-token breakdown names the credential, not its row id.
+    ///
+    /// The id appears nowhere else in the product — the Security tab lists
+    /// tokens by name — so a panel that printed one could not answer the
+    /// question it exists for, which is whether a given credential is worth
+    /// revoking. A **revoked** token keeps its name for the same reason: its
+    /// spending history is most of what made the revocation an informed
+    /// decision.
+    #[test]
+    fn the_per_token_breakdown_names_the_token_rather_than_its_row_id() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        {
+            let conn = super::super::db::open_read_write(file.path()).expect("open");
+            conn.execute(
+                "INSERT INTO api_tokens (id, name, scope, jti, created_at) \
+                 VALUES ('tok-live', 'Zed', 'llm', 'j1', '2026-08-01 00:00:00 +0000 UTC')",
+                [],
+            )
+            .expect("live token");
+            conn.execute(
+                "INSERT INTO api_tokens (id, name, scope, jti, created_at, revoked_at) \
+                 VALUES ('tok-dead', 'Old laptop', 'llm', 'j2', \
+                         '2026-08-01 00:00:00 +0000 UTC', '2026-08-02 00:00:00 +0000 UTC')",
+                [],
+            )
+            .expect("revoked token");
+        }
+
+        let row = |id: &'static str, token: &'static str| Fixture {
+            id,
+            at: "2026-08-03 09:00:00 +0000 UTC",
+            alias: "a",
+            provider: "p",
+            surface: "openai",
+            token,
+            status: "ok",
+            prompt: 1,
+            completion: 1,
+            cache_read: 0,
+            cache_write: 0,
+            ms: 10,
+            cost: Some(0.01),
+            unpriced: false,
+            model: "m",
+        };
+        insert_fixture(&file, &row("u1", "tok-live"));
+        insert_fixture(&file, &row("u2", "tok-dead"));
+        // A token row that no longer exists, and a request no token could be
+        // attributed to. Neither may vanish from the breakdown: both spent money,
+        // and dropping them would make it disagree with the window's total.
+        insert_fixture(&file, &row("u3", "tok-deleted"));
+        insert_fixture(&file, &row("u4", ""));
+
+        let answer = call_query(
+            &ctx,
+            "/api/gateway/usage",
+            "from=2026-08-01T00:00:00Z&to=2026-08-15T00:00:00Z&tz=UTC",
+        )
+        .expect("usage");
+        let body: serde_json::Value = serde_json::from_str(&body_of(&answer)).expect("json");
+        let groups = body["by_token"].as_array().expect("by_token");
+        assert_eq!(
+            groups.len(),
+            4,
+            "every payer is listed: {}",
+            body["by_token"]
+        );
+
+        let labelled = |key: &str| -> Option<String> {
+            groups
+                .iter()
+                .find(|g| g["key"] == key)
+                .and_then(|g| g["label"].as_str())
+                .map(str::to_string)
+        };
+        assert_eq!(labelled("tok-live").as_deref(), Some("Zed"));
+        assert_eq!(labelled("tok-dead").as_deref(), Some("Old laptop"));
+        // Absent, not null — the view falls back to the key, and every other
+        // breakdown's rows carry no `label` key at all.
+        assert_eq!(labelled("tok-deleted"), None);
+        assert_eq!(labelled(""), None);
+        for key in ["by_alias", "by_provider", "by_status", "by_surface"] {
+            for group in body[key].as_array().expect(key) {
+                assert!(
+                    group.get("label").is_none(),
+                    "{key} must not carry a label: {group}"
+                );
+            }
+        }
+    }
+
     /// The bucket boundary is the *request's* timezone, not UTC.
     ///
     /// A row at 23:30 UTC is the next day in Berlin, so the same fixture read
@@ -1752,8 +1888,12 @@ mod tests {
         .expect("answered");
         assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
         let body = body_of(&err);
+        // The **whole** `validation error for "<field>"` prefix, not a bare
+        // `contains("usage_retention_days")`: the message itself names the field
+        // too, so the loose assertion passed with the reported field hardcoded
+        // to `port` — i.e. it could not fail on the revert it was written for.
         assert!(
-            body.contains("usage_retention_days"),
+            body.contains(r#"validation error for \"usage_retention_days\""#),
             "the refusal must name the field that failed: {body}"
         );
 

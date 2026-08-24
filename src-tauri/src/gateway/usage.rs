@@ -788,10 +788,22 @@ fn prune_due(now: i64) -> bool {
 /// so a row landing exactly on the horizon is kept — the boundary belongs to the
 /// window the user asked to retain.
 pub fn prune(db_path: &std::path::Path, days: u32) -> Result<usize, String> {
+    prune_since(db_path, days, Utc::now())
+}
+
+/// [`prune`] with the "now" it measures back from supplied.
+///
+/// Split out purely so the cut is *constructible*: the boundary is the whole
+/// question a `<` versus `<=` gets wrong, and with `Utc::now()` read inside there
+/// is no way to write a row that lands exactly on it — the first version of this
+/// test put its "boundary" row five seconds late, so flipping the comparison left
+/// it green. Not a test seam in the `#[cfg(test)]` sense: it takes no dependency
+/// and hides nothing from a shipped build.
+fn prune_since(db_path: &std::path::Path, days: u32, now: DateTime<Utc>) -> Result<usize, String> {
     if days == 0 {
         return Ok(0);
     }
-    let Some(cutoff) = Utc::now().checked_sub_signed(chrono::Duration::days(days as i64)) else {
+    let Some(cutoff) = now.checked_sub_signed(chrono::Duration::days(days as i64)) else {
         // Unreachable for any value `validate` admits; refusing beats deleting
         // against a cutoff that saturated.
         return Err(format!("retention horizon of {days} days is out of range"));
@@ -900,27 +912,37 @@ mod retention_tests {
 
     /// The horizon is a cut, and which side of it the boundary row falls on is
     /// the whole question a `<` versus `<=` gets wrong.
+    ///
+    /// `prune_since` rather than `prune` so the cut is a value this test holds:
+    /// with `Utc::now()` read inside, a row landing *exactly* on it cannot be
+    /// constructed, and a "boundary" row placed a few seconds late is on the
+    /// keep side of both comparisons — which is how the first version of this
+    /// test stayed green against the very flip it is named for.
     #[test]
     fn a_prune_deletes_strictly_older_rows_and_keeps_the_boundary() {
         let file = migrated();
-        let now = Utc::now();
+        let now = Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap();
+        let cut = now - chrono::Duration::days(90);
+
         row_at(file.path(), "ancient", now - chrono::Duration::days(400));
-        // A second either side of the 90-day cut, plus the cut itself.
+        row_at(file.path(), "just-past", cut - chrono::Duration::seconds(1));
+        // Exactly on the cut. `<` keeps it; `<=` would delete it, and that is
+        // the only row in this fixture that tells the two apart.
+        row_at(file.path(), "on-the-cut", cut);
         row_at(
             file.path(),
-            "just-past",
-            now - chrono::Duration::days(90) - chrono::Duration::seconds(5),
-        );
-        row_at(
-            file.path(),
-            "boundary",
-            now - chrono::Duration::days(90) + chrono::Duration::seconds(5),
+            "just-inside",
+            cut + chrono::Duration::seconds(1),
         );
         row_at(file.path(), "fresh", now - chrono::Duration::days(1));
 
-        let deleted = prune(file.path(), 90).expect("prune");
-        assert_eq!(deleted, 2, "both rows past the horizon go");
-        assert_eq!(ids(file.path()), vec!["boundary", "fresh"]);
+        let deleted = prune_since(file.path(), 90, now).expect("prune");
+        assert_eq!(deleted, 2, "only the two rows before the cut go");
+        assert_eq!(
+            ids(file.path()),
+            vec!["fresh", "just-inside", "on-the-cut"],
+            "the row on the horizon belongs to the window the user asked to keep"
+        );
     }
 
     /// `0` is an opt-out, not a horizon of zero days. Getting this backwards

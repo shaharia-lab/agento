@@ -821,6 +821,12 @@ export interface GatewayUsagePoint {
 /** One row of a breakdown. `key` is the alias, provider, status, surface or token. */
 export interface GatewayUsageGroup {
   key: string;
+  /**
+   * What to show instead of `key`, **omitted** (not null) when there is nothing
+   * better. Only `by_token` sets it: its key is an `api_tokens` row id, which
+   * appears nowhere else in the UI — the Security tab lists tokens by name.
+   */
+  label?: string;
   requests: number;
   prompt_tokens: number;
   completion_tokens: number;

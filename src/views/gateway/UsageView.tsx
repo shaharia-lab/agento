@@ -3,7 +3,7 @@ import { api, qs } from "../../lib/api";
 import { AreaChart, BarChart, CardEmpty, type Point } from "../../components/charts";
 import { Empty, Segmented, Splitter } from "../../components/ui";
 import { Icon, type IconName } from "../../lib/icons";
-import { compactNumber, duration, integer, percent, usd } from "../../lib/format";
+import { compactNumber, integer, latency, percent, usd } from "../../lib/format";
 import { useResource } from "../../lib/hooks";
 import type {
   GatewaySettings,
@@ -361,12 +361,10 @@ function Body({
         <Tile
           icon="clock"
           label="Latency p95"
-          value={
-            (t.requests ?? 0) > 0 ? duration(usage.latency.p95_ms) : "—"
-          }
+          value={(t.requests ?? 0) > 0 ? latency(usage.latency.p95_ms) : "—"}
           note={
             (t.requests ?? 0) > 0
-              ? `p50 ${duration(usage.latency.p50_ms)} · max ${duration(usage.latency.max_ms)}`
+              ? `p50 ${latency(usage.latency.p50_ms)} · max ${latency(usage.latency.max_ms)}`
               : undefined
           }
         />
@@ -450,15 +448,15 @@ function Body({
             emptyText="No traffic in this period"
           />
         </Card>
-        <Card
-          title="By token"
-          sub="Which credential spent it"
-          table
-        >
+        <Card title="By token" sub="Which credential spent it" table>
+          {/* The server resolves each key to the token's name; the raw
+              `api_tokens` id is the fallback for a token deleted outright, and
+              is shown rather than hidden so the row still accounts for its
+              spend. `""` is a request no token could be attributed to. */}
           <Breakdown
             rows={list(usage.by_token)}
             total={t.requests ?? 0}
-            label={(key) => key || "unattributed"}
+            label={(key, row) => row.label || key || "unattributed"}
             emptyText="No traffic in this period"
           />
         </Card>
@@ -485,7 +483,8 @@ function Breakdown({
   rows: GatewayUsageGroup[];
   total: number;
   emptyText: string;
-  label?: (key: string) => string;
+  /** Takes the row too, so `by_token` can prefer the server-resolved name. */
+  label?: (key: string, row: GatewayUsageGroup) => string;
   badge?: (key: string) => string | undefined;
 }) {
   if (!rows.length) return <CardEmpty text={emptyText} />;
@@ -497,7 +496,7 @@ function Breakdown({
   return (
     <div className="gw-rank">
       {ranked.map((row) => {
-        const text = label(row.key);
+        const text = label(row.key, row);
         const tone = badge?.(row.key);
         return (
           <div className="gw-rank__row" key={row.key}>

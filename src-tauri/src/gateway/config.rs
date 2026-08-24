@@ -159,6 +159,25 @@ impl Default for GatewaySettings {
     }
 }
 
+/// Which field a [`GatewaySettings::validate`] failure is about, and why.
+///
+/// **The field is returned, not parsed back out of the message.** The route
+/// turns this into `WriteError::validation(field, message)`, and the first
+/// version derived the field by `starts_with`-ing the message — a prose coupling
+/// that would silently mislabel the input a form highlights the moment either
+/// string was reworded, with no test able to notice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettingsError {
+    pub field: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for SettingsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
 impl GatewaySettings {
     /// Reject a configuration this build cannot serve.
     ///
@@ -166,14 +185,23 @@ impl GatewaySettings {
     /// anything", which is unusable here for a reason specific to this feature:
     /// the port is what a user pastes into a tool config, so it has to be the
     /// number they chose and it has to survive a restart.
-    pub fn validate(&self) -> Result<(), String> {
+    ///
+    /// The retention ceiling is a typo bound rather than a correctness one; `0`
+    /// is *keep everything* and is always accepted.
+    pub fn validate(&self) -> Result<(), SettingsError> {
         if self.port == 0 {
-            return Err("port must be between 1 and 65535".to_string());
+            return Err(SettingsError {
+                field: "port",
+                message: "port must be between 1 and 65535".to_string(),
+            });
         }
         if self.usage_retention_days > MAX_RETENTION_DAYS {
-            return Err(format!(
-                "usage_retention_days must be {MAX_RETENTION_DAYS} or fewer; 0 keeps everything"
-            ));
+            return Err(SettingsError {
+                field: "usage_retention_days",
+                message: format!(
+                    "usage_retention_days must be {MAX_RETENTION_DAYS} or fewer; 0 keeps everything"
+                ),
+            });
         }
         Ok(())
     }
@@ -220,7 +248,7 @@ fn load_settings_from(conn: &Connection) -> Result<GatewaySettings, String> {
 
 /// Write the settings row, creating it on first save.
 pub fn store_settings(db_path: &Path, settings: &GatewaySettings) -> Result<(), String> {
-    settings.validate()?;
+    settings.validate().map_err(|e| e.message)?;
     let mut conn = db::open_read_write(db_path)?;
     // The guard every native write applies: refuse a database whose schema is
     // not the one this build compiled against, in either direction. These three
