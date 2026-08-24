@@ -48,6 +48,7 @@ pub mod query;
 pub mod scan;
 pub mod scanner;
 pub mod schedule;
+pub mod search;
 pub mod security;
 pub mod sessions;
 pub mod settings;

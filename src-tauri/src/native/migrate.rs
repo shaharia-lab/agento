@@ -8,7 +8,7 @@
 //! `internal/storage/migrations_vector_test.go`. Adding migration 28 without
 //! regenerating fails Go's own test suite.
 //!
-//! # ...but migration 31 onward is this build's own (#405, #422)
+//! # ...but migration 31 onward is this build's own (#405, #422, #433)
 //!
 //! That paragraph describes migrations 1–30, and they are still exactly Go's
 //! bytes. It stopped being the whole story with #405, which needs an
@@ -17,22 +17,32 @@
 //! here, and the vector file's own `_comment` says so at the top.
 //!
 //! Migration **32** is the second of them: the LLM gateway's three
-//! configuration tables (#422, epic #421). Same terms — authored, additive,
-//! and appended to the vector file as *text*, because a JSON round-trip
-//! through most encoders rewrites Go's `>` escaping across the frozen
-//! entries and that is the reformat the file's `_comment` forbids.
+//! configuration tables (#422, epic #421). Migration **33** is the third: the
+//! `session_search` FTS5 index and `claude_cache_metadata.search_index_version`
+//! (#433, epic #432). Same terms every time — authored, additive, and appended
+//! to the vector file as *text*, because a JSON round-trip through most encoders
+//! rewrites Go's `>` escaping across the frozen entries and that is the reformat
+//! the file's `_comment` forbids.
+//!
+//! **Two authors will reach for the same number.** #422 and #433 were worked in
+//! parallel and both wrote migration 32; the second to merge has to rebase and
+//! renumber, and the only thing that catches it is the hardcoded count below
+//! disagreeing with the file. Re-read the vector file's tail after any rebase
+//! that touches it rather than trusting a clean auto-merge — appending to a JSON
+//! array from two branches conflicts, but appending a *sibling* object does not
+//! have to.
 //!
 //! Two rules follow, and both are asserted below:
 //!
 //! - **Do not edit 1–30.** They are a frozen record of what Go produced, and
 //!   the only thing that still makes the "not transcribed" argument above true.
 //! - **Anything appended must be additive.** Migrations run only when *newer*
-//!   than the recorded version, so a database at 31 makes an older build apply
-//!   nothing and carry on — it simply never reads the new table. A migration
-//!   that *altered* an existing column would break a downgrade instead,
-//!   silently, on a user's machine. Downgrades are already refused below 0.1.1
-//!   (see `docs/troubleshooting.md`), but the rule keeps the damage to a
-//!   refusal rather than corruption.
+//!   than the recorded version, so a database at the latest version makes an
+//!   older build apply nothing and carry on — it simply never reads the new
+//!   table. A migration that *altered* an existing column would break a
+//!   downgrade instead, silently, on a user's machine. Downgrades are already
+//!   refused below 0.1.1 (see `docs/troubleshooting.md`), but the rule keeps the
+//!   damage to a refusal rather than corruption.
 //!
 //! Twenty-seven migrations of hand-copied DDL is precisely the kind of thing
 //! that agrees on every table anyone happens to check and differs on one column
@@ -128,8 +138,9 @@ pub fn current_version(conn: &Connection) -> Result<i64, String> {
 /// Confirm the database is the schema this build writes against.
 ///
 /// Called by every native write before it touches anything. The cost is one
-/// indexed aggregate over a table with 27 rows; the alternative is discovering
-/// the mismatch as a constraint violation halfway through a transaction.
+/// indexed aggregate over a table with one row per migration; the alternative
+/// is discovering the mismatch as a constraint violation halfway through a
+/// transaction.
 pub fn verify(conn: &Connection) -> Result<(), String> {
     let want = expected_version();
     let have = current_version(conn)?;
@@ -231,8 +242,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 32, "expected 32 migrations");
-        assert_eq!(expected_version(), 32);
+        assert_eq!(all.len(), 33, "expected 33 migrations");
+        assert_eq!(expected_version(), 33);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -326,7 +337,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 32);
+        assert_eq!(current_version(&conn).expect("version"), 33);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -365,7 +376,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 32);
+        assert_eq!(current_version(&conn).expect("version"), 33);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -473,7 +484,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 32);
+        assert_eq!(current_version(&conn).expect("version"), 33);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -482,7 +493,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 32);
+        assert_eq!(recorded, 33);
     }
 
     #[test]

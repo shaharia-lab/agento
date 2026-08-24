@@ -228,7 +228,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   31 migrations, embedded from parity/ — applied at startup
+    migrate.rs   33 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
