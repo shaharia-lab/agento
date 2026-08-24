@@ -43,6 +43,17 @@
 //! negated score specifically so that a plain `ORDER BY rank` puts the best
 //! match first. Sorting descending silently returns the *worst* matches, and
 //! every row is still a genuine hit, so nothing about the answer looks wrong.
+//!
+//! # `rank` is also a magic FTS5 column, and that is a trap
+//!
+//! Every FTS5 table has a hidden `rank` column of its own, which is bm25 with
+//! **all weights 1.0**. [`match_sql`] aliases the weighted expression to `rank`
+//! because that is the name a caller wants to order by — and SQLite resolves a
+//! bare `ORDER BY rank` against the output alias, so it is the weighted one that
+//! sorts. Nothing about a query says which of the two won, and both answers are
+//! made of genuine hits in a plausible order, so a regression here is invisible.
+//! `the_returned_rank_is_the_weighted_bm25` compares the value against both
+//! spellings rather than trusting the resolution rule.
 
 use rusqlite::{params, Connection};
 
@@ -544,6 +555,46 @@ mod tests {
 
         assert_eq!(search(&conn, "cafe", 10).expect("search").len(), 1);
         assert_eq!(search(&conn, "café", 10).expect("search").len(), 1);
+    }
+
+    /// `ORDER BY rank` must sort by the **weighted** expression, not by FTS5's
+    /// own hidden `rank` column — which is bm25 with all weights 1.0 and would
+    /// still return every genuine hit, in a plausible order, with nothing to say
+    /// the weights had stopped applying.
+    ///
+    /// Asserted against both spellings computed directly, so it fails whichever
+    /// way a future edit breaks the alias resolution.
+    #[test]
+    fn the_returned_rank_is_the_weighted_bm25() {
+        let (_file, conn) = migrated();
+
+        let term = "quasarflux";
+        let mut d = doc("s", "/p");
+        d.title = format!("{term} in the title");
+        d.tool_text = "unrelated filler text making the documents differ".into();
+        replace(&conn, &d).expect("index");
+
+        let (weighted, unweighted): (f64, f64) = conn
+            .query_row(
+                "SELECT bm25(session_search, 8.0, 4.0, 2.0, 0.5),
+                        bm25(session_search, 1.0, 1.0, 1.0, 1.0)
+                   FROM session_search
+                  WHERE session_search MATCH ?1",
+                params![term],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("both spellings");
+        assert_ne!(
+            weighted, unweighted,
+            "the fixture must be able to tell the two apart"
+        );
+
+        let hits = search(&conn, term, 10).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(
+            hits[0].rank, weighted,
+            "search() must return the weighted score, not FTS5's default rank"
+        );
     }
 
     /// The one place the weights are spelled twice. `BM25_EXPR` goes into SQL
