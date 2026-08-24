@@ -423,6 +423,34 @@ pub fn run() {
                         }
                     });
 
+                    // The LLM gateway (#424). Spawned beside the integration
+                    // servers and for the same reasons — it binds a listener,
+                    // and the window must not wait on it.
+                    //
+                    // **The placement is load-bearing, not incidental.** This
+                    // must stay below `keys::install` and
+                    // `tokens::load_revoked` above: the gateway's auth
+                    // middleware reads both process-wide statics per request,
+                    // and a listener bound before the revoked set is loaded
+                    // would *accept a revoked token* for the length of that
+                    // window. `gateway::registry::start_if_enabled`'s doc
+                    // carries the argument, and
+                    // `a_gateway_start_requires_an_installed_keypair` in
+                    // `tests/gateway_engine.rs` is what fails if this call ever
+                    // moves above them.
+                    //
+                    // It reads one row and returns when the gateway is
+                    // disabled, which is the default — so an install that never
+                    // configures one pays a single `SELECT` at boot.
+                    let gateway_db = db.clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) =
+                            crate::gateway::registry::start_if_enabled(&gateway_db).await
+                        {
+                            log::warn!("the llm gateway failed to start: {e}");
+                        }
+                    });
+
                     // The task scheduler (#275): replaces the
                     // `initTaskScheduler` the Go server used to run at boot.
                     // Unlike the two above it is not spawned — `start` only

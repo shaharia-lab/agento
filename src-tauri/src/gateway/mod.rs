@@ -18,11 +18,27 @@
 //!
 //! # What exists so far
 //!
-//! **[`config`] only.** This is #422: the settings model and its SQLite
-//! storage, and nothing else. There is no listener, no router, no dispatch and
-//! no usage recording — those are #424 and #425, and nothing in the app reads
-//! these tables yet. The module is wired into the crate so the schema and the
-//! `ferrox-providers` dependency land, compile and are tested ahead of the
-//! engine that needs them, rather than arriving inside it.
+//! **The engine, as of #424.** [`config`] is #422's settings model and its
+//! SQLite storage; [`registry`], [`server`], [`dispatch`] and [`stream`] are
+//! the listener that reads it:
+//!
+//! | module | what it owns |
+//! |---|---|
+//! | [`config`] | the three tables, and the mapping onto `ferrox-providers`' own config types |
+//! | [`registry`] | the listener's lifecycle — start at boot, reload on a config write, and the *stored* [`Status`](registry::Status) a bind failure leaves behind |
+//! | [`server`] | the five routes, the `Host` allowlist, the `llm`-scope auth layer, and the per-surface error dialect |
+//! | [`dispatch`] | alias → ordered targets, retry on the same target, and the fallback walk |
+//! | [`stream`] | the SSE bytes of both surfaces, and the `anthropic-beta` merge |
+//!
+//! What is still absent: **usage recording** (#425 — `server`'s handlers log a
+//! line where the row will go), the **`/api/gateway/*` control API** (#426 —
+//! which is what will read [`registry::status`] and call
+//! [`registry::reload`]), and any **UI** (#427/#428). The gateway is disabled
+//! by default and costs nothing when off: `start_if_enabled` reads one row and
+//! returns.
 
 pub mod config;
+pub mod dispatch;
+pub mod registry;
+pub mod server;
+pub mod stream;
