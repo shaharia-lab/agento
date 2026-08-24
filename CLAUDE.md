@@ -213,7 +213,14 @@ src-tauri/src/
                  formats, so no /api seam and no parity machinery applies
     config.rs    the settings model, its three tables and the mapping onto
                  ferrox-providers' own config types (#422). Two projections:
-                 the public one never selects api_key. No listener yet (#424)
+                 the public one never selects api_key
+    registry.rs  the listener's lifecycle (#424) — integrations/registry.rs's
+                 shape, and the *stored* Status a bind failure leaves behind
+    server.rs    the five routes, the Host allowlist, the llm-scope auth layer
+                 (both header spellings), and the per-surface error dialect
+    dispatch.rs  alias → ordered targets, retry, and the fallback walk;
+                 is_retryable/should_failover copied from ferrox/src/retry.rs
+    stream.rs    the SSE bytes of both surfaces, and the anthropic-beta merge
   native/        ported endpoints (phase 2+)
     active_time.rs the capped-gap rule, shared by the scanner and the pipeline
     scanner/     the Claude session scanner (issue #270) — computes, never writes
@@ -2925,6 +2932,119 @@ inverse of how an ordinary timestamp would read. `google_oauth_token` maps it to
 **500 with a body produced here**. A failed OAuth flow must not answer from the
 stored token, because `authenticated: false` would be a plausible lie about a
 flow that actually errored.
+
+### The LLM gateway's engine (`src-tauri/src/gateway/`, #424)
+
+The second listener. It is **not** `proxy.rs` and **not** part of the `/api`
+seam: its own user-configured port, two third-party wire formats, no parity
+machinery, and — since every request it accepts spends the user's provider
+credits — a different threat model from anything else in the shell.
+
+`ferrox-providers` supplies every translation and every adapter. What is here is
+the listener, the auth, the routing table and the framing:
+`registry.rs` (lifecycle), `server.rs` (five routes, two layers),
+`dispatch.rs` (alias → targets, retry, failover), `stream.rs` (SSE bytes).
+It is **disabled by default** and costs one `SELECT` at boot when off.
+
+**Three rules that keep a permissive listener from being one:**
+
+- **`Scope::Llm`, verified with `token::verify_against`** — the pure
+  four-argument function, **not** `security::verify_request`, which derives a
+  required scope from an `/api` method and path. A `read` or `write` token is a
+  **403** here and an `llm` token is a 403 on `/api`: that disjointness (#423) is
+  the whole reason a third scope exists, and the *false* cells are what the tests
+  assert.
+- **No CORS layer, ever.** ferrox's own server mounts `CorsLayer::permissive()`,
+  which is right behind a network boundary and catastrophic on loopback — it
+  would let any page the user has open spend their provider credits *and read
+  the response*. The **`Host` allowlist** is the other half: preflight already
+  shuts a browser out of a `POST` carrying `Authorization`, but a DNS-rebinding
+  page reaches a loopback port with a *simple* request. `guards.rs::host_allowed`
+  is `pub(crate)` and shared rather than copied — an allowlist that exists twice
+  is one that gets widened once. `/healthz` is outside the auth layer and
+  **inside** this one.
+- **Errors in the client's dialect, never Agento's.** `error::openai_error_body`
+  on `/v1/*`, `error::anthropic_error_body` on `/anthropic/*`, picked by path
+  prefix so a route added under `/anthropic/` cannot forget. SDKs *branch* on
+  `error.type` — `authentication_error` versus `permission_error` drives real
+  retry behaviour — so this is behaviour, not wording.
+
+**Both header spellings.** OpenAI SDKs send `Authorization: Bearer`; the
+Anthropic SDK and Claude Code send `x-api-key`. Bearer wins a tie, and a useless
+`Authorization` (`Basic …`, an empty `Bearer `) must fall *through* to
+`x-api-key` rather than shadow it with `""`.
+
+**A bind failure is a stored value, not a log line.** `registry::Status` has a
+`BindFailed { port, error }` variant and is stored rather than derived from
+whether a handle exists, because that is what #426's status route reads. The
+collision is routine rather than exotic — a `~/.agento-desktop-dev` instance and
+an installed one read different databases but share the machine's ports — and
+without a stored status the second reports "not running" and offers a Start
+button that silently does nothing forever. It logs once at `warn` and does
+**not** retry another port: a gateway on a port the user did not configure is one
+every tool they set up is pointed away from.
+
+**Graceful shutdown comes from `claude/mcp.rs`, not from `proxy.rs`.** `proxy.rs`
+never stops — it is spawned once and process exit is its shutdown, so it has no
+`with_graceful_shutdown` to copy. This listener is torn down on every settings
+write, so a request in flight across a reload is ordinary. Same shape as #311's:
+a oneshot fired by `Drop`, awaited as `axum::serve`'s shutdown future. The
+generation counter is `integrations/registry.rs`' verbatim, for the same race — a
+`stop` landing mid-start must **drop** the handle, and dropping it is what closes
+a socket that would otherwise hold provider credentials for the life of the
+process.
+
+**`is_retryable` and `should_failover` differ by exactly one status, and they
+live in ferrox's *binary* crate** (`ferrox/src/retry.rs`), so they are copied
+rather than imported. An upstream **403** fails over *without* retrying: some
+providers report quota exhaustion with 403 rather than 429, and the same
+provider will keep answering 403 — while this gateway's own `ProxyError::Forbidden`
+must **not** fail over, or a client's bad token burns the next provider's quota.
+Only the *handshake* of a stream is retried; once chunks are flowing the head is
+committed and failing over would replay tokens the client has seen.
+
+**Every unbounded wait races the client's departure — `turn.rs`'s rule, one level
+down.** A failed `send` catches a client that left while a frame was being
+written, which is what happens when tokens are flowing; it is *not* what happens
+when the client leaves while the model is thinking, which is most of a request.
+There the loop is parked on `stream.next()`, nothing is being sent, and the
+disconnect is invisible — the task parks forever holding the upstream connection,
+one leak per abandoned request. `stream::next_or_disconnect` is the
+`tokio::select!` against `Sender::closed`, and
+`a_disconnect_mid_stream_tears_down_the_upstream_request` is what fails on the
+revert. It asserts on the **upstream** side, because that is the only place the
+leak is observable.
+
+**`Next::Ended` and `Next::Disconnected` are separate variants deliberately.**
+Collapsing them into one `None` loses `data: [DONE]` on a clean stream — and,
+worse in the other direction, would *send* one on an abandoned stream, where
+`[DONE]` means "the completion finished" and a client would record a truncated
+answer as a whole one. Both halves were caught by the suite, in both directions.
+
+**The frames are bytes, not `axum::response::sse::Event`.** The plan was
+`impl From<SseFrame> for Event`; both types are foreign, so the orphan rule
+refuses it. Bytes are the better answer anyway — the acceptance criteria are byte
+properties, and `axum` writes `event:name` with no space where every Anthropic
+fixture and ferrox's own API reference show `event: name`. Both parse; this emits
+the documented spelling.
+
+**Ordering: the listener starts strictly after `keys::install` and
+`tokens::load_revoked`.** Bound before the first, every client gets a 401 until
+the key lands — visible, and merely broken. Bound before the second, a token the
+user **revoked is honoured** for the length of that window, and nothing reports
+it. `a_gateway_start_requires_an_installed_keypair` asserts the order of the
+three calls in `lib.rs` against its source, deliberately: the consequence is a
+*window* rather than a state, so a test that asked the running app would have to
+win that race to see anything.
+
+Two smaller notes. `tokens::touch` already throttles to one write a minute and
+spawns its own `db::blocking`, so calling it from the middleware is not a
+database call on the request path and must **not** be wrapped a second time. And
+the `anthropic-beta` header and the body's `betas` array are merged into one
+comma-separated header value, header first, with `raw_anthropic_body` forwarding
+the client's document verbatim — both copied from
+`ferrox/src/handlers/anthropic_messages.rs`, and Claude Code compatibility
+depends on them.
 
 ### Not implemented, on purpose
 

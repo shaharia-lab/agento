@@ -266,7 +266,12 @@ fn request_host(headers: &HeaderMap, uri: &Uri) -> String {
 /// `localhost:1420`. Reproducing either branch would widen the guard past
 /// anything this app can be reached at, which is the one direction a guard must
 /// not move in.
-fn host_allowed(raw_host: &str) -> bool {
+///
+/// `pub(crate)` for a second caller since #424: the LLM gateway's listener has
+/// the same property (`127.0.0.1` unconditionally, no public name) and so needs
+/// the same allowlist. It is shared rather than copied deliberately — an
+/// allowlist that exists twice is one that gets widened once.
+pub(crate) fn host_allowed(raw_host: &str) -> bool {
     if raw_host.is_empty() {
         // HTTP/1.0 with no Host. Nothing legitimate reaches the API this way.
         return false;
