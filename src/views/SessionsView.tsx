@@ -28,6 +28,7 @@ import {
   usd,
 } from "../lib/format";
 import { Icon } from "../lib/icons";
+import { snippetParts, snippetText } from "../lib/snippet";
 import { sessionAgentName } from "../lib/sessionAgent";
 import { openExternal } from "../lib/tauri";
 import {
@@ -52,9 +53,10 @@ import "../styles/sessions.css";
 
 const PAGE_SIZE = 50;
 
-type Sort = "recent" | "cost" | "tokens" | "duration" | "messages";
+type Sort = "recent" | "cost" | "tokens" | "duration" | "messages" | "relevance";
 
 const SORTS: { value: Sort; label: string }[] = [
+  { value: "relevance", label: "Relevance" },
   { value: "recent", label: "Recent" },
   { value: "cost", label: "Cost" },
   { value: "tokens", label: "Tokens" },
@@ -64,15 +66,44 @@ const SORTS: { value: Sort; label: string }[] = [
 
 interface Filters {
   project: string;
-  sort: Sort;
+  /**
+   * The sort the user picked, or `""` while it follows the server's default.
+   *
+   * The empty value is what makes "reflect the server default" possible without
+   * a second source of truth: the effective sort is [`resolveSort`], a mirror of
+   * `sessions/query.rs::resolve_sort`, so the dropdown's label always states
+   * what the server will actually do.
+   */
+  sort: Sort | "";
   favorites: boolean;
 }
 
 const INITIAL_FILTERS: Filters = {
   project: "",
-  sort: "recent",
+  sort: "",
   favorites: false,
 };
+
+/**
+ * The sort a request will really run under — `sessions/query.rs::resolve_sort`,
+ * mirrored so the control cannot claim an ordering the server would not use.
+ *
+ * Two rules, both the server's:
+ *
+ * * **No explicit choice plus a search term is `relevance`.** Somebody who typed
+ *   a query wants the best match first; somebody who did not has no ranking to
+ *   sort by. An explicit pick always wins, so a user who chose "Recent" keeps it
+ *   while typing.
+ * * **`relevance` with no search term is `recent`**, because without a `MATCH`
+ *   there is no rank. That is also what restores the pre-search ordering when
+ *   the query is cleared: the relevance the search selected simply stops
+ *   applying, and an explicit pick made before the search is still in `filters`.
+ */
+function resolveSort(chosen: Sort | "", searching: boolean): Sort {
+  if (!chosen) return searching ? "relevance" : "recent";
+  if (chosen === "relevance" && !searching) return "recent";
+  return chosen;
+}
 
 /** Rows accumulated across pages, tagged with the filter set that produced them. */
 interface Loaded {
@@ -154,6 +185,38 @@ function modeBadge(s: ClaudeSessionSummary): { label: string; tone: string } | n
 }
 
 /**
+ * The second line under a row's title: why this row matched.
+ *
+ * Rendered only for a **content** match — a row that matched on its id, its
+ * project path or its title carries no snippet, and gets no extra line, which
+ * is what keeps an ordinary listing at its 28px row height.
+ *
+ * **The markers are the only markup honoured.** Every segment goes through JSX
+ * as a text child, so a transcript containing `<script>` renders as the literal
+ * characters; nothing here builds an HTML string and nothing may reach for
+ * `dangerouslySetInnerHTML`. `snippetParts` also strips any stray sentinel, so
+ * a malformed snippet cannot leak a control character into the cell.
+ */
+function MatchSnippet({ snippet }: { snippet?: string }) {
+  const raw = snippet ?? "";
+  const parts = useMemo(() => snippetParts(raw), [raw]);
+  if (parts.length === 0) return null;
+  return (
+    <span className="sess-snippet" title={snippetText(raw)}>
+      {parts.map((p, i) =>
+        p.hit ? (
+          <mark className="sess-snippet__hit" key={i}>
+            {p.text}
+          </mark>
+        ) : (
+          <Fragment key={i}>{p.text}</Fragment>
+        )
+      )}
+    </span>
+  );
+}
+
+/**
  * A scan that has never run reports a zero timestamp, which must read as
  * "not indexed yet" rather than as an empty index.
  */
@@ -169,11 +232,18 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   const q = useDebounced(query, 250);
   const [filters, setFilters] = useState<Filters>(INITIAL_FILTERS);
 
-  // Every filter and the sort belong to the key: the keyset cursor encodes the
-  // sort, so re-using one across a change is a 400 from the server.
+  // The debounced term, not the raw one: gating relevance on what the user is
+  // still typing would flicker the option in and out per keystroke and refetch
+  // the list ahead of the debounce it exists to respect.
+  const searching = q.trim() !== "";
+  const sort = resolveSort(filters.sort, searching);
+
+  // Every filter and the *resolved* sort belong to the key: the keyset cursor
+  // encodes the sort, so re-using one across a change is a 400 from the server —
+  // and it is the resolved value the request carries.
   const listKey = useMemo(
-    () => JSON.stringify({ q, ...filters }),
-    [q, filters]
+    () => JSON.stringify({ q, ...filters, sort }),
+    [q, filters, sort]
   );
 
   const [paging, setPaging] = useState({ key: "", cursor: "" });
@@ -202,7 +272,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
       api.get<SessionPage>(
         `/claude-sessions${qs({
           ...filterParams,
-          sort: filters.sort,
+          sort,
           limit: PAGE_SIZE,
           cursor: cursor || undefined,
         })}`,
@@ -487,11 +557,23 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
         ) : (
           <>
         <div className="toolbar">
-          <div style={{ width: 260, display: "flex" }}>
+          {/* The placeholder carries the one piece of query syntax that is not
+              guessable — words are AND'ed, so quoting is the only way to ask
+              for a phrase — and the tooltip carries the rest. It sits on the
+              wrapper because `Search` takes no `title`, and widening a shared
+              component for one caller's hint is the larger change. */}
+          <div
+            style={{ width: 260, display: "flex" }}
+            title={
+              "Words are matched together, in any order. " +
+              'Wrap text in "double quotes" to match it as a phrase. ' +
+              "The last word matches as a prefix while you type."
+            }
+          >
             <Search
               value={query}
               onChange={onQuery}
-              placeholder="Search titles and messages"
+              placeholder={'Search — "quotes" match a phrase'}
             />
           </div>
 
@@ -516,15 +598,21 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             ]}
           />
 
+          {/* Relevance is offered only while a term is active, because without
+              a MATCH there is no rank — the server would answer `recent` and
+              the label would be a lie. The value shown is the resolved sort,
+              so "Sort: Relevance" appears the moment a search selects it. */}
           <Dropdown
             small
             className="sess-select"
             label={`Sort: ${
-              SORTS.find((s) => s.value === filters.sort)?.label ?? "Recent"
+              SORTS.find((s) => s.value === sort)?.label ?? "Recent"
             }`}
-            value={filters.sort}
+            value={sort}
             onChange={(v) => patchFilters({ sort: v as Sort })}
-            options={SORTS.map((s) => ({ value: s.value, label: s.label }))}
+            options={SORTS.filter(
+              (s) => s.value !== "relevance" || searching
+            ).map((s) => ({ value: s.value, label: s.label }))}
           />
 
           <button
@@ -685,6 +773,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                                 {s.display_title || "Untitled session"}
                               </span>
                             </span>
+                            <MatchSnippet snippet={s.match_snippet} />
                           </td>
                           <td title={s.project_path}>
                             <span

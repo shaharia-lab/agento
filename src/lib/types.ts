@@ -296,6 +296,16 @@ export interface ClaudeSessionSummary {
   subagent_cost_by_model?: Record<string, SessionCost>;
   unpriced_models?: string[];
   unpriced_tokens?: number;
+  /**
+   * Why this row matched, when the match came through the content index (#437).
+   * FTS5's `snippet()` over the highest-matching column, with every matched
+   * term wrapped in the U+0001/U+0002 markers `lib/snippet.ts` splits on.
+   *
+   * Last, and optional, because the server omits the key entirely when it is
+   * empty — which is every response that is not a search, *and* a search row
+   * that matched only on its id, path or title. Default it (`?? ""`).
+   */
+  match_snippet?: string;
 }
 
 /** One content block of an assistant turn, normalized by the scanner. */

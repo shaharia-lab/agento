@@ -83,6 +83,34 @@
   color: var(--amber);
   flex: none;
 }
+
+/* The "why this row matched" line (#438). It is a second line inside the title
+   cell, so it only exists on a content match — an ordinary listing keeps the
+   28px row and this rule never applies. `.table tbody td` already clips the
+   cell, but its `text-overflow` belongs to the cell's own inline box, so the
+   snippet needs its own block-level clamp to ellipsise rather than be cut. */
+.sess-snippet {
+  display: block;
+  margin-top: 1px;
+  font-size: var(--text-sm);
+  color: var(--fg-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A tint rather than a colour: `.table tbody tr.is-selected td *` forces
+   `color: inherit !important` on a focused row, so a foreground-only highlight
+   would vanish exactly where the user is looking. Same reasoning — and the same
+   shape — as `.badge` and `.meter` in views.css. */
+.sess-snippet__hit {
+  background: var(--accent-soft);
+  color: inherit;
+  border-radius: var(--r-sm);
+  padding: 0 1px;
+}
+.window--focused .table tbody tr.is-selected .sess-snippet__hit {
+  background: rgba(255, 255, 255, 0.28);
+}
 .sess-dim {
   color: var(--fg-quaternary);
   font-size: var(--text-sm);
