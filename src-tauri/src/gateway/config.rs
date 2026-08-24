@@ -1004,6 +1004,63 @@ mod tests {
         assert_eq!(d.timeouts.idle_secs, TimeoutsConfig::default().idle_secs);
     }
 
+    /// **A database this build was not compiled against is refused by all three
+    /// writes**, which is what `migrate::verify` is for.
+    ///
+    /// Added in review, because the guard itself is invisible without it:
+    /// deleting the three `verify` calls left every other test in this module
+    /// green. That is the shape a guard silently stops being applied in.
+    #[test]
+    fn a_schema_this_build_does_not_write_against_is_refused() {
+        let db = scratch_db();
+        {
+            let conn = Connection::open(db.path()).expect("open");
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
+                rusqlite::params![
+                    crate::native::migrate::expected_version() + 1,
+                    gotime::now_go_text()
+                ],
+            )
+            .expect("bump");
+        }
+
+        let settings = GatewaySettings::default();
+        assert!(
+            store_settings(db.path(), &settings).is_err(),
+            "the settings write must refuse a newer schema"
+        );
+        assert!(
+            store_provider(
+                db.path(),
+                &ProviderInput {
+                    id: "p1",
+                    name: "prod",
+                    provider_type: ProviderType::Anthropic,
+                    api_key: "sk-secret",
+                    base_url: "",
+                    timeouts: Timeouts::default(),
+                    enabled: true,
+                },
+            )
+            .is_err(),
+            "the provider write must refuse a newer schema"
+        );
+        assert!(
+            store_alias(
+                db.path(),
+                &ModelAlias {
+                    id: "a1".into(),
+                    alias: "claude-sonnet".into(),
+                    routing: Routing::default(),
+                    enabled: true,
+                }
+            )
+            .is_err(),
+            "the alias write must refuse a newer schema"
+        );
+    }
+
     /// A temp-file database with the schema applied.
     ///
     /// A **file**, not `:memory:`, and that is the point: the public write
