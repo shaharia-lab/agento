@@ -1005,26 +1005,44 @@ mod retention_tests {
     /// because it never gets that far; remove the short-circuit and this fails
     /// with `attempt to write a readonly database`.
     ///
-    /// That the write path *is* still reached when there are rows is
-    /// `a_prune_deletes_strictly_older_rows_and_keeps_the_boundary`'s job, so
-    /// this cannot pass by the short-circuit swallowing every prune.
+    /// The second half is what keeps that true. A permission-based test
+    /// discriminates only while the process cannot ignore permission bits — as
+    /// root it would silently stop failing on the revert, which is the exact
+    /// class of "a test that can stop failing" this issue already fixed twice.
+    /// So the *non-empty* case is asserted on the same read-only file: if the
+    /// bits are being bypassed, that assertion goes red loudly rather than the
+    /// first one going quietly green.
     #[test]
     fn an_empty_log_is_pruned_without_opening_a_write_connection() {
-        let file = migrated();
-        let mut perms = std::fs::metadata(file.path()).expect("stat").permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(file.path(), perms).expect("chmod");
+        let readonly = |path: &std::path::Path, on: bool| {
+            let mut perms = std::fs::metadata(path).expect("stat").permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(on);
+            std::fs::set_permissions(path, perms).expect("chmod");
+        };
 
-        let pruned = prune(file.path(), 90);
+        let empty = migrated();
+        readonly(empty.path(), true);
+        let pruned = prune(empty.path(), 90);
 
-        // Restored before the assertion, so a failing assert does not also leave
-        // an undeletable tempfile behind and turn one red test into two.
-        let mut perms = std::fs::metadata(file.path()).expect("stat").permissions();
-        #[allow(clippy::permissions_set_readonly_false)]
-        perms.set_readonly(false);
-        std::fs::set_permissions(file.path(), perms).expect("chmod");
+        // A file with something to delete, made read-only *after* the row lands.
+        let full = migrated();
+        row_at(full.path(), "ancient", Utc.timestamp_opt(0, 0).unwrap());
+        readonly(full.path(), true);
+        let refused = prune(full.path(), 90);
+
+        // Restored before either assertion, so a failure does not also leave
+        // undeletable tempfiles behind and turn one red test into three.
+        readonly(empty.path(), false);
+        readonly(full.path(), false);
 
         assert_eq!(pruned.expect("an empty log needs no write lock"), 0);
+        assert!(
+            refused.is_err(),
+            "a non-empty log must still reach the write path — if this passes, \
+             the read-only bit is not discriminating and the assertion above \
+             proves nothing"
+        );
     }
 
     /// A horizon this build cannot honour must not become a cutoff that
