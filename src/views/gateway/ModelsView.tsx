@@ -134,14 +134,21 @@ export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean })
             screen to say why. */}
         {(aliases.error || providers.error) && (
           <div className="scroll" style={{ padding: "var(--sp-8)" }}>
-            {[aliases.error, providers.error]
-              .filter((e): e is string => !!e)
-              .map((message) => (
-                <div className="msgline msgline--error" key={message}>
+            {(
+              [
+                ["aliases", aliases.error],
+                ["providers", providers.error],
+              ] as const
+            ).map(([source, message]) =>
+              message ? (
+                // Keyed by which read failed, not by the text — two requests
+                // refused for the same reason carry the same message.
+                <div className="msgline msgline--error" key={source}>
                   <Icon name="alert" size={13} className="msgline__icon" />
                   <span>{message}</span>
                 </div>
-              ))}
+              ) : null
+            )}
           </div>
         )}
         {!aliases.error && selection.kind === "new" && (

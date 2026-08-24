@@ -135,14 +135,21 @@ export function GatewayOverviewView({
                 nastier of the two: `port` would fall back to 0 and the snippets
                 below would be replaced by "No port configured", which blames
                 the user's configuration for a failed request. */}
-            {[status.error, settings.error]
-              .filter((e): e is string => !!e)
-              .map((message) => (
-                <div className="msgline msgline--error" key={message}>
+            {(
+              [
+                ["status", status.error],
+                ["settings", settings.error],
+              ] as const
+            ).map(([source, message]) =>
+              message ? (
+                // Keyed by which read failed, not by the text — two requests
+                // refused for the same reason carry the same message.
+                <div className="msgline msgline--error" key={source}>
                   <Icon name="alert" size={13} className="msgline__icon" />
                   <span>{message}</span>
                 </div>
-              ))}
+              ) : null
+            )}
 
             {/* ── Status ──────────────────────────────────────────────────── */}
             <div className="formsec">
