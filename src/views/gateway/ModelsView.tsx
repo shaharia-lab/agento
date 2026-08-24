@@ -128,12 +128,20 @@ export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean })
       <Splitter variable="--list-w" min={240} max={460} />
 
       <div className="pane-detail">
-        {aliases.error && (
+        {/* The provider read is surfaced too, and it is the one that would
+            otherwise be silent: a failed fetch leaves `providerNames` empty,
+            which disables "Add alias" and every provider picker with nothing on
+            screen to say why. */}
+        {(aliases.error || providers.error) && (
           <div className="scroll" style={{ padding: "var(--sp-8)" }}>
-            <div className="msgline msgline--error">
-              <Icon name="alert" size={13} className="msgline__icon" />
-              <span>{aliases.error}</span>
-            </div>
+            {[aliases.error, providers.error]
+              .filter((e): e is string => !!e)
+              .map((message) => (
+                <div className="msgline msgline--error" key={message}>
+                  <Icon name="alert" size={13} className="msgline__icon" />
+                  <span>{message}</span>
+                </div>
+              ))}
           </div>
         )}
         {!aliases.error && selection.kind === "new" && (
@@ -244,6 +252,16 @@ function AliasForm({
       (t) => t.provider !== "" && t.model_id.trim() !== ""
     );
   const canSave = changed && complete;
+
+  /** Back out of an edit in one click, the way every other form here does. */
+  function revert() {
+    if (!alias) return;
+    setName(alias.alias);
+    setEnabled(alias.enabled);
+    setTargets(alias.routing.targets ?? []);
+    setFallbacks(alias.routing.fallbacks ?? []);
+    setError(undefined);
+  }
 
   async function save() {
     setBusy(true);
@@ -393,9 +411,13 @@ function AliasForm({
                   ? "Add at least one target."
                   : "Every target needs a provider and a model id."}
           </span>
-          {onCancel && (
+          {onCancel ? (
             <button className="btn" onClick={onCancel} disabled={busy}>
               Cancel
+            </button>
+          ) : (
+            <button className="btn" onClick={revert} disabled={busy}>
+              Revert
             </button>
           )}
           <button

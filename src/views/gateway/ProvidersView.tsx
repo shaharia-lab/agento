@@ -262,6 +262,18 @@ function ProviderForm({
   const hasKey = apiKey.trim() !== "";
   const canSave = changed && name.trim() !== "" && hasKey;
 
+  /** Back out of an edit in one click, the way every other form here does. */
+  function revert() {
+    if (!provider) return;
+    setName(provider.name);
+    setType(provider.type);
+    setBaseUrl(provider.base_url);
+    setEnabled(provider.enabled);
+    setTimeouts(provider.timeouts);
+    setApiKey("");
+    setError(undefined);
+  }
+
   async function save() {
     setBusy(true);
     setError(undefined);
@@ -478,9 +490,13 @@ function ProviderForm({
                 ? "A name is required."
                 : "Enter the API key to save."}
           </span>
-          {onCancel && (
+          {onCancel ? (
             <button className="btn" onClick={onCancel} disabled={busy}>
               Cancel
+            </button>
+          ) : (
+            <button className="btn" onClick={revert} disabled={busy}>
+              Revert
             </button>
           )}
           <button

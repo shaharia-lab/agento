@@ -131,12 +131,18 @@ export function GatewayOverviewView({
 
         <div className="scroll" style={{ flex: 1, padding: "var(--sp-8)" }}>
           <div className="form">
-            {status.error && (
-              <div className="msgline msgline--error">
-                <Icon name="alert" size={13} className="msgline__icon" />
-                <span>{status.error}</span>
-              </div>
-            )}
+            {/* Both reads are surfaced. A swallowed settings error is the
+                nastier of the two: `port` would fall back to 0 and the snippets
+                below would be replaced by "No port configured", which blames
+                the user's configuration for a failed request. */}
+            {[status.error, settings.error]
+              .filter((e): e is string => !!e)
+              .map((message) => (
+                <div className="msgline msgline--error" key={message}>
+                  <Icon name="alert" size={13} className="msgline__icon" />
+                  <span>{message}</span>
+                </div>
+              ))}
 
             {/* ── Status ──────────────────────────────────────────────────── */}
             <div className="formsec">
@@ -237,8 +243,12 @@ export function GatewayOverviewView({
               {snippets.length === 0 ? (
                 <Empty
                   icon="zap"
-                  title="No port configured"
-                  text="Set a port in Gateway Settings and the snippets appear here."
+                  title={settings.error ? "Settings unavailable" : "No port configured"}
+                  text={
+                    settings.error
+                      ? "The port could not be read, so there is nothing to build a snippet from."
+                      : "Set a port in Gateway Settings and the snippets appear here."
+                  }
                 />
               ) : (
                 snippets.map((s) => (
