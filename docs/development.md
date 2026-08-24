@@ -347,8 +347,22 @@ format, the JWKS document or the signing key.
 **Two 4xx to tell apart.** A **401** is "you have not proved who you are" —
 missing, expired, revoked, or signed by a key this install no longer uses. A
 **403** with `this token's scope does not permit this request` is "you have, and
-a `read` token cannot do that"; retrying will not help, and the fix is a `write`
-token or a different request.
+this credential does not reach that"; retrying will not help. There are two ways
+to earn it, and they have different fixes:
+
+- a **`read`** token against a state-changing method, or against
+  `/api/security/*` (which needs `write` whatever the method) — the fix is a
+  `write` token or a different request;
+- an **`llm`** token against *anything* under `/api`. That scope is the LLM
+  gateway's data plane and is disjoint from `read`/`write` by design, so no
+  `/api` route accepts it and a bigger `/api` token is not the fix — you want a
+  token of the right kind for the surface you are calling. The reverse holds
+  too: `read` and `write` tokens are refused by the gateway.
+
+That last one is worth knowing before it bites in dev: the debug build's
+`api-token` file holds a **`write`** token, so it will not work against the
+gateway. Mint an `llm` one through `POST /api/security/tokens` (or
+Settings → Security) first.
 
 **Regenerating the key in Settings → Security invalidates every token at once**,
 the dev file's included, which is exactly what it is for. The app window recovers

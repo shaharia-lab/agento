@@ -902,6 +902,67 @@ pub(crate) mod tests {
         }
     }
 
+    /// **...and an `llm` token serves none of them** (#423).
+    ///
+    /// The gateway data plane's scope is disjoint from `read`/`write`, so a
+    /// credential minted for a tool config reaches nothing on `/api` — not the
+    /// safe methods, not the state-changing ones, and not the security routes.
+    /// It is a **403**: the signature verified and the token is exactly what it
+    /// claims to be, so retrying cannot help.
+    ///
+    /// This is the half of the disjointness that lives outside `Scope::covers`.
+    /// That function says `llm` grants nothing; this says the guard actually
+    /// asks it, on every method, rather than short-circuiting somewhere first.
+    #[test]
+    fn an_llm_token_serves_nothing_on_the_api() {
+        let llm = mint(Scope::Llm);
+        for method in [
+            Method::GET,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+        ] {
+            for path in ["/api/agents", "/api/security/tokens", "/api/chats"] {
+                assert_eq!(
+                    reject(&authed_request(
+                        method.clone(),
+                        path,
+                        "localhost",
+                        "application/json",
+                        Some(&llm)
+                    )),
+                    Some(INSUFFICIENT_SCOPE),
+                    "an llm token must not serve {method} {path}"
+                );
+            }
+        }
+    }
+
+    /// The converse, and the reason the scope exists at all: the credentials
+    /// that *do* serve `/api` must not reach the gateway.
+    ///
+    /// Asserted at the lattice rather than through `reject`, because no route
+    /// here requires [`Scope::Llm`] — `required_scope` never returns it, which
+    /// is deliberate and documented at that function. So this is the only place
+    /// in the guard's own suite that can state the direction.
+    #[test]
+    fn no_api_credential_reaches_the_gateway() {
+        assert!(!Scope::Write.covers(Scope::Llm));
+        assert!(!Scope::Read.covers(Scope::Llm));
+        for method in [Method::GET, Method::POST, Method::DELETE] {
+            for path in ["/api/agents", "/api/security/tokens", "/api/chats/x"] {
+                assert_ne!(
+                    security::required_scope(&method, path),
+                    Scope::Llm,
+                    "no /api route may require the gateway's scope"
+                );
+            }
+        }
+    }
+
     /// The one route family where the scope is not a function of the method:
     /// a `read` token may not enumerate the machine's credentials.
     #[test]

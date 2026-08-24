@@ -383,6 +383,38 @@ mod tests {
         assert!(get(&conn, "nope").expect("get").is_none());
     }
 
+    /// **Every scope stores and lists, including `llm`** (#423).
+    ///
+    /// The column is free-text and was already wide enough, which is why the
+    /// gateway scope needed no migration — but "wide enough" is a claim about
+    /// the schema, and this is what checks it against the code that writes and
+    /// reads the column. A scope that mints and then lists as something else
+    /// would show the wrong badge in the Security tab and, worse, revoke the
+    /// wrong thing.
+    #[test]
+    fn every_scope_round_trips_through_the_column() {
+        let conn = schema();
+        for (id, scope) in [
+            ("t-read", Scope::Read),
+            ("t-write", Scope::Write),
+            ("t-llm", Scope::Llm),
+        ] {
+            add(&conn, id, "tool config", scope);
+            let row = get(&conn, id).expect("get").expect("row");
+            assert_eq!(
+                row.scope,
+                scope.as_str(),
+                "{scope:?} must read back as its own wire spelling"
+            );
+            assert_eq!(
+                Scope::parse(&row.scope),
+                Some(scope),
+                "and must parse back to the same variant"
+            );
+        }
+        assert_eq!(list(&conn).expect("list").len(), 3);
+    }
+
     /// **Every timestamp on the wire is RFC 3339**, not the `time.Time.String()`
     /// text the column holds.
     ///

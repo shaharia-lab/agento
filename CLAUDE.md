@@ -368,7 +368,24 @@ Four consequences worth knowing before debugging anything:
   malformed, expired, revoked, signed by a superseded key. 403 with `this
   token's scope does not permit this request` means it did, and the token is
   `read`-scoped against a state-changing method (or against `/api/security/*`,
-  which needs `write` whatever the method). Retrying will not help.
+  which needs `write` whatever the method), **or it is `llm`-scoped and on
+  `/api` at all**. Retrying will not help.
+- **There are three scopes, and the third is not on the ladder** (#423).
+  `read` < `write` is a hierarchy; **`llm` is disjoint from both**. It is the LLM
+  gateway's data-plane credential: `write` does **not** cover it, `llm` covers
+  nothing on `/api`, and `required_scope` never returns it — those two halves
+  together are what make it disjoint, so neither can be relaxed alone. The
+  reasoning is that a gateway token is pasted into tool configs in plaintext
+  (`OPENAI_API_KEY`, `ANTHROPIC_AUTH_TOKEN`), where `write` would be arbitrary
+  command execution and `read` would be every chat transcript; and conversely a
+  credential for spending provider credits has no business reading chat history.
+  `Scope::covers` is deliberately **enumerated rather than wildcarded** — it was
+  `(Write, _) | (Read, Read)`, and adding a variant under that wildcard would
+  have made `write` a gateway credential silently, with every test still green.
+  Do not reintroduce a wildcard there.
+  One dev consequence: the debug build's `api-token` file holds a **`write`**
+  token, so it will *not* work against the gateway — mint an `llm` one via
+  `POST /api/security/tokens` first.
 - **`api.ts` retries a 401 exactly once**, re-invoking `host_info` for a fresh
   token first. That is what makes a keypair regenerate recoverable without a
   restart, and the bound is structural rather than a counter — see `withAuth`,
