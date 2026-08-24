@@ -58,6 +58,7 @@ interface CreatedToken extends TokenRow {
 const SCOPES = [
   { value: "read", label: "Read only" },
   { value: "write", label: "Read and write" },
+  { value: "llm", label: "LLM gateway" },
 ];
 
 /**
@@ -80,6 +81,42 @@ const WRITE_WARNING =
 const READ_WARNING =
   "A read token can read every chat transcript, agent system prompt and " +
   "integration list on this machine. It cannot change anything.";
+
+/**
+ * ...and `llm` is the one whose cost is money rather than access (#423).
+ *
+ * Says both halves, because both are the point: it spends real provider credits,
+ * and it reaches nothing else. A gateway token is meant to be pasted into tool
+ * configs where it sits in plaintext, so the honest thing to state is the actual
+ * ceiling rather than "limited access".
+ */
+const LLM_WARNING =
+  "An LLM gateway token can spend your configured LLM provider credits, with " +
+  "no spending limit of its own. It cannot read or change anything in Agento.";
+
+/**
+ * The capability note shown under the scope picker.
+ *
+ * A lookup rather than a ternary: at two scopes a ternary read fine, at three it
+ * would nest, and the next scope would nest it again. An unknown value falls
+ * back to the narrowest copy rather than to nothing, so a scope this build does
+ * not know is never described as harmless.
+ */
+const SCOPE_WARNINGS: Record<string, string> = {
+  read: READ_WARNING,
+  write: WRITE_WARNING,
+  llm: LLM_WARNING,
+};
+
+/**
+ * The badge class per scope. `write` is amber because it is the dangerous one;
+ * `llm` gets its own colour because three scopes reading as two visuals is how a
+ * gateway token gets mistaken for a read token at a glance.
+ */
+const SCOPE_BADGES: Record<string, string> = {
+  write: "badge badge--amber",
+  llm: "badge badge--purple",
+};
 
 export function SecurityPane() {
   const host = useHostInfo();
@@ -207,13 +244,15 @@ export function SecurityPane() {
 
         <FormRow
           label="Regenerate"
-          help="Creates a new keypair. Every token ever issued stops working immediately, including this window's — which recovers on its own."
+          help="Creates a new keypair. Every token ever issued stops working immediately. This window's recovers on its own; anything else holding one — a script, or a tool configured against the LLM gateway — starts getting 401s with no other signal and needs a new token issued by hand."
         >
           {confirmRegenerate ? (
             <div className="row">
               <span className="confirm" style={{ flex: 1 }}>
                 Replace the signing key? Every issued token stops working and
-                cannot be restored.
+                cannot be restored — including LLM gateway tokens, so any tool
+                configured against the gateway stops until you issue it a new
+                one.
               </span>
               <button
                 className="btn btn--ghost"
@@ -303,7 +342,7 @@ export function SecurityPane() {
 
         <FormRow
           label="Scope"
-          help={scope === "write" ? WRITE_WARNING : READ_WARNING}
+          help={SCOPE_WARNINGS[scope] ?? READ_WARNING}
         >
           <Dropdown value={scope} options={SCOPES} onChange={setScope} />
         </FormRow>
@@ -383,13 +422,7 @@ export function SecurityPane() {
                     {t.name}
                   </td>
                   <td>
-                    <span
-                      className={
-                        t.scope === "write"
-                          ? "badge badge--amber"
-                          : "badge"
-                      }
-                    >
+                    <span className={SCOPE_BADGES[t.scope] ?? "badge"}>
                       {t.scope}
                     </span>
                   </td>
