@@ -161,8 +161,23 @@ pub fn match_sql() -> &'static str {
 /// Delete-then-insert rather than an upsert: an FTS5 table has no unique index
 /// to conflict on, so `ON CONFLICT` has nothing to name. The two statements are
 /// not atomic on their own — the caller's transaction is what makes them one.
+///
+/// **The delete is the expensive half** — see [`delete`] — so a caller that has
+/// just emptied the table has no reason to pay it. That is what [`insert`] is
+/// for, and why a full rebuild uses [`delete_all`] plus `insert` rather than
+/// `replace` per session.
 pub fn replace(conn: &Connection, doc: &SearchDoc) -> Result<(), String> {
     delete(conn, &doc.session_id, &doc.project_path)?;
+    insert(conn, doc)
+}
+
+/// Add a row, without first removing one for the same pair.
+///
+/// **Only safe where the caller knows no row for this pair exists** — after
+/// [`delete_all`], which is the rebuild path. FTS5 has no unique index, so a
+/// second row for the same key is not refused: it is a duplicate, and the pair
+/// would then return two hits and two `delete`s' worth of content for ever.
+pub fn insert(conn: &Connection, doc: &SearchDoc) -> Result<(), String> {
     conn.execute(
         "INSERT INTO session_search
              (title, user_text, assistant_text, tool_text, session_id, project_path)
@@ -185,6 +200,21 @@ pub fn replace(conn: &Connection, doc: &SearchDoc) -> Result<(), String> {
 /// Keyed on the pair. A claim shift moves a transcript to a different path and
 /// is an **update**, not a deletion (#245), so the caller decides what is gone;
 /// this only removes what it is told to.
+///
+/// **This scans, and the cost grows with the corpus.** FTS5's `xBestIndex`
+/// accepts only `rowid` and `MATCH`, so a predicate over the UNINDEXED key
+/// columns cannot use an index — SQLite answers `SCAN session_search VIRTUAL
+/// TABLE INDEX 0:` — and a content-storing table materializes each scanned row
+/// to serve it. Measured at ~9.5 ms against a 17 MB index and ~63 ms against a
+/// 176 MB one, per call.
+///
+/// Two consequences the callers are built around:
+///
+/// * A **rebuild must not call this per session** — 1,178 scans of a table that
+///   grows with every insert is quadratic. [`delete_all`] once, then [`insert`].
+/// * On the incremental path it is one scan per *changed* session, which is what
+///   #433 signed up for and what #439 owns measuring. Do not add a caller that
+///   turns it back into a per-corpus loop.
 pub fn delete(conn: &Connection, session_id: &str, project_path: &str) -> Result<(), String> {
     conn.execute(
         "DELETE FROM session_search WHERE session_id = ?1 AND project_path = ?2",
@@ -241,7 +271,9 @@ pub fn delete_orphans(conn: &Connection) -> Result<usize, String> {
 ///
 /// Missing metadata row reads as 0 — "nothing indexed" — which is the same
 /// answer migration 33's column default gives an upgraded database, and is what
-/// makes a first index and a rebuild one code path.
+/// makes a first index and a rebuild one code path. The `COALESCE` is belt and
+/// braces: migration 33 declares the column `NOT NULL DEFAULT 0`, so it can only
+/// fire against a database something else has altered.
 pub fn stored_version(conn: &Connection) -> Result<i64, String> {
     conn.query_row(
         "SELECT COALESCE(search_index_version, 0) FROM claude_cache_metadata WHERE id = 1",
@@ -258,9 +290,16 @@ pub fn stored_version(conn: &Connection) -> Result<i64, String> {
 ///
 /// Written **only after** a rebuild has covered the whole corpus, never before:
 /// a version recorded ahead of the work leaves a partial index that nothing will
-/// ever finish, because the mismatch that would have driven it is gone. Uses the
-/// same insert-or-update as `scan.rs`'s `last_scanned_at` so it also works on a
-/// database whose singleton metadata row does not exist yet.
+/// ever finish, because the mismatch that would have driven it is gone.
+///
+/// Insert-or-update rather than `scan.rs`'s bare `UPDATE … WHERE id = 1`, which
+/// affects nothing until `record_last_scanned` has created the singleton row.
+/// **The worker can be the first writer of that row**: on a fresh install the
+/// boot sweep runs before the boot scan (`lib.rs` starts the worker, then the
+/// scan), so an empty corpus stamps the version with no scan having happened.
+/// The `''` written to `last_scanned_at` here is what a never-scanned database
+/// holds anyway — `scan.rs` reads it as "never" and scans — so seeding the row
+/// early changes nothing about when the first scan runs.
 pub fn record_version(conn: &Connection, version: i64) -> Result<(), String> {
     conn.execute(
         "INSERT INTO claude_cache_metadata (id, last_scanned_at, search_index_version)

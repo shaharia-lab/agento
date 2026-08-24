@@ -69,6 +69,16 @@ const RESCAN_INTERVAL: Duration = Duration::from_secs(5 * 60);
 /// How many sessions one write transaction covers, matching
 /// `apply::SCAN_BATCH_SIZE`'s reasoning: large enough to amortize the commit,
 /// small enough that a failure loses a bounded amount of work.
+///
+/// Since #435 it also bounds **memory**, and the two constants that decide that
+/// live in different files: a batch holds one `search::SearchDoc` per session
+/// until the write, each up to `normalize::SESSION_CAP` (512 KiB), so the peak
+/// is ~51 MB of document text plus each reader thread's `Vec<Event>` for the
+/// transcript it is decoding. That is comfortable, and it is a product of two
+/// numbers neither of which mentions the other — so raising either wants a
+/// glance at this line. Bounding a batch by accumulated document bytes rather
+/// than by row count is the principled version, and is not worth it while the
+/// product is this far inside the budget.
 const BATCH_SIZE: usize = 100;
 
 /// The queue's capacity. Go's `insightWorkerQueueSize`.
@@ -176,7 +186,10 @@ fn run(db_path: &Path, rx: Receiver<Pending>) {
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
 
-        process_batch(db_path, batch);
+        // The queue is the incremental path, so a row for a pair may exist.
+        // Its return is deliberately ignored: only a rebuild needs to know
+        // whether a batch committed, and a rebuild is `sweep`'s alone.
+        let _ = process_batch(db_path, batch, Write::Replace);
 
         // Whatever `enqueue` could not deliver, picked up now rather than at
         // the next five-minute tick. The swap clears the flag before the sweep
@@ -210,6 +223,27 @@ fn run(db_path: &Path, rx: Receiver<Pending>) {
 /// The new version is stamped **after** the rebuild, and only if every batch in
 /// it committed. Stamping first would leave a partially indexed corpus that
 /// nothing ever finishes, because the mismatch driving the work would be gone.
+///
+/// ## A rebuild empties the index first, and that is a cost decision
+///
+/// `search::delete` is a **scan** of the FTS5 content table, so re-indexing a
+/// corpus with `search::replace` per session is quadratic — 1,178 scans of a
+/// table that grows with every insert, measured at 11–76 s of pure delete
+/// depending on document size, all of it inside a write transaction competing
+/// with the boot scan that `lib.rs` starts two lines later. `delete_all` once
+/// plus [`search::insert`] is the same end state for one scan-free `DELETE`.
+///
+/// It has a second effect worth having: after emptying, a session the rebuild
+/// **skips** has no row at all, where per-session replacement would have left
+/// its *previous* row in place — carrying text in the format this build has just
+/// declared it disagrees with, under a version stamp saying otherwise. Missing
+/// is a recoverable state that `needs_processing` can still describe; silently
+/// stale is not.
+///
+/// The cost is that search answers nothing for the length of a rebuild. That is
+/// accepted rather than overlooked: the rows it would otherwise return were
+/// produced by a reader this build no longer agrees with, which is what the
+/// version bump means. `delete_all`'s own header records the same intent.
 fn sweep(db_path: &Path) {
     let conn = match db::open_read_only(db_path) {
         Ok(conn) => conn,
@@ -260,14 +294,49 @@ fn sweep(db_path: &Path) {
         log::info!("insights: reprocessing {} outdated sessions", pending.len());
     }
 
+    // Emptied once, before the first batch, so the batches can insert without
+    // paying `search::delete`'s scan each — see the header. A failure here
+    // abandons the rebuild rather than proceeding: inserting into a table that
+    // still holds the old rows would duplicate every pair, and FTS5 has no
+    // unique index to refuse it.
+    if rebuild {
+        match db::open_read_write(db_path).and_then(|conn| search::delete_all(&conn)) {
+            Ok(()) => {}
+            Err(e) => {
+                log::warn!("search: cannot clear the index to rebuild it: {e}");
+                return;
+            }
+        }
+    }
+
     let mut every_batch_committed = true;
     for chunk in pending.chunks(BATCH_SIZE) {
-        every_batch_committed &= process_batch(db_path, chunk.iter().cloned().collect());
+        let write = if rebuild {
+            Write::Insert
+        } else {
+            Write::Replace
+        };
+        every_batch_committed &= process_batch(db_path, chunk.iter().cloned().collect(), write);
     }
 
     if rebuild && every_batch_committed {
         record_index_version(db_path);
     }
+}
+
+/// How a batch puts a session's document into the index.
+///
+/// The two differ only in whether the scan-costing delete runs first, and
+/// choosing wrongly is silent in both directions: `Insert` against a populated
+/// table duplicates rows, `Replace` during a rebuild is the quadratic cost
+/// [`sweep`]'s header describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Write {
+    /// The incremental path: a row for this pair may already exist.
+    Replace,
+    /// The rebuild path, immediately after [`search::delete_all`], where no row
+    /// for any pair exists.
+    Insert,
 }
 
 /// Stamp `claude_cache_metadata.search_index_version`.
@@ -306,7 +375,7 @@ fn record_index_version(db_path: &Path) {
 /// What is left blocking a stamp is exactly the set of things that would make
 /// the rebuild genuinely incomplete and are worth retrying: the settings read,
 /// opening the database for writing, and the batch transaction itself.
-fn process_batch(db_path: &Path, batch: BTreeSet<Pending>) -> bool {
+fn process_batch(db_path: &Path, batch: BTreeSet<Pending>, write: Write) -> bool {
     let items: Vec<Pending> = batch
         .into_iter()
         // `rescanOutdated` skips a row with no file path, and so does this:
@@ -348,7 +417,7 @@ fn process_batch(db_path: &Path, batch: BTreeSet<Pending>) -> bool {
             return false;
         }
     };
-    match write_batch(&mut conn, &mut computed) {
+    match write_batch(&mut conn, &mut computed, write) {
         Ok(n) => {
             log::debug!("insights: stored {n} session insights and search rows");
             true
@@ -452,8 +521,12 @@ fn read_in_parallel(
 /// why `search/mod.rs` opens no connection of its own.
 ///
 /// The title is read here rather than carried from the read pass because it
-/// lives in the cache row, not the transcript. Inside the transaction, so it
-/// cannot be a value from before a concurrent rename.
+/// lives in the cache row, not the transcript. Reading it inside the transaction
+/// buys **batch-internal consistency** — every session in one batch sees one
+/// state of the cache — and deliberately not freshness: this is `BEGIN
+/// DEFERRED`, and a rename landing an instant after the commit is invisible
+/// either way. A rename does not re-index at all; `store::display_title` records
+/// why.
 ///
 /// `?` on either write aborts the whole batch, and the `Transaction`'s `Drop`
 /// rolls it back — so a failure leaves neither table changed for any session in
@@ -463,14 +536,21 @@ fn read_in_parallel(
 /// `SearchDoc` carries up to `normalize::SESSION_CAP` of text, and a batch is a
 /// hundred of them, so building a titled copy per row would clone tens of
 /// megabytes per batch to add a few dozen bytes to each.
-fn write_batch(conn: &mut Connection, computed: &mut [Computed]) -> Result<usize, String> {
+fn write_batch(
+    conn: &mut Connection,
+    computed: &mut [Computed],
+    write: Write,
+) -> Result<usize, String> {
     let scanned_at = store::scanned_at_now();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for item in computed.iter_mut() {
         store::upsert(&tx, &item.insight, &item.project_path, &scanned_at)?;
         let title = store::display_title(&tx, &item.doc.session_id, &item.doc.project_path);
         item.doc.title = super::index::normalize_title(&title);
-        search::replace(&tx, &item.doc)?;
+        match write {
+            Write::Replace => search::replace(&tx, &item.doc)?,
+            Write::Insert => search::insert(&tx, &item.doc)?,
+        }
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(computed.len())
@@ -673,6 +753,7 @@ mod tests {
         assert!(process_batch(
             &db_path,
             [pending_for("s1", "/a", &file)].into_iter().collect(),
+            Write::Replace,
         ));
 
         let conn = db::open_read_only(&db_path).expect("open");
@@ -713,6 +794,7 @@ mod tests {
         assert!(process_batch(
             &db_path,
             [pending_for("s1", "/a", &file)].into_iter().collect(),
+            Write::Replace,
         ));
 
         let conn = db::open_read_only(&db_path).expect("open");
@@ -720,6 +802,128 @@ mod tests {
             .query_row("SELECT title FROM session_search", [], |r| r.get(0))
             .expect("title");
         assert_eq!(title, "quarterly rollup");
+    }
+
+    /// The rest of the precedence, which the `custom_title` test above cannot
+    /// reach: native beats AI beats the first prompt, and a session with none of
+    /// them is indexed untitled rather than not at all.
+    #[test]
+    fn the_indexed_title_falls_back_through_the_display_precedence() {
+        for (columns, expected) in [
+            ("native_title = 'native', ai_title = 'ai'", "native"),
+            ("ai_title = 'ai'", "ai"),
+            (
+                "preview = 'the first thing they typed'",
+                "the first thing they typed",
+            ),
+            ("preview = ''", ""),
+        ] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let db_path = fixture_db(&dir);
+            let file = seed_session(&dir, &db_path, "s1", "/a", "pagination");
+            let conn = db::open_read_write(&db_path).expect("open");
+            conn.execute(&format!("UPDATE claude_session_cache SET {columns}"), [])
+                .expect("set titles");
+            drop(conn);
+
+            assert!(process_batch(
+                &db_path,
+                [pending_for("s1", "/a", &file)].into_iter().collect(),
+                Write::Replace,
+            ));
+
+            let conn = db::open_read_only(&db_path).expect("open");
+            let title: String = conn
+                .query_row("SELECT title FROM session_search", [], |r| r.get(0))
+                .expect("title");
+            assert_eq!(title, expected, "for {columns}");
+        }
+    }
+
+    /// A rebuild must not leave a session carrying text this build's indexer no
+    /// longer produces.
+    ///
+    /// The failure it guards is silent and looks healthy: with per-session
+    /// replacement, a session the rebuild **skips** keeps its previous row — old
+    /// format — while the version stamp says the whole index is current, so
+    /// nothing ever revisits it. Emptying first makes a skip visible as a
+    /// *missing* row instead, which is a state `needs_processing` can still
+    /// describe.
+    ///
+    /// The marker row here stands in for "indexed by an older build": it is
+    /// present before the rebuild, belongs to a session the rebuild cannot read,
+    /// and must be gone afterwards.
+    #[test]
+    fn a_rebuild_leaves_no_row_from_the_previous_index_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        seed_session(&dir, &db_path, "good", "/a", "pagination");
+
+        let conn = db::open_read_write(&db_path).expect("open");
+        // Still cached, but its transcript cannot be read — the shape an
+        // unmounted drive or a permissions change leaves, which `scan.rs`
+        // deliberately protects from deletion.
+        conn.execute(
+            "INSERT INTO claude_session_cache
+                 (session_id, project_path, file_path, file_mtime, start_time, last_activity)
+             VALUES ('unreadable', '/a', ?1, '2026-01-01 00:00:00+00:00',
+                     '2026-01-01 00:00:00+00:00', '2026-01-01 00:00:00+00:00')",
+            rusqlite::params![dir.path().join("absent.jsonl").to_string_lossy()],
+        )
+        .expect("cache row");
+        search::replace(
+            &conn,
+            &search::SearchDoc {
+                session_id: "unreadable".into(),
+                project_path: "/a".into(),
+                user_text: "obsoletemarker".into(),
+                ..Default::default()
+            },
+        )
+        .expect("seed a previous-version row");
+        search::record_version(&conn, search::SEARCH_INDEX_VERSION - 1).expect("age");
+        drop(conn);
+
+        sweep(&db_path);
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert!(
+            search::search(&conn, "\"obsoletemarker\"", 10)
+                .expect("search")
+                .is_empty(),
+            "text from the previous index version survived the rebuild",
+        );
+        assert_eq!(indexed_pairs(&conn), vec![("good".into(), "/a".into())]);
+    }
+
+    /// The rebuild path must not leave two rows for one pair.
+    ///
+    /// It inserts without deleting, which is only sound because the index was
+    /// emptied first — and FTS5 has no unique index to refuse a duplicate, so
+    /// getting this wrong doubles every hit silently rather than failing.
+    #[test]
+    fn a_rebuild_does_not_duplicate_a_pair_that_was_already_indexed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        seed_session(&dir, &db_path, "s1", "/a", "pagination");
+
+        // Index it once at the current version, then force a rebuild over it.
+        sweep(&db_path);
+        let conn = db::open_read_write(&db_path).expect("open");
+        search::record_version(&conn, search::SEARCH_INDEX_VERSION - 1).expect("age");
+        drop(conn);
+
+        sweep(&db_path);
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(indexed_pairs(&conn), vec![("s1".into(), "/a".into())]);
+        assert_eq!(
+            search::search(&conn, "\"pagination\"", 10)
+                .expect("search")
+                .len(),
+            1,
+            "the pair was indexed twice, so every hit for it is doubled",
+        );
     }
 
     /// The #362-family assertion, in its fifth form: one session id under two
@@ -740,6 +944,7 @@ mod tests {
             [pending_for("s1", "/a", &a), pending_for("s1", "/b", &b)]
                 .into_iter()
                 .collect(),
+            Write::Replace,
         ));
 
         let conn = db::open_read_only(&db_path).expect("open");
@@ -902,7 +1107,8 @@ mod tests {
         assert!(
             !process_batch(
                 &db_path,
-                [pending_for("s1", "/a", &file)].into_iter().collect()
+                [pending_for("s1", "/a", &file)].into_iter().collect(),
+                Write::Replace,
             ),
             "a batch that could not commit must report so",
         );
@@ -944,6 +1150,7 @@ mod tests {
         assert!(process_batch(
             &db_path,
             [pending_for("s1", "/a", &missing)].into_iter().collect(),
+            Write::Replace,
         ));
     }
 
@@ -1011,37 +1218,42 @@ mod tests {
         assert!(!process_batch(
             &db_path,
             [pending_for("s1", "/a", &file)].into_iter().collect(),
+            Write::Replace,
         ));
     }
 
-    /// The #366 pattern (`tests/scheduled_run.rs`, `tests/chat_turn.rs`), with
-    /// indexing active.
+    /// A batch meeting a contended write lock still commits, and does not stall
+    /// a runtime beside it.
     ///
-    /// The worker is a plain OS thread and deliberately holds no runtime handle
-    /// — its header says so — so what this pins is that the property survives
-    /// the extra database work #435 puts inside the batch transaction. A batch
-    /// now writes `session_insights` *and* an FTS5 row per session while holding
-    /// one write lock for longer, so "the worker's writes are off the runtime"
-    /// is a claim worth re-asserting rather than inheriting.
+    /// **Be precise about what this can and cannot catch**, because the #366
+    /// tests it is modelled on (`tests/scheduled_run.rs`, `tests/chat_turn.rs`)
+    /// catch something this one structurally cannot. There, the defect was
+    /// database work running inline on an axum worker, and the test drives the
+    /// real entry point, so reverting the `db::blocking` hand-off fails it.
+    /// Here the worker owns an OS thread by construction — its header explains
+    /// why — and `run()` is an unexported infinite loop, so this test spawns the
+    /// thread itself. **No change to non-test code can make it fail**: falsifying
+    /// it means editing the `std::thread::spawn` below into a `tokio::spawn`,
+    /// which does take the ticker from ~150 advances to 0.
     ///
-    /// The shape is the original's: **one** worker thread so a single parked
-    /// worker is the whole runtime; a plain OS thread holding the lock, so the
-    /// contention comes from outside exactly as the session scanner's batch
-    /// writer does; and `last` seeded **before** the spawn, because a starved
-    /// ticker is never polled and seeding on the first poll would start the
-    /// clock after the stall and measure nothing.
+    /// So it is named for the property it genuinely pins, which #435 makes worth
+    /// pinning: a batch now writes `session_insights` **and** an FTS5 row per
+    /// session, holding one write lock for longer than before, and it must still
+    /// commit inside `db::open_read_write`'s five-second `busy_timeout` against
+    /// an outside writer. The runtime assertions come with the borrowed harness
+    /// and are kept because they are free, not because they are the point.
     ///
-    /// **Calibrated rather than assumed.** Replacing the `std::thread::spawn`
-    /// below with `tokio::spawn` — i.e. putting the batch's rusqlite work on the
-    /// single worker, which is the defect this shape exists to catch — takes the
-    /// ticker from ~150 advances to **0** and fails the assertion. Note it must
-    /// be `tokio::spawn` to falsify it: calling `process_batch` inline in this
-    /// async body blocks the *calling* thread, which `block_on` runs the test
-    /// future on, and the ticker on the worker keeps going regardless. That
-    /// version of the test passes against the defect, which is the trap the
-    /// scheduler's copy documents too.
+    /// (Falsifying it against production code would need `run()`'s body split
+    /// into a testable `run_once`. Worth doing; it is not this change's scope.)
+    ///
+    /// The rest of the shape is the original's, each part load-bearing: **one**
+    /// worker thread so a single parked worker is the whole runtime; a plain OS
+    /// thread holding the lock, so contention comes from outside exactly as the
+    /// session scanner's batch writer does; and `last` seeded **before** the
+    /// spawn, because a starved ticker is never polled and seeding on the first
+    /// poll would start the clock after the stall and measure nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn a_contended_write_lock_does_not_stall_the_runtime() {
+    async fn a_contended_batch_still_commits_within_the_busy_timeout() {
         use std::sync::atomic::AtomicU64;
         use std::sync::Arc;
         use std::time::Instant;
@@ -1102,6 +1314,7 @@ mod tests {
             process_batch(
                 &batch_db,
                 [pending_for("s1", "/a", &file)].into_iter().collect(),
+                Write::Replace,
             )
         });
 

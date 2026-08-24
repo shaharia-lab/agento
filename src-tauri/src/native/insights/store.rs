@@ -58,8 +58,12 @@ pub fn needs_processing(conn: &Connection, version: i64) -> Result<Vec<Pending>,
 }
 
 /// Which cached sessions a sweep should pick up.
+///
+/// `pub(super)` rather than `pub`: the only consumer is `insights::worker`, and
+/// keeping it module-local is what lets [`select_pending`]'s `format!` be
+/// provably constant by construction rather than by inspecting callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scope {
+pub(super) enum Scope {
     /// The ordinary rule: no insight row, or one behind the processor version.
     Outdated,
     /// **Every** cached session, whatever its insight row says.
@@ -79,16 +83,25 @@ pub enum Scope {
 /// The `LEFT JOIN` is kept under [`Scope::Everything`] rather than being
 /// switched to a bare `SELECT`, so both scopes are one statement shape and the
 /// pair-keyed join cannot be right in one and wrong in the other.
-pub fn select_pending(
+///
+/// `format!` into SQL, so: the interpolated string is one of two `&'static str`
+/// literals chosen by a fieldless enum, and no caller-supplied value can reach
+/// it. The **version** is bound, never interpolated.
+///
+/// `Scope::Everything` binds no parameter at all rather than neutralizing one
+/// with a tautology. `"?1 IS NOT NULL"` was the first version and it is safe
+/// only because an `i64` cannot bind SQL NULL — an invariant expressed nowhere,
+/// whose failure would be silent and severe: the predicate would be false, the
+/// query would answer no rows, and [`super::worker::sweep`] would take its
+/// "nothing pending" branch and stamp a version over an index it never built.
+pub(super) fn select_pending(
     conn: &Connection,
     version: i64,
     scope: Scope,
 ) -> Result<Vec<Pending>, String> {
     let filter = match scope {
         Scope::Outdated => "i.session_id IS NULL OR i.processor_version < ?1",
-        // `?1` still has to appear or the binding is unused, and SQLite has no
-        // way to bind a parameter a statement never mentions.
-        Scope::Everything => "?1 IS NOT NULL",
+        Scope::Everything => "1 = 1",
     };
     let mut stmt = conn
         .prepare(&format!(
@@ -101,8 +114,14 @@ pub fn select_pending(
         ))
         .map_err(|e| format!("preparing needs_processing: {e}"))?;
 
+    // Bound only where the statement mentions it: rusqlite rejects a parameter
+    // count that does not match, so the two arms cannot share one `params!`.
+    let bindings: Vec<rusqlite::types::Value> = match scope {
+        Scope::Outdated => vec![version.into()],
+        Scope::Everything => Vec::new(),
+    };
     let rows = stmt
-        .query_map(params![version], |row| {
+        .query_map(rusqlite::params_from_iter(bindings), |row| {
             Ok(Pending {
                 session_id: row.get(0)?,
                 project_path: row.get(1)?,
@@ -133,16 +152,41 @@ pub fn select_pending(
 /// nor `processor_version`, so a rename alone does not re-index. The title
 /// catches up the next time the session's transcript changes. Making a rename
 /// re-index is a write-side concern and deliberately outside #435.
+/// `prepare_cached` for [`upsert`]'s reason, which applies unchanged here: this
+/// runs in the same loop, once per session over a whole corpus, so re-preparing
+/// per row is the one avoidable cost in the write half.
+///
+/// A missing row and a *failed read* are told apart deliberately. Collapsing
+/// them was the first version, and it meant one `SQLITE_BUSY` could index a
+/// whole hundred-session batch titleless — under the highest-weighted column in
+/// the ranking — with nothing in the log to say it had happened. `scan.rs`'s
+/// `record_marker` sets the convention: best-effort, but named when it fails.
 pub fn display_title(conn: &Connection, session_id: &str, project_path: &str) -> String {
-    let row: Result<(String, String, String, String), _> = conn.query_row(
+    let mut stmt = match conn.prepare_cached(
         "SELECT custom_title, native_title, ai_title, preview
            FROM claude_session_cache
           WHERE session_id = ?1 AND project_path = ?2",
-        params![session_id, project_path],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    );
-    let Ok((custom, native, ai, preview)) = row else {
-        return String::new();
+    ) {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            log::warn!("search: cannot prepare the title read for {session_id}: {e}");
+            return String::new();
+        }
+    };
+    let row = stmt.query_row(params![session_id, project_path], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    });
+    let (custom, native, ai, preview): (String, String, String, String) = match row {
+        Ok(row) => row,
+        // The documented case: the cache row was deleted between the sweep's
+        // read and this write. Its index row is an orphan by now and the next
+        // reconcile removes it, so an untitled document is the right answer and
+        // not worth a line.
+        Err(rusqlite::Error::QueryReturnedNoRows) => return String::new(),
+        Err(e) => {
+            log::warn!("search: cannot read the title for {session_id}: {e}");
+            return String::new();
+        }
     };
     [custom, native, ai, preview]
         .into_iter()

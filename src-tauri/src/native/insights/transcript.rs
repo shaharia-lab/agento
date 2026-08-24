@@ -492,23 +492,6 @@ pub struct ContentBlock {
         deserialize_with = "crate::native::gojson::null_is_zero_value"
     )]
     pub is_error: bool,
-
-    /// A `tool_result` block's payload: the tool's own output.
-    ///
-    /// A `Value` rather than a `RawValue`, and that is the opposite choice to
-    /// [`ContentBlock::input`] one field up — deliberately. `input` is echoed
-    /// back on the wire and into `chat_messages`, where a `Value` round trip
-    /// would sort its keys and respell its numbers with nothing to signal it.
-    /// This one has exactly one reader, `insights::index`, which turns it into
-    /// index tokens and never re-encodes it, so the parsed form is what that
-    /// reader wants and costs nothing anyone can observe.
-    ///
-    /// The format allows two shapes here — a bare string, or an array of `text`
-    /// blocks — which is why [`extract_text_content`] rather than a cast is what
-    /// reads it. Absent on every other block type, so `Value::Null` is the
-    /// ordinary case and `extract_text_content` answers `""` to it.
-    #[serde(default)]
-    pub content: serde_json::Value,
 }
 
 /// Decode array content into blocks **from the original bytes**, so a

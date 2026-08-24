@@ -103,16 +103,21 @@ impl DocAccumulator {
     }
 
     fn observe_user(&mut self, content: &Value) {
-        let blocks = transcript::parse_content_blocks(content);
         let mut carried_a_result = false;
-        for block in blocks.iter().filter(|b| b.block_type == "tool_result") {
+        for payload in tool_result_payloads(content) {
             carried_a_result = true;
-            self.builder.push_tool(&tool_result_text(block));
+            self.builder
+                .push_tool(&transcript::extract_text_content(payload));
         }
         if carried_a_result {
             return;
         }
-        if transcript::is_user_turn_content(content) {
+        // `is_injected_user_content`, not `is_user_turn_content`. The latter is
+        // "no `tool_result` block **and** not injected", and the early return
+        // above has already settled the first half — so calling it here would
+        // re-run `parse_content_blocks` over the same array to re-derive an
+        // answer we have, and that call clones every block's `Value`.
+        if !transcript::is_injected_user_content(content) {
             self.builder
                 .push_user(&transcript::extract_text_content(content));
         }
@@ -167,14 +172,33 @@ pub fn normalize_title(raw: &str) -> String {
     normalize::normalize_text(raw, normalize::MESSAGE_CAP)
 }
 
-/// A `tool_result` block's payload as text.
+/// Each `tool_result` block's payload, borrowed straight out of the message's
+/// content array.
 ///
-/// The block's `content` is a string for most tools and an array of `text`
-/// blocks for the rest, which is exactly the shape
-/// [`transcript::extract_text_content`] already decides between — so this is
-/// that function plus the `is_error` note below, not a second decoder.
-fn tool_result_text(block: &ContentBlock) -> String {
-    transcript::extract_text_content(&block.content)
+/// **Deliberately not routed through [`transcript::ContentBlock`]**, which is
+/// the obvious way to write this and is the expensive one. That struct does not
+/// decode a `tool_result`'s `content`, and adding the field to it would reach
+/// far past this module: `parse_content_blocks` is called four times per message
+/// by the processors, and `parse_content_blocks_raw` is on the
+/// `GET /api/claude-sessions/{id}` read path — where the payload is currently
+/// skipped by the decoder entirely. A `Read` of a large file is a multi-megabyte
+/// `tool_result`, so adding the field would make every one of those callers
+/// materialize and retain payloads none of them look at, to serve one reader
+/// here.
+///
+/// Borrowing costs nothing instead: the content is already a `Value` on
+/// `Message`, so this only walks it. The block shape is checked by hand for the
+/// same reason — one `type` comparison against a shared type's whole decode.
+fn tool_result_payloads(content: &Value) -> impl Iterator<Item = &Value> {
+    content
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        // The payload a tool's output arrives in. Absent is `Value::Null`, which
+        // `extract_text_content` answers `""` to, so a malformed block
+        // contributes nothing rather than needing its own arm.
+        .map(|block| block.get("content").unwrap_or(&Value::Null))
 }
 
 /// A `tool_use` block as text: the tool's name, then the string leaves of its
@@ -202,11 +226,16 @@ fn tool_use_text(block: &ContentBlock) -> String {
 /// Append every string leaf of `value`, in document order, space separated.
 ///
 /// **Bounded by [`normalize::TOOL_RESULT_CAP`]**, which is the cap the result
-/// will be truncated to anyway: a `Write` call's input carries a whole file, and
-/// building a multi-megabyte `String` to hand `push_tool` two kilobytes of it is
-/// the shape #434's own "every forward scan needs a bound" note is about. The
-/// bound is checked between leaves rather than inside one, so a single enormous
-/// leaf is still materialized once — `normalize_text` is what trims it.
+/// will be truncated to anyway: building a multi-megabyte `String` so that
+/// `push_tool` can keep two kilobytes of it is the shape #434's own "every
+/// forward scan needs a bound" note is about.
+///
+/// The bound is applied **inside a leaf as well as between leaves**, and that is
+/// the half worth stating: the case it exists for is a `Write` call, whose input
+/// is `{"file_path": "…", "content": "<the whole file>"}` — *one* enormous leaf.
+/// A guard that only checked between leaves would leave the dominant case
+/// completely uncovered while looking as though it handled it. The many-small-
+/// leaves shape is real too, so both are tested.
 fn push_string_leaves(value: &Value, out: &mut String) {
     if out.len() >= normalize::TOOL_RESULT_CAP {
         return;
@@ -215,7 +244,10 @@ fn push_string_leaves(value: &Value, out: &mut String) {
         Value::String(s) => {
             if !s.is_empty() {
                 out.push(' ');
-                out.push_str(s);
+                out.push_str(truncate_on_boundary(
+                    s,
+                    normalize::TOOL_RESULT_CAP.saturating_sub(out.len()),
+                ));
             }
         }
         Value::Array(items) => {
@@ -234,6 +266,22 @@ fn push_string_leaves(value: &Value, out: &mut String) {
         // Numbers, booleans and nulls are not search terms.
         _ => {}
     }
+}
+
+/// `s` cut to at most `max` bytes, never through a character.
+///
+/// `normalize_text` applies its own cap afterwards, so this is only about not
+/// building the huge intermediate — but it still must not split a codepoint,
+/// because slicing a `str` mid-character panics.
+fn truncate_on_boundary(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 #[cfg(test)]
@@ -393,6 +441,56 @@ mod tests {
         assert_eq!((assistant.as_str(), tool.as_str()), ("", ""));
     }
 
+    /// The case the bound actually exists for: **one** enormous leaf, which is
+    /// what a `Write` call's `content` argument is.
+    ///
+    /// The many-small-leaves test below caught a guard checked only *between*
+    /// leaves; this one does not, and it is the commoner shape by far. A 4 MiB
+    /// file uploaded through `Write` is 4 MiB of `String` built to keep 2 KiB.
+    #[test]
+    fn a_single_enormous_leaf_is_truncated_rather_than_copied_whole() {
+        let file = "x".repeat(4 * 1024 * 1024);
+        let block = ContentBlock {
+            block_type: "tool_use".into(),
+            name: "Write".into(),
+            input: Some(
+                serde_json::value::RawValue::from_string(
+                    json!({"file_path": "/a.txt", "content": file}).to_string(),
+                )
+                .expect("raw"),
+            ),
+            ..Default::default()
+        };
+
+        let text = tool_use_text(&block);
+
+        assert!(
+            text.len() <= normalize::TOOL_RESULT_CAP + 16,
+            "collected {} bytes from a 4 MiB single-leaf input",
+            text.len(),
+        );
+        assert!(text.starts_with("Write "), "got {:?}", &text[..16]);
+        // `serde_json` sorts an object's keys, so `content` is walked before
+        // `file_path` and eats the whole budget — the path does not make it in.
+        // That is unchanged from building the string in full and letting
+        // `normalize_text` trim it, which cut at the same place; the only thing
+        // this fix changes is how much is built to get there.
+        assert!(text.contains('x'));
+    }
+
+    /// Truncating a leaf must not split a character — slicing a `str`
+    /// mid-codepoint panics, and a tool argument is arbitrary user text.
+    #[test]
+    fn truncating_a_leaf_never_splits_a_character() {
+        // Multi-byte throughout, so almost every byte offset is a split point.
+        let text = "é".repeat(normalize::TOOL_RESULT_CAP);
+        for max in [0, 1, 2, 3, 1_023, normalize::TOOL_RESULT_CAP - 1] {
+            let cut = truncate_on_boundary(&text, max);
+            assert!(cut.len() <= max, "{} > {max}", cut.len());
+            assert!(text.starts_with(cut));
+        }
+    }
+
     /// The bound on a tool call's input, which is what stops a `Write` of a
     /// large file materializing in full before the cap trims it.
     #[test]
@@ -415,6 +513,46 @@ mod tests {
             "collected {} bytes from a 64 KiB input",
             text.len()
         );
+    }
+
+    /// [`push_string_leaves`] recurses, so the depth it can reach has to be
+    /// bounded by something.
+    ///
+    /// It is, and by the parse rather than by a check here: `serde_json`'s
+    /// deserializer enforces a 128-level recursion limit, so a `Value` this
+    /// function is handed can never be deeper than that. Input past the limit
+    /// fails to parse and takes the "name only" arm — which is the same
+    /// keep-what-is-certain direction every rule in `normalize` fails in.
+    ///
+    /// Pinned rather than reasoned about, because the guarantee lives in a
+    /// dependency's default and a `Value` built in memory would not have it.
+    #[test]
+    fn a_deeply_nested_tool_input_is_bounded_by_the_parser() {
+        let deep = format!("{}\"x\"{}", "[".repeat(600), "]".repeat(600));
+        let block = ContentBlock {
+            block_type: "tool_use".into(),
+            name: "Deep".into(),
+            input: Some(serde_json::value::RawValue::from_string(deep).expect("raw")),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            tool_use_text(&block),
+            "Deep",
+            "input past serde_json's recursion limit must not parse, and must \
+             not recurse",
+        );
+
+        // …and a depth the parser *does* accept is walked normally, so the
+        // assertion above is about the limit rather than about all nesting.
+        let shallow = format!("{}\"found\"{}", "[".repeat(20), "]".repeat(20));
+        let block = ContentBlock {
+            block_type: "tool_use".into(),
+            name: "Deep".into(),
+            input: Some(serde_json::value::RawValue::from_string(shallow).expect("raw")),
+            ..Default::default()
+        };
+        assert_eq!(tool_use_text(&block), "Deep found");
     }
 
     /// An event with no message at all — a `file-history-snapshot` reaching here
