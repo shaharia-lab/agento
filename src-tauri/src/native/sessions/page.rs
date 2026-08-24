@@ -15,12 +15,13 @@ use rusqlite::Connection;
 use serde::Serialize;
 
 use super::query::{
-    add_config_dir_scope, add_links, build_filter, cursor_value, Cursor, Filter, Links,
-    SessionQuery, Value, SQL_COST_USD, SQL_TOKENS,
+    add_config_dir_scope, add_links, build_filter, cursor_value, page_sort_expr, Cursor, Filter,
+    Links, SessionQuery, Sort, Value, RELEVANCE_UNRANKED, SQL_COST_USD, SQL_TOKENS,
 };
 use super::summary::{display_model, scan, SessionCost, SessionPR, SessionSummary, TokenUsage};
 use super::summary::{SUMMARY_COLUMNS, SUMMARY_SOURCE};
 use crate::native::gotime::GoTime;
+use crate::native::search;
 use crate::native::settings::DataSettings;
 
 /// One page of the sessions list.
@@ -61,13 +62,41 @@ pub fn list_page(
     settings: &DataSettings,
     q: &SessionQuery,
 ) -> Result<SessionPage, String> {
-    let (expr, is_time) = q.sort.expr();
     let mut filter = build_filter(
         conn,
         q,
         &settings.hidden_projects,
         &settings.indexed_config_dirs,
     )?;
+
+    // The ranked half of the search clause (#437). `build_filter` already
+    // decided whether the index can answer this term and composed the
+    // membership test; joining the *same* subquery a second time is what
+    // carries the score out to the ORDER BY, which a row-value `IN` cannot do.
+    //
+    // Only for the relevance sort: every other ordering pays nothing, and the
+    // snippet below is its own read.
+    //
+    // A join where the membership test was an `IN` also stops collapsing
+    // duplicates, so an index holding two rows for one pair would put that
+    // session on the page twice. That is not a new defect — `search::insert`'s
+    // doc calls such a row "a silent duplicate, not a refusal" — and a visibly
+    // doubled row is the better symptom of it than a hidden one.
+    let ranked_fts = match q.sort {
+        Sort::Relevance => filter.fts.clone(),
+        _ => None,
+    };
+    let ranked = ranked_fts.is_some();
+    let (expr, is_time) = page_sort_expr(q.sort, ranked);
+    let rank_join = if ranked {
+        format!(
+            "\nLEFT JOIN (\n{}\n) fts ON fts.session_id = c.session_id \
+             AND fts.project_path = c.project_path",
+            search::match_sql()
+        )
+    } else {
+        String::new()
+    };
 
     if let Some(cur) = Cursor::decode(&q.cursor, q.sort)? {
         let bound = cur.bind(is_time)?;
@@ -93,27 +122,59 @@ pub fn list_page(
     }
 
     let limit = q.page_size();
+    // Relevance selects its sort key alongside the row, because it is the one
+    // value the cursor cannot recompute from the row itself — it belongs to the
+    // query. Only relevance: the other sorts' keys are already columns `scan`
+    // reads, and `c.last_activity` is *text*, so selecting every sort's key
+    // here would hand the scan a string where it expects a float.
+    //
     // One extra row, so "is there a next page" is answered without a second
     // COUNT over the same predicate.
+    let relevance = q.sort == Sort::Relevance;
+    let rank_select = if relevance {
+        format!(", {expr}")
+    } else {
+        String::new()
+    };
     let sql = format!(
-        "{SUMMARY_COLUMNS}{SUMMARY_SOURCE}{}\
+        "{SUMMARY_COLUMNS}{rank_select}{SUMMARY_SOURCE}{rank_join}{}\
          \nORDER BY {expr} DESC, c.session_id DESC, c.project_path DESC\nLIMIT {}",
         filter.where_clause(),
         limit + 1
     );
 
+    // The join's `MATCH` parameter is the first `?` in the statement, ahead of
+    // every filter argument — `rusqlite` binds positionally, so a parameter
+    // appended instead would silently shift the whole predicate by one.
+    let mut args: Vec<Value> = Vec::with_capacity(filter.args.len() + 1);
+    if let Some(fts) = ranked_fts {
+        args.push(Value::Text(fts));
+    }
+    args.extend(filter.args.iter().cloned());
+
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|e| format!("claudesessions: preparing session page: {e}"))?;
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(filter.args.iter()), |row| {
-            scan(row)
+        .query_map(rusqlite::params_from_iter(args.iter()), |row| {
+            // `SUMMARY_COLUMNS` is 54 columns, 0..=53; the relevance key is the
+            // one appended above, and is absent for every other sort.
+            let sort_value = if relevance {
+                row.get::<_, f64>(54)?
+            } else {
+                RELEVANCE_UNRANKED
+            };
+            Ok((scan(row)?, sort_value))
         })
         .map_err(|e| format!("claudesessions: querying session page: {e}"))?;
 
     let mut items = Vec::with_capacity(limit as usize);
+    let mut sort_values: Vec<f64> = Vec::with_capacity(limit as usize);
     for row in rows {
-        items.push(row.map_err(|e| format!("claudesessions: scanning session page: {e}"))?);
+        let (summary, sort_value) =
+            row.map_err(|e| format!("claudesessions: scanning session page: {e}"))?;
+        items.push(summary);
+        sort_values.push(sort_value);
     }
 
     let mut page = SessionPage {
@@ -123,10 +184,15 @@ pub fn list_page(
     };
     if items.len() as i64 > limit {
         items.truncate(limit as usize);
+        sort_values.truncate(limit as usize);
         if let Some(last) = items.last() {
             page.next_cursor = Cursor {
                 sort: q.sort.as_str().to_string(),
-                value: cursor_value(last, q.sort),
+                value: cursor_value(
+                    last,
+                    q.sort,
+                    sort_values.last().copied().unwrap_or(RELEVANCE_UNRANKED),
+                ),
                 id: last.session_id.clone(),
                 project: last.project_path.clone(),
             }
@@ -137,8 +203,49 @@ pub fn list_page(
 
     attach_prs(conn, &mut items);
     attach_subagent_usage_by_model(conn, &mut items);
+    if let Some(fts) = &filter.fts {
+        attach_match_snippets(conn, &mut items, fts);
+    }
     page.items = items;
     Ok(page)
+}
+
+/// Attach the highlighted snippet for every row on the page that matched
+/// through the content index (#437).
+///
+/// Best-effort, like `attach_prs` beside it: a failure logs and leaves
+/// `match_snippet` empty, which is already what a metadata-only match answers.
+/// The snippet explains a row; it is not what makes it correct, and a page that
+/// is otherwise complete must not 500 because a highlight could not be built.
+///
+/// A row that matched only through the six metadata columns gets nothing, and
+/// that is the honest answer: there is no index hit to point at.
+fn attach_match_snippets(conn: &Connection, sessions: &mut [SessionSummary], fts: &str) {
+    if sessions.is_empty() {
+        return;
+    }
+    let ids: Vec<&str> = sessions.iter().map(|s| s.session_id.as_str()).collect();
+    let hits = match search::snippets(conn, fts, &ids) {
+        Ok(hits) => hits,
+        Err(e) => {
+            log::warn!("claude sessions: failed to load match snippets for page: {e}");
+            return;
+        }
+    };
+
+    // Keyed on the **pair**: a session id under two project paths is two rows
+    // (#362 family), and only the project whose transcript holds the match has
+    // a snippet. Keyed on the id alone the other project's row would show a
+    // highlight explaining text it does not contain.
+    let by_key: BTreeMap<(&str, &str), &str> = hits
+        .iter()
+        .map(|(id, project, snip)| ((id.as_str(), project.as_str()), snip.as_str()))
+        .collect();
+    for s in sessions.iter_mut() {
+        if let Some(snip) = by_key.get(&(s.session_id.as_str(), s.project_path.as_str())) {
+            s.match_snippet = (*snip).to_string();
+        }
+    }
 }
 
 /// The filtered totals and the filter options for `q`.

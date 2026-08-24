@@ -121,6 +121,23 @@ pub struct SessionSummary {
     pub unpriced_models: Vec<String>,
     #[serde(skip_serializing_if = "is_zero")]
     pub unpriced_tokens: i64,
+    /// Why this row matched, when the match came through the content index
+    /// (#437): FTS5's `snippet()` over the highest-matching column, with the
+    /// matched terms wrapped in `search::SNIPPET_MARK_START`/`_END`.
+    ///
+    /// **Last, and omitted when empty.** Every response that is not a search
+    /// carries it at `""`, so `skip_serializing_if` keeps those bytes exactly
+    /// what they were — which is what lets every frozen golden stay unmodified.
+    /// Appended rather than placed beside `preview` because the fields above it
+    /// are a Go struct's declaration order and this one has no Go counterpart;
+    /// a new field goes on the end, where it cannot move an existing key.
+    ///
+    /// Empty is also a real answer within a search: a row that matched only
+    /// through the six metadata columns (its id, its project path, a title) has
+    /// no index hit to snippet, and a session the worker has not reached yet has
+    /// no index row at all.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub match_snippet: String,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -351,6 +368,9 @@ pub fn scan(row: &Row<'_>) -> rusqlite::Result<SessionSummary> {
         subagent_cost_by_model: BTreeMap::new(),
         unpriced_models: merge_unpriced_models(&unpriced, &subagent_unpriced_models),
         unpriced_tokens: row.get::<_, i64>(35)? + subagent_unpriced_tokens,
+        // Not in `SUMMARY_COLUMNS`: the snippet is one extra read over the
+        // index for the page's rows, attached afterwards (`page::attach_match_snippets`).
+        match_snippet: String::new(),
     };
     s.display_title = resolve_display_title(&s);
     Ok(s)
@@ -510,6 +530,7 @@ mod tests {
             subagent_cost_by_model: BTreeMap::new(),
             unpriced_models: Vec::new(),
             unpriced_tokens: 0,
+            match_snippet: String::new(),
         }
     }
 }

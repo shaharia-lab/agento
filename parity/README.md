@@ -52,8 +52,17 @@ git show 07b6212^:desktop/parity/
 git show 07b6212^:desktop/parity/github_parity_test.go
 ```
 
-Two files never had a generator and are hand-written beside the code:
-`desktop_routes.json` and `session_metric_vectors.json`.
+Three files never had a generator and are hand-written beside the code:
+`desktop_routes.json`, `session_metric_vectors.json` and
+`claude_sessions_search_golden.json`.
+
+The last is the newest and the only one recorded *after* the Go tree was
+deleted: `match_snippet` and the `relevance` sort (#437) have no Go ancestor, so
+there was never a second implementation to record it from. It pins one search
+response — where the field sits, that it is omitted where there is no index hit,
+and the ranked order. Two things it deliberately does **not** pin: SQLite's bm25
+*values*, which is why the fixture's page is exhausted and mints no cursor, and
+which column `snippet()` picks out of a tie.
 
 ## Who reads them
 
@@ -63,8 +72,9 @@ Two mechanisms, and the difference matters when files move:
   `goquote.rs`, `migrate.rs`, `pricing.rs`, `pricing_seed.rs`,
   `trigger/match_rule.rs`, `schedule/tests_vectors.rs`,
   `integrations/oauth/mod.rs`, `notifications/template.rs`,
-  `analytics/tests_golden.rs`, `sessions/tests_db.rs`. These count directory
-  levels and break if either tree moves.
+  `analytics/tests_golden.rs`, `sessions/tests_db.rs`,
+  `sessions/tests_search.rs`. These count directory levels and break if either
+  tree moves.
 - **`concat!(env!("CARGO_MANIFEST_DIR"), "/../parity/…")`** — `settings.rs`,
   `gopath.rs`, `gourl.rs`, `mod.rs`, and each integration's `tests_vectors.rs`.
   Anchored to the crate, so they survive a move.
