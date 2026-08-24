@@ -40,9 +40,24 @@
 //! written from the other side: `a_less_than_sign_in_prose_is_not_a_tag` and
 //! `incomplete_link_syntax_keeps_every_word` exist to fail if it does.
 //!
+//! **Both syntaxes here collide with ordinary code, and neither collision is
+//! detectable from a fence** — tool results are raw program output with nothing
+//! marking them as code — so each is settled by a local rule, documented and
+//! tested at [`binds_to_an_identifier`] and [`tag_end`]:
+//!
+//! - `handlers[name](request, ctx)` is `[text](target)` to the letter, and
+//!   reducing it produces `handlersname`, deleting the arguments. A `[` that
+//!   follows an identifier is a subscript, not a link.
+//! - `if a <b and c >d` looks exactly like `<b attr1 attr2 >`, and stripping it
+//!   produces `if a d`. A `>` preceded by a space is prose; generated markup
+//!   closes with `"`, `/` or a letter.
+//!
+//! Both fail towards *keeping* text, which is the direction that costs ranking
+//! noise rather than a word the user will search for and not find.
+//!
 //! # Linear time is a property of the code, not an aspiration
 //!
-//! Three places could have been quadratic, and each is bounded on purpose:
+//! Four places could have been quadratic, and each is bounded on purpose:
 //!
 //! - **The writer stops at `cap`**, so a multi-megabyte line costs the cap and
 //!   not the line. That is what bounds every other loop here too.
@@ -50,6 +65,8 @@
 //!   costs a constant rather than a scan to end of input — `](](](…` repeated is
 //!   the shape an unbounded scan is quadratic on. It is also skipped entirely
 //!   when no `[` is open, which is that exact input.
+//! - **The tag scan** stops after [`MAX_TAG_SPAN`] bytes and at a newline, for
+//!   the same reason and with the same safe failure.
 //! - **Erasing a confirmed link's `[`** would be an `O(n)` `String::remove` per
 //!   link. The offsets are collected instead and spliced out in one final pass.
 
@@ -79,6 +96,15 @@ pub const SESSION_CAP: usize = 512 * 1024;
 /// not one a reader would recognise, and giving up means "not a link", so the
 /// text is kept — the safe direction, since a rule may only drop syntax.
 pub const MAX_LINK_TARGET: usize = 2 * 1024;
+
+/// How far past a `<` a closing `>` is looked for.
+///
+/// Same reasoning as [`MAX_LINK_TARGET`], and the same safe failure: a `<` with
+/// no `>` within this span is not markup, so the text is kept. Real tags are
+/// tens of bytes; this is generous enough for a `<div>` carrying several
+/// attributes and short enough that a misread `<` costs a clause rather than a
+/// document.
+pub const MAX_TAG_SPAN: usize = 256;
 
 /// Normalize one string, capped at `cap` bytes.
 ///
@@ -121,14 +147,13 @@ pub fn normalize_text(input: &str, cap: usize) -> String {
         }
 
         match c {
-            '<' if looks_like_tag(&input[i + width..]) => {
-                // Skip to the closing `>`. With none, the rest of the input is
-                // inside a tag — which is what a browser would decide too.
-                match input[i..].find('>') {
-                    Some(rel) => i += rel + 1,
-                    None => i = bytes.len(),
+            '<' => {
+                if let Some(end) = tag_end(input, i) {
+                    i = end;
+                    continue;
                 }
-                continue;
+                // Not a tag: `<` is arithmetic, or a generic, or a stray
+                // character, and falls through to be written like any other.
             }
             '`' => {
                 let run = run_length(&input[i..], b'`');
@@ -158,7 +183,13 @@ pub fn normalize_text(input: &str, cap: usize) -> String {
                 // the *inner* bracket and erase the wrong character, keeping the
                 // outer `[` and dropping one the reader typed.
                 let open = opens.pop().expect("checked non-empty");
-                if let Some(end) = link_target_end(input, i + width) {
+                // An index is not a link — see `binds_to_an_identifier`.
+                let target = if binds_to_an_identifier(&out, open) {
+                    None
+                } else {
+                    link_target_end(input, i + width)
+                };
+                if let Some(end) = target {
                     erase.push(open);
                     // An image's `!` is part of the same syntax. It can only be
                     // directly adjacent, because `! [x](y)` is not image syntax.
@@ -218,21 +249,74 @@ fn splice_out(out: String, mut erase: Vec<usize>) -> String {
     result
 }
 
-/// `true` when `rest` — the text directly after a `<` — begins like a tag.
+/// If an HTML tag starts at `at` (which must be a `<`), the offset just past its
+/// `>`.
 ///
-/// Requiring this is what keeps `a < b` and `x <- y` intact: a `<` followed by a
-/// space, a digit or an operator is arithmetic somebody wrote, and swallowing to
-/// the next `>` would delete a sentence rather than a tag.
-fn looks_like_tag(rest: &str) -> bool {
-    matches!(
+/// **Three conditions, and every one of them exists to protect words**, because
+/// `<` is far more often arithmetic or a generic than markup. Each was measured
+/// against real shapes rather than reasoned about, and the tests below carry
+/// them:
+///
+/// - **It must begin like a tag** — `/`, `!`, `?` or a letter. `a < b` and
+///   `x <- y` are stopped here.
+/// - **The `>` must not be preceded by a space.** Generated markup closes with
+///   `"`, `/` or a letter before the `>`; a space there is the signature of
+///   prose. This is the condition that saves `if a <b and c >d`, which is
+///   otherwise indistinguishable from `<b attr1 attr2 >` — the cost is that
+///   sloppy `<div >` stays as text, which is noise rather than loss, and noise
+///   is the direction this module errs in.
+/// - **It must close on the same line and within [`MAX_TAG_SPAN`] bytes.** An
+///   unterminated `<` would otherwise swallow everything to the next `>`, or to
+///   end of input when there is none — the failure that turned
+///   `unterminated <div followed by many real words` into `unterminated`.
+fn tag_end(input: &str, at: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let rest = input.get(at + 1..)?;
+    if !matches!(
         rest.chars().next(),
         Some(c) if c.is_ascii_alphabetic() || c == '/' || c == '!' || c == '?'
-    )
+    ) {
+        return None;
+    }
+    let limit = (at + MAX_TAG_SPAN).min(bytes.len());
+    let mut prev = b'<';
+    for (offset, b) in bytes[at + 1..limit].iter().enumerate() {
+        match b {
+            b'\n' => return None,
+            b'>' if prev == b' ' || prev == b'\t' => return None,
+            b'>' => return Some(at + offset + 2),
+            _ => prev = *b,
+        }
+    }
+    None
 }
 
 /// How many bytes at the start of `s` are a run of the ASCII byte `b`.
 fn run_length(s: &str, b: u8) -> usize {
     s.bytes().take_while(|x| *x == b).count()
+}
+
+/// `true` when the `[` at `open` binds to the identifier in front of it — which
+/// makes it a subscript, not a link.
+///
+/// `handlers[name](request, ctx)` is `[text](target)` to the letter, and reducing
+/// it yields `handlersname`: the arguments are deleted outright. Tool results are
+/// raw program output with no fence to detect, so this cannot be solved by
+/// tracking code blocks — the discriminator has to be local.
+///
+/// The one that holds: in markdown a link's `[` follows whitespace, the start of
+/// the text, or punctuation like `(`; in every language with subscripting it
+/// follows an identifier or a closing bracket. So a `[` preceded by an
+/// alphanumeric, `_`, `]` or `)` is an index. `see [text](url)` and
+/// `![alt](url)` are unaffected, because a space and `!` are neither.
+fn binds_to_an_identifier(out: &str, open: usize) -> bool {
+    if open == 0 {
+        return false;
+    }
+    matches!(
+        out.as_bytes()[open - 1],
+        b'_' | b']' | b')' | b'0'..=b'9' | b'a'..=b'z' | b'A'..=b'Z'
+    )
 }
 
 /// If a link target starts at `at`, the byte offset just past its `)`.
@@ -408,6 +492,45 @@ mod tests {
         );
     }
 
+    /// **Subscripting is not link syntax**, and reading it as one deletes the
+    /// arguments: `handlers[name](request, ctx)` became `handlersname`.
+    ///
+    /// Tool results are raw program output with no fence to detect, so this has
+    /// to hold everywhere, not only inside a code block.
+    #[test]
+    fn an_index_expression_is_not_a_link() {
+        for (input, want) in [
+            ("arr[0](x) returns", "arr[0](x) returns"),
+            (
+                "handlers[name](request, ctx) dispatches",
+                "handlers[name](request, ctx) dispatches",
+            ),
+            ("d[k](v)", "d[k](v)"),
+            ("_private[i](a)", "_private[i](a)"),
+            // A chained call: the `[` follows a `)`, which is equally not prose.
+            ("f(x)[0](y)", "f(x)[0](y)"),
+            // ...and one following a `]`.
+            ("m[a][b](c)", "m[a][b](c)"),
+        ] {
+            assert_eq!(norm(input), want, "input: {input}");
+        }
+    }
+
+    /// The other side of that rule: a real link must still be reduced wherever
+    /// its `[` follows something that is not an identifier.
+    #[test]
+    fn a_link_is_still_reduced_after_punctuation() {
+        for (input, want) in [
+            ("see [text](http://e.com)", "see text"),
+            ("([text](http://e.com))", "(text)"),
+            ("- [text](http://e.com)", "- text"),
+            ("[text](http://e.com) leads", "text leads"),
+            ("![alt](http://e.com/i.png)", "alt"),
+        ] {
+            assert_eq!(norm(input), want, "input: {input}");
+        }
+    }
+
     /// A **bare** URL is text the user typed and is kept — the rule is about
     /// link *syntax*, not about URLs.
     #[test]
@@ -513,17 +636,43 @@ mod tests {
         assert_eq!(norm("a <!-- note --> b"), "a b");
     }
 
-    /// `<` is not always a tag, and swallowing to the next `>` would delete a
+    /// `<` is not always a tag, and swallowing to the next `>` deletes a
     /// sentence rather than syntax.
+    ///
+    /// The last three are the ones that were wrong: `if a <b and c >d` came out
+    /// as `if a d`, and an unterminated `<div` ate everything after it.
     #[test]
     fn a_less_than_sign_in_prose_is_not_a_tag() {
         for (input, want) in [
             ("assert a < b and c > d", "assert a < b and c > d"),
             ("x <- y is assignment", "x <- y is assignment"),
             ("count < 10 always", "count < 10 always"),
+            // A space before the `>` is the signature of prose; generated markup
+            // closes with `"`, `/` or a letter.
+            ("if a <b and c >d then stop", "if a <b and c >d then stop"),
+            // Never closed at all.
+            (
+                "unterminated <div followed by real words",
+                "unterminated <div followed by real words",
+            ),
+            // Closed, but only on a later line.
+            ("a <b\nand c> d", "a <b and c> d"),
         ] {
             assert_eq!(norm(input), want, "input: {input}");
         }
+    }
+
+    /// A `<` with no `>` within [`MAX_TAG_SPAN`] is not a tag — the bound that
+    /// keeps a misread `<` costing a clause rather than the whole message.
+    #[test]
+    fn an_absurdly_long_tag_is_treated_as_text() {
+        let out = norm(&format!("<div {}>tail", "a".repeat(MAX_TAG_SPAN + 10)));
+        assert!(out.contains("tail"), "the text after it must survive");
+        assert!(
+            out.starts_with("<div"),
+            "got: {}",
+            &out[..20.min(out.len())]
+        );
     }
 
     // ---- whitespace ------------------------------------------------------
