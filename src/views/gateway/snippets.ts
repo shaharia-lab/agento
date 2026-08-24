@@ -22,6 +22,7 @@
    ========================================================================== */
 
 import type { GatewayStatus } from "../../lib/types";
+import type { Eq, Expect } from "../../lib/typeAssert";
 
 /** The gateway binds `127.0.0.1` unconditionally; there is no public URL. */
 const HOST = "http://127.0.0.1";
@@ -48,14 +49,6 @@ export function healthUrl<P extends number>(
 }
 
 /* --- The compile-time pin ------------------------------------------------- */
-
-/** Exact type equality — `extends` alone would accept a wider literal. */
-type Eq<A, B> =
-  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
-    ? true
-    : false;
-
-type Expect<T extends true> = T;
 
 /**
  * Change either literal above and these stop compiling. Exported so

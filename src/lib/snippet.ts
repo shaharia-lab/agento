@@ -18,20 +18,14 @@
  * pass that could be forgotten one call site later.
  */
 
+import type { Eq, Expect } from "./typeAssert";
+
 export const SNIPPET_MARK_START = "\u0001";
 export const SNIPPET_MARK_END = "\u0002";
 
-/* These two are a wire contract with `native/search/mod.rs`, and this repo has
-   no TypeScript test harness — `npm run build` is `tsc --noEmit && vite build`
-   and that is the whole frontend gate. So they are pinned at the *type* level,
-   the way `views/gateway/snippets.ts` pins the gateway's two base URLs (#427):
-   respelling either constant fails `tsc`, i.e. CI. Exported so `noUnusedLocals`
-   does not flag the guard away. */
-type Eq<A, B> =
-  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
-    ? true
-    : false;
-type Expect<T extends true> = T;
+/* These two are a wire contract with `native/search/mod.rs`, so they are pinned
+   at the type level — see `lib/typeAssert.ts` for why that is this repo's only
+   guard for a value. Respelling either constant fails `tsc`, i.e. CI. */
 export type PinnedSnippetMarkStart = Expect<
   Eq<typeof SNIPPET_MARK_START, "\u0001">
 >;

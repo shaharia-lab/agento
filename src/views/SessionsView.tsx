@@ -66,21 +66,30 @@ const SORTS: { value: Sort; label: string }[] = [
 
 interface Filters {
   project: string;
+  /** The ordering while no search term is active. */
+  sort: Sort;
   /**
-   * The sort the user picked, or `""` while it follows the server's default.
+   * The ordering while one is — `""` meaning "follow the server", which for a
+   * search is relevance.
    *
-   * The empty value is what makes "reflect the server default" possible without
-   * a second source of truth: the effective sort is [`resolveSort`], a mirror of
-   * `sessions/query.rs::resolve_sort`, so the dropdown's label always states
-   * what the server will actually do.
+   * **Two slots rather than one, because the sort a search wants and the sort a
+   * listing wants are different questions.** With a single field, "restore the
+   * previous sort when the query clears" has nowhere to restore *from*, and the
+   * control becomes one-way: relevance is what an unchosen sort already resolves
+   * to while searching, so recording that pick would store a `relevance` that
+   * reads as `recent` the moment the term goes, silently discarding whatever the
+   * user had picked before. Keeping the browsing sort untouched by anything done
+   * during a search is what makes both directions work with no effect, no
+   * remembered transition and no extra request.
    */
-  sort: Sort | "";
+  searchSort: Sort | "";
   favorites: boolean;
 }
 
 const INITIAL_FILTERS: Filters = {
   project: "",
-  sort: "",
+  sort: "recent",
+  searchSort: "",
   favorites: false,
 };
 
@@ -92,12 +101,10 @@ const INITIAL_FILTERS: Filters = {
  *
  * * **No explicit choice plus a search term is `relevance`.** Somebody who typed
  *   a query wants the best match first; somebody who did not has no ranking to
- *   sort by. An explicit pick always wins, so a user who chose "Recent" keeps it
- *   while typing.
+ *   sort by. An explicit pick always wins, so a user who chose "Recent" for this
+ *   search keeps it while typing.
  * * **`relevance` with no search term is `recent`**, because without a `MATCH`
- *   there is no rank. That is also what restores the pre-search ordering when
- *   the query is cleared: the relevance the search selected simply stops
- *   applying, and an explicit pick made before the search is still in `filters`.
+ *   there is no rank.
  */
 function resolveSort(chosen: Sort | "", searching: boolean): Sort {
   if (!chosen) return searching ? "relevance" : "recent";
@@ -236,7 +243,10 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   // still typing would flicker the option in and out per keystroke and refetch
   // the list ahead of the debounce it exists to respect.
   const searching = q.trim() !== "";
-  const sort = resolveSort(filters.sort, searching);
+  const sort = resolveSort(
+    searching ? filters.searchSort : filters.sort,
+    searching
+  );
 
   // Every filter and the *resolved* sort belong to the key: the keyset cursor
   // encodes the sort, so re-using one across a change is a 400 from the server —
@@ -565,6 +575,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
           <div
             style={{ width: 260, display: "flex" }}
             title={
+              "Searches session titles and message content. " +
               "Words are matched together, in any order. " +
               'Wrap text in "double quotes" to match it as a phrase. ' +
               "The last word matches as a prefix while you type."
@@ -609,7 +620,14 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
               SORTS.find((s) => s.value === sort)?.label ?? "Recent"
             }`}
             value={sort}
-            onChange={(v) => patchFilters({ sort: v as Sort })}
+            onChange={(v) =>
+              // Written into the slot the current mode reads, so a sort picked
+              // for a search never outlives it and a sort picked while browsing
+              // is never what a search silently inherits.
+              patchFilters(
+                searching ? { searchSort: v as Sort } : { sort: v as Sort }
+              )
+            }
             options={SORTS.filter(
               (s) => s.value !== "relevance" || searching
             ).map((s) => ({ value: s.value, label: s.label }))}
