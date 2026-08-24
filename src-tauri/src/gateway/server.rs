@@ -431,8 +431,11 @@ fn models_precondition(state: &GatewayState) -> Result<(), ProxyError> {
     if state.dispatcher.has_providers() {
         Ok(())
     } else {
+        // "enabled" rather than "configured": a row that exists but is switched
+        // off produces exactly this state, and telling the user nothing is
+        // configured would send them to add a second one.
         Err(ProxyError::ConfigError(
-            "no LLM provider is configured on this gateway".to_string(),
+            "no enabled LLM provider is configured on this gateway".to_string(),
         ))
     }
 }

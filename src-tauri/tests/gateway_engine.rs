@@ -676,6 +676,62 @@ async fn a_400_is_neither_retried_nor_failed_over() {
     );
 }
 
+/// Retry and failover work on the **streaming** path too, and that is not
+/// implied by the non-streaming tests.
+///
+/// It holds only because `chat_stream` checks the upstream status *before*
+/// handing back a stream (`ferrox-providers`' adapters all
+/// `return Err(ProviderError { status })` on a 4xx/5xx), so a failed handshake
+/// is an ordinary `Err` the retry loop can see. An adapter that instead
+/// returned `Ok` with a stream that errored on first poll would make every
+/// assertion below silently false — the head would already be committed, and a
+/// rate-limited streaming request would reach the client as a broken stream
+/// rather than being served by the fallback. Streaming is also where a 429 is
+/// *most* likely, so this is the path that matters.
+#[tokio::test]
+async fn a_streaming_request_retries_and_fails_over_the_same_way() {
+    let primary = fake_upstream(vec![Reply::status(429); 3]).await;
+    let fallback = fake_upstream(vec![Reply::Sse {
+        chunks: vec![chunk("Hello"), final_chunk()],
+    }])
+    .await;
+
+    let db = seeded_db(
+        &[("p1", &primary.base_url()), ("p2", &fallback.base_url())],
+        "my-alias",
+        &[("p1", "primary-model"), ("p2", "fallback-model")],
+    );
+    let gateway = gateway_for(&db).await;
+
+    let response = client()
+        .post(gateway.url("/v1/chat/completions"))
+        .bearer_auth(token_with(Scope::Llm))
+        .json(&serde_json::json!({
+            "model": "my-alias",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "stream": true,
+        }))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        response.status(),
+        200,
+        "the fallback served it, and the status is still open to be set"
+    );
+
+    let body = body_text(response).await;
+    assert!(body.contains(r#""content":"Hello""#), "got:\n{body}");
+    assert_eq!(
+        body.matches("data: [DONE]\n\n").count(),
+        1,
+        "the failed-over stream is still terminated exactly once; got:\n{body}"
+    );
+
+    assert_eq!(primary.calls().len(), 3, "the handshake is retried");
+    assert_eq!(fallback.calls().len(), 1, "then the chain is walked");
+}
+
 /// An upstream **403** is the asymmetric case, and the reason two predicates
 /// exist: quota exhaustion reported as a 403 must not be retried against the
 /// provider that is out of quota, and must still be served from the next one.
