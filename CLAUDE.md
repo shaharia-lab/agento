@@ -297,6 +297,9 @@ src-tauri/src/
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
+    gateway_api.rs the LLM gateway's control plane (#426) — twelve
+                 /api/gateway/* routes; under native/ because it IS the /api
+                 seam, where gateway/'s listener is not
     security/    what `/api` accepts as proof of identity (#405)
       keys.rs    the per-install Ed25519 keypair: create-if-absent, 0600, and
                  the one path that replaces it
@@ -3038,6 +3041,53 @@ it. `a_gateway_start_requires_an_installed_keypair` asserts the order of the
 three calls in `lib.rs` against its source, deliberately: the consequence is a
 *window* rather than a state, so a test that asked the running app would have to
 win that race to see anything.
+
+**The control plane is `/api/gateway/*` and lives under `native/`, not under
+`gateway/`** (#426, `native/gateway_api.rs`). The split is the seam, not the
+feature: `gateway/` speaks somebody else's wire formats on its own port, this
+speaks Agento's, behind Agento's guard with ordinary `read`/`write` scoping —
+and `Scope::Llm` opens none of its twelve routes, which is the disjointness
+#423 built seen from the other side (a credential issued to *spend* through the
+gateway must not be able to reconfigure which provider it spends with).
+
+Three things about it are decisions:
+
+- **The route table is `parity/desktop_routes.json`, and it now has two
+  owners.** #405 created that file for `/api/security/*` — routes with no Go
+  ancestor, which could go in neither frozen Go table without destroying what
+  those are. Its guarantee is *stronger* than theirs: they assert in one
+  direction, so a route claimed and never recorded passes, while this is **set
+  equality** against the modules' `ROUTES` consts. The claimed set is now the
+  **union** of `security::ROUTES` and `gateway_api::ROUTES`; a third owner
+  appends there, and forgetting to would quietly weaken the assertion back to
+  one direction. The issue's "resolve at implementation time" question — grow
+  the Go tables, or fall back to Tauri commands — is answered by this file
+  existing. A command would have been wrong anyway: `logs.rs` is a command
+  because the app log belongs to the *process*; gateway config is API surface.
+- **An omitted `api_key` preserves the stored one, and that is the whole point
+  of `config::update_provider`.** `PUT /api/integrations/{id}` wipes
+  credentials the caller omits while `GET` scrubs them, so a read-then-write
+  round trip — exactly what an edit form does — destroys the secret. That is
+  reproduced there deliberately because it was Go's behaviour, and it must not
+  be inherited here. `api_key` is `Option<String>` with three meanings: absent
+  leaves the column out of the `SET` list entirely, `Some("")` is a deliberate
+  clear, `Some(k)` replaces. `a_scrubbed_read_written_straight_back_preserves_the_stored_key`
+  drives the **real** `GET` body back through the `PUT`, and fails with `""` on
+  the revert. No response carries the key either — asserted over the *bytes*,
+  because a struct-level check only proves the field the test knows about is
+  absent.
+- **Referential integrity is checked in code, from both sides.** Routing names
+  providers by **name**, inside a JSON column, so nothing in SQL can enforce it:
+  deleting a referenced provider is a 409 naming the aliases, and an alias whose
+  target names no configured provider is refused. Without both, an alias
+  resolves to nothing and fails at *request* time, far from the action that
+  caused it.
+
+Every write ends with a spawned `registry::reload` — the write and its effect in
+one place — and a `#335`-convention log line with a test. `reload` is not
+awaited: it is stop-then-start over a socket bind, and a save that blocked on it
+would feel like a hang. `a_provider_save_reloads_without_cutting_an_in_flight_stream`
+pins both halves at once, which is where they pull against each other.
 
 **Usage recording is one row per served request, written off the request path**
 (#425, `gateway/usage.rs`, migration 34). Four things about it are decisions:

@@ -594,3 +594,153 @@ mod tests {
         );
     }
 }
+
+// ── Reading the log back (#426's `GET /api/gateway/usage`) ───────────────────
+
+/// One recorded request, as a read sees it.
+///
+/// Deliberately not [`UsageRow`]: that type is what a *write* assembles and
+/// carries a `&'static str` surface and a not-yet-resolved cost. This is what
+/// came back out, cost included.
+#[derive(Debug, Clone)]
+pub struct Record {
+    pub at: DateTime<Utc>,
+    pub alias: String,
+    pub provider: String,
+    pub model_id: String,
+    pub observed: Observed,
+    pub duration_ms: i64,
+    pub status: String,
+    pub streamed: bool,
+    pub surface: String,
+    pub cost_usd: Option<f64>,
+    pub unpriced: bool,
+}
+
+/// Every row in `[from, to]`, optionally narrowed to one alias.
+///
+/// # Why the window is compared as text
+///
+/// `created_at` holds Go's `time.Time.String()`, and every DATETIME column in
+/// this schema is compared **as text** — that is the whole reason
+/// `gotime::go_text` exists rather than each writer formatting its own.
+/// Parsing every row to filter in Rust would read the whole table to answer a
+/// one-day question.
+///
+/// That is sound because **`go_text` is lexicographically ordered**, and the
+/// non-obvious part is the fraction, which is variable-width because trailing
+/// zeros are trimmed. It still sorts right: the character after the seconds is
+/// `.` for a row that has one and `' '` for a row that does not, and `'.' >
+/// ' '`, so an unfractioned instant sorts before every fractioned one in the
+/// same second — which is exactly its chronological place, since no fraction
+/// means `.0`. Within a fraction the digits compare left to right and a shorter
+/// one ends at the space, which is below every digit. Every row is written
+/// `+0000 UTC`, so there is no second zone to break the ordering.
+/// `the_stored_timestamp_sorts_as_text_the_way_it_sorts_in_time` pins it.
+///
+/// The bound is therefore the plain rendering of `to`. An earlier version
+/// appended a sentinel to "reach past any fraction"; that was reasoning about a
+/// problem that does not exist — a fractioned row in `to`'s second is *after*
+/// `to` and is correctly excluded — and the sentinel changed no answer.
+pub fn load_window(
+    db_path: &std::path::Path,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    alias: &str,
+) -> Result<Vec<Record>, String> {
+    let conn = db::open_read_only(db_path)?;
+    let lower = gotime::go_text(&from);
+    let upper = gotime::go_text(&to);
+
+    let sql = "SELECT created_at, alias, provider, model_id, prompt_tokens, completion_tokens, \
+               cache_read_tokens, cache_write_tokens, duration_ms, status, streamed, surface, \
+               cost_usd, unpriced \
+               FROM gateway_usage_log \
+               WHERE created_at >= ?1 AND created_at <= ?2 \
+               AND (?3 = '' OR alias = ?3) \
+               ORDER BY created_at";
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("preparing gateway usage read: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![lower, upper, alias], |r| {
+            let created_at: String = r.get(0)?;
+            Ok((
+                created_at,
+                Record {
+                    // Replaced below; a parse failure decides the row's fate
+                    // outside the closure, where an error can be reported.
+                    at: from,
+                    alias: r.get(1)?,
+                    provider: r.get(2)?,
+                    model_id: r.get(3)?,
+                    observed: Observed {
+                        prompt: r.get::<_, i64>(4)?.max(0) as u64,
+                        completion: r.get::<_, i64>(5)?.max(0) as u64,
+                        cache_read: r.get::<_, i64>(6)?.max(0) as u64,
+                        cache_write: r.get::<_, i64>(7)?.max(0) as u64,
+                    },
+                    duration_ms: r.get(8)?,
+                    status: r.get(9)?,
+                    streamed: r.get(10)?,
+                    surface: r.get(11)?,
+                    cost_usd: r.get(12)?,
+                    unpriced: r.get(13)?,
+                },
+            ))
+        })
+        .map_err(|e| format!("reading gateway usage: {e}"))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (created_at, mut record) = row.map_err(|e| format!("reading gateway usage: {e}"))?;
+        // A row this process cannot place in time is **skipped**, not defaulted:
+        // it can only come from a hand-edited database, and folding it into the
+        // window's first bucket would put spend on a day it did not happen.
+        match gotime::GoTime::parse_go_string(&created_at) {
+            Ok(t) => record.at = t.instant(),
+            Err(e) => {
+                log::warn!("gateway usage row has an unreadable created_at, skipping it: {e}");
+                continue;
+            }
+        }
+        out.push(record);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    /// The property [`load_window`]'s `WHERE` clause rests on.
+    ///
+    /// If text order ever stopped matching time order, the window would return
+    /// the wrong rows — silently, and only near a boundary, which is the
+    /// hardest kind of wrong to notice on a chart.
+    #[test]
+    fn the_stored_timestamp_sorts_as_text_the_way_it_sorts_in_time() {
+        use chrono::TimeZone;
+        let base = Utc.with_ymd_and_hms(2026, 8, 7, 23, 59, 59).unwrap();
+        // Deliberately includes the no-fraction case beside fractioned ones in
+        // the same second, which is where a naive format breaks.
+        let instants = [
+            Utc.with_ymd_and_hms(2026, 8, 7, 23, 59, 58).unwrap(),
+            base,
+            base + chrono::Duration::nanoseconds(250_000_000),
+            base + chrono::Duration::nanoseconds(500_000_000),
+            base + chrono::Duration::nanoseconds(510_000_000),
+            base + chrono::Duration::nanoseconds(999_999_999),
+            Utc.with_ymd_and_hms(2026, 8, 8, 0, 0, 0).unwrap(),
+        ];
+        let texts: Vec<String> = instants.iter().map(gotime::go_text).collect();
+
+        let mut sorted = texts.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted, texts,
+            "chronological order and text order must agree, or a windowed query \
+             returns the wrong rows near its bounds"
+        );
+    }
+}
