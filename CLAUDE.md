@@ -182,6 +182,18 @@ src/
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
     newChatPrefs.ts  what the New Chat bar was last set to (localStorage)
     logs.ts      the log commands, and the line parser (target before level)
+    snippet.ts   the U+0001/U+0002 highlight sentinels, mirrored once from
+                 native/search/mod.rs, and snippetParts() (#438). They are
+                 **markers, not markup**: a snippet carries the transcript's own
+                 bytes, so every run is handed to JSX as a text child and
+                 nothing here builds an HTML string
+    typeAssert.ts  Eq / Expect — the compile-time value pin, lifted out of
+                 views/gateway/snippets.ts by #438 for its second consumer.
+                 **This is the repo's only regression guard for a value**, since
+                 there is no TypeScript test harness: give the value a literal
+                 type and assert it exactly, and respelling it fails `tsc`.
+                 `Eq`, never `extends` (`"a" extends string` pins nothing), and
+                 export the alias or `noUnusedLocals` deletes the guard
   components/    TitleBar, Sidebar, StatusBar, CommandPalette, ui.tsx,
                  DirField (native picker + the /api/fs fallback), CopyButton,
                  TokenReveal (the show-once minted token, #427 — shared by
@@ -201,8 +213,9 @@ src/
     gateway/     the LLM Gateway section (#427) — its own sidebar section,
                  sharing nothing with Claude analytics or stats.ts
       OverviewView.tsx  status, the mint-once `llm` token, and the env snippets
-      snippets.ts       the two base URLs and the type-level pin on them:
-                        OpenAI is `/v1`, Anthropic is `/anthropic` with no `/v1`
+      snippets.ts       the two base URLs and the type-level pin on them
+                        (through lib/typeAssert.ts): OpenAI is `/v1`, Anthropic
+                        is `/anthropic` with no `/v1`
       UsageView.tsx     the gateway's own dashboard (#428) over
                         GET /api/gateway/usage — and the two places a total is
                         labelled a *floor* rather than reported as a fact
