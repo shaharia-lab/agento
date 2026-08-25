@@ -1,0 +1,310 @@
+/* ============================================================================
+   LLM Gateway (#427) — Overview, Providers, Models, Gateway Settings.
+
+   Almost everything here reuses what already exists: `.panes`/`.pane-*`,
+   `.toolbar`, `.listrow*`, `.form`/`.formsec`/`.formrow`, `.msgline`,
+   `.savebar`, `.confirm`, `.codebox`, `.badge`, `.dot`. Only the pieces no
+   other view has are defined below.
+
+   Note where four of those come from: `.msgline*`, `.savebar*`, `.confirm` and
+   `.codebox` are declared in `integrations.css` and `settings.css` rather than
+   in a global sheet. Both are loaded unconditionally — `App.tsx` imports
+   `IntegrationsView` and `SettingsView` statically, so their stylesheets are in
+   the bundle whichever view is on screen — which is why this file does not
+   restate them for a third time.
+
+   Every colour is a token, so light and dark both come from `tokens.css` and
+   nothing here needs a media query — a colour whose only definition sat inside
+   one would have no light-mode value at all.
+   ========================================================================== */
+
+/* --- Stacked read errors -------------------------------------------------- */
+
+/* Two failed reads produce two rows. `.msgline` carries no margin of its own —
+   it is normally a `.form` child, and `.form`'s gap does the spacing — so a
+   pane that renders them outside a form has to say so, or they read as one
+   block with a rule through it. */
+.gw-errors > .msgline + .msgline {
+  margin-top: var(--sp-4);
+}
+
+/* --- The status card on the Overview ------------------------------------- */
+
+.gw-status {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  border: var(--hairline) solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+}
+
+/* The two failure states get a visible left edge: a bind failure is the one
+   state a user has to act on, and a badge alone reads as decoration. */
+.gw-status--bind_failed,
+.gw-status--start_failed {
+  border-left: 2px solid var(--red);
+}
+
+.gw-status--running {
+  border-left: 2px solid var(--green);
+}
+
+.gw-status__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.gw-status__port {
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+.gw-status__text {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-relaxed);
+  color: var(--fg-secondary);
+}
+
+/* The OS error, verbatim. It wraps rather than truncating: "Address already in
+   use (os error 98)" is the whole content, and an ellipsis would hide the half
+   that names the cause. */
+.gw-status__error {
+  display: block;
+  padding: var(--sp-4);
+  border-radius: var(--r-sm);
+  background: var(--red-soft);
+  color: var(--fg);
+  font-size: var(--text-xs);
+  line-height: var(--leading-normal);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.gw-statusline {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  font-size: var(--text-sm);
+  color: var(--fg-secondary);
+}
+
+/* --- Copyable env snippets ------------------------------------------------ */
+
+.gw-snippet + .gw-snippet {
+  margin-top: var(--sp-5);
+}
+
+.gw-snippet__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-3);
+}
+
+.gw-snippet__title {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+}
+
+.gw-snippet__note {
+  font-size: var(--text-xs);
+  color: var(--fg-tertiary);
+}
+
+/* `.codebox` comes from integrations.css and already sets the mono face and
+   the inset background; it does not preserve newlines, and these snippets are
+   two lines of shell. */
+.gw-snippet .codebox {
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* --- The ordered target rows on Models ------------------------------------ */
+
+.gw-target {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) 0;
+}
+
+.gw-target + .gw-target {
+  border-top: var(--hairline) solid var(--line);
+}
+
+/* The position, stated rather than implied — the order *is* the fallback
+   chain, so a list that only looked ordered would be hiding the meaning. */
+.gw-target__ord {
+  flex: 0 0 auto;
+  width: 18px;
+  text-align: right;
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+}
+
+.gw-target__provider {
+  flex: 0 0 40%;
+  min-width: 0;
+}
+
+.gw-target__model {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* --- Explanatory prose ---------------------------------------------------- */
+
+.gw-help {
+  margin: 0 0 var(--sp-4);
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  color: var(--fg-tertiary);
+}
+
+.gw-help--muted {
+  color: var(--fg-quaternary);
+}
+
+/* --- Overview scrolling --------------------------------------------------- */
+
+/* `.card` sets `overflow: hidden`, so a flex child of a scrolling column
+   collapses to zero min-content height and everything below the fold becomes a
+   sliver. Nothing here is a `.card`, but the same rule applies to the sections
+   inside this pane's scroller. */
+.gw-overview .form > * {
+  flex: 0 0 auto;
+}
+
+/* --- Usage dashboard (#428) ---------------------------------------------- */
+
+/* The scrolling dashboard column. `.card` sets `overflow: hidden`, so as a flex
+   child its min-content height collapses to zero and everything below the fold
+   becomes a sliver — the same trap `.gw-overview .form` documents. */
+.gw-usage {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  padding: var(--sp-8);
+}
+.gw-usage > * {
+  flex: 0 0 auto;
+}
+
+/* A refresh in flight fades the previous window rather than replacing it with a
+   spinner: the numbers are still the last true ones. */
+.gw-usage--stale {
+  opacity: 0.55;
+  transition: opacity 120ms ease-out;
+}
+
+.gw-usage__state {
+  padding: var(--sp-9) var(--sp-8);
+  color: var(--fg-quaternary);
+  font-size: var(--text-sm);
+}
+
+.gw-usage__banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-8);
+  border-bottom: var(--hairline) solid var(--line);
+  color: var(--amber);
+  font-size: var(--text-sm);
+}
+
+/* The disclosure that a total is a floor — unpriced traffic, a pruned window, or
+   both. Deliberately inside the dashboard flow rather than a toolbar banner: it
+   qualifies the tiles directly above it. */
+.gw-usage__floor {
+  display: flex;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  border: var(--hairline) solid var(--line);
+  border-left: 2px solid var(--amber);
+  border-radius: var(--r-md);
+  background: var(--bg-inset);
+  color: var(--amber);
+}
+.gw-usage__floor .gw-help {
+  margin: 0;
+  color: var(--fg-secondary);
+}
+.gw-usage__floor .gw-help + .gw-help {
+  margin-top: var(--sp-3);
+}
+
+.gw-usage__grid {
+  display: grid;
+  gap: var(--sp-6);
+  min-width: 0;
+}
+.gw-usage__grid--2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+/* The chart takes the room; the breakdown beside it needs only enough for a
+   label and a number. */
+.gw-usage__grid--wide {
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+}
+@media (max-width: 1080px) {
+  .gw-usage__grid--2,
+  .gw-usage__grid--wide {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.gw-usage__card--table > .card__body {
+  padding: 0 0 var(--sp-3);
+  overflow-x: auto;
+}
+
+/* Ranked breakdowns. Named for the gateway rather than reusing `.a-rank`: those
+   rules belong to a section this one deliberately shares no data with, and a
+   second consumer of them would be the first step towards sharing more. */
+.gw-rank {
+  display: flex;
+  flex-direction: column;
+}
+.gw-rank__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: var(--sp-3) var(--sp-5);
+  font-size: var(--text-sm);
+}
+.gw-rank__row + .gw-rank__row {
+  border-top: var(--hairline) solid var(--line);
+}
+.gw-rank__name {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+.gw-rank__bar {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--bg-active);
+  overflow: hidden;
+}
+.gw-rank__fill {
+  height: 100%;
+  background: var(--accent);
+}
+.gw-rank__count {
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.gw-rank__sub {
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+}

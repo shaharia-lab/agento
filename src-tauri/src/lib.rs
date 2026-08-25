@@ -451,6 +451,23 @@ pub fn run() {
                         }
                     });
 
+                    // The usage log's retention sweep (#428). The gate on the
+                    // write path prunes at most once a day, which is enough for
+                    // an app that is *running* — but a desktop app that is open
+                    // for ten minutes a week would only ever prune if a gateway
+                    // request happened to land more than a day after the last
+                    // one, so the horizon would quietly stop being enforced.
+                    // Both callers claim the same daily slot, so a launch
+                    // immediately followed by traffic prunes once, not twice.
+                    //
+                    // Spawned, never awaited, and it logs its own failure: a
+                    // retention sweep must not be able to delay a window, and it
+                    // is not a reason to fail a launch.
+                    let prune_db = db.clone();
+                    tauri::async_runtime::spawn(async move {
+                        crate::gateway::usage::prune_at_startup(prune_db).await;
+                    });
+
                     // The task scheduler (#275): replaces the
                     // `initTaskScheduler` the Go server used to run at boot.
                     // Unlike the two above it is not spawned — `start` only

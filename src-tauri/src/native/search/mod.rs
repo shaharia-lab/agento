@@ -29,15 +29,36 @@
 //! `db::open_read_write` pragma rules. `rusqlite::Transaction` derefs to
 //! `Connection`, so a caller inside a transaction passes `&tx`.
 //!
-//! # Two costs to know before #435 and #439
+//! # `session_search_key` is the reason a delete no longer scans (#446)
 //!
-//! **A delete scans.** FTS5 will not index the UNINDEXED key columns and does
-//! not accept an index on them, so `DELETE … WHERE session_id = ? AND
-//! project_path = ?` is a scan of the backing `%_content` table. That is
-//! correct and it is cheap at one row; it is *not* free at corpus scale, where
-//! [`replace`] runs once per changed session. Measuring it — and deciding
-//! whether a rowid side table earns its keep — is #439's, and this note is the
-//! handle for it.
+//! FTS5 will not index the UNINDEXED key columns and does not accept an index on
+//! them, so `DELETE … WHERE session_id = ? AND project_path = ?` is a **scan** of
+//! the backing `%_content` table — `SCAN session_search VIRTUAL TABLE INDEX 0:`,
+//! with a content-storing table materializing every row it walks. #439 measured
+//! it at **44.57 ms median** against a 188.7 MB / 1,178-session index and found
+//! it to be *the whole* of the incremental path's cost, against 11 ms for the
+//! insert beside it.
+//!
+//! Migration 36 adds `session_search_key(session_id, project_path, rowid_ref)`,
+//! so [`delete`] resolves the pair to a rowid in an ordinary B-tree and then
+//! deletes on `rowid`, which is the one constraint besides `MATCH` that FTS5's
+//! `xBestIndex` accepts. That is what makes a per-row rebuild affordable, and
+//! per-row rebuilds are what let a skipped session be retried (#446).
+//!
+//! **Every writer here maintains it, inside the caller's transaction**, and the
+//! table's PRIMARY KEY is the uniqueness FTS5 itself cannot offer — so a second
+//! row for one pair is now a refusal rather than a duplicate that returns two
+//! hits for ever. Two things follow, and both are deliberate:
+//!
+//! * **A missing key row is not an error.** A database indexed by a build older
+//!   than migration 36 has none for rows the backfill could not claim, so
+//!   [`delete`] falls back to the scan-shaped predicate rather than silently
+//!   leaving a row behind.
+//! * **[`delete_orphans`] is still keyed on the cache, not on this table.**
+//!   Driving it from the side table would make an index row with no key entry
+//!   unreachable for ever; keying both statements on "no cache row for this pair
+//!   remains" makes them independently correct, and #439 measured that pass at
+//!   35 ms over the whole index — once per scan, not once per session.
 //!
 //! **bm25 is negative, and smaller is better.** SQLite's `bm25()` returns the
 //! negated score specifically so that a plain `ORDER BY rank` puts the best
@@ -57,7 +78,7 @@
 
 pub mod normalize;
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 /// The bm25 column weights, in the FTS table's column order.
 ///
@@ -75,12 +96,21 @@ use rusqlite::{params, Connection};
 pub const BM25_WEIGHTS: [f64; 4] = [8.0, 4.0, 2.0, 0.5];
 
 /// What this build's indexer produces, compared against
-/// `claude_cache_metadata.search_index_version` (#435).
+/// **`session_insights.search_index_version`** — one value per row since #446,
+/// not the single `claude_cache_metadata` stamp #435 introduced.
 ///
 /// Bump it whenever the *stored text* changes — a different column routing, a
-/// changed cap, a normalizer rule that keeps or drops different words. The
-/// worker's sweep then rebuilds every row (see
+/// changed cap, a normalizer rule that keeps or drops different words. Every row
+/// then reads as behind and the worker's sweep re-indexes it (see
 /// [`crate::native::insights::worker`]).
+///
+/// **Per row is what makes a bump resumable and a skip recoverable.** The column
+/// is written in the same transaction as the index row, so a session whose
+/// transcript could not be read keeps its old value and is retried by every
+/// later sweep, and a rebuild interrupted between batches costs the batches it
+/// had left rather than the whole corpus. A bump also no longer means "the index
+/// answers nothing until the rebuild finishes": each row is replaced in place,
+/// so the un-rebuilt part of the corpus keeps answering with its previous text.
 ///
 /// **It is deliberately not one of the scanner's staleness markers**, which is
 /// the same separation `CURRENT_PROCESSOR_VERSION` has: rebuilding the index
@@ -88,7 +118,7 @@ pub const BM25_WEIGHTS: [f64; 4] = [8.0, 4.0, 2.0, 0.5];
 /// re-read `claude_session_cache` — those rows are a function of the transcript
 /// and the pricing catalog, neither of which a search-text change touches.
 ///
-/// 0 is reserved for "nothing indexed": migration 33 defaults the column to it,
+/// 0 is reserved for "nothing indexed": migration 36 defaults the column to it,
 /// so an upgraded database and a fresh install are the same case, and both
 /// trigger a full first index.
 pub const SEARCH_INDEX_VERSION: i64 = 1;
@@ -101,6 +131,40 @@ pub const SEARCH_INDEX_VERSION: i64 = 1;
 /// grows a caller-supplied argument. `the_ranking_expression_matches_the_weights`
 /// asserts the two agree.
 pub const BM25_EXPR: &str = "bm25(session_search, 8.0, 4.0, 2.0, 0.5)";
+
+/// The markers `snippet()` wraps a matched term in, on the wire (#437).
+///
+/// **U+0001 and U+0002, because they cannot occur in the indexed text.**
+/// `normalize::normalize_text` collapses every whitespace *and control*
+/// character to a space before a byte is stored — "a control character is never
+/// a word, and leaving one in would put it in a snippet and in the stored
+/// column" — so these two are unambiguous by construction rather than by
+/// convention. A printable sentinel (`[MATCH]`, `**`, a `<mark>` tag) is text a
+/// session could genuinely contain, and the consumer splitting on it would then
+/// highlight the wrong span with nothing to say so.
+///
+/// They are deliberately **not HTML**: `match_snippet` carries the transcript's
+/// own bytes, and a consumer that received markup would have to decide what is
+/// text and what is not. #438 splits on these and renders the spans itself.
+///
+/// `gojson` escapes both as `\u0001` / `\u0002`, which is ordinary JSON.
+pub const SNIPPET_MARK_START: char = '\u{1}';
+pub const SNIPPET_MARK_END: char = '\u{2}';
+
+/// The snippet expression, spelled once beside the ranking it accompanies.
+///
+/// `-1` lets FTS5 pick the column rather than pinning one, so a hit that only
+/// appears in a tool result still produces a snippet instead of an empty string
+/// from an empty `title`. The UNINDEXED key columns can never be picked — they
+/// hold no matches at all. Which column wins a tie is FTS5's business and
+/// deliberately not asserted; that a snippet comes back, from a column that
+/// contains the term, is.
+///
+/// The markers go in as `char(1)`/`char(2)` rather than as literals so this
+/// stays an ASCII string, and `12` tokens is a phrase-length window: long enough
+/// to read as a sentence, short enough that a page of 200 rows is still one
+/// line each.
+pub const SNIPPET_EXPR: &str = "snippet(session_search, -1, char(1), char(2), '…', 12)";
 
 /// One session's indexable text, as the indexer hands it over.
 ///
@@ -162,10 +226,13 @@ pub fn match_sql() -> &'static str {
 /// to conflict on, so `ON CONFLICT` has nothing to name. The two statements are
 /// not atomic on their own — the caller's transaction is what makes them one.
 ///
-/// **The delete is the expensive half** — see [`delete`] — so a caller that has
-/// just emptied the table has no reason to pay it. That is what [`insert`] is
-/// for, and why a full rebuild uses [`delete_all`] plus `insert` rather than
-/// `replace` per session.
+/// **This is the rebuild path as well as the incremental one since #446.** It
+/// was not: `search_index_version` was one stamp for the whole corpus, so a
+/// rebuild emptied the index with [`delete_all`] and then used [`insert`], which
+/// is what kept it from paying the old [`delete`]'s scan 1,178 times. The
+/// version now lives per row, so a rebuild replaces each row in place — which is
+/// affordable only because `session_search_key` turned that delete into a rowid
+/// lookup.
 pub fn replace(conn: &Connection, doc: &SearchDoc) -> Result<(), String> {
     delete(conn, &doc.session_id, &doc.project_path)?;
     insert(conn, doc)
@@ -173,10 +240,15 @@ pub fn replace(conn: &Connection, doc: &SearchDoc) -> Result<(), String> {
 
 /// Add a row, without first removing one for the same pair.
 ///
-/// **Only safe where the caller knows no row for this pair exists** — after
-/// [`delete_all`], which is the rebuild path. FTS5 has no unique index, so a
-/// second row for the same key is not refused: it is a duplicate, and the pair
-/// would then return two hits and two `delete`s' worth of content for ever.
+/// **Only safe where the caller knows no row for this pair exists.** FTS5 has no
+/// unique index of its own, so a second *index* row is not refused there — but
+/// since #446 the accompanying `session_search_key` insert is, on its PRIMARY
+/// KEY. So a misuse is now an `Err` rather than a silent duplicate returning two
+/// hits for ever, and inside the caller's transaction that `Err` rolls the index
+/// row back with it.
+///
+/// It survives [`replace`] as its second half, and as the shortest way to time
+/// the insert on its own (`tests/search_live.rs`).
 pub fn insert(conn: &Connection, doc: &SearchDoc) -> Result<(), String> {
     conn.execute(
         "INSERT INTO session_search
@@ -192,6 +264,23 @@ pub fn insert(conn: &Connection, doc: &SearchDoc) -> Result<(), String> {
         ],
     )
     .map_err(|e| format!("indexing session {}: {e}", doc.session_id))?;
+
+    // Read straight back off the connection rather than re-querying for it: FTS5
+    // assigns the docid on insert and `last_insert_rowid` is how SQLite reports
+    // it, where a `SELECT rowid … WHERE session_id = ?` would be the very scan
+    // this table exists to remove.
+    let rowid = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO session_search_key (session_id, project_path, rowid_ref)
+         VALUES (?1, ?2, ?3)",
+        params![doc.session_id, doc.project_path, rowid],
+    )
+    .map_err(|e| {
+        format!(
+            "recording the index key for session {}: {e}",
+            doc.session_id
+        )
+    })?;
     Ok(())
 }
 
@@ -201,38 +290,74 @@ pub fn insert(conn: &Connection, doc: &SearchDoc) -> Result<(), String> {
 /// is an **update**, not a deletion (#245), so the caller decides what is gone;
 /// this only removes what it is told to.
 ///
-/// **This scans, and the cost grows with the corpus.** FTS5's `xBestIndex`
+/// **This used to scan, and since #446 it does not.** FTS5's `xBestIndex`
 /// accepts only `rowid` and `MATCH`, so a predicate over the UNINDEXED key
 /// columns cannot use an index — SQLite answers `SCAN session_search VIRTUAL
 /// TABLE INDEX 0:` — and a content-storing table materializes each scanned row
-/// to serve it. Measured at ~9.5 ms against a 17 MB index and ~63 ms against a
-/// 176 MB one, per call.
+/// to serve it. #439 measured that at **44.57 ms median** against a 188.7 MB
+/// index, growing with the corpus, and found it to be the entire cost of the
+/// incremental path.
 ///
-/// Two consequences the callers are built around:
+/// `session_search_key` resolves the pair to a rowid in an ordinary B-tree, and
+/// `rowid` is the one non-`MATCH` constraint FTS5 does accept — so the delete is
+/// a docid lookup. `a_keyed_delete_is_a_rowid_lookup_rather_than_a_scan` pins
+/// that through `EXPLAIN QUERY PLAN`, because both spellings return the right
+/// rows and only the plan says which one ran.
 ///
-/// * A **rebuild must not call this per session** — 1,178 scans of a table that
-///   grows with every insert is quadratic. [`delete_all`] once, then [`insert`].
-/// * On the incremental path it is one scan per *changed* session, which is what
-///   #433 signed up for and what #439 owns measuring. Do not add a caller that
-///   turns it back into a per-corpus loop.
+/// **A pair with no key row is not an error.** A database indexed before
+/// migration 36 has none for any row the backfill could not claim — a duplicate
+/// pair is the reachable case, since `INSERT OR IGNORE` keeps only the first —
+/// so the old predicate is the fallback, and the upgrade is a slow path rather
+/// than a correctness cliff. The key row is removed either way, so a fallback
+/// delete cannot leave a dangling `rowid_ref` behind.
 pub fn delete(conn: &Connection, session_id: &str, project_path: &str) -> Result<(), String> {
+    let rowid: Option<i64> = conn
+        .query_row(
+            "SELECT rowid_ref FROM session_search_key
+              WHERE session_id = ?1 AND project_path = ?2",
+            params![session_id, project_path],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("reading the index key for session {session_id}: {e}"))?;
+
+    match rowid {
+        Some(rowid) => conn.execute(
+            "DELETE FROM session_search WHERE rowid = ?1",
+            params![rowid],
+        ),
+        None => conn.execute(
+            "DELETE FROM session_search WHERE session_id = ?1 AND project_path = ?2",
+            params![session_id, project_path],
+        ),
+    }
+    .map_err(|e| format!("removing session {session_id} from the search index: {e}"))?;
+
     conn.execute(
-        "DELETE FROM session_search WHERE session_id = ?1 AND project_path = ?2",
+        "DELETE FROM session_search_key WHERE session_id = ?1 AND project_path = ?2",
         params![session_id, project_path],
     )
-    .map_err(|e| format!("removing session {session_id} from the search index: {e}"))?;
+    .map_err(|e| format!("removing the index key for session {session_id}: {e}"))?;
     Ok(())
 }
 
 /// Empty the index.
 ///
-/// For a `search_index_version` bump, where every row was produced by a reader
-/// this build no longer agrees with. `DELETE FROM` rather than `DROP`/`CREATE`
-/// so the schema stays exactly what migration 33 built — a rebuilt virtual
-/// table is a second place the DDL is spelled, and the two would drift.
+/// `DELETE FROM` rather than `DROP`/`CREATE` so the schema stays exactly what
+/// migration 33 built — a rebuilt virtual table is a second place the DDL is
+/// spelled, and the two would drift.
+///
+/// **No longer part of the rebuild path** (#446): a version bump is now per row
+/// and each row is replaced in place, so nothing empties the index to rebuild
+/// it. What is left is the tests that need a known-empty index, and any future
+/// caller that genuinely wants one — the side table is emptied with it, because
+/// a key row pointing at a deleted docid is the one state that would make a
+/// later `delete` remove somebody else's row.
 pub fn delete_all(conn: &Connection) -> Result<(), String> {
     conn.execute("DELETE FROM session_search", [])
         .map_err(|e| format!("clearing the search index: {e}"))?;
+    conn.execute("DELETE FROM session_search_key", [])
+        .map_err(|e| format!("clearing the search index keys: {e}"))?;
     Ok(())
 }
 
@@ -251,64 +376,43 @@ pub fn delete_all(conn: &Connection) -> Result<(), String> {
 /// left alone. That is what stops an unmounted drive emptying an account's
 /// search index.
 ///
-/// Note the cost, which is [`delete`]'s: FTS5 accepts no index on the UNINDEXED
-/// key columns, so the `NOT EXISTS` runs over the backing `%_content` table.
-/// One pass per scan, and #439 owns measuring it.
+/// **Both tables are reconciled against the cache, independently** (#446), and
+/// that is deliberately not "delete the index rows the key table says are
+/// orphans". Driving the index delete off the side table would make an index row
+/// with no key entry — an older build's, or a duplicate the backfill's `INSERT
+/// OR IGNORE` could not claim — unreachable for ever, which is the one failure a
+/// reconcile exists to prevent. Keyed on the cache, each statement is correct
+/// whatever the other table holds.
+///
+/// The cost is [`delete`]'s old one, and it stays: FTS5 accepts no index on the
+/// UNINDEXED key columns, so the `NOT EXISTS` runs over the backing `%_content`
+/// table. #439 measured that at 35 ms over a 188.7 MB index — one pass per scan,
+/// not one per session, which is why it does not want the rowid treatment.
+///
+/// The count returned is the index's, which is what the caller reports.
 pub fn delete_orphans(conn: &Connection) -> Result<usize, String> {
-    conn.execute(
-        "DELETE FROM session_search
+    let removed = conn
+        .execute(
+            "DELETE FROM session_search
          WHERE NOT EXISTS (
              SELECT 1 FROM claude_session_cache c
               WHERE c.session_id = session_search.session_id
                 AND c.project_path = session_search.project_path
          )",
-        [],
-    )
-    .map_err(|e| format!("reconciling orphaned search rows: {e}"))
-}
-
-/// The `search_index_version` the stored rows were produced by.
-///
-/// Missing metadata row reads as 0 — "nothing indexed" — which is the same
-/// answer migration 33's column default gives an upgraded database, and is what
-/// makes a first index and a rebuild one code path. The `COALESCE` is belt and
-/// braces: migration 33 declares the column `NOT NULL DEFAULT 0`, so it can only
-/// fire against a database something else has altered.
-pub fn stored_version(conn: &Connection) -> Result<i64, String> {
-    conn.query_row(
-        "SELECT COALESCE(search_index_version, 0) FROM claude_cache_metadata WHERE id = 1",
-        [],
-        |row| row.get(0),
-    )
-    .or_else(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => Ok(0),
-        other => Err(format!("reading search_index_version: {other}")),
-    })
-}
-
-/// Stamp the version the index now holds.
-///
-/// Written **only after** a rebuild has covered the whole corpus, never before:
-/// a version recorded ahead of the work leaves a partial index that nothing will
-/// ever finish, because the mismatch that would have driven it is gone.
-///
-/// Insert-or-update rather than `scan.rs`'s bare `UPDATE … WHERE id = 1`, which
-/// affects nothing until `record_last_scanned` has created the singleton row.
-/// **The worker can be the first writer of that row**: on a fresh install the
-/// boot sweep runs before the boot scan (`lib.rs` starts the worker, then the
-/// scan), so an empty corpus stamps the version with no scan having happened.
-/// The `''` written to `last_scanned_at` here is what a never-scanned database
-/// holds anyway — `scan.rs` reads it as "never" and scans — so seeding the row
-/// early changes nothing about when the first scan runs.
-pub fn record_version(conn: &Connection, version: i64) -> Result<(), String> {
+            [],
+        )
+        .map_err(|e| format!("reconciling orphaned search rows: {e}"))?;
     conn.execute(
-        "INSERT INTO claude_cache_metadata (id, last_scanned_at, search_index_version)
-              VALUES (1, '', ?1)
-         ON CONFLICT(id) DO UPDATE SET search_index_version = excluded.search_index_version",
-        params![version],
+        "DELETE FROM session_search_key
+         WHERE NOT EXISTS (
+             SELECT 1 FROM claude_session_cache c
+              WHERE c.session_id = session_search_key.session_id
+                AND c.project_path = session_search_key.project_path
+         )",
+        [],
     )
-    .map_err(|e| format!("recording search_index_version: {e}"))?;
-    Ok(())
+    .map_err(|e| format!("reconciling orphaned search index keys: {e}"))?;
+    Ok(removed)
 }
 
 /// Run one FTS query and return its hits, best first.
@@ -333,6 +437,60 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Hit>, 
         .map_err(|e| format!("querying search: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("reading search results: {e}"))
+}
+
+/// The highlighted snippet for each of `session_ids` that matched `query`
+/// through the index (#437).
+///
+/// Returns `(session_id, project_path, snippet)`, so the caller keys on the pair
+/// the way everything else here does; a session id under two project paths
+/// matches under one of them and gets a snippet for that one alone.
+///
+/// **One statement per page, not one per row, and not one per match.** The
+/// filter (#436) has already reduced the corpus to the rows on the page; this
+/// re-runs the same `MATCH` and keeps only the page's ids, so the cost is one
+/// more walk of the inverted index — the same walk the filter's membership test
+/// performs — rather than a correlated subquery per row. `snippet()` itself is
+/// the expensive half and it is evaluated **only for rows that survive the
+/// `IN`**, so the highlighting is bounded by the page rather than by the match
+/// set. The page cap (200) bounds the `IN` list.
+///
+/// Filtering on `session_id` alone rather than on the pair is deliberate: FTS5
+/// accepts no index on either UNINDEXED column, so neither form narrows the
+/// scan, and one placeholder per row keeps the statement half the size. The
+/// caller matches the pair on the rows that come back.
+///
+/// An empty `session_ids` returns no rows without preparing anything: a page
+/// with nothing on it has nothing to highlight.
+pub fn snippets(
+    conn: &Connection,
+    query: &str,
+    session_ids: &[&str],
+) -> Result<Vec<(String, String, String)>, String> {
+    if session_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = vec!["?"; session_ids.len()].join(", ");
+    let sql = format!(
+        "SELECT session_id, project_path, {SNIPPET_EXPR}
+           FROM session_search
+          WHERE session_search MATCH ?1
+            AND session_id IN ({placeholders})"
+    );
+    let mut args: Vec<&str> = Vec::with_capacity(session_ids.len() + 1);
+    args.push(query);
+    args.extend(session_ids.iter().copied());
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("preparing search snippets: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(args.iter()), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|e| format!("querying search snippets: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("reading search snippets: {e}"))
 }
 
 #[cfg(test)]
@@ -432,64 +590,6 @@ mod tests {
         assert_eq!(indexed_pairs(&conn), vec![("s1".into(), "/a".into())]);
     }
 
-    /// The version round trip, including the case that decides the upgrade
-    /// path: a database whose singleton metadata row does not exist yet reads 0
-    /// and can still be stamped.
-    ///
-    /// A bare `UPDATE … WHERE id = 1` — which is how `scan.rs` records its own
-    /// markers, after `record_last_scanned` has inserted the row — would affect
-    /// nothing here and the rebuild would repeat forever.
-    #[test]
-    fn the_index_version_round_trips_even_with_no_metadata_row() {
-        let (_file, conn) = migrated();
-
-        assert_eq!(
-            stored_version(&conn).expect("version"),
-            0,
-            "no metadata row means nothing indexed",
-        );
-
-        record_version(&conn, SEARCH_INDEX_VERSION).expect("record");
-        assert_eq!(
-            stored_version(&conn).expect("version"),
-            SEARCH_INDEX_VERSION
-        );
-
-        record_version(&conn, SEARCH_INDEX_VERSION + 1).expect("record again");
-        assert_eq!(
-            stored_version(&conn).expect("version"),
-            SEARCH_INDEX_VERSION + 1,
-        );
-    }
-
-    /// Stamping the version must not disturb the row's other columns — it shares
-    /// `claude_cache_metadata` with the scanner's three staleness markers, and
-    /// an `INSERT … ON CONFLICT` that named them would reset a marker and force
-    /// a full transcript re-read.
-    #[test]
-    fn recording_the_version_leaves_the_scanners_markers_alone() {
-        let (_file, conn) = migrated();
-        conn.execute(
-            "INSERT INTO claude_cache_metadata
-                 (id, last_scanned_at, scanner_version, pricing_rev, idle_threshold_ms)
-             VALUES (1, 'when', 7, 42, 900000)",
-            [],
-        )
-        .expect("seed");
-
-        record_version(&conn, SEARCH_INDEX_VERSION).expect("record");
-
-        let row: (String, i64, i64, i64) = conn
-            .query_row(
-                "SELECT last_scanned_at, scanner_version, pricing_rev, idle_threshold_ms
-                   FROM claude_cache_metadata WHERE id = 1",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .expect("row");
-        assert_eq!(row, ("when".to_string(), 7, 42, 900_000));
-    }
-
     /// The table has to exist after a plain migrate, and it has to be the FTS5
     /// one — a `CREATE VIRTUAL TABLE` that silently became something else would
     /// still answer `SELECT`.
@@ -515,23 +615,25 @@ mod tests {
         );
     }
 
-    /// `search_index_version` reads back 0 on an existing database, which is the
-    /// acceptance criterion for the upgrade path: 0 is "nothing indexed", and a
-    /// database that predates this migration and a fresh install are the same
-    /// case on purpose.
+    /// `session_insights.search_index_version` reads back 0 for a row nothing
+    /// has indexed, which is the acceptance criterion for the upgrade path: 0 is
+    /// "nothing indexed", and a database that predates migration 36 and a fresh
+    /// install are the same case on purpose.
     #[test]
     fn search_index_version_starts_at_zero() {
         let (_file, conn) = migrated();
 
         conn.execute(
-            "INSERT INTO claude_cache_metadata (id, last_scanned_at) VALUES (1, '')",
+            "INSERT INTO session_insights (session_id, project_path, scanned_at)
+             VALUES ('s1', '/a', '')",
             [],
         )
-        .expect("seed the singleton metadata row");
+        .expect("seed an insight row the way an older build would have");
 
         let version: i64 = conn
             .query_row(
-                "SELECT search_index_version FROM claude_cache_metadata WHERE id = 1",
+                "SELECT search_index_version FROM session_insights
+                  WHERE session_id = 's1' AND project_path = '/a'",
                 [],
                 |row| row.get(0),
             )
@@ -544,16 +646,118 @@ mod tests {
     /// `migrate::a_database_at_any_earlier_version_upgrades_to_this_one` already
     /// walks every intermediate version, but it applies DDL to an empty database
     /// and asserts on versions — so it cannot see an `ALTER TABLE` that runs
-    /// cleanly and loses or rewrites a row. This one seeds the singleton
-    /// `claude_cache_metadata` row before the last migration runs, and asserts
-    /// both that the row survives untouched and that the added column defaults
-    /// rather than needing a backfill.
+    /// cleanly and loses or rewrites a row. This one seeds a `session_insights`
+    /// row **and an index row for it** before the last migration runs, and
+    /// asserts three things #446 depends on: the row survives untouched, its new
+    /// `search_index_version` **inherits the global stamp** that described the
+    /// text already in the index, and migration 36's backfill claimed the
+    /// already-indexed pair.
+    ///
+    /// The middle one is what stops the upgrade being a 35.8 s rebuild for no
+    /// reason. Both directions are covered — an install that had stamped a
+    /// version carries it forward and indexes nothing; one that had not (the 0
+    /// below, seeded by the sibling case) reads as behind and is rebuilt.
     ///
     /// The boundary is derived from `expected_version()`, not written as a
-    /// literal, so appending migration 34 does not silently turn this into a
+    /// literal, so appending migration 37 does not silently turn this into a
     /// fresh-install test that no longer exercises an upgrade at all.
     #[test]
     fn the_migration_applies_to_a_populated_database() {
+        // Two installs, differing only in whether the old global stamp had been
+        // written: `Some(1)` is an install whose index is current, `None` one
+        // that never finished (or never ran) an index.
+        for stamped in [Some(SEARCH_INDEX_VERSION), None] {
+            let file = tempfile::NamedTempFile::new().expect("temp file");
+            let mut conn = Connection::open(file.path()).expect("open");
+            let last = migrate::expected_version();
+
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version    INTEGER PRIMARY KEY,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )",
+            )
+            .expect("tracking table");
+            for m in migrate::migrations().iter().filter(|m| m.version < last) {
+                conn.execute_batch(&m.sql)
+                    .unwrap_or_else(|e| panic!("migration {}: {e}", m.version));
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, '')",
+                    params![m.version],
+                )
+                .expect("record");
+            }
+            conn.execute(
+                "INSERT INTO session_insights (session_id, project_path, scanned_at, turn_count)
+                 VALUES ('s1', '/a', '', 7)",
+                [],
+            )
+            .expect("seed an insight row");
+            // Indexed by the older build, which had no key table to record.
+            conn.execute(
+                "INSERT INTO session_search
+                     (title, user_text, assistant_text, tool_text, session_id, project_path)
+                 VALUES ('old', '', '', '', 's1', '/a')",
+                [],
+            )
+            .expect("seed an index row");
+            if let Some(version) = stamped {
+                conn.execute(
+                    "INSERT INTO claude_cache_metadata (id, last_scanned_at, search_index_version)
+                     VALUES (1, 'when', ?1)",
+                    params![version],
+                )
+                .expect("seed the old global stamp");
+            }
+            assert_eq!(migrate::current_version(&conn).expect("version"), last - 1);
+
+            migrate::apply(&mut conn).expect("upgrade must apply");
+
+            assert_eq!(migrate::current_version(&conn).expect("version"), last);
+            migrate::verify(&conn).expect("verify");
+            let (kept, version): (i64, i64) = conn
+                .query_row(
+                    "SELECT turn_count, search_index_version
+                       FROM session_insights WHERE session_id = 's1' AND project_path = '/a'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the existing row survives");
+            assert_eq!(kept, 7, "the migration must not rewrite the row");
+            assert_eq!(
+                version,
+                stamped.unwrap_or(0),
+                "the row must inherit the stamp that described its indexed text \
+                 (stamped: {stamped:?})",
+            );
+
+            // The backfill: the pre-existing index row now has a key, pointing at
+            // its own docid. Without it every session in a later rebuild takes
+            // `delete`'s fallback scan.
+            let (session, project, rowid_ref): (String, String, i64) = conn
+                .query_row(
+                    "SELECT session_id, project_path, rowid_ref FROM session_search_key",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("the backfill claimed the indexed pair");
+            assert_eq!((session.as_str(), project.as_str()), ("s1", "/a"));
+            let docid: i64 = conn
+                .query_row("SELECT rowid FROM session_search", [], |row| row.get(0))
+                .expect("docid");
+            assert_eq!(rowid_ref, docid, "the backfill recorded the wrong docid");
+        }
+    }
+
+    /// An insight row with **no** index row must not inherit the stamp, however
+    /// current the stamp is — it has nothing indexed, so it is behind.
+    ///
+    /// This is the half the loop above cannot reach, and getting it wrong is
+    /// silent in the worst direction: the session would read as indexed for ever
+    /// and never be searchable. It is the same hole #446 exists to close,
+    /// reintroduced by the migration that closes it.
+    #[test]
+    fn the_migration_leaves_an_unindexed_session_behind() {
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let mut conn = Connection::open(file.path()).expect("open");
         let last = migrate::expected_version();
@@ -575,26 +779,95 @@ mod tests {
             .expect("record");
         }
         conn.execute(
-            "INSERT INTO claude_cache_metadata (id, last_scanned_at) VALUES (1, 'before')",
+            "INSERT INTO session_insights (session_id, project_path, scanned_at)
+             VALUES ('never-indexed', '/a', '')",
             [],
         )
-        .expect("seed metadata");
-        assert_eq!(migrate::current_version(&conn).expect("version"), last - 1);
+        .expect("seed an insight row with nothing in the index");
+        conn.execute(
+            "INSERT INTO claude_cache_metadata (id, last_scanned_at, search_index_version)
+             VALUES (1, 'when', ?1)",
+            params![SEARCH_INDEX_VERSION],
+        )
+        .expect("seed a current global stamp");
 
         migrate::apply(&mut conn).expect("upgrade must apply");
 
-        assert_eq!(migrate::current_version(&conn).expect("version"), last);
-        migrate::verify(&conn).expect("verify");
-        let (kept, version): (String, i64) = conn
+        let version: i64 = conn
             .query_row(
-                "SELECT last_scanned_at, search_index_version
-                   FROM claude_cache_metadata WHERE id = 1",
+                "SELECT search_index_version FROM session_insights",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
-            .expect("the existing row survives");
-        assert_eq!(kept, "before", "the migration must not rewrite the row");
-        assert_eq!(version, 0, "an upgraded database has nothing indexed");
+            .expect("version");
+        assert_eq!(
+            version, 0,
+            "a session with no index row inherited the stamp and will never be \
+             indexed",
+        );
+    }
+
+    /// Migration 36 removes a duplicate pair the older schema could not refuse.
+    ///
+    /// It matters because [`delete`] is keyed on **one** recorded rowid from
+    /// here on: the scan-shaped predicate used to remove every row for a pair,
+    /// so a duplicate self-healed on the next re-index, and a rowid delete
+    /// removes one and leaves the other for ever. The migration is the one place
+    /// that can still see both.
+    #[test]
+    fn the_migration_removes_a_duplicate_pair_the_old_schema_allowed() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        let last = migrate::expected_version();
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version    INTEGER PRIMARY KEY,
+                applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .expect("tracking table");
+        for m in migrate::migrations().iter().filter(|m| m.version < last) {
+            conn.execute_batch(&m.sql)
+                .unwrap_or_else(|e| panic!("migration {}: {e}", m.version));
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, '')",
+                params![m.version],
+            )
+            .expect("record");
+        }
+        for title in ["first", "second"] {
+            conn.execute(
+                "INSERT INTO session_search
+                     (title, user_text, assistant_text, tool_text, session_id, project_path)
+                 VALUES (?1, 'quasarflux', '', '', 'dup', '/a')",
+                params![title],
+            )
+            .expect("seed a duplicate pair");
+        }
+        conn.execute(
+            "INSERT INTO session_search
+                 (title, user_text, assistant_text, tool_text, session_id, project_path)
+             VALUES ('kept', 'quasarflux', '', '', 'other', '/a')",
+            [],
+        )
+        .expect("seed an ordinary pair");
+
+        migrate::apply(&mut conn).expect("upgrade must apply");
+
+        assert_eq!(
+            indexed_pairs(&conn),
+            vec![
+                ("dup".to_string(), "/a".to_string()),
+                ("other".to_string(), "/a".to_string()),
+            ],
+        );
+        assert_eq!(
+            search(&conn, "quasarflux", 10).expect("search").len(),
+            2,
+            "the duplicate still answers twice",
+        );
+        assert_key_table_agrees(&conn, "after the migration's dedup and backfill");
     }
 
     /// The rule this module exists to hold: the key is the **pair**. Two
@@ -686,9 +959,242 @@ mod tests {
         delete_all(&conn).expect("clear");
 
         assert!(indexed_pairs(&conn).is_empty());
-        // And it is still usable afterwards — a rebuild inserts straight after.
+        // And it is still usable afterwards.
         replace(&conn, &doc("c", "/p/three")).expect("reindex after clear");
         assert_eq!(indexed_pairs(&conn).len(), 1);
+    }
+
+    // ─── the rowid side table (#446) ─────────────────────────────────────────
+
+    /// Every `(session_id, project_path)` the key table holds, ordered.
+    fn key_pairs(conn: &Connection) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare("SELECT session_id, project_path FROM session_search_key ORDER BY 1, 2")
+            .expect("prepare");
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect")
+    }
+
+    /// Every `rowid_ref` must name a row that is actually in the index, and
+    /// every indexed row must have exactly one key. Checked as *both*
+    /// directions rather than as a count, because two rows and two keys that
+    /// point at each other's docids agree on every count and delete the wrong
+    /// row.
+    fn assert_key_table_agrees(conn: &Connection, where_: &str) {
+        assert_eq!(
+            key_pairs(conn),
+            indexed_pairs(conn),
+            "the key table and the index hold different pairs, {where_}",
+        );
+        let mismatched: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_search_key k
+                  WHERE NOT EXISTS (
+                      SELECT 1 FROM session_search s
+                       WHERE s.rowid = k.rowid_ref
+                         AND s.session_id = k.session_id
+                         AND s.project_path = k.project_path
+                  )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(
+            mismatched, 0,
+            "{mismatched} key rows point at the wrong docid, {where_}",
+        );
+    }
+
+    /// The invariant the whole design rests on, walked through every writer.
+    ///
+    /// A drift here is silent and severe in both directions: a stale
+    /// `rowid_ref` deletes **somebody else's** row, and a missing one leaves a
+    /// duplicate that returns two hits for ever. Nothing about a search says
+    /// either has happened.
+    #[test]
+    fn the_key_table_tracks_the_index_through_every_writer() {
+        let (_file, conn) = migrated();
+
+        for (session, project) in [("s1", "/a"), ("s1", "/b"), ("gone", "/a")] {
+            cache_row(
+                &conn,
+                session,
+                project,
+                &format!("{project}/{session}.jsonl"),
+            );
+            replace(&conn, &doc(session, project)).expect("index");
+        }
+        assert_key_table_agrees(&conn, "after a replace");
+
+        // A re-replace of the same pair: the docid changes, so a key row left
+        // behind is exactly the stale pointer that deletes the wrong row.
+        let mut rewritten = doc("s1", "/a");
+        rewritten.title = "rewritten".into();
+        replace(&conn, &rewritten).expect("re-index");
+        assert_key_table_agrees(&conn, "after a re-replace of the same pair");
+        assert_eq!(
+            indexed_pairs(&conn).len(),
+            3,
+            "a re-replace duplicated a pair"
+        );
+
+        // One pair removed outright.
+        delete(&conn, "gone", "/a").expect("delete");
+        assert_key_table_agrees(&conn, "after a delete");
+
+        // The reconcile: `/b`'s cache row goes, so its index row and its key row
+        // must both go with it.
+        conn.execute(
+            "DELETE FROM claude_session_cache WHERE project_path = '/b'",
+            [],
+        )
+        .expect("reconcile the cache");
+        assert_eq!(delete_orphans(&conn).expect("delete_orphans"), 1);
+        assert_key_table_agrees(&conn, "after delete_orphans");
+
+        delete_all(&conn).expect("clear");
+        assert_key_table_agrees(&conn, "after delete_all");
+        assert!(key_pairs(&conn).is_empty());
+    }
+
+    /// The acceptance criterion #446 exists for: the keyed delete is a rowid
+    /// lookup, not the `%_content` scan #439 measured at 44.57 ms.
+    ///
+    /// Asserted through `EXPLAIN QUERY PLAN`, because both spellings delete the
+    /// right row and only the plan says which one ran — a regression here is a
+    /// pure performance cliff with no visible symptom until a corpus is large
+    /// enough for the difference to be seconds.
+    ///
+    /// **`SCAN` is not the tell, and reading it as one is how this test gets
+    /// written wrong.** SQLite prints `SCAN <table> VIRTUAL TABLE INDEX <n>:<s>`
+    /// for *every* virtual-table access — it has no idea what the module will
+    /// do — so the two plans differ only in `<s>`, which is fts5's own `idxStr`.
+    /// `fts5BestIndexMethod` appends one character per constraint it accepted,
+    /// and `=` is the one it appends for a rowid equality. So the whole content
+    /// of this test is `0:` (nothing accepted; fts5 walks the content table and
+    /// filters) versus `0:=` (a docid seek).
+    ///
+    /// Both are pinned as exact strings, so a future SQLite that respells either
+    /// fails loudly here rather than quietly passing a `contains` that no longer
+    /// means anything.
+    #[test]
+    fn a_keyed_delete_is_a_rowid_lookup_rather_than_a_scan() {
+        let (_file, conn) = migrated();
+        replace(&conn, &doc("s1", "/a")).expect("index");
+
+        let plan = |sql: &str| -> String {
+            let mut stmt = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .expect("prepare");
+            let rows = stmt
+                .query_map([], |row| row.get::<_, String>(3))
+                .expect("query");
+            rows.collect::<Result<Vec<_>, _>>()
+                .expect("collect")
+                .join(" | ")
+        };
+
+        assert_eq!(
+            plan("DELETE FROM session_search WHERE session_id = 'x' AND project_path = 'y'"),
+            "SCAN session_search VIRTUAL TABLE INDEX 0:",
+            "the fallback is the scan this table exists to avoid",
+        );
+        assert_eq!(
+            plan("DELETE FROM session_search WHERE rowid = 1"),
+            "SCAN session_search VIRTUAL TABLE INDEX 0:=",
+            "the keyed delete did not reach fts5 as a rowid constraint",
+        );
+    }
+
+    /// …and the other half of the same claim, from **behaviour** rather than
+    /// from a query plan: [`delete`] runs the keyed statement, not the scan.
+    ///
+    /// The plan test above is about two SQL literals and would go on passing if
+    /// `delete` were reverted to the scan — so it pins the *predicate*, and this
+    /// pins the *call site*. Two rows for one pair are the one input that tells
+    /// them apart: the scan matches on the key columns and removes both, the
+    /// rowid delete removes only the one the key table names.
+    ///
+    /// (The duplicate is unreachable from this module's own API since migration
+    /// 36 — `insert`'s key row refuses a second — so it is built by hand, which
+    /// is also exactly the state an older build could leave behind.)
+    #[test]
+    fn a_keyed_delete_targets_the_recorded_rowid() {
+        let (_file, conn) = migrated();
+        replace(&conn, &doc("s1", "/a")).expect("index");
+        let recorded: i64 = conn
+            .query_row("SELECT rowid_ref FROM session_search_key", [], |r| r.get(0))
+            .expect("the key row");
+        conn.execute(
+            "INSERT INTO session_search
+                 (title, user_text, assistant_text, tool_text, session_id, project_path)
+             VALUES ('shadow', '', '', '', 's1', '/a')",
+            [],
+        )
+        .expect("a second row for the pair, as an older build could leave");
+
+        delete(&conn, "s1", "/a").expect("delete");
+
+        let survivors: Vec<i64> = {
+            let mut stmt = conn
+                .prepare("SELECT rowid FROM session_search")
+                .expect("prepare");
+            stmt.query_map([], |r| r.get(0))
+                .expect("query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect")
+        };
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the delete removed both rows, so it ran the key-column scan",
+        );
+        assert_ne!(
+            survivors[0], recorded,
+            "the delete removed the wrong row — the recorded docid is the one to go",
+        );
+    }
+
+    /// A database indexed before migration 36 can hold an index row with no key
+    /// entry — the duplicate the backfill's `INSERT OR IGNORE` could not claim.
+    /// It must still delete, or the upgrade is a correctness cliff rather than a
+    /// slow path.
+    #[test]
+    fn a_pair_with_no_key_row_still_deletes() {
+        let (_file, conn) = migrated();
+        replace(&conn, &doc("s1", "/a")).expect("index");
+        replace(&conn, &doc("s2", "/a")).expect("index the neighbour");
+        conn.execute("DELETE FROM session_search_key WHERE session_id = 's1'", [])
+            .expect("forget the key, as an older build would have");
+
+        delete(&conn, "s1", "/a").expect("delete through the fallback");
+
+        assert_eq!(indexed_pairs(&conn), vec![("s2".into(), "/a".into())]);
+        assert_key_table_agrees(&conn, "after a fallback delete");
+    }
+
+    /// [`insert`] against a pair that is already indexed is now **refused** by
+    /// the key table's PRIMARY KEY, where FTS5 alone accepted it silently.
+    ///
+    /// Inside the caller's transaction — which is where every real caller runs —
+    /// the refusal takes the index row with it, so the duplicate never exists.
+    #[test]
+    fn a_second_insert_for_one_pair_is_refused_rather_than_duplicated() {
+        let (_file, mut conn) = migrated();
+        replace(&conn, &doc("s1", "/a")).expect("index");
+
+        let tx = conn.transaction().expect("begin");
+        let err = insert(&tx, &doc("s1", "/a")).expect_err("a duplicate must be refused");
+        assert!(
+            err.contains("s1"),
+            "the error should name the session: {err}"
+        );
+        drop(tx);
+
+        assert_eq!(indexed_pairs(&conn), vec![("s1".into(), "/a".into())]);
+        assert_key_table_agrees(&conn, "after a refused duplicate");
     }
 
     /// The ranking acceptance criterion: two documents differing **only** in

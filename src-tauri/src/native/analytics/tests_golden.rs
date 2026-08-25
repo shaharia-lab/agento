@@ -129,6 +129,9 @@ impl Row {
                 .map(|m| (*m).to_string())
                 .collect(),
             unpriced_tokens: self.unpriced_tokens,
+            // Never set outside a search response, and the analytics golden is
+            // not one — see `SessionSummary::match_snippet`.
+            match_snippet: String::new(),
         }
     }
 }

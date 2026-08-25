@@ -924,6 +924,196 @@ mod tests {
         }
     }
 
+    // ─── the reconcile's wiring (#447) ───────────────────────────────────────
+    //
+    // The block at the end of `run_scan` is where the search index and the
+    // insight rows are reconciled against the cache, and until #447 nothing
+    // asserted that `run_scan` calls either — the only test reaching `run_scan`
+    // is the cooldown one above, which returns at the no-readable-dir branch
+    // long before them. `search::delete_orphans` and
+    // `insights::store::delete_orphans` have unit tests of their own against a
+    // hand-built database; what those cannot say is *where* they are called
+    // from, and the ordering is the whole correctness argument.
+
+    /// Build `<dir>/projects/<encoded>/<session>.jsonl`, returning the file.
+    ///
+    /// `cfg(unix)` with its only caller: the reconcile test needs a `chmod`ped
+    /// directory, so on Windows both would be dead code under `-D warnings`.
+    #[cfg(unix)]
+    fn seed_transcript(config_dir: &Path, encoded_project: &str, session: &str) -> PathBuf {
+        let project = config_dir.join("projects").join(encoded_project);
+        std::fs::create_dir_all(&project).expect("project dir");
+        let file = project.join(format!("{session}.jsonl"));
+        std::fs::write(
+            &file,
+            "{\"type\":\"user\",\"timestamp\":\"2026-03-15T12:00:00Z\",\"cwd\":\"/w\",\
+              \"message\":{\"role\":\"user\",\"content\":\"do the thing\"}}\n\
+             {\"type\":\"assistant\",\"timestamp\":\"2026-03-15T12:01:00Z\",\
+              \"message\":{\"role\":\"assistant\",\"model\":\"claude-opus-5\",\
+              \"content\":[{\"type\":\"text\",\"text\":\"done\"}],\
+              \"usage\":{\"input_tokens\":10,\"output_tokens\":4}}}\n",
+        )
+        .expect("transcript");
+        file
+    }
+
+    #[cfg(unix)]
+    fn pairs(conn: &rusqlite::Connection, table: &str) -> Vec<(String, String)> {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT session_id, project_path FROM {table} ORDER BY 1, 2"
+            ))
+            .expect("prepare");
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+    }
+
+    /// A removed session loses its index row, and one under a config dir that
+    /// could not be listed keeps both its rows.
+    ///
+    /// **The first half is the ordering assertion**, and it is the one that
+    /// fails on the revert: `search::delete_orphans` keys on "no cache row for
+    /// this pair remains", so moving it *above* `apply_changes` — which is where
+    /// the cache's own delete pass runs — finds the row still present, deletes
+    /// nothing, and leaves an index row for a session that no longer exists.
+    /// Every other observable stays identical, which is why this needs a test
+    /// rather than a comment.
+    ///
+    /// **The second half is what that ordering buys**, and it is the failure the
+    /// argument is actually about: an unlistable config dir is an unplugged
+    /// drive, its cache rows are deliberately protected from the delete pass,
+    /// and the reconcile running afterwards inherits that protection for free.
+    /// Reconciling on a path instead, or before the delete pass, empties that
+    /// account's index with nothing to report it.
+    ///
+    /// The index rows are written directly rather than by running the worker:
+    /// this is a test of the reconcile, and `insights/worker.rs` owns the
+    /// question of what a correct index row contains.
+    #[cfg(unix)]
+    #[test]
+    fn the_reconcile_drops_a_removed_sessions_rows_and_spares_a_protected_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _serialised = scan_state_lock();
+        // `HOME` is a second global, and `paths::tests` read it — without this
+        // they fail on a value this test swapped underneath them.
+        let _env = crate::paths::tests::env_lock();
+
+        let home = tempfile::tempdir().expect("tempdir");
+        // RAII rather than a trailing restore, for the reason the cooldown test
+        // above records: a failed assertion panics past any epilogue.
+        let _home_var = crate::paths::tests::EnvVar::set("HOME", home.path());
+        // `run_config_dir` reads this before the stored setting, so a developer
+        // who exports it would otherwise have their own corpus walked.
+        let _run_dir = crate::paths::tests::EnvVar::unset("CLAUDE_CONFIG_DIR");
+
+        // Two config dirs: the default one, and an extra the settings row names.
+        let default_dir = home.path().join(".claude");
+        let extra_dir = home.path().join("second");
+        seed_transcript(&default_dir, "-tmp-alpha", "alpha");
+        seed_transcript(&extra_dir, "-tmp-beta", "beta");
+
+        let file = migrated();
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        // The column is a JSON string array, read back through
+        // `gojson::decode_string_list` — so it is encoded by a JSON encoder and
+        // not by `{:?}`, whose escapes are Rust's (`\u{a0}`) rather than JSON's.
+        conn.execute(
+            "INSERT INTO user_settings (id, claude_config_dirs) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET claude_config_dirs = excluded.claude_config_dirs",
+            [serde_json::json!([extra_dir]).to_string()],
+        )
+        .expect("seed the extra config dir");
+        drop(conn);
+
+        run_scan(file.path()).expect("the first scan");
+
+        // An assertion over an empty result set is not evidence, so the corpus
+        // is confirmed before anything is removed from it.
+        let conn = super::super::db::open_read_write(file.path()).expect("open");
+        let cached = pairs(&conn, "claude_session_cache");
+        assert_eq!(
+            cached.len(),
+            2,
+            "both config dirs must have been walked: {cached:?}"
+        );
+        for (session_id, project_path) in &cached {
+            super::super::search::replace(
+                &conn,
+                &super::super::search::SearchDoc {
+                    session_id: session_id.clone(),
+                    project_path: project_path.clone(),
+                    user_text: "do the thing".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("index");
+            // The sibling reconcile's input. Written with SQL rather than
+            // through the worker for the same reason as the index row: what a
+            // correct insight row contains is `insights/`'s question.
+            conn.execute(
+                "INSERT INTO session_insights (session_id, project_path, scanned_at)
+                 VALUES (?1, ?2, '2026-03-15 12:00:00+00:00')",
+                rusqlite::params![session_id, project_path],
+            )
+            .expect("insight row");
+        }
+        assert_eq!(pairs(&conn, "session_search"), cached);
+        assert_eq!(pairs(&conn, "session_insights"), cached);
+        drop(conn);
+
+        // `alpha` is deleted from a dir that still lists; `beta`'s dir becomes
+        // unlistable, which is what an unplugged drive looks like from here.
+        std::fs::remove_file(default_dir.join("projects/-tmp-alpha/alpha.jsonl"))
+            .expect("remove the transcript");
+        let locked = extra_dir.join("projects");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("lock the projects dir");
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root, where the mode is not enforced. Skipping beats
+            // passing vacuously.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+                .expect("restore");
+            eprintln!("skipping: this user can read a 0o000 directory");
+            return;
+        }
+
+        let scanned = run_scan(file.path());
+
+        // Restored before the assertions, so a failure still leaves the tempdir
+        // removable.
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("restore");
+        scanned.expect("the second scan");
+
+        let conn = rusqlite::Connection::open(file.path()).expect("open");
+        let survivor: Vec<(String, String)> = cached
+            .iter()
+            .filter(|(session_id, _)| session_id == "beta")
+            .cloned()
+            .collect();
+        assert_eq!(survivor.len(), 1, "the fixture named its sessions wrongly");
+        assert_eq!(
+            pairs(&conn, "claude_session_cache"),
+            survivor,
+            "a session under an unlistable config dir must keep its cache row, \
+             and a deleted one must lose it",
+        );
+        assert_eq!(
+            pairs(&conn, "session_search"),
+            survivor,
+            "the reconcile must drop the removed session's index row — and must \
+             run after the delete pass, or it finds nothing to drop",
+        );
+        assert_eq!(
+            pairs(&conn, "session_insights"),
+            survivor,
+            "the sibling reconcile is wired on exactly the same terms, and an \
+             unmounted drive must not cost an account its insights either",
+        );
+    }
+
     /// `EnsureScan` admits one scan, so a double-click cannot start a second
     /// full re-read on top of the first.
     #[test]

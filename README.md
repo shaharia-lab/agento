@@ -60,6 +60,11 @@ Anthropic API key to enter; the app tells you on launch if the CLI is missing.
 | **Linux** Debian / Ubuntu | `Agento_<version>_amd64.deb` / `_arm64.deb` | Notify only |
 | **Linux** Fedora / RHEL / openSUSE | `Agento-<version>-1.x86_64.rpm` / `.aarch64.rpm` | Notify only |
 
+> [!IMPORTANT]
+> **macOS:** the app is ad-hoc signed, not notarised. The first launch needs one trip to
+> **System Settings → Privacy & Security → Open Anyway**; updates the app installs itself
+> never ask again.
+
 **In-app** means Agento downloads, verifies and installs the next version itself. `.deb`
 and `.rpm` are owned by your package manager, so Agento only tells you when one exists.
 Want in-app updates on Linux? Take the AppImage. Every file ships with a `.sig` from
@@ -240,6 +245,53 @@ added through `~/.agento/mcps.yaml`.
 
 </details>
 
+### Route your other tools through Agento
+
+Turn on the built-in **LLM Gateway** and Agento serves an OpenAI-compatible and an
+Anthropic-native endpoint on `127.0.0.1`, forwarding to providers you configure with your
+own keys. Point the OpenAI SDK, the Anthropic SDK or Claude Code at it and get ordered
+fallback between providers plus a record of what every tool spent. **Off by default** — a
+fresh install binds no port.
+
+<details>
+<summary><b>Show the LLM Gateway, view by view</b> (five screenshots)</summary>
+
+<br>
+
+**Overview.** Is the listener up, mint the one token a tool config needs, and copy the
+environment variables for the OpenAI SDK, the Anthropic SDK or Claude Code. The token is
+`llm`-scoped: it can spend your provider credits and can reach nothing else in Agento.
+
+![LLM Gateway Overview: the listener running on 127.0.0.1:8880, the Create gateway token button, and copyable env snippets for the OpenAI SDK, the Anthropic SDK, Claude Code and curl](docs/screenshots/light/gateway-overview.png)
+
+**Providers.** One upstream account each: adapter type, base URL, your API key and the
+three timeouts. A stored key is never returned by any read, so the field is empty every
+time you open the form.
+
+![LLM Gateway Providers: a Moonshot provider on the OpenAI adapter with its base URL, an empty API key field and connect, first-byte and idle timeouts](docs/screenshots/light/gateway-providers.png)
+
+**Models.** An alias is the whole routing key: the name your tools send as `model`. Its
+targets are tried in order, and the fallbacks are walked only after every target has
+failed.
+
+![LLM Gateway Models: the open-weight-models alias routing to Moonshot k3 first, then z_ai_glm glm-5.2, with a fallback below](docs/screenshots/light/gateway-models.png)
+
+**Usage.** One row per served request, with requests, tokens, cost, error rate and p50 /
+p95 latency, broken down by alias, provider, wire format and which token spent it. A model
+the pricing catalogue does not cover is counted and named, never charged at zero.
+
+![LLM Gateway Usage: requests, tokens, cost, error rate and p95 latency cards over 30 days, with requests, tokens and spend over time and breakdowns by alias and provider](docs/screenshots/light/gateway-usage.png)
+
+**Gateway Settings.** The enable switch, the port you paste into tool configs, whether the
+listener starts with the app, and how long usage rows are kept.
+
+![Gateway Settings: enable the gateway, port 8880, start with the app, and a 90-day usage-log retention horizon](docs/screenshots/light/gateway-settings.png)
+
+Setup, both base URLs and the token scopes are in the
+[user guide](docs/user-guide.md#llm-gateway).
+
+</details>
+
 ### Honest pricing, your data
 
 Rates for Anthropic, Moonshot, Z.ai and Alibaba models ship with the app and are
@@ -256,7 +308,8 @@ no account and no server. Hide projects from every report, set the idle threshol
 
 </details>
 
-*Screenshots are taken from the app over a synthetic dataset — see
+*Screenshots are taken from the app: the Claude Code views over a synthetic dataset, the
+LLM Gateway views from a live gateway configuration with no key or token on screen. See
 [`docs/screenshots/README.md`](docs/screenshots/README.md).*
 
 ---
@@ -332,7 +385,7 @@ Everything lives in [`docs/`](docs/README.md).
 **User guide** — how to *use* it
 
 - [Installation](docs/installation.md)
-- [User guide](docs/user-guide.md): chats, agents, integrations, scheduled tasks, sessions, analytics, settings
+- [User guide](docs/user-guide.md): chats, agents, integrations, scheduled tasks, sessions, analytics, the LLM gateway, settings
 - [Troubleshooting](docs/troubleshooting.md)
 
 </td>

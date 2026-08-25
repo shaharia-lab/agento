@@ -12,6 +12,7 @@ New here? Install first: [Installation](installation.md).
 - [Job history](#job-history)
 - [Claude sessions](#claude-sessions)
 - [Analytics](#analytics)
+- [LLM Gateway](#llm-gateway)
 - [Settings](#settings)
 - [Privacy](#privacy)
 
@@ -379,9 +380,217 @@ one.
 
 ---
 
+## LLM Gateway
+
+Everything above this point reports on Claude Code runs. This is the one feature
+that works the other way round: Agento becomes an endpoint your *other* tools
+call.
+
+The gateway is a local HTTP endpoint that speaks the OpenAI and Anthropic wire
+formats and forwards to providers you configure with your own API keys. Anything
+that can be pointed at a different base URL — the OpenAI SDK, the Anthropic SDK,
+Claude Code, LiteLLM, Aider — can go through it. In return you get one place to
+keep provider keys, ordered fallback between providers, and a record of what
+every tool spent.
+
+It binds `127.0.0.1` and nothing else, so it is reachable from your machine only.
+
+**It ships disabled.** A fresh install binds no port and starts no listener; the
+feature costs one database read at launch until you turn it on.
+
+<details>
+<summary><b>Screenshots</b> of the five gateway views this section walks through</summary>
+
+<br>
+
+**Overview.** Listener state, the token, and the snippet for each client.
+
+![LLM Gateway Overview: the listener running on 127.0.0.1:8880, the Create gateway token button, and copyable env snippets for the OpenAI SDK, the Anthropic SDK, Claude Code and curl](screenshots/light/gateway-overview.png)
+
+**Providers.** One upstream account, its adapter, base URL, key and timeouts.
+
+![LLM Gateway Providers: a Moonshot provider on the OpenAI adapter with its base URL, an empty API key field and connect, first-byte and idle timeouts](screenshots/light/gateway-providers.png)
+
+**Models.** The alias, its ordered targets and its fallbacks.
+
+![LLM Gateway Models: the open-weight-models alias routing to Moonshot k3 first, then z_ai_glm glm-5.2, with a fallback below](screenshots/light/gateway-models.png)
+
+**Usage.** One row per served request, aggregated.
+
+![LLM Gateway Usage: requests, tokens, cost, error rate and p95 latency cards over 30 days, with requests, tokens and spend over time and breakdowns by alias and provider](screenshots/light/gateway-usage.png)
+
+**Gateway Settings.** The switch, the port, and the retention horizon.
+
+![Gateway Settings: enable the gateway, port 8880, start with the app, and a 90-day usage-log retention horizon](screenshots/light/gateway-settings.png)
+
+</details>
+
+### Turning it on
+
+**LLM Gateway → Gateway Settings**, under **Listener**:
+
+- **Enable the gateway.** Off by default. When off, no port is bound.
+- **Port**, 8880 by default, and between 1024 and 65535. This is the number you
+  paste into tool configs, so Agento will not accept `0` and take an OS-assigned
+  one, and it will not accept a port below 1024, which would need root.
+- **Start with the app.** On by default, and only meaningful while the gateway is
+  enabled. Without it the port dies with every restart, which is not much of a
+  gateway.
+
+Changing the port restarts the listener, and anything already configured against
+the old one stops working until you update it. The view says so before you save.
+
+**Overview** shows whether the listener is actually up: **Running**, **Stopped**,
+**Port unavailable** or **Failed to start**.
+
+### Adding a provider
+
+**LLM Gateway → Providers → +**. A provider is one upstream account.
+
+- **Name** — how aliases refer to this provider. Renaming it breaks every alias
+  that routes to it.
+- **Type** — Anthropic, OpenAI, Google Gemini or Z.AI GLM. This picks the
+  adapter.
+- **Base URL** — leave empty for the provider's own endpoint. GLM requires one.
+- **API key** — yours. It is sent only when you type one and is never returned by
+  any read, so the field is empty every time you open the form. That is
+  deliberate rather than a bug: no read can echo it, so nothing can leak it back
+  through the UI, and leaving the field alone keeps the stored key.
+- **Timeouts** — connect, first byte, and idle between tokens.
+
+A disabled provider stays configured and is not dispatched to.
+
+### Defining an alias
+
+**LLM Gateway → Models → +**. An alias is the name your tools ask for.
+
+- **Model name** — exactly what the client sends as `model`. This is the whole
+  routing key; there is no prefix parsing and no pattern matching.
+- **Targets** — a provider plus that provider's own model id. **The order is the
+  meaning**: the first is preferred, and each one after it is tried when the one
+  before fails.
+- **Fallbacks** — walked only after every target has failed.
+
+Failure means a timeout, a connection error, a 429, or a 5xx. A provider
+answering **403** is failed over to the next target *without* being retried,
+because several providers report an exhausted plan that way and asking the same
+one again will not help.
+
+### Getting a token
+
+The gateway does not accept your provider keys as its own credential — it has
+one of its own, so that a tool config holds something you can revoke without
+touching anything else.
+
+**LLM Gateway → Overview → Create gateway token** mints one. It is an `llm`
+token, valid for a year, and it is shown **once**: it is not stored anywhere and
+cannot be shown again. Copy it then. While the banner is open the snippets below
+it have the real token embedded, ready to copy whole.
+
+Lost it? Mint another and revoke the old one in **Settings → Security**.
+
+### Pointing a tool at it
+
+Two environment variables, and **the two base URLs are not the same shape**:
+
+| Client | Base URL |
+| --- | --- |
+| OpenAI SDK, LiteLLM, Aider | `http://127.0.0.1:8880/v1` |
+| Anthropic SDK, Claude Code | `http://127.0.0.1:8880/anthropic` |
+
+The OpenAI one **ends in `/v1`** and the Anthropic one **does not**. That is
+because an OpenAI client takes a base URL that already includes the version
+segment and appends `/chat/completions` to it, while the Anthropic SDK and Claude
+Code append `/v1/messages` themselves. Writing `/anthropic/v1` therefore asks for
+`/anthropic/v1/v1/messages`, which is not a route and answers **404**. This is
+the single most common way to get this wrong.
+
+**OpenAI SDK:**
+
+```bash
+export OPENAI_BASE_URL=http://127.0.0.1:8880/v1
+export OPENAI_API_KEY=<your gateway token>
+```
+
+**Anthropic SDK:**
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8880/anthropic
+export ANTHROPIC_AUTH_TOKEN=<your gateway token>
+```
+
+**Claude Code:**
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8880/anthropic
+export ANTHROPIC_AUTH_TOKEN=<your gateway token>
+export ANTHROPIC_MODEL=<one of your aliases>
+claude
+```
+
+The third line matters. Without it Claude Code asks for whichever model it
+defaults to, which is not one of your aliases, and it stops with *"There's an
+issue with the selected model"*. Either export `ANTHROPIC_MODEL`, or name an
+alias after the model Claude Code asks for. Claude Code also warns that it does
+not recognise a made-up model name and will assume a 200k context window; that
+warning is its own and is harmless.
+
+To check the listener without any of that:
+
+```bash
+curl http://127.0.0.1:8880/v1/models \
+  -H "Authorization: Bearer <your gateway token>"
+```
+
+It answers with **your aliases**, not with a provider's catalogue — the aliases
+are what this endpoint routes.
+
+### Watching usage
+
+**LLM Gateway → Usage** is one row per served request, broken down by alias,
+provider, surface, status and which token was used, with p50/p95/max latency.
+
+Two numbers are labelled as **floors** rather than reported as facts:
+
+- A model with no entry in the pricing catalogue is recorded as unpriced rather
+  than as free, so a cost total that is missing something says so. The shipped
+  catalogue covers Anthropic, Moonshot, Z.ai and Alibaba models, so OpenAI and
+  Gemini traffic is unpriced until you add rates under **Settings → Pricing**.
+- A window reaching further back than the retention horizon reports what
+  survives, which is not everything that happened.
+
+**Keep usage rows for** (Gateway Settings → Usage log) is that horizon: 90 days
+by default, up to 3650, and **`0` keeps everything**. Shortening it deletes
+anything already older, the next time the log is pruned, and usage rows are not
+recoverable.
+
+### Tokens, and the one thing that revokes them all
+
+Agento has three token scopes and they are not a ladder:
+
+- **`read`** and **`write`** reach the Agento API. `write` includes `read`.
+- **`llm`** reaches the gateway, and nothing else.
+
+They are deliberately disjoint in both directions. A `read` or `write` token is
+refused by the gateway with **403**, and an `llm` token is refused everywhere in
+the Agento API with **403**. Neither is a bigger version of the other: a gateway
+token is pasted in plain text into tool configs, where `write` would be arbitrary
+command execution on your machine, and a credential for spending provider credits
+has no business reading your chat transcripts.
+
+**Regenerating the signing key in Settings → Security revokes every token at
+once** — the app's own session, every API token, and every gateway token with
+them. Every tool you configured starts getting 401s with nothing else to tell you
+why, and each one needs a freshly minted token pasted in again. That is the point
+of the button rather than a side effect, and it is an accepted trade-off for a
+single-user app: one key, one blast radius. To revoke a single gateway client
+instead, revoke that token by name in **Settings → Security**.
+
+---
+
 ## Settings
 
-`Ctrl ,` opens Settings. Seven panes.
+`Ctrl ,` opens Settings. Nine panes.
 
 ### General
 
@@ -437,6 +646,23 @@ Two separate actions, on purpose:
 
 Either way, your sessions are re-priced in the background afterwards.
 
+### Security
+
+The API tokens this install has issued, and the key that signs them.
+
+- **Issue a token** with a scope: `read` or `write` for the Agento API, or `llm`
+  for the [LLM Gateway](#llm-gateway). It is shown once and stored nowhere.
+- **Revoke** one by name, which stops it immediately and leaves every other token
+  working.
+- **Regenerate the signing key** invalidates *every* token at once, gateway
+  clients included. The app window recovers by itself; nothing else does.
+
+### Logs
+
+The app's own log file — tail it, follow it, filter by level, and save a copy to
+send with a bug report. It records one line per API request and what each write
+did, and no message bodies, prompts or credentials.
+
 ### Advanced
 
 Monitoring configuration, shown read-only. Agento does not export telemetry, so
@@ -452,9 +678,11 @@ reference, along with any `OTEL_*` environment variables pinning them.
   runs.
 - Agento has no account, no telemetry and no analytics of its own.
 - The only outbound network calls are the ones you asked for: agent runs, the
-  integrations you connected, and the update check (which you can switch off).
-- Integration credentials are stored in plain text in the local database. Its
-  protection is your user account and your disk. Treat `~/.agento` as sensitive.
+  integrations you connected, the update check (which you can switch off), and —
+  if you enable it — the providers the [LLM Gateway](#llm-gateway) forwards to.
+- Integration credentials and gateway provider keys are stored in plain text in
+  the local database. Their protection is your user account and your disk. Treat
+  `~/.agento` as sensitive.
 - Your Claude Code transcripts in `~/.claude` are read only, never modified.
 
 ---

@@ -10,6 +10,11 @@ export type ViewId =
   | "tokens"
   | "usage"
   | "insights"
+  | "gateway"
+  | "gateway-providers"
+  | "gateway-models"
+  | "gateway-usage"
+  | "gateway-settings"
   | "settings"
   | "about";
 
@@ -53,6 +58,19 @@ export const SECTIONS: NavSection[] = [
       { id: "insights", label: "Insights", icon: "bulb", badge: "Beta" },
     ],
   },
+  // Its own section, sharing nothing with Claude Usage or Analytics — the
+  // gateway spends the user's *provider* credits, where everything above it
+  // reports on Claude Code runs. Mixing the two was ruled out at design time.
+  {
+    caption: "LLM Gateway",
+    items: [
+      { id: "gateway", label: "Overview", icon: "zap" },
+      { id: "gateway-providers", label: "Providers", icon: "database" },
+      { id: "gateway-models", label: "Models", icon: "layers" },
+      { id: "gateway-usage", label: "Usage", icon: "chart" },
+      { id: "gateway-settings", label: "Gateway Settings", icon: "gear" },
+    ],
+  },
 ];
 
 export const VIEW_TITLES: Record<ViewId, string> = {
@@ -65,6 +83,11 @@ export const VIEW_TITLES: Record<ViewId, string> = {
   tokens: "Token Usage",
   usage: "General Usage",
   insights: "Insights",
+  gateway: "LLM Gateway",
+  "gateway-providers": "Gateway Providers",
+  "gateway-models": "Gateway Models",
+  "gateway-usage": "Gateway Usage",
+  "gateway-settings": "Gateway Settings",
   settings: "Settings",
   about: "About Agento",
 };

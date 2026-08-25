@@ -1,5 +1,5 @@
 import { useId } from "react";
-import { CardEmpty } from "./shared";
+import "../styles/charts.css";
 
 /* ============================================================================
    Inline SVG charts.
@@ -10,7 +10,36 @@ import { CardEmpty } from "./shared";
    The plot is stretched with preserveAspectRatio="none" — cheap and crisp for
    paths (strokes are pinned with vector-effect), but it would distort text, so
    axis labels are rendered as HTML siblings instead.
+
+   This module lives under `components/` rather than under `views/analytics/`
+   (#428) because it is pure presentation over `{label, value, hint}[]` and has
+   no Claude semantics in it: the LLM Gateway's Usage dashboard draws the same
+   charts over an entirely separate table. The locked decision that the gateway
+   shares nothing with Claude analytics is about *data* and *sections*; a second
+   copy of 250 lines of SVG would only guarantee the two drift.
+
+   It imports nothing from `views/`, and its stylesheet moved with it: every
+   `.a-chart*` / `.a-heat*` rule came out of `styles/analytics.css` verbatim, so
+   the class names — and therefore every existing chart's rendering — are
+   unchanged. `CardEmpty` moved here from `views/analytics/shared.tsx` for the
+   same reason and is re-exported from there, so no analytics call site churns.
    ========================================================================== */
+
+/** The empty state every chart falls back to, and the only thing they share. */
+export function CardEmpty({ text }: { text: string }) {
+  return (
+    <div
+      style={{
+        padding: "var(--sp-7) 0",
+        textAlign: "center",
+        color: "var(--fg-quaternary)",
+        fontSize: "var(--text-sm)",
+      }}
+    >
+      {text}
+    </div>
+  );
+}
 
 export interface Point {
   label: string;

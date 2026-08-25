@@ -1,7 +1,7 @@
 import { Icon } from "../../lib/icons";
 import { compactNumber, duration, integer, percent, usd } from "../../lib/format";
 import type { AnalyticsReport, InsightCard } from "../../lib/types";
-import { AreaChart, RateChart, type Point } from "./charts";
+import { AreaChart, RateChart, type Point } from "../../components/charts";
 import {
   Card,
   CardEmpty,
