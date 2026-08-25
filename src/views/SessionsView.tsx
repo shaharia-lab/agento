@@ -66,6 +66,17 @@ const SORTS: { value: Sort; label: string }[] = [
 
 interface Filters {
   project: string;
+  /**
+   * One Claude account, identified by the config dir its sessions were scanned
+   * from. `""` is every account.
+   *
+   * Indexing every configured dir into one corpus is deliberate — analytics is
+   * retrospective, and a machine running two accounts wants both in every
+   * total — so this is the only way to read one account's sessions on their
+   * own. It is a *view* over the corpus, not the hidden-project mechanism in
+   * Settings: nothing is excluded from reporting by picking one here.
+   */
+  configDir: string;
   /** The ordering while no search term is active. */
   sort: Sort;
   /**
@@ -88,6 +99,7 @@ interface Filters {
 
 const INITIAL_FILTERS: Filters = {
   project: "",
+  configDir: "",
   sort: "recent",
   searchSort: "",
   favorites: false,
@@ -272,9 +284,10 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
     () => ({
       q: q.trim() || undefined,
       project: filters.project || undefined,
+      config_dir: filters.configDir || undefined,
       favorites: filters.favorites ? true : undefined,
     }),
-    [q, filters.project, filters.favorites]
+    [q, filters.project, filters.configDir, filters.favorites]
   );
 
   const page = useResource<SessionPage>(
@@ -540,8 +553,27 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
     );
   }, [projects.data]);
 
+  /**
+   * The accounts the corpus actually spans, for the account control.
+   *
+   * The facet is computed over every *visible* session rather than the filtered
+   * set, so picking one account never removes the others from the list — a
+   * dropdown that drops the option you just chose cannot be un-chosen.
+   *
+   * A selection is kept in the list even when the facet no longer offers it,
+   * which happens when the dir is un-indexed in Settings while it is picked.
+   * Without this the control disappears at the moment it is the only thing that
+   * could clear itself, leaving the list pinned to an account with no rows.
+   */
+  const accountOptions = useMemo(() => {
+    const dirs = facets.data?.config_dirs?.filter(Boolean) ?? [];
+    return filters.configDir && !dirs.includes(filters.configDir)
+      ? [...dirs, filters.configDir]
+      : dirs;
+  }, [facets.data, filters.configDir]);
+
   const filtersActive = Boolean(
-    query.trim() || filters.project || filters.favorites
+    query.trim() || filters.project || filters.configDir || filters.favorites
   );
   const loadingMore = page.loading && cursor !== "";
   const remaining = facets.data ? facets.data.total - items.length : 0;
@@ -608,6 +640,35 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
               })),
             ]}
           />
+
+          {/* Only when there is a choice to make. One account is the common
+              case, and a control whose every state shows the same rows is
+              noise — hence driven by the facet rather than always rendered and
+              disabled. The second clause is the escape hatch: a live selection
+              always keeps its own control on screen, whatever the facet says. */}
+          {(accountOptions.length > 1 || filters.configDir !== "") && (
+            <Dropdown
+              small
+              className="sess-select"
+              label={
+                filters.configDir
+                  ? tildePath(filters.configDir)
+                  : "All accounts"
+              }
+              value={filters.configDir}
+              onChange={(v) => patchFilters({ configDir: v })}
+              options={[
+                { value: "", label: "All accounts" },
+                // The server matches `config_dir` exactly, so the value stays
+                // the absolute path the scan recorded; only the label is
+                // shortened.
+                ...accountOptions.map((d) => ({
+                  value: d,
+                  label: tildePath(d),
+                })),
+              ]}
+            />
+          )}
 
           {/* Relevance is offered only while a term is active, because without
               a MATCH there is no rank — the server would answer `recent` and
