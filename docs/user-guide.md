@@ -398,6 +398,33 @@ It binds `127.0.0.1` and nothing else, so it is reachable from your machine only
 **It ships disabled.** A fresh install binds no port and starts no listener; the
 feature costs one database read at launch until you turn it on.
 
+<details>
+<summary><b>Screenshots</b> of the five gateway views this section walks through</summary>
+
+<br>
+
+**Overview.** Listener state, the token, and the snippet for each client.
+
+![LLM Gateway Overview: the listener running on 127.0.0.1:8880, the Create gateway token button, and copyable env snippets for the OpenAI SDK, the Anthropic SDK, Claude Code and curl](screenshots/light/gateway-overview.png)
+
+**Providers.** One upstream account, its adapter, base URL, key and timeouts.
+
+![LLM Gateway Providers: a Moonshot provider on the OpenAI adapter with its base URL, an empty API key field and connect, first-byte and idle timeouts](screenshots/light/gateway-providers.png)
+
+**Models.** The alias, its ordered targets and its fallbacks.
+
+![LLM Gateway Models: the open-weight-models alias routing to Moonshot k3 first, then z_ai_glm glm-5.2, with a fallback below](screenshots/light/gateway-models.png)
+
+**Usage.** One row per served request, aggregated.
+
+![LLM Gateway Usage: requests, tokens, cost, error rate and p95 latency cards over 30 days, with requests, tokens and spend over time and breakdowns by alias and provider](screenshots/light/gateway-usage.png)
+
+**Gateway Settings.** The switch, the port, and the retention horizon.
+
+![Gateway Settings: enable the gateway, port 8880, start with the app, and a 90-day usage-log retention horizon](screenshots/light/gateway-settings.png)
+
+</details>
+
 ### Turning it on
 
 **LLM Gateway → Gateway Settings**, under **Listener**:

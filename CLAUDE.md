@@ -272,7 +272,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   35 migrations, embedded from parity/ — applied at startup
+    migrate.rs   36 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -1019,6 +1019,65 @@ two tests of it live is the decision worth knowing:
 
 It is **not** `#[ignore]`d: it needs no corpus, only a tempdir.
 
+**Both version markers live on the row, and that is what makes the sweep short**
+(#446, migration 36). `session_insights` carries `processor_version` *and*
+`search_index_version`, `store::upsert` writes both in the **same transaction**
+as the `session_search` row, and `store::needs_processing` selects on either
+being behind. Three consequences, and the first is the whole reason the column
+moved:
+
+- **A session the sweep skips stays behind and is retried.** An unreadable
+  transcript whose cache row survives — an unmounted drive, a permissions
+  change, exactly what the unreadable-config-dir protection preserves — never
+  reaches the upsert, so its version does not advance and every later sweep
+  picks it up again. Under #435's single `claude_cache_metadata` stamp it was
+  invisible to every recovery path at once (its insight row was current, its
+  `file_mtime` unchanged, the stamp recorded) and stayed unindexed until its
+  transcript next changed.
+- **An interrupted rebuild resumes.** The stamp was written only when every
+  batch had committed, so a process killed mid-rebuild re-read the whole corpus.
+- **A version bump no longer blanks the index.** Nothing calls `delete_all` on
+  the rebuild path any more; each row is replaced in place, so the un-rebuilt
+  part of the corpus keeps answering.
+
+**The upgrade itself indexes nothing**, and that is migration 36's doing rather
+than a property of the column: `DEFAULT 0` alone would make every existing row
+read as behind and rebuild the whole corpus once, so the migration carries
+`claude_cache_metadata.search_index_version` forward onto every row that has an
+index row (found through the freshly backfilled `session_search_key`, so it is a
+B-tree join and not 1,178 FTS scans). A row with **no** index row is left at 0 —
+inheriting the stamp there would mark a never-indexed session done for ever,
+which is the very hole this issue closes.
+
+**What a genuine `SEARCH_INDEX_VERSION` bump now costs is 5.4× what #444's did**
+— 35.8 s against 6.66 s over the same 1,178 sessions — because per-session
+`replace` is not the same work as `delete_all` plus insert-into-empty, and the
+side table removed only the *scan* half of the delete (44.57 ms → 7.79 ms; the
+rest is FTS5 rewriting one document's term lists, which nothing can remove). It
+buys a bump that is resumable, retries what it skipped, and leaves search
+answering throughout. Weigh that trade before bumping.
+
+`search::{stored_version,record_version}`, `store::Scope` and `worker::Write`
+are gone with it. `claude_cache_metadata.search_index_version` remains as a
+**dead column** — the migrations are append-only — so a `SELECT` on it still
+works and means nothing.
+
+What paid for it is `session_search_key(session_id, project_path, rowid_ref)`,
+also migration 36: `search::delete` resolves the pair there and deletes on
+`rowid`, the one non-`MATCH` constraint FTS5's `xBestIndex` accepts, instead of
+scanning the `%_content` table. Three rules around it:
+
+- **Every `search` writer maintains it inside the caller's transaction**, and a
+  key row pointing at the wrong docid deletes somebody else's session with
+  nothing to report it. `the_key_table_tracks_the_index_through_every_writer`
+  and `search_live`'s corpus-scale copy of the same check are the guard.
+- **A missing key row is a fallback, not an error** — a database indexed before
+  migration 36 can hold one (the backfill's `INSERT OR IGNORE` skips a duplicate
+  pair), so `delete` falls back to the old scan-shaped predicate.
+- **`delete_orphans` is still keyed on the cache, not on the side table.**
+  Driving it off the key table would make an index row with no key entry
+  unreachable for ever, and it runs once per scan rather than once per session.
+
 ### The search index, measured (`src-tauri/tests/search_live.rs`, #439)
 
 The third `#[ignore]`d live suite over the corpus, and the only one whose output
@@ -1034,20 +1093,27 @@ cargo test --release --test search_live -- --ignored --nocapture  # the numbers
 
 It copies `~/.agento/agento.db`, **migrates the copy** (the installed database
 lags the repository — on the reference machine it had no `session_search` table
-at all), forces `search_index_version` to 0, drives the rebuild through
-`worker::start`, and then measures. `sweep` is private, so the terminal
-condition is the **version stamp** rather than a row count: `sweep` records it
-last and only when every batch committed, where a row count sits flat for the
-whole of each batch's read phase and a test waiting for it to settle declares
-success mid-sweep.
+at all), forces every row's `session_insights.search_index_version` to 0, drives
+the rebuild through `worker::start`, and then measures.
+
+**The terminal condition was the global version stamp and since #446 it is
+convergence**, which is worth knowing before touching it. There is no stamp any
+more, and "nothing is pending" is *not* the replacement: a real corpus holds
+transcripts that cannot be read, those sessions deliberately stay behind for
+ever, and a suite waiting for zero would time out on a healthy build. So the
+loop watches the pending count fall and stops when it holds still — the failure
+the old note warned about (a count sits flat for a whole batch's *read* phase,
+so a naive "stopped changing" declares success mid-sweep) is answered twice
+over: `SETTLE` is 20 s against a sub-second batch, and the reported build time is
+taken at the **last observed change**, so the settle window is not charged to it.
 
 **The reference numbers, release profile, 1,178 sessions** — a baseline for
 anything that claims to make this faster or smaller, not a promise:
 
 | | |
 |---|---|
-| cold full rebuild | **6.7 s** (5.7 ms/session) |
-| incremental `search::delete` | **45 ms** — this is the scan |
+| cold full rebuild | **6.7 s** (5.7 ms/session) — **#446 made this 35.8 s**, see above |
+| incremental `search::delete` | **45 ms** — this was the scan; **#446 made it 7.8 ms** |
 | incremental `search::insert` | 11 ms |
 | one session through the worker | 207 ms, transcript read included |
 | `delete_orphans`, whole index | 35 ms |
@@ -1058,10 +1124,13 @@ anything that claims to make this faster or smaller, not a promise:
 
 Three things those numbers settled:
 
-- **`search::delete`'s scan is real and it is the incremental path's whole
+- **`search::delete`'s scan was real and it was the incremental path's whole
   cost.** 45 ms against a 188 MB index, against the 9.5 ms/17 MB and 63 ms/176 MB
-  already recorded — it tracks index size, as a scan does. The rowid side table
-  (#446) is what removes it; nothing here should add a second caller.
+  already recorded — it tracked index size, as a scan does. **#446 removed it**
+  with the `session_search_key` rowid side table, so the row above is the
+  pre-#446 baseline; re-measure rather than quoting it. That table is also what
+  made per-row rebuilds affordable, since a rebuild is per-session `replace`
+  again.
 - **`tool_text` is 86.5 % of the stored text** (122.2 MB of 141.3 MB), against
   `assistant_text`'s 10.5 % and `user_text`'s 3.0 % — and it carries the *lowest*
   bm25 weight (0.5). #434's caps were **left alone** anyway: they are per tool
@@ -3636,9 +3705,9 @@ Windows x86_64 — and attaches the installers to a draft release.
 
 Signed with **our own minisign key**, generated by `tauri signer generate`.
 It has nothing to do with Apple or Microsoft code signing; it only proves an
-update came from us. That is why in-app updates work fine on unsigned macOS
-builds — Gatekeeper gates the first launch of a *downloaded* app, not a bundle
-the updater swapped in.
+update came from us. That is why in-app updates work fine on ad-hoc signed,
+non-notarised macOS builds — Gatekeeper gates the first launch of a *downloaded*
+app, not a bundle the updater swapped in.
 
 - Private key: 1Password → GCP Secret Manager
   (`github-repo-agento-tauri-updater-private-key`) → the repo's

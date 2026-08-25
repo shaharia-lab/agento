@@ -20,10 +20,15 @@
 //! configuration tables (#422, epic #421). Migration **33** is the third: the
 //! `session_search` FTS5 index and `claude_cache_metadata.search_index_version`
 //! (#433, epic #432). Migration **34** is the fourth: `gateway_usage_log`
-//! (#425, epic #421). Same terms every time — authored, additive, and appended
-//! to the vector file as *text*, because a JSON round-trip through most encoders
-//! rewrites Go's `>` escaping across the frozen entries and that is the reformat
-//! the file's `_comment` forbids.
+//! (#425, epic #421). Migration **35** is the fifth: the gateway's usage
+//! retention horizon (#428, epic #421). Migration **36** is the sixth:
+//! `session_insights.search_index_version` and the `session_search_key` rowid
+//! side table (#446, epic #432) — which is also what leaves 33's
+//! `claude_cache_metadata.search_index_version` a dead column, kept because the
+//! migrations are append-only. Same terms every time — authored, additive, and
+//! appended to the vector file as *text*, because a JSON round-trip through most
+//! encoders rewrites Go's `>` escaping across the frozen entries and that is the
+//! reformat the file's `_comment` forbids.
 //!
 //! **Two authors will reach for the same number.** #422 and #433 were worked in
 //! parallel and both wrote migration 32; the second to merge has to rebase and
@@ -250,8 +255,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 35, "expected 35 migrations");
-        assert_eq!(expected_version(), 35);
+        assert_eq!(all.len(), 36, "expected 36 migrations");
+        assert_eq!(expected_version(), 36);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -345,7 +350,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 35);
+        assert_eq!(current_version(&conn).expect("version"), 36);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -384,7 +389,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 35);
+        assert_eq!(current_version(&conn).expect("version"), 36);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -492,7 +497,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 35);
+        assert_eq!(current_version(&conn).expect("version"), 36);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -501,7 +506,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 35);
+        assert_eq!(recorded, 36);
     }
 
     #[test]
