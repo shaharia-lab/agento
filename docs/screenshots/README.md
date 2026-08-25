@@ -31,6 +31,27 @@ or written. See "How they were made" for what is still worth a designer's eye.
 | `settings-pricing.png` | Settings → Pricing, scrolled to the Anthropic rows |
 | `settings-data.png` | Settings → Data: idle threshold, hidden projects |
 | `settings-claude.png` | Settings → Claude |
+| `gateway-overview.png` | LLM Gateway → Overview: listener state, the token, the per-client env snippets |
+| `gateway-providers.png` | LLM Gateway → Providers: one upstream account, its adapter, base URL, key field and timeouts |
+| `gateway-models.png` | LLM Gateway → Models: an alias with ordered targets and a fallback |
+| `gateway-usage.png` | LLM Gateway → Usage: cards, requests / tokens / spend over time, breakdowns by alias and provider |
+| `gateway-settings.png` | LLM Gateway → Gateway Settings: enable, port, start with the app, retention horizon |
+
+## The gateway shots are not from the synthetic corpus
+
+The five `gateway-*.png` files are the exception to everything above: they were
+taken from a live gateway configuration rather than the fake `HOME`, because the
+gateway's views are populated by provider accounts and served requests, and the
+synthetic corpus has neither.
+
+Nothing secret is on screen, and the app is what guarantees it rather than a
+crop: an API key is never returned by any read, so the Providers field is empty
+by construction, and a gateway token is shown once at mint time and stored
+nowhere, so the Overview snippets read `<your gateway token>`. What the shots do
+carry is the provider names, base URL, model ids and spend of a real setup
+(Moonshot and Z.AI GLM, $1.71 over 14 requests). Redo them the same way, from a
+configured gateway in the `light` theme at 1440x900, rather than through the
+`app-demo-ui-screenshot` skill.
 
 ## What a designer may still want to touch
 

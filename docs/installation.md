@@ -76,8 +76,9 @@ means take the `aarch64` build.
 ### The first launch is blocked
 
 macOS refuses to open the app the first time and says it cannot be verified. This
-is expected. The app is not signed with a paid Apple Developer certificate, so
-Gatekeeper treats it as an unidentified developer.
+is expected. The app is ad-hoc signed, which is what lets it launch at all on
+Apple Silicon, but it is not notarised — that needs a paid Apple Developer
+certificate — so Gatekeeper treats it as an unidentified developer.
 
 To allow it:
 
