@@ -250,8 +250,8 @@ mod tests {
     #[test]
     fn the_embedded_vector_is_the_whole_schema() {
         let all = migrations();
-        assert_eq!(all.len(), 34, "expected 34 migrations");
-        assert_eq!(expected_version(), 34);
+        assert_eq!(all.len(), 35, "expected 35 migrations");
+        assert_eq!(expected_version(), 35);
         for (i, m) in all.iter().enumerate() {
             assert_eq!(
                 m.version,
@@ -345,7 +345,7 @@ mod tests {
 
         apply(&mut conn).expect("apply");
 
-        assert_eq!(current_version(&conn).expect("version"), 34);
+        assert_eq!(current_version(&conn).expect("version"), 35);
         verify(&conn).expect("verify");
 
         // A column from the last migration, and the one migration 24 renamed:
@@ -384,7 +384,7 @@ mod tests {
 
         apply(&mut conn).expect("first");
         apply(&mut conn).expect("second must not fail");
-        assert_eq!(current_version(&conn).expect("version"), 34);
+        assert_eq!(current_version(&conn).expect("version"), 35);
     }
 
     /// **The upgrade path a real install takes**, which neither the
@@ -492,7 +492,7 @@ mod tests {
         }
 
         let conn = Connection::open(&path).expect("open");
-        assert_eq!(current_version(&conn).expect("version"), 34);
+        assert_eq!(current_version(&conn).expect("version"), 35);
         // Each migration recorded exactly once — a double-apply would have
         // violated the primary key and failed above, but assert the end state
         // rather than relying on that.
@@ -501,7 +501,7 @@ mod tests {
                 row.get(0)
             })
             .expect("count");
-        assert_eq!(recorded, 34);
+        assert_eq!(recorded, 35);
     }
 
     #[test]

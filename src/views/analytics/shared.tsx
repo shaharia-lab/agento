@@ -1,6 +1,15 @@
 import { Icon, type IconName } from "../../lib/icons";
+import { CardEmpty } from "../../components/charts";
 import { compactNumber, integer, tildePath } from "../../lib/format";
 import type { AnalyticsReport, TopEntry } from "../../lib/types";
+
+/**
+ * `CardEmpty` moved to `components/charts.tsx` with the charts that fall back to
+ * it (#428) and is re-exported here so no analytics call site had to churn — the
+ * chart lift is a move, and a move that rewrites five import lists is harder to
+ * read as one.
+ */
+export { CardEmpty };
 
 /* ============================================================================
    Shared analytics plumbing: the period model, safe arithmetic, bucket labels
@@ -242,21 +251,6 @@ export function Card({
         )}
       </div>
       <div className="card__body">{children}</div>
-    </div>
-  );
-}
-
-export function CardEmpty({ text }: { text: string }) {
-  return (
-    <div
-      style={{
-        padding: "var(--sp-7) 0",
-        textAlign: "center",
-        color: "var(--fg-quaternary)",
-        fontSize: "var(--text-sm)",
-      }}
-    >
-      {text}
     </div>
   );
 }

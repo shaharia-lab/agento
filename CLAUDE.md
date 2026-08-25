@@ -182,12 +182,45 @@ src/
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
     newChatPrefs.ts  what the New Chat bar was last set to (localStorage)
     logs.ts      the log commands, and the line parser (target before level)
+    snippet.ts   the U+0001/U+0002 highlight sentinels, mirrored once from
+                 native/search/mod.rs, and snippetParts() (#438). They are
+                 **markers, not markup**: a snippet carries the transcript's own
+                 bytes, so every run is handed to JSX as a text child and
+                 nothing here builds an HTML string
+    typeAssert.ts  Eq / Expect — the compile-time value pin, lifted out of
+                 views/gateway/snippets.ts by #438 for its second consumer.
+                 **This is the repo's only regression guard for a value**, since
+                 there is no TypeScript test harness: give the value a literal
+                 type and assert it exactly, and respelling it fails `tsc`.
+                 `Eq`, never `extends` (`"a" extends string` pins nothing), and
+                 export the alias or `noUnusedLocals` deletes the guard
   components/    TitleBar, Sidebar, StatusBar, CommandPalette, ui.tsx,
-                 DirField (native picker + the /api/fs fallback), CopyButton
+                 DirField (native picker + the /api/fs fallback), CopyButton,
+                 TokenReveal (the show-once minted token, #427 — shared by
+                 SecurityPane and the gateway Overview)
+    charts.tsx   the inline-SVG chart primitives — AreaChart, BarChart,
+                 RateChart, Heatmap, CardEmpty — lifted out of views/analytics/
+                 by #428 when the gateway's Usage view needed the same ones.
+                 Pure presentation over `{label, value, hint}[]`: it imports
+                 nothing from views/ and no Claude type, and it carries its own
+                 stylesheet (styles/charts.css) so a consumer outside the
+                 analytics section does not have to import that section's sheet.
+                 The `.a-` class prefix is history, not scope
   views/         one file per section
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
                  and revoking scoped API tokens (#405)
+    gateway/     the LLM Gateway section (#427) — its own sidebar section,
+                 sharing nothing with Claude analytics or stats.ts
+      OverviewView.tsx  status, the mint-once `llm` token, and the env snippets
+      snippets.ts       the two base URLs and the type-level pin on them
+                        (through lib/typeAssert.ts): OpenAI is `/v1`, Anthropic
+                        is `/anthropic` with no `/v1`
+      UsageView.tsx     the gateway's own dashboard (#428) over
+                        GET /api/gateway/usage — and the two places a total is
+                        labelled a *floor* rather than reported as a fact
+      ProvidersView.tsx / ModelsView.tsx / SettingsView.tsx (which owns the
+                        `usage_retention_days` control, #428)
   styles/        tokens → base → shell → controls → views (+ per-view files)
 
 src-tauri/src/
@@ -222,7 +255,9 @@ src-tauri/src/
                  is_retryable/should_failover copied from ferrox/src/retry.rs
     stream.rs    the SSE bytes of both surfaces, and the anthropic-beta merge
     usage.rs     one row per served request (#425) — the accumulator a stream
-                 reports through, and the cost resolved at write time
+                 reports through, and the cost resolved at write time; plus the
+                 retention prune (#428) and the once-a-day gate that rides the
+                 write rather than owning a timer
   native/        ported endpoints (phase 2+)
     active_time.rs the capped-gap rule, shared by the scanner and the pipeline
     scanner/     the Claude session scanner (issue #270) — computes, never writes
@@ -237,7 +272,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   34 migrations, embedded from parity/ — applied at startup
+    migrate.rs   35 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -318,6 +353,10 @@ src-tauri/src/
       detail.rs  one session re-read from its transcript, patched from the cache
       projects.rs the project picker's list, derived from the same walk a scan is
       corpus.rs  loads the lot
+      query.rs   the filter, the sort and the cursor — including `add_search`
+                 (#436) and the `relevance` arm over negated bm25 (#437)
+      page.rs    the page and the facets; the ranked FTS join and the per-page
+                 `match_snippet` read hang off `list_page` alone
     analytics/   GET /api/claude-analytics
       buckets.rs Go's time.Date/AddDate and the bucket walks, in the request's tz
       params.rs  from/to/project/tz, and the granularity the window picks
@@ -333,6 +372,8 @@ src-tauri/src/
     diff.rs      byte comparison + reporting for shadow mode
 
 src-tauri/tests/ integration suites (the live-diff ones went with the Go tree)
+                 insights_worker.rs  the worker through the real `worker::start`
+                 (#447) — not `#[ignore]`d, and one `start` per binary
 parity/          frozen goldens from the Go server; see parity/README.md
 ```
 
@@ -348,8 +389,24 @@ as `null`, so every array field is `T[] | null` — handle it.
 `http://127.0.0.1:8990` with the user's real history and credentials.
 `curl -H "Content-Type: application/json" http://127.0.0.1:8990/api/...` is the
 ground truth for wire formats — better than reading Go structs. **GET only.**
-Never write to it. For write-path testing, start your own instance with
-`AGENTO_DATA_DIR` pointed at a scratch directory.
+Never write to it. For write-path testing, start your own instance against a
+scratch data directory.
+
+**`AGENTO_DATA_DIR` is not how you do that in a debug build**, and this file said
+it was until #429's cold-start test followed its own advice and wrote to the
+developer's real dev database. `paths.rs::data_dir` is `cfg`-split: the release
+arm reads the variable, and **the debug arm ignores the environment entirely**
+and always answers `~/.agento-desktop-dev` — deliberately, so that a shell
+exporting `AGENTO_DATA_DIR=~/.agento` cannot make `npm run app` collide with an
+installed Agento over one SQLite file and one scheduler. The lever a debug build
+*does* obey is `HOME`, since that is what `data_dir` joins onto:
+
+```bash
+HOME=/tmp/scratch-home ./target/debug/agento    # its own db, keypair and corpus
+```
+
+That also gives the instance an empty `~/.claude`, which is what makes it a cold
+install rather than a copy of yours.
 
 Every state-changing `/api` request needs `Content-Type: application/json` —
 `POST`, `PUT`, `PATCH`, `DELETE`; the server's guard (`isStateChanging` in
@@ -920,6 +977,13 @@ Three rules, each silent when wrong:
   `session_insights` has no `file_path` to get this wrong with. Running it after
   the scan's own delete pass is what inherits the unreadable-config-dir
   protection: those cache rows survive, so their insights are not orphans.
+  **The ordering is asserted in `scan.rs`'s own tests since #447**, over a
+  two-config-dir fixture corpus under a swapped `HOME`: a removed session loses
+  its index row, and a session under a `chmod 0o000` config dir keeps its cache,
+  insight *and* index rows. Both `delete_orphans` functions had unit tests
+  against a hand-built database, and what those cannot say is *where they are
+  called from* — moving `search::delete_orphans` above `apply_changes` finds
+  every row still present, deletes nothing, and changes no other observable.
 - **A full queue asks for a sweep; it does not drop and wait.** The scan
   announces changed sessions on a 100-slot channel, and a first scan announces
   ten times that. Go warns per dropped item and waits for the next five-minute
@@ -932,6 +996,86 @@ scan's staleness markers deliberately do **not** cover
 `CURRENT_PROCESSOR_VERSION`: a processor-only bump must not force a full
 re-read of `claude_session_cache`, so the five-minute sweep is the only thing
 that notices one.
+
+**`run` is the boot sweep plus `loop { run_once(..) }`** (#447), and where the
+two tests of it live is the decision worth knowing:
+
+- **`run_once` is private, and it exists for the *unit* tests.** It returns a
+  `Pass` so one deterministic pass is assertable — the `BATCH_SIZE` cutoff, the
+  remainder waiting for the next pass, the `SWEEP_REQUESTED` follow-up, and
+  `enqueue`'s own path end to end. Before the split, every test called
+  `process_batch` directly and none of that was reachable. It takes the timeout
+  as a parameter purely so a test does not wait five minutes; `RESCAN_INTERVAL`
+  is production's only value for it.
+- **`run_once` does *not* make "the worker's database work is off the runtime"
+  testable**, and that is the trap the split invites. A test calling it from a
+  `tokio::spawn` is still the test choosing where the work runs — the same
+  non-falsifiability under a new name. The thing under test is **`start`'s
+  `std::thread::spawn`**, so it is driven from `src-tauri/tests/insights_worker.rs`
+  through the real `start`/`enqueue`, in #366's harness. That binary may hold
+  **exactly one** test calling `start`, because `QUEUE` is a process-wide
+  `OnceLock` — a second gets `already started` and silently drives the first
+  test's worker against the first test's database.
+
+It is **not** `#[ignore]`d: it needs no corpus, only a tempdir.
+
+### The search index, measured (`src-tauri/tests/search_live.rs`, #439)
+
+The third `#[ignore]`d live suite over the corpus, and the only one whose output
+is as much of the point as its assertions. Run it by hand, like its siblings —
+and under `--release` when you care about the numbers, because the `bundled`
+SQLite is a C dependency compiled at the profile's optimization level, so a
+debug run measures a SQLite nobody ships:
+
+```bash
+cargo test --test search_live -- --ignored --nocapture            # correctness
+cargo test --release --test search_live -- --ignored --nocapture  # the numbers
+```
+
+It copies `~/.agento/agento.db`, **migrates the copy** (the installed database
+lags the repository — on the reference machine it had no `session_search` table
+at all), forces `search_index_version` to 0, drives the rebuild through
+`worker::start`, and then measures. `sweep` is private, so the terminal
+condition is the **version stamp** rather than a row count: `sweep` records it
+last and only when every batch committed, where a row count sits flat for the
+whole of each batch's read phase and a test waiting for it to settle declares
+success mid-sweep.
+
+**The reference numbers, release profile, 1,178 sessions** — a baseline for
+anything that claims to make this faster or smaller, not a promise:
+
+| | |
+|---|---|
+| cold full rebuild | **6.7 s** (5.7 ms/session) |
+| incremental `search::delete` | **45 ms** — this is the scan |
+| incremental `search::insert` | 11 ms |
+| one session through the worker | 207 ms, transcript read included |
+| `delete_orphans`, whole index | 35 ms |
+| index on disk | **188.7 MB** (164 KB/session) |
+| page query, common word | **33.6 s p50** · facets for the same query, 101 ms |
+| page query, rare word (16 hits) | 23 ms |
+| the suite itself | ~6 min release, ~25 min debug |
+
+Three things those numbers settled:
+
+- **`search::delete`'s scan is real and it is the incremental path's whole
+  cost.** 45 ms against a 188 MB index, against the 9.5 ms/17 MB and 63 ms/176 MB
+  already recorded — it tracks index size, as a scan does. The rowid side table
+  (#446) is what removes it; nothing here should add a second caller.
+- **`tool_text` is 86.5 % of the stored text** (122.2 MB of 141.3 MB), against
+  `assistant_text`'s 10.5 % and `user_text`'s 3.0 % — and it carries the *lowest*
+  bm25 weight (0.5). #434's caps were **left alone** anyway: they are per tool
+  result and already a quarter of `MESSAGE_CAP`, so what is large is the number
+  of tool calls in a Claude Code transcript rather than any one of them, and
+  `SESSION_CAP` already binds (the widest session indexes 523,339 of 524,288
+  bytes). Lowering the cap would trade recall for size against a budget nobody
+  has set, and would need a `SEARCH_INDEX_VERSION` bump to take effect.
+- **The expensive half of a search is the ranked join and the snippet, not the
+  index.** The same query answers its *facets* — which use the membership `IN`,
+  with no `bm25()` carried through and no `snippet()` — in 101 ms while the page
+  takes 33.6 s, and a term with 16 hits takes 23 ms either way, so the cost
+  tracks the number of hits rather than the corpus. Read that before optimizing
+  the index for it.
 
 ### The Claude Agent SDK (`src-tauri/src/claude/`)
 
@@ -1970,6 +2114,25 @@ busy timeout.
   it (#364). A cursor minted before the `p` field decodes with it empty and
   pages exactly as it used to, which is Go's missing-field behaviour and why the
   Rust field carries `#[serde(default)]`.
+- **`sort=relevance` is the default when `q` is set, and bm25 reaches it
+  negated** (#437). `q` with no explicit `sort` resolves to `relevance`; an
+  explicit one always wins; `relevance` with no `q` is the unknown-sort fallback
+  to `recent`, because there is no `MATCH` to rank. The sort key is
+  `COALESCE(-fts.rank, -1.0)` and both halves are load-bearing: SQLite's `bm25()`
+  is *negative* — smaller is better — so negating it is what lets "best first"
+  stay `DESC` like every other sort, and the `COALESCE` is what keeps the LIKE
+  half pageable. A search is an `OR`, so a row can match on its id, its path or a
+  title with no index hit at all; left as SQL NULL those rows sort last correctly
+  on the **first** page and then vanish, because `NULL < ?` is NULL and the
+  keyset predicate drops them. The sentinel is safely below every real value
+  because `-bm25` is never negative. The cursor needed no new field — the rank
+  goes in `v`, which already carries a decimal for every non-time sort.
+- **`match_snippet` is present only on a search response, and only where the
+  index matched.** `skip_serializing_if` on an empty string is what kept every
+  frozen golden byte-identical; a metadata-only match honestly carries nothing.
+  Its markers are **U+0001/U+0002**, unambiguous because `search::normalize`
+  strips every control character from the indexed text — never HTML, and never a
+  printable sentinel a transcript could contain.
 - **Cache invalidation is multi-dimensional**: TTL (1h), `scanner_version`,
   pricing revision fingerprint, and idle-threshold drift each force a re-read.
 - **Chat SSE is a POST response**, so `EventSource` cannot be used. Events are
@@ -3138,6 +3301,134 @@ comma-separated header value, header first, with `raw_anthropic_body` forwarding
 the client's document verbatim — both copied from
 `ferrox/src/handlers/anthropic_messages.rs`, and Claude Code compatibility
 depends on them.
+
+**Retention is a horizon, a prune, and a disclosure — and the third is what
+makes the first two honest** (#428, migration 35). `gateway_usage_log` was
+append-only: at ~100 bytes a row, 5k requests a day reaches ~180 MB in a year.
+`gateway_settings.usage_retention_days` bounds it, default 90, ceiling 3650.
+
+Four things about it are decisions rather than details:
+
+- **`0` means keep everything, and it is therefore the *longest* horizon rather
+  than the shortest.** Every comparison over this value has to read that way: the
+  prune returns before opening a connection, the UI's "you are shortening this"
+  warning fires on moving *off* zero and never onto it. Read as a horizon of zero
+  days it would mean "delete immediately", which is the exact inverse.
+- **The field carries `#[serde(default)]` where every sibling request struct
+  deliberately carries none.** `GatewaySettings` *is* the
+  `PUT /api/gateway/settings` body, so a required field would 400 every client
+  written against #426's three-key shape. The default is the column's — an
+  omitted key must not silently mean `0`, which is *keep forever*. The Settings
+  view still sends it on every save, because with a default present, omitting it
+  is the difference between preserving the stored horizon and resetting it to 90.
+- **The prune rides the write; it owns no timer.** It runs inside
+  `Accounting::finish`'s spawned `db::blocking` section — already off the request
+  path — behind a once-a-day gate shaped like `tokens::due`, plus a launch sweep
+  in `lib.rs` because a desktop app open ten minutes a week would never reach the
+  daily interval on traffic alone. Both claim the same slot. `<` not `<=`, so the
+  boundary row is kept. A failed prune is a `warn` and is dropped, as a failed
+  insert is.
+
+  **`prune_since` exists so that last sentence is testable.** With `Utc::now()`
+  read inside the function there is no way to write a row landing *exactly* on
+  the cut, and the first version of the boundary test put its row five seconds
+  late — on the keep side of both `<` and `<=`, so it passed against the very
+  flip it was named for. A review caught it. The general form is worth keeping:
+  **a test named for a boundary has to construct the boundary**, which usually
+  means the value being compared against cannot be read from the clock inside
+  the function under test.
+- **A pruned window says so.** An under-reported total that looks complete is the
+  failure a prune introduces, and it is silent without this — so the Usage view
+  labels the window a **floor** whenever it reaches past the horizon, in the same
+  wording as the unpriced-cost note, so the two read as one idea rather than two
+  warnings.
+
+**The Usage view is #426's endpoint plus the three aggregates it did not ship.**
+`by_surface`, `by_token` and a `latency` block (nearest-rank p50/p95/max) were in
+#428's acceptance criteria and not in #426's `UsageBody`; they are computed over
+columns migration 34 already stores, so the addition is additive and no existing
+field moved. `by_token` groups on the token's `sub` — an `api_tokens` row id,
+never a secret — and an unattributable row is grouped under `""` rather than
+dropped, so the breakdown's total cannot disagree with the window's.
+
+**That id is not a label, and `UsageGroup.label` is why.** The row id appears
+nowhere else in the product: the Security tab lists tokens by *name*, so a panel
+printing `3f2a…` cannot answer the one question it exists for. `read_usage`
+resolves the names itself rather than leaving the view to fetch them, because
+`/api/security/*` needs a **`write`** scope whatever the method — a read-only
+dashboard has no business holding one. Revoked tokens keep their names, since a
+revoked credential's spending history is most of what made the revocation
+informed. `label` is `skip_serializing_if = "Option::is_none"` and only
+`by_token` ever sets it. **It widens what a `read` token can see, and that is
+argued at the site rather than left implicit:** `required_scope` forces `write`
+on `/api/security/*` so a `read` token cannot enumerate every credential, and
+what this returns is not an enumeration — only tokens with traffic in the
+window, only `(id, name)`, with the scope, `jti`, expiry and revocation state
+left where they were.
+
+**The launch sweep asks a reader before it asks for a write lock.** It runs on
+every boot, and an install that never switched the gateway on has an empty
+`gateway_usage_log` forever — so `prune_since` short-circuits on
+`SELECT EXISTS(...)` through a WAL reader, which never waits on a writer. That is
+what keeps "an install that never configures one pays a single `SELECT` at boot"
+true. An *unreadable* database is not an empty one: it falls through, so the
+write path reports the real error rather than a silent no-op.
+
+**`validate` returns the field it refused, and must keep doing so.** It is
+`Result<(), SettingsError>` with `field` and `message`, not a bare `String`: the
+first version had the route recover the field by `starts_with`-ing the message,
+a prose coupling that would mislabel the input a form highlights the moment
+either string was reworded — and the test written for it asserted
+`contains("usage_retention_days")`, which the *message* also satisfies, so it
+passed with the field hardcoded. Assert the whole
+`validation error for \"<field>\"` prefix, which is the only part of that body
+the field actually decides.
+
+**The chart primitives are shared; nothing else is.** `src/components/charts.tsx`
+is `views/analytics/charts.tsx` moved, with its stylesheet
+(`styles/charts.css`). The locked decision that gateway traffic is never mixed
+into Claude analytics is about **data and sections**, not React components —
+`charts.tsx` is presentation over `{label, value, hint}[]` and holds no Claude
+type. What stayed unshared is everything typed: `analytics/shared.tsx`'s
+`entryLabel`/`projectLabel`/`RankList`, `stats.ts`, the wire types, and the
+ranked-list CSS (the gateway has its own `.gw-rank`). Prove a move like this
+rather than asserting it: building both sides and comparing the emitted CSS as a
+sorted set of rules gave 578 identical rules.
+
+### The gateway is documented, and where (#429)
+
+The epic closes with the docs, so the user-facing account of this feature lives
+outside this file and must not be duplicated back into it:
+
+| where | what it carries |
+|---|---|
+| `docs/user-guide.md` → **LLM Gateway** | the whole flow — enable, provider, alias, mint, point a tool, watch usage, and the retention horizon |
+| `docs/troubleshooting.md` → **LLM Gateway** | bind failure, 401 vs 403 in both directions, the model-name mismatch, empty Usage, the log lines |
+| `docs/development.md` → **The LLM gateway** | the `/api`-versus-listener split, the `ferrox-providers` feature policy, and the two curl commands |
+| `README.md` → *Route your other tools through Agento* | one bullet, flagged off by default |
+
+**Three claims a doc must keep making, because each is the inverse of what a
+reader assumes.** `0` retention days is *keep everything*, the **longest**
+horizon and not the shortest. The Anthropic base URL has **no** `/v1` while the
+OpenAI one does, because the Anthropic SDK appends its own — the measured failure
+is a 404 on `/anthropic/v1/v1/messages`. And the three scopes are **disjoint, not
+ranked**: `write` is not a superset of `llm`, so "use a bigger token" is never
+the fix for a gateway 403.
+
+**A cold-start test is the acceptance bar for this feature's docs, and it found
+things reading the code did not.** The one worth keeping: Claude Code pointed at
+the gateway with only `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` asks for
+*its own* default model, which is not a configured alias, and stops with "There's
+an issue with the selected model". The alias name is the whole routing key, so
+either `ANTHROPIC_MODEL` names an alias or an alias is named after what the
+client sends. The env snippets in `views/gateway/snippets.ts` show two variables
+and the user guide shows three, deliberately.
+
+**The `ferrox-providers` pin is a tag, and the crates.io question is open.**
+`Cargo.toml`'s comment defers "tag vs crates.io publish" to before the first
+shipping release; #429 records it as a release-gate item rather than deciding it,
+because a docs change must not settle a supply-chain choice. See
+[#453](https://github.com/shaharia-lab/agento/issues/453).
 
 ### Not implemented, on purpose
 

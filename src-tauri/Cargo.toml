@@ -331,6 +331,19 @@ opt-level = "s"
 panic = "unwind"
 strip = true
 
+# CI compiles the release profile only to type-check and codegen the
+# `cfg(not(debug_assertions))` paths that never build during development
+# (see .github/workflows/ci.yml) — it throws the binary away. `inherits`
+# carries `debug-assertions = false`, which is the entire point; fat LTO and
+# codegen-units = 1 cost ~4 minutes and buy CI nothing. The shipped installers
+# are built by release.yml through `tauri build`, which uses [profile.release]
+# above and is unaffected by this profile.
+[profile.ci]
+inherits = "release"
+lto = false
+codegen-units = 16
+opt-level = 0
+
 [dev-dependencies]
 tempfile = "3.27.0"
 # Collecting a streamed SSE body in the turn tests.

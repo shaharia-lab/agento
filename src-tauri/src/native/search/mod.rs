@@ -102,6 +102,40 @@ pub const SEARCH_INDEX_VERSION: i64 = 1;
 /// asserts the two agree.
 pub const BM25_EXPR: &str = "bm25(session_search, 8.0, 4.0, 2.0, 0.5)";
 
+/// The markers `snippet()` wraps a matched term in, on the wire (#437).
+///
+/// **U+0001 and U+0002, because they cannot occur in the indexed text.**
+/// `normalize::normalize_text` collapses every whitespace *and control*
+/// character to a space before a byte is stored — "a control character is never
+/// a word, and leaving one in would put it in a snippet and in the stored
+/// column" — so these two are unambiguous by construction rather than by
+/// convention. A printable sentinel (`[MATCH]`, `**`, a `<mark>` tag) is text a
+/// session could genuinely contain, and the consumer splitting on it would then
+/// highlight the wrong span with nothing to say so.
+///
+/// They are deliberately **not HTML**: `match_snippet` carries the transcript's
+/// own bytes, and a consumer that received markup would have to decide what is
+/// text and what is not. #438 splits on these and renders the spans itself.
+///
+/// `gojson` escapes both as `\u0001` / `\u0002`, which is ordinary JSON.
+pub const SNIPPET_MARK_START: char = '\u{1}';
+pub const SNIPPET_MARK_END: char = '\u{2}';
+
+/// The snippet expression, spelled once beside the ranking it accompanies.
+///
+/// `-1` lets FTS5 pick the column rather than pinning one, so a hit that only
+/// appears in a tool result still produces a snippet instead of an empty string
+/// from an empty `title`. The UNINDEXED key columns can never be picked — they
+/// hold no matches at all. Which column wins a tie is FTS5's business and
+/// deliberately not asserted; that a snippet comes back, from a column that
+/// contains the term, is.
+///
+/// The markers go in as `char(1)`/`char(2)` rather than as literals so this
+/// stays an ASCII string, and `12` tokens is a phrase-length window: long enough
+/// to read as a sentence, short enough that a page of 200 rows is still one
+/// line each.
+pub const SNIPPET_EXPR: &str = "snippet(session_search, -1, char(1), char(2), '…', 12)";
+
 /// One session's indexable text, as the indexer hands it over.
 ///
 /// The four text fields are already normalized by the time they arrive (#434);
@@ -333,6 +367,60 @@ pub fn search(conn: &Connection, query: &str, limit: usize) -> Result<Vec<Hit>, 
         .map_err(|e| format!("querying search: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("reading search results: {e}"))
+}
+
+/// The highlighted snippet for each of `session_ids` that matched `query`
+/// through the index (#437).
+///
+/// Returns `(session_id, project_path, snippet)`, so the caller keys on the pair
+/// the way everything else here does; a session id under two project paths
+/// matches under one of them and gets a snippet for that one alone.
+///
+/// **One statement per page, not one per row, and not one per match.** The
+/// filter (#436) has already reduced the corpus to the rows on the page; this
+/// re-runs the same `MATCH` and keeps only the page's ids, so the cost is one
+/// more walk of the inverted index — the same walk the filter's membership test
+/// performs — rather than a correlated subquery per row. `snippet()` itself is
+/// the expensive half and it is evaluated **only for rows that survive the
+/// `IN`**, so the highlighting is bounded by the page rather than by the match
+/// set. The page cap (200) bounds the `IN` list.
+///
+/// Filtering on `session_id` alone rather than on the pair is deliberate: FTS5
+/// accepts no index on either UNINDEXED column, so neither form narrows the
+/// scan, and one placeholder per row keeps the statement half the size. The
+/// caller matches the pair on the rows that come back.
+///
+/// An empty `session_ids` returns no rows without preparing anything: a page
+/// with nothing on it has nothing to highlight.
+pub fn snippets(
+    conn: &Connection,
+    query: &str,
+    session_ids: &[&str],
+) -> Result<Vec<(String, String, String)>, String> {
+    if session_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = vec!["?"; session_ids.len()].join(", ");
+    let sql = format!(
+        "SELECT session_id, project_path, {SNIPPET_EXPR}
+           FROM session_search
+          WHERE session_search MATCH ?1
+            AND session_id IN ({placeholders})"
+    );
+    let mut args: Vec<&str> = Vec::with_capacity(session_ids.len() + 1);
+    args.push(query);
+    args.extend(session_ids.iter().copied());
+
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| format!("preparing search snippets: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(args.iter()), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(|e| format!("querying search snippets: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("reading search snippets: {e}"))
 }
 
 #[cfg(test)]

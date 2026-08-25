@@ -1,6 +1,6 @@
 import { compactNumber, integer, percent, usd, duration } from "../../lib/format";
 import type { AnalyticsReport, SessionRanking } from "../../lib/types";
-import { AreaChart, BarChart, Heatmap, type Point } from "./charts";
+import { AreaChart, BarChart, Heatmap, type Point } from "../../components/charts";
 import {
   Card,
   CardEmpty,
