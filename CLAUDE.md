@@ -1040,6 +1040,23 @@ moved:
   the rebuild path any more; each row is replaced in place, so the un-rebuilt
   part of the corpus keeps answering.
 
+**The upgrade itself indexes nothing**, and that is migration 36's doing rather
+than a property of the column: `DEFAULT 0` alone would make every existing row
+read as behind and rebuild the whole corpus once, so the migration carries
+`claude_cache_metadata.search_index_version` forward onto every row that has an
+index row (found through the freshly backfilled `session_search_key`, so it is a
+B-tree join and not 1,178 FTS scans). A row with **no** index row is left at 0 —
+inheriting the stamp there would mark a never-indexed session done for ever,
+which is the very hole this issue closes.
+
+**What a genuine `SEARCH_INDEX_VERSION` bump now costs is 5.4× what #444's did**
+— 35.8 s against 6.66 s over the same 1,178 sessions — because per-session
+`replace` is not the same work as `delete_all` plus insert-into-empty, and the
+side table removed only the *scan* half of the delete (44.57 ms → 7.79 ms; the
+rest is FTS5 rewriting one document's term lists, which nothing can remove). It
+buys a bump that is resumable, retries what it skipped, and leaves search
+answering throughout. Weigh that trade before bumping.
+
 `search::{stored_version,record_version}`, `store::Scope` and `worker::Write`
 are gone with it. `claude_cache_metadata.search_index_version` remains as a
 **dead column** — the migrations are append-only — so a `SELECT` on it still
@@ -1095,8 +1112,8 @@ anything that claims to make this faster or smaller, not a promise:
 
 | | |
 |---|---|
-| cold full rebuild | **6.7 s** (5.7 ms/session) |
-| incremental `search::delete` | **45 ms** — this is the scan |
+| cold full rebuild | **6.7 s** (5.7 ms/session) — **#446 made this 35.8 s**, see above |
+| incremental `search::delete` | **45 ms** — this was the scan; **#446 made it 7.8 ms** |
 | incremental `search::insert` | 11 ms |
 | one session through the worker | 207 ms, transcript read included |
 | `delete_orphans`, whole index | 35 ms |

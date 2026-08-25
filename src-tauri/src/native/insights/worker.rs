@@ -240,8 +240,9 @@ fn run_once(db_path: &Path, rx: &Receiver<Pending>, timeout: Duration) -> Pass {
     }
 
     // The queue is the incremental path, so a row for a pair may exist. The
-    // answer is reported rather than acted on: only a rebuild needs to know
-    // whether a batch committed, and a rebuild is [`sweep`]'s alone.
+    // answer is reported rather than acted on: since #446 nothing branches on
+    // it, because a failed batch leaves both of its rows' versions where they
+    // were and the next sweep finds it again. It is on [`Pass`] for the tests.
     let size = batch.len();
     let committed = process_batch(db_path, batch);
 

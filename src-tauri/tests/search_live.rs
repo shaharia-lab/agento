@@ -522,7 +522,7 @@ fn the_index_is_correct_and_measured_over_the_real_corpus() {
         cold_build.as_secs_f64() * 1000.0 / indexed as f64
     );
     eprintln!(
-        "incremental: delete  {:>9.2?}  median of {INCREMENTAL_SAMPLES} (this is the scan)",
+        "incremental: delete  {:>9.2?}  median of {INCREMENTAL_SAMPLES} (keyed on the rowid since #446)",
         median(deletes)
     );
     eprintln!(

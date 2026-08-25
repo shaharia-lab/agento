@@ -649,16 +649,115 @@ mod tests {
     /// cleanly and loses or rewrites a row. This one seeds a `session_insights`
     /// row **and an index row for it** before the last migration runs, and
     /// asserts three things #446 depends on: the row survives untouched, its new
-    /// `search_index_version` defaults to 0 rather than needing a backfill (so
-    /// an upgraded database rebuilds exactly once), and migration 36's backfill
-    /// claimed the already-indexed pair — without which that first rebuild pays
-    /// the pre-#446 scan on every session it re-reads.
+    /// `search_index_version` **inherits the global stamp** that described the
+    /// text already in the index, and migration 36's backfill claimed the
+    /// already-indexed pair.
+    ///
+    /// The middle one is what stops the upgrade being a 35.8 s rebuild for no
+    /// reason. Both directions are covered — an install that had stamped a
+    /// version carries it forward and indexes nothing; one that had not (the 0
+    /// below, seeded by the sibling case) reads as behind and is rebuilt.
     ///
     /// The boundary is derived from `expected_version()`, not written as a
     /// literal, so appending migration 37 does not silently turn this into a
     /// fresh-install test that no longer exercises an upgrade at all.
     #[test]
     fn the_migration_applies_to_a_populated_database() {
+        // Two installs, differing only in whether the old global stamp had been
+        // written: `Some(1)` is an install whose index is current, `None` one
+        // that never finished (or never ran) an index.
+        for stamped in [Some(SEARCH_INDEX_VERSION), None] {
+            let file = tempfile::NamedTempFile::new().expect("temp file");
+            let mut conn = Connection::open(file.path()).expect("open");
+            let last = migrate::expected_version();
+
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS schema_migrations (
+                    version    INTEGER PRIMARY KEY,
+                    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )",
+            )
+            .expect("tracking table");
+            for m in migrate::migrations().iter().filter(|m| m.version < last) {
+                conn.execute_batch(&m.sql)
+                    .unwrap_or_else(|e| panic!("migration {}: {e}", m.version));
+                conn.execute(
+                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, '')",
+                    params![m.version],
+                )
+                .expect("record");
+            }
+            conn.execute(
+                "INSERT INTO session_insights (session_id, project_path, scanned_at, turn_count)
+                 VALUES ('s1', '/a', '', 7)",
+                [],
+            )
+            .expect("seed an insight row");
+            // Indexed by the older build, which had no key table to record.
+            conn.execute(
+                "INSERT INTO session_search
+                     (title, user_text, assistant_text, tool_text, session_id, project_path)
+                 VALUES ('old', '', '', '', 's1', '/a')",
+                [],
+            )
+            .expect("seed an index row");
+            if let Some(version) = stamped {
+                conn.execute(
+                    "INSERT INTO claude_cache_metadata (id, last_scanned_at, search_index_version)
+                     VALUES (1, 'when', ?1)",
+                    params![version],
+                )
+                .expect("seed the old global stamp");
+            }
+            assert_eq!(migrate::current_version(&conn).expect("version"), last - 1);
+
+            migrate::apply(&mut conn).expect("upgrade must apply");
+
+            assert_eq!(migrate::current_version(&conn).expect("version"), last);
+            migrate::verify(&conn).expect("verify");
+            let (kept, version): (i64, i64) = conn
+                .query_row(
+                    "SELECT turn_count, search_index_version
+                       FROM session_insights WHERE session_id = 's1' AND project_path = '/a'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("the existing row survives");
+            assert_eq!(kept, 7, "the migration must not rewrite the row");
+            assert_eq!(
+                version,
+                stamped.unwrap_or(0),
+                "the row must inherit the stamp that described its indexed text \
+                 (stamped: {stamped:?})",
+            );
+
+            // The backfill: the pre-existing index row now has a key, pointing at
+            // its own docid. Without it every session in a later rebuild takes
+            // `delete`'s fallback scan.
+            let (session, project, rowid_ref): (String, String, i64) = conn
+                .query_row(
+                    "SELECT session_id, project_path, rowid_ref FROM session_search_key",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .expect("the backfill claimed the indexed pair");
+            assert_eq!((session.as_str(), project.as_str()), ("s1", "/a"));
+            let docid: i64 = conn
+                .query_row("SELECT rowid FROM session_search", [], |row| row.get(0))
+                .expect("docid");
+            assert_eq!(rowid_ref, docid, "the backfill recorded the wrong docid");
+        }
+    }
+
+    /// An insight row with **no** index row must not inherit the stamp, however
+    /// current the stamp is — it has nothing indexed, so it is behind.
+    ///
+    /// This is the half the loop above cannot reach, and getting it wrong is
+    /// silent in the worst direction: the session would read as indexed for ever
+    /// and never be searchable. It is the same hole #446 exists to close,
+    /// reintroduced by the migration that closes it.
+    #[test]
+    fn the_migration_leaves_an_unindexed_session_behind() {
         let file = tempfile::NamedTempFile::new().expect("temp file");
         let mut conn = Connection::open(file.path()).expect("open");
         let last = migrate::expected_version();
@@ -680,51 +779,95 @@ mod tests {
             .expect("record");
         }
         conn.execute(
-            "INSERT INTO session_insights (session_id, project_path, scanned_at, turn_count)
-             VALUES ('s1', '/a', '', 7)",
+            "INSERT INTO session_insights (session_id, project_path, scanned_at)
+             VALUES ('never-indexed', '/a', '')",
             [],
         )
-        .expect("seed an insight row");
-        // Indexed by the older build, which had no key table to record.
+        .expect("seed an insight row with nothing in the index");
         conn.execute(
-            "INSERT INTO session_search
-                 (title, user_text, assistant_text, tool_text, session_id, project_path)
-             VALUES ('old', '', '', '', 's1', '/a')",
-            [],
+            "INSERT INTO claude_cache_metadata (id, last_scanned_at, search_index_version)
+             VALUES (1, 'when', ?1)",
+            params![SEARCH_INDEX_VERSION],
         )
-        .expect("seed an index row");
-        assert_eq!(migrate::current_version(&conn).expect("version"), last - 1);
+        .expect("seed a current global stamp");
 
         migrate::apply(&mut conn).expect("upgrade must apply");
 
-        assert_eq!(migrate::current_version(&conn).expect("version"), last);
-        migrate::verify(&conn).expect("verify");
-        let (kept, version): (i64, i64) = conn
+        let version: i64 = conn
             .query_row(
-                "SELECT turn_count, search_index_version
-                   FROM session_insights WHERE session_id = 's1' AND project_path = '/a'",
+                "SELECT search_index_version FROM session_insights",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
-            .expect("the existing row survives");
-        assert_eq!(kept, 7, "the migration must not rewrite the row");
-        assert_eq!(version, 0, "an upgraded database has nothing indexed");
+            .expect("version");
+        assert_eq!(
+            version, 0,
+            "a session with no index row inherited the stamp and will never be \
+             indexed",
+        );
+    }
 
-        // The backfill: the pre-existing index row now has a key, pointing at
-        // its own docid. Without it every session in the upgrade's one rebuild
-        // takes `delete`'s fallback scan.
-        let (session, project, rowid_ref): (String, String, i64) = conn
-            .query_row(
-                "SELECT session_id, project_path, rowid_ref FROM session_search_key",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    /// Migration 36 removes a duplicate pair the older schema could not refuse.
+    ///
+    /// It matters because [`delete`] is keyed on **one** recorded rowid from
+    /// here on: the scan-shaped predicate used to remove every row for a pair,
+    /// so a duplicate self-healed on the next re-index, and a rowid delete
+    /// removes one and leaves the other for ever. The migration is the one place
+    /// that can still see both.
+    #[test]
+    fn the_migration_removes_a_duplicate_pair_the_old_schema_allowed() {
+        let file = tempfile::NamedTempFile::new().expect("temp file");
+        let mut conn = Connection::open(file.path()).expect("open");
+        let last = migrate::expected_version();
+
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
+                version    INTEGER PRIMARY KEY,
+                applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+        )
+        .expect("tracking table");
+        for m in migrate::migrations().iter().filter(|m| m.version < last) {
+            conn.execute_batch(&m.sql)
+                .unwrap_or_else(|e| panic!("migration {}: {e}", m.version));
+            conn.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, '')",
+                params![m.version],
             )
-            .expect("the backfill claimed the indexed pair");
-        assert_eq!((session.as_str(), project.as_str()), ("s1", "/a"));
-        let docid: i64 = conn
-            .query_row("SELECT rowid FROM session_search", [], |row| row.get(0))
-            .expect("docid");
-        assert_eq!(rowid_ref, docid, "the backfill recorded the wrong docid");
+            .expect("record");
+        }
+        for title in ["first", "second"] {
+            conn.execute(
+                "INSERT INTO session_search
+                     (title, user_text, assistant_text, tool_text, session_id, project_path)
+                 VALUES (?1, 'quasarflux', '', '', 'dup', '/a')",
+                params![title],
+            )
+            .expect("seed a duplicate pair");
+        }
+        conn.execute(
+            "INSERT INTO session_search
+                 (title, user_text, assistant_text, tool_text, session_id, project_path)
+             VALUES ('kept', 'quasarflux', '', '', 'other', '/a')",
+            [],
+        )
+        .expect("seed an ordinary pair");
+
+        migrate::apply(&mut conn).expect("upgrade must apply");
+
+        assert_eq!(
+            indexed_pairs(&conn),
+            vec![
+                ("dup".to_string(), "/a".to_string()),
+                ("other".to_string(), "/a".to_string()),
+            ],
+        );
+        assert_eq!(
+            search(&conn, "quasarflux", 10).expect("search").len(),
+            2,
+            "the duplicate still answers twice",
+        );
+        assert_key_table_agrees(&conn, "after the migration's dedup and backfill");
     }
 
     /// The rule this module exists to hold: the key is the **pair**. Two
@@ -962,6 +1105,55 @@ mod tests {
             plan("DELETE FROM session_search WHERE rowid = 1"),
             "SCAN session_search VIRTUAL TABLE INDEX 0:=",
             "the keyed delete did not reach fts5 as a rowid constraint",
+        );
+    }
+
+    /// …and the other half of the same claim, from **behaviour** rather than
+    /// from a query plan: [`delete`] runs the keyed statement, not the scan.
+    ///
+    /// The plan test above is about two SQL literals and would go on passing if
+    /// `delete` were reverted to the scan — so it pins the *predicate*, and this
+    /// pins the *call site*. Two rows for one pair are the one input that tells
+    /// them apart: the scan matches on the key columns and removes both, the
+    /// rowid delete removes only the one the key table names.
+    ///
+    /// (The duplicate is unreachable from this module's own API since migration
+    /// 36 — `insert`'s key row refuses a second — so it is built by hand, which
+    /// is also exactly the state an older build could leave behind.)
+    #[test]
+    fn a_keyed_delete_targets_the_recorded_rowid() {
+        let (_file, conn) = migrated();
+        replace(&conn, &doc("s1", "/a")).expect("index");
+        let recorded: i64 = conn
+            .query_row("SELECT rowid_ref FROM session_search_key", [], |r| r.get(0))
+            .expect("the key row");
+        conn.execute(
+            "INSERT INTO session_search
+                 (title, user_text, assistant_text, tool_text, session_id, project_path)
+             VALUES ('shadow', '', '', '', 's1', '/a')",
+            [],
+        )
+        .expect("a second row for the pair, as an older build could leave");
+
+        delete(&conn, "s1", "/a").expect("delete");
+
+        let survivors: Vec<i64> = {
+            let mut stmt = conn
+                .prepare("SELECT rowid FROM session_search")
+                .expect("prepare");
+            stmt.query_map([], |r| r.get(0))
+                .expect("query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect")
+        };
+        assert_eq!(
+            survivors.len(),
+            1,
+            "the delete removed both rows, so it ran the key-column scan",
+        );
+        assert_ne!(
+            survivors[0], recorded,
+            "the delete removed the wrong row — the recorded docid is the one to go",
         );
     }
 
