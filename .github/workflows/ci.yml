@@ -120,13 +120,35 @@ jobs:
       # Covers every endpoint, including the frozen goldens in parity/. This is
       # their only reader, so a change to one of those files is only ever
       # noticed here — see parity/README.md before editing any of them.
+      #
+      # `cargo test` and not `cargo nextest run`, and that was measured rather
+      # than assumed (#449). nextest does run the 14 test binaries as parallel
+      # processes and it does win there — 37-41s against `cargo test`'s ~59s of
+      # strictly sequential execution. But nextest cannot run doctests, so the
+      # step becomes two cargo invocations, and the second one's compile phase
+      # does not overlap the first's the way a single `cargo test` overlaps
+      # building the doctest lib with building the test binaries. That costs
+      # ~40s, more than the ~20s parallelism saves: three consecutive runs
+      # measured the split step at 155s against this one's 130-162s, and
+      # reversing the order of the two commands changed nothing (155s again).
+      # If you revisit it, the thing to beat is the serialized second compile,
+      # not the execution time.
       - name: Rust tests
         working-directory: src-tauri
         run: cargo test
 
-      # A full `tauri build` here would double CI time; compiling the release
-      # profile is what actually catches the `cfg(not(debug_assertions))` code
-      # that never builds during development.
-      - name: Compile Rust (release)
+      # A full `tauri build` here would double CI time; compiling a
+      # release-derived profile is what actually catches the
+      # `cfg(not(debug_assertions))` code that never builds during development.
+      #
+      # `ci` rather than `release`, and the difference is the point: that goal
+      # is a *compilation* property — `cfg(debug_assertions)` keys off the
+      # profile's `debug-assertions` flag, which `[profile.ci]` inherits — while
+      # `lto = true` + `codegen-units = 1` spend ~4 minutes re-optimizing all
+      # 594 crates' bitcode as one largely single-threaded unit, for a binary
+      # this job throws away. The installers users actually install are built by
+      # release.yml through `tauri build`, which uses `--release` and so cannot
+      # reach this profile. See `[profile.ci]` in src-tauri/Cargo.toml.
+      - name: Compile Rust (ci profile)
         working-directory: src-tauri
-        run: cargo build --release
+        run: cargo build --profile ci
