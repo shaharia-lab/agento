@@ -266,6 +266,36 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
 
+      # `bundle.macOS.signingIdentity` is `-` (ad-hoc), which is what makes a
+      # quarantined Apple Silicon download launchable at all: Apple's linker
+      # force-signs every arm64 executable ad-hoc anyway, but that signature
+      # seals no resources, and Gatekeeper calls a bundle with an invalid seal
+      # "damaged" — a verdict that deliberately has no Open Anyway override.
+      # This step exists because losing the seal is invisible everywhere else:
+      # an un-quarantined app (CI, a local build) launches fine either way, so
+      # only a downloader would ever notice, which is exactly how v1.0.0
+      # shipped unlaunchable on every Mac sold since 2020. The bundler signs
+      # the .app before deriving the .dmg and the updater .app.tar.gz, so
+      # checking the .app covers all three artifacts.
+      - name: Verify the macOS bundle is sealed
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/macos" \
+                  -maxdepth 1 -name '*.app' | head -1)
+          if [ -z "$app" ]; then
+            echo "::error::no .app bundle found for ${{ matrix.target }}"
+            exit 1
+          fi
+          codesign --verify --deep --strict --verbose=2 "$app"
+          # --verify passes on the linker's executable-only signature too, so
+          # assert the resource seal separately: CodeResources is the file that
+          # only a real `codesign` run over the bundle produces.
+          test -f "$app/Contents/_CodeSignature/CodeResources"
+          # Diagnostics for the log: "Sealed Resources ... files=N" is the line
+          # that distinguishes this from `adhoc,linker-signed`, which seals none.
+          codesign --display --verbose=4 "$app"
+
       - name: Collect artifacts
         shell: bash
         run: |
@@ -366,10 +396,11 @@ jobs:
             | macOS | `.dmg` (Apple Silicon and Intel) | automatic, in-app |
             | Windows | `-setup.exe` | automatic, in-app |
 
-            macOS builds are not notarised. On first launch macOS will say it
-            cannot verify the developer: open **System Settings → Privacy &
-            Security** and choose **Open Anyway**. Installing via Homebrew
-            (`brew install --cask --no-quarantine …`) skips this.
+            macOS builds are ad-hoc signed but **not notarised**. On first
+            launch macOS says it cannot verify the developer: open
+            **System Settings → Privacy & Security** and choose
+            **Open Anyway**. That is a one-time step — updates the app
+            installs itself never ask again.
 
             Requires the Claude Code CLI to be installed and signed in.
 
