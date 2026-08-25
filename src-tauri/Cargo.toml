@@ -250,7 +250,7 @@ schemars = "1"
 # PKCS#8 DER `ring` generates, and the public key travels as JWKS, which is
 # exactly the format that lets an external verifier use a stock library with no
 # PEM handling of its own.
-jsonwebtoken = { version = "9", default-features = false }
+jsonwebtoken = { version = "10", default-features = false }
 # Key *generation* and the `kid` digest, which `jsonwebtoken` does not provide —
 # it consumes keys and never mints them. Default features on purpose: `alloc` is
 # what `Ed25519KeyPair::generate_pkcs8` needs, and relying on cargo's feature
