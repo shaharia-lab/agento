@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { api, qs } from "../lib/api";
+import { CopyButton } from "../components/CopyButton";
 import type {
   ClaudeProject,
   ClaudeSessionSummary,
@@ -1011,14 +1012,20 @@ function Inspector({
   return (
     <>
       <InspGroup title="Session">
-        <div className="sess-heading selectable">
+        <div className="sess-heading">
           {session.display_title || "Untitled session"}
         </div>
         {session.preview && (
-          <div className="sess-preview selectable">{session.preview}</div>
+          <div className="sess-preview">{session.preview}</div>
         )}
+        {/* Both of these are single values a user copies whole and neither
+            fits the pane, so the button carries the real string while the row
+            shows an abbreviated one (#469). */}
         <InspRow label="ID">
-          <span className="mono selectable">{session.session_id}</span>
+          <span className="insp-row__copy">
+            <span className="mono truncate">{session.session_id}</span>
+            <CopyButton text={session.session_id} title="Copy session ID" />
+          </span>
         </InspRow>
         {session.custom_title && (
           <InspRow label="Custom">{session.custom_title}</InspRow>
@@ -1036,8 +1043,14 @@ function Inspector({
             name an agent, so it belongs here with the other titles. */}
         {agentName && <InspRow label="Named">{agentName}</InspRow>}
         <InspRow label="Project">
-          <span title={session.project_path}>
-            {tildePath(session.project_path)}
+          <span className="insp-row__copy">
+            <span className="truncate" title={session.project_path}>
+              {tildePath(session.project_path)}
+            </span>
+            <CopyButton
+              text={session.project_path}
+              title="Copy the project path"
+            />
           </span>
         </InspRow>
         {session.cwd && session.cwd !== session.project_path && (
@@ -1215,13 +1228,6 @@ function Inspector({
           >
             <Icon name="play" size={13} />
             {busy === "continue" ? "Starting…" : "Continue in chat"}
-          </button>
-          <button
-            className="btn"
-            onClick={() => navigator.clipboard?.writeText(session.session_id)}
-          >
-            <Icon name="copy" size={13} />
-            Copy session ID
           </button>
           {continuedChat !== undefined && (
             <div className="sess-note">

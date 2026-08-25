@@ -472,6 +472,22 @@ status bar, focus-aware selection (accent when the window is focused, grey
 when not), ⌘K palette, no browser affordances. Reuse the existing CSS classes;
 new CSS goes in a per-view file imported by that view.
 
+**Text selection is a denylist over chrome, not an allowlist over content**
+(#469). `base.css` declares `user-select: text` on `body` and `none` on one
+named list — the titlebar and every drag region, the sidebar, the toolbar, the
+status bar, source-list and table rows, table headers, `button` and `select` —
+so a view added later is selectable without anyone remembering a class. It was
+the other way round until #469, and the allowlist drifted exactly as one does:
+the whole `views/gateway/` section, `views/analytics/` and the session detail
+shipped with no opt-in at all, so a user could not copy a session id or an
+error string. **Do not re-introduce a `.selectable` class or a per-view
+`user-select: text`** — the denylist is the whole rule and it lives in
+`base.css`; a second spelling elsewhere is how it comes apart. Rows stay in the
+denylist deliberately: a table row's double-click *opens* the session, and a
+drag across it means "select this row", so selectable cells would leave a word
+highlighted behind the view they opened. `::selection` is focus-aware over the
+existing `--bg-select*` tokens, matching `.window--focused`.
+
 **The window's origin has to be in the capability's scope, or every IPC
 command is denied — silently.** This is the single most expensive thing to
 re-discover in this shell, because it fails *only in release builds* and it

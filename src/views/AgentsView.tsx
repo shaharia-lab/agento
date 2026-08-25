@@ -470,7 +470,7 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                       </label>
                     ) : (
                       <span
-                        className="mono selectable"
+                        className="mono"
                         style={{ color: "var(--fg-secondary)", paddingTop: 6 }}
                       >
                         {draft.slug}
@@ -728,7 +728,7 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             <div className="inspector__scroll scroll">
               <InspGroup title="Identity">
                 <InspRow label="Slug">
-                  <span className="mono selectable">
+                  <span className="mono">
                     {draft.slug || (creating ? "—" : draft.slug)}
                   </span>
                 </InspRow>
@@ -764,7 +764,7 @@ export function AgentsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
               <InspGroup title="Runtime">
                 <InspRow label="Config dir">
-                  <span className="mono selectable">
+                  <span className="mono">
                     {draft.claude_config_dir || "Default"}
                   </span>
                 </InspRow>

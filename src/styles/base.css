@@ -1,7 +1,9 @@
 /* ============================================================================
    Base — desktop application shell resets.
-   A desktop window is not a document: it never scrolls as a whole, text is not
-   selectable by default, and there is no native browser affordance anywhere.
+   A desktop window is not a document: it never scrolls as a whole, and there is
+   no native browser affordance anywhere. Content *is* selectable; the window's
+   chrome is not, and the denylist that says which is which lives below — one
+   list, in this file. Do not re-add a per-element opt-in (#469).
    ========================================================================== */
 
 *,
@@ -30,23 +32,72 @@ body {
   text-rendering: optimizeLegibility;
   font-synthesis: none;
 
-  /* Chrome-like text selection is a web tell. Opt in per element instead. */
-  user-select: none;
-  -webkit-user-select: none;
+  /* Content is selectable; the chrome below opts out. The inverse — `none`
+     here plus a `.selectable` opt-in — was the rule until #469, and it drifted
+     exactly as an allowlist over content does: content is unbounded, so every
+     view added since shipped unselectable and a user could not copy a session
+     id or an error string. Chrome is a small, stable set, which is the split
+     native apps draw. Both spellings: WebKitGTK and WKWebView need the prefix. */
+  user-select: text;
+  -webkit-user-select: text;
 
   /* No rubber-band / pull-to-refresh inside an app window. */
   overscroll-behavior: none;
   cursor: default;
 }
 
-/* Content the user genuinely reads or copies opts back in. */
-.selectable,
+/* The chrome denylist — the whole of it, so there is one place to read.
+   These behave as controls, not as text: dragging them must move the window,
+   activate a row or sort a column, and a double-click on a row must open it
+   rather than leave a word selected behind the view it opened. */
+.titlebar,
+[data-tauri-drag-region],
+.sidebar,
+.toolbar,
+.statusbar,
+.srcitem,
+.listrow,
+.table thead th,
+.table tbody tr,
+button,
+select {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+/* Form fields are content wherever they sit — a search field inside `.toolbar`
+   would otherwise inherit the denylist's `none` and refuse its own text. A
+   direct declaration always beats an inherited one, so order does not matter. */
 input,
 textarea,
 [contenteditable="true"] {
   user-select: text;
   -webkit-user-select: text;
   cursor: auto;
+}
+
+/* Cursor follows the same split, one level coarser: the three content panes
+   read as text, and the denylist above has already claimed the chrome inside
+   them. This half is cosmetic — the selection rule is the denylist. */
+.pane-list,
+.pane-detail,
+.pane-inspector {
+  cursor: text;
+}
+
+/* Selected text follows the window's focus, exactly as a selected row does
+   (`.window--focused`, shell.css / views.css) — accent while the window is key,
+   grey when it is not. That focus-awareness is what keeps a selection reading
+   as desktop rather than as a web page. The colours are the existing selection
+   tokens, so they are already declared in all three theme places. */
+::selection {
+  background: var(--bg-select);
+  color: var(--fg);
+}
+.window--focused ::selection {
+  background: var(--bg-select-focus);
+  color: var(--fg-select-focus);
 }
 
 button,
@@ -60,13 +111,12 @@ select {
   outline: none;
 }
 
-button {
-  cursor: default;
-}
-
 a {
   color: var(--accent);
   text-decoration: none;
+  /* A link is a control here too — the panes above read as text, and an I-beam
+     over something you click is the web tell this shell avoids. */
+  cursor: default;
 }
 
 /* Native focus: keyboard only. Mouse clicks must not leave a ring behind. */

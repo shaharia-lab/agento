@@ -469,7 +469,7 @@ function PermissionPrompt({
               Allow <span className="mono">{toolName}</span>?
             </span>
           </div>
-          <div className="prompt__pre mono selectable">{clip(prettyJson(input))}</div>
+          <div className="prompt__pre mono">{clip(prettyJson(input))}</div>
           <div className="prompt__actions">
             <button className="btn" onClick={() => onDecide(false)}>
               Deny

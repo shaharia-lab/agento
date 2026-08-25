@@ -232,7 +232,6 @@
   font-size: var(--text-md);
   line-height: var(--leading-relaxed);
   color: var(--fg);
-  user-select: text;
 }
 /* Paragraph spacing and inline code live in markdown.css, with the rest of the
    rendered tree — a message's body is markdown now (`.md`), and two files
@@ -284,7 +283,6 @@
   line-height: var(--leading-normal);
   color: var(--fg-secondary);
   white-space: pre-wrap;
-  user-select: text;
   max-height: 260px;
   overflow: auto;
 }
@@ -389,7 +387,6 @@
   height: 26px;
   border-bottom: var(--hairline) solid var(--line);
   white-space: nowrap;
-  user-select: none;
 }
 .table thead th:hover {
   color: var(--fg-secondary);
@@ -664,6 +661,19 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A single-value row whose value is worth copying whole: the visible text is
+   abbreviated to fit the pane, so drag-selecting it would copy the ellipsis
+   rather than the value. The button carries the real one (#469). */
+.insp-row__copy {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.insp-row__copy > .truncate {
+  min-width: 0;
 }
 
 /* --- Forms (Settings / editors) ------------------------------------------ */

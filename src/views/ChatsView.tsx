@@ -701,7 +701,7 @@ export function ChatsView({
               )}
 
               <InspGroup title="Working directory">
-                <div className="pathwell mono selectable">
+                <div className="pathwell mono">
                   {session.working_directory
                     ? tildePath(session.working_directory)
                     : "Not set"}
