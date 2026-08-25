@@ -988,6 +988,64 @@ scan's staleness markers deliberately do **not** cover
 re-read of `claude_session_cache`, so the five-minute sweep is the only thing
 that notices one.
 
+### The search index, measured (`src-tauri/tests/search_live.rs`, #439)
+
+The third `#[ignore]`d live suite over the corpus, and the only one whose output
+is as much of the point as its assertions. Run it by hand, like its siblings —
+and under `--release` when you care about the numbers, because the `bundled`
+SQLite is a C dependency compiled at the profile's optimization level, so a
+debug run measures a SQLite nobody ships:
+
+```bash
+cargo test --test search_live -- --ignored --nocapture            # correctness
+cargo test --release --test search_live -- --ignored --nocapture  # the numbers
+```
+
+It copies `~/.agento/agento.db`, **migrates the copy** (the installed database
+lags the repository — on the reference machine it had no `session_search` table
+at all), forces `search_index_version` to 0, drives the rebuild through
+`worker::start`, and then measures. `sweep` is private, so the terminal
+condition is the **version stamp** rather than a row count: `sweep` records it
+last and only when every batch committed, where a row count sits flat for the
+whole of each batch's read phase and a test waiting for it to settle declares
+success mid-sweep.
+
+**The reference numbers, release profile, 1,178 sessions** — a baseline for
+anything that claims to make this faster or smaller, not a promise:
+
+| | |
+|---|---|
+| cold full rebuild | **6.7 s** (5.7 ms/session) |
+| incremental `search::delete` | **45 ms** — this is the scan |
+| incremental `search::insert` | 11 ms |
+| one session through the worker | 207 ms, transcript read included |
+| `delete_orphans`, whole index | 35 ms |
+| index on disk | **188.7 MB** (164 KB/session) |
+| page query, common word | **33.6 s p50** · facets for the same query, 101 ms |
+| page query, rare word (16 hits) | 23 ms |
+| the suite itself | ~6 min release, ~25 min debug |
+
+Three things those numbers settled:
+
+- **`search::delete`'s scan is real and it is the incremental path's whole
+  cost.** 45 ms against a 188 MB index, against the 9.5 ms/17 MB and 63 ms/176 MB
+  already recorded — it tracks index size, as a scan does. The rowid side table
+  (#446) is what removes it; nothing here should add a second caller.
+- **`tool_text` is 86.5 % of the stored text** (122.2 MB of 141.3 MB), against
+  `assistant_text`'s 10.5 % and `user_text`'s 3.0 % — and it carries the *lowest*
+  bm25 weight (0.5). #434's caps were **left alone** anyway: they are per tool
+  result and already a quarter of `MESSAGE_CAP`, so what is large is the number
+  of tool calls in a Claude Code transcript rather than any one of them, and
+  `SESSION_CAP` already binds (the widest session indexes 523,339 of 524,288
+  bytes). Lowering the cap would trade recall for size against a budget nobody
+  has set, and would need a `SEARCH_INDEX_VERSION` bump to take effect.
+- **The expensive half of a search is the ranked join and the snippet, not the
+  index.** The same query answers its *facets* — which use the membership `IN`,
+  with no `bm25()` carried through and no `snippet()` — in 101 ms while the page
+  takes 33.6 s, and a term with 16 hits takes 23 ms either way, so the cost
+  tracks the number of hits rather than the corpus. Read that before optimizing
+  the index for it.
+
 ### The Claude Agent SDK (`src-tauri/src/claude/`)
 
 `github.com/shaharia-lab/claude-agent-sdk-go` reimplemented in Rust — the
