@@ -72,6 +72,38 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// pointing at something enormous cannot buffer it into this process.
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 
+/// The one client every catalog fetch goes through.
+///
+/// **Built once**, like `github::client`'s and for the same two reasons: a
+/// `reqwest::Client` owns a connection pool, and `build()` reads the *platform*
+/// trust store — so constructing one per request throws the pool away and
+/// re-parses every root certificate on the machine on each keystroke-adjacent
+/// interaction. It answers `Option` rather than panicking because that store can
+/// be unusable, which `build()` reports as a **builder** error reachable with no
+/// network at all.
+///
+/// **Redirects are refused, and that is a credential decision rather than a
+/// preference.** `base_url` is typed by a person and [`Base`] checks where the
+/// *first* request goes; a redirect moves it afterwards, which is precisely the
+/// hole that guard cannot see. `reqwest` strips `Authorization` on a cross-origin
+/// redirect — and strips nothing else, so a `302` would carry `x-api-key` and
+/// `x-goog-api-key` to whatever host answered it. A list endpoint has no
+/// legitimate need to redirect, so a `3xx` falls through to the non-success arm
+/// and is reported as the status it is, which is both safe and actionable.
+fn client() -> Option<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .timeout(TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|e| log::warn!("gateway model catalog: no usable HTTP client: {e}"))
+                .ok()
+        })
+        .as_ref()
+}
+
 /// Why a catalog could not be produced.
 ///
 /// `message` is what the UI renders, so it names a cause and never a value:
@@ -129,13 +161,9 @@ pub async fn fetch(row: &ProviderRow) -> Result<Vec<String>, CatalogError> {
         )
     })?;
 
-    let client = reqwest::Client::builder()
-        .timeout(TIMEOUT)
-        .build()
-        // `reqwest` loads the platform trust store inside `build()` and reports
-        // an unusable one as a *builder* error, so this is reachable without any
-        // network at all — see `native/integrations/github/client.rs`.
-        .map_err(|_| CatalogError::Unaskable("no usable TLS trust store on this machine".into()))?;
+    let client = client().ok_or_else(|| {
+        CatalogError::Unaskable("no usable TLS trust store on this machine".into())
+    })?;
 
     let request = match shape.auth {
         Auth::Bearer => client.get(url).bearer_auth(key),

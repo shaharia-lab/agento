@@ -2511,6 +2511,46 @@ mod tests {
         );
     }
 
+    /// **A redirect is refused rather than followed**, and this is the guard
+    /// `base_url::Base` cannot provide on its own: it checks where the *first*
+    /// request goes, and a `302` moves it afterwards. `reqwest` strips
+    /// `Authorization` across origins and strips nothing else, so a followed
+    /// redirect would carry `x-api-key`/`x-goog-api-key` to whichever host
+    /// answered — the credential leak this whole surface is built to prevent.
+    ///
+    /// The fake redirects to an absolute URL it also serves, so following it
+    /// would produce a perfectly good `200` and a green test; the assertion is
+    /// therefore that the **redirect itself** is the answer.
+    #[tokio::test]
+    async fn a_redirect_is_reported_rather_than_followed_with_the_key_attached() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let (elsewhere, elsewhere_seen) =
+            fake_upstream(StatusCode::OK, r#"{"data":[{"id":"leaked"}]}"#).await;
+
+        let target = format!("{elsewhere}/models");
+        let app = axum::Router::new().fallback(move || {
+            let target = target.clone();
+            async move { (StatusCode::FOUND, [(axum::http::header::LOCATION, target)]) }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        seed_provider(&ctx, "p1", "anthropic", "sk-secret-value", &base);
+
+        let (status, body) = parts_of(catalog(&ctx, "p1").await).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body.contains("302"), "{body}");
+        assert!(
+            elsewhere_seen.lock().expect("lock").target.is_empty(),
+            "the redirect was followed, carrying the key to another host"
+        );
+    }
+
     /// A trailing slash is the same endpoint to a person and `//models` to
     /// naive concatenation. `Base` concatenates because its two other callers
     /// are ports of Go that does; this one trims first.
