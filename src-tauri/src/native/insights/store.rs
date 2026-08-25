@@ -44,8 +44,24 @@ pub struct Pending {
     pub file_path: String,
 }
 
-/// `NeedsProcessing`: every cached session with no insight row, or one computed
-/// by an older processor version.
+/// `NeedsProcessing`: every cached session with no insight row, one computed by
+/// an older processor version, **or one whose search text was written by an
+/// older indexer** (#446).
+///
+/// The third clause is what replaced `Scope::Everything` and the global
+/// `claude_cache_metadata.search_index_version` stamp. That stamp was one value
+/// for the whole corpus, so a rebuild could only ever be all-or-nothing: a
+/// session skipped because its transcript was unreadable — an unmounted drive, a
+/// permissions change, exactly what `scan.rs`'s unreadable-config-dir protection
+/// preserves — was invisible to every mechanism that would recover it, because
+/// its insight row was current, its `file_mtime` unchanged and the stamp
+/// recorded. Comparing the *row's* version instead makes that session pending
+/// until it succeeds, and makes an interrupted rebuild resume rather than
+/// restart.
+///
+/// **The two versions are independent and both are bound**, never interpolated:
+/// `processor_version` says the insight is stale, `search_index_version` says
+/// the indexed text is, and a row can be behind on either alone.
 ///
 /// `DISTINCT` is Go's and is kept, though the pair is the cache's primary key
 /// so it can no longer remove a row — it is what stopped the single-keyed join
@@ -53,75 +69,26 @@ pub struct Pending {
 ///
 /// A row whose `file_path` is empty is skipped by the caller rather than here,
 /// matching `rescanOutdated`.
-pub fn needs_processing(conn: &Connection, version: i64) -> Result<Vec<Pending>, String> {
-    select_pending(conn, version, Scope::Outdated)
-}
-
-/// Which cached sessions a sweep should pick up.
-///
-/// `pub(super)` rather than `pub`: the only consumer is `insights::worker`, and
-/// keeping it module-local is what lets [`select_pending`]'s `format!` be
-/// provably constant by construction rather than by inspecting callers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Scope {
-    /// The ordinary rule: no insight row, or one behind the processor version.
-    Outdated,
-    /// **Every** cached session, whatever its insight row says.
-    ///
-    /// What a `search::SEARCH_INDEX_VERSION` bump needs, and it cannot be
-    /// expressed as a processor-version comparison: the insight rows are
-    /// perfectly current, and it is the *index* rows that were produced by a
-    /// reader this build no longer agrees with. Zeroing `processor_version` to
-    /// force them through would work by corrupting a column that means something
-    /// else — and would leave the corpus reporting itself unprocessed if the
-    /// rebuild were interrupted.
-    Everything,
-}
-
-/// Every cached session in `scope`, with the transcript to recompute it from.
-///
-/// The `LEFT JOIN` is kept under [`Scope::Everything`] rather than being
-/// switched to a bare `SELECT`, so both scopes are one statement shape and the
-/// pair-keyed join cannot be right in one and wrong in the other.
-///
-/// `format!` into SQL, so: the interpolated string is one of two `&'static str`
-/// literals chosen by a fieldless enum, and no caller-supplied value can reach
-/// it. The **version** is bound, never interpolated.
-///
-/// `Scope::Everything` binds no parameter at all rather than neutralizing one
-/// with a tautology. `"?1 IS NOT NULL"` was the first version and it is safe
-/// only because an `i64` cannot bind SQL NULL — an invariant expressed nowhere,
-/// whose failure would be silent and severe: the predicate would be false, the
-/// query would answer no rows, and [`super::worker::sweep`] would take its
-/// "nothing pending" branch and stamp a version over an index it never built.
-pub(super) fn select_pending(
+pub fn needs_processing(
     conn: &Connection,
-    version: i64,
-    scope: Scope,
+    processor_version: i64,
+    index_version: i64,
 ) -> Result<Vec<Pending>, String> {
-    let filter = match scope {
-        Scope::Outdated => "i.session_id IS NULL OR i.processor_version < ?1",
-        Scope::Everything => "1 = 1",
-    };
     let mut stmt = conn
-        .prepare(&format!(
+        .prepare(
             "SELECT DISTINCT c.session_id, c.project_path, c.file_path
              FROM claude_session_cache c
              LEFT JOIN session_insights i
                     ON c.session_id = i.session_id
                    AND c.project_path = i.project_path
-             WHERE {filter}"
-        ))
+             WHERE i.session_id IS NULL
+                OR i.processor_version < ?1
+                OR i.search_index_version < ?2",
+        )
         .map_err(|e| format!("preparing needs_processing: {e}"))?;
 
-    // Bound only where the statement mentions it: rusqlite rejects a parameter
-    // count that does not match, so the two arms cannot share one `params!`.
-    let bindings: Vec<rusqlite::types::Value> = match scope {
-        Scope::Outdated => vec![version.into()],
-        Scope::Everything => Vec::new(),
-    };
     let rows = stmt
-        .query_map(rusqlite::params_from_iter(bindings), |row| {
+        .query_map(params![processor_version, index_version], |row| {
             Ok(Pending {
                 session_id: row.get(0)?,
                 project_path: row.get(1)?,
@@ -202,6 +169,12 @@ pub fn display_title(conn: &Connection, session_id: &str, project_path: &str) ->
 /// reprocess authoritative rather than a merge.
 const WRITABLE_COLUMNS: &[&str] = &[
     "processor_version",
+    // Written here rather than by `search`, and that is the whole of #446: the
+    // index row and this row commit in one transaction (`worker::write_batch`),
+    // so the version is atomic with the text it describes. A session skipped
+    // because its transcript could not be read never reaches this statement and
+    // keeps its old value, which is what makes it pending again next sweep.
+    "search_index_version",
     "scanned_at",
     "turn_count",
     "steps_per_turn_avg",
@@ -289,6 +262,7 @@ pub fn upsert(
         insight.session_id,
         project_path,
         super::processors::CURRENT_PROCESSOR_VERSION,
+        crate::native::search::SEARCH_INDEX_VERSION,
         scanned_at,
         insight.turn_count,
         insight.steps_per_turn_avg,
@@ -426,6 +400,19 @@ mod tests {
         tx.commit().expect("commit");
     }
 
+    /// The two versions this build writes, spelled once so a test cannot pin
+    /// either against a literal that a bump would silently invalidate.
+    fn current(conn: &Connection) -> Vec<Pending> {
+        let mut pending = needs_processing(
+            conn,
+            super::super::processors::CURRENT_PROCESSOR_VERSION,
+            crate::native::search::SEARCH_INDEX_VERSION,
+        )
+        .expect("needs_processing");
+        pending.sort();
+        pending
+    }
+
     /// The whole reason this module is not a transcription of the Go store.
     ///
     /// One session id under two project paths is two sessions with two
@@ -497,19 +484,80 @@ mod tests {
         )
         .expect("age the row");
 
-        let pending = {
-            let mut p =
-                needs_processing(&conn, super::super::processors::CURRENT_PROCESSOR_VERSION)
-                    .expect("needs_processing");
-            p.sort();
-            p
-        };
         assert_eq!(
-            pending
+            current(&conn)
                 .iter()
                 .map(|p| p.session_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["absent", "stale"],
+        );
+    }
+
+    /// The third clause, and the one #446 adds: a row that is perfectly current
+    /// on `processor_version` and behind on `search_index_version` is pending.
+    ///
+    /// This is the case a global stamp could not express at all, and it is the
+    /// whole point — the insight is fine, the *indexed text* is not. Both
+    /// directions are asserted, because a predicate that simply ORed in `1 = 1`
+    /// would satisfy the first half and re-read the corpus every five minutes.
+    #[test]
+    fn needs_processing_finds_a_row_behind_on_either_version_alone() {
+        let mut conn = db();
+        for session in ["indexed-stale", "processor-stale", "current"] {
+            cache_row(&conn, session, "/a", &format!("/a/{session}.jsonl"));
+            write(&mut conn, &insight(session), "/a");
+        }
+        conn.execute(
+            "UPDATE session_insights SET search_index_version = 0
+              WHERE session_id = 'indexed-stale'",
+            [],
+        )
+        .expect("age the indexed text");
+        conn.execute(
+            "UPDATE session_insights SET processor_version = 0
+              WHERE session_id = 'processor-stale'",
+            [],
+        )
+        .expect("age the insight");
+
+        assert_eq!(
+            current(&conn)
+                .iter()
+                .map(|p| p.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["indexed-stale", "processor-stale"],
+        );
+    }
+
+    /// The upsert stamps the index version this build writes, which is what
+    /// makes the row stop being pending. Spelled as "a written row is not
+    /// pending" rather than as an equality against the constant, because that is
+    /// the property the sweep's termination depends on.
+    #[test]
+    fn a_written_row_carries_this_builds_index_version() {
+        let mut conn = db();
+        cache_row(&conn, "s1", "/a", "/a/s1.jsonl");
+        conn.execute(
+            "INSERT INTO session_insights (session_id, project_path, scanned_at)
+             VALUES ('s1', '/a', '')",
+            [],
+        )
+        .expect("seed the row an older build would have left");
+        assert_eq!(current(&conn).len(), 1, "a version-0 row must be pending");
+
+        write(&mut conn, &insight("s1"), "/a");
+
+        let stored: i64 = conn
+            .query_row(
+                "SELECT search_index_version FROM session_insights",
+                [],
+                |r| r.get(0),
+            )
+            .expect("search_index_version");
+        assert_eq!(stored, crate::native::search::SEARCH_INDEX_VERSION);
+        assert!(
+            current(&conn).is_empty(),
+            "the row is still reported behind"
         );
     }
 
@@ -525,10 +573,8 @@ mod tests {
         cache_row(&conn, "s1", "/b", "/b/s1.jsonl");
         write(&mut conn, &insight("s1"), "/a");
 
-        let pending = needs_processing(&conn, super::super::processors::CURRENT_PROCESSOR_VERSION)
-            .expect("needs_processing");
         assert_eq!(
-            pending,
+            current(&conn),
             vec![Pending {
                 session_id: "s1".into(),
                 project_path: "/b".into(),
