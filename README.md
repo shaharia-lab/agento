@@ -60,6 +60,11 @@ Anthropic API key to enter; the app tells you on launch if the CLI is missing.
 | **Linux** Debian / Ubuntu | `Agento_<version>_amd64.deb` / `_arm64.deb` | Notify only |
 | **Linux** Fedora / RHEL / openSUSE | `Agento-<version>-1.x86_64.rpm` / `.aarch64.rpm` | Notify only |
 
+> [!IMPORTANT]
+> **macOS:** the app is ad-hoc signed, not notarised. The first launch needs one trip to
+> **System Settings → Privacy & Security → Open Anyway**; updates the app installs itself
+> never ask again.
+
 **In-app** means Agento downloads, verifies and installs the next version itself. `.deb`
 and `.rpm` are owned by your package manager, so Agento only tells you when one exists.
 Want in-app updates on Linux? Take the AppImage. Every file ships with a `.sig` from

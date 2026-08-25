@@ -17,11 +17,12 @@ Common problems and what to do about them.
 
 ## Installing and launching
 
-### macOS says the app is damaged or cannot be verified
+### macOS says the app cannot be verified
 
-The app is not signed with a paid Apple Developer certificate, so macOS blocks
-the first launch. Open **System Settings → Privacy & Security**, find the line
-about Agento, and click **Open Anyway**.
+Expected, and recoverable. The app is ad-hoc signed but not notarised — that
+needs a paid Apple Developer certificate — so macOS blocks the first launch.
+Open **System Settings → Privacy & Security**, find the line about Agento, and
+click **Open Anyway**.
 
 If that line is not there:
 
@@ -29,7 +30,24 @@ If that line is not there:
 xattr -dr com.apple.quarantine /Applications/Agento.app
 ```
 
-Only the first launch needs this.
+Only the first launch needs this. Updates the app installs itself are not
+quarantined, so they never ask again.
+
+### macOS says the app is damaged and should be moved to the Bin
+
+This is a different message, and it means the download predates the release that
+added ad-hoc signing. Those builds were not signed at all, and on Apple Silicon
+the linker's own bare signature sealed nothing — Gatekeeper reads an invalid
+seal as "damaged", which deliberately offers no **Open Anyway**.
+
+Download the current release and install it over the old copy. If you would
+rather keep the copy you have:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Agento.app
+```
+
+Either way it is once; the app then updates itself normally.
 
 ### Windows SmartScreen blocks the installer
 
