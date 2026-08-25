@@ -343,11 +343,16 @@ jobs:
           # The updater payload, which is what every installed app swaps in.
           # Found rather than globbed at a fixed path, so a bundler that moves
           # it fails the `-eq 0` check below instead of being silently skipped.
-          # -print0 into mapfile, not `$(find …)`: an unquoted command
+          # Read -print0 rather than `$(find …)`: an unquoted command
           # substitution word-splits, which would turn one moved path into
           # several fragments and slip straight past that `-eq 0` check.
-          mapfile -d '' tarballs \
-            < <(find "$base" -type f -name '*.app.tar.gz' -print0)
+          # A `read -d ''` loop rather than `mapfile`, because the macOS
+          # runners' `bash` is 3.2 — `mapfile` is a bash 4 builtin and this
+          # step failed with `mapfile: command not found` on both macOS legs.
+          tarballs=()
+          while IFS= read -r -d '' found; do
+            tarballs+=("$found")
+          done < <(find "$base" -type f -name '*.app.tar.gz' -print0)
           if [ ${#tarballs[@]} -eq 0 ]; then
             echo "::error::no .app.tar.gz built for ${{ matrix.target }}"
             exit 1
