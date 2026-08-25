@@ -117,13 +117,38 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
-      # `cargo test` runs the 11 test binaries strictly one after another;
-      # nextest runs them as parallel processes, which is ~25-30s of the run.
-      # The action fetches a prebuilt binary, so this costs seconds rather than
-      # the minutes a `cargo install` compile would.
-      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
-        with:
-          tool: nextest
+      # `cargo test` runs the test binaries strictly one after another; nextest
+      # runs them as parallel processes, which is most of the test step's
+      # execution time.
+      #
+      # A prebuilt binary, not `cargo install cargo-nextest`, which would pay a
+      # multi-minute compile and undo the point of this change. And a direct
+      # download rather than `taiki-e/install-action`, which is the obvious way
+      # to write this and does not work here: the org pins
+      # `allowed_actions = "selected"` with an explicit `patterns_allowed`
+      # allowlist (terraform/github-shaharia-lab/actions.tf), and an action
+      # outside it fails the run at *startup* — no job, no log, only "this run
+      # likely failed because of a workflow file issue". Adding an entry there
+      # is an org-wide security change and belongs in that repository, not this
+      # one.
+      #
+      # The version and the digest are both pinned, which is the same
+      # supply-chain property the SHA-pinned `uses:` lines above have — and
+      # strictly stronger, since it pins the *artifact* rather than the
+      # installer that chooses it. `--check` fails the step on a mismatch.
+      # Bumping the version means bumping the checksum beside it; the upstream
+      # value is published as `<asset>.sha256` on the same release.
+      - name: Install cargo-nextest
+        env:
+          NEXTEST_VERSION: 0.9.143
+          NEXTEST_SHA256: 66786b9abe23920d022a182d1416b1bbc8130dd4872a9553d76985a1708dcd1e
+        run: |
+          asset="cargo-nextest-${NEXTEST_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --retry 3 -o /tmp/nextest.tar.gz \
+            "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}/${asset}"
+          echo "${NEXTEST_SHA256}  /tmp/nextest.tar.gz" | sha256sum --check -
+          tar -xzf /tmp/nextest.tar.gz -C "$HOME/.cargo/bin" cargo-nextest
+          cargo nextest --version
 
       # Covers every endpoint, including the frozen goldens in parity/. This is
       # their only reader, so a change to one of those files is only ever
