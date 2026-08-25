@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 
 use agento_lib::native::insights::{processors::CURRENT_PROCESSOR_VERSION, store, worker};
+use agento_lib::native::search::SEARCH_INDEX_VERSION;
 
 fn real_db() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
@@ -113,7 +114,7 @@ fn every_cached_session_gains_an_insight_row() {
     let mut settled = false;
     for _ in 0..1_800 {
         let conn = rusqlite::Connection::open(&db).expect("open");
-        let left = store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION)
+        let left = store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION, SEARCH_INDEX_VERSION)
             .expect("needs_processing")
             .into_iter()
             .filter(|p| !p.file_path.is_empty())
@@ -156,7 +157,8 @@ fn every_cached_session_gains_an_insight_row() {
     // whole key. A join or an upsert written on `session_id` alone leaves the
     // duplicated ids reporting work forever.
     let still_pending =
-        store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION).expect("needs_processing");
+        store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION, SEARCH_INDEX_VERSION)
+            .expect("needs_processing");
     let with_a_transcript: Vec<_> = still_pending
         .iter()
         .filter(|p| !p.file_path.is_empty())
@@ -241,12 +243,19 @@ fn every_cached_session_gains_an_insight_row() {
          English — the column is stored but not searchable"
     );
 
-    // The version is stamped, so the next boot does not rebuild the whole
-    // corpus again.
+    // Every row this build wrote carries the index version it wrote, so the next
+    // boot does not re-read the corpus. Per row since #446: there is no global
+    // stamp to check, and the count is over rows *that exist* — a session whose
+    // transcript could not be read has none, and is meant to stay pending.
+    let behind = scalar(
+        &conn,
+        &format!(
+            "SELECT COUNT(*) FROM session_insights WHERE search_index_version < {SEARCH_INDEX_VERSION}"
+        ),
+    );
     assert_eq!(
-        agento_lib::native::search::stored_version(&conn).expect("stored_version"),
-        agento_lib::native::search::SEARCH_INDEX_VERSION,
-        "the index was built but its version was never recorded, so every \
-         later sweep rebuilds it"
+        behind, 0,
+        "{behind} rows were indexed but left behind this build's index version, \
+         so every later sweep re-reads them"
     );
 }

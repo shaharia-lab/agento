@@ -69,7 +69,7 @@ use rusqlite::Connection;
 
 use super::index::DocAccumulator;
 use super::processors::{self, SessionInsight, CURRENT_PROCESSOR_VERSION};
-use super::store::{self, Pending, Scope};
+use super::store::{self, Pending};
 use crate::native::{db, pricing::Resolver, search, settings};
 
 /// How often the worker looks for rows a version bump or an idle-threshold
@@ -243,7 +243,7 @@ fn run_once(db_path: &Path, rx: &Receiver<Pending>, timeout: Duration) -> Pass {
     // answer is reported rather than acted on: only a rebuild needs to know
     // whether a batch committed, and a rebuild is [`sweep`]'s alone.
     let size = batch.len();
-    let committed = process_batch(db_path, batch, Write::Replace);
+    let committed = process_batch(db_path, batch);
 
     // Whatever `enqueue` could not deliver, picked up now rather than at the
     // next five-minute tick. The swap clears the flag before the sweep begins,
@@ -255,8 +255,8 @@ fn run_once(db_path: &Path, rx: &Receiver<Pending>, timeout: Duration) -> Pass {
     Pass::Batch { size, committed }
 }
 
-/// `rescanOutdated`: everything with no insight row or an outdated one — **or
-/// the whole corpus, when the search index needs rebuilding** (#435).
+/// `rescanOutdated`: everything with no insight row, an outdated one, or one
+/// whose indexed text an older indexer wrote (#446).
 ///
 /// Processed directly rather than pushed through the queue, which Go does and
 /// this deliberately does not: a corpus of 2,000 unprocessed sessions against a
@@ -264,41 +264,38 @@ fn run_once(db_path: &Path, rx: &Receiver<Pending>, timeout: Duration) -> Pass {
 /// them again five minutes later. The queue is for the scan's incremental
 /// announcements; the sweep already has the whole list in hand.
 ///
-/// ## The two versions are separate, and only one of them widens the scope
+/// ## Both versions live on the row, which is why this function is short
 ///
-/// `CURRENT_PROCESSOR_VERSION` selects rows whose *insight* is stale;
-/// [`search::SEARCH_INDEX_VERSION`] selects rows whose *index text* is, which is
-/// every row at once because the constant is not stored per row. A bump to the
-/// second therefore reads every transcript again — through **this** thread, and
-/// **not** through the scanner: no staleness marker is touched, so
-/// `claude_session_cache.file_mtime` is left exactly as it was and the scan does
-/// not re-read a thing. That is `CURRENT_PROCESSOR_VERSION`'s own separation,
-/// applied to the second version constant.
+/// It used to read `claude_cache_metadata.search_index_version`, widen the scope
+/// to the whole corpus on a mismatch, empty the index, run the batches in an
+/// insert-only mode, track whether every one of them committed, and stamp the
+/// version afterwards — with a rule about the stamping *order* that was silent
+/// when broken. All of that was scaffolding around one value describing 1,178
+/// rows. `session_insights.search_index_version` is per row and
+/// `store::upsert` writes it in the **same transaction** as the index row
+/// (`write_batch`), so:
 ///
-/// The new version is stamped **after** the rebuild, and only if every batch in
-/// it committed. Stamping first would leave a partially indexed corpus that
-/// nothing ever finishes, because the mismatch driving the work would be gone.
+/// * a session skipped because its transcript was unreadable keeps its old value
+///   and is selected again by every later sweep — the hole #446 is named for;
+/// * a rebuild interrupted between batches resumes, because the batches that
+///   committed are no longer behind;
+/// * nothing needs to know whether "every batch committed", so nothing has to
+///   get the ordering of a stamp right.
 ///
-/// ## A rebuild empties the index first, and that is a cost decision
+/// The scanner is still untouched by a bump, which is
+/// `CURRENT_PROCESSOR_VERSION`'s own separation applied to the second constant:
+/// re-indexing reads transcripts through **this** thread, no staleness marker
+/// moves, `claude_session_cache.file_mtime` is left exactly as it was, and the
+/// scan re-reads nothing.
 ///
-/// `search::delete` is a **scan** of the FTS5 content table, so re-indexing a
-/// corpus with `search::replace` per session is quadratic — 1,178 scans of a
-/// table that grows with every insert, measured at 11–76 s of pure delete
-/// depending on document size, all of it inside a write transaction competing
-/// with the boot scan that `lib.rs` starts two lines later. `delete_all` once
-/// plus [`search::insert`] is the same end state for one scan-free `DELETE`.
+/// ## What a permanently unreadable transcript costs now
 ///
-/// It has a second effect worth having: after emptying, a session the rebuild
-/// **skips** has no row at all, where per-session replacement would have left
-/// its *previous* row in place — carrying text in the format this build has just
-/// declared it disagrees with, under a version stamp saying otherwise. Missing
-/// is a recoverable state that `needs_processing` can still describe; silently
-/// stale is not.
-///
-/// The cost is that search answers nothing for the length of a rebuild. That is
-/// accepted rather than overlooked: the rows it would otherwise return were
-/// produced by a reader this build no longer agrees with, which is what the
-/// version bump means. `delete_all`'s own header records the same intent.
+/// It is selected by every sweep rather than once, so `read_in_parallel` warns
+/// about it every [`RESCAN_INTERVAL`] instead of never. That is the intended
+/// trade and it is bounded: a transcript that is simply *gone* has its cache row
+/// removed by the scan's own delete pass and its rows reconciled away, so what
+/// retries for ever is precisely the protected case — a config dir that could
+/// not be listed — which is the case that must retry.
 fn sweep(db_path: &Path) {
     let conn = match db::open_read_only(db_path) {
         Ok(conn) => conn,
@@ -307,20 +304,11 @@ fn sweep(db_path: &Path) {
             return;
         }
     };
-    let indexed_version = search::stored_version(&conn).unwrap_or_else(|e| {
-        // Treated as current rather than as 0: a read failure that answered
-        // "nothing indexed" would rebuild the entire corpus on every sweep for
-        // as long as the failure lasts.
-        log::warn!("insights: cannot read search_index_version: {e}");
-        search::SEARCH_INDEX_VERSION
-    });
-    let rebuild = indexed_version != search::SEARCH_INDEX_VERSION;
-    let scope = if rebuild {
-        Scope::Everything
-    } else {
-        Scope::Outdated
-    };
-    let pending = match store::select_pending(&conn, CURRENT_PROCESSOR_VERSION, scope) {
+    let pending = match store::needs_processing(
+        &conn,
+        CURRENT_PROCESSOR_VERSION,
+        search::SEARCH_INDEX_VERSION,
+    ) {
         Ok(pending) => pending,
         Err(e) => {
             log::warn!("insights: failed to list sessions needing processing: {e}");
@@ -330,107 +318,34 @@ fn sweep(db_path: &Path) {
     drop(conn);
 
     if pending.is_empty() {
-        // Nothing to index, so the version is trivially reached. Recording it
-        // here is what stops an empty corpus rebuilding on every five-minute
-        // tick for the life of the process.
-        if rebuild {
-            record_index_version(db_path);
-        }
         return;
     }
-    if rebuild {
-        log::info!(
-            "search: rebuilding the index for {} sessions (stored version {indexed_version}, \
-             this build writes {})",
-            pending.len(),
-            search::SEARCH_INDEX_VERSION,
-        );
-    } else {
-        log::info!("insights: reprocessing {} outdated sessions", pending.len());
-    }
+    log::info!("insights: reprocessing {} outdated sessions", pending.len());
 
-    // Emptied once, before the first batch, so the batches can insert without
-    // paying `search::delete`'s scan each — see the header. A failure here
-    // abandons the rebuild rather than proceeding: inserting into a table that
-    // still holds the old rows would duplicate every pair, and FTS5 has no
-    // unique index to refuse it.
-    if rebuild {
-        match db::open_read_write(db_path).and_then(|conn| search::delete_all(&conn)) {
-            Ok(()) => {}
-            Err(e) => {
-                log::warn!("search: cannot clear the index to rebuild it: {e}");
-                return;
-            }
-        }
-    }
-
-    let mut every_batch_committed = true;
     for chunk in pending.chunks(BATCH_SIZE) {
-        let write = if rebuild {
-            Write::Insert
-        } else {
-            Write::Replace
-        };
-        every_batch_committed &= process_batch(db_path, chunk.iter().cloned().collect(), write);
-    }
-
-    if rebuild && every_batch_committed {
-        record_index_version(db_path);
-    }
-}
-
-/// How a batch puts a session's document into the index.
-///
-/// The two differ only in whether the scan-costing delete runs first, and
-/// choosing wrongly is silent in both directions: `Insert` against a populated
-/// table duplicates rows, `Replace` during a rebuild is the quadratic cost
-/// [`sweep`]'s header describes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Write {
-    /// The incremental path: a row for this pair may already exist.
-    Replace,
-    /// The rebuild path, immediately after [`search::delete_all`], where no row
-    /// for any pair exists.
-    Insert,
-}
-
-/// Stamp `claude_cache_metadata.search_index_version`.
-///
-/// Best-effort, like every marker `scan.rs` records: losing it costs one
-/// redundant rebuild at the next sweep, where failing the sweep costs the
-/// corpus its insights too.
-fn record_index_version(db_path: &Path) {
-    let result = db::open_read_write(db_path)
-        .and_then(|conn| search::record_version(&conn, search::SEARCH_INDEX_VERSION));
-    match result {
-        Ok(()) => log::info!(
-            "search: index rebuilt at version {}",
-            search::SEARCH_INDEX_VERSION
-        ),
-        Err(e) => log::warn!("search: failed to record search_index_version: {e}"),
+        process_batch(db_path, chunk.iter().cloned().collect());
     }
 }
 
 /// Read every session in the batch in parallel, then write the results in one
 /// transaction.
 ///
-/// Answers whether the batch got as far as the database agreeing with it, which
-/// [`sweep`] needs in order to decide whether a rebuild may stamp its version.
+/// Answers whether the batch got as far as the database agreeing with it.
 ///
 /// **`false` means a *database* failure, never an unreadable transcript.** That
 /// distinction is the whole value of the return: a real corpus always contains
 /// some session whose file has been deleted, truncated or replaced since it was
-/// cached, and `read_in_parallel` skips those by design. Counting a skip as
-/// failure would mean the version is never recorded on any real machine, so
-/// every five-minute sweep would rebuild the entire index again — for ever, at
-/// full corpus cost, with nothing in the log to say why. A batch with nothing
+/// cached, and `read_in_parallel` skips those by design. A batch with nothing
 /// readable in it is therefore `true`: nothing was committed because there was
 /// nothing to commit.
 ///
-/// What is left blocking a stamp is exactly the set of things that would make
-/// the rebuild genuinely incomplete and are worth retrying: the settings read,
-/// opening the database for writing, and the batch transaction itself.
-fn process_batch(db_path: &Path, batch: BTreeSet<Pending>, write: Write) -> bool {
+/// Since #446 nothing in [`sweep`] branches on it — the per-row version is what
+/// decides what a later sweep picks up, and a failed batch simply leaves both of
+/// its rows' versions where they were. It is kept because it is the only thing
+/// that distinguishes "this batch wrote nothing because there was nothing to
+/// write" from "this batch could not reach the database", which is what the
+/// tests either side of that line assert.
+fn process_batch(db_path: &Path, batch: BTreeSet<Pending>) -> bool {
     let items: Vec<Pending> = batch
         .into_iter()
         // `rescanOutdated` skips a row with no file path, and so does this:
@@ -472,7 +387,7 @@ fn process_batch(db_path: &Path, batch: BTreeSet<Pending>, write: Write) -> bool
             return false;
         }
     };
-    match write_batch(&mut conn, &mut computed, write) {
+    match write_batch(&mut conn, &mut computed) {
         Ok(n) => {
             log::debug!("insights: stored {n} session insights and search rows");
             true
@@ -568,12 +483,17 @@ fn read_in_parallel(
 ///
 /// **The `session_insights` row and the `session_search` row commit or fail
 /// together**, which is the acceptance criterion and also the only arrangement
-/// that stays consistent: `processor_version` is what tells the next sweep a
+/// that stays consistent: the row's two versions are what tell the next sweep a
 /// session is done, so an index write that failed after the insight row landed
 /// would leave that session permanently unindexed with nothing reporting it.
 /// `search::replace` is itself a delete followed by an insert and is *not*
 /// atomic on its own — this transaction is what makes it so, which is exactly
 /// why `search/mod.rs` opens no connection of its own.
+///
+/// Since #446 that is stronger than an arrangement, it is the mechanism:
+/// `store::upsert` writes `search::SEARCH_INDEX_VERSION` onto the very row this
+/// transaction indexes, so the version and the text it describes are atomic by
+/// construction rather than by a stamp written afterwards.
 ///
 /// The title is read here rather than carried from the read pass because it
 /// lives in the cache row, not the transcript. Reading it inside the transaction
@@ -591,21 +511,14 @@ fn read_in_parallel(
 /// `SearchDoc` carries up to `normalize::SESSION_CAP` of text, and a batch is a
 /// hundred of them, so building a titled copy per row would clone tens of
 /// megabytes per batch to add a few dozen bytes to each.
-fn write_batch(
-    conn: &mut Connection,
-    computed: &mut [Computed],
-    write: Write,
-) -> Result<usize, String> {
+fn write_batch(conn: &mut Connection, computed: &mut [Computed]) -> Result<usize, String> {
     let scanned_at = store::scanned_at_now();
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for item in computed.iter_mut() {
         store::upsert(&tx, &item.insight, &item.project_path, &scanned_at)?;
         let title = store::display_title(&tx, &item.doc.session_id, &item.doc.project_path);
         item.doc.title = super::index::normalize_title(&title);
-        match write {
-            Write::Replace => search::replace(&tx, &item.doc)?,
-            Write::Insert => search::insert(&tx, &item.doc)?,
-        }
+        search::replace(&tx, &item.doc)?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(computed.len())
@@ -808,7 +721,6 @@ mod tests {
         assert!(process_batch(
             &db_path,
             [pending_for("s1", "/a", &file)].into_iter().collect(),
-            Write::Replace,
         ));
 
         let conn = db::open_read_only(&db_path).expect("open");
@@ -849,7 +761,6 @@ mod tests {
         assert!(process_batch(
             &db_path,
             [pending_for("s1", "/a", &file)].into_iter().collect(),
-            Write::Replace,
         ));
 
         let conn = db::open_read_only(&db_path).expect("open");
@@ -884,7 +795,6 @@ mod tests {
             assert!(process_batch(
                 &db_path,
                 [pending_for("s1", "/a", &file)].into_iter().collect(),
-                Write::Replace,
             ));
 
             let conn = db::open_read_only(&db_path).expect("open");
@@ -895,89 +805,220 @@ mod tests {
         }
     }
 
-    /// A rebuild must not leave a session carrying text this build's indexer no
-    /// longer produces.
-    ///
-    /// The failure it guards is silent and looks healthy: with per-session
-    /// replacement, a session the rebuild **skips** keeps its previous row — old
-    /// format — while the version stamp says the whole index is current, so
-    /// nothing ever revisits it. Emptying first makes a skip visible as a
-    /// *missing* row instead, which is a state `needs_processing` can still
-    /// describe.
-    ///
-    /// The marker row here stands in for "indexed by an older build": it is
-    /// present before the rebuild, belongs to a session the rebuild cannot read,
-    /// and must be gone afterwards.
-    #[test]
-    fn a_rebuild_leaves_no_row_from_the_previous_index_version() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = fixture_db(&dir);
-        seed_session(&dir, &db_path, "good", "/a", "pagination");
+    // ─── per-row index versioning (#446) ─────────────────────────────────────
 
-        let conn = db::open_read_write(&db_path).expect("open");
-        // Still cached, but its transcript cannot be read — the shape an
-        // unmounted drive or a permissions change leaves, which `scan.rs`
-        // deliberately protects from deletion.
+    /// Force a rebuild the way the product reaches one: every row reads as
+    /// behind, which is exactly what a `SEARCH_INDEX_VERSION` bump and migration
+    /// 36's `DEFAULT 0` both produce.
+    ///
+    /// Derived from the constant rather than written as a literal, so bumping it
+    /// does not turn any of these into a test of nothing.
+    fn age_the_index_version(db_path: &Path) {
+        let conn = db::open_read_write(db_path).expect("open");
+        conn.execute(
+            "UPDATE session_insights SET search_index_version = ?1",
+            rusqlite::params![search::SEARCH_INDEX_VERSION - 1],
+        )
+        .expect("age the per-row index version");
+    }
+
+    /// Each pair's stored `search_index_version`, which is the whole subject of
+    /// #446: a global stamp could only ever answer one number for all of them.
+    fn index_versions(conn: &Connection) -> Vec<(String, String, i64)> {
+        let mut stmt = conn
+            .prepare(
+                "SELECT session_id, project_path, search_index_version
+                   FROM session_insights ORDER BY 1, 2",
+            )
+            .expect("prepare");
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("rows")
+    }
+
+    /// Register a cached session whose transcript is at `file`, without writing
+    /// one — the shape an unmounted drive or a permissions change leaves, which
+    /// `scan.rs`'s unreadable-config-dir protection deliberately preserves.
+    fn seed_cache_row(db_path: &Path, session_id: &str, project_path: &str, file: &Path) {
+        let conn = db::open_read_write(db_path).expect("open");
         conn.execute(
             "INSERT INTO claude_session_cache
                  (session_id, project_path, file_path, file_mtime, start_time, last_activity)
-             VALUES ('unreadable', '/a', ?1, '2026-01-01 00:00:00+00:00',
+             VALUES (?1, ?2, ?3, '2026-01-01 00:00:00+00:00',
                      '2026-01-01 00:00:00+00:00', '2026-01-01 00:00:00+00:00')",
-            rusqlite::params![dir.path().join("absent.jsonl").to_string_lossy()],
+            rusqlite::params![session_id, project_path, file.to_string_lossy()],
         )
         .expect("cache row");
-        search::replace(
-            &conn,
-            &search::SearchDoc {
-                session_id: "unreadable".into(),
-                project_path: "/a".into(),
-                user_text: "obsoletemarker".into(),
-                ..Default::default()
-            },
-        )
-        .expect("seed a previous-version row");
-        search::record_version(&conn, search::SEARCH_INDEX_VERSION - 1).expect("age");
-        drop(conn);
+    }
+
+    /// **The test #446 exists for.** A session the rebuild skips because its
+    /// transcript is unreadable stays behind, is retried by the next sweep, and
+    /// is indexed as soon as the transcript comes back.
+    ///
+    /// Under the global stamp this was unreachable in both directions. A rebuild
+    /// that skipped it still stamped the corpus current, so `Scope::Outdated`
+    /// never picked it up again, the scanner announced nothing (its `file_mtime`
+    /// is unchanged and its cache row is protected from deletion) and no later
+    /// sweep rebuilt — the session stayed unindexed until its transcript next
+    /// changed. The alternative, refusing to stamp while anything was skipped,
+    /// rebuilt the whole corpus every five minutes for ever.
+    ///
+    /// The middle assertion is the load-bearing one: the readable session
+    /// advanced **and** the unreadable one did not, in the same pass. A version
+    /// written per corpus cannot express that at all.
+    #[test]
+    fn a_skipped_session_stays_behind_and_is_retried_by_a_later_sweep() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let good = seed_session(&dir, &db_path, "good", "/a", "pagination");
+        // Cached, indexed by an older build, and unreadable right now.
+        let later = dir.path().join("later.jsonl");
+        seed_cache_row(&db_path, "unreadable", "/a", &later);
+        {
+            let conn = db::open_read_write(&db_path).expect("open");
+            conn.execute(
+                "INSERT INTO session_insights (session_id, project_path, scanned_at)
+                 VALUES ('unreadable', '/a', '')",
+                [],
+            )
+            .expect("an insight row from an older build");
+        }
+        sweep(&db_path);
+        age_the_index_version(&db_path);
 
         sweep(&db_path);
 
         let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(
+            index_versions(&conn),
+            vec![
+                (
+                    "good".to_string(),
+                    "/a".to_string(),
+                    search::SEARCH_INDEX_VERSION
+                ),
+                (
+                    "unreadable".to_string(),
+                    "/a".to_string(),
+                    search::SEARCH_INDEX_VERSION - 1
+                ),
+            ],
+            "the skipped session must stay behind while its neighbour advances",
+        );
+        drop(conn);
+
+        // The drive comes back. Nothing else changes — no version bump, no
+        // scanner marker, no announcement.
+        std::fs::copy(&good, &later).expect("the transcript becomes readable");
+
+        sweep(&db_path);
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(
+            index_versions(&conn)
+                .into_iter()
+                .map(|(_, _, v)| v)
+                .collect::<Vec<_>>(),
+            vec![search::SEARCH_INDEX_VERSION; 2],
+            "the retry never happened — this is the hole the issue is named for",
+        );
+        assert_eq!(
+            indexed_pairs(&conn),
+            vec![
+                ("good".into(), "/a".into()),
+                ("unreadable".into(), "/a".into())
+            ],
+        );
+    }
+
+    /// A rebuild **replaces** each row rather than adding to it, so text the
+    /// previous indexer produced is gone afterwards.
+    ///
+    /// This is what `delete_all`-then-`insert` bought #444 and what per-session
+    /// `replace` has to buy back: FTS5 has no unique index, so getting it wrong
+    /// leaves two rows for one pair and doubles every hit silently.
+    #[test]
+    fn a_rebuild_replaces_a_pair_rather_than_duplicating_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        seed_session(&dir, &db_path, "s1", "/a", "pagination");
+        sweep(&db_path);
+
+        // Stand in for "the previous indexer wrote different text": rewrite the
+        // stored document, then declare the row behind.
+        {
+            let conn = db::open_read_write(&db_path).expect("open");
+            search::replace(
+                &conn,
+                &search::SearchDoc {
+                    session_id: "s1".into(),
+                    project_path: "/a".into(),
+                    user_text: "obsoletemarker".into(),
+                    ..Default::default()
+                },
+            )
+            .expect("seed a previous-version row");
+        }
+        age_the_index_version(&db_path);
+
+        sweep(&db_path);
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(indexed_pairs(&conn), vec![("s1".into(), "/a".into())]);
         assert!(
             search::search(&conn, "\"obsoletemarker\"", 10)
                 .expect("search")
                 .is_empty(),
             "text from the previous index version survived the rebuild",
         );
-        assert_eq!(indexed_pairs(&conn), vec![("good".into(), "/a".into())]);
-    }
-
-    /// The rebuild path must not leave two rows for one pair.
-    ///
-    /// It inserts without deleting, which is only sound because the index was
-    /// emptied first — and FTS5 has no unique index to refuse a duplicate, so
-    /// getting this wrong doubles every hit silently rather than failing.
-    #[test]
-    fn a_rebuild_does_not_duplicate_a_pair_that_was_already_indexed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = fixture_db(&dir);
-        seed_session(&dir, &db_path, "s1", "/a", "pagination");
-
-        // Index it once at the current version, then force a rebuild over it.
-        sweep(&db_path);
-        let conn = db::open_read_write(&db_path).expect("open");
-        search::record_version(&conn, search::SEARCH_INDEX_VERSION - 1).expect("age");
-        drop(conn);
-
-        sweep(&db_path);
-
-        let conn = db::open_read_only(&db_path).expect("open");
-        assert_eq!(indexed_pairs(&conn), vec![("s1".into(), "/a".into())]);
         assert_eq!(
             search::search(&conn, "\"pagination\"", 10)
                 .expect("search")
                 .len(),
             1,
             "the pair was indexed twice, so every hit for it is doubled",
+        );
+    }
+
+    /// A rebuild interrupted between batches **resumes**: the next sweep selects
+    /// only the rows still behind, not the whole corpus.
+    ///
+    /// Interruption is simulated the only way an in-process test can — half the
+    /// corpus is put through a batch by hand, which is exactly the state a
+    /// process killed between two of `sweep`'s chunks leaves behind. The
+    /// assertion is on what the *next* sweep considers pending, because that is
+    /// the property: under the global stamp it was every cached session, since
+    /// the stamp is only written when the last batch commits.
+    #[test]
+    fn an_interrupted_rebuild_resumes_rather_than_restarting() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let a = seed_session(&dir, &db_path, "done", "/a", "pagination");
+        seed_session(&dir, &db_path, "left", "/a", "kestrel");
+        sweep(&db_path);
+        age_the_index_version(&db_path);
+
+        // One chunk of a two-session rebuild committed; the process died here.
+        assert!(process_batch(
+            &db_path,
+            [pending_for("done", "/a", &a)].into_iter().collect(),
+        ));
+
+        let conn = db::open_read_only(&db_path).expect("open");
+        let pending = store::needs_processing(
+            &conn,
+            CURRENT_PROCESSOR_VERSION,
+            search::SEARCH_INDEX_VERSION,
+        )
+        .expect("needs_processing");
+        assert_eq!(
+            pending
+                .iter()
+                .map(|p| p.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["left"],
+            "the committed half was re-read, so the whole corpus restarts",
         );
     }
 
@@ -999,7 +1040,6 @@ mod tests {
             [pending_for("s1", "/a", &a), pending_for("s1", "/b", &b)]
                 .into_iter()
                 .collect(),
-            Write::Replace,
         ));
 
         let conn = db::open_read_only(&db_path).expect("open");
@@ -1030,9 +1070,9 @@ mod tests {
     /// disk. Zeroed mtimes are what that looks like, so they are compared before
     /// and after.
     ///
-    /// The stored version is set to a value that is not `SEARCH_INDEX_VERSION`
-    /// rather than to a literal, so bumping the constant does not turn this into
-    /// a test of nothing.
+    /// The aged version is derived from `SEARCH_INDEX_VERSION` rather than
+    /// written as a literal, so bumping the constant does not turn this into a
+    /// test of nothing.
     #[test]
     fn a_version_bump_reindexes_without_touching_the_scanners_mtimes() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1044,18 +1084,22 @@ mod tests {
         let conn = db::open_read_only(&db_path).expect("open");
         assert_eq!(indexed_pairs(&conn).len(), 1);
         assert_eq!(
-            search::stored_version(&conn).expect("version"),
-            search::SEARCH_INDEX_VERSION,
-            "a completed sweep stamps the version it indexed at",
+            index_versions(&conn),
+            vec![(
+                "s1".to_string(),
+                "/a".to_string(),
+                search::SEARCH_INDEX_VERSION
+            )],
+            "a committed batch stamps the version it indexed at, on the row",
         );
         let before = mtimes(&conn);
         drop(conn);
 
         // Now pretend this build's indexer disagrees with what is stored, and
-        // empty the index the way a rebuild's first act would not: if the sweep
-        // does nothing, the rows stay gone and the assertion below fails.
+        // empty the index: if the sweep does nothing, the rows stay gone and the
+        // assertion below fails.
+        age_the_index_version(&db_path);
         let conn = db::open_read_write(&db_path).expect("open");
-        search::record_version(&conn, search::SEARCH_INDEX_VERSION - 1).expect("age the version");
         search::delete_all(&conn).expect("empty the index");
         drop(conn);
 
@@ -1068,17 +1112,21 @@ mod tests {
             "a version mismatch must reindex every session",
         );
         assert_eq!(
-            search::stored_version(&conn).expect("version"),
-            search::SEARCH_INDEX_VERSION,
-            "and stamp the new version once the rebuild covered the corpus",
+            index_versions(&conn),
+            vec![(
+                "s1".to_string(),
+                "/a".to_string(),
+                search::SEARCH_INDEX_VERSION
+            )],
+            "and record the new version on the row it rebuilt",
         );
         assert_eq!(
             mtimes(&conn),
             before,
             "a search rebuild must not make the scanner re-read a transcript",
         );
-        // The insight row is current throughout, which is what makes the
-        // ordinary `needs_processing` scope unable to express this rebuild.
+        // The insight row is current on `processor_version` throughout, which is
+        // what a rebuild driven by that column alone could never express.
         let stale: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM session_insights WHERE processor_version < ?1",
@@ -1090,9 +1138,9 @@ mod tests {
         let _ = file;
     }
 
-    /// An ordinary sweep, with the version already current, must not rebuild.
+    /// An ordinary sweep, with every row already current, must not rebuild.
     ///
-    /// Without the equality check this would re-index the whole corpus every
+    /// Without the version comparison this would re-index the whole corpus every
     /// five minutes forever — correct output, and a permanent full-corpus read
     /// nothing would ever report.
     #[test]
@@ -1117,25 +1165,6 @@ mod tests {
         );
     }
 
-    /// An empty corpus still reaches the new version, rather than asking for a
-    /// rebuild on every five-minute tick for the life of the process.
-    #[test]
-    fn a_rebuild_over_an_empty_corpus_still_records_the_version() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db_path = fixture_db(&dir);
-        let conn = db::open_read_write(&db_path).expect("open");
-        search::record_version(&conn, search::SEARCH_INDEX_VERSION - 1).expect("age");
-        drop(conn);
-
-        sweep(&db_path);
-
-        let conn = db::open_read_only(&db_path).expect("open");
-        assert_eq!(
-            search::stored_version(&conn).expect("version"),
-            search::SEARCH_INDEX_VERSION,
-        );
-    }
-
     /// The two writes are one transaction: if the index write fails, the insight
     /// row must not survive either.
     ///
@@ -1144,10 +1173,10 @@ mod tests {
     /// test-only hook — so this exercises the same `?` a genuine FTS5 error
     /// would take.
     ///
-    /// The consequence being pinned is not tidiness: `processor_version` is what
-    /// tells the next sweep a session is done, so an insight row that outlived a
-    /// failed index write would mark that session complete and it would never be
-    /// indexed again.
+    /// The consequence being pinned is not tidiness: the row's two versions are
+    /// what tell the next sweep a session is done, so an insight row that
+    /// outlived a failed index write would mark that session complete and it
+    /// would never be indexed again.
     #[test]
     fn a_failed_index_write_rolls_back_the_insight_row_with_it() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1163,7 +1192,6 @@ mod tests {
             !process_batch(
                 &db_path,
                 [pending_for("s1", "/a", &file)].into_iter().collect(),
-                Write::Replace,
             ),
             "a batch that could not commit must report so",
         );
@@ -1179,9 +1207,13 @@ mod tests {
         // …and the session is therefore still pending, which is what makes the
         // failure recoverable rather than permanent.
         assert_eq!(
-            store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION)
-                .expect("needs_processing")
-                .len(),
+            store::needs_processing(
+                &conn,
+                CURRENT_PROCESSOR_VERSION,
+                search::SEARCH_INDEX_VERSION
+            )
+            .expect("needs_processing")
+            .len(),
             1,
         );
     }
@@ -1191,11 +1223,10 @@ mod tests {
     ///
     /// This looks like the lenient answer and is the strict one. Every real
     /// corpus holds a session whose file has since been deleted or truncated —
-    /// `insights_live.rs` allows a 10% shortfall for exactly that — so if a skip
-    /// counted as failure, [`sweep`] would never stamp the version on any real
-    /// machine and would rebuild the whole index every five minutes for the life
-    /// of the process. Correct output, unbounded cost, and nothing in the log
-    /// naming the cause.
+    /// `insights_live.rs` allows a 10% shortfall for exactly that — and the
+    /// distinction is what separates "there was nothing to commit" from "the
+    /// database could not be reached", which the two tests either side of this
+    /// one pin.
     #[test]
     fn an_unreadable_transcript_is_a_skip_rather_than_a_batch_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1205,48 +1236,46 @@ mod tests {
         assert!(process_batch(
             &db_path,
             [pending_for("s1", "/a", &missing)].into_iter().collect(),
-            Write::Replace,
         ));
     }
 
-    /// …and the consequence, end to end: a corpus containing an unreadable
-    /// transcript still finishes its rebuild.
+    /// …and the consequence, end to end: **one unreadable transcript must not
+    /// make the readable corpus rebuild for ever.**
     ///
-    /// The second sweep is what makes this an assertion about *termination*
-    /// rather than about one pass: with the skip counted as a failure the
-    /// version stays behind, so the second sweep rebuilds all over again.
+    /// This is the trap #444 documented and #446 has to keep closed from the
+    /// other side. The global stamp made it all-or-nothing — refuse to stamp
+    /// while anything was skipped, and every sweep re-read the whole corpus — and
+    /// the per-row column makes it per row, so only the skipped session stays
+    /// pending. The good session is what is asserted on: it must be re-indexed
+    /// **once** and then left alone, however long the bad one goes on failing.
+    ///
+    /// Emptying the index between the sweeps is what makes "did the second sweep
+    /// re-read it?" observable at all: nothing else about a correct rebuild and
+    /// an endless one differs.
     #[test]
-    fn a_rebuild_completes_over_a_corpus_with_an_unreadable_transcript() {
+    fn one_unreadable_transcript_does_not_make_the_corpus_rebuild_for_ever() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = fixture_db(&dir);
         seed_session(&dir, &db_path, "good", "/a", "pagination");
         // A cache row whose transcript does not exist — the ordinary shape of a
         // session deleted from disk since it was scanned.
-        let conn = db::open_read_write(&db_path).expect("open");
-        conn.execute(
-            "INSERT INTO claude_session_cache
-                 (session_id, project_path, file_path, file_mtime, start_time, last_activity)
-             VALUES ('gone', '/a', ?1, '2026-01-01 00:00:00+00:00',
-                     '2026-01-01 00:00:00+00:00', '2026-01-01 00:00:00+00:00')",
-            rusqlite::params![dir.path().join("absent.jsonl").to_string_lossy()],
-        )
-        .expect("cache row");
-        search::record_version(&conn, search::SEARCH_INDEX_VERSION - 1).expect("age");
-        drop(conn);
+        seed_cache_row(&db_path, "gone", "/a", &dir.path().join("absent.jsonl"));
 
         sweep(&db_path);
 
         let conn = db::open_read_only(&db_path).expect("open");
-        assert_eq!(
-            search::stored_version(&conn).expect("version"),
-            search::SEARCH_INDEX_VERSION,
-            "one unreadable transcript must not stop the rebuild concluding",
-        );
         assert_eq!(indexed_pairs(&conn), vec![("good".into(), "/a".into())]);
+        assert_eq!(
+            index_versions(&conn),
+            vec![(
+                "good".to_string(),
+                "/a".to_string(),
+                search::SEARCH_INDEX_VERSION
+            )],
+            "the readable session must be current; the unreadable one has no row",
+        );
         drop(conn);
 
-        // Termination: with the version stamped, a second sweep has nothing to
-        // rebuild. Emptying the index first is what makes that observable.
         let conn = db::open_read_write(&db_path).expect("open");
         search::delete_all(&conn).expect("empty");
         drop(conn);
@@ -1256,7 +1285,8 @@ mod tests {
         let conn = db::open_read_only(&db_path).expect("open");
         assert!(
             indexed_pairs(&conn).is_empty(),
-            "the rebuild repeated, so it would repeat every five minutes for ever",
+            "the readable session was re-read, so it would be re-read every five \
+             minutes for ever",
         );
     }
 
@@ -1273,7 +1303,6 @@ mod tests {
         assert!(!process_batch(
             &db_path,
             [pending_for("s1", "/a", &file)].into_iter().collect(),
-            Write::Replace,
         ));
     }
 
