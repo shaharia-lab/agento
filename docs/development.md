@@ -169,6 +169,14 @@ cargo test --test scan_live -- --ignored --nocapture
 
 # The MCP server, dialled by the real Claude Code CLI.
 cargo test --test claude_mcp_live -- --ignored --nocapture
+
+# The search index, against a copy of your real corpus: correctness, plus
+# printed build / index-size / query-latency numbers. Run it under --release
+# when you care about the numbers — the bundled SQLite is a C dependency
+# compiled at the profile's optimization level, so a debug run measures a
+# SQLite nobody ships.
+cargo test --test search_live -- --ignored --nocapture
+cargo test --release --test search_live -- --ignored --nocapture
 ```
 
 Verify scanner changes against real data, not a fixture. The failure that matters
