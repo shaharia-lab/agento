@@ -74,6 +74,10 @@ Drag **Agento** into Applications and open it. macOS blocks it once, because the
 not signed with an Apple Developer certificate: go to **System Settings → Privacy &
 Security**, scroll down, click **Open Anyway**. Updates installed by the app never ask again.
 
+Got **"damaged and can't be opened"** with no Open Anyway? That is an Apple Silicon
+download of 1.0.0 or earlier — see
+[Troubleshooting](docs/troubleshooting.md#macos-says-the-app-is-damaged-and-cant-be-opened).
+
 </details>
 
 <details>

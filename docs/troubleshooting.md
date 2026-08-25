@@ -17,19 +17,49 @@ Common problems and what to do about them.
 
 ## Installing and launching
 
-### macOS says the app is damaged or cannot be verified
+### macOS says the app cannot be verified
 
-The app is not signed with a paid Apple Developer certificate, so macOS blocks
-the first launch. Open **System Settings → Privacy & Security**, find the line
-about Agento, and click **Open Anyway**.
+Expected, on every version. The app is signed, but not with a paid Apple
+Developer certificate, so Gatekeeper has no identity to check and blocks the
+first launch of anything downloaded.
 
-If that line is not there:
+Open **System Settings → Privacy & Security**, find the line about Agento, and
+click **Open Anyway**. Only the first launch needs it: updates the app installs
+itself are never quarantined, so they do not ask again.
+
+### macOS says the app is damaged and can't be opened
+
+A different dialog, a different cause, and the important distinction is that
+this one offers **only Move to Trash**. There is no Open Anyway button and no
+line ever appears in Privacy & Security, so the steps above cannot help — that
+path does not exist for this dialog.
+
+**Apple Silicon downloads up to and including 1.0.0 are affected**; fixed in
+every release after it ([#461](https://github.com/shaharia-lab/agento/issues/461)).
+Nothing ran `codesign` over the app bundle, so it shipped carrying only the
+ad-hoc signature the linker puts on every arm64 binary. That seals the
+executable but not the bundle around it, and macOS treats a signature which
+claims resources it cannot find as *damaged* rather than unsigned — a verdict
+reserved for tampering, which is why it comes with no override. Intel downloads
+were not affected: with no signature at all they read as merely unsigned, and
+unsigned gets the Open Anyway prompt.
+
+To launch a copy you already downloaded, drag it to Applications first (the
+mounted `.dmg` is read-only), then either remove the flag that makes Gatekeeper
+look:
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Agento.app
 ```
 
-Only the first launch needs this.
+or seal the bundle yourself, which is what the build should have done:
+
+```bash
+codesign --force --deep --sign - /Applications/Agento.app
+```
+
+Either is one-time, neither needs an Apple account, and both leave your data
+alone. Updating to a later release makes both unnecessary.
 
 ### Windows SmartScreen blocks the installer
 

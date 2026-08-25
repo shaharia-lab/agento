@@ -76,8 +76,9 @@ means take the `aarch64` build.
 ### The first launch is blocked
 
 macOS refuses to open the app the first time and says it cannot be verified. This
-is expected. The app is not signed with a paid Apple Developer certificate, so
-Gatekeeper treats it as an unidentified developer.
+is expected. The app is ad-hoc signed rather than signed with a paid Apple
+Developer certificate, so Gatekeeper has no identity to check and treats it as an
+unidentified developer.
 
 To allow it:
 
@@ -94,6 +95,12 @@ xattr -dr com.apple.quarantine /Applications/Agento.app
 
 You only do this once. Updates the app installs itself are not quarantined, so
 they launch without any prompt.
+
+If macOS instead says Agento is **damaged and can't be opened**, offering only
+Move to Trash, you have an Apple Silicon download of 1.0.0 or earlier, which
+shipped without a sealed code signature. See
+[Troubleshooting](troubleshooting.md#macos-says-the-app-is-damaged-and-cant-be-opened) —
+the Open Anyway route above does not apply to that dialog.
 
 ---
 

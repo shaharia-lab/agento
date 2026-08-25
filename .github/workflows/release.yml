@@ -265,6 +265,62 @@ jobs:
           # updates.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          #
+          # Apple code signing is deliberately NOT configured here. It comes
+          # from `bundle.macOS.signingIdentity` in tauri.conf.json (`-`, ad-hoc)
+          # so that a local `tauri build` produces the same sealed bundle CI
+          # does, and the verify step below is checking the artifact a developer
+          # can reproduce rather than a CI-only variant. When a real Developer ID
+          # arrives, `APPLE_SIGNING_IDENTITY` set here overrides that config
+          # value without editing it.
+
+      # Through v1.0.0 nothing ran `codesign` at all, and the consequence was
+      # invisible everywhere except on the machine of someone who downloaded a
+      # release. The linker ad-hoc signs every arm64 Mach-O, so the executable
+      # carried a valid signature while the *bundle* had no
+      # `Contents/_CodeSignature/CodeResources` — a signature that declares
+      # resources but seals none is **invalid**, not merely untrusted, and
+      # Gatekeeper renders invalid as "Agento is damaged and can't be opened",
+      # offering only Move to Trash. No Open Anyway, no Privacy & Security
+      # entry: the path installation.md documents does not exist for that
+      # dialog, so Apple Silicon users could not launch the app at all (#461).
+      #
+      # It survived a release because it only fires on a *quarantined* bundle.
+      # The app ran fine from CI, from a local `tauri build`, and after every
+      # in-app update (the updater's payload is not quarantined) — only a
+      # browser download reproduced it. Intel was unaffected for the opposite
+      # reason: with no linker signature at all it read as an unsigned app,
+      # which does get Open Anyway.
+      #
+      # So this step exists because no test anyone would think to write covers
+      # it, and because the failure is silent: `codesign -dv` prints a
+      # plausible-looking ad-hoc signature and exits 0 on the broken bundle.
+      # `--deep --strict` is the check that actually rejects it.
+      - name: Verify the macOS bundle is signed and sealed
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          app="src-tauri/target/${{ matrix.target }}/release/bundle/macos/Agento.app"
+          test -d "$app" || { echo "::error::no app bundle at $app"; exit 1; }
+
+          codesign --verify --deep --strict --verbose=2 "$app"
+
+          # The seal itself. `--deep --strict` already fails without it, but
+          # naming the file is what makes a future failure legible.
+          test -f "$app/Contents/_CodeSignature/CodeResources" \
+            || { echo "::error::$app has no sealed resources"; exit 1; }
+
+          # A linker-signed binary reports the identifier the linker invented
+          # (`agento-527c51eb3773d164`); codesign takes it from CFBundleIdentifier.
+          # So this distinguishes "we signed it" from "the toolchain did", which
+          # the verify above cannot: re-sealing by hand would satisfy that too.
+          id="$(codesign -d --verbose=2 "$app" 2>&1 | sed -n 's/^Identifier=//p')"
+          if [ "$id" != "com.shaharialab.agento" ]; then
+            echo "::error::$app is signed as '${id}', not com.shaharialab.agento — codesign did not run over the bundle"
+            exit 1
+          fi
+
+          echo "sealed and signed as ${id}"
 
       - name: Collect artifacts
         shell: bash
@@ -366,10 +422,13 @@ jobs:
             | macOS | `.dmg` (Apple Silicon and Intel) | automatic, in-app |
             | Windows | `-setup.exe` | automatic, in-app |
 
-            macOS builds are not notarised. On first launch macOS will say it
-            cannot verify the developer: open **System Settings → Privacy &
-            Security** and choose **Open Anyway**. Installing via Homebrew
-            (`brew install --cask --no-quarantine …`) skips this.
+            macOS builds are ad-hoc signed but not notarised. On first launch
+            macOS will say it cannot verify the developer: open **System
+            Settings → Privacy & Security** and choose **Open Anyway**.
+
+            Upgrading from 1.0.0 or earlier on Apple Silicon, where the app was
+            reported as *damaged* rather than unverified? That is fixed here —
+            see [Troubleshooting](https://github.com/shaharia-lab/agento/blob/main/docs/troubleshooting.md#macos-says-the-app-is-damaged-and-cant-be-opened).
 
             Requires the Claude Code CLI to be installed and signed in.
 
