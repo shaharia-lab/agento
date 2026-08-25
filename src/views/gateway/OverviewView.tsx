@@ -311,7 +311,7 @@ export function GatewayOverviewView({
               <InspGroup title="Endpoints">
                 <InspRow label="OpenAI">
                   {port > 0 ? (
-                    <span className="insp-row__copy">
+                    <span className="row insp-row__copy">
                       <span className="truncate">{`:${port}/v1`}</span>
                       <CopyButton
                         text={openaiBaseUrl(port)}
@@ -324,7 +324,7 @@ export function GatewayOverviewView({
                 </InspRow>
                 <InspRow label="Anthropic">
                   {port > 0 ? (
-                    <span className="insp-row__copy">
+                    <span className="row insp-row__copy">
                       <span className="truncate">{`:${port}/anthropic`}</span>
                       <CopyButton
                         text={anthropicBaseUrl(port)}
@@ -337,7 +337,7 @@ export function GatewayOverviewView({
                 </InspRow>
                 <InspRow label="Health">
                   {port > 0 ? (
-                    <span className="insp-row__copy">
+                    <span className="row insp-row__copy">
                       <span className="truncate">{healthUrl(port)}</span>
                       <CopyButton
                         text={healthUrl(port)}

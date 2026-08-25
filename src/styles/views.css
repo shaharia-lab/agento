@@ -667,8 +667,6 @@
    abbreviated to fit the pane, so drag-selecting it would copy the ellipsis
    rather than the value. The button carries the real one (#469). */
 .insp-row__copy {
-  display: flex;
-  align-items: center;
   gap: var(--sp-3);
   min-width: 0;
 }

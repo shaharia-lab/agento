@@ -1022,7 +1022,7 @@ function Inspector({
             fits the pane, so the button carries the real string while the row
             shows an abbreviated one (#469). */}
         <InspRow label="ID">
-          <span className="insp-row__copy">
+          <span className="row insp-row__copy">
             <span className="mono truncate">{session.session_id}</span>
             <CopyButton text={session.session_id} title="Copy session ID" />
           </span>
@@ -1043,7 +1043,7 @@ function Inspector({
             name an agent, so it belongs here with the other titles. */}
         {agentName && <InspRow label="Named">{agentName}</InspRow>}
         <InspRow label="Project">
-          <span className="insp-row__copy">
+          <span className="row insp-row__copy">
             <span className="truncate" title={session.project_path}>
               {tildePath(session.project_path)}
             </span>
