@@ -156,11 +156,11 @@ jobs:
       - name: Rust tests
         working-directory: src-tauri
         run: |
-          cargo nextest run
           # nextest does not run doctests at all — it has no way to. This repo
           # has 2, and without this line they would silently stop being
           # checked rather than fail.
           cargo test --doc
+          cargo nextest run
 
       # A full `tauri build` here would double CI time; compiling a
       # release-derived profile is what actually catches the
