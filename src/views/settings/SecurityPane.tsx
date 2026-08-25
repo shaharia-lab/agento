@@ -1,11 +1,13 @@
 import { useCallback, useState } from "react";
 import { api } from "../../lib/api";
 import { CopyButton } from "../../components/CopyButton";
+import { TokenReveal } from "../../components/TokenReveal";
 import { Dropdown, Empty, FormRow } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
 import { dateTime, relativeTime, tildePath } from "../../lib/format";
 import { useHostInfo } from "../../lib/host";
+import type { ApiTokenRow, CreatedApiToken } from "../../lib/types";
 import "../../styles/security.css";
 
 /* ============================================================================
@@ -41,23 +43,15 @@ interface KeyInfo {
   public_key_path: string;
 }
 
-interface TokenRow {
-  id: string;
-  name: string;
-  scope: string;
-  created_at: string;
-  expires_at: string | null;
-  last_used_at: string | null;
-  revoked_at: string | null;
-}
-
-interface CreatedToken extends TokenRow {
-  token: string;
-}
+/* The two token shapes moved to `lib/types.ts` when the LLM Gateway Overview
+   (#427) became a second consumer of `POST /api/security/tokens`. */
+type TokenRow = ApiTokenRow;
+type CreatedToken = CreatedApiToken;
 
 const SCOPES = [
   { value: "read", label: "Read only" },
   { value: "write", label: "Read and write" },
+  { value: "llm", label: "LLM gateway" },
 ];
 
 /**
@@ -80,6 +74,52 @@ const WRITE_WARNING =
 const READ_WARNING =
   "A read token can read every chat transcript, agent system prompt and " +
   "integration list on this machine. It cannot change anything.";
+
+/**
+ * ...and `llm` is the one whose cost is money rather than access (#423).
+ *
+ * Says both halves, because both are the point: it spends real provider credits,
+ * and it reaches nothing else. A gateway token is meant to be pasted into tool
+ * configs where it sits in plaintext, so the honest thing to state is the actual
+ * ceiling rather than "limited access".
+ */
+const LLM_WARNING =
+  "An LLM gateway token can spend your configured LLM provider credits, with " +
+  "no spending limit of its own. It cannot read or change anything in Agento.";
+
+/**
+ * Shown when a scope has no copy of its own — i.e. a value was added to
+ * `SCOPES` and not to `SCOPE_WARNINGS`.
+ *
+ * Deliberately *not* one of the three real warnings. Each of those makes a
+ * positive claim about what the scope does and does not reach, and asserting any
+ * of them about a scope this file knows nothing about would be a guess shown to
+ * the person deciding whether to hand the token out.
+ */
+const UNKNOWN_SCOPE_WARNING =
+  "This build does not describe what this scope grants. Do not issue it.";
+
+/**
+ * The capability note shown under the scope picker.
+ *
+ * A lookup rather than a ternary: at two scopes a ternary read fine, at three it
+ * would nest, and the next scope would nest it again.
+ */
+const SCOPE_WARNINGS: Record<string, string> = {
+  read: READ_WARNING,
+  write: WRITE_WARNING,
+  llm: LLM_WARNING,
+};
+
+/**
+ * The badge class per scope. `write` is amber because it is the dangerous one;
+ * `llm` gets its own colour because three scopes reading as two visuals is how a
+ * gateway token gets mistaken for a read token at a glance.
+ */
+const SCOPE_BADGES: Record<string, string> = {
+  write: "badge badge--amber",
+  llm: "badge badge--purple",
+};
 
 export function SecurityPane() {
   const host = useHostInfo();
@@ -207,13 +247,15 @@ export function SecurityPane() {
 
         <FormRow
           label="Regenerate"
-          help="Creates a new keypair. Every token ever issued stops working immediately, including this window's — which recovers on its own."
+          help="Creates a new keypair. Every token ever issued stops working immediately. This window's recovers on its own; anything else holding one — a script, or a tool configured against the LLM gateway — starts getting 401s with no other signal and needs a new token issued by hand."
         >
           {confirmRegenerate ? (
             <div className="row">
               <span className="confirm" style={{ flex: 1 }}>
                 Replace the signing key? Every issued token stops working and
-                cannot be restored.
+                cannot be restored — including LLM gateway tokens, so any tool
+                configured against the gateway stops until you issue it a new
+                one.
               </span>
               <button
                 className="btn btn--ghost"
@@ -265,31 +307,11 @@ export function SecurityPane() {
             banner stays until dismissed for that reason: a toast that faded
             would lose the credential. */}
         {created && (
-          <div className="secnew">
-            <div className="secnew__head">
-              <Icon name="shield" size={14} />
-              <span>
-                <strong>{created.name}</strong> created. Copy it now — this is
-                the only time it is shown, and it is not stored anywhere.
-              </span>
-              <button
-                className="iconbtn"
-                title="Dismiss"
-                onClick={() => setCreated(undefined)}
-              >
-                <Icon name="close" size={12} />
-              </button>
-            </div>
-            <div className="secnew__token">
-              <code className="mono selectable">{created.token}</code>
-              <CopyButton
-                text={created.token}
-                title="Copy token"
-                className="btn"
-                label="Copy"
-              />
-            </div>
-          </div>
+          <TokenReveal
+            name={created.name}
+            token={created.token}
+            onDismiss={() => setCreated(undefined)}
+          />
         )}
 
         <FormRow label="Name" help="What this token is for. Shown in the list below.">
@@ -303,7 +325,7 @@ export function SecurityPane() {
 
         <FormRow
           label="Scope"
-          help={scope === "write" ? WRITE_WARNING : READ_WARNING}
+          help={SCOPE_WARNINGS[scope] ?? UNKNOWN_SCOPE_WARNING}
         >
           <Dropdown value={scope} options={SCOPES} onChange={setScope} />
         </FormRow>
@@ -383,13 +405,7 @@ export function SecurityPane() {
                     {t.name}
                   </td>
                   <td>
-                    <span
-                      className={
-                        t.scope === "write"
-                          ? "badge badge--amber"
-                          : "badge"
-                      }
-                    >
+                    <span className={SCOPE_BADGES[t.scope] ?? "badge"}>
                       {t.scope}
                     </span>
                   </td>

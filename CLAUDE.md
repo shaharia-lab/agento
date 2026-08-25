@@ -182,12 +182,45 @@ src/
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
     newChatPrefs.ts  what the New Chat bar was last set to (localStorage)
     logs.ts      the log commands, and the line parser (target before level)
+    snippet.ts   the U+0001/U+0002 highlight sentinels, mirrored once from
+                 native/search/mod.rs, and snippetParts() (#438). They are
+                 **markers, not markup**: a snippet carries the transcript's own
+                 bytes, so every run is handed to JSX as a text child and
+                 nothing here builds an HTML string
+    typeAssert.ts  Eq / Expect — the compile-time value pin, lifted out of
+                 views/gateway/snippets.ts by #438 for its second consumer.
+                 **This is the repo's only regression guard for a value**, since
+                 there is no TypeScript test harness: give the value a literal
+                 type and assert it exactly, and respelling it fails `tsc`.
+                 `Eq`, never `extends` (`"a" extends string` pins nothing), and
+                 export the alias or `noUnusedLocals` deletes the guard
   components/    TitleBar, Sidebar, StatusBar, CommandPalette, ui.tsx,
-                 DirField (native picker + the /api/fs fallback), CopyButton
+                 DirField (native picker + the /api/fs fallback), CopyButton,
+                 TokenReveal (the show-once minted token, #427 — shared by
+                 SecurityPane and the gateway Overview)
+    charts.tsx   the inline-SVG chart primitives — AreaChart, BarChart,
+                 RateChart, Heatmap, CardEmpty — lifted out of views/analytics/
+                 by #428 when the gateway's Usage view needed the same ones.
+                 Pure presentation over `{label, value, hint}[]`: it imports
+                 nothing from views/ and no Claude type, and it carries its own
+                 stylesheet (styles/charts.css) so a consumer outside the
+                 analytics section does not have to import that section's sheet.
+                 The `.a-` class prefix is history, not scope
   views/         one file per section
     settings/LogsPane.tsx      Settings → Logs: tail, follow, filter, save a copy
     settings/SecurityPane.tsx  Settings → Security: the public key, and issuing
                  and revoking scoped API tokens (#405)
+    gateway/     the LLM Gateway section (#427) — its own sidebar section,
+                 sharing nothing with Claude analytics or stats.ts
+      OverviewView.tsx  status, the mint-once `llm` token, and the env snippets
+      snippets.ts       the two base URLs and the type-level pin on them
+                        (through lib/typeAssert.ts): OpenAI is `/v1`, Anthropic
+                        is `/anthropic` with no `/v1`
+      UsageView.tsx     the gateway's own dashboard (#428) over
+                        GET /api/gateway/usage — and the two places a total is
+                        labelled a *floor* rather than reported as a fact
+      ProvidersView.tsx / ModelsView.tsx / SettingsView.tsx (which owns the
+                        `usage_retention_days` control, #428)
   styles/        tokens → base → shell → controls → views (+ per-view files)
 
 src-tauri/src/
@@ -208,6 +241,23 @@ src-tauri/src/
     schema_vectors.rs  tests only: which Go shapes schemars reproduces, and what
                  a port must write for the ones it does not (#312)
     lenient.rs   Go's partial-decode semantics, which serde does not have
+  gateway/       the embedded LLM gateway (#421) — beside native/, not inside it:
+                 it is a second listener speaking OpenAI's and Anthropic's wire
+                 formats, so no /api seam and no parity machinery applies
+    config.rs    the settings model, its three tables and the mapping onto
+                 ferrox-providers' own config types (#422). Two projections:
+                 the public one never selects api_key
+    registry.rs  the listener's lifecycle (#424) — integrations/registry.rs's
+                 shape, and the *stored* Status a bind failure leaves behind
+    server.rs    the five routes, the Host allowlist, the llm-scope auth layer
+                 (both header spellings), and the per-surface error dialect
+    dispatch.rs  alias → ordered targets, retry, and the fallback walk;
+                 is_retryable/should_failover copied from ferrox/src/retry.rs
+    stream.rs    the SSE bytes of both surfaces, and the anthropic-beta merge
+    usage.rs     one row per served request (#425) — the accumulator a stream
+                 reports through, and the cost resolved at write time; plus the
+                 retention prune (#428) and the once-a-day gate that rides the
+                 write rather than owning a timer
   native/        ported endpoints (phase 2+)
     active_time.rs the capped-gap rule, shared by the scanner and the pipeline
     scanner/     the Claude session scanner (issue #270) — computes, never writes
@@ -222,7 +272,7 @@ src-tauri/src/
     gojson.rs    Go-compatible JSON encoder — read this before porting anything
     gotime.rs    Go's time.Time on the wire
     db.rs        the SQLite handles: read-only for reads, read-write for writes
-    migrate.rs   31 migrations, embedded from parity/ — applied at startup
+    migrate.rs   36 migrations, embedded from parity/ — applied at startup
                  since #278; verify() still guards every write
     pricing_seed.rs the built-in pricing catalog seed, run at startup (#278) —
                  embeds internal/pricing/catalog.json, pinned to
@@ -282,6 +332,9 @@ src-tauri/src/
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
+    gateway_api.rs the LLM gateway's control plane (#426) — twelve
+                 /api/gateway/* routes; under native/ because it IS the /api
+                 seam, where gateway/'s listener is not
     security/    what `/api` accepts as proof of identity (#405)
       keys.rs    the per-install Ed25519 keypair: create-if-absent, 0600, and
                  the one path that replaces it
@@ -300,6 +353,10 @@ src-tauri/src/
       detail.rs  one session re-read from its transcript, patched from the cache
       projects.rs the project picker's list, derived from the same walk a scan is
       corpus.rs  loads the lot
+      query.rs   the filter, the sort and the cursor — including `add_search`
+                 (#436) and the `relevance` arm over negated bm25 (#437)
+      page.rs    the page and the facets; the ranked FTS join and the per-page
+                 `match_snippet` read hang off `list_page` alone
     analytics/   GET /api/claude-analytics
       buckets.rs Go's time.Date/AddDate and the bucket walks, in the request's tz
       params.rs  from/to/project/tz, and the granularity the window picks
@@ -315,6 +372,8 @@ src-tauri/src/
     diff.rs      byte comparison + reporting for shadow mode
 
 src-tauri/tests/ integration suites (the live-diff ones went with the Go tree)
+                 insights_worker.rs  the worker through the real `worker::start`
+                 (#447) — not `#[ignore]`d, and one `start` per binary
 parity/          frozen goldens from the Go server; see parity/README.md
 ```
 
@@ -330,8 +389,24 @@ as `null`, so every array field is `T[] | null` — handle it.
 `http://127.0.0.1:8990` with the user's real history and credentials.
 `curl -H "Content-Type: application/json" http://127.0.0.1:8990/api/...` is the
 ground truth for wire formats — better than reading Go structs. **GET only.**
-Never write to it. For write-path testing, start your own instance with
-`AGENTO_DATA_DIR` pointed at a scratch directory.
+Never write to it. For write-path testing, start your own instance against a
+scratch data directory.
+
+**`AGENTO_DATA_DIR` is not how you do that in a debug build**, and this file said
+it was until #429's cold-start test followed its own advice and wrote to the
+developer's real dev database. `paths.rs::data_dir` is `cfg`-split: the release
+arm reads the variable, and **the debug arm ignores the environment entirely**
+and always answers `~/.agento-desktop-dev` — deliberately, so that a shell
+exporting `AGENTO_DATA_DIR=~/.agento` cannot make `npm run app` collide with an
+installed Agento over one SQLite file and one scheduler. The lever a debug build
+*does* obey is `HOME`, since that is what `data_dir` joins onto:
+
+```bash
+HOME=/tmp/scratch-home ./target/debug/agento    # its own db, keypair and corpus
+```
+
+That also gives the instance an empty `~/.claude`, which is what makes it a cold
+install rather than a copy of yours.
 
 Every state-changing `/api` request needs `Content-Type: application/json` —
 `POST`, `PUT`, `PATCH`, `DELETE`; the server's guard (`isStateChanging` in
@@ -368,7 +443,24 @@ Four consequences worth knowing before debugging anything:
   malformed, expired, revoked, signed by a superseded key. 403 with `this
   token's scope does not permit this request` means it did, and the token is
   `read`-scoped against a state-changing method (or against `/api/security/*`,
-  which needs `write` whatever the method). Retrying will not help.
+  which needs `write` whatever the method), **or it is `llm`-scoped and on
+  `/api` at all**. Retrying will not help.
+- **There are three scopes, and the third is not on the ladder** (#423).
+  `read` < `write` is a hierarchy; **`llm` is disjoint from both**. It is the LLM
+  gateway's data-plane credential: `write` does **not** cover it, `llm` covers
+  nothing on `/api`, and `required_scope` never returns it — those two halves
+  together are what make it disjoint, so neither can be relaxed alone. The
+  reasoning is that a gateway token is pasted into tool configs in plaintext
+  (`OPENAI_API_KEY`, `ANTHROPIC_AUTH_TOKEN`), where `write` would be arbitrary
+  command execution and `read` would be every chat transcript; and conversely a
+  credential for spending provider credits has no business reading chat history.
+  `Scope::covers` is deliberately **enumerated rather than wildcarded** — it was
+  `(Write, _) | (Read, Read)`, and adding a variant under that wildcard would
+  have made `write` a gateway credential silently, with every test still green.
+  Do not reintroduce a wildcard there.
+  One dev consequence: the debug build's `api-token` file holds a **`write`**
+  token, so it will *not* work against the gateway — mint an `llm` one via
+  `POST /api/security/tokens` first.
 - **`api.ts` retries a 401 exactly once**, re-invoking `host_info` for a fresh
   token first. That is what makes a keypair regenerate recoverable without a
   restart, and the bound is structural rather than a counter — see `withAuth`,
@@ -885,6 +977,13 @@ Three rules, each silent when wrong:
   `session_insights` has no `file_path` to get this wrong with. Running it after
   the scan's own delete pass is what inherits the unreadable-config-dir
   protection: those cache rows survive, so their insights are not orphans.
+  **The ordering is asserted in `scan.rs`'s own tests since #447**, over a
+  two-config-dir fixture corpus under a swapped `HOME`: a removed session loses
+  its index row, and a session under a `chmod 0o000` config dir keeps its cache,
+  insight *and* index rows. Both `delete_orphans` functions had unit tests
+  against a hand-built database, and what those cannot say is *where they are
+  called from* — moving `search::delete_orphans` above `apply_changes` finds
+  every row still present, deletes nothing, and changes no other observable.
 - **A full queue asks for a sweep; it does not drop and wait.** The scan
   announces changed sessions on a 100-slot channel, and a first scan announces
   ten times that. Go warns per dropped item and waits for the next five-minute
@@ -897,6 +996,155 @@ scan's staleness markers deliberately do **not** cover
 `CURRENT_PROCESSOR_VERSION`: a processor-only bump must not force a full
 re-read of `claude_session_cache`, so the five-minute sweep is the only thing
 that notices one.
+
+**`run` is the boot sweep plus `loop { run_once(..) }`** (#447), and where the
+two tests of it live is the decision worth knowing:
+
+- **`run_once` is private, and it exists for the *unit* tests.** It returns a
+  `Pass` so one deterministic pass is assertable — the `BATCH_SIZE` cutoff, the
+  remainder waiting for the next pass, the `SWEEP_REQUESTED` follow-up, and
+  `enqueue`'s own path end to end. Before the split, every test called
+  `process_batch` directly and none of that was reachable. It takes the timeout
+  as a parameter purely so a test does not wait five minutes; `RESCAN_INTERVAL`
+  is production's only value for it.
+- **`run_once` does *not* make "the worker's database work is off the runtime"
+  testable**, and that is the trap the split invites. A test calling it from a
+  `tokio::spawn` is still the test choosing where the work runs — the same
+  non-falsifiability under a new name. The thing under test is **`start`'s
+  `std::thread::spawn`**, so it is driven from `src-tauri/tests/insights_worker.rs`
+  through the real `start`/`enqueue`, in #366's harness. That binary may hold
+  **exactly one** test calling `start`, because `QUEUE` is a process-wide
+  `OnceLock` — a second gets `already started` and silently drives the first
+  test's worker against the first test's database.
+
+It is **not** `#[ignore]`d: it needs no corpus, only a tempdir.
+
+**Both version markers live on the row, and that is what makes the sweep short**
+(#446, migration 36). `session_insights` carries `processor_version` *and*
+`search_index_version`, `store::upsert` writes both in the **same transaction**
+as the `session_search` row, and `store::needs_processing` selects on either
+being behind. Three consequences, and the first is the whole reason the column
+moved:
+
+- **A session the sweep skips stays behind and is retried.** An unreadable
+  transcript whose cache row survives — an unmounted drive, a permissions
+  change, exactly what the unreadable-config-dir protection preserves — never
+  reaches the upsert, so its version does not advance and every later sweep
+  picks it up again. Under #435's single `claude_cache_metadata` stamp it was
+  invisible to every recovery path at once (its insight row was current, its
+  `file_mtime` unchanged, the stamp recorded) and stayed unindexed until its
+  transcript next changed.
+- **An interrupted rebuild resumes.** The stamp was written only when every
+  batch had committed, so a process killed mid-rebuild re-read the whole corpus.
+- **A version bump no longer blanks the index.** Nothing calls `delete_all` on
+  the rebuild path any more; each row is replaced in place, so the un-rebuilt
+  part of the corpus keeps answering.
+
+**The upgrade itself indexes nothing**, and that is migration 36's doing rather
+than a property of the column: `DEFAULT 0` alone would make every existing row
+read as behind and rebuild the whole corpus once, so the migration carries
+`claude_cache_metadata.search_index_version` forward onto every row that has an
+index row (found through the freshly backfilled `session_search_key`, so it is a
+B-tree join and not 1,178 FTS scans). A row with **no** index row is left at 0 —
+inheriting the stamp there would mark a never-indexed session done for ever,
+which is the very hole this issue closes.
+
+**What a genuine `SEARCH_INDEX_VERSION` bump now costs is 5.4× what #444's did**
+— 35.8 s against 6.66 s over the same 1,178 sessions — because per-session
+`replace` is not the same work as `delete_all` plus insert-into-empty, and the
+side table removed only the *scan* half of the delete (44.57 ms → 7.79 ms; the
+rest is FTS5 rewriting one document's term lists, which nothing can remove). It
+buys a bump that is resumable, retries what it skipped, and leaves search
+answering throughout. Weigh that trade before bumping.
+
+`search::{stored_version,record_version}`, `store::Scope` and `worker::Write`
+are gone with it. `claude_cache_metadata.search_index_version` remains as a
+**dead column** — the migrations are append-only — so a `SELECT` on it still
+works and means nothing.
+
+What paid for it is `session_search_key(session_id, project_path, rowid_ref)`,
+also migration 36: `search::delete` resolves the pair there and deletes on
+`rowid`, the one non-`MATCH` constraint FTS5's `xBestIndex` accepts, instead of
+scanning the `%_content` table. Three rules around it:
+
+- **Every `search` writer maintains it inside the caller's transaction**, and a
+  key row pointing at the wrong docid deletes somebody else's session with
+  nothing to report it. `the_key_table_tracks_the_index_through_every_writer`
+  and `search_live`'s corpus-scale copy of the same check are the guard.
+- **A missing key row is a fallback, not an error** — a database indexed before
+  migration 36 can hold one (the backfill's `INSERT OR IGNORE` skips a duplicate
+  pair), so `delete` falls back to the old scan-shaped predicate.
+- **`delete_orphans` is still keyed on the cache, not on the side table.**
+  Driving it off the key table would make an index row with no key entry
+  unreachable for ever, and it runs once per scan rather than once per session.
+
+### The search index, measured (`src-tauri/tests/search_live.rs`, #439)
+
+The third `#[ignore]`d live suite over the corpus, and the only one whose output
+is as much of the point as its assertions. Run it by hand, like its siblings —
+and under `--release` when you care about the numbers, because the `bundled`
+SQLite is a C dependency compiled at the profile's optimization level, so a
+debug run measures a SQLite nobody ships:
+
+```bash
+cargo test --test search_live -- --ignored --nocapture            # correctness
+cargo test --release --test search_live -- --ignored --nocapture  # the numbers
+```
+
+It copies `~/.agento/agento.db`, **migrates the copy** (the installed database
+lags the repository — on the reference machine it had no `session_search` table
+at all), forces every row's `session_insights.search_index_version` to 0, drives
+the rebuild through `worker::start`, and then measures.
+
+**The terminal condition was the global version stamp and since #446 it is
+convergence**, which is worth knowing before touching it. There is no stamp any
+more, and "nothing is pending" is *not* the replacement: a real corpus holds
+transcripts that cannot be read, those sessions deliberately stay behind for
+ever, and a suite waiting for zero would time out on a healthy build. So the
+loop watches the pending count fall and stops when it holds still — the failure
+the old note warned about (a count sits flat for a whole batch's *read* phase,
+so a naive "stopped changing" declares success mid-sweep) is answered twice
+over: `SETTLE` is 20 s against a sub-second batch, and the reported build time is
+taken at the **last observed change**, so the settle window is not charged to it.
+
+**The reference numbers, release profile, 1,178 sessions** — a baseline for
+anything that claims to make this faster or smaller, not a promise:
+
+| | |
+|---|---|
+| cold full rebuild | **6.7 s** (5.7 ms/session) — **#446 made this 35.8 s**, see above |
+| incremental `search::delete` | **45 ms** — this was the scan; **#446 made it 7.8 ms** |
+| incremental `search::insert` | 11 ms |
+| one session through the worker | 207 ms, transcript read included |
+| `delete_orphans`, whole index | 35 ms |
+| index on disk | **188.7 MB** (164 KB/session) |
+| page query, common word | **33.6 s p50** · facets for the same query, 101 ms |
+| page query, rare word (16 hits) | 23 ms |
+| the suite itself | ~6 min release, ~25 min debug |
+
+Three things those numbers settled:
+
+- **`search::delete`'s scan was real and it was the incremental path's whole
+  cost.** 45 ms against a 188 MB index, against the 9.5 ms/17 MB and 63 ms/176 MB
+  already recorded — it tracked index size, as a scan does. **#446 removed it**
+  with the `session_search_key` rowid side table, so the row above is the
+  pre-#446 baseline; re-measure rather than quoting it. That table is also what
+  made per-row rebuilds affordable, since a rebuild is per-session `replace`
+  again.
+- **`tool_text` is 86.5 % of the stored text** (122.2 MB of 141.3 MB), against
+  `assistant_text`'s 10.5 % and `user_text`'s 3.0 % — and it carries the *lowest*
+  bm25 weight (0.5). #434's caps were **left alone** anyway: they are per tool
+  result and already a quarter of `MESSAGE_CAP`, so what is large is the number
+  of tool calls in a Claude Code transcript rather than any one of them, and
+  `SESSION_CAP` already binds (the widest session indexes 523,339 of 524,288
+  bytes). Lowering the cap would trade recall for size against a budget nobody
+  has set, and would need a `SEARCH_INDEX_VERSION` bump to take effect.
+- **The expensive half of a search is the ranked join and the snippet, not the
+  index.** The same query answers its *facets* — which use the membership `IN`,
+  with no `bm25()` carried through and no `snippet()` — in 101 ms while the page
+  takes 33.6 s, and a term with 16 hits takes 23 ms either way, so the cost
+  tracks the number of hits rather than the corpus. Read that before optimizing
+  the index for it.
 
 ### The Claude Agent SDK (`src-tauri/src/claude/`)
 
@@ -1935,6 +2183,25 @@ busy timeout.
   it (#364). A cursor minted before the `p` field decodes with it empty and
   pages exactly as it used to, which is Go's missing-field behaviour and why the
   Rust field carries `#[serde(default)]`.
+- **`sort=relevance` is the default when `q` is set, and bm25 reaches it
+  negated** (#437). `q` with no explicit `sort` resolves to `relevance`; an
+  explicit one always wins; `relevance` with no `q` is the unknown-sort fallback
+  to `recent`, because there is no `MATCH` to rank. The sort key is
+  `COALESCE(-fts.rank, -1.0)` and both halves are load-bearing: SQLite's `bm25()`
+  is *negative* — smaller is better — so negating it is what lets "best first"
+  stay `DESC` like every other sort, and the `COALESCE` is what keeps the LIKE
+  half pageable. A search is an `OR`, so a row can match on its id, its path or a
+  title with no index hit at all; left as SQL NULL those rows sort last correctly
+  on the **first** page and then vanish, because `NULL < ?` is NULL and the
+  keyset predicate drops them. The sentinel is safely below every real value
+  because `-bm25` is never negative. The cursor needed no new field — the rank
+  goes in `v`, which already carries a decimal for every non-time sort.
+- **`match_snippet` is present only on a search response, and only where the
+  index matched.** `skip_serializing_if` on an empty string is what kept every
+  frozen golden byte-identical; a metadata-only match honestly carries nothing.
+  Its markers are **U+0001/U+0002**, unambiguous because `search::normalize`
+  strips every control character from the indexed text — never HTML, and never a
+  printable sentinel a transcript could contain.
 - **Cache invalidation is multi-dimensional**: TTL (1h), `scanner_version`,
   pricing revision fingerprint, and idle-threshold drift each force a re-read.
 - **Chat SSE is a POST response**, so `EventSource` cannot be used. Events are
@@ -2903,6 +3170,335 @@ inverse of how an ordinary timestamp would read. `google_oauth_token` maps it to
 stored token, because `authenticated: false` would be a plausible lie about a
 flow that actually errored.
 
+### The LLM gateway's engine (`src-tauri/src/gateway/`, #424)
+
+The second listener. It is **not** `proxy.rs` and **not** part of the `/api`
+seam: its own user-configured port, two third-party wire formats, no parity
+machinery, and — since every request it accepts spends the user's provider
+credits — a different threat model from anything else in the shell.
+
+`ferrox-providers` supplies every translation and every adapter. What is here is
+the listener, the auth, the routing table and the framing:
+`registry.rs` (lifecycle), `server.rs` (five routes, two layers),
+`dispatch.rs` (alias → targets, retry, failover), `stream.rs` (SSE bytes).
+It is **disabled by default** and costs one `SELECT` at boot when off.
+
+**Three rules that keep a permissive listener from being one:**
+
+- **`Scope::Llm`, verified with `token::verify_against`** — the pure
+  four-argument function, **not** `security::verify_request`, which derives a
+  required scope from an `/api` method and path. A `read` or `write` token is a
+  **403** here and an `llm` token is a 403 on `/api`: that disjointness (#423) is
+  the whole reason a third scope exists, and the *false* cells are what the tests
+  assert.
+- **No CORS layer, ever.** ferrox's own server mounts `CorsLayer::permissive()`,
+  which is right behind a network boundary and catastrophic on loopback — it
+  would let any page the user has open spend their provider credits *and read
+  the response*. The **`Host` allowlist** is the other half: preflight already
+  shuts a browser out of a `POST` carrying `Authorization`, but a DNS-rebinding
+  page reaches a loopback port with a *simple* request. `guards.rs::host_allowed`
+  is `pub(crate)` and shared rather than copied — an allowlist that exists twice
+  is one that gets widened once. `/healthz` is outside the auth layer and
+  **inside** this one.
+- **Errors in the client's dialect, never Agento's.** `error::openai_error_body`
+  on `/v1/*`, `error::anthropic_error_body` on `/anthropic/*`, picked by path
+  prefix so a route added under `/anthropic/` cannot forget. SDKs *branch* on
+  `error.type` — `authentication_error` versus `permission_error` drives real
+  retry behaviour — so this is behaviour, not wording.
+
+**Both header spellings.** OpenAI SDKs send `Authorization: Bearer`; the
+Anthropic SDK and Claude Code send `x-api-key`. Bearer wins a tie, and a useless
+`Authorization` (`Basic …`, an empty `Bearer `) must fall *through* to
+`x-api-key` rather than shadow it with `""`.
+
+**A bind failure is a stored value, not a log line.** `registry::Status` has a
+`BindFailed { port, error }` variant and is stored rather than derived from
+whether a handle exists, because that is what #426's status route reads. The
+collision is routine rather than exotic — a `~/.agento-desktop-dev` instance and
+an installed one read different databases but share the machine's ports — and
+without a stored status the second reports "not running" and offers a Start
+button that silently does nothing forever. It logs once at `warn` and does
+**not** retry another port: a gateway on a port the user did not configure is one
+every tool they set up is pointed away from.
+
+**Graceful shutdown comes from `claude/mcp.rs`, not from `proxy.rs`.** `proxy.rs`
+never stops — it is spawned once and process exit is its shutdown, so it has no
+`with_graceful_shutdown` to copy. This listener is torn down on every settings
+write, so a request in flight across a reload is ordinary. Same shape as #311's:
+a oneshot fired by `Drop`, awaited as `axum::serve`'s shutdown future. The
+generation counter is `integrations/registry.rs`' verbatim, for the same race — a
+`stop` landing mid-start must **drop** the handle, and dropping it is what closes
+a socket that would otherwise hold provider credentials for the life of the
+process.
+
+**`is_retryable` and `should_failover` differ by exactly one status, and they
+live in ferrox's *binary* crate** (`ferrox/src/retry.rs`), so they are copied
+rather than imported. An upstream **403** fails over *without* retrying: some
+providers report quota exhaustion with 403 rather than 429, and the same
+provider will keep answering 403 — while this gateway's own `ProxyError::Forbidden`
+must **not** fail over, or a client's bad token burns the next provider's quota.
+Only the *handshake* of a stream is retried; once chunks are flowing the head is
+committed and failing over would replay tokens the client has seen.
+
+**Every unbounded wait races the client's departure — `turn.rs`'s rule, one level
+down.** A failed `send` catches a client that left while a frame was being
+written, which is what happens when tokens are flowing; it is *not* what happens
+when the client leaves while the model is thinking, which is most of a request.
+There the loop is parked on `stream.next()`, nothing is being sent, and the
+disconnect is invisible — the task parks forever holding the upstream connection,
+one leak per abandoned request. `stream::next_or_disconnect` is the
+`tokio::select!` against `Sender::closed`, and
+`a_disconnect_mid_stream_tears_down_the_upstream_request` is what fails on the
+revert. It asserts on the **upstream** side, because that is the only place the
+leak is observable.
+
+**`Next::Ended` and `Next::Disconnected` are separate variants deliberately.**
+Collapsing them into one `None` loses `data: [DONE]` on a clean stream — and,
+worse in the other direction, would *send* one on an abandoned stream, where
+`[DONE]` means "the completion finished" and a client would record a truncated
+answer as a whole one. Both halves were caught by the suite, in both directions.
+
+**The frames are bytes, not `axum::response::sse::Event`.** The plan was
+`impl From<SseFrame> for Event`; both types are foreign, so the orphan rule
+refuses it. Bytes are the better answer anyway — the acceptance criteria are byte
+properties, and `axum` writes `event:name` with no space where every Anthropic
+fixture and ferrox's own API reference show `event: name`. Both parse; this emits
+the documented spelling.
+
+**Ordering: the listener starts strictly after `keys::install` and
+`tokens::load_revoked`.** Bound before the first, every client gets a 401 until
+the key lands — visible, and merely broken. Bound before the second, a token the
+user **revoked is honoured** for the length of that window, and nothing reports
+it. `a_gateway_start_requires_an_installed_keypair` asserts the order of the
+three calls in `lib.rs` against its source, deliberately: the consequence is a
+*window* rather than a state, so a test that asked the running app would have to
+win that race to see anything.
+
+**The control plane is `/api/gateway/*` and lives under `native/`, not under
+`gateway/`** (#426, `native/gateway_api.rs`). The split is the seam, not the
+feature: `gateway/` speaks somebody else's wire formats on its own port, this
+speaks Agento's, behind Agento's guard with ordinary `read`/`write` scoping —
+and `Scope::Llm` opens none of its twelve routes, which is the disjointness
+#423 built seen from the other side (a credential issued to *spend* through the
+gateway must not be able to reconfigure which provider it spends with).
+
+Three things about it are decisions:
+
+- **The route table is `parity/desktop_routes.json`, and it now has two
+  owners.** #405 created that file for `/api/security/*` — routes with no Go
+  ancestor, which could go in neither frozen Go table without destroying what
+  those are. Its guarantee is *stronger* than theirs: they assert in one
+  direction, so a route claimed and never recorded passes, while this is **set
+  equality** against the modules' `ROUTES` consts. The claimed set is now the
+  **union** of `security::ROUTES` and `gateway_api::ROUTES`; a third owner
+  appends there, and forgetting to would quietly weaken the assertion back to
+  one direction. The issue's "resolve at implementation time" question — grow
+  the Go tables, or fall back to Tauri commands — is answered by this file
+  existing. A command would have been wrong anyway: `logs.rs` is a command
+  because the app log belongs to the *process*; gateway config is API surface.
+- **An omitted `api_key` preserves the stored one, and that is the whole point
+  of `config::update_provider`.** `PUT /api/integrations/{id}` wipes
+  credentials the caller omits while `GET` scrubs them, so a read-then-write
+  round trip — exactly what an edit form does — destroys the secret. That is
+  reproduced there deliberately because it was Go's behaviour, and it must not
+  be inherited here. `api_key` is `Option<String>` with three meanings: absent
+  leaves the column out of the `SET` list entirely, `Some("")` is a deliberate
+  clear, `Some(k)` replaces. `a_scrubbed_read_written_straight_back_preserves_the_stored_key`
+  drives the **real** `GET` body back through the `PUT`, and fails with `""` on
+  the revert. No response carries the key either — asserted over the *bytes*,
+  because a struct-level check only proves the field the test knows about is
+  absent.
+- **Referential integrity is checked in code, from both sides.** Routing names
+  providers by **name**, inside a JSON column, so nothing in SQL can enforce it:
+  deleting a referenced provider is a 409 naming the aliases, and an alias whose
+  target names no configured provider is refused. Without both, an alias
+  resolves to nothing and fails at *request* time, far from the action that
+  caused it.
+
+Every write ends with a spawned `registry::reload` — the write and its effect in
+one place — and a `#335`-convention log line with a test. `reload` is not
+awaited: it is stop-then-start over a socket bind, and a save that blocked on it
+would feel like a hang. `a_provider_save_reloads_without_cutting_an_in_flight_stream`
+pins both halves at once, which is where they pull against each other.
+
+**Usage recording is one row per served request, written off the request path**
+(#425, `gateway/usage.rs`, migration 34). Four things about it are decisions:
+
+- **A usage row may never fail a request.** The tokens are already spent by the
+  time there is anything to record, so `Accounting::finish` spawns and is never
+  awaited, the insert goes through `db::blocking` (#366 — this listener is not
+  on `proxy.rs`'s blocking pool at all, so an inline insert parks a *runtime
+  worker* for up to the five-second `busy_timeout`), and every failure below it
+  is a `warn`. `a_contended_write_lock_does_not_stall_the_runtime` is the third
+  copy of that regression test; without the hand-off the runtime stalls 1541 ms
+  against a 1500 ms hold.
+- **Exactly one row, enforced rather than hoped for.** Both surfaces have three
+  terminal arms and the Anthropic one reaches them through a translation layer
+  with its own state machine. A missed arm writes none; a doubled arm writes
+  two, and a log that sometimes double-counts is worse than one that sometimes
+  misses because nothing in the numbers says which. `finish` is a
+  compare-exchange on a `done` flag, and the status defaults to `Interrupted`
+  so the arm most easily missed is the default rather than the special case.
+- **Provider usage is a running total, so the counters are replaced, not
+  summed.** Accumulating would multiply a 200-chunk stream's prompt tokens by
+  200. A chunk carrying no usage leaves them alone, which is what lets an
+  **interrupted** stream record the tokens it saw rather than zeros — the arm
+  that matters most, since an abandoned stream still spent them. On the
+  Anthropic surface the metering happens **before** the translation
+  (`usage::meter`), because the emitter consumes the provider stream and a
+  frame carries no `usage`.
+- **Cost is stored, not derived** — the rule the scanner already enforces. A
+  rate correction must not retroactively rewrite past spend, and joining the
+  catalog at read time reproduces the list-versus-dashboard disagreement the
+  Claude side refuses. An unpriced model stores `NULL` with `unpriced = 1`,
+  **never `0.0`**; that is the common case here, not an edge one, since the
+  catalog is seeded for Claude models and OpenAI/Gemini/GLM aliases miss.
+
+Two rows are deliberately *not* written: a body that will not decode (no alias,
+no provider, nothing spent — four empty columns diluting every average) and a
+request refused by **auth** (no attributable token; logging unauthenticated
+attempts is a different feature). A refused *dispatch* does get one, because it
+names an alias the user configured — and it carries the **last target
+attempted**, so an empty `provider` means specifically "resolution failed"
+rather than "unknown".
+
+Two smaller notes. `tokens::touch` already throttles to one write a minute and
+spawns its own `db::blocking`, so calling it from the middleware is not a
+database call on the request path and must **not** be wrapped a second time. And
+the `anthropic-beta` header and the body's `betas` array are merged into one
+comma-separated header value, header first, with `raw_anthropic_body` forwarding
+the client's document verbatim — both copied from
+`ferrox/src/handlers/anthropic_messages.rs`, and Claude Code compatibility
+depends on them.
+
+**Retention is a horizon, a prune, and a disclosure — and the third is what
+makes the first two honest** (#428, migration 35). `gateway_usage_log` was
+append-only: at ~100 bytes a row, 5k requests a day reaches ~180 MB in a year.
+`gateway_settings.usage_retention_days` bounds it, default 90, ceiling 3650.
+
+Four things about it are decisions rather than details:
+
+- **`0` means keep everything, and it is therefore the *longest* horizon rather
+  than the shortest.** Every comparison over this value has to read that way: the
+  prune returns before opening a connection, the UI's "you are shortening this"
+  warning fires on moving *off* zero and never onto it. Read as a horizon of zero
+  days it would mean "delete immediately", which is the exact inverse.
+- **The field carries `#[serde(default)]` where every sibling request struct
+  deliberately carries none.** `GatewaySettings` *is* the
+  `PUT /api/gateway/settings` body, so a required field would 400 every client
+  written against #426's three-key shape. The default is the column's — an
+  omitted key must not silently mean `0`, which is *keep forever*. The Settings
+  view still sends it on every save, because with a default present, omitting it
+  is the difference between preserving the stored horizon and resetting it to 90.
+- **The prune rides the write; it owns no timer.** It runs inside
+  `Accounting::finish`'s spawned `db::blocking` section — already off the request
+  path — behind a once-a-day gate shaped like `tokens::due`, plus a launch sweep
+  in `lib.rs` because a desktop app open ten minutes a week would never reach the
+  daily interval on traffic alone. Both claim the same slot. `<` not `<=`, so the
+  boundary row is kept. A failed prune is a `warn` and is dropped, as a failed
+  insert is.
+
+  **`prune_since` exists so that last sentence is testable.** With `Utc::now()`
+  read inside the function there is no way to write a row landing *exactly* on
+  the cut, and the first version of the boundary test put its row five seconds
+  late — on the keep side of both `<` and `<=`, so it passed against the very
+  flip it was named for. A review caught it. The general form is worth keeping:
+  **a test named for a boundary has to construct the boundary**, which usually
+  means the value being compared against cannot be read from the clock inside
+  the function under test.
+- **A pruned window says so.** An under-reported total that looks complete is the
+  failure a prune introduces, and it is silent without this — so the Usage view
+  labels the window a **floor** whenever it reaches past the horizon, in the same
+  wording as the unpriced-cost note, so the two read as one idea rather than two
+  warnings.
+
+**The Usage view is #426's endpoint plus the three aggregates it did not ship.**
+`by_surface`, `by_token` and a `latency` block (nearest-rank p50/p95/max) were in
+#428's acceptance criteria and not in #426's `UsageBody`; they are computed over
+columns migration 34 already stores, so the addition is additive and no existing
+field moved. `by_token` groups on the token's `sub` — an `api_tokens` row id,
+never a secret — and an unattributable row is grouped under `""` rather than
+dropped, so the breakdown's total cannot disagree with the window's.
+
+**That id is not a label, and `UsageGroup.label` is why.** The row id appears
+nowhere else in the product: the Security tab lists tokens by *name*, so a panel
+printing `3f2a…` cannot answer the one question it exists for. `read_usage`
+resolves the names itself rather than leaving the view to fetch them, because
+`/api/security/*` needs a **`write`** scope whatever the method — a read-only
+dashboard has no business holding one. Revoked tokens keep their names, since a
+revoked credential's spending history is most of what made the revocation
+informed. `label` is `skip_serializing_if = "Option::is_none"` and only
+`by_token` ever sets it. **It widens what a `read` token can see, and that is
+argued at the site rather than left implicit:** `required_scope` forces `write`
+on `/api/security/*` so a `read` token cannot enumerate every credential, and
+what this returns is not an enumeration — only tokens with traffic in the
+window, only `(id, name)`, with the scope, `jti`, expiry and revocation state
+left where they were.
+
+**The launch sweep asks a reader before it asks for a write lock.** It runs on
+every boot, and an install that never switched the gateway on has an empty
+`gateway_usage_log` forever — so `prune_since` short-circuits on
+`SELECT EXISTS(...)` through a WAL reader, which never waits on a writer. That is
+what keeps "an install that never configures one pays a single `SELECT` at boot"
+true. An *unreadable* database is not an empty one: it falls through, so the
+write path reports the real error rather than a silent no-op.
+
+**`validate` returns the field it refused, and must keep doing so.** It is
+`Result<(), SettingsError>` with `field` and `message`, not a bare `String`: the
+first version had the route recover the field by `starts_with`-ing the message,
+a prose coupling that would mislabel the input a form highlights the moment
+either string was reworded — and the test written for it asserted
+`contains("usage_retention_days")`, which the *message* also satisfies, so it
+passed with the field hardcoded. Assert the whole
+`validation error for \"<field>\"` prefix, which is the only part of that body
+the field actually decides.
+
+**The chart primitives are shared; nothing else is.** `src/components/charts.tsx`
+is `views/analytics/charts.tsx` moved, with its stylesheet
+(`styles/charts.css`). The locked decision that gateway traffic is never mixed
+into Claude analytics is about **data and sections**, not React components —
+`charts.tsx` is presentation over `{label, value, hint}[]` and holds no Claude
+type. What stayed unshared is everything typed: `analytics/shared.tsx`'s
+`entryLabel`/`projectLabel`/`RankList`, `stats.ts`, the wire types, and the
+ranked-list CSS (the gateway has its own `.gw-rank`). Prove a move like this
+rather than asserting it: building both sides and comparing the emitted CSS as a
+sorted set of rules gave 578 identical rules.
+
+### The gateway is documented, and where (#429)
+
+The epic closes with the docs, so the user-facing account of this feature lives
+outside this file and must not be duplicated back into it:
+
+| where | what it carries |
+|---|---|
+| `docs/user-guide.md` → **LLM Gateway** | the whole flow — enable, provider, alias, mint, point a tool, watch usage, and the retention horizon |
+| `docs/troubleshooting.md` → **LLM Gateway** | bind failure, 401 vs 403 in both directions, the model-name mismatch, empty Usage, the log lines |
+| `docs/development.md` → **The LLM gateway** | the `/api`-versus-listener split, the `ferrox-providers` feature policy, and the two curl commands |
+| `README.md` → *Route your other tools through Agento* | one bullet, flagged off by default |
+
+**Three claims a doc must keep making, because each is the inverse of what a
+reader assumes.** `0` retention days is *keep everything*, the **longest**
+horizon and not the shortest. The Anthropic base URL has **no** `/v1` while the
+OpenAI one does, because the Anthropic SDK appends its own — the measured failure
+is a 404 on `/anthropic/v1/v1/messages`. And the three scopes are **disjoint, not
+ranked**: `write` is not a superset of `llm`, so "use a bigger token" is never
+the fix for a gateway 403.
+
+**A cold-start test is the acceptance bar for this feature's docs, and it found
+things reading the code did not.** The one worth keeping: Claude Code pointed at
+the gateway with only `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` asks for
+*its own* default model, which is not a configured alias, and stops with "There's
+an issue with the selected model". The alias name is the whole routing key, so
+either `ANTHROPIC_MODEL` names an alias or an alias is named after what the
+client sends. The env snippets in `views/gateway/snippets.ts` show two variables
+and the user guide shows three, deliberately.
+
+**The `ferrox-providers` pin is a tag, and the crates.io question is open.**
+`Cargo.toml`'s comment defers "tag vs crates.io publish" to before the first
+shipping release; #429 records it as a release-gate item rather than deciding it,
+because a docs change must not settle a supply-chain choice. See
+[#453](https://github.com/shaharia-lab/agento/issues/453).
+
 ### Not implemented, on purpose
 
 OpenTelemetry, Prometheus metrics and a self-updater of Agento's own are all
@@ -3109,9 +3705,9 @@ Windows x86_64 — and attaches the installers to a draft release.
 
 Signed with **our own minisign key**, generated by `tauri signer generate`.
 It has nothing to do with Apple or Microsoft code signing; it only proves an
-update came from us. That is why in-app updates work fine on unsigned macOS
-builds — Gatekeeper gates the first launch of a *downloaded* app, not a bundle
-the updater swapped in.
+update came from us. That is why in-app updates work fine on ad-hoc signed,
+non-notarised macOS builds — Gatekeeper gates the first launch of a *downloaded*
+app, not a bundle the updater swapped in.
 
 - Private key: 1Password → GCP Secret Manager
   (`github-repo-agento-tauri-updater-private-key`) → the repo's

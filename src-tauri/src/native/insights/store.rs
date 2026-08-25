@@ -44,8 +44,24 @@ pub struct Pending {
     pub file_path: String,
 }
 
-/// `NeedsProcessing`: every cached session with no insight row, or one computed
-/// by an older processor version.
+/// `NeedsProcessing`: every cached session with no insight row, one computed by
+/// an older processor version, **or one whose search text was written by an
+/// older indexer** (#446).
+///
+/// The third clause is what replaced `Scope::Everything` and the global
+/// `claude_cache_metadata.search_index_version` stamp. That stamp was one value
+/// for the whole corpus, so a rebuild could only ever be all-or-nothing: a
+/// session skipped because its transcript was unreadable — an unmounted drive, a
+/// permissions change, exactly what `scan.rs`'s unreadable-config-dir protection
+/// preserves — was invisible to every mechanism that would recover it, because
+/// its insight row was current, its `file_mtime` unchanged and the stamp
+/// recorded. Comparing the *row's* version instead makes that session pending
+/// until it succeeds, and makes an interrupted rebuild resume rather than
+/// restart.
+///
+/// **The two versions are independent and both are bound**, never interpolated:
+/// `processor_version` says the insight is stale, `search_index_version` says
+/// the indexed text is, and a row can be behind on either alone.
 ///
 /// `DISTINCT` is Go's and is kept, though the pair is the cache's primary key
 /// so it can no longer remove a row — it is what stopped the single-keyed join
@@ -53,7 +69,11 @@ pub struct Pending {
 ///
 /// A row whose `file_path` is empty is skipped by the caller rather than here,
 /// matching `rescanOutdated`.
-pub fn needs_processing(conn: &Connection, version: i64) -> Result<Vec<Pending>, String> {
+pub fn needs_processing(
+    conn: &Connection,
+    processor_version: i64,
+    index_version: i64,
+) -> Result<Vec<Pending>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT DISTINCT c.session_id, c.project_path, c.file_path
@@ -61,12 +81,14 @@ pub fn needs_processing(conn: &Connection, version: i64) -> Result<Vec<Pending>,
              LEFT JOIN session_insights i
                     ON c.session_id = i.session_id
                    AND c.project_path = i.project_path
-             WHERE i.session_id IS NULL OR i.processor_version < ?1",
+             WHERE i.session_id IS NULL
+                OR i.processor_version < ?1
+                OR i.search_index_version < ?2",
         )
         .map_err(|e| format!("preparing needs_processing: {e}"))?;
 
     let rows = stmt
-        .query_map(params![version], |row| {
+        .query_map(params![processor_version, index_version], |row| {
             Ok(Pending {
                 session_id: row.get(0)?,
                 project_path: row.get(1)?,
@@ -79,6 +101,66 @@ pub fn needs_processing(conn: &Connection, version: i64) -> Result<Vec<Pending>,
         .map_err(|e| format!("reading needs_processing: {e}"))
 }
 
+/// The label the search index files a session under, for one cache row.
+///
+/// `sessions::summary::resolve_display_title`'s precedence, read straight from
+/// the columns: the user's own rename first, then Claude Code's native title,
+/// then its AI-generated one, then the first prompt. Spelled here rather than
+/// reusing that function because it takes a fully built `SessionSummary`, which
+/// is a corpus read; four columns is the whole input.
+///
+/// A pair with no cache row answers `""` rather than failing: the row can be
+/// deleted between the sweep's read and the batch's write, and a session indexed
+/// without a title is better than a batch dropped. Its index row is an orphan by
+/// then and the next reconcile removes it.
+///
+/// **Note what this does not do**: `custom_title` is user-writable at any time
+/// through `PATCH /api/claude-sessions/{id}`, which changes neither `file_mtime`
+/// nor `processor_version`, so a rename alone does not re-index. The title
+/// catches up the next time the session's transcript changes. Making a rename
+/// re-index is a write-side concern and deliberately outside #435.
+/// `prepare_cached` for [`upsert`]'s reason, which applies unchanged here: this
+/// runs in the same loop, once per session over a whole corpus, so re-preparing
+/// per row is the one avoidable cost in the write half.
+///
+/// A missing row and a *failed read* are told apart deliberately. Collapsing
+/// them was the first version, and it meant one `SQLITE_BUSY` could index a
+/// whole hundred-session batch titleless — under the highest-weighted column in
+/// the ranking — with nothing in the log to say it had happened. `scan.rs`'s
+/// `record_marker` sets the convention: best-effort, but named when it fails.
+pub fn display_title(conn: &Connection, session_id: &str, project_path: &str) -> String {
+    let mut stmt = match conn.prepare_cached(
+        "SELECT custom_title, native_title, ai_title, preview
+           FROM claude_session_cache
+          WHERE session_id = ?1 AND project_path = ?2",
+    ) {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            log::warn!("search: cannot prepare the title read for {session_id}: {e}");
+            return String::new();
+        }
+    };
+    let row = stmt.query_row(params![session_id, project_path], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+    });
+    let (custom, native, ai, preview): (String, String, String, String) = match row {
+        Ok(row) => row,
+        // The documented case: the cache row was deleted between the sweep's
+        // read and this write. Its index row is an orphan by now and the next
+        // reconcile removes it, so an untitled document is the right answer and
+        // not worth a line.
+        Err(rusqlite::Error::QueryReturnedNoRows) => return String::new(),
+        Err(e) => {
+            log::warn!("search: cannot read the title for {session_id}: {e}");
+            return String::new();
+        }
+    };
+    [custom, native, ai, preview]
+        .into_iter()
+        .find(|candidate| !candidate.is_empty())
+        .unwrap_or_default()
+}
+
 /// The column list, shared by the insert and the conflict update so the two
 /// cannot drift.
 ///
@@ -87,6 +169,12 @@ pub fn needs_processing(conn: &Connection, version: i64) -> Result<Vec<Pending>,
 /// reprocess authoritative rather than a merge.
 const WRITABLE_COLUMNS: &[&str] = &[
     "processor_version",
+    // Written here rather than by `search`, and that is the whole of #446: the
+    // index row and this row commit in one transaction (`worker::write_batch`),
+    // so the version is atomic with the text it describes. A session skipped
+    // because its transcript could not be read never reaches this statement and
+    // keeps its old value, which is what makes it pending again next sweep.
+    "search_index_version",
     "scanned_at",
     "turn_count",
     "steps_per_turn_avg",
@@ -174,6 +262,7 @@ pub fn upsert(
         insight.session_id,
         project_path,
         super::processors::CURRENT_PROCESSOR_VERSION,
+        crate::native::search::SEARCH_INDEX_VERSION,
         scanned_at,
         insight.turn_count,
         insight.steps_per_turn_avg,
@@ -311,6 +400,19 @@ mod tests {
         tx.commit().expect("commit");
     }
 
+    /// The two versions this build writes, spelled once so a test cannot pin
+    /// either against a literal that a bump would silently invalidate.
+    fn current(conn: &Connection) -> Vec<Pending> {
+        let mut pending = needs_processing(
+            conn,
+            super::super::processors::CURRENT_PROCESSOR_VERSION,
+            crate::native::search::SEARCH_INDEX_VERSION,
+        )
+        .expect("needs_processing");
+        pending.sort();
+        pending
+    }
+
     /// The whole reason this module is not a transcription of the Go store.
     ///
     /// One session id under two project paths is two sessions with two
@@ -382,19 +484,80 @@ mod tests {
         )
         .expect("age the row");
 
-        let pending = {
-            let mut p =
-                needs_processing(&conn, super::super::processors::CURRENT_PROCESSOR_VERSION)
-                    .expect("needs_processing");
-            p.sort();
-            p
-        };
         assert_eq!(
-            pending
+            current(&conn)
                 .iter()
                 .map(|p| p.session_id.as_str())
                 .collect::<Vec<_>>(),
             vec!["absent", "stale"],
+        );
+    }
+
+    /// The third clause, and the one #446 adds: a row that is perfectly current
+    /// on `processor_version` and behind on `search_index_version` is pending.
+    ///
+    /// This is the case a global stamp could not express at all, and it is the
+    /// whole point — the insight is fine, the *indexed text* is not. Both
+    /// directions are asserted, because a predicate that simply ORed in `1 = 1`
+    /// would satisfy the first half and re-read the corpus every five minutes.
+    #[test]
+    fn needs_processing_finds_a_row_behind_on_either_version_alone() {
+        let mut conn = db();
+        for session in ["indexed-stale", "processor-stale", "current"] {
+            cache_row(&conn, session, "/a", &format!("/a/{session}.jsonl"));
+            write(&mut conn, &insight(session), "/a");
+        }
+        conn.execute(
+            "UPDATE session_insights SET search_index_version = 0
+              WHERE session_id = 'indexed-stale'",
+            [],
+        )
+        .expect("age the indexed text");
+        conn.execute(
+            "UPDATE session_insights SET processor_version = 0
+              WHERE session_id = 'processor-stale'",
+            [],
+        )
+        .expect("age the insight");
+
+        assert_eq!(
+            current(&conn)
+                .iter()
+                .map(|p| p.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["indexed-stale", "processor-stale"],
+        );
+    }
+
+    /// The upsert stamps the index version this build writes, which is what
+    /// makes the row stop being pending. Spelled as "a written row is not
+    /// pending" rather than as an equality against the constant, because that is
+    /// the property the sweep's termination depends on.
+    #[test]
+    fn a_written_row_carries_this_builds_index_version() {
+        let mut conn = db();
+        cache_row(&conn, "s1", "/a", "/a/s1.jsonl");
+        conn.execute(
+            "INSERT INTO session_insights (session_id, project_path, scanned_at)
+             VALUES ('s1', '/a', '')",
+            [],
+        )
+        .expect("seed the row an older build would have left");
+        assert_eq!(current(&conn).len(), 1, "a version-0 row must be pending");
+
+        write(&mut conn, &insight("s1"), "/a");
+
+        let stored: i64 = conn
+            .query_row(
+                "SELECT search_index_version FROM session_insights",
+                [],
+                |r| r.get(0),
+            )
+            .expect("search_index_version");
+        assert_eq!(stored, crate::native::search::SEARCH_INDEX_VERSION);
+        assert!(
+            current(&conn).is_empty(),
+            "the row is still reported behind"
         );
     }
 
@@ -410,10 +573,8 @@ mod tests {
         cache_row(&conn, "s1", "/b", "/b/s1.jsonl");
         write(&mut conn, &insight("s1"), "/a");
 
-        let pending = needs_processing(&conn, super::super::processors::CURRENT_PROCESSOR_VERSION)
-            .expect("needs_processing");
         assert_eq!(
-            pending,
+            current(&conn),
             vec![Pending {
                 session_id: "s1".into(),
                 project_path: "/b".into(),

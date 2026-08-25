@@ -1,0 +1,96 @@
+/* ============================================================================
+   Inline SVG charts — the stylesheet of `components/charts.tsx`.
+
+   Lifted verbatim out of `analytics.css` (#428) when the chart components moved
+   under `components/`, so that a consumer outside `views/analytics/` gets the
+   styles by importing the component rather than by importing another section's
+   sheet. Every selector here is unique to this file — nothing else in the tree
+   declares `.a-chart*` or `.a-heat*` — so its position in the bundle cannot
+   change any cascade, and no rule's text was edited. The `a-` prefix is kept for
+   the same reason the class names are: renaming them would make the move
+   something other than a move.
+   ========================================================================== */
+
+/* --- Charts -------------------------------------------------------------- */
+
+.a-chart {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.a-chart__plot {
+  display: block;
+  width: 100%;
+  overflow: visible;
+}
+
+/* Axis labels live in HTML rather than in the SVG: the plot is stretched with
+   preserveAspectRatio="none", which would distort any text inside it. */
+.a-chart__axis {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+  font-variant-numeric: tabular-nums;
+}
+.a-chart__axis span {
+  white-space: nowrap;
+}
+
+/* The plot has no drawn y-axis, so the top gridline is captioned instead. */
+.a-chart__scale {
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.a-chart__hit {
+  fill: transparent;
+}
+.a-chart__hit:hover {
+  fill: var(--fg);
+  fill-opacity: 0.06;
+}
+
+/* --- Heatmap ------------------------------------------------------------- */
+
+.a-heat {
+  display: grid;
+  grid-template-columns: 28px repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  align-items: center;
+}
+.a-heat__label {
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+  text-align: right;
+  padding-right: var(--sp-3);
+  white-space: nowrap;
+}
+.a-heat__cell {
+  aspect-ratio: 1;
+  border-radius: 2px;
+  background: var(--bg-active);
+  min-width: 0;
+}
+.a-heat__cell--on {
+  background: var(--accent);
+}
+.a-heat__hours {
+  display: grid;
+  grid-template-columns: 28px repeat(24, minmax(0, 1fr));
+  gap: 2px;
+  margin-top: var(--sp-3);
+  font-size: var(--text-xs);
+  color: var(--fg-quaternary);
+  font-variant-numeric: tabular-nums;
+}
+.a-heat__hour {
+  text-align: center;
+  min-width: 0;
+  overflow: hidden;
+}

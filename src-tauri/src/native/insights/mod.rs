@@ -4,6 +4,9 @@
 //!
 //! - [`processors`] recomputes one session's row from its transcripts. Pure
 //!   computation — a function from a transcript to a `SessionInsight`.
+//! - [`index`] routes the *same* decoded events into the three
+//!   `session_search` text columns (#435), so the search index is a second
+//!   product of one read rather than a second read.
 //! - [`store`] is the `session_insights` half: what needs recomputing, the
 //!   upsert, and the reconcile. **Every statement there keys on
 //!   `(session_id, project_path)`**, which is where it parts company with the
@@ -41,6 +44,7 @@
 //! must be bumped together when it changes — bumping one recreates exactly the
 //! drift the shared predicate exists to prevent.
 
+pub mod index;
 pub mod processors;
 pub mod store;
 pub mod summary;

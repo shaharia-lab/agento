@@ -11,8 +11,9 @@ notes, with the reasoning behind individual decisions, are in
 - [Running it](#running-it)
 - [Project layout](#project-layout)
 - [Tests](#tests)
-- [Parity testing](#parity-testing)
+- [The wire format is exact](#the-wire-format-is-exact)
 - [Conventions](#conventions)
+- [The LLM gateway](#the-llm-gateway)
 - [Debugging](#debugging)
 - [Branches and pull requests](#branches-and-pull-requests)
 
@@ -129,6 +130,7 @@ src-tauri/
   src/paths.rs       data directory and database path
   src/claude/        the Claude Agent SDK
   src/native/        the backend, one module per API area
+  src/gateway/       the embedded LLM gateway's own listener — not part of /api
   tests/             integration tests
 parity/              the frozen wire-format spec; see parity/README.md
 docs/                this documentation
@@ -167,6 +169,14 @@ cargo test --test scan_live -- --ignored --nocapture
 
 # The MCP server, dialled by the real Claude Code CLI.
 cargo test --test claude_mcp_live -- --ignored --nocapture
+
+# The search index, against a copy of your real corpus: correctness, plus
+# printed build / index-size / query-latency numbers. Run it under --release
+# when you care about the numbers — the bundled SQLite is a C dependency
+# compiled at the profile's optimization level, so a debug run measures a
+# SQLite nobody ships.
+cargo test --test search_live -- --ignored --nocapture
+cargo test --release --test search_live -- --ignored --nocapture
 ```
 
 Verify scanner changes against real data, not a fixture. The failure that matters
@@ -289,6 +299,96 @@ line that quietly stops being emitted.
 
 ---
 
+## The LLM gateway
+
+`src-tauri/src/gateway/` is a **second HTTP listener**, and the thing to get
+straight before changing anything in it is that it is not part of `/api`.
+
+| | `/api`, in `native/` | the gateway, in `gateway/` |
+| --- | --- | --- |
+| Port | the app's own | the user's, 8880 by default |
+| Wire format | Agento's | OpenAI's and Anthropic's |
+| Credential | `read` / `write` | `llm`, and only `llm` |
+| Guards | `guards.rs`, before routing | its own auth layer, and `guards::host_allowed` **shared** rather than copied |
+| Route tables | `parity/read_routes.json`, `write_routes.json` | **none — they say nothing about it** |
+
+So the parity machinery does not apply to the five routes it serves
+(`/v1/chat/completions`, `/v1/models`, `/anthropic/v1/messages`,
+`/anthropic/v1/models`, `/healthz`): there is no Go ancestor to be byte-identical
+to, and the wire format that matters is somebody else's.
+
+Its **control plane is the opposite** and this is where the split gets confused.
+`/api/gateway/*` — twelve routes in `native/gateway_api.rs` — is ordinary `/api`
+surface, behind the ordinary guard with ordinary `read`/`write` scoping, and it
+is recorded in `parity/desktop_routes.json`. That file holds the routes with no
+Go ancestor, and its assertion is **set equality** against the union of every
+owning module's `ROUTES` const. Add a third owner and you must add it to that
+union, or the test silently weakens to a one-directional check and still passes.
+
+An `llm` token opens none of those twelve routes. That is the same disjointness
+seen from the other side: a credential issued to *spend* through the gateway must
+not be able to reconfigure which provider it spends with.
+
+### The `ferrox-providers` dependency
+
+Every translation and every provider adapter comes from `ferrox-providers`, the
+crate extracted from [ferrox](https://github.com/shaharia-lab/ferrox) with this
+app as its intended desktop consumer. What lives here is only the listener, the
+auth, the routing table and the framing.
+
+```toml
+ferrox-providers = { git = "https://github.com/shaharia-lab/ferrox",
+                     tag = "providers-v0.1.0", default-features = false,
+                     features = ["anthropic", "openai", "gemini"] }
+```
+
+Three parts of that line are load-bearing:
+
+- **`default-features = false`**, because the default feature set includes
+  `axum`, which pins **axum 0.7** while this crate is on **0.8**. Enabling it
+  compiles two axums or fails outright. The casualty is the crate's own Anthropic
+  SSE emitter, which is why `gateway/stream.rs` writes raw SSE bytes over the
+  framework-free `SseFrame` the crate emits instead.
+- **no `bedrock`**, because its AWS SDK pins Rust **1.94.1** against this crate's
+  declared **1.88** floor. That is also why `gateway_providers.type` accepts four
+  provider types and not five.
+- **a tag, not a commit SHA.** The design document predates the tag existing and
+  says to pin a SHA. A tag can be moved where a SHA cannot, which is accepted
+  here only because ferrox is our own repository and its README documents this
+  tag as the reference point.
+
+**Open, and due before the first release that ships the gateway:** whether to
+publish `ferrox-providers` to crates.io rather than depending on it by git —
+[#453](https://github.com/shaharia-lab/agento/issues/453).
+
+Two more things are copied rather than imported, and both are deliberate:
+`is_retryable` / `should_failover` (`gateway/dispatch.rs`) live in ferrox's
+*binary* crate, not in `ferrox-providers`; and there is **no `CorsLayer`**, which
+ferrox's own server mounts permissively. That is right behind a network boundary
+and catastrophic on loopback — it would let any page you have open spend your
+provider credits and read the answer.
+
+### Curling it in dev
+
+The gateway needs a credential of its own, and the debug build's `api-token` file
+is **not** it — that holds a `write` token, which the gateway refuses with a 403.
+Mint an `llm` one first:
+
+```bash
+API=$(cat ~/.agento-desktop-dev/api-token)
+LLM=$(curl -s -X POST -H "Authorization: Bearer $API" -H "Content-Type: application/json" \
+  -d '{"name":"dev","scope":"llm","expires_in_days":1}' \
+  http://127.0.0.1:8991/api/security/tokens | jq -r .token)
+
+curl -s http://127.0.0.1:8880/v1/models -H "Authorization: Bearer $LLM" | jq
+```
+
+That last line is the cheapest live check that the listener is up and the
+credential works; it answers with the configured **aliases**. `/healthz` on the
+same port needs no credential at all and is the check for "is anything bound".
+
+---
+
 ## Debugging
 
 **The webview inspector** is available in dev builds: right-click, Inspect
@@ -347,12 +447,40 @@ format, the JWKS document or the signing key.
 **Two 4xx to tell apart.** A **401** is "you have not proved who you are" —
 missing, expired, revoked, or signed by a key this install no longer uses. A
 **403** with `this token's scope does not permit this request` is "you have, and
-a `read` token cannot do that"; retrying will not help, and the fix is a `write`
-token or a different request.
+this credential does not reach that"; retrying will not help. There are two ways
+to earn it, and they have different fixes:
+
+- a **`read`** token against a state-changing method, or against
+  `/api/security/*` (which needs `write` whatever the method) — the fix is a
+  `write` token or a different request;
+- an **`llm`** token against *anything* under `/api`. That scope is the LLM
+  gateway's data plane and is disjoint from `read`/`write` by design, so no
+  `/api` route accepts it and a bigger `/api` token is not the fix — you want a
+  token of the right kind for the surface you are calling. The reverse holds
+  too: `read` and `write` tokens are refused by the gateway.
+
+That last one is worth knowing before it bites in dev: the debug build's
+`api-token` file holds a **`write`** token, so it will not work against the
+gateway. [The LLM gateway](#the-llm-gateway) has the two commands that mint an
+`llm` one and check the listener with it.
 
 **Regenerating the key in Settings → Security invalidates every token at once**,
 the dev file's included, which is exactly what it is for. The app window recovers
-on its own; a shell holding an old token needs to re-read the file.
+on its own; a shell holding an old token needs to re-read the file, and any tool
+configured against the gateway needs a freshly minted one pasted in.
+
+**A scratch instance, for anything you would not want to do to your own data**,
+is a scratch `HOME` — **not** `AGENTO_DATA_DIR`, which a debug build ignores
+(`paths.rs::data_dir` is `cfg`-split and the debug arm always answers
+`~/.agento-desktop-dev`, so that an exported variable cannot make `npm run app`
+share a database and a scheduler with an installed Agento):
+
+```bash
+HOME=/tmp/scratch-home ./target/debug/agento
+```
+
+That gets its own database, its own signing keypair and an empty `~/.claude` —
+a genuinely cold install, which is the only way to test a first-run path.
 
 There is also a project skill, `local-verify`, describing how to reproduce a bug
 before fixing it and how to verify each hop separately: backend wire, browser

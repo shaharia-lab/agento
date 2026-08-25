@@ -582,6 +582,7 @@ fn a_drilldown_window_replaces_the_range_rather_than_narrowing_it() {
     }]);
 
     let filter = build_filter(
+        &conn,
         &SessionQuery::parse("windows=1000-2000&from=2026-01-01T00:00:00Z").expect("parse"),
         &[],
         &[],
@@ -602,8 +603,47 @@ fn a_drilldown_window_replaces_the_range_rather_than_narrowing_it() {
         2,
         "one window binds exactly its two ends"
     );
+}
 
-    let _ = conn;
+/// The search answers exactly as it did before #436 on a database with no
+/// `session_search` table — which is what this whole fixture is, since `SCHEMA`
+/// above is the pre-#436 subset. It is the honest form of the degradation case:
+/// `tests_search.rs` can only reach it by dropping a table it created, which
+/// leaves the migration behind and could mask a difference between "never
+/// existed" and "removed".
+///
+/// The six metadata columns still match, and nothing errors.
+#[test]
+fn a_search_still_matches_metadata_with_no_index_table() {
+    let conn = fixture(&[
+        TestSession {
+            id: "wanted",
+            project: "/home/u/alpha",
+            ..Default::default()
+        },
+        TestSession {
+            id: "other",
+            project: "/home/u/beta",
+            ..Default::default()
+        },
+    ]);
+
+    let q = SessionQuery::parse("q=wanted").expect("parse");
+    let page = list_page(&conn, &no_settings(), &q).expect("page");
+    assert_eq!(
+        page.items.iter().map(|s| &s.session_id).collect::<Vec<_>>(),
+        vec!["wanted"]
+    );
+    // And the toolbar's counters agree, over the same predicate.
+    assert_eq!(facets(&conn, &no_settings(), &q).expect("facets").total, 1);
+
+    // A multi-word query is still the old substring match: nothing here can
+    // answer word-order-independently, and it must not error trying.
+    let words = SessionQuery::parse("q=alpha+wanted").expect("parse");
+    assert!(list_page(&conn, &no_settings(), &words)
+        .expect("page")
+        .items
+        .is_empty());
 }
 
 #[test]

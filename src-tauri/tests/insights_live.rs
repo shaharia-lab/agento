@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 
 use agento_lib::native::insights::{processors::CURRENT_PROCESSOR_VERSION, store, worker};
+use agento_lib::native::search::SEARCH_INDEX_VERSION;
 
 fn real_db() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
@@ -58,6 +59,24 @@ fn every_cached_session_gains_an_insight_row() {
     };
     let dir = tempfile::tempdir().expect("tempdir");
     let db = copy_db(&src, dir.path());
+
+    // **Migrate the copy, exactly as the app migrates before starting the
+    // worker** (`lib.rs`: `migrate::apply` at startup, `worker::start` long
+    // after). The installed database is whatever version the last release left,
+    // and this test's whole premise is a *copy of that* — so without this the
+    // worker runs against a schema no shipped build ever presents it with.
+    //
+    // Found the hard way, and worth keeping the reason: with the machine's real
+    // database at migration 31, `session_search` did not exist, every batch's
+    // index write failed, and — because #435 deliberately commits the index row
+    // and the insight row in **one transaction** — the insight write rolled back
+    // with it. The result was 0 insight rows over 1,178 sessions: this test's own
+    // headline failure, reported against a build that is fine, for a schema
+    // reason nothing in the message pointed at.
+    {
+        let mut conn = rusqlite::Connection::open(&db).expect("open");
+        agento_lib::native::migrate::apply(&mut conn).expect("migrate the copy");
+    }
 
     let cached = {
         let conn = rusqlite::Connection::open(&db).expect("open");
@@ -95,7 +114,7 @@ fn every_cached_session_gains_an_insight_row() {
     let mut settled = false;
     for _ in 0..1_800 {
         let conn = rusqlite::Connection::open(&db).expect("open");
-        let left = store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION)
+        let left = store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION, SEARCH_INDEX_VERSION)
             .expect("needs_processing")
             .into_iter()
             .filter(|p| !p.file_path.is_empty())
@@ -138,7 +157,8 @@ fn every_cached_session_gains_an_insight_row() {
     // whole key. A join or an upsert written on `session_id` alone leaves the
     // duplicated ids reporting work forever.
     let still_pending =
-        store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION).expect("needs_processing");
+        store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION, SEARCH_INDEX_VERSION)
+            .expect("needs_processing");
     let with_a_transcript: Vec<_> = still_pending
         .iter()
         .filter(|p| !p.file_path.is_empty())
@@ -177,5 +197,65 @@ fn every_cached_session_gains_an_insight_row() {
     assert!(
         breakdowns > 0,
         "no row has a tool breakdown, over a corpus of {cached} real sessions"
+    );
+
+    // ─── the search index (#435) ─────────────────────────────────────────────
+    //
+    // The same argument as everything above, for the table the same transaction
+    // writes: the index is populated by the *worker*, so a build whose indexer
+    // never runs leaves `session_search` empty while every count here still
+    // passes — and search simply answers nothing, which is indistinguishable
+    // from a corpus with nothing in it. That is #408's failure mode, one table
+    // to the right.
+    let indexed = scalar(&conn, "SELECT COUNT(*) FROM session_search");
+    eprintln!("index rows: {indexed}");
+    assert_eq!(
+        indexed, written,
+        "the index and the insights are written in one transaction, so their \
+         row counts cannot differ"
+    );
+
+    // Rows are not enough: a document whose columns are all empty is a row, and
+    // matches nothing. Requiring *most* rows to carry text rather than all of
+    // them, because a session really can be a single injected preamble with no
+    // indexable content at all.
+    let with_text = scalar(
+        &conn,
+        "SELECT COUNT(*) FROM session_search
+          WHERE user_text <> '' OR assistant_text <> '' OR tool_text <> ''",
+    );
+    assert!(
+        with_text * 2 > indexed,
+        "only {with_text} of {indexed} index rows carry any text — \
+         the rows are being written but not built"
+    );
+
+    // …and the text has to be *reachable through FTS5*, which is the only thing
+    // any of this is for. A stored column that the tokenizer never indexed would
+    // satisfy every assertion above.
+    let hits = scalar(
+        &conn,
+        "SELECT COUNT(*) FROM session_search WHERE session_search MATCH '\"the\"'",
+    );
+    assert!(
+        hits > 0,
+        "no session in a corpus of {cached} matches the commonest word in \
+         English — the column is stored but not searchable"
+    );
+
+    // Every row this build wrote carries the index version it wrote, so the next
+    // boot does not re-read the corpus. Per row since #446: there is no global
+    // stamp to check, and the count is over rows *that exist* — a session whose
+    // transcript could not be read has none, and is meant to stay pending.
+    let behind = scalar(
+        &conn,
+        &format!(
+            "SELECT COUNT(*) FROM session_insights WHERE search_index_version < {SEARCH_INDEX_VERSION}"
+        ),
+    );
+    assert_eq!(
+        behind, 0,
+        "{behind} rows were indexed but left behind this build's index version, \
+         so every later sweep re-reads them"
     );
 }

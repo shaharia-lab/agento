@@ -296,6 +296,16 @@ export interface ClaudeSessionSummary {
   subagent_cost_by_model?: Record<string, SessionCost>;
   unpriced_models?: string[];
   unpriced_tokens?: number;
+  /**
+   * Why this row matched, when the match came through the content index (#437).
+   * FTS5's `snippet()` over the highest-matching column, with every matched
+   * term wrapped in the U+0001/U+0002 markers `lib/snippet.ts` splits on.
+   *
+   * Last, and optional, because the server omits the key entirely when it is
+   * empty — which is every response that is not a search, *and* a search row
+   * that matched only on its id, path or title. Default it (`?? ""`).
+   */
+  match_snippet?: string;
 }
 
 /** One content block of an assistant turn, normalized by the scanner. */
@@ -652,4 +662,213 @@ export interface ClaudeSettingsProfile {
   name: string;
   file_path: string;
   is_default: boolean;
+}
+
+/* --- Security tokens (#405) ---------------------------------------------- */
+
+export interface ApiTokenRow {
+  id: string;
+  name: string;
+  scope: string;
+  created_at: string;
+  expires_at: string | null;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+/**
+ * The creation response, and the **only** copy of the token that will ever
+ * exist — nothing stores it, so a second read is impossible rather than
+ * refused. Never put one of these anywhere but component state.
+ */
+export interface CreatedApiToken extends ApiTokenRow {
+  token: string;
+}
+
+/* --- LLM Gateway (#421) — the control plane, /api/gateway/* --------------- */
+
+/**
+ * Four, not five: `bedrock` is a real ferrox provider type this build cannot
+ * serve, so the server refuses it and the picker must not offer it.
+ */
+export type GatewayProviderType = "anthropic" | "openai" | "gemini" | "glm";
+
+export interface GatewayTimeouts {
+  connect_secs: number;
+  ttfb_secs: number;
+  idle_secs: number;
+}
+
+export interface GatewaySettings {
+  enabled: boolean;
+  port: number;
+  start_with_app: boolean;
+  /**
+   * How long a `gateway_usage_log` row is kept, in days. **`0` keeps
+   * everything** — it is an opt-out, not a horizon of zero days, and treating it
+   * as one would read as "delete immediately". Ceiling 3650.
+   */
+  usage_retention_days: number;
+}
+
+/**
+ * Four states, and `start_failed` is the one a three-state UI drops.
+ *
+ * `bind_failed` carries the port it could not bind (something else has it);
+ * `start_failed` reached no port at all (a provider row this build could not
+ * turn into an adapter). They send the user to different places, which is why
+ * the server keeps them apart.
+ */
+export type GatewayState =
+  | "stopped"
+  | "running"
+  | "bind_failed"
+  | "start_failed";
+
+/**
+ * `port` and `error` are **omitted**, not null, on the states that have no such
+ * value — branch on presence.
+ */
+export interface GatewayStatus {
+  state: GatewayState;
+  port?: number;
+  error?: string;
+}
+
+/** A provider row as a read answers it: `has_api_key`, never the key. */
+export interface GatewayProviderSummary {
+  id: string;
+  name: string;
+  type: GatewayProviderType;
+  has_api_key: boolean;
+  base_url: string;
+  timeouts: GatewayTimeouts;
+  enabled: boolean;
+}
+
+/**
+ * A provider write.
+ *
+ * `api_key` is three-valued and this is the field the whole surface is built
+ * around: **absent** preserves the stored key, `""` clears it, a value replaces
+ * it. Every other field is overwritten from what the body carries, so a `PUT`
+ * has to send them all.
+ */
+export interface GatewayProviderRequest {
+  id?: string;
+  name: string;
+  type: GatewayProviderType;
+  api_key?: string;
+  base_url: string;
+  timeouts: GatewayTimeouts;
+  enabled: boolean;
+}
+
+export interface GatewayRouteTarget {
+  /** The provider's **name**, not its id — that is what routing refers to. */
+  provider: string;
+  /** The model id sent upstream, which is not the alias the client asked for. */
+  model_id: string;
+}
+
+/** `targets` is ordered and the order is the meaning; `fallbacks` follows it. */
+export interface GatewayRouting {
+  targets: GatewayRouteTarget[] | null;
+  fallbacks: GatewayRouteTarget[] | null;
+}
+
+export interface GatewayModelAlias {
+  id: string;
+  alias: string;
+  routing: GatewayRouting;
+  enabled: boolean;
+}
+
+/* --- The gateway's own usage dashboard (#428), GET /api/gateway/usage ----- */
+
+/**
+ * Totals over the window.
+ *
+ * `unpriced_models` is `skip_serializing_if = "Vec::is_empty"` on the server, so
+ * it is genuinely **absent** rather than `null` when nothing was unpriced —
+ * which is why it is optional here and every other array is not.
+ *
+ * `cost_usd` is a **floor** whenever `unpriced_requests > 0`: the catalog is
+ * seeded for Claude models, so OpenAI, Gemini and GLM aliases miss routinely,
+ * and an unpriced request stores `NULL` rather than `0.0`. Rendering the total
+ * without saying so is the one number on this view that would be confidently
+ * wrong.
+ */
+export interface GatewayUsageTotals {
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+  unpriced_requests: number;
+  unpriced_models?: string[] | null;
+}
+
+/** Milliseconds. Nearest-rank percentiles — every value is a real request's. */
+export interface GatewayUsageLatency {
+  p50_ms: number;
+  p95_ms: number;
+  max_ms: number;
+}
+
+/** One bucket. The series is **dense**: a quiet day is a zero, not a gap. */
+export interface GatewayUsagePoint {
+  date: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  cost_usd: number;
+}
+
+/** One row of a breakdown. `key` is the alias, provider, status, surface or token. */
+export interface GatewayUsageGroup {
+  key: string;
+  /**
+   * What to show instead of `key`, **omitted** (not null) when there is nothing
+   * better. Only `by_token` sets it: its key is an `api_tokens` row id, which
+   * appears nowhere else in the UI — the Security tab lists tokens by name.
+   */
+  label?: string;
+  requests: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  cost_usd: number;
+}
+
+/**
+ * `by_status`'s keys are #425's four stored spellings, and `interrupted` is
+ * deliberately not merged into `upstream_error`: a closed tab and a provider
+ * outage call for opposite reactions.
+ */
+export type GatewayUsageStatus =
+  | "ok"
+  | "upstream_error"
+  | "interrupted"
+  | "refused";
+
+export interface GatewayUsage {
+  /**
+   * The same five values `AnalyticsReport.granularity` carries — the two
+   * endpoints share `AnalyticsParams`, so a window of a given span buckets the
+   * same way on both. Spelled out rather than imported from that interface so
+   * this block stays readable as the gateway's own wire contract.
+   */
+  granularity: "hourly" | "daily" | "weekly" | "monthly" | "yearly";
+  totals: GatewayUsageTotals;
+  latency: GatewayUsageLatency;
+  series: GatewayUsagePoint[] | null;
+  by_alias: GatewayUsageGroup[] | null;
+  by_provider: GatewayUsageGroup[] | null;
+  by_status: GatewayUsageGroup[] | null;
+  by_surface: GatewayUsageGroup[] | null;
+  /** Keyed on the token's `sub` — an `api_tokens` row id. `""` when the row could not name one. */
+  by_token: GatewayUsageGroup[] | null;
 }

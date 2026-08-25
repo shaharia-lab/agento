@@ -196,6 +196,9 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
 #[cfg(test)]
 mod tests_db;
 
+#[cfg(test)]
+mod tests_search;
+
 /// Whether this route is one that would have triggered a rescan in Go.
 ///
 /// A continuation — a request carrying a cursor — deliberately returns `false`,

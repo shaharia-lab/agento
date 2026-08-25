@@ -14,10 +14,12 @@
 
 use std::collections::HashMap;
 
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 use crate::native::gojson;
 use crate::native::gotime::GoTime;
+use crate::native::search;
 
 /// Per-session figures as SQL over the summary select's `c` (session) and `sa`
 /// (sub-agent roll-up) aliases. Every one but `messages` sums the main thread
@@ -33,6 +35,45 @@ pub const SQL_ACTIVE_DURATION_MS: &str = "(c.active_duration_ms + COALESCE(sa.ad
 /// Message count stays main-thread, matching the column beside it.
 pub const SQL_MESSAGE_COUNT: &str = "c.message_count";
 
+/// The relevance sort's key, over the FTS join `page::list_page` adds (#437).
+///
+/// **Negated, so that "best first" is `DESC` like every other sort.** SQLite's
+/// `bm25()` is already negative — more negative is a better match — so `-rank`
+/// is non-negative and larger is better, which is exactly the direction the
+/// existing keyset predicate and `ORDER BY … DESC` are written for. Negating
+/// here rather than special-casing the comparison is what keeps relevance one
+/// more arm of the machinery instead of a second ordering to keep in step.
+///
+/// The `COALESCE` is the LIKE half. A search is an `OR` (#436): a row can match
+/// on its session id, its project path or a title and have no index hit at all,
+/// which the `LEFT JOIN` leaves NULL. Left as NULL those rows sort last under
+/// `DESC` — correct — but `NULL < ?` is NULL, so the keyset predicate would
+/// exclude every one of them from the second page onwards and they would
+/// silently vanish mid-scroll. [`RELEVANCE_UNRANKED`] is strictly below every
+/// real value because `-bm25` is never negative.
+pub const SQL_RELEVANCE: &str = "COALESCE(-fts.rank, -1.0)";
+
+/// The sort value a row with no index hit takes, and the whole sort key when the
+/// index cannot answer at all — see [`SQL_RELEVANCE`].
+pub const RELEVANCE_UNRANKED: f64 = -1.0;
+
+/// The relevance key when there is no FTS join to read: every row unranked.
+///
+/// `usable_fts_query` degrades to the metadata-only clause on a database with no
+/// `session_search` table or an expression FTS5 refuses, and then there is no
+/// `fts` alias for [`SQL_RELEVANCE`] to name. Every row ties at
+/// [`RELEVANCE_UNRANKED`], the `(session_id, project_path)` tiebreak makes the
+/// order total anyway, and the cursor round-trips through the same constant —
+/// so a degraded relevance sort pages correctly rather than erroring.
+///
+/// **It must stay an expression rather than becoming a bare integer.** This
+/// string is interpolated into an `ORDER BY`, where SQLite reads a bare positive
+/// integer literal as a **column ordinal**: spelling it `1` would silently order
+/// by `session_id` — a plausible order over the wrong key — and `0` would be an
+/// out-of-range error. `-1.0` is unary minus applied to a literal, which SQLite
+/// parses as an expression, so it means the value and not the column.
+pub const SQL_RELEVANCE_UNRANKED: &str = "-1.0";
+
 /// The order a page is returned in. A closed set, because keyset pagination
 /// needs the sort column indexed and the tiebreak stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -43,18 +84,26 @@ pub enum Sort {
     Tokens,
     Duration,
     Messages,
+    /// Best match first, over the weighted bm25 of the content index (#437).
+    /// Only meaningful with a search term — see [`resolve_sort`].
+    Relevance,
 }
 
 impl Sort {
     /// Parse the `sort` parameter. An unknown value falls back to `Recent`
     /// rather than erroring: the list is a read-only view, and a stale bookmark
     /// is better rendered in the default order than refused.
+    ///
+    /// `relevance` without a search term is one of those unknown values — the
+    /// rule is applied by [`resolve_sort`], which is the only caller that knows
+    /// whether `q` is set.
     pub fn parse(raw: &str) -> Self {
         match raw {
             "cost" => Sort::Cost,
             "tokens" => Sort::Tokens,
             "duration" => Sort::Duration,
             "messages" => Sort::Messages,
+            "relevance" => Sort::Relevance,
             _ => Sort::Recent,
         }
     }
@@ -67,11 +116,16 @@ impl Sort {
             Sort::Tokens => "tokens",
             Sort::Duration => "duration",
             Sort::Messages => "messages",
+            Sort::Relevance => "relevance",
         }
     }
 
     /// The SQL the sort orders and pages on, and whether its values are
     /// timestamps (which page through a time cursor rather than a float).
+    ///
+    /// The relevance arm names the `fts` alias, which only `page::list_page`
+    /// joins in — and only when the index can answer. That is why it takes the
+    /// expression from [`page_sort_expr`] rather than from here.
     pub fn expr(self) -> (&'static str, bool) {
         match self {
             Sort::Cost => (SQL_COST_USD, false),
@@ -79,7 +133,53 @@ impl Sort {
             Sort::Duration => (SQL_ACTIVE_DURATION_MS, false),
             Sort::Messages => (SQL_MESSAGE_COUNT, false),
             Sort::Recent => ("c.last_activity", true),
+            Sort::Relevance => (SQL_RELEVANCE, false),
         }
+    }
+}
+
+/// The sort a page actually orders by, given whether the FTS join is present.
+///
+/// One function rather than a branch at the call site, because the *cursor* has
+/// to agree with it: a degraded relevance page mints
+/// [`RELEVANCE_UNRANKED`] as its value and reads it back through the same
+/// constant, so the two spellings cannot drift into paging one ordering with
+/// another's position.
+pub fn page_sort_expr(sort: Sort, ranked: bool) -> (&'static str, bool) {
+    match (sort, ranked) {
+        (Sort::Relevance, false) => (SQL_RELEVANCE_UNRANKED, false),
+        (other, _) => other.expr(),
+    }
+}
+
+/// Resolve the `sort` parameter against the search term.
+///
+/// Two rules, and both are the existing fallback rather than new behaviour:
+///
+/// * **`q` set with no explicit `sort` is `relevance`.** Somebody who typed a
+///   search wants the best match first; somebody who did not has no ranking to
+///   sort by. An explicit `sort` always wins, so a user who picked "most recent"
+///   keeps it while typing.
+/// * **`relevance` with no `q` is `recent`**, which is exactly what
+///   [`Sort::parse`] already does with any value it does not recognise. Without
+///   a search term there is no `MATCH`, so there is no rank — and a stale
+///   bookmark carrying `sort=relevance` renders in the default order rather
+///   than being refused.
+///
+/// The term is trimmed because [`add_search`] trims it: `q=%20` adds no clause
+/// at all, so it must not select an ordering that depends on one.
+pub fn resolve_sort(raw_sort: &str, search: &str) -> Sort {
+    let searching = !search.trim().is_empty();
+    if raw_sort.is_empty() {
+        return if searching {
+            Sort::Relevance
+        } else {
+            Sort::Recent
+        };
+    }
+    match Sort::parse(raw_sort) {
+        Sort::Relevance if !searching => Sort::Recent,
+        other => other,
     }
 }
 
@@ -166,6 +266,7 @@ impl SessionQuery {
     pub fn parse(raw_query: &str) -> Result<Self, String> {
         let params = parse_params(raw_query);
         let get = |k: &str| params.get(k).cloned().unwrap_or_default();
+        let search = get("q");
 
         let links = match get("links").as_str() {
             "" => Links::Any,
@@ -184,7 +285,6 @@ impl SessionQuery {
         Ok(SessionQuery {
             project: get("project"),
             config_dir: get("config_dir"),
-            search: get("q"),
             favorites_only: get("favorites") == "true",
             links,
             permission_mode: get("permission_mode"),
@@ -197,7 +297,8 @@ impl SessionQuery {
             from: optional_time(&get("from")),
             to: optional_time(&get("to")),
             windows: parse_windows(&get("windows"))?,
-            sort: Sort::parse(&get("sort")),
+            sort: resolve_sort(&get("sort"), &search),
+            search,
             limit,
             cursor: get("cursor"),
         })
@@ -263,6 +364,20 @@ fn parse_windows(raw: &str) -> Result<Vec<TimeWindow>, String> {
 pub struct Filter {
     sql: Vec<String>,
     pub args: Vec<Value>,
+    /// The FTS5 expression the search clause matched on, when there was one and
+    /// the index could answer it (#437).
+    ///
+    /// Carried out of [`add_search`] rather than rebuilt by the caller, because
+    /// deciding it costs a real prepare-and-step against the index — see
+    /// [`usable_fts_query`] — and `page::list_page` needs the same answer twice
+    /// more: once for the ranked join and once for the snippet read. Asking
+    /// again would pay that probe three times per page and, worse, could answer
+    /// differently if the index changed underneath, leaving a join whose rows
+    /// the filter did not select.
+    ///
+    /// `None` means the metadata-only clause: no search term, nothing left after
+    /// tokenizing, no `session_search` table, or an expression FTS5 refused.
+    pub fts: Option<String>,
 }
 
 /// A bound parameter. Timestamps are bound as the text the column holds, so the
@@ -292,6 +407,11 @@ impl Filter {
 
     /// Copy another filter's terms and arguments in, for the facet queries
     /// that start from the visible-session scope and add one term.
+    ///
+    /// `fts` is deliberately **not** copied: it is not a predicate but a handle
+    /// for the ranked join, every caller here starts from a filter that has no
+    /// search clause, and a copy would advertise a join the copy's SQL does not
+    /// select through.
     pub fn add_all(&mut self, other: &Filter) {
         self.sql.extend(other.sql.iter().cloned());
         self.args.extend(other.args.iter().cloned());
@@ -310,7 +430,12 @@ impl Filter {
 /// Turn a query into its WHERE clause, excluding pagination — the same
 /// predicate serves the page, the facet aggregate and the total count, so the
 /// counter in the toolbar and the rows below it cannot disagree.
+///
+/// `conn` is read only to decide whether the search term can go through the
+/// full-text index — see [`add_search`]. Every other term is a pure function of
+/// `q`.
 pub fn build_filter(
+    conn: &Connection,
     q: &SessionQuery,
     hidden_projects: &[String],
     indexed_dirs: &[String],
@@ -340,7 +465,7 @@ pub fn build_filter(
     if !q.model.is_empty() {
         f.add("c.model = ?", vec![Value::Text(q.model.clone())]);
     }
-    add_search(&mut f, &q.search);
+    add_search(conn, &mut f, &q.search);
     add_links(&mut f, q.links);
 
     add_range(&mut f, SQL_MESSAGE_COUNT, q.messages, 1.0);
@@ -371,26 +496,224 @@ pub fn add_config_dir_scope(f: &mut Filter, dirs: &[String]) {
     );
 }
 
-/// Match the same fields the client-side predicate did, case-insensitively.
+/// The six metadata columns the list has always matched, case-insensitively.
 ///
 /// `LOWER` on both sides rather than `COLLATE NOCASE`, because NOCASE is
-/// ASCII-only in SQLite and project paths and titles are not.
-fn add_search(f: &mut Filter, search: &str) {
-    let q = search.trim().to_lowercase();
-    if q.is_empty() {
-        return;
-    }
-    // Bound, not interpolated, so % and _ typed by the user match literally.
-    let pattern = format!("%{}%", escape_like(&q));
-    f.add(
-        r"(LOWER(c.session_id) LIKE ? ESCAPE '\'
+/// ASCII-only in SQLite and project paths and titles are not. Six `?`, in this
+/// order, all bound to the same pattern.
+const LIKE_COLUMNS: &str = r"LOWER(c.session_id) LIKE ? ESCAPE '\'
     OR LOWER(c.preview) LIKE ? ESCAPE '\'
     OR LOWER(c.custom_title) LIKE ? ESCAPE '\'
     OR LOWER(c.native_title) LIKE ? ESCAPE '\'
     OR LOWER(c.ai_title) LIKE ? ESCAPE '\'
-    OR LOWER(c.project_path) LIKE ? ESCAPE '\')",
-        vec![Value::Text(pattern); 6],
+    OR LOWER(c.project_path) LIKE ? ESCAPE '\'";
+
+/// Match the search term against the full-text index **or** the six metadata
+/// columns.
+///
+/// One `Filter` clause, deliberately: facets, the config-dir scope, every
+/// numeric and time bound and the keyset predicate all compose through the same
+/// funnel, so adding a term here is the whole change and nothing downstream has
+/// to know a content index exists.
+///
+/// The two halves are OR'd rather than one replacing the other, because they
+/// answer different questions and neither is a superset:
+///
+/// * the index holds a session's **content**, which the cache row never has —
+///   only a 120-char `preview` is stored;
+/// * the LIKE clause matches the **session id**, the **project path** and the
+///   titles, which are UNINDEXED in `session_search` and so can never be a
+///   content hit — and it matches sessions the worker has not indexed yet, which
+///   on a fresh install is all of them.
+///
+/// # The FTS half degrades rather than failing
+///
+/// A user's text reaches FTS5's own query grammar, where `-`, `OR`, `NOT`, `^`,
+/// `*`, `:` and `"` are operators. [`build_fts_query`] neutralizes them by
+/// quoting each token, which is a construction rule and not a sanitization one —
+/// but "the builder can never produce a syntax error" is a claim about a parser
+/// this code does not own, so it is *checked* rather than trusted: the built
+/// expression is run against the index once, and anything that errors (a missing
+/// table on a database that has not migrated, a query FTS5 refuses) falls back to
+/// the LIKE-only clause this route answered with before #436. Search must never
+/// answer 500 because of a character somebody typed.
+fn add_search(conn: &Connection, f: &mut Filter, text: &str) {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    // Bound, not interpolated, so % and _ typed by the user match literally.
+    let pattern = format!("%{}%", escape_like(&trimmed.to_lowercase()));
+    let like_args = vec![Value::Text(pattern); 6];
+
+    let Some(fts) = usable_fts_query(conn, trimmed) else {
+        f.add(format!("({LIKE_COLUMNS})"), like_args);
+        return;
+    };
+
+    // The subquery is re-projected to two columns: `match_sql()` also selects
+    // `rank`, which #437 orders by and a row-value `IN` cannot accept — so the
+    // rank reaches the ORDER BY through a second, joined copy of the same
+    // subquery instead, over the expression recorded here.
+    let mut args = vec![Value::Text(fts.clone())];
+    args.extend(like_args);
+    f.fts = Some(fts);
+    f.add(
+        format!(
+            "((c.session_id, c.project_path) IN (
+      SELECT session_id, project_path FROM (
+{}
+      ))
+    OR {LIKE_COLUMNS})",
+            search::match_sql()
+        ),
+        args,
     );
+}
+
+/// The FTS expression for `search`, or `None` when the index cannot answer it.
+///
+/// The probe is a real prepare-and-step rather than a `SELECT 1 FROM
+/// session_search LIMIT 0` existence check, because the two failures it has to
+/// catch surface at different points: a missing table fails the *prepare*, while
+/// an expression FTS5 refuses fails on the *first step* — and an unstepped
+/// statement never parses the MATCH argument at all — including against an
+/// **empty** index, which is what a fresh install has and where a probe that
+/// short-circuited would accept anything
+/// (`the_probe_still_rejects_a_bad_expression_against_an_empty_index`).
+///
+/// The cost is one extra inverted-index lookup per `build_filter`, i.e. one per
+/// call of `GET /api/claude-sessions` and one per `…/facets` — the same lookup
+/// the clause itself then performs, stopped at the first row. Worth knowing
+/// before #437, which composes this as a ranked join and may want to fold the
+/// two together.
+///
+/// The two failures are logged differently on purpose, and neither line carries
+/// the user's search text — `proxy.rs` keeps query strings out of this file, and
+/// FTS5's own syntax-error message quotes the text it choked on.
+fn usable_fts_query(conn: &Connection, text: &str) -> Option<String> {
+    let query = build_fts_query(text);
+    if query.is_empty() {
+        return None;
+    }
+    let mut stmt =
+        match conn.prepare("SELECT 1 FROM session_search WHERE session_search MATCH ?1 LIMIT 1") {
+            Ok(stmt) => stmt,
+            // Debug, and with the cause: on a database that has not migrated
+            // this is the ordinary answer for every keystroke, and a warning per
+            // keystroke is how a log stops being read. The message names the
+            // missing table, nothing the user typed.
+            Err(e) => {
+                log::debug!("claude sessions: no search index, matching metadata only: {e}");
+                return None;
+            }
+        };
+    if stmt.exists(rusqlite::params![&query]).is_err() {
+        // Warn, and *without* the cause: `build_fts_query` is meant to make this
+        // unreachable, so reaching it is a defect worth seeing rather than
+        // routine degradation — and the one thing rusqlite would tell us here is
+        // the FTS5 message, which quotes the search term back.
+        log::warn!(
+            "claude sessions: the search index refused a built query, matching metadata only"
+        );
+        return None;
+    }
+    Some(query)
+}
+
+/// How many *alphanumeric* characters a trailing token needs before it is
+/// extended into a prefix term.
+///
+/// `"a"*` matches roughly every session on the machine, so the first keystroke
+/// of a query would flash the whole corpus in and out. Counted over the
+/// alphanumerics rather than the whole token because those are what `unicode61`
+/// keeps: on the raw length, `-a` would clear the bar and still produce `a*`.
+const MIN_PREFIX_LEN: usize = 2;
+
+/// Turn what a user typed into an FTS5 query that can only ever be a conjunction
+/// of literal terms.
+///
+/// **Safe by construction, not by sanitization.** Nothing typed is ever passed
+/// through: the input is split into tokens and each token is *re-emitted* inside
+/// a double-quoted FTS5 string, where the grammar has no operators at all. So
+/// `-foo`, `a OR b`, `NOT`, `^x`, `a*b`, `(a)` and `a:b` are terms rather than
+/// syntax, and the function has no notion of "a character to escape" that a
+/// future FTS5 could add to.
+///
+/// The rules, in the order a user meets them:
+///
+/// * **Whitespace separates tokens, and tokens are AND'd** — FTS5's implicit
+///   operator between two phrases. `fix auth bug` finds a session containing all
+///   three words in any order, which is what the old single `LIKE '%fix auth
+///   bug%'` substring could not do.
+/// * **A user-typed `"…"` span is kept as one phrase**, so quoting is the one
+///   piece of query syntax that still means what people expect it to. An
+///   unterminated quote is a phrase too — it is what half-typing one looks like.
+/// * **The final token becomes a prefix term** (`"efficien"*`) so the list
+///   narrows as the user types, unless the user closed a quote — which says the
+///   word is finished — or the token carries fewer than [`MIN_PREFIX_LEN`]
+///   alphanumerics.
+/// * **Control characters are separators.** They are separators to `unicode61`
+///   anyway, so this changes no result — but a NUL reaching FTS5's parser is an
+///   error (`unterminated string`), and `%00` in a query string decodes to one.
+/// * **A token with no alphanumeric character is dropped.** `unicode61` indexes
+///   alphanumerics and treats everything else as a separator, so `"-"` is a
+///   phrase of *zero* terms — which matches no document, and AND'd with the rest
+///   empties the whole result. Without this, one stray dash in `fix auth -` costs
+///   the user every hit. Dropping can only widen the FTS half, and it discards
+///   nothing that could ever have matched; the LIKE half still sees the raw
+///   text, so a search for `---` is unaffected.
+///
+/// Returns an empty string when nothing survives — an input of only separators.
+/// An empty MATCH argument is itself a syntax error, so the caller reads that as
+/// "no FTS half" rather than passing it on.
+pub fn build_fts_query(text: &str) -> String {
+    // (text, the user closed a quote around it)
+    let mut tokens: Vec<(String, bool)> = Vec::new();
+    let mut buf = String::new();
+    let mut in_quote = false;
+
+    for raw in text.chars() {
+        let ch = if raw.is_control() { ' ' } else { raw };
+        if in_quote {
+            if ch == '"' {
+                tokens.push((std::mem::take(&mut buf), true));
+                in_quote = false;
+            } else {
+                buf.push(ch);
+            }
+        } else if ch == '"' {
+            tokens.push((std::mem::take(&mut buf), false));
+            in_quote = true;
+        } else if ch.is_whitespace() {
+            tokens.push((std::mem::take(&mut buf), false));
+        } else {
+            buf.push(ch);
+        }
+    }
+    tokens.push((buf, false));
+    tokens.retain(|(text, _)| text.chars().any(char::is_alphanumeric));
+
+    let last = tokens.len().saturating_sub(1);
+    let mut out = String::new();
+    for (i, (text, closed)) in tokens.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push('"');
+        // A `"` cannot reach here — one opens or closes a span — but the escape
+        // is what makes the emitter safe on its own terms rather than safe
+        // because of how the loop above happens to be written.
+        out.push_str(&text.replace('"', "\"\""));
+        out.push('"');
+        if i == last
+            && !closed
+            && text.chars().filter(|c| c.is_alphanumeric()).count() >= MIN_PREFIX_LEN
+        {
+            out.push('*');
+        }
+    }
+    out
 }
 
 /// Neutralize LIKE's wildcards so a search for "100%" does not match
@@ -550,13 +873,18 @@ impl Cursor {
 /// Render a row's sort value for the next cursor, in the spelling Go uses:
 /// `strconv.FormatFloat(_, 'g', -1, 64)` for the cost, plain integers for the
 /// counts, and RFC3339Nano for the timestamp.
-pub fn cursor_value(s: &super::summary::SessionSummary, sort: Sort) -> String {
+/// `relevance` is the one value that is not a function of the row: it is the
+/// negated bm25 the page's own query computed, so the caller reads it off the
+/// result set and hands it in. Rows on a non-relevance page pass
+/// [`RELEVANCE_UNRANKED`], which is never looked at.
+pub fn cursor_value(s: &super::summary::SessionSummary, sort: Sort, relevance: f64) -> String {
     match sort {
         Sort::Cost => gojson::format_g(s.total_cost_usd()),
         Sort::Tokens => s.total_conversation_tokens().to_string(),
         Sort::Duration => s.total_active_duration_ms().to_string(),
         Sort::Messages => s.message_count.to_string(),
         Sort::Recent => s.last_activity.to_rfc3339_nano(),
+        Sort::Relevance => gojson::format_g(relevance),
     }
 }
 
@@ -745,5 +1073,101 @@ mod tests {
         assert_eq!(escape_like("100%"), r"100\%");
         assert_eq!(escape_like("a_b"), r"a\_b");
         assert_eq!(escape_like(r"back\slash"), r"back\\slash");
+    }
+
+    /// Whitespace separates, tokens are AND'd, and the last one is a prefix.
+    #[test]
+    fn an_fts_query_ands_one_quoted_term_per_word() {
+        assert_eq!(build_fts_query("fix auth bug"), r#""fix" "auth" "bug"*"#);
+        assert_eq!(build_fts_query("  spaced   out  "), r#""spaced" "out"*"#);
+        assert_eq!(build_fts_query("single"), r#""single"*"#);
+    }
+
+    /// Every character FTS5 treats as syntax is re-emitted inside a quoted
+    /// string, so it reaches the tokenizer as text.
+    ///
+    /// The table is the acceptance criterion written out: `- * ^ ( ) : "` and
+    /// the bare boolean keywords. What each *matches* is the tokenizer's
+    /// business — what matters here is that none of them can still be an
+    /// operator, and none of them can end a string early.
+    #[test]
+    fn every_fts_metacharacter_is_emitted_as_a_literal_term() {
+        for (input, want) in [
+            ("-foo", r#""-foo"*"#),
+            ("foo -bar", r#""foo" "-bar"*"#),
+            ("a OR b", r#""a" "OR" "b""#),
+            ("NOT auth", r#""NOT" "auth"*"#),
+            ("a AND b", r#""a" "AND" "b""#),
+            ("^start", r#""^start"*"#),
+            ("wild*card", r#""wild*card"*"#),
+            ("(group)", r#""(group)"*"#),
+            ("col:val", r#""col:val"*"#),
+            // `b)` is two characters and one term, so it stays below the
+            // prefix bar — see `MIN_PREFIX_LEN`.
+            ("NEAR(a b)", r#""NEAR(a" "b)""#),
+            // A lone quote opens a span that never closes and holds nothing.
+            ("\"", ""),
+            ("a\"", r#""a""#),
+            // A token of pure punctuation is a phrase of zero terms, which
+            // would AND the whole query down to nothing.
+            ("auth *", r#""auth"*"#),
+            ("-", ""),
+            ("fix auth ---", r#""fix" "auth"*"#),
+        ] {
+            assert_eq!(build_fts_query(input), want, "input {input:?}");
+        }
+    }
+
+    /// A user-typed phrase is the one piece of query syntax kept, because it is
+    /// the one people mean.
+    #[test]
+    fn a_user_typed_phrase_stays_one_phrase() {
+        assert_eq!(
+            build_fts_query("\"auth failed\" retry"),
+            r#""auth failed" "retry"*"#
+        );
+        // Closing the quote says the word is finished, so no prefix is added.
+        assert_eq!(build_fts_query("\"auth failed\""), r#""auth failed""#);
+        // Half-typed, though, is still as-you-type.
+        assert_eq!(build_fts_query("\"auth fail"), r#""auth fail"*"#);
+        // A doubled quote in the *input* is not read as FTS5's escape — every
+        // `"` opens or closes a span, so this is two phrases. That is the point
+        // of quoting on the way out rather than interpreting on the way in:
+        // there is no input spelling that reaches the grammar.
+        assert_eq!(build_fts_query("\"say \"\"hi\""), r#""say " "hi""#);
+    }
+
+    /// `"a"*` matches most of a corpus, so the first keystroke must not flash
+    /// every session into the list.
+    #[test]
+    fn a_one_character_final_token_is_not_extended_into_a_prefix() {
+        assert_eq!(build_fts_query("a"), r#""a""#);
+        assert_eq!(build_fts_query("ab"), r#""ab"*"#);
+        assert_eq!(build_fts_query("auth a"), r#""auth" "a""#);
+        // The bar is the alphanumerics, not the token's length: `-a` is two
+        // characters and one term, and `"-a"*` is the `a*` this rule exists to
+        // prevent.
+        assert_eq!(build_fts_query("-a"), r#""-a""#);
+        assert_eq!(build_fts_query("-ab"), r#""-ab"*"#);
+    }
+
+    /// A NUL reaching FTS5's parser is an error, and `%00` in a query string
+    /// decodes to one — so control characters are separators here, which is
+    /// what they already are to `unicode61`.
+    #[test]
+    fn control_characters_are_separators_rather_than_text() {
+        assert_eq!(build_fts_query("fix\u{0}auth"), r#""fix" "auth"*"#);
+        assert_eq!(build_fts_query("line\nbreak"), r#""line" "break"*"#);
+        assert_eq!(build_fts_query("\u{0}"), "");
+        assert_eq!(build_fts_query("tab\tsep"), r#""tab" "sep"*"#);
+    }
+
+    /// Nothing left to search for is not an empty query — an empty MATCH
+    /// argument is a syntax error, so it has to read as "no FTS half".
+    #[test]
+    fn an_input_of_only_separators_produces_no_expression() {
+        for input in ["\"\"", "\"\"\"\"", " ", "\u{0}\u{1}", "-", "***", "()", ":"] {
+            assert_eq!(build_fts_query(input), "", "input {input:?}");
+        }
     }
 }

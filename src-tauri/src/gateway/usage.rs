@@ -1,0 +1,1093 @@
+//! One row per served gateway request (#425).
+//!
+//! # Two hard parts, and neither is the SQL
+//!
+//! **Where the write happens.** A usage row must never be able to fail a
+//! request the user has already paid for — the tokens are spent by the time
+//! there is anything to record. So [`Accounting::finish`] spawns and is never
+//! awaited, the insert goes through [`db::blocking`] (#366: a rusqlite call
+//! meets a five-second `busy_timeout`, and this listener's streaming path is
+//! not on the blocking pool), and every failure below it is a `warn` line.
+//!
+//! **How a stream reports what it saw.** A finished response carries its own
+//! `usage`; a stream that was cut does not, and there may never be a final
+//! chunk at all. So the counters live in a shared accumulator that the stream
+//! updates as chunks pass ([`meter`]), and the terminal arm flushes whatever is
+//! in it. That is what makes an interrupted stream record the tokens actually
+//! consumed rather than nothing.
+//!
+//! # Exactly one row, enforced rather than hoped for
+//!
+//! Both surfaces have three ways to end — a clean finish, an upstream error,
+//! and the client going away — and the Anthropic surface reaches them through
+//! a translation layer that owns its own state machine. A missed arm writes no
+//! row; a doubled arm writes two, and a usage log that sometimes double-counts
+//! is worse than one that sometimes misses, because nothing in the numbers says
+//! which. [`Accounting`] therefore carries a `done` flag and `finish` is a
+//! compare-exchange: the first call wins, every later one returns.
+//!
+//! # Cost is stored, not derived
+//!
+//! Resolved against the pricing catalog **at write time** and stored, which is
+//! the rule the scanner already enforces for Claude sessions. A later rate
+//! correction must not retroactively rewrite what a past request cost, and
+//! joining the catalog at read time reproduces exactly the
+//! list-versus-dashboard disagreement the Claude side refuses. A model the
+//! catalog does not price stores `NULL` with `unpriced = 1` — **never `0.0`**,
+//! because unpriced models are disclosed rather than zeroed and a total has to
+//! read as a floor. That case is common here rather than exotic: the catalog is
+//! seeded for Claude models, so OpenAI, Gemini and GLM aliases routinely miss.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use ferrox_providers::providers::ProviderStream;
+use ferrox_providers::types::{cache_tokens, Usage};
+
+use crate::gateway::config;
+use crate::native::{db, gotime, pricing};
+
+/// How a request ended, as the `status` column stores it.
+///
+/// `Interrupted` and `UpstreamError` are separate on purpose: a single "error"
+/// would leave a dashboard unable to tell a provider outage from a closed tab,
+/// and those call for opposite reactions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    /// The response completed.
+    Ok,
+    /// Every target failed, or the stream errored mid-flight.
+    UpstreamError,
+    /// The client went away before the response finished.
+    Interrupted,
+    /// Never dispatched — an unknown alias, or one with no enabled target.
+    Refused,
+}
+
+impl Status {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::UpstreamError => "upstream_error",
+            Self::Interrupted => "interrupted",
+            Self::Refused => "refused",
+        }
+    }
+
+    /// How a dispatch failure is classified.
+    ///
+    /// The two arms that never reached a provider are the operator's or the
+    /// client's mistake rather than an upstream fault, and counting them as
+    /// outages would make a misconfigured alias look like a failing provider.
+    pub fn for_dispatch_error(e: &ferrox_providers::error::ProxyError) -> Self {
+        use ferrox_providers::error::ProxyError;
+        match e {
+            ProxyError::ModelNotFound(_) | ProxyError::ConfigError(_) => Self::Refused,
+            _ => Self::UpstreamError,
+        }
+    }
+}
+
+/// Everything known about a request before its outcome is.
+pub struct Seed {
+    pub alias: String,
+    pub provider: String,
+    pub model_id: String,
+    pub surface: &'static str,
+    pub streamed: bool,
+    pub token_sub: String,
+    pub started: std::time::Instant,
+    pub at: DateTime<Utc>,
+}
+
+/// The token counts observed so far.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Observed {
+    pub prompt: u64,
+    pub completion: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+}
+
+/// # Why four separate atomics rather than one `Mutex<Observed>`
+///
+/// Four independent stores are not an atomic group, so in general a reader
+/// could see three fields from one chunk and one from the next. That cannot
+/// happen here, and the reason is worth writing down because it is a property
+/// of the *callers* rather than of this type: the counters are written only by
+/// [`meter`], which runs inside the stream, and a stream advances only when
+/// something polls it — which is the single frame loop that also calls
+/// [`Accounting::finish`]. One task, so a write is never in flight while that
+/// task reads.
+///
+/// If a second poller is ever introduced, this stops being true and a `Mutex`
+/// becomes the honest answer. `done` is genuinely concurrent by contrast, which
+/// is why it is a compare-exchange and not a `bool`.
+struct Inner {
+    db_path: PathBuf,
+    seed: Seed,
+    prompt: AtomicU64,
+    completion: AtomicU64,
+    cache_read: AtomicU64,
+    cache_write: AtomicU64,
+    done: AtomicBool,
+}
+
+/// The handle a request carries from dispatch to its last frame.
+///
+/// Cloneable, because the streaming path needs one copy inside the metering
+/// adapter and one in the frame loop that ends the request.
+#[derive(Clone)]
+pub struct Accounting {
+    inner: Arc<Inner>,
+}
+
+impl Accounting {
+    pub fn new(db_path: PathBuf, seed: Seed) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                db_path,
+                seed,
+                prompt: AtomicU64::new(0),
+                completion: AtomicU64::new(0),
+                cache_read: AtomicU64::new(0),
+                cache_write: AtomicU64::new(0),
+                done: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    /// Record what a provider reported for one response or chunk.
+    ///
+    /// **Last write wins rather than accumulating**, because every provider in
+    /// `ferrox-providers` reports usage as a running total for the request, not
+    /// as a per-chunk delta — summing them would multiply a long stream's
+    /// prompt tokens by its chunk count. A `None` (most chunks carry none)
+    /// leaves the counters alone, so the last chunk that *did* carry usage is
+    /// what an interrupted stream records.
+    pub fn observe(&self, usage: Option<&Usage>) {
+        let Some(usage) = usage else { return };
+        let (read, write) = cache_tokens(usage);
+        self.inner
+            .prompt
+            .store(u64::from(usage.prompt_tokens), Ordering::Relaxed);
+        self.inner
+            .completion
+            .store(u64::from(usage.completion_tokens), Ordering::Relaxed);
+        self.inner
+            .cache_read
+            .store(u64::from(read), Ordering::Relaxed);
+        self.inner
+            .cache_write
+            .store(u64::from(write), Ordering::Relaxed);
+    }
+
+    /// What has been observed so far.
+    pub fn observed(&self) -> Observed {
+        Observed {
+            prompt: self.inner.prompt.load(Ordering::Relaxed),
+            completion: self.inner.completion.load(Ordering::Relaxed),
+            cache_read: self.inner.cache_read.load(Ordering::Relaxed),
+            cache_write: self.inner.cache_write.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Write the row. **The first call wins; every later one is a no-op.**
+    ///
+    /// Spawned and never awaited — see the module header. Outside a tokio
+    /// runtime (only reachable from a synchronous test) it does nothing rather
+    /// than panicking, which is `tokens::touch`'s behaviour for the same
+    /// reason.
+    pub fn finish(&self, status: Status) {
+        if self
+            .inner
+            .done
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+
+        let observed = self.observed();
+        let duration_ms =
+            u64::try_from(self.inner.seed.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let row = UsageRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            at: self.inner.seed.at,
+            alias: self.inner.seed.alias.clone(),
+            provider: self.inner.seed.provider.clone(),
+            model_id: self.inner.seed.model_id.clone(),
+            observed,
+            duration_ms,
+            status,
+            streamed: self.inner.seed.streamed,
+            surface: self.inner.seed.surface,
+            token_sub: self.inner.seed.token_sub.clone(),
+        };
+        let db_path = self.inner.db_path.clone();
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        handle.spawn(async move {
+            let Some(result) = db::blocking("gateway usage", move || {
+                let inserted = insert(&db_path, &row);
+                // Retention rides the write that is already off the request
+                // path and already on the blocking pool (#428), behind a
+                // once-a-day gate — no new thread, no new timer, and nothing
+                // added to the latency of a served request. It runs *after* the
+                // insert so a failing prune can never cost the row it was meant
+                // to make room for.
+                prune_if_due(&db_path);
+                inserted
+            })
+            .await
+            else {
+                return;
+            };
+            if let Err(e) = result {
+                // Dropped, never propagated: the request is already answered
+                // and the money already spent.
+                log::warn!("gateway usage row not recorded: {e}");
+            }
+        });
+    }
+}
+
+/// Wrap a provider stream so every chunk's usage reaches `accounting`.
+///
+/// The Anthropic surface needs this rather than reading usage in its own frame
+/// loop: `openai_stream_to_anthropic_frames` **consumes** the provider stream
+/// and emits protocol frames, so by the time the frames are visible the
+/// per-chunk `usage` is gone. Metering before the translation is what ferrox
+/// does too, for the same reason.
+pub fn meter(stream: ProviderStream, accounting: Accounting) -> ProviderStream {
+    use tokio_stream::StreamExt as _;
+    Box::pin(stream.map(move |item| {
+        if let Ok(chunk) = &item {
+            accounting.observe(chunk.usage.as_ref());
+        }
+        item
+    }))
+}
+
+/// One row, ready to insert.
+pub struct UsageRow {
+    pub id: String,
+    pub at: DateTime<Utc>,
+    pub alias: String,
+    pub provider: String,
+    pub model_id: String,
+    pub observed: Observed,
+    pub duration_ms: u64,
+    pub status: Status,
+    pub streamed: bool,
+    pub surface: &'static str,
+    pub token_sub: String,
+}
+
+/// Resolve the cost and insert. Blocking; callers go through [`db::blocking`].
+fn insert(db_path: &std::path::Path, row: &UsageRow) -> Result<(), String> {
+    let conn = db::open_read_write(db_path)?;
+
+    // One connection serves both the catalog read and the insert. The resolver
+    // is a snapshot of the whole rate table, so this is a read of a small
+    // seeded reference table rather than a per-row join.
+    let (cost_usd, unpriced) = match pricing::Resolver::load(&conn) {
+        Ok(resolver) => price(&resolver, row),
+        Err(e) => {
+            // A catalog this process cannot read is not the same as a model it
+            // does not price, but the row is still worth having: recording the
+            // tokens with the cost disclosed as unknown is strictly better than
+            // recording nothing.
+            log::warn!("gateway usage: pricing catalog unavailable, recording unpriced: {e}");
+            (None, true)
+        }
+    };
+
+    conn.execute(
+        "INSERT INTO gateway_usage_log \
+         (id, created_at, alias, provider, model_id, prompt_tokens, completion_tokens, \
+          cache_read_tokens, cache_write_tokens, duration_ms, status, streamed, surface, \
+          token_sub, cost_usd, unpriced) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        rusqlite::params![
+            row.id,
+            // `now_go_text` rather than RFC 3339: every DATETIME column in this
+            // schema holds Go's `time.Time.String()` and is compared **as
+            // text**, so another spelling sorts into the wrong place against
+            // every row beside it — a silently wrong list rather than an error.
+            gotime::go_text(&row.at),
+            row.alias,
+            row.provider,
+            row.model_id,
+            row.observed.prompt as i64,
+            row.observed.completion as i64,
+            row.observed.cache_read as i64,
+            row.observed.cache_write as i64,
+            row.duration_ms as i64,
+            row.status.as_str(),
+            row.streamed,
+            row.surface,
+            row.token_sub,
+            cost_usd,
+            unpriced,
+        ],
+    )
+    .map_err(|e| format!("inserting gateway usage row: {e}"))?;
+    Ok(())
+}
+
+/// `(cost_usd, unpriced)` for a row.
+///
+/// Split out from [`insert`] so the catalog behaviour is testable without a
+/// database write, and because the `None` arm is the one that must not drift:
+/// it returns `(None, true)`, never `(Some(0.0), false)`.
+fn price(resolver: &pricing::Resolver, row: &UsageRow) -> (Option<f64>, bool) {
+    let Some(resolved) = resolver.resolve(&row.model_id, row.at) else {
+        return (None, true);
+    };
+    let cost = resolved.rate.price(pricing::PricedUsage {
+        input_tokens: row.observed.prompt as i64,
+        output_tokens: row.observed.completion as i64,
+        cache_read_tokens: row.observed.cache_read as i64,
+        // Providers report one combined cache-creation figure with no TTL
+        // split, so there is nothing to attribute to the 1h band. The 5m band
+        // is Anthropic's default TTL and therefore the right guess; picking the
+        // 1h band instead would over-report, and splitting the number between
+        // them would invent a breakdown nobody measured.
+        cache_creation_5m_tokens: row.observed.cache_write as i64,
+        cache_creation_1h_tokens: 0,
+    });
+    (Some(cost.total_cost_usd), false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seed() -> Seed {
+        Seed {
+            alias: "my-alias".into(),
+            provider: "p1".into(),
+            model_id: "claude-sonnet-4-5".into(),
+            surface: "openai",
+            streamed: false,
+            token_sub: "token-1".into(),
+            started: std::time::Instant::now(),
+            at: Utc::now(),
+        }
+    }
+
+    fn usage(prompt: u32, completion: u32) -> Usage {
+        Usage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn every_status_has_a_distinct_stored_spelling() {
+        let all = [
+            Status::Ok,
+            Status::UpstreamError,
+            Status::Interrupted,
+            Status::Refused,
+        ];
+        let spellings: std::collections::BTreeSet<_> = all.iter().map(|s| s.as_str()).collect();
+        assert_eq!(
+            spellings.len(),
+            all.len(),
+            "two statuses sharing a string would silently merge in every aggregate"
+        );
+        assert_eq!(Status::Ok.as_str(), "ok");
+        assert_eq!(Status::Interrupted.as_str(), "interrupted");
+    }
+
+    /// The classification that decides whether a misconfigured alias looks like
+    /// a failing provider.
+    #[test]
+    fn a_dispatch_failure_that_never_reached_a_provider_is_refused() {
+        use ferrox_providers::error::ProxyError;
+        assert_eq!(
+            Status::for_dispatch_error(&ProxyError::ModelNotFound("x".into())),
+            Status::Refused
+        );
+        assert_eq!(
+            Status::for_dispatch_error(&ProxyError::ConfigError("x".into())),
+            Status::Refused
+        );
+        assert_eq!(
+            Status::for_dispatch_error(&ProxyError::ProviderError {
+                provider: "p".into(),
+                status: 500,
+                message: "m".into(),
+            }),
+            Status::UpstreamError
+        );
+        assert_eq!(
+            Status::for_dispatch_error(&ProxyError::UpstreamTimeout("t".into())),
+            Status::UpstreamError
+        );
+    }
+
+    /// Provider usage is a running total, so the counters must be *replaced*
+    /// rather than summed.
+    ///
+    /// The failure this pins is quiet and large: a 200-chunk stream that
+    /// accumulated would report 200× the prompt tokens, and a cost to match.
+    #[test]
+    fn observing_replaces_rather_than_accumulates() {
+        let acct = Accounting::new(PathBuf::from("/nonexistent"), seed());
+        acct.observe(Some(&usage(15, 1)));
+        acct.observe(Some(&usage(15, 2)));
+        acct.observe(Some(&usage(15, 3)));
+        assert_eq!(
+            acct.observed(),
+            Observed {
+                prompt: 15,
+                completion: 3,
+                cache_read: 0,
+                cache_write: 0
+            }
+        );
+    }
+
+    /// Most chunks carry no usage; they must not reset what the last one said,
+    /// or an interrupted stream records zeros.
+    #[test]
+    fn a_chunk_with_no_usage_leaves_the_counters_alone() {
+        let acct = Accounting::new(PathBuf::from("/nonexistent"), seed());
+        acct.observe(Some(&usage(15, 7)));
+        acct.observe(None);
+        acct.observe(None);
+        assert_eq!(acct.observed().completion, 7);
+    }
+
+    /// The cache split comes from `ferrox-providers`' single reading, whose
+    /// tuple is `(read, write)` while the carrier underneath is
+    /// `(creation, read)`. Getting it backwards swaps two columns that look
+    /// equally plausible in a dashboard.
+    #[test]
+    fn the_cache_tokens_split_is_read_then_write() {
+        let mut u = usage(47, 2);
+        u.extra.insert(
+            "cache_read_input_tokens".to_string(),
+            serde_json::json!(3968),
+        );
+        u.extra.insert(
+            "cache_creation_input_tokens".to_string(),
+            serde_json::json!(100),
+        );
+        let acct = Accounting::new(PathBuf::from("/nonexistent"), seed());
+        acct.observe(Some(&u));
+        let observed = acct.observed();
+        assert_eq!(observed.cache_read, 3968);
+        assert_eq!(observed.cache_write, 100);
+    }
+
+    /// Exactly one row, whatever the caller does.
+    ///
+    /// Both surfaces have three terminal arms and the Anthropic one runs its
+    /// frames through a translation layer; a double-fire is the realistic
+    /// mistake, and a usage log that sometimes double-counts is worse than one
+    /// that sometimes misses because the numbers do not say which.
+    #[tokio::test]
+    async fn finish_writes_once_however_many_times_it_is_called() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        {
+            let mut conn = db::ensure_database(file.path()).expect("create");
+            crate::native::migrate::apply(&mut conn).expect("migrate");
+        }
+
+        let acct = Accounting::new(file.path().to_path_buf(), seed());
+        acct.observe(Some(&usage(15, 12)));
+        acct.finish(Status::Ok);
+        acct.finish(Status::Interrupted);
+        acct.finish(Status::UpstreamError);
+
+        // `finish` spawns; wait for the write rather than sleeping a fixed amount.
+        let mut rows = 0;
+        for _ in 0..200 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            let conn = db::open_read_only(file.path()).expect("open");
+            rows = conn
+                .query_row("SELECT COUNT(*) FROM gateway_usage_log", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .expect("count");
+            if rows > 0 {
+                break;
+            }
+        }
+        assert_eq!(rows, 1, "three finishes must leave exactly one row");
+
+        let conn = db::open_read_only(file.path()).expect("open");
+        let (status, prompt, completion): (String, i64, i64) = conn
+            .query_row(
+                "SELECT status, prompt_tokens, completion_tokens FROM gateway_usage_log",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .expect("row");
+        assert_eq!(status, "ok", "the first finish is the one that counts");
+        assert_eq!((prompt, completion), (15, 12));
+    }
+
+    /// An unwritable database must not panic, hang, or otherwise reach the
+    /// caller — the request is already answered by the time this runs.
+    #[tokio::test]
+    async fn an_unwritable_database_is_dropped_rather_than_raised() {
+        let acct = Accounting::new(
+            PathBuf::from("/nonexistent/directory/agento.db"),
+            Seed {
+                streamed: true,
+                ..seed()
+            },
+        );
+        acct.finish(Status::Ok);
+        // Nothing to assert but the absence of a panic; give the spawned task a
+        // chance to run and fail.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    /// A model the catalog does not price stores `NULL` and `unpriced = 1` —
+    /// never `0.0`, which would read as "this request was free".
+    #[test]
+    fn an_unpriced_model_is_disclosed_rather_than_zeroed() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let conn = {
+            let mut conn = db::ensure_database(file.path()).expect("create");
+            crate::native::migrate::apply(&mut conn).expect("migrate");
+            crate::native::pricing_seed::seed(&conn).expect("seed the catalog");
+            conn
+        };
+        let resolver = pricing::Resolver::load(&conn).expect("resolver");
+
+        let row = UsageRow {
+            id: "id".into(),
+            at: Utc::now(),
+            alias: "a".into(),
+            provider: "p".into(),
+            model_id: "definitely-not-a-real-model-xyz".into(),
+            observed: Observed {
+                prompt: 1000,
+                completion: 1000,
+                cache_read: 0,
+                cache_write: 0,
+            },
+            duration_ms: 1,
+            status: Status::Ok,
+            streamed: false,
+            surface: "openai",
+            token_sub: "t".into(),
+        };
+        assert_eq!(
+            price(&resolver, &row),
+            (None, true),
+            "an unknown model must be disclosed as unpriced, not costed at zero"
+        );
+
+        // ...and a model it does price produces a real, positive figure, so the
+        // assertion above is not passing because pricing is broken outright.
+        let priced = UsageRow {
+            model_id: "claude-sonnet-4-5-20250929".into(),
+            ..row
+        };
+        let (cost, unpriced) = price(&resolver, &priced);
+        assert!(!unpriced);
+        assert!(
+            cost.is_some_and(|c| c > 0.0),
+            "a catalogued model must cost something; got {cost:?}"
+        );
+    }
+}
+
+// ── Reading the log back (#426's `GET /api/gateway/usage`) ───────────────────
+
+/// One recorded request, as a read sees it.
+///
+/// Deliberately not [`UsageRow`]: that type is what a *write* assembles and
+/// carries a `&'static str` surface and a not-yet-resolved cost. This is what
+/// came back out, cost included.
+#[derive(Debug, Clone)]
+pub struct Record {
+    pub at: DateTime<Utc>,
+    pub alias: String,
+    pub provider: String,
+    pub model_id: String,
+    pub observed: Observed,
+    pub duration_ms: i64,
+    pub status: String,
+    pub streamed: bool,
+    pub surface: String,
+    /// The `sub` of the token that served the request — an `api_tokens` row id.
+    ///
+    /// Empty for a row written before a token could be attributed. It is the key
+    /// the per-client breakdown groups on, which is what turns "revoke this
+    /// credential" from a guess into a decision (#428).
+    pub token_sub: String,
+    pub cost_usd: Option<f64>,
+    pub unpriced: bool,
+}
+
+/// Every row in `[from, to]`, optionally narrowed to one alias.
+///
+/// # Why the window is compared as text
+///
+/// `created_at` holds Go's `time.Time.String()`, and every DATETIME column in
+/// this schema is compared **as text** — that is the whole reason
+/// `gotime::go_text` exists rather than each writer formatting its own.
+/// Parsing every row to filter in Rust would read the whole table to answer a
+/// one-day question.
+///
+/// That is sound because **`go_text` is lexicographically ordered**, and the
+/// non-obvious part is the fraction, which is variable-width because trailing
+/// zeros are trimmed. It still sorts right: the character after the seconds is
+/// `.` for a row that has one and `' '` for a row that does not, and `'.' >
+/// ' '`, so an unfractioned instant sorts before every fractioned one in the
+/// same second — which is exactly its chronological place, since no fraction
+/// means `.0`. Within a fraction the digits compare left to right and a shorter
+/// one ends at the space, which is below every digit. Every row is written
+/// `+0000 UTC`, so there is no second zone to break the ordering.
+/// `the_stored_timestamp_sorts_as_text_the_way_it_sorts_in_time` pins it.
+///
+/// The bound is therefore the plain rendering of `to`. An earlier version
+/// appended a sentinel to "reach past any fraction"; that was reasoning about a
+/// problem that does not exist — a fractioned row in `to`'s second is *after*
+/// `to` and is correctly excluded — and the sentinel changed no answer.
+pub fn load_window(
+    db_path: &std::path::Path,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    alias: &str,
+) -> Result<Vec<Record>, String> {
+    let conn = db::open_read_only(db_path)?;
+    let lower = gotime::go_text(&from);
+    let upper = gotime::go_text(&to);
+
+    let sql = "SELECT created_at, alias, provider, model_id, prompt_tokens, completion_tokens, \
+               cache_read_tokens, cache_write_tokens, duration_ms, status, streamed, surface, \
+               token_sub, cost_usd, unpriced \
+               FROM gateway_usage_log \
+               WHERE created_at >= ?1 AND created_at <= ?2 \
+               AND (?3 = '' OR alias = ?3) \
+               ORDER BY created_at";
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("preparing gateway usage read: {e}"))?;
+    let rows = stmt
+        .query_map(rusqlite::params![lower, upper, alias], |r| {
+            let created_at: String = r.get(0)?;
+            Ok((
+                created_at,
+                Record {
+                    // Replaced below; a parse failure decides the row's fate
+                    // outside the closure, where an error can be reported.
+                    at: from,
+                    alias: r.get(1)?,
+                    provider: r.get(2)?,
+                    model_id: r.get(3)?,
+                    observed: Observed {
+                        prompt: r.get::<_, i64>(4)?.max(0) as u64,
+                        completion: r.get::<_, i64>(5)?.max(0) as u64,
+                        cache_read: r.get::<_, i64>(6)?.max(0) as u64,
+                        cache_write: r.get::<_, i64>(7)?.max(0) as u64,
+                    },
+                    duration_ms: r.get(8)?,
+                    status: r.get(9)?,
+                    streamed: r.get(10)?,
+                    surface: r.get(11)?,
+                    token_sub: r.get(12)?,
+                    cost_usd: r.get(13)?,
+                    unpriced: r.get(14)?,
+                },
+            ))
+        })
+        .map_err(|e| format!("reading gateway usage: {e}"))?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (created_at, mut record) = row.map_err(|e| format!("reading gateway usage: {e}"))?;
+        // A row this process cannot place in time is **skipped**, not defaulted:
+        // it can only come from a hand-edited database, and folding it into the
+        // window's first bucket would put spend on a day it did not happen.
+        match gotime::GoTime::parse_go_string(&created_at) {
+            Ok(t) => record.at = t.instant(),
+            Err(e) => {
+                log::warn!("gateway usage row has an unreadable created_at, skipping it: {e}");
+                continue;
+            }
+        }
+        out.push(record);
+    }
+    Ok(out)
+}
+
+// ── Retention (#428) ─────────────────────────────────────────────────────────
+
+/// How often the prune is allowed to run, in seconds.
+///
+/// A day. The horizon is measured in days, so running more often deletes the
+/// same rows a second time for nothing, and `Accounting::finish` calls the gate
+/// on **every served request** — an ungated prune would be a full `DELETE`
+/// statement per request against a table the request is already writing to.
+/// `tokens::touch`'s minute throttle is the precedent and the shape.
+const PRUNE_INTERVAL_SECS: i64 = 86_400;
+
+/// When the prune last ran, as a Unix second. `0` means "not this process yet",
+/// which is why the first call after launch always passes.
+fn last_pruned() -> &'static AtomicI64 {
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    &LAST
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default()
+}
+
+/// Whether a prune is due, and — if it is — claiming the slot.
+///
+/// A pure function of the two clocks, tested as one: the prune itself is
+/// spawned, so a test of *that* would race. This is `tokens::due`'s reasoning
+/// applied to a longer interval, with one difference: the claim is a
+/// compare-exchange rather than a `Mutex` insert, because there is a single slot
+/// rather than one per token and two concurrent requests must not both win it.
+///
+/// A clock that jumps **backwards** (an NTP correction, a user setting the
+/// date) leaves `last` in the future and simply defers the prune until the wall
+/// clock catches up. That is the right failure: a prune deferred is a table that
+/// grows for a while, and the alternative — treating any surprise as "due" —
+/// would delete on every request for as long as the skew lasted.
+fn prune_due(now: i64) -> bool {
+    let last = last_pruned();
+    let seen = last.load(Ordering::SeqCst);
+    if seen != 0 && now - seen < PRUNE_INTERVAL_SECS {
+        return false;
+    }
+    last.compare_exchange(seen, now, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// Delete every usage row older than `days`, returning how many went.
+///
+/// `days == 0` is the supported "keep everything" and returns immediately
+/// without opening a connection — it is not a degenerate horizon of zero days,
+/// which would delete the entire table.
+///
+/// The cutoff is `gotime::go_text`, for [`load_window`]'s reason: `created_at`
+/// holds Go's `time.Time.String()` and is compared as text, which is sound
+/// because that rendering is lexicographically ordered. `<` rather than `<=`,
+/// so a row landing exactly on the horizon is kept — the boundary belongs to the
+/// window the user asked to retain.
+pub fn prune(db_path: &std::path::Path, days: u32) -> Result<usize, String> {
+    prune_since(db_path, days, Utc::now())
+}
+
+/// [`prune`] with the "now" it measures back from supplied.
+///
+/// Split out purely so the cut is *constructible*: the boundary is the whole
+/// question a `<` versus `<=` gets wrong, and with `Utc::now()` read inside there
+/// is no way to write a row that lands exactly on it — the first version of this
+/// test put its "boundary" row five seconds late, so flipping the comparison left
+/// it green. Not a test seam in the `#[cfg(test)]` sense: it takes no dependency
+/// and hides nothing from a shipped build.
+fn prune_since(db_path: &std::path::Path, days: u32, now: DateTime<Utc>) -> Result<usize, String> {
+    if days == 0 {
+        return Ok(0);
+    }
+    let Some(cutoff) = now.checked_sub_signed(chrono::Duration::days(days as i64)) else {
+        // Unreachable for any value `validate` admits; refusing beats deleting
+        // against a cutoff that saturated.
+        return Err(format!("retention horizon of {days} days is out of range"));
+    };
+
+    // An empty log is the ordinary state of an install that has never switched
+    // the gateway on, and the launch sweep runs on **every** boot — so asking a
+    // WAL reader (which never waits on a writer) whether there is anything at
+    // all is what keeps `CLAUDE.md`'s "an install that never configures one pays
+    // a single `SELECT` at boot" true, rather than a write-lock acquisition
+    // against an empty table. Unreadable is not "empty": fall through and let
+    // the write path report the real error.
+    if let Ok(conn) = db::open_read_only(db_path) {
+        let any: Result<i64, _> =
+            conn.query_row("SELECT EXISTS(SELECT 1 FROM gateway_usage_log)", [], |r| {
+                r.get(0)
+            });
+        if matches!(any, Ok(0)) {
+            return Ok(0);
+        }
+    }
+
+    let conn = db::open_read_write(db_path)?;
+    conn.execute(
+        "DELETE FROM gateway_usage_log WHERE created_at < ?1",
+        rusqlite::params![gotime::go_text(&cutoff)],
+    )
+    .map_err(|e| format!("pruning gateway usage: {e}"))
+}
+
+/// Read the configured horizon and prune, logging the outcome. Blocking.
+///
+/// Reads the horizon itself rather than taking it as an argument, so the two
+/// callers — the once-a-day gate on the write path and the launch sweep — cannot
+/// disagree about which value is in force.
+fn prune_now(db_path: &std::path::Path) {
+    let days = match config::load_settings(db_path) {
+        Ok(settings) => settings.usage_retention_days,
+        Err(e) => {
+            log::warn!("gateway usage prune: settings unavailable, skipping: {e}");
+            return;
+        }
+    };
+    match prune(db_path, days) {
+        // Only a prune that did something is worth a line; a daily no-op on a
+        // quiet install would be pure noise in a 5 MiB log.
+        Ok(rows) if rows > 0 => {
+            log::info!("gateway usage pruned rows={rows} older_than_days={days}")
+        }
+        Ok(_) => {}
+        // Dropped exactly as a failed insert is: nothing downstream can act on
+        // it, and a retention sweep must never be able to fail a request.
+        Err(e) => log::warn!("gateway usage not pruned: {e}"),
+    }
+}
+
+/// Prune off the request path, at most once a day.
+///
+/// Called from [`Accounting::finish`]'s spawned write, which is already off the
+/// request path and already on the blocking pool — so this costs one relaxed
+/// atomic load per served request and nothing else on the 86 399 seconds out of
+/// 86 400 when it is not due.
+fn prune_if_due(db_path: &std::path::Path) {
+    if !prune_due(unix_now()) {
+        return;
+    }
+    prune_now(db_path);
+}
+
+/// The launch sweep, spawned by `lib.rs`.
+///
+/// Without it an app that is opened for ten minutes a week — which is the
+/// ordinary way a desktop app is used — would only ever prune if a gateway
+/// request happened to land more than a day after the last one. It claims the
+/// same daily slot, so a launch immediately followed by traffic prunes once
+/// rather than twice.
+pub async fn prune_at_startup(db_path: std::path::PathBuf) {
+    if !prune_due(unix_now()) {
+        return;
+    }
+    // #366: a `DELETE` meeting a lock held by the session scanner's batch writer
+    // parks its thread for up to the five-second `busy_timeout`, and this is
+    // spawned onto a runtime worker rather than reached from `proxy.rs`'s
+    // blocking pool — so the hand-off is required, not decorative.
+    db::blocking("gateway usage prune", move || prune_now(&db_path)).await;
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn migrated() -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let mut conn = db::ensure_database(file.path()).expect("create");
+        crate::native::migrate::apply(&mut conn).expect("migrate");
+        file
+    }
+
+    /// Insert a row at an exact instant, bypassing `insert`'s pricing lookup —
+    /// the point here is `created_at` and nothing else.
+    fn row_at(db_path: &std::path::Path, id: &str, at: DateTime<Utc>) {
+        let conn = db::open_read_write(db_path).expect("open");
+        conn.execute(
+            "INSERT INTO gateway_usage_log (id, created_at, alias, provider, model_id, status, surface) \
+             VALUES (?1, ?2, 'a', 'p', 'm', 'ok', 'openai')",
+            rusqlite::params![id, gotime::go_text(&at)],
+        )
+        .expect("insert");
+    }
+
+    fn ids(db_path: &std::path::Path) -> Vec<String> {
+        let conn = db::open_read_only(db_path).expect("open");
+        let mut stmt = conn
+            .prepare("SELECT id FROM gateway_usage_log ORDER BY id")
+            .expect("prepare");
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .expect("query")
+            .map(|r| r.expect("row"))
+            .collect();
+        rows
+    }
+
+    /// The horizon is a cut, and which side of it the boundary row falls on is
+    /// the whole question a `<` versus `<=` gets wrong.
+    ///
+    /// `prune_since` rather than `prune` so the cut is a value this test holds:
+    /// with `Utc::now()` read inside, a row landing *exactly* on it cannot be
+    /// constructed, and a "boundary" row placed a few seconds late is on the
+    /// keep side of both comparisons — which is how the first version of this
+    /// test stayed green against the very flip it is named for.
+    #[test]
+    fn a_prune_deletes_strictly_older_rows_and_keeps_the_boundary() {
+        let file = migrated();
+        let now = Utc.with_ymd_and_hms(2026, 8, 24, 12, 0, 0).unwrap();
+        let cut = now - chrono::Duration::days(90);
+
+        row_at(file.path(), "ancient", now - chrono::Duration::days(400));
+        row_at(file.path(), "just-past", cut - chrono::Duration::seconds(1));
+        // Exactly on the cut. `<` keeps it; `<=` would delete it, and that is
+        // the only row in this fixture that tells the two apart.
+        row_at(file.path(), "on-the-cut", cut);
+        row_at(
+            file.path(),
+            "just-inside",
+            cut + chrono::Duration::seconds(1),
+        );
+        row_at(file.path(), "fresh", now - chrono::Duration::days(1));
+
+        let deleted = prune_since(file.path(), 90, now).expect("prune");
+        assert_eq!(deleted, 2, "only the two rows before the cut go");
+        assert_eq!(
+            ids(file.path()),
+            vec!["fresh", "just-inside", "on-the-cut"],
+            "the row on the horizon belongs to the window the user asked to keep"
+        );
+    }
+
+    /// `0` is an opt-out, not a horizon of zero days. Getting this backwards
+    /// deletes the entire table on the first save of "keep everything".
+    #[test]
+    fn a_retention_of_zero_deletes_nothing() {
+        let file = migrated();
+        row_at(file.path(), "ancient", Utc.timestamp_opt(0, 0).unwrap());
+        assert_eq!(prune(file.path(), 0).expect("prune"), 0);
+        assert_eq!(ids(file.path()), vec!["ancient"]);
+    }
+
+    /// The gate, as a pure function of the two clocks — the prune it guards is
+    /// spawned, so asserting on the write itself would race.
+    #[test]
+    fn the_gate_fires_once_a_day_however_often_it_is_asked() {
+        // A fresh process has never pruned, so the first ask always wins.
+        last_pruned().store(0, Ordering::SeqCst);
+        let t0 = 1_800_000_000;
+        assert!(prune_due(t0), "the first call after launch is always due");
+        assert!(!prune_due(t0), "a second call in the same instant is not");
+        assert!(
+            !prune_due(t0 + PRUNE_INTERVAL_SECS - 1),
+            "nor is one a second short of the interval"
+        );
+        assert!(
+            prune_due(t0 + PRUNE_INTERVAL_SECS),
+            "the interval elapsing makes it due again"
+        );
+        // A backwards clock jump defers rather than re-firing: `last` is in the
+        // future, so the difference is negative and stays below the interval.
+        assert!(!prune_due(t0 + 60), "a clock that went backwards defers");
+        last_pruned().store(0, Ordering::SeqCst);
+    }
+
+    /// An empty log costs a read, not a write lock.
+    ///
+    /// The launch sweep runs on every boot, and an install that never switched
+    /// the gateway on has an empty table forever — so the sweep must not be a
+    /// write-lock acquisition per launch. Asserted by making the *write* path
+    /// impossible: a read-only database file. An empty log still answers `Ok(0)`
+    /// because it never gets that far; remove the short-circuit and this fails
+    /// with `attempt to write a readonly database`.
+    ///
+    /// The second half is what keeps that true. A permission-based test
+    /// discriminates only while the process cannot ignore permission bits — as
+    /// root it would silently stop failing on the revert, which is the exact
+    /// class of "a test that can stop failing" this issue already fixed twice.
+    /// So the *non-empty* case is asserted on the same read-only file: if the
+    /// bits are being bypassed, that assertion goes red loudly rather than the
+    /// first one going quietly green.
+    #[test]
+    fn an_empty_log_is_pruned_without_opening_a_write_connection() {
+        let readonly = |path: &std::path::Path, on: bool| {
+            let mut perms = std::fs::metadata(path).expect("stat").permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(on);
+            std::fs::set_permissions(path, perms).expect("chmod");
+        };
+
+        let empty = migrated();
+        readonly(empty.path(), true);
+        let pruned = prune(empty.path(), 90);
+
+        // A file with something to delete, made read-only *after* the row lands.
+        let full = migrated();
+        row_at(full.path(), "ancient", Utc.timestamp_opt(0, 0).unwrap());
+        readonly(full.path(), true);
+        let refused = prune(full.path(), 90);
+
+        // Restored before either assertion, so a failure does not also leave
+        // undeletable tempfiles behind and turn one red test into three.
+        readonly(empty.path(), false);
+        readonly(full.path(), false);
+
+        assert_eq!(pruned.expect("an empty log needs no write lock"), 0);
+        assert!(
+            refused.is_err(),
+            "a non-empty log must still reach the write path — if this passes, \
+             the read-only bit is not discriminating and the assertion above \
+             proves nothing"
+        );
+    }
+
+    /// A horizon this build cannot honour must not become a cutoff that
+    /// saturated — that would delete either everything or nothing, silently.
+    #[test]
+    fn an_absurd_horizon_is_refused_rather_than_saturated() {
+        let file = migrated();
+        row_at(file.path(), "fresh", Utc::now());
+        assert!(prune(file.path(), u32::MAX).is_err());
+        assert_eq!(ids(file.path()), vec!["fresh"]);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    /// The property [`load_window`]'s `WHERE` clause rests on.
+    ///
+    /// If text order ever stopped matching time order, the window would return
+    /// the wrong rows — silently, and only near a boundary, which is the
+    /// hardest kind of wrong to notice on a chart.
+    #[test]
+    fn the_stored_timestamp_sorts_as_text_the_way_it_sorts_in_time() {
+        use chrono::TimeZone;
+        let base = Utc.with_ymd_and_hms(2026, 8, 7, 23, 59, 59).unwrap();
+        // Deliberately includes the no-fraction case beside fractioned ones in
+        // the same second, which is where a naive format breaks.
+        let instants = [
+            Utc.with_ymd_and_hms(2026, 8, 7, 23, 59, 58).unwrap(),
+            base,
+            base + chrono::Duration::nanoseconds(250_000_000),
+            base + chrono::Duration::nanoseconds(500_000_000),
+            base + chrono::Duration::nanoseconds(510_000_000),
+            base + chrono::Duration::nanoseconds(999_999_999),
+            Utc.with_ymd_and_hms(2026, 8, 8, 0, 0, 0).unwrap(),
+        ];
+        let texts: Vec<String> = instants.iter().map(gotime::go_text).collect();
+
+        let mut sorted = texts.clone();
+        sorted.sort();
+        assert_eq!(
+            sorted, texts,
+            "chronological order and text order must agree, or a windowed query \
+             returns the wrong rows near its bounds"
+        );
+    }
+}
