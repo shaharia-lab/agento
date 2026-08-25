@@ -87,6 +87,14 @@ use agento_lib::native::settings::{self, DataSettings};
 const BUILD_BUDGET: Duration = Duration::from_secs(6 * 60);
 const POLL: Duration = Duration::from_millis(200);
 
+/// How long the pending count must hold still before the rebuild is called done.
+///
+/// It has to be comfortably longer than one batch's read phase — 100 sessions,
+/// which is ~0.6 s in release and a few seconds in debug — because that is the
+/// window in which a count legitimately sits flat mid-sweep. It is charged to
+/// nothing: the reported build time is taken at the last observed change.
+const SETTLE: Duration = Duration::from_secs(20);
+
 /// Timed runs per query shape, and the floor and ceiling on them.
 ///
 /// The floor exists because a p-value over fewer than three samples is not a
@@ -245,48 +253,70 @@ fn the_index_is_correct_and_measured_over_the_real_corpus() {
 
     // ─── cold build ─────────────────────────────────────────────────────────
     //
-    // Force the rebuild rather than relying on the copy's own state. `sweep`
-    // rebuilds when the stored version disagrees with this build's, and 0 is
-    // what a fresh install and a database that has never been indexed both
-    // carry — so writing it is the one lever that makes this a *cold* build on
-    // any developer's database, including one whose index is already current.
+    // Force the rebuild rather than relying on the copy's own state. Since #446
+    // the version lives on the `session_insights` row, so 0 on every row is what
+    // a fresh install and a database that has never been indexed both carry —
+    // writing it is the one lever that makes this a *cold* build on any
+    // developer's database, including one whose index is already current.
     //
-    // `sweep` itself is private, so the build is driven the only way an
-    // integration test can drive it: start the worker and poll the terminal
-    // condition. The version stamp is that condition — `sweep` records it last,
-    // and only if every batch committed — which is stronger than a row count,
-    // because a row count sits flat for the whole of each batch's read phase and
-    // a test that waits for it to stop moving declares success mid-sweep.
+    // `sweep` is private, so the build is driven the only way an integration test
+    // can drive it: start the worker and poll. **The terminal condition is no
+    // longer a stamp**, because there is none — and it cannot simply be "nothing
+    // is pending", either: a real corpus contains transcripts that cannot be
+    // read, those sessions deliberately stay behind for ever, and a test waiting
+    // for zero would time out on a healthy build. That is the whole point of the
+    // per-row column, so the suite has to allow for it.
+    //
+    // So: converged, not zero. The pending count falls once per committed batch
+    // and then stops, and the loop stops with it — with two guards against the
+    // failure the old comment warned about (a count sits flat for the whole of
+    // each batch's *read* phase, so a naive "stopped changing" declares success
+    // mid-sweep). First, [`SETTLE`] is far longer than a batch. Second, the
+    // reported duration is taken at the **last observed change**, so the settle
+    // window is not charged to the build.
+    let pending_sql = format!(
+        "SELECT COUNT(*) FROM claude_session_cache c
+         LEFT JOIN session_insights i
+                ON c.session_id = i.session_id AND c.project_path = i.project_path
+          WHERE i.session_id IS NULL OR i.search_index_version < {SEARCH_INDEX_VERSION}"
+    );
     {
         let conn = db::open_read_write(&db).expect("open the copy read-write");
-        search::record_version(&conn, 0).expect("force a rebuild");
-        assert_eq!(
-            search::stored_version(&conn).expect("stored_version"),
-            0,
-            "the rebuild lever did not take"
+        conn.execute("UPDATE session_insights SET search_index_version = 0", [])
+            .expect("force a rebuild");
+        assert!(
+            scalar(&conn, &pending_sql) > 0,
+            "the rebuild lever did not take — nothing reads as behind"
         );
     }
 
     let started = Instant::now();
     worker::start(db.clone());
 
-    let mut built = false;
+    let mut behind = i64::MAX;
+    let mut last_change = Instant::now();
+    let mut settled = None;
     while started.elapsed() < BUILD_BUDGET {
         let conn = db::open_read_only(&db).expect("open the copy read-only");
-        let stamped = search::stored_version(&conn).unwrap_or(0) == SEARCH_INDEX_VERSION;
+        let now_behind = scalar(&conn, &pending_sql);
         drop(conn);
-        if stamped {
-            built = true;
+        if now_behind != behind {
+            behind = now_behind;
+            last_change = Instant::now();
+        }
+        if behind == 0 || last_change.elapsed() > SETTLE {
+            settled = Some(last_change.duration_since(started));
             break;
         }
         std::thread::sleep(POLL);
     }
-    let cold_build = started.elapsed();
-    assert!(
-        built,
-        "the index was not rebuilt within {BUILD_BUDGET:?} — the version was \
-         never stamped, which `sweep` does only when every batch committed"
-    );
+    let cold_build = settled.unwrap_or_else(|| {
+        panic!(
+            "the index was still being rebuilt after {BUILD_BUDGET:?}, with \
+             {behind} sessions to go"
+        )
+    });
+    eprintln!("cold build left {behind} sessions behind (unreadable transcripts)");
 
     let conn = db::open_read_write(&db).expect("open the copy read-write");
 
@@ -309,6 +339,32 @@ fn the_index_is_correct_and_measured_over_the_real_corpus() {
         indexed, insights,
         "the index row and the insight row are written in one transaction, so \
          their counts cannot differ"
+    );
+    // …and the same for the rowid side table (#446), which is the one invariant
+    // this change introduces. A stale `rowid_ref` deletes somebody else's row and
+    // a missing one leaves a duplicate that answers twice for ever — neither of
+    // which any query reports. Checked over the real corpus rather than only in
+    // unit tests, because this is the only place the whole write path runs at
+    // scale.
+    let keys = scalar(&conn, "SELECT COUNT(*) FROM session_search_key");
+    assert_eq!(
+        indexed, keys,
+        "the index holds {indexed} rows and the key table {keys}"
+    );
+    let mismatched = scalar(
+        &conn,
+        "SELECT COUNT(*) FROM session_search_key k
+          WHERE NOT EXISTS (
+              SELECT 1 FROM session_search s
+               WHERE s.rowid = k.rowid_ref
+                 AND s.session_id = k.session_id
+                 AND s.project_path = k.project_path
+          )",
+    );
+    assert_eq!(
+        mismatched, 0,
+        "{mismatched} key rows point at the wrong docid — a delete would remove \
+         somebody else's session from the index"
     );
     // Not an equality against `cached`: a transcript that cannot be read is
     // skipped by design, and one whose file vanished between the copy and the
@@ -361,12 +417,13 @@ fn the_index_is_correct_and_measured_over_the_real_corpus() {
     //
     // Two different numbers, and the distinction is the point.
     //
-    // `search::replace` is delete-then-insert, and the delete **scans**: FTS5's
-    // `xBestIndex` accepts only `rowid` and `MATCH`, so a predicate over the
-    // UNINDEXED key columns cannot use an index, and a content-storing table
-    // materializes every scanned row to serve it. That cost grows with the
-    // corpus, and it is what a rowid side table would remove — so it is measured
-    // on its own, against a *full* index, which is the only state in which the
+    // `search::replace` is delete-then-insert, and the delete **used to scan**:
+    // FTS5's `xBestIndex` accepts only `rowid` and `MATCH`, so a predicate over
+    // the UNINDEXED key columns cannot use an index, and a content-storing table
+    // materializes every scanned row to serve it. #439 measured that at 44.57 ms
+    // median and found it to be the whole of the incremental cost; #446's
+    // `session_search_key` is what removed it, and this figure is how that claim
+    // is checked. It is measured on its own, against a *full* index, which is the
     // figure means anything.
     //
     // The worker round trip is the other number: the whole incremental path a
@@ -465,7 +522,7 @@ fn the_index_is_correct_and_measured_over_the_real_corpus() {
         cold_build.as_secs_f64() * 1000.0 / indexed as f64
     );
     eprintln!(
-        "incremental: delete  {:>9.2?}  median of {INCREMENTAL_SAMPLES} (this is the scan)",
+        "incremental: delete  {:>9.2?}  median of {INCREMENTAL_SAMPLES} (keyed on the rowid since #446)",
         median(deletes)
     );
     eprintln!(
@@ -708,7 +765,7 @@ fn worker_round_trip(db: &Path, doc: &SearchDoc) -> Duration {
 
     while started.elapsed() < BUILD_BUDGET {
         let conn = db::open_read_only(db).expect("open the copy read-only");
-        let still = store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION)
+        let still = store::needs_processing(&conn, CURRENT_PROCESSOR_VERSION, SEARCH_INDEX_VERSION)
             .expect("needs_processing")
             .into_iter()
             .any(|p| p.session_id == pending.session_id && p.project_path == pending.project_path);
