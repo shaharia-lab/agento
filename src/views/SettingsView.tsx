@@ -1615,22 +1615,22 @@ function MonitoringSection({
       {mon && (
         <>
           <FormRow label="Export telemetry">
-            <span className="mono selectable">{mon.enabled ? "on" : "off"}</span>
+            <span className="mono">{mon.enabled ? "on" : "off"}</span>
           </FormRow>
           <FormRow label="Metrics exporter">
-            <span className="mono selectable">{mon.metrics_exporter || "none"}</span>
+            <span className="mono">{mon.metrics_exporter || "none"}</span>
           </FormRow>
           <FormRow label="Logs exporter">
-            <span className="mono selectable">{mon.logs_exporter || "none"}</span>
+            <span className="mono">{mon.logs_exporter || "none"}</span>
           </FormRow>
           <FormRow label="OTLP endpoint">
-            <span className="mono selectable">{mon.otlp_endpoint || "—"}</span>
+            <span className="mono">{mon.otlp_endpoint || "—"}</span>
           </FormRow>
           <FormRow label="Insecure">
-            <span className="mono selectable">{mon.otlp_insecure ? "yes" : "no"}</span>
+            <span className="mono">{mon.otlp_insecure ? "yes" : "no"}</span>
           </FormRow>
           <FormRow label="Export interval">
-            <span className="mono selectable tnum">
+            <span className="mono tnum">
               {mon.metric_export_interval_ms} ms
             </span>
           </FormRow>
@@ -1641,7 +1641,7 @@ function MonitoringSection({
             >
               <div className="col" style={{ gap: "var(--sp-1)" }}>
                 {lockedFields.map(([field, envVar]) => (
-                  <span key={field} className="mono selectable">
+                  <span key={field} className="mono">
                     {field} = ${envVar}
                   </span>
                 ))}
@@ -1680,7 +1680,7 @@ function VersionSection() {
       <div className="formsec__title">Version</div>
       <FormRow label="Installed">
         <div className="row" style={{ gap: "var(--sp-4)", alignItems: "center" }}>
-          <span className="mono selectable">{version.data?.version ?? "—"}</span>
+          <span className="mono">{version.data?.version ?? "—"}</span>
           {version.data?.commit && (
             <span className="badge mono">{version.data.commit}</span>
           )}

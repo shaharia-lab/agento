@@ -98,7 +98,6 @@
   text-transform: uppercase;
   color: var(--fg-tertiary);
   padding: var(--sp-6) var(--sp-3) var(--sp-2);
-  user-select: none;
 }
 
 .srcitem {
@@ -275,7 +274,6 @@
   border-top: var(--hairline) solid var(--line);
   font-size: var(--text-sm);
   color: var(--fg-tertiary);
-  user-select: none;
 }
 
 .statusbar__item {

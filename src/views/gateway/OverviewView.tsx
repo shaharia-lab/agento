@@ -12,8 +12,10 @@ import type {
   GatewayStatus,
 } from "../../lib/types";
 import {
+  anthropicBaseUrl,
   effectivePort,
   healthUrl,
+  openaiBaseUrl,
   snippetsFor,
   TOKEN_PLACEHOLDER,
 } from "./snippets";
@@ -168,7 +170,7 @@ export function GatewayOverviewView({
                 <p className="gw-status__text">{explain(status.data, settings.data)}</p>
 
                 {status.data?.error && (
-                  <code className="gw-status__error mono selectable">
+                  <code className="gw-status__error mono">
                     {status.data.error}
                   </code>
                 )}
@@ -271,7 +273,7 @@ export function GatewayOverviewView({
                         label="Copy"
                       />
                     </div>
-                    <pre className="codebox selectable">{s.body}</pre>
+                    <pre className="codebox">{s.body}</pre>
                   </div>
                 ))
               )}
@@ -302,15 +304,49 @@ export function GatewayOverviewView({
                     : "—"}
                 </InspRow>
               </InspGroup>
+              {/* Each row abbreviates the URL to fit the pane but copies the
+                  whole thing: the base URLs are the one value in this feature a
+                  user retypes by hand, and one wrong character (`/anthropic/v1`)
+                  is the documented failure. See snippets.ts. */}
               <InspGroup title="Endpoints">
                 <InspRow label="OpenAI">
-                  {port > 0 ? `:${port}/v1` : "—"}
+                  {port > 0 ? (
+                    <span className="row insp-row__copy">
+                      <span className="truncate">{`:${port}/v1`}</span>
+                      <CopyButton
+                        text={openaiBaseUrl(port)}
+                        title="Copy the OpenAI base URL"
+                      />
+                    </span>
+                  ) : (
+                    "—"
+                  )}
                 </InspRow>
                 <InspRow label="Anthropic">
-                  {port > 0 ? `:${port}/anthropic` : "—"}
+                  {port > 0 ? (
+                    <span className="row insp-row__copy">
+                      <span className="truncate">{`:${port}/anthropic`}</span>
+                      <CopyButton
+                        text={anthropicBaseUrl(port)}
+                        title="Copy the Anthropic base URL"
+                      />
+                    </span>
+                  ) : (
+                    "—"
+                  )}
                 </InspRow>
                 <InspRow label="Health">
-                  {port > 0 ? healthUrl(port) : "—"}
+                  {port > 0 ? (
+                    <span className="row insp-row__copy">
+                      <span className="truncate">{healthUrl(port)}</span>
+                      <CopyButton
+                        text={healthUrl(port)}
+                        title="Copy the health-check URL"
+                      />
+                    </span>
+                  ) : (
+                    "—"
+                  )}
                 </InspRow>
               </InspGroup>
             </div>

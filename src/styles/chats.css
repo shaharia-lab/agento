@@ -114,7 +114,6 @@
 .prompt__text {
   font-size: var(--text-base);
   line-height: var(--leading-normal);
-  user-select: text;
 }
 
 .prompt__opts {

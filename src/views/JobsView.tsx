@@ -383,13 +383,13 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
                   {job.prompt_preview && (
                     <InspGroup title="Prompt">
-                      <div className="logblock selectable">{job.prompt_preview}</div>
+                      <div className="logblock">{job.prompt_preview}</div>
                     </InspGroup>
                   )}
 
                   {job.error_message && (
                     <InspGroup title="Error">
-                      <div className="logblock logblock--error selectable">
+                      <div className="logblock logblock--error">
                         {job.error_message}
                       </div>
                     </InspGroup>
@@ -397,7 +397,7 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
                   {job.response_text && (
                     <InspGroup title="Output">
-                      <div className="logblock selectable">{job.response_text}</div>
+                      <div className="logblock">{job.response_text}</div>
                     </InspGroup>
                   )}
 
@@ -413,7 +413,7 @@ export function JobsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
                   {job.chat_session_id && (
                     <InspGroup title="Session">
-                      <div className="logblock selectable">{job.chat_session_id}</div>
+                      <div className="logblock">{job.chat_session_id}</div>
                     </InspGroup>
                   )}
                 </>

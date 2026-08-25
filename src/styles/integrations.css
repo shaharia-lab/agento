@@ -123,8 +123,6 @@
   max-height: 90px;
   overflow: auto;
   word-break: break-all;
-  user-select: text;
-  cursor: text;
 }
 
 /* --- Trigger rules ------------------------------------------------------- */

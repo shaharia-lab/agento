@@ -121,7 +121,7 @@ export function AboutView() {
 
           {version.data?.commit && (
             <div
-              className="mono selectable"
+              className="mono"
               style={{ fontSize: "var(--text-sm)", color: "var(--fg-tertiary)" }}
             >
               {version.data.commit.slice(0, 12)}
@@ -130,7 +130,6 @@ export function AboutView() {
           )}
 
           <p
-            className="selectable"
             style={{
               maxWidth: 440,
               color: "var(--fg-secondary)",

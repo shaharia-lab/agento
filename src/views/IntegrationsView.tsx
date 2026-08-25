@@ -360,7 +360,6 @@ function ConnectForm({
                 color: "var(--fg-secondary)",
                 maxWidth: 560,
               }}
-              className="selectable"
             >
               {provider.blurb}. Once connected, any agent you grant access to can call
               these tools on your behalf.
@@ -1371,7 +1370,7 @@ function WebhookPanel({ integrationId }: { integrationId: string }) {
             URL, set under Settings → General.
           </div>
 
-          {s?.url && <div className="codebox selectable">{s.url}</div>}
+          {s?.url && <div className="codebox">{s.url}</div>}
           {s?.error && <div className="msgline msgline--error">{s.error}</div>}
           {error && <div className="msgline msgline--error">{error}</div>}
         </div>
@@ -1444,7 +1443,7 @@ function ConnectedInspector({
           <span title={dateTime(item.updated_at)}>{relativeTime(item.updated_at)}</span>
         </InspRow>
         <InspRow label="ID">
-          <span className="mono selectable" style={{ fontSize: "var(--text-xs)" }}>
+          <span className="mono" style={{ fontSize: "var(--text-xs)" }}>
             {item.id}
           </span>
         </InspRow>

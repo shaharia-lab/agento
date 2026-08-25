@@ -347,7 +347,7 @@ export function LogsPane() {
           <span className="msgline__icon">
             <Icon name="check" size={13} />
           </span>
-          <span className="selectable">{saved}</span>
+          <span>{saved}</span>
         </div>
       )}
 
@@ -391,14 +391,14 @@ export function LogsPane() {
               <span className="logline__target" title={e.target}>
                 {shortTarget(e.target)}
               </span>
-              <span className="logline__text selectable">{e.text}</span>
+              <span className="logline__text">{e.text}</span>
             </div>
           ))
         )}
       </div>
 
       <div className="logs__foot">
-        <span className="logs__path selectable mono">{dir}</span>
+        <span className="logs__path mono">{dir}</span>
         <CopyButton text={dir} title="Copy the log directory path" />
         <span className="logs__spacer" />
         <span className="logs__meta">

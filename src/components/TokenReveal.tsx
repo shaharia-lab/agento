@@ -47,7 +47,7 @@ export function TokenReveal({
         </button>
       </div>
       <div className="secnew__token">
-        <code className="mono selectable">{token}</code>
+        <code className="mono">{token}</code>
         <CopyButton
           text={token}
           title="Copy token"

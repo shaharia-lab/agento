@@ -64,7 +64,7 @@ export const Markdown = memo(function Markdown({
                 className="iconbtn iconbtn--onsurface"
               />
             </div>
-            <pre className="selectable">{children}</pre>
+            <pre>{children}</pre>
           </div>
         );
       },

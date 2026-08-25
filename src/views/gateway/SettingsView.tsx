@@ -267,7 +267,7 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
                 <span>{sentenceFor(status.data)}</span>
               </div>
               {status.data?.error && (
-                <code className="gw-status__error mono selectable">
+                <code className="gw-status__error mono">
                   {status.data.error}
                 </code>
               )}

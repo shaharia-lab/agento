@@ -339,6 +339,4 @@
   max-height: 92px;
   overflow: auto;
   word-break: break-all;
-  user-select: text;
-  cursor: text;
 }

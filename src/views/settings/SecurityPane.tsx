@@ -198,7 +198,7 @@ export function SecurityPane() {
           help="Named in every token this install issues. It changes when the key does, so a token whose kid does not match this one was issued before the last regenerate."
         >
           <div className="row">
-            <span className="mono selectable truncate">{keys.data.kid}</span>
+            <span className="mono truncate">{keys.data.kid}</span>
             <CopyButton text={keys.data.kid} title="Copy key ID" />
           </div>
         </FormRow>
@@ -208,7 +208,7 @@ export function SecurityPane() {
           help="Ed25519, base64url. This is what a verifier needs — it can check a token Agento issued and cannot mint one."
         >
           <div className="row">
-            <span className="mono selectable truncate">
+            <span className="mono truncate">
               {keys.data.public_key}
             </span>
             <CopyButton text={keys.data.public_key} title="Copy public key" />
@@ -220,7 +220,7 @@ export function SecurityPane() {
           help="Serves the public key in the standard form, with no credential required. Point a stock JWT library at this and it can verify Agento's tokens offline."
         >
           <div className="row">
-            <span className="mono selectable truncate">{jwksUrl}</span>
+            <span className="mono truncate">{jwksUrl}</span>
             <CopyButton text={jwksUrl} title="Copy JWKS URL" />
           </div>
         </FormRow>
