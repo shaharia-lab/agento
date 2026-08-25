@@ -24,15 +24,21 @@ needs a paid Apple Developer certificate — so macOS blocks the first launch.
 Open **System Settings → Privacy & Security**, find the line about Agento, and
 click **Open Anyway**.
 
+If that line is not there:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Agento.app
+```
+
 Only the first launch needs this. Updates the app installs itself are not
 quarantined, so they never ask again.
 
 ### macOS says the app is damaged and should be moved to the Bin
 
-This is a different message, and it means the download predates `v1.0.1`. Those
-builds were not signed at all, and on Apple Silicon the linker's own bare
-signature sealed nothing — Gatekeeper reads an invalid seal as "damaged", which
-deliberately offers no **Open Anyway**.
+This is a different message, and it means the download predates the release that
+added ad-hoc signing. Those builds were not signed at all, and on Apple Silicon
+the linker's own bare signature sealed nothing — Gatekeeper reads an invalid
+seal as "damaged", which deliberately offers no **Open Anyway**.
 
 Download the current release and install it over the old copy. If you would
 rather keep the copy you have:

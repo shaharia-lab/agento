@@ -274,27 +274,90 @@ jobs:
       # This step exists because losing the seal is invisible everywhere else:
       # an un-quarantined app (CI, a local build) launches fine either way, so
       # only a downloader would ever notice, which is exactly how v1.0.0
-      # shipped unlaunchable on every Mac sold since 2020. The bundler signs
-      # the .app before deriving the .dmg and the updater .app.tar.gz, so
-      # checking the .app covers all three artifacts.
-      - name: Verify the macOS bundle is sealed
+      # shipped unlaunchable on every Mac sold since 2020.
+      #
+      # It checks all three artifacts rather than only the .app the bundler
+      # signs first. The .app is not what anyone receives: a downloader opens
+      # the .dmg and the updater consumes Agento.app.tar.gz, and each is
+      # re-derived by third-party code (hdiutil, a tar writer) whose symlink
+      # and permission handling this repo does not control across CLI
+      # upgrades. Verifying only the pre-derivation copy would reproduce the
+      # exact blind spot this step exists to close.
+      - name: Verify the macOS bundles are sealed
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          app=$(find "src-tauri/target/${{ matrix.target }}/release/bundle/macos" \
-                  -maxdepth 1 -name '*.app' | head -1)
+          base="src-tauri/target/${{ matrix.target }}/release/bundle"
+
+          # `codesign --verify` passes on the linker's executable-only
+          # signature too, so the resource seal needs its own assertion:
+          # CodeResources is the file only a real `codesign` run over a whole
+          # bundle produces. The --display comes first, so the log carries
+          # "Sealed Resources ... files=N" (and `flags=`) in the failing case
+          # too — with `bash -eo pipefail` a trailing diagnostic would only
+          # ever print when nothing was wrong.
+          assert_sealed() {
+            echo "── $1"
+            codesign --display --verbose=4 "$1" || true
+            codesign --verify --deep --strict --verbose=2 "$1"
+            test -f "$1/Contents/_CodeSignature/CodeResources"
+          }
+
+          # `find` itself exits non-zero on a missing directory, which under
+          # `-e` would abort before the friendly message — so test the path
+          # first. A moved bundle dir is the realistic regression here.
+          test -d "$base/macos" || {
+            echo "::error::no macos bundle dir for ${{ matrix.target }}"
+            exit 1
+          }
+
+          app=$(find "$base/macos" -maxdepth 1 -name '*.app' | head -1)
           if [ -z "$app" ]; then
             echo "::error::no .app bundle found for ${{ matrix.target }}"
             exit 1
           fi
-          codesign --verify --deep --strict --verbose=2 "$app"
-          # --verify passes on the linker's executable-only signature too, so
-          # assert the resource seal separately: CodeResources is the file that
-          # only a real `codesign` run over the bundle produces.
-          test -f "$app/Contents/_CodeSignature/CodeResources"
-          # Diagnostics for the log: "Sealed Resources ... files=N" is the line
-          # that distinguishes this from `adhoc,linker-signed`, which seals none.
-          codesign --display --verbose=4 "$app"
+          assert_sealed "$app"
+
+          # The .dmg a user downloads.
+          shopt -s nullglob
+          dmgs=("$base/dmg"/*.dmg)
+          if [ ${#dmgs[@]} -eq 0 ]; then
+            echo "::error::no .dmg built for ${{ matrix.target }}"
+            exit 1
+          fi
+          for dmg in "${dmgs[@]}"; do
+            mnt=$(mktemp -d)
+            hdiutil attach -nobrowse -readonly -mountpoint "$mnt" "$dmg"
+            mounted=$(find "$mnt" -maxdepth 1 -name '*.app' | head -1)
+            if [ -z "$mounted" ]; then
+              hdiutil detach "$mnt"
+              echo "::error::no .app inside $dmg"
+              exit 1
+            fi
+            assert_sealed "$mounted"
+            # Tolerated: a detach that loses a race leaves a stale mount on a
+            # throwaway runner, which is not worth failing a release over.
+            hdiutil detach "$mnt" || true
+          done
+
+          # The updater payload, which is what every installed app swaps in.
+          # Found rather than globbed at a fixed path, so a bundler that moves
+          # it fails the `-eq 0` check below instead of being silently skipped.
+          tarballs=($(find "$base" -type f -name '*.app.tar.gz'))
+          if [ ${#tarballs[@]} -eq 0 ]; then
+            echo "::error::no .app.tar.gz built for ${{ matrix.target }}"
+            exit 1
+          fi
+          for tarball in "${tarballs[@]}"; do
+            tmp=$(mktemp -d)
+            tar -xzf "$tarball" -C "$tmp"
+            extracted=$(find "$tmp" -maxdepth 1 -name '*.app' | head -1)
+            if [ -z "$extracted" ]; then
+              echo "::error::no .app inside $tarball"
+              exit 1
+            fi
+            assert_sealed "$extracted"
+          done
 
       - name: Collect artifacts
         shell: bash
