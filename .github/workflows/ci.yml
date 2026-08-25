@@ -117,16 +117,38 @@ jobs:
         working-directory: src-tauri
         run: cargo clippy --all-targets -- -D warnings
 
+      # `cargo test` runs the 11 test binaries strictly one after another;
+      # nextest runs them as parallel processes, which is ~25-30s of the run.
+      # The action fetches a prebuilt binary, so this costs seconds rather than
+      # the minutes a `cargo install` compile would.
+      - uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
+        with:
+          tool: nextest
+
       # Covers every endpoint, including the frozen goldens in parity/. This is
       # their only reader, so a change to one of those files is only ever
       # noticed here — see parity/README.md before editing any of them.
       - name: Rust tests
         working-directory: src-tauri
-        run: cargo test
+        run: |
+          cargo nextest run
+          # nextest does not run doctests at all — it has no way to. This repo
+          # has 2, and without this line they would silently stop being
+          # checked rather than fail.
+          cargo test --doc
 
-      # A full `tauri build` here would double CI time; compiling the release
-      # profile is what actually catches the `cfg(not(debug_assertions))` code
-      # that never builds during development.
-      - name: Compile Rust (release)
+      # A full `tauri build` here would double CI time; compiling a
+      # release-derived profile is what actually catches the
+      # `cfg(not(debug_assertions))` code that never builds during development.
+      #
+      # `ci` rather than `release`, and the difference is the point: that goal
+      # is a *compilation* property — `cfg(debug_assertions)` keys off the
+      # profile's `debug-assertions` flag, which `[profile.ci]` inherits — while
+      # `lto = true` + `codegen-units = 1` spend ~4 minutes re-optimizing all
+      # 594 crates' bitcode as one largely single-threaded unit, for a binary
+      # this job throws away. The installers users actually install are built by
+      # release.yml through `tauri build`, which uses `--release` and so cannot
+      # reach this profile. See `[profile.ci]` in src-tauri/Cargo.toml.
+      - name: Compile Rust (ci profile)
         working-directory: src-tauri
-        run: cargo build --release
+        run: cargo build --profile ci
