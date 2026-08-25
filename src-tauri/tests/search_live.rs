@@ -79,7 +79,7 @@ use agento_lib::native::search::{
 };
 use agento_lib::native::sessions::page::{facets, list_page};
 use agento_lib::native::sessions::query::{SessionQuery, Sort};
-use agento_lib::native::settings;
+use agento_lib::native::settings::{self, DataSettings};
 
 /// How long to wait for the boot rebuild. The sweep reads every transcript in
 /// the corpus, so this is minutes rather than seconds — the same 6-minute
@@ -415,9 +415,9 @@ fn the_index_is_correct_and_measured_over_the_real_corpus() {
     // the probe and every latency figure below measure a different query from
     // the one the product runs.
     let settings = settings::load(&conn);
-    let probe = find_probe(&conn).expect(
-        "no indexed session yielded a distinctive term — the index holds rows \
-         but nothing in them is reachable through FTS5",
+    let probe = find_probe(&conn, &settings).expect(
+        "no session the list would show yielded a distinctive term — the index \
+         holds rows but nothing in them is reachable through FTS5",
     );
     eprintln!(
         "probe: {:?} ({} hits) from session {}",
@@ -740,7 +740,16 @@ struct Probe {
 /// about ranking rather than a restatement of "the corpus is small". A term
 /// matching one row is ideal; up to [`MAX_PROBE_HITS`] is still decisive, since
 /// relevance sorts every index hit above every metadata-only one.
-fn find_probe(conn: &Connection) -> Option<Probe> {
+///
+/// **A candidate must be visible to the list before it can be probed**, and that
+/// is not the same as being indexed. `session_search` holds a row for every
+/// cached session, while `list_page` applies the stored `hidden_projects` and
+/// `indexed_config_dirs` — so on a machine that hides a project, a probe drawn
+/// straight from the index would name a session the list is *right* not to
+/// return, and the assertion would fail for a reason that has nothing to do with
+/// search. [`is_visible`] is the filter, asked of the same `list_page` the
+/// assertion uses rather than by re-deriving the scope here.
+fn find_probe(conn: &Connection, settings: &DataSettings) -> Option<Probe> {
     const MAX_PROBE_HITS: i64 = 20;
     const SESSIONS_TO_TRY: i64 = 200;
 
@@ -764,6 +773,9 @@ fn find_probe(conn: &Connection) -> Option<Probe> {
 
     for row in rows.flatten() {
         let (session_id, project_path, text) = row;
+        if !is_visible(conn, settings, &session_id, &project_path) {
+            continue;
+        }
         for term in candidate_terms(&text) {
             let hits = match_count(conn, &term);
             if (1..=MAX_PROBE_HITS).contains(&hits) {
@@ -777,6 +789,31 @@ fn find_probe(conn: &Connection) -> Option<Probe> {
         }
     }
     None
+}
+
+/// Would the sessions list return this session at all, under the settings stored
+/// in this database?
+///
+/// Asked by searching for the **session id**, which is one of the six columns the
+/// LIKE half of `add_search` matches, so the answer comes from the same
+/// `list_page` the probe's assertion goes through — including the hidden-project
+/// and config-dir scope — rather than from a second copy of that scope written
+/// here, which could agree with the wrong thing. A UUID is its own rare term, so
+/// this costs one cheap query per session tried.
+fn is_visible(
+    conn: &Connection,
+    settings: &DataSettings,
+    session_id: &str,
+    project_path: &str,
+) -> bool {
+    let Ok(q) = SessionQuery::parse(&format!("q={}", enc(session_id))) else {
+        return false;
+    };
+    list_page(conn, settings, &q).is_ok_and(|page| {
+        page.items
+            .iter()
+            .any(|s| s.session_id == session_id && s.project_path == project_path)
+    })
 }
 
 /// The project with the most cached sessions — the filter most likely to be
