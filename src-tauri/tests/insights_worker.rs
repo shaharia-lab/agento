@@ -208,6 +208,11 @@ fn the_worker_does_its_database_work_off_the_runtime() {
         // delivers the same session down the queue, so the pass that indexes it
         // is whichever reaches the lock first — both on the thread `start`
         // chose.
+        //
+        // Called from **inside** `block_on` deliberately: `tokio::spawn` panics
+        // outside a runtime, so calling `start` out here would make the revert
+        // fail on "there is no reactor running" rather than on the stall this
+        // measures — a red test for the wrong reason.
         worker::start(db_path.clone());
         worker::enqueue([Pending {
             session_id: "s1".into(),

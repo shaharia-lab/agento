@@ -936,6 +936,10 @@ mod tests {
     // from, and the ordering is the whole correctness argument.
 
     /// Build `<dir>/projects/<encoded>/<session>.jsonl`, returning the file.
+    ///
+    /// `cfg(unix)` with its only caller: the reconcile test needs a `chmod`ped
+    /// directory, so on Windows both would be dead code under `-D warnings`.
+    #[cfg(unix)]
     fn seed_transcript(config_dir: &Path, encoded_project: &str, session: &str) -> PathBuf {
         let project = config_dir.join("projects").join(encoded_project);
         std::fs::create_dir_all(&project).expect("project dir");
@@ -953,6 +957,7 @@ mod tests {
         file
     }
 
+    #[cfg(unix)]
     fn pairs(conn: &rusqlite::Connection, table: &str) -> Vec<(String, String)> {
         let mut stmt = conn
             .prepare(&format!(
@@ -1012,10 +1017,13 @@ mod tests {
 
         let file = migrated();
         let conn = rusqlite::Connection::open(file.path()).expect("open");
+        // The column is a JSON string array, read back through
+        // `gojson::decode_string_list` — so it is encoded by a JSON encoder and
+        // not by `{:?}`, whose escapes are Rust's (`\u{a0}`) rather than JSON's.
         conn.execute(
             "INSERT INTO user_settings (id, claude_config_dirs) VALUES (1, ?1)
              ON CONFLICT(id) DO UPDATE SET claude_config_dirs = excluded.claude_config_dirs",
-            [format!("[{:?}]", extra_dir.to_string_lossy())],
+            [serde_json::json!([extra_dir]).to_string()],
         )
         .expect("seed the extra config dir");
         drop(conn);
