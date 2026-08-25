@@ -20,6 +20,22 @@
 //! `scan::ensure_scan` already does with `std::thread::spawn`. So there is no
 //! `db::blocking` here and no `async` anywhere in this module.
 //!
+//! **That `std::thread::spawn` is pinned by `tests/insights_worker.rs`** (#447),
+//! not by anything here: the property is a claim about where [`start`] puts the
+//! loop, so only a test driving `start` itself can falsify it. That binary may
+//! hold exactly one such test, because [`QUEUE`] is a process-wide `OnceLock`;
+//! its own header says so.
+//!
+//! ## `run` and `run_once`
+//!
+//! [`run`] is the boot sweep plus `loop { run_once(..) }`, and the split is a
+//! pure extraction (#447). The whole of the loop's behaviour — `recv_timeout`,
+//! the batch accumulation, the [`BATCH_SIZE`] cutoff, the [`SWEEP_REQUESTED`]
+//! follow-up — lives in [`run_once`], which returns a [`Pass`] so a unit test
+//! can drive **one deterministic pass** and assert which arm it took. Polling a
+//! started worker cannot give that, and every one of those steps was previously
+//! covered only by the unit tests on [`offer`].
+//!
 //! ## Why one worker rather than Go's pool of four
 //!
 //! Go runs four goroutines each upserting on its own connection. SQLite
@@ -150,54 +166,93 @@ pub fn start(db_path: PathBuf) {
 
 /// The worker loop: sweep, then drain the queue, forever.
 ///
-/// `recv_timeout` is both halves at once — it delivers enqueued work
-/// immediately and falls out every [`RESCAN_INTERVAL`] to sweep, with no
-/// separate ticker thread and no way for the two to run concurrently.
+/// The body is [`run_once`] so a test can drive **one deterministic pass** —
+/// see its header for what that buys and what it deliberately does not.
 fn run(db_path: &Path, rx: Receiver<Pending>) {
     // The sweep runs first, before any event can arrive, so a fresh install
     // gets its whole corpus processed without waiting for a scan to report
     // anything — which is the state the issue was filed about.
     sweep(db_path);
 
-    loop {
-        let mut batch: BTreeSet<Pending> = BTreeSet::new();
+    while run_once(db_path, &rx, RESCAN_INTERVAL) != Pass::Disconnected {}
+}
 
-        match rx.recv_timeout(RESCAN_INTERVAL) {
-            Ok(item) => {
-                batch.insert(item);
-                // Take whatever else is already queued, so a scan that
-                // announced 300 sessions is a handful of transactions rather
-                // than 300.
-                while batch.len() < BATCH_SIZE {
-                    match rx.try_recv() {
-                        Ok(item) => {
-                            batch.insert(item);
-                        }
-                        Err(_) => break,
+/// What one pass of [`run`] did.
+///
+/// It exists so a unit test can assert which arm a pass took — the batch
+/// accumulation and the `BATCH_SIZE` cutoff are otherwise observable only as
+/// "the rows eventually appear", which is true of any number of passes.
+/// Deliberately private and deliberately narrow: it is not a contract, it is
+/// what the tests in this file assert on, and the follow-up sweep is asserted
+/// through its **effect** on the database rather than by growing a variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    /// A batch came off the queue and was processed. `committed` is
+    /// [`process_batch`]'s answer, which carries its own careful definition of
+    /// failure.
+    Batch { size: usize, committed: bool },
+    /// `recv_timeout` expired into the periodic sweep.
+    Swept,
+    /// Every sender is gone, so [`run`] returns.
+    Disconnected,
+}
+
+/// One pass: take a batch off the queue (or time out into a sweep), process it,
+/// then honour a requested sweep.
+///
+/// `recv_timeout` is both halves of the schedule at once — it delivers enqueued
+/// work immediately and falls out every `timeout` to sweep, with no separate
+/// ticker thread and no way for the two to run concurrently.
+///
+/// **`timeout` is a parameter only so a test does not wait five minutes.**
+/// Production has exactly one value for it, [`RESCAN_INTERVAL`], passed by
+/// [`run`]; nothing else should ever pass another.
+///
+/// This being callable does **not** make "the worker's database work is off the
+/// runtime" testable — a test choosing to call it from a `tokio::spawn` is
+/// still the test choosing where the work runs. What puts that property under
+/// test is [`start`]'s `std::thread::spawn`, and the thing that drives it is
+/// `tests/insights_worker.rs`.
+fn run_once(db_path: &Path, rx: &Receiver<Pending>, timeout: Duration) -> Pass {
+    let mut batch: BTreeSet<Pending> = BTreeSet::new();
+
+    match rx.recv_timeout(timeout) {
+        Ok(item) => {
+            batch.insert(item);
+            // Take whatever else is already queued, so a scan that announced
+            // 300 sessions is a handful of transactions rather than 300.
+            while batch.len() < BATCH_SIZE {
+                match rx.try_recv() {
+                    Ok(item) => {
+                        batch.insert(item);
                     }
+                    Err(_) => break,
                 }
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                sweep(db_path);
-                continue;
-            }
-            // Every sender is gone, which cannot happen while the static holds
-            // one — but exiting is the only correct answer if it ever does.
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
-
-        // The queue is the incremental path, so a row for a pair may exist.
-        // Its return is deliberately ignored: only a rebuild needs to know
-        // whether a batch committed, and a rebuild is `sweep`'s alone.
-        let _ = process_batch(db_path, batch, Write::Replace);
-
-        // Whatever `enqueue` could not deliver, picked up now rather than at
-        // the next five-minute tick. The swap clears the flag before the sweep
-        // begins, so an overflow during it is not lost.
-        if SWEEP_REQUESTED.swap(false, Ordering::AcqRel) {
+        Err(mpsc::RecvTimeoutError::Timeout) => {
             sweep(db_path);
+            return Pass::Swept;
         }
+        // Every sender is gone, which cannot happen while the static holds
+        // one — but exiting is the only correct answer if it ever does.
+        Err(mpsc::RecvTimeoutError::Disconnected) => return Pass::Disconnected,
     }
+
+    // The queue is the incremental path, so a row for a pair may exist. The
+    // answer is reported rather than acted on: only a rebuild needs to know
+    // whether a batch committed, and a rebuild is [`sweep`]'s alone.
+    let size = batch.len();
+    let committed = process_batch(db_path, batch, Write::Replace);
+
+    // Whatever `enqueue` could not deliver, picked up now rather than at the
+    // next five-minute tick. The swap clears the flag before the sweep begins,
+    // so an overflow during it is not lost.
+    if SWEEP_REQUESTED.swap(false, Ordering::AcqRel) {
+        sweep(db_path);
+    }
+
+    Pass::Batch { size, committed }
 }
 
 /// `rescanOutdated`: everything with no insight row or an outdated one — **or
@@ -1222,128 +1277,204 @@ mod tests {
         ));
     }
 
-    /// A batch meeting a contended write lock still commits, and does not stall
-    /// a runtime beside it.
-    ///
-    /// **Be precise about what this can and cannot catch**, because the #366
-    /// tests it is modelled on (`tests/scheduled_run.rs`, `tests/chat_turn.rs`)
-    /// catch something this one structurally cannot. There, the defect was
-    /// database work running inline on an axum worker, and the test drives the
-    /// real entry point, so reverting the `db::blocking` hand-off fails it.
-    /// Here the worker owns an OS thread by construction — its header explains
-    /// why — and `run()` is an unexported infinite loop, so this test spawns the
-    /// thread itself. **No change to non-test code can make it fail**: falsifying
-    /// it means editing the `std::thread::spawn` below into a `tokio::spawn`,
-    /// which does take the ticker from ~150 advances to 0.
-    ///
-    /// So it is named for the property it genuinely pins, which #435 makes worth
-    /// pinning: a batch now writes `session_insights` **and** an FTS5 row per
-    /// session, holding one write lock for longer than before, and it must still
-    /// commit inside `db::open_read_write`'s five-second `busy_timeout` against
-    /// an outside writer. The runtime assertions come with the borrowed harness
-    /// and are kept because they are free, not because they are the point.
-    ///
-    /// (Falsifying it against production code would need `run()`'s body split
-    /// into a testable `run_once`. Worth doing; it is not this change's scope.)
-    ///
-    /// The rest of the shape is the original's, each part load-bearing: **one**
-    /// worker thread so a single parked worker is the whole runtime; a plain OS
-    /// thread holding the lock, so contention comes from outside exactly as the
-    /// session scanner's batch writer does; and `last` seeded **before** the
-    /// spawn, because a starved ticker is never polled and seeding on the first
-    /// poll would start the clock after the stall and measure nothing.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn a_contended_batch_still_commits_within_the_busy_timeout() {
-        use std::sync::atomic::AtomicU64;
-        use std::sync::Arc;
-        use std::time::Instant;
+    // ─── the loop itself (#447) ──────────────────────────────────────────────
+    //
+    // Everything below drives `run_once`, which is `run`'s whole body. Until it
+    // was split out, `recv_timeout` → batch accumulation → the `BATCH_SIZE`
+    // cutoff → the `SWEEP_REQUESTED` follow-up were reachable from no test at
+    // all; only `offer` was covered.
+    //
+    // The contended-write-lock test that used to sit here has moved to
+    // `tests/insights_worker.rs`, because the property it is named for is a
+    // claim about `start` and only a test driving `start` can falsify it.
 
-        /// Long enough that a parked worker is unmistakable, short enough to
-        /// stay well inside `open_read_write`'s 5s `busy_timeout` so the batch
-        /// itself still commits.
-        const HOLD: Duration = Duration::from_millis(1_500);
+    /// Serialises the tests that drive [`run_once`].
+    ///
+    /// [`SWEEP_REQUESTED`] is process-wide and a pass **clears** it, so two of
+    /// these running concurrently would steal each other's flag — the sweep
+    /// test would see it already consumed, and a queue-path test would take an
+    /// unasked-for sweep that indexes its fixture for the wrong reason. Each
+    /// test also stores `false` on entry, so none of them depends on another's
+    /// leftovers either.
+    fn run_once_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// #435's first acceptance criterion, at last driven through the code that
+    /// implements it: a session announced by a scan is searchable **after one
+    /// queue pass**.
+    ///
+    /// Every other test in this file calls `process_batch` directly, which
+    /// skips `recv_timeout` and the accumulation entirely. Here the only input
+    /// is a `Pending` on a channel, exactly as `enqueue` delivers one.
+    ///
+    /// The flag is cleared first and the arm is asserted, which together are
+    /// what make this a test *of the queue*: a pass that swept would index the
+    /// same session for a completely different reason and look identical.
+    #[test]
+    fn one_pass_over_a_queued_session_leaves_a_searchable_row() {
+        let _serialised = run_once_lock();
+        SWEEP_REQUESTED.store(false, Ordering::Release);
 
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = fixture_db(&dir);
         let file = seed_session(&dir, &db_path, "s1", "/a", "pagination");
 
-        // The file must already be WAL. Left in the default rollback journal,
-        // `open_read_write`'s own `PRAGMA journal_mode=WAL` is a *mode change*
-        // needing an exclusive lock and fails outright in about a millisecond
-        // instead of waiting on `busy_timeout` — which would make this measure
-        // the wrong thing entirely.
-        db::open_read_write(&db_path).expect("convert the fixture to WAL");
+        let (tx, rx) = mpsc::sync_channel::<Pending>(QUEUE_SIZE);
+        tx.send(pending_for("s1", "/a", &file)).expect("announce");
 
-        let (holding_tx, holding_rx) = mpsc::channel();
-        let lock_db = db_path.clone();
-        let holder = std::thread::spawn(move || {
-            let mut conn = rusqlite::Connection::open(&lock_db).expect("open");
-            let tx = conn
-                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-                .expect("begin immediate");
-            holding_tx.send(()).expect("signal");
-            std::thread::sleep(HOLD);
-            tx.rollback().expect("rollback");
-        });
-        holding_rx.recv().expect("the writer took the lock");
+        assert_eq!(
+            run_once(&db_path, &rx, Duration::from_millis(50)),
+            Pass::Batch {
+                size: 1,
+                committed: true
+            },
+            "the item must arrive as a batch, not as a timed-out sweep",
+        );
 
-        let worst_gap_ms = Arc::new(AtomicU64::new(0));
-        let ticks = Arc::new(AtomicU64::new(0));
-        let ticker = {
-            let (worst_gap_ms, ticks, mut last) = (
-                Arc::clone(&worst_gap_ms),
-                Arc::clone(&ticks),
-                Instant::now(),
-            );
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                    let now = Instant::now();
-                    let gap =
-                        u64::try_from(now.duration_since(last).as_millis()).unwrap_or(u64::MAX);
-                    worst_gap_ms.fetch_max(gap, Ordering::Relaxed);
-                    ticks.fetch_add(1, Ordering::Relaxed);
-                    last = now;
+        let conn = db::open_read_only(&db_path).expect("open");
+        let hits = search::search(&conn, "\"pagination\"", 10).expect("search");
+        assert_eq!(
+            hits.iter()
+                .map(|h| (h.session_id.as_str(), h.project_path.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("s1", "/a")],
+            "one pass over an announced session must leave a searchable row",
+        );
+    }
+
+    /// The accumulation stops at [`BATCH_SIZE`], and the remainder is taken by
+    /// the next pass rather than dropped.
+    ///
+    /// Both halves matter and they fail in opposite directions: no cutoff makes
+    /// one transaction unbounded in size (and, since #435, in memory — see
+    /// `BATCH_SIZE`'s own header), while a cutoff that consumed the rest would
+    /// silently lose every announcement past the hundredth.
+    ///
+    /// The transcripts do not exist, so nothing is committed; this is a test of
+    /// how many items one pass *takes*, which `Pass::size` reports directly.
+    #[test]
+    fn a_pass_takes_at_most_batch_size_and_the_rest_waits_for_the_next() {
+        let _serialised = run_once_lock();
+        SWEEP_REQUESTED.store(false, Ordering::Release);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+
+        const EXTRA: usize = 5;
+        let (tx, rx) = mpsc::sync_channel::<Pending>(BATCH_SIZE + EXTRA);
+        for i in 0..BATCH_SIZE + EXTRA {
+            tx.send(pending(&format!("s{i:04}"))).expect("announce");
+        }
+
+        assert!(
+            matches!(
+                run_once(&db_path, &rx, Duration::from_millis(50)),
+                Pass::Batch {
+                    size: BATCH_SIZE,
+                    ..
                 }
-            })
-        };
-
-        // Exactly how production runs it: a plain thread, never a tokio task.
-        let batch_db = db_path.clone();
-        let batch = std::thread::spawn(move || {
-            process_batch(
-                &batch_db,
-                [pending_for("s1", "/a", &file)].into_iter().collect(),
-                Write::Replace,
-            )
-        });
-
-        let committed = tokio::task::spawn_blocking(move || batch.join().expect("batch"))
-            .await
-            .expect("join");
-        ticker.abort();
-        holder.join().expect("the writer finished");
-
-        assert!(committed, "the batch did not commit");
-
-        let worst = worst_gap_ms.load(Ordering::Relaxed);
-        assert!(
-            worst < 500,
-            "the runtime stalled for {worst} ms while the write lock was held \
-             (the hold is {} ms; anything near it means indexing blocked a worker)",
-            HOLD.as_millis(),
+            ),
+            "one pass must not take more than BATCH_SIZE",
         );
-        // The gap alone would read as healthy if the ticker had simply been
-        // cancelled early, so assert it really ran throughout.
-        let ticks = ticks.load(Ordering::Relaxed);
         assert!(
-            ticks > 50,
-            "the ticker only advanced {ticks} times across a {} ms hold",
-            HOLD.as_millis(),
+            matches!(
+                run_once(&db_path, &rx, Duration::from_millis(50)),
+                Pass::Batch { size: EXTRA, .. }
+            ),
+            "the remainder must be taken by the next pass, not dropped",
+        );
+    }
+
+    /// A pass with [`SWEEP_REQUESTED`] set runs the sweep and leaves the flag
+    /// clear.
+    ///
+    /// Asserted through the sweep's **effect**: `swept` is never announced, so
+    /// the only thing that can index it is the follow-up sweep. A `bool` on
+    /// [`Pass`] would have been cheaper and would have pinned the branch rather
+    /// than the work.
+    ///
+    /// This is what makes a full queue cost one sweep instead of a five-minute
+    /// hole — `SWEEP_REQUESTED`'s own header records why that matters, and
+    /// `everything_past_the_queues_capacity_is_reported_as_overflow` covers the
+    /// half that *sets* the flag.
+    #[test]
+    fn a_requested_sweep_runs_at_the_end_of_the_pass_and_clears_the_flag() {
+        let _serialised = run_once_lock();
+        SWEEP_REQUESTED.store(false, Ordering::Release);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let queued = seed_session(&dir, &db_path, "queued", "/a", "pagination");
+        // Cached, needing an insight row, and deliberately never announced —
+        // the shape of an announcement `enqueue` had to drop.
+        seed_session(&dir, &db_path, "swept", "/a", "overflowed");
+
+        let (tx, rx) = mpsc::sync_channel::<Pending>(QUEUE_SIZE);
+        tx.send(pending_for("queued", "/a", &queued))
+            .expect("announce");
+        SWEEP_REQUESTED.store(true, Ordering::Release);
+
+        assert_eq!(
+            run_once(&db_path, &rx, Duration::from_millis(50)),
+            Pass::Batch {
+                size: 1,
+                committed: true
+            },
         );
 
-        // …and both rows landed, so this is not passing because nothing
-        // happened.
+        assert!(
+            !SWEEP_REQUESTED.load(Ordering::Acquire),
+            "the flag must be cleared, or every later pass sweeps for ever",
+        );
+        let conn = db::open_read_only(&db_path).expect("open");
+        assert_eq!(
+            search::search(&conn, "\"overflowed\"", 10)
+                .expect("search")
+                .len(),
+            1,
+            "a session that was only ever dropped from the queue must be \
+             picked up by the sweep the overflow requested",
+        );
+    }
+
+    /// Every sender gone ends the loop, which is the one arm `run`'s `while`
+    /// condition reads.
+    #[test]
+    fn a_disconnected_queue_ends_the_loop() {
+        let _serialised = run_once_lock();
+        SWEEP_REQUESTED.store(false, Ordering::Release);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        let (tx, rx) = mpsc::sync_channel::<Pending>(1);
+        drop(tx);
+
+        assert_eq!(
+            run_once(&db_path, &rx, Duration::from_millis(50)),
+            Pass::Disconnected,
+        );
+    }
+
+    /// …and an idle queue times out into the periodic sweep rather than
+    /// spinning.
+    #[test]
+    fn an_idle_queue_times_out_into_a_sweep() {
+        let _serialised = run_once_lock();
+        SWEEP_REQUESTED.store(false, Ordering::Release);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = fixture_db(&dir);
+        seed_session(&dir, &db_path, "s1", "/a", "pagination");
+
+        // Held, so the channel is idle rather than disconnected.
+        let (_tx, rx) = mpsc::sync_channel::<Pending>(1);
+
+        assert_eq!(
+            run_once(&db_path, &rx, Duration::from_millis(50)),
+            Pass::Swept,
+        );
         let conn = db::open_read_only(&db_path).expect("open");
         assert_eq!(indexed_pairs(&conn), vec![("s1".into(), "/a".into())]);
     }

@@ -372,6 +372,8 @@ src-tauri/src/
     diff.rs      byte comparison + reporting for shadow mode
 
 src-tauri/tests/ integration suites (the live-diff ones went with the Go tree)
+                 insights_worker.rs  the worker through the real `worker::start`
+                 (#447) — not `#[ignore]`d, and one `start` per binary
 parity/          frozen goldens from the Go server; see parity/README.md
 ```
 
@@ -975,6 +977,13 @@ Three rules, each silent when wrong:
   `session_insights` has no `file_path` to get this wrong with. Running it after
   the scan's own delete pass is what inherits the unreadable-config-dir
   protection: those cache rows survive, so their insights are not orphans.
+  **The ordering is asserted in `scan.rs`'s own tests since #447**, over a
+  two-config-dir fixture corpus under a swapped `HOME`: a removed session loses
+  its index row, and a session under a `chmod 0o000` config dir keeps its cache,
+  insight *and* index rows. Both `delete_orphans` functions had unit tests
+  against a hand-built database, and what those cannot say is *where they are
+  called from* — moving `search::delete_orphans` above `apply_changes` finds
+  every row still present, deletes nothing, and changes no other observable.
 - **A full queue asks for a sweep; it does not drop and wait.** The scan
   announces changed sessions on a 100-slot channel, and a first scan announces
   ten times that. Go warns per dropped item and waits for the next five-minute
@@ -987,6 +996,28 @@ scan's staleness markers deliberately do **not** cover
 `CURRENT_PROCESSOR_VERSION`: a processor-only bump must not force a full
 re-read of `claude_session_cache`, so the five-minute sweep is the only thing
 that notices one.
+
+**`run` is the boot sweep plus `loop { run_once(..) }`** (#447), and where the
+two tests of it live is the decision worth knowing:
+
+- **`run_once` is private, and it exists for the *unit* tests.** It returns a
+  `Pass` so one deterministic pass is assertable — the `BATCH_SIZE` cutoff, the
+  remainder waiting for the next pass, the `SWEEP_REQUESTED` follow-up, and
+  `enqueue`'s own path end to end. Before the split, every test called
+  `process_batch` directly and none of that was reachable. It takes the timeout
+  as a parameter purely so a test does not wait five minutes; `RESCAN_INTERVAL`
+  is production's only value for it.
+- **`run_once` does *not* make "the worker's database work is off the runtime"
+  testable**, and that is the trap the split invites. A test calling it from a
+  `tokio::spawn` is still the test choosing where the work runs — the same
+  non-falsifiability under a new name. The thing under test is **`start`'s
+  `std::thread::spawn`**, so it is driven from `src-tauri/tests/insights_worker.rs`
+  through the real `start`/`enqueue`, in #366's harness. That binary may hold
+  **exactly one** test calling `start`, because `QUEUE` is a process-wide
+  `OnceLock` — a second gets `already started` and silently drives the first
+  test's worker against the first test's database.
+
+It is **not** `#[ignore]`d: it needs no corpus, only a tempdir.
 
 ### The search index, measured (`src-tauri/tests/search_live.rs`, #439)
 
