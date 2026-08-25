@@ -146,6 +146,13 @@
     },
     {
       "method": "GET",
+      "route": "/api/gateway/providers/{id}/models",
+      "status": "native",
+      "owner": "#470",
+      "reason": "the model ids that provider's own upstream reports, so an alias target is picked rather than typed; the only route here answered by the ASYNC registry, because it makes an outbound HTTPS call -- and the answer is ids alone, never the key and never the upstream body"
+    },
+    {
+      "method": "GET",
       "route": "/api/gateway/usage",
       "status": "native",
       "owner": "#426",

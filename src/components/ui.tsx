@@ -331,6 +331,258 @@ export function Dropdown({
   );
 }
 
+/* --- Combobox ------------------------------------------------------------ */
+
+/**
+ * A text field with a filtered list of suggestions — an **open** set, where
+ * `Dropdown` above is a closed one.
+ *
+ * The distinction is the whole reason this exists rather than a `Dropdown` with
+ * an extra prop. A `Dropdown`'s value must be one of its options; here the
+ * options are only a *catalog*, and a value that is not in the list is a
+ * first-class answer — a model released this morning, a fine-tune id, a
+ * provider whose list endpoint this build could not reach. So the value lives in
+ * the input, `onChange` fires on every keystroke exactly as the plain `<input>`
+ * this replaces did, and picking a suggestion is a shortcut rather than the only
+ * route. Nothing here can reject what the user typed.
+ *
+ * With no options it is deliberately indistinguishable from that plain input:
+ * the menu never opens and no chevron is drawn, which is what lets a caller
+ * degrade to free text by passing an empty list rather than by branching.
+ */
+export function Combobox({
+  value,
+  options,
+  onChange,
+  placeholder,
+  className,
+  disabled,
+  ariaLabel,
+}: {
+  value: string;
+  /** Suggestions. Empty means "behave as a plain text field". */
+  options: string[];
+  onChange(v: string): void;
+  placeholder?: string;
+  className?: string;
+  disabled?: boolean;
+  ariaLabel?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(-1);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{
+    left: number;
+    top: number;
+    minWidth: number;
+    maxHeight: number;
+    up: boolean;
+  }>();
+
+  // Filtered by what is typed, case-insensitively and as a substring rather
+  // than a prefix — model ids are versioned and vendor-prefixed, so the part a
+  // user remembers ("sonnet", "4o") is rarely at the front.
+  const needle = value.trim().toLowerCase();
+  const matches = needle
+    ? options.filter((o) => o.toLowerCase().includes(needle))
+    : options;
+
+  const close = useCallback(() => setOpen(false), []);
+
+  const openMenu = useCallback(() => {
+    const el = wrapRef.current;
+    if (!el || options.length === 0) return;
+    const r = el.getBoundingClientRect();
+    const below = window.innerHeight - r.bottom - 8;
+    const above = r.top - 8;
+    const up = below < 160 && above > below;
+    setPos({
+      left: Math.max(4, Math.min(r.left, window.innerWidth - r.width - 4)),
+      top: up ? r.top - 4 : r.bottom + 4,
+      minWidth: r.width,
+      maxHeight: Math.min(320, up ? above : below),
+      up,
+    });
+    setActive(-1);
+    setOpen(true);
+  }, [options.length]);
+
+  // Same portal rules as Dropdown: "outside" spans the trigger and the menu,
+  // and any scroll or resize underneath would strand the menu.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (menuRef.current?.contains(t) || wrapRef.current?.contains(t)) return;
+      close();
+    };
+    const onScroll = (e: Event) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      close();
+    };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", close);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open, close]);
+
+  // A filter that empties the list leaves an open menu with nothing in it, and
+  // an active index pointing past the end.
+  useEffect(() => {
+    if (open && matches.length === 0) close();
+    setActive((i) => (i >= matches.length ? matches.length - 1 : i));
+  }, [matches.length, open, close]);
+
+  useEffect(() => {
+    if (!open || active < 0) return;
+    menuRef.current
+      ?.querySelector(`[data-index="${active}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [open, active]);
+
+  function pick(v: string) {
+    setOpen(false);
+    onChange(v);
+    inputRef.current?.focus();
+  }
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Escape") {
+      // Only swallow Escape when there is a menu to close, so it still reaches
+      // whatever the field sits inside.
+      if (open) {
+        e.preventDefault();
+        close();
+      }
+      return;
+    }
+    if (!open) {
+      if (e.key === "ArrowDown" && matches.length > 0) {
+        e.preventDefault();
+        openMenu();
+      }
+      return;
+    }
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        setActive((i) => Math.min(matches.length - 1, i + 1));
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        setActive((i) => Math.max(0, i - 1));
+        break;
+      case "Enter":
+        // Enter commits the highlighted suggestion, and otherwise does
+        // nothing but close — what is typed is already the value, so
+        // "confirming" it must never rewrite it to the nearest match.
+        if (active >= 0 && matches[active]) {
+          e.preventDefault();
+          pick(matches[active]);
+        } else {
+          close();
+        }
+        break;
+      case "Tab":
+        close();
+        break;
+    }
+  };
+
+  return (
+    <>
+      <div
+        ref={wrapRef}
+        className={`combo ${options.length > 0 ? "combo--suggesting" : ""} ${
+          className ?? ""
+        }`}
+      >
+        <input
+          ref={inputRef}
+          className="field mono combo__input"
+          value={value}
+          placeholder={placeholder}
+          disabled={disabled}
+          aria-label={ariaLabel}
+          role="combobox"
+          aria-expanded={open}
+          aria-autocomplete="list"
+          onChange={(e) => {
+            onChange(e.target.value);
+            if (!open) openMenu();
+          }}
+          onFocus={openMenu}
+          onKeyDown={onKeyDown}
+        />
+        {options.length > 0 && (
+          <button
+            type="button"
+            className="combo__chevron"
+            tabIndex={-1}
+            disabled={disabled}
+            aria-label="Show model ids"
+            onClick={() => (open ? close() : (inputRef.current?.focus(), openMenu()))}
+          >
+            <Icon name="chevronUD" size={12} />
+          </button>
+        )}
+      </div>
+
+      {open &&
+        pos &&
+        matches.length > 0 &&
+        createPortal(
+          <div
+            ref={menuRef}
+            className="menu dropdown__menu scroll"
+            role="listbox"
+            style={{
+              left: pos.left,
+              ...(pos.up
+                ? { bottom: window.innerHeight - pos.top }
+                : { top: pos.top }),
+              minWidth: pos.minWidth,
+              maxHeight: pos.maxHeight,
+            }}
+          >
+            {matches.map((o, i) => (
+              <button
+                key={o}
+                type="button"
+                role="option"
+                data-index={i}
+                aria-selected={o === value}
+                className={`dropdown__item mono ${
+                  i === active ? "dropdown__item--active" : ""
+                }`}
+                onMouseEnter={() => setActive(i)}
+                // `mousedown` rather than `click`: the input's blur would
+                // otherwise close the menu and unmount the row before the click
+                // landed on it.
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pick(o);
+                }}
+              >
+                <span className="dropdown__check">
+                  {o === value && <Icon name="check" size={11} />}
+                </span>
+                <span className="truncate">{o}</span>
+              </button>
+            ))}
+          </div>,
+          document.body
+        )}
+    </>
+  );
+}
+
 /* --- Draggable splitter -------------------------------------------------- */
 
 /**

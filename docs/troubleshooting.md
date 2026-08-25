@@ -287,6 +287,28 @@ and the same line is in the log:
 binding the llm gateway on 127.0.0.1:8880: Address already in use (os error 98)
 ```
 
+### The model box on Models offers no list
+
+**LLM Gateway → Models** fills a target's model box from that provider's own
+catalog, and shows a note under the row when it could not. It never blocks the
+save — type the id and carry on. The note says which of these it was:
+
+- **No API key** — the provider row has none stored, so there is nobody to ask.
+  Set it in **LLM Gateway → Providers**.
+- **The provider answered 401 / 403** — the key is wrong, revoked, or not
+  entitled to the list endpoint. The same key is what serving a request would
+  use, so this is worth fixing whatever the model box does.
+- **The provider could not be reached** — a wrong base URL, no network, a proxy,
+  or an upstream that is simply slow; the fetch gives up after ten seconds.
+- **The answer was not a model list** — the base URL points at something that is
+  not that provider's API. Check it against **Providers**.
+- **No models returned** — the account is authenticated but the catalog is
+  empty, which usually means a project or region with nothing enabled on it.
+
+The list is fetched when you open the Models view, not when you save, so a slow
+provider never delays a save. It is not cached between visits: fix a key in
+**Providers** and come back to this view to see the list.
+
 ### The gateway answers 401
 
 The token is absent, malformed, expired, revoked, or was signed by a key this

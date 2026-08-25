@@ -51,6 +51,8 @@ use super::writes::{self, WriteError};
 use super::{Answer, Ctx, Request};
 use crate::gateway::{config, registry, usage};
 
+pub mod catalog;
+
 /// Every route this module claims.
 ///
 /// Asserted as **set equality** against `parity/desktop_routes.json` by
@@ -69,7 +71,30 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("DELETE", "/api/gateway/models/{id}"),
     ("GET", "/api/gateway/status"),
     ("GET", "/api/gateway/usage"),
+    ("GET", "/api/gateway/providers/{id}/models"),
 ];
+
+/// The one route in [`ROUTES`] the **streaming** registry answers (#470).
+///
+/// It does not stream. `StreamEndpoint` is simply the only registry here that is
+/// `async`, and this route makes a network call: `Endpoint::serve` is a sync
+/// `fn` the proxy runs on `spawn_blocking`, which is exactly right for thirteen
+/// areas that read SQLite and wrong for an outbound HTTPS request. Returning a
+/// buffered JSON `Response` from the async registry is a smaller change than
+/// putting a runtime in front of the blocking one — see `StreamEndpoint`'s own
+/// header for why the two registries exist at all.
+///
+/// Consequences, both load-bearing:
+///
+/// - It stays in [`ROUTES`], because that const is what
+///   `parity/desktop_routes.json` is asserted against as **set equality** and a
+///   route recorded nowhere is the drift that file exists to stop.
+/// - [`claims`] must therefore *exclude* it, or both registries claim one path.
+///   `proxy.rs` checks `claims_stream` first, so the buffered handler would
+///   never run — it would merely sit there as a route claimed by a `serve` arm
+///   that answers "claimed but unhandled". `the_catalog_route_is_claimed_by_the
+///   _streaming_registry_alone` is the guard.
+const CATALOG_ROUTE: (&str, &str) = ("GET", "/api/gateway/providers/{id}/models");
 
 pub const ENDPOINT: super::Endpoint = super::Endpoint {
     name: "gateway",
@@ -77,10 +102,23 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
     serve,
 };
 
+/// The async half — [`CATALOG_ROUTE`] and nothing else.
+pub const STREAM_ENDPOINT: super::StreamEndpoint = super::StreamEndpoint {
+    name: "gateway-catalog",
+    claims: claims_catalog,
+    serve: serve_catalog,
+};
+
 fn claims(method: &Method, path: &str) -> bool {
-    ROUTES
-        .iter()
-        .any(|(m, pattern)| method.as_str() == *m && path_matches(pattern, path))
+    !claims_catalog(method, path)
+        && ROUTES
+            .iter()
+            .any(|(m, pattern)| method.as_str() == *m && path_matches(pattern, path))
+}
+
+fn claims_catalog(method: &Method, path: &str) -> bool {
+    let (m, pattern) = CATALOG_ROUTE;
+    method.as_str() == m && path_matches(pattern, path)
 }
 
 /// Match a chi-style pattern against a concrete path.
@@ -118,6 +156,90 @@ fn id_under(path: &str, collection: &str) -> Option<String> {
         return None;
     }
     Some(rest.to_string())
+}
+
+/// The `{id}` of `/api/gateway/providers/{id}/models`.
+///
+/// [`id_under`] cannot answer this: it refuses a remainder containing a `/`,
+/// which is what keeps a one-segment route one segment. Here the suffix is part
+/// of the pattern, so the `/models` is stripped first and the same one-segment
+/// rule is applied to what is left.
+fn provider_id_for_catalog(path: &str) -> Option<String> {
+    let rest = path.strip_prefix("/api/gateway/providers/")?;
+    let id = rest.strip_suffix("/models")?;
+    if id.is_empty() || id.contains('/') {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+/// `GET /api/gateway/providers/{id}/models` (#470) — what that provider's own
+/// upstream says it serves.
+///
+/// Async because it makes a network call; buffered because the answer is a
+/// finished document. See [`CATALOG_ROUTE`].
+///
+/// The database read is on this runtime worker and stays there deliberately:
+/// it is `open_read_only`, and a WAL reader does not wait on a writer, which is
+/// the same reasoning that leaves `runner::load` and `TurnSettings::stored` off
+/// `db::blocking`. The unbounded part of this handler is the HTTPS call, which
+/// is `await`ed rather than blocked on.
+fn serve_catalog(req: super::StreamRequest) -> super::BoxFuture<'static, Result<Response, String>> {
+    Box::pin(async move {
+        let Some(id) = provider_id_for_catalog(&req.path) else {
+            return Err(format!(
+                "{} {} is claimed but has no id",
+                req.method, req.path
+            ));
+        };
+
+        let Some(row) = config::load_provider_secret(&req.db_path, &id)? else {
+            // The same 404 every other `{id}` route here answers for a row that
+            // is not there.
+            return answer(Answer::error(StatusCode::NOT_FOUND, "provider not found")?);
+        };
+
+        // `row` holds the key. It goes no further than `catalog::fetch`, which
+        // puts it in one header and drops it with the request builder; nothing
+        // below this line can reach it, because only a `&str` ever leaves
+        // `ProviderRow` and the borrow ends here.
+        let body = match catalog::fetch(&row).await {
+            Ok(models) => super::gojson::to_vec(&CatalogBody { models })
+                .map_err(|e| format!("encoding gateway provider catalog: {e}"))?,
+            Err(e) => {
+                // Logged with the provider **id**, never its name, base URL or
+                // key: this line lands in a plain file on disk, and the id is
+                // already in the access line's path.
+                log::warn!("gateway model catalog for provider {id}: {}", e.message());
+                let status = match e {
+                    catalog::CatalogError::Unaskable(_) => StatusCode::BAD_REQUEST,
+                    catalog::CatalogError::Upstream(_) => StatusCode::BAD_GATEWAY,
+                };
+                return answer(Answer::error(status, e.message())?);
+            }
+        };
+        answer(Answer::json(body))
+    })
+}
+
+/// Render a buffered [`Answer`] as the streaming registry's `Response`.
+///
+/// The one thing this registry does not do for a handler, because a chat turn
+/// builds its own response from a body stream.
+fn answer(answer: Answer) -> Result<Response, String> {
+    Ok(super::response(answer))
+}
+
+type Response = axum::http::Response<axum::body::Body>;
+
+/// `{"models": ["id", …]}` — ids only, and **never** the upstream body.
+///
+/// Re-encoding somebody else's JSON would reorder its keys and respell its
+/// numbers, and forwarding it verbatim would hand a caller every field a
+/// catalog carries. This route answers the one thing it was asked for.
+#[derive(Serialize)]
+struct CatalogBody {
+    models: Vec<String>,
 }
 
 fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
@@ -2109,5 +2231,339 @@ mod tests {
         let file = migrated();
         let ctx = ctx(&file);
         assert!(call_query(&ctx, "/api/gateway/usage", "tz=Mars/Olympus").is_err());
+    }
+
+    // ── The provider model catalog (#470) ─────────────────────────────────
+
+    /// What the fake upstream saw, so a test can assert on the request that was
+    /// built rather than only on the answer it produced.
+    #[derive(Default)]
+    struct Seen {
+        target: String,
+        headers: Vec<(String, String)>,
+    }
+
+    /// A loopback stand-in for a provider's list endpoint.
+    ///
+    /// **This is the whole test seam, and it is a parameter rather than a
+    /// `#[cfg(test)]` static.** A gateway provider's base URL comes out of the
+    /// row, so a test simply stores one pointing here — the narrower answer
+    /// #317 reached for Confluence, where GitHub's fixed API root forced a
+    /// `SetAPIBase`-shaped seam. Nothing test-only ships.
+    async fn fake_upstream(
+        status: StatusCode,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Seen>>) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Seen::default()));
+        let recorder = seen.clone();
+        let app = axum::Router::new().fallback(move |req: axum::extract::Request| {
+            let recorder = recorder.clone();
+            async move {
+                {
+                    let mut seen = recorder.lock().expect("lock");
+                    seen.target = req.uri().to_string();
+                    seen.headers = req
+                        .headers()
+                        .iter()
+                        .map(|(k, v)| {
+                            (
+                                k.as_str().to_string(),
+                                v.to_str().unwrap_or_default().to_string(),
+                            )
+                        })
+                        .collect();
+                }
+                (status, body)
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (base, seen)
+    }
+
+    fn seed_provider(ctx: &Ctx, id: &str, kind: &str, key: &str, base: &str) {
+        let answer = call(
+            ctx,
+            "POST",
+            "/api/gateway/providers",
+            &format!(
+                r#"{{"id":"{id}","name":"{id}","type":"{kind}","api_key":"{key}",
+                    "base_url":"{base}","enabled":true}}"#
+            ),
+        )
+        .expect("created");
+        assert_eq!(answer.status, StatusCode::CREATED);
+    }
+
+    async fn catalog(ctx: &Ctx, id: &str) -> Response {
+        serve_catalog(crate::native::StreamRequest {
+            method: Method::GET,
+            path: format!("/api/gateway/providers/{id}/models"),
+            body: Vec::new(),
+            db_path: ctx.db_path.clone(),
+        })
+        .await
+        .expect("the handler answers its own 4xx rather than erroring")
+    }
+
+    async fn parts_of(response: Response) -> (StatusCode, String) {
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("body");
+        (status, String::from_utf8(bytes.to_vec()).expect("utf-8"))
+    }
+
+    fn header_of(seen: &std::sync::Arc<std::sync::Mutex<Seen>>, name: &str) -> String {
+        seen.lock()
+            .expect("lock")
+            .headers
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// The four provider types, each asked the way its own API expects and each
+    /// answering the ids and nothing else.
+    ///
+    /// One test rather than four because the *table* is the thing under test:
+    /// four near-identical bodies would drift apart, and what matters is that
+    /// every arm of `Shape::of` builds a request the upstream would accept.
+    #[tokio::test]
+    async fn every_provider_type_is_asked_the_way_its_own_api_expects() {
+        let openai_body = r#"{"object":"list","data":[{"id":"gpt-4o-2024-11-20"},{"id":"o3"}]}"#;
+        let gemini_body = r#"{"models":[{"name":"models/gemini-2.5-pro"}]}"#;
+
+        for (kind, body, want_path, want_models) in [
+            (
+                "openai",
+                openai_body,
+                "/models",
+                vec!["gpt-4o-2024-11-20", "o3"],
+            ),
+            (
+                "glm",
+                openai_body,
+                "/models",
+                vec!["gpt-4o-2024-11-20", "o3"],
+            ),
+            (
+                "anthropic",
+                openai_body,
+                "/v1/models?limit=1000",
+                vec!["gpt-4o-2024-11-20", "o3"],
+            ),
+            (
+                "gemini",
+                gemini_body,
+                "/v1beta/models?pageSize=1000",
+                vec!["gemini-2.5-pro"],
+            ),
+        ] {
+            let file = migrated();
+            let ctx = ctx(&file);
+            let (base, seen) = fake_upstream(StatusCode::OK, body).await;
+            seed_provider(&ctx, "p1", kind, "sk-secret-value", &base);
+
+            let (status, answered) = parts_of(catalog(&ctx, "p1").await).await;
+            assert_eq!(status, StatusCode::OK, "{kind}");
+            assert_eq!(
+                answered,
+                format!(
+                    "{{\"models\":[{}]}}\n",
+                    want_models
+                        .iter()
+                        .map(|m| format!("\"{m}\""))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                "{kind}",
+            );
+
+            assert_eq!(seen.lock().expect("lock").target, want_path, "{kind}");
+            match kind {
+                "openai" | "glm" => {
+                    assert_eq!(header_of(&seen, "authorization"), "Bearer sk-secret-value")
+                }
+                "anthropic" => {
+                    assert_eq!(header_of(&seen, "x-api-key"), "sk-secret-value");
+                    assert_eq!(header_of(&seen, "anthropic-version"), "2023-06-01");
+                }
+                // The header form rather than `?key=`, so the credential is
+                // never in a URL.
+                _ => {
+                    assert_eq!(header_of(&seen, "x-goog-api-key"), "sk-secret-value");
+                    assert!(!seen.lock().expect("lock").target.contains("sk-"));
+                }
+            }
+        }
+    }
+
+    /// **The credential rule, asserted over the bytes.**
+    ///
+    /// A struct-level check only proves the field the test knows about is
+    /// absent; this is the sibling of
+    /// `a_scrubbed_read_written_straight_back_preserves_the_stored_key`, and it
+    /// covers the whole response including anything a future field might carry.
+    /// The upstream deliberately *echoes* the key back in its own body, which is
+    /// the shape a forwarded upstream document would leak.
+    #[tokio::test]
+    async fn the_catalog_answer_carries_no_api_key_and_no_upstream_body() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let (base, _) = fake_upstream(
+            StatusCode::OK,
+            r#"{"data":[{"id":"gpt-4o","owned_by":"sk-secret-value","secret":"sk-secret-value"}]}"#,
+        )
+        .await;
+        seed_provider(&ctx, "p1", "openai", "sk-secret-value", &base);
+
+        let (status, body) = parts_of(catalog(&ctx, "p1").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(!body.contains("sk-secret-value"), "{body}");
+        // ...and the upstream's other fields did not come through either.
+        assert_eq!(body, "{\"models\":[\"gpt-4o\"]}\n");
+        assert!(!body.contains("owned_by"), "{body}");
+    }
+
+    /// The same 404 every other `{id}` route on this surface answers.
+    #[tokio::test]
+    async fn an_unknown_provider_id_is_a_404() {
+        let file = migrated();
+        let (status, body) = parts_of(catalog(&ctx(&file), "nope").await).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, "{\"error\":\"provider not found\"}\n");
+    }
+
+    /// An upstream that refuses is a **502**, distinct from the 404 above, and
+    /// it names the status because that is the half a user can act on — a `401`
+    /// says "the key is wrong" better than any wording here could.
+    ///
+    /// Nothing else crosses: not the key, not the base URL, not the upstream's
+    /// own body, which this fake fills with both.
+    #[tokio::test]
+    async fn an_upstream_refusal_is_a_502_naming_the_status_and_nothing_else() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let (base, _) = fake_upstream(
+            StatusCode::UNAUTHORIZED,
+            r#"{"error":{"message":"incorrect api key sk-secret-value"}}"#,
+        )
+        .await;
+        seed_provider(&ctx, "p1", "openai", "sk-secret-value", &base);
+
+        let (status, body) = parts_of(catalog(&ctx, "p1").await).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(body.contains("401"), "{body}");
+        assert!(!body.contains("sk-secret-value"), "{body}");
+        assert!(!body.contains("127.0.0.1"), "{body}");
+        assert!(!body.contains("incorrect api key"), "{body}");
+    }
+
+    /// A provider with no key is answered **before** a request is built, so the
+    /// UI gets a cause it can act on rather than the upstream's `401` — and no
+    /// unauthenticated call is made in the user's name.
+    #[tokio::test]
+    async fn a_provider_with_no_key_is_refused_without_asking_anyone() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let (base, seen) = fake_upstream(StatusCode::OK, r#"{"data":[]}"#).await;
+        seed_provider(&ctx, "p1", "openai", "", &base);
+
+        let (status, body) = parts_of(catalog(&ctx, "p1").await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("no API key"), "{body}");
+        assert!(
+            seen.lock().expect("lock").target.is_empty(),
+            "a request was sent"
+        );
+    }
+
+    /// The guard `native/integrations/base_url.rs` exists for, at this call
+    /// site: `url::Url::parse` removes dot segments and would send the key to an
+    /// endpoint the user did not configure, so the request is refused instead —
+    /// and refused as `Unaskable`, since retrying cannot help.
+    #[tokio::test]
+    async fn a_base_url_that_resolves_elsewhere_is_refused_before_the_key_is_sent() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let (base, seen) = fake_upstream(StatusCode::OK, r#"{"data":[]}"#).await;
+        seed_provider(
+            &ctx,
+            "p1",
+            "openai",
+            "sk-secret-value",
+            &format!("{base}/v1/.."),
+        );
+
+        let (status, body) = parts_of(catalog(&ctx, "p1").await).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.contains("base URL"), "{body}");
+        assert!(
+            seen.lock().expect("lock").target.is_empty(),
+            "a request was sent"
+        );
+    }
+
+    /// A trailing slash is the same endpoint to a person and `//models` to
+    /// naive concatenation. `Base` concatenates because its two other callers
+    /// are ports of Go that does; this one trims first.
+    #[tokio::test]
+    async fn a_base_url_with_a_trailing_slash_reaches_the_same_endpoint() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let (base, seen) = fake_upstream(StatusCode::OK, r#"{"data":[{"id":"a"}]}"#).await;
+        seed_provider(&ctx, "p1", "openai", "sk-secret-value", &format!("{base}/"));
+
+        let (status, _) = parts_of(catalog(&ctx, "p1").await).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(seen.lock().expect("lock").target, "/models");
+    }
+
+    /// Both registries ask `claims`-shaped questions and `proxy.rs` asks the
+    /// streaming one first, so a route claimed by both would leave the buffered
+    /// arm permanently unreachable — a latent "claimed but unhandled" nobody
+    /// would trip over until the two disagreed.
+    #[test]
+    fn the_catalog_route_is_claimed_by_the_streaming_registry_alone() {
+        let path = "/api/gateway/providers/p1/models";
+        assert!(claims_catalog(&Method::GET, path));
+        assert!(!claims(&Method::GET, path));
+        // ...and the buffered half is untouched by the exclusion.
+        assert!(claims(&Method::GET, "/api/gateway/providers"));
+        assert!(claims(&Method::PUT, "/api/gateway/providers/p1"));
+        // The route is still in ROUTES, which is what `desktop_routes.json` is
+        // asserted against.
+        assert!(ROUTES.contains(&CATALOG_ROUTE));
+    }
+
+    /// `id_under` refuses a remainder holding a `/`, which is what keeps a
+    /// one-segment route one segment — so the two-segment suffix needs its own
+    /// extractor, and that extractor must keep the same one-segment rule.
+    #[test]
+    fn the_catalog_id_is_one_segment_and_nothing_else() {
+        assert_eq!(
+            provider_id_for_catalog("/api/gateway/providers/p1/models").as_deref(),
+            Some("p1")
+        );
+        assert_eq!(
+            provider_id_for_catalog("/api/gateway/providers//models"),
+            None
+        );
+        assert_eq!(
+            provider_id_for_catalog("/api/gateway/providers/a/b/models"),
+            None
+        );
+        assert_eq!(provider_id_for_catalog("/api/gateway/providers/p1"), None);
+        assert_eq!(
+            provider_id_for_catalog("/api/gateway/providers/p1/models/x"),
+            None
+        );
     }
 }

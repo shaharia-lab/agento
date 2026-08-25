@@ -280,6 +280,46 @@ textarea.field-area:focus {
   place-items: center;
 }
 
+/* --- Combobox ------------------------------------------------------------ */
+
+/* An open set, where .select is a closed one: the value lives in a real text
+   input and the list only suggests. So the surface is .field's — the same
+   inset hairline and focus ring every other typed field wears — rather than
+   .select's raised one, because what it *is* is a text field. It reuses
+   .dropdown__menu for the popup, since a suggestion list and a select menu are
+   the same object on screen. */
+.combo {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.combo__input {
+  flex: 1;
+  min-width: 0;
+}
+/* Room for the chevron, but only when one is drawn — with no suggestions the
+   control is a plain field and must look like one. A modifier rather than
+   `:has(.combo__chevron)`, which WebKitGTK only learned recently and this app
+   ships against whatever GTK the distro has. */
+.combo--suggesting .combo__input {
+  padding-right: var(--sp-8);
+}
+.combo__chevron {
+  position: absolute;
+  right: var(--sp-4);
+  display: grid;
+  place-items: center;
+  color: var(--fg-tertiary);
+}
+.combo__chevron:hover {
+  color: var(--fg-secondary);
+}
+.combo__chevron:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 /* --- Switch -------------------------------------------------------------- */
 .switch {
   /* Flex, not the button default: the knob is a <span>, and an inline span

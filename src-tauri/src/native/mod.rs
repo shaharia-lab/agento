@@ -242,8 +242,15 @@ pub struct StreamRequest {
 
 pub type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 
-/// Areas whose answer streams. Only chat execution, and likely only ever.
-const STREAM_ENDPOINTS: &[StreamEndpoint] = &[chat::ENDPOINT];
+/// Areas the **async** registry answers.
+///
+/// Chat execution, whose answer genuinely streams — and, since #470, one route
+/// whose answer does not: `GET /api/gateway/providers/{id}/models` makes an
+/// outbound HTTPS call, which the buffered registry's sync `fn` on
+/// `spawn_blocking` is the wrong shape for. Returning a finished body from the
+/// async registry is a smaller change than putting a runtime in front of the
+/// blocking one; see `gateway_api::CATALOG_ROUTE`.
+const STREAM_ENDPOINTS: &[StreamEndpoint] = &[chat::ENDPOINT, gateway_api::STREAM_ENDPOINT];
 
 /// Whether this request is answered by a *streaming* native handler.
 pub fn claims_stream(method: &Method, path: &str) -> bool {

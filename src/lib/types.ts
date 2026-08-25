@@ -747,6 +747,21 @@ export interface GatewayProviderSummary {
 }
 
 /**
+ * `GET /api/gateway/providers/{id}/models` (#470) — the model ids that
+ * provider's own upstream reports.
+ *
+ * **Ids and nothing else.** No pricing, no context window, no capability flags,
+ * and above all nothing of the upstream's own body: the route answers the one
+ * thing it was asked. Always an array — this route has no Go ancestor and
+ * always sends `[]` rather than the `null` an empty Go slice would have
+ * produced — and the list is a *suggestion*, so a target's `model_id` is never
+ * constrained to it.
+ */
+export interface GatewayProviderModels {
+  models: string[];
+}
+
+/**
  * A provider write.
  *
  * `api_key` is three-valued and this is the field the whole surface is built

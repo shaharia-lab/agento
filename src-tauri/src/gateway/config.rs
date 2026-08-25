@@ -377,6 +377,19 @@ impl ProviderRow {
         }
     }
 
+    /// The stored API key, or `""` when none is set.
+    ///
+    /// **A `&str` and nothing else**, which is rule 2 of the module header held
+    /// at its narrowest: the borrow cannot be serialized, logged through
+    /// `Debug`, or outlive the row it came from. Its one caller is
+    /// `native::gateway_api::catalog`, which puts it straight into an
+    /// `Authorization`/`x-api-key` header on one outbound request and drops it
+    /// with the request builder — the same "build at the point of use and drop"
+    /// shape [`Self::to_ferrox`] already has.
+    pub fn api_key(&self) -> &str {
+        &self.api_key
+    }
+
     /// The redacted view of this row.
     pub fn to_summary(&self) -> ProviderSummary {
         ProviderSummary {
@@ -455,6 +468,26 @@ fn load_providers_from(conn: &Connection) -> Result<Vec<ProviderRow>, String> {
         .map_err(|e| format!("reading gateway providers: {e}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e| format!("reading gateway providers: {e}"))
+}
+
+/// **One** provider by row id, with its key — `None` when no such row exists.
+///
+/// The second reader of [`PROVIDER_COLUMNS_SECRET`], and it exists for exactly
+/// one caller: `GET /api/gateway/providers/{id}/models` (#470), which has to
+/// authenticate to that provider's own upstream to ask what it serves. It goes
+/// through the secret projection rather than beside it, and answers the same
+/// [`ProviderRow`] that derives neither `Serialize` nor `Debug`, so the
+/// discipline in the module header covers this path unchanged.
+///
+/// It deliberately does **not** filter on `enabled`: the catalog is a
+/// configuration aid, and a provider a user has switched off is exactly one they
+/// may still be editing an alias against.
+pub fn load_provider_secret(db_path: &Path, id: &str) -> Result<Option<ProviderRow>, String> {
+    let conn = db::open_read_only(db_path)?;
+    let sql = format!("{PROVIDER_COLUMNS_SECRET}\n     WHERE id = ?1");
+    conn.query_row(&sql, [id], scan_provider_secret)
+        .optional()
+        .map_err(|e| format!("reading gateway provider: {e}"))
 }
 
 /// Every provider, redacted — the read the control API and UI use.
