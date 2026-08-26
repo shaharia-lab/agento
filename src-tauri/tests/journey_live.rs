@@ -181,23 +181,26 @@ fn the_journey_builds_over_the_real_corpus() {
             "{session_id}: total_turns disagrees with the turns it shipped"
         );
 
-        // The two active figures, bounded against each other at corpus scale.
-        // The journey is a union over every stamp; the sessions list adds the
-        // scanner's per-transcript figures. So the union can never be below the
-        // parent's own, and never above the sum — and the second bound is what a
-        // regression in `absorb` or in the cap would break.
+        // The one bound that is actually an invariant: `durations()` is
+        // `Σ min(gap, cap)` over consecutive stamps, so absorbing more stamps
+        // can only subdivide gaps and never lower the total — and the scanner
+        // observed the same parent stamp set (both skip `file-history-snapshot`
+        // before observing). A regression in `absorb` breaks this.
+        //
+        // There is deliberately **no upper bound against the sessions list's
+        // sum**, and the reason is the trap this suite exists to avoid stating
+        // as fact: subdividing a gap that was already longer than the cap
+        // replaces one capped gap with two, so the merged figure can legitimately
+        // come out *larger* than the sum — one sidecar with a single logged event
+        // inside a long parent gap is enough. It happens not to on this corpus,
+        // which is exactly why asserting it would be a test that flakes on
+        // somebody else's. So the relationship is counted and reported instead.
         assert!(
             journey.active_duration_ms >= *cached_active_ms,
             "{session_id}: the journey's active time ({}) is below the parent's \
-             own cached figure ({cached_active_ms}) — the union lost stamps",
+             own cached figure ({cached_active_ms}) — absorbing stamps cannot \
+             lower the total, so a stamp was lost",
             journey.active_duration_ms
-        );
-        assert!(
-            journey.active_duration_ms <= cached_active_ms + cached_subagent_active_ms,
-            "{session_id}: the journey's active time ({}) exceeds the sessions \
-             list's sum ({}) — a union cannot be larger than the sum it unions",
-            journey.active_duration_ms,
-            cached_active_ms + cached_subagent_active_ms
         );
         if journey.active_duration_ms < cached_active_ms + cached_subagent_active_ms {
             below_the_sum += 1;
@@ -257,7 +260,10 @@ fn the_journey_builds_over_the_real_corpus() {
     eprintln!("  with sub-agents        {with_subagents} (all rendered: {nested_or_appended})");
     eprintln!("  steps built            {total_steps}");
     eprintln!("  led by orphan steps    {orphan_headed} (one turn more than turn_count)");
-    eprintln!("  active below list sum  {below_the_sum} (concurrent delegation counted once)");
+    eprintln!(
+        "  active below list sum  {below_the_sum}/{} (concurrent delegation counted once)",
+        rows.len()
+    );
     eprintln!(
         "  mean per journey       {} ms",
         elapsed_total / (rows.len() as u128).max(1)

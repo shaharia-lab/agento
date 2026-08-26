@@ -2211,15 +2211,26 @@ busy timeout.
   silently price them at $0.
 - **Session list totals include sub-agents** (`usage + subagent_usage`,
   `cost + subagent_cost`). The facets bar and the rows must agree.
-- **The journey's `active_duration_ms` is a *union* and the sessions list's is a
-  *sum*, and neither is derivable from the other** (#479). The scanner caps each
-  transcript on its own, so the list's `active + subagent_active` counts a
-  wall-clock minute once per transcript running in it — and delegation is
-  concurrent, so that total can exceed the session's own span. The journey feeds
-  every stamp to one tracker and caps each gap once, which is bounded by the
-  span. Both are right about different questions; the view labels which it
-  shows, and `sessions/journey.rs`'s header carries the argument. Do not
+- **The journey's `active_duration_ms` and the sessions list's are the same
+  formula over different stamp sets, and neither dominates the other** (#479).
+  Both are `Σ min(gap, idle_cap)` over consecutive stamps. The scanner caps each
+  transcript on its own and the list adds the results, so `active +
+  subagent_active` counts a wall-clock minute once per transcript running in it
+  — and delegation is concurrent, so that total can exceed the session's own
+  span. The journey takes one sum over every stamp, so it counts that minute
+  once. **It is not a union of intervals**, which is the inference to resist:
+  absorbing a stamp inside a gap already longer than the cap replaces one capped
+  gap with two, so the merged figure can come out *above* the sum — a sidecar
+  with a single logged event is enough. So the ordering is observed, never
+  asserted (`tests/journey_live.rs` bounds only the sound side). Both figures
+  are right about different questions; the view labels which it shows. Do not
   "reconcile" them by changing which stamps reach a tracker.
+- **A journey's `active_duration_ms` can exceed its `total_duration_ms`**
+  (#479). The time range is widened only by the events the parent walk sees,
+  while the active tracker also absorbs every sub-agent's stamps — Go's split,
+  and moving `start_time`/`end_time` would change the wire. A delegated
+  transcript stamped past the parent's last event therefore lands outside the
+  span it is reported beside.
 - **A journey can render one more turn than Insights counts, and only ever
   one** (#479). `is_user_turn_content` decides both, so they cannot disagree
   about any single event — but the journey's `ensure_turn` opens a leading turn

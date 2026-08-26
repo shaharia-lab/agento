@@ -39,22 +39,36 @@
 //!    the parent's `Task` wait instead of collapsing to one capped gap.
 //!
 //!    **It does not make this agree with the sessions list, and the two figures
-//!    are different questions rather than one of them being wrong.** The list
-//!    reports `active_duration_ms + subagent_active_duration_ms`, where every
-//!    transcript was capped *on its own* by the scanner and the sub-agents'
-//!    results were then `SUM`-ed (`summary.rs::total_active_duration_ms`, over
-//!    the `SUM(active_duration_ms)` in `SUMMARY_SOURCE`). Delegation is
-//!    concurrent — the parent is parked on the `Task` while its agent works — so
-//!    that sum counts one wall-clock minute once per transcript running in it,
-//!    and can exceed the session's own span. This is a **union**: one tracker,
-//!    every stamp, each gap capped once, so it is bounded by the span and reads
-//!    as "how long was this session actually being worked on".
+//!    are different questions rather than one of them being wrong.** Both are
+//!    `Σ min(gap, idle_cap)` over consecutive stamps; what differs is the stamp
+//!    set each sum is taken over. The list caps every transcript *on its own*
+//!    (the scanner) and adds the results — `active_duration_ms +
+//!    SUM(subagent active_duration_ms)`, via
+//!    `summary.rs::total_active_duration_ms` — so a wall-clock minute in which
+//!    the parent waits on a `Task` and its agent works is counted twice. This
+//!    takes one sum over every stamp, so that minute is counted once, which is
+//!    the honest reading of "how long was this session actually being worked
+//!    on".
 //!
-//!    Both are defensible and neither can be derived from the other, so the view
-//!    labels what it shows. `a_delegated_run_is_counted_once_here_and_twice_by_the_list`
-//!    pins the relationship rather than leaving it to a comment; without the
-//!    absorb the union collapses to the parent's own figure and that test fails
-//!    on its lower bound.
+//!    **Neither figure dominates the other, and the arithmetic is the reason.**
+//!    It is tempting to call this a union of intervals and conclude it can never
+//!    exceed the sum; it is not one. Absorbing a stamp *inside* a parent gap
+//!    that was longer than the cap replaces one capped gap with two, so the
+//!    merged total can come out **larger** — a sidecar holding a single logged
+//!    event, whose own duration is therefore 0, is enough. So the relationship
+//!    is stated and observed rather than asserted as an invariant: the fixture
+//!    test `a_delegated_run_is_counted_once_here_and_twice_by_the_list` pins the
+//!    concrete numbers for the ordinary shape, `tests/journey_live.rs` asserts
+//!    only the sound bound (absorbing stamps never *lowers* the total) and
+//!    counts the rest, and the view's tooltip names which figure it is showing.
+//!
+//!    One consequence worth knowing before reading a header: **`active_duration_ms`
+//!    can exceed `total_duration_ms`.** `Builder::range` is widened only by the
+//!    events the parent walk sees, and `build_subagent_steps` absorbs a
+//!    sub-builder's tracker and deliberately not its range — which is Go's
+//!    split, and moving `start_time`/`end_time` would change the wire. A sidecar
+//!    stamped after the parent's last event therefore lands outside the span it
+//!    is reported beside.
 //!
 //! ## Where this deliberately does not reproduce the Go
 //!
@@ -1842,10 +1856,14 @@ mod tests {
         );
         assert!(
             merged.active_duration_ms < list,
-            "the union must not reach the list's sum, which double-counts \
-             concurrent delegation"
+            "on this shape the single sum must come out below the list's, which \
+             counts the concurrent delegation twice"
         );
-        // And it is bounded by the session's own span, which the sum is not.
+        // On *this* fixture every stamp falls inside the parent's span, so the
+        // two agree. That is a property of the fixture: `Builder::range` is
+        // widened only by the parent walk, so a sidecar stamped past the
+        // parent's last event puts `active_duration_ms` above the span it is
+        // reported beside — see the header.
         assert_eq!(merged.active_duration_ms, merged.total_duration_ms);
         assert!(list > merged.total_duration_ms);
     }
