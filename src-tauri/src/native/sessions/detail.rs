@@ -50,6 +50,13 @@ use crate::native::{gopath, settings};
 /// `previewMaxRunes`.
 const PREVIEW_MAX_CHARS: usize = 120;
 
+/// How much of a tool result travels. A `Bash` call can print megabytes, and
+/// the detail response already carries every message of a session — the whole
+/// of one build log would make the page's payload unbounded for no reader's
+/// benefit. 2000 runes is the cap the deleted journey builder applied to the
+/// same value.
+const TOOL_RESULT_MAX_CHARS: usize = 2000;
+
 /// One rendered conversation event. Mirrors `claudesessions.ClaudeMessage`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionMessage {
@@ -106,6 +113,13 @@ pub struct NormalizedBlock {
         serialize_with = "crate::native::gojson::serialize_compacted_option"
     )]
     pub input: Option<Box<RawValue>>,
+    /// Whether a `tool_result` reports a failure. Only ever set on that block
+    /// type, and **last on the wire deliberately**: with `skip_serializing_if`
+    /// it is absent for every other block and for a successful result, so a
+    /// transcript with no failed tool call encodes exactly the bytes it did
+    /// before the field existed.
+    #[serde(skip_serializing_if = "is_false")]
+    pub is_error: bool,
 }
 
 /// One todo from the session's todo list. Mirrors `claudesessions.ClaudeTodo`.
@@ -310,7 +324,7 @@ fn process_user_event(
         timestamp: go_time(ev.timestamp),
         role: "user".to_string(),
         content,
-        blocks: Vec::new(),
+        blocks: tool_result_blocks(ev.message.as_ref().and_then(|m| m.content_raw.as_deref())),
         usage: None,
         git_branch: ev.git_branch.clone(),
         is_sidechain: false,
@@ -371,8 +385,11 @@ fn process_assistant_event(
     messages.push(msg);
 }
 
-/// `populateAssistantBlocks` + `normalizeBlock`: only the three renderable
-/// types survive, and anything else is dropped rather than passed through.
+/// `populateAssistantBlocks` + `normalizeBlock`: only the renderable types
+/// survive, and anything else is dropped rather than passed through.
+///
+/// `tool_result` is the fourth, and it is the one that does not come from an
+/// assistant event — see [`tool_result_blocks`].
 fn normalized_blocks(content: Option<&RawValue>) -> Vec<NormalizedBlock> {
     let Some(content) = content else {
         return Vec::new();
@@ -386,6 +403,7 @@ fn normalized_blocks(content: Option<&RawValue>) -> Vec<NormalizedBlock> {
                 id: String::new(),
                 name: String::new(),
                 input: None,
+                is_error: false,
             }),
             "text" => out.push(NormalizedBlock {
                 block_type: "text".to_string(),
@@ -393,6 +411,7 @@ fn normalized_blocks(content: Option<&RawValue>) -> Vec<NormalizedBlock> {
                 id: String::new(),
                 name: String::new(),
                 input: None,
+                is_error: false,
             }),
             "tool_use" => out.push(NormalizedBlock {
                 block_type: "tool_use".to_string(),
@@ -400,11 +419,44 @@ fn normalized_blocks(content: Option<&RawValue>) -> Vec<NormalizedBlock> {
                 id: b.id,
                 name: b.name,
                 input: b.input.map(crate::native::gojson::compact_raw),
+                is_error: false,
+            }),
+            // The result's own text lands in `text` and the call it answers in
+            // `id`, so a client pairs the two on `id` alone — the same key a
+            // `tool_use` block already publishes.
+            "tool_result" => out.push(NormalizedBlock {
+                block_type: "tool_result".to_string(),
+                text: summary_file::truncate_chars(
+                    &transcript::extract_text_content(&b.content),
+                    TOOL_RESULT_MAX_CHARS,
+                ),
+                id: b.tool_use_id,
+                name: String::new(),
+                input: None,
+                is_error: b.is_error,
             }),
             _ => {}
         }
     }
     out
+}
+
+/// The blocks a **user** event contributes: its `tool_result` carriers, and
+/// nothing else.
+///
+/// A tool's result is written as a user-role event, so `normalized_blocks`
+/// alone — which only the assistant path calls — never sees one. This is the
+/// other half, and it filters rather than the arm doing so because a user
+/// event's prose already travels in `content`: re-emitting it as `text` blocks
+/// would duplicate every user message on the wire for nothing. What the array
+/// carries and `content` cannot is the result of a call and whether it failed.
+///
+/// A message whose content is a plain string decodes to no blocks at all, so
+/// an ordinary typed turn is untouched.
+fn tool_result_blocks(content: Option<&RawValue>) -> Vec<NormalizedBlock> {
+    let mut blocks = normalized_blocks(content);
+    blocks.retain(|b| b.block_type == "tool_result");
+    blocks
 }
 
 /// `derivePreview`: the first user message carrying any text.
@@ -902,19 +954,172 @@ mod tests {
     /// Thinking text lands in `text`, and an unrenderable block is dropped
     /// rather than passed through with an empty type.
     #[test]
-    fn only_the_three_renderable_block_types_survive() {
+    fn only_the_renderable_block_types_survive() {
         let content = RawValue::from_string(
             r#"[{"type":"thinking","thinking":"hmm"},
                 {"type":"text","text":"hi"},
-                {"type":"tool_result","tool_use_id":"t1"}]"#
+                {"type":"tool_result","tool_use_id":"t1","content":"out"},
+                {"type":"image","source":{"type":"base64"}}]"#
                 .to_string(),
         )
         .expect("content");
         let blocks = normalized_blocks(Some(&content));
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].block_type, "thinking");
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|b| b.block_type.as_str())
+                .collect::<Vec<_>>(),
+            vec!["thinking", "text", "tool_result"],
+            "an image block has no rendering here and is still dropped"
+        );
         assert_eq!(blocks[0].text, "hmm");
-        assert_eq!(blocks[1].block_type, "text");
+        assert_eq!(blocks[2].id, "t1", "the result carries the call it answers");
+        assert_eq!(blocks[2].text, "out");
+    }
+
+    /// The two shapes a `tool_result`'s content is written in, and the two
+    /// that carry nothing — none of which may fail the decode of the array
+    /// they sit in, since that would take the `tool_use` blocks with them.
+    #[test]
+    fn a_tool_result_reads_both_content_shapes_and_neither_panics() {
+        let block = |raw: &str| {
+            let content = RawValue::from_string(raw.to_string()).expect("content");
+            normalized_blocks(Some(&content))
+        };
+
+        // A bare string, which is what a short command's output is written as.
+        let s = block(r#"[{"type":"tool_result","tool_use_id":"t1","content":"ok\nfine"}]"#);
+        assert_eq!(s[0].text, "ok\nfine");
+        assert!(!s[0].is_error);
+
+        // An array of content blocks, which is what a longer one is written
+        // as. Only the text blocks contribute, joined the way a message's own
+        // text content is.
+        let a = block(
+            r#"[{"type":"tool_result","tool_use_id":"t2","is_error":true,
+                 "content":[{"type":"text","text":"one"},
+                            {"type":"image","source":{}},
+                            {"type":"text","text":"two"}]}]"#,
+        );
+        assert_eq!(a[0].text, "one\ntwo");
+        assert!(a[0].is_error, "a failure is carried, not inferred");
+
+        // Neither shape: an absent content key, and an explicit null. Both are
+        // an empty result, and both keep the sibling `tool_use` block.
+        for raw in [
+            r#"[{"type":"tool_use","id":"t","name":"Bash"},{"type":"tool_result","tool_use_id":"t3"}]"#,
+            r#"[{"type":"tool_use","id":"t","name":"Bash"},{"type":"tool_result","tool_use_id":"t3","content":null}]"#,
+        ] {
+            let b = block(raw);
+            assert_eq!(b.len(), 2, "{raw}");
+            assert_eq!(b[1].text, "", "{raw}");
+        }
+    }
+
+    /// A tool result is capped, because one `Bash` call can print megabytes
+    /// into a response that already carries every message of the session.
+    #[test]
+    fn a_long_tool_result_is_truncated() {
+        let long = "x".repeat(TOOL_RESULT_MAX_CHARS + 500);
+        let content = RawValue::from_string(format!(
+            r#"[{{"type":"tool_result","tool_use_id":"t","content":"{long}"}}]"#
+        ))
+        .expect("content");
+        let blocks = normalized_blocks(Some(&content));
+        assert_eq!(
+            blocks[0].text.chars().count(),
+            TOOL_RESULT_MAX_CHARS + 1,
+            "truncation appends one ellipsis"
+        );
+    }
+
+    /// A user event contributes its results and nothing else: its prose
+    /// already travels in `content`, and duplicating it as `text` blocks would
+    /// widen every message on the wire.
+    #[test]
+    fn a_user_event_carries_its_tool_results_and_no_other_block() {
+        let carrier = RawValue::from_string(
+            r#"[{"type":"text","text":"ignore me"},
+                {"type":"tool_result","tool_use_id":"t1","content":"out"}]"#
+                .to_string(),
+        )
+        .expect("content");
+        let blocks = tool_result_blocks(Some(&carrier));
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].block_type, "tool_result");
+
+        // An ordinary typed turn is string content, which decodes to no
+        // blocks at all — so nothing about it moves.
+        let typed = RawValue::from_string(r#""just some prose""#.to_string()).expect("content");
+        assert!(tool_result_blocks(Some(&typed)).is_empty());
+        assert!(tool_result_blocks(None).is_empty());
+    }
+
+    /// `is_error` is absent from the wire unless it is true, which is what
+    /// keeps every response for a transcript with no failed call byte-identical
+    /// to what it was before the field existed.
+    #[test]
+    fn is_error_is_omitted_unless_the_call_failed() {
+        let encode = |raw: &str| {
+            let content = RawValue::from_string(raw.to_string()).expect("content");
+            String::from_utf8(
+                crate::native::gojson::to_vec(&normalized_blocks(Some(&content))).expect("encode"),
+            )
+            .expect("utf8")
+        };
+
+        assert_eq!(
+            encode(r#"[{"type":"tool_result","tool_use_id":"t","content":"ok"}]"#),
+            "[{\"type\":\"tool_result\",\"text\":\"ok\",\"id\":\"t\"}]\n"
+        );
+        assert_eq!(
+            encode(r#"[{"type":"tool_result","tool_use_id":"t","content":"no","is_error":true}]"#),
+            "[{\"type\":\"tool_result\",\"text\":\"no\",\"id\":\"t\",\"is_error\":true}]\n"
+        );
+        // And it never appears on a block type that cannot carry it.
+        assert_eq!(
+            encode(r#"[{"type":"text","text":"hi"}]"#),
+            "[{\"type\":\"text\",\"text\":\"hi\"}]\n"
+        );
+    }
+
+    /// The rendered message list of one fixture transcript, byte for byte.
+    ///
+    /// Hand-written beside the code, like `desktop_routes.json` and
+    /// `claude_sessions_search_golden.json`: `tool_result` on this endpoint has
+    /// no Go ancestor to record it from, because the arm that would have
+    /// emitted it never existed. **A change here is a change to the contract** —
+    /// edit it deliberately, never by re-recording until the test passes.
+    ///
+    /// What it pins that no unit test above can: the block's *position* in the
+    /// wire object (`is_error` last, after `input`), that a successful result
+    /// carries no `is_error` key at all, that a `tool_use` block's `input`
+    /// still reaches the wire with its own key order and number spelling, and
+    /// that a tool-result carrier is a user message with `blocks` and no
+    /// `content`.
+    #[test]
+    fn the_detail_messages_match_the_golden_bytes() {
+        let lines = [
+            r#"{"type":"user","uuid":"u1","parentUuid":null,"timestamp":"2026-08-01T10:00:00Z","gitBranch":"main","message":{"role":"user","content":"run the build"}}"#,
+            r#"{"type":"assistant","uuid":"a1","parentUuid":"u1","timestamp":"2026-08-01T10:00:01Z","message":{"role":"assistant","model":"sonnet","content":[{"type":"thinking","thinking":"which build"},{"type":"text","text":"Running it."},{"type":"tool_use","id":"t1","name":"Bash","input":{"z":1.50,"cmd":"make"}},{"type":"tool_use","id":"t2","name":"Bash","input":{"cmd":"make test"}}]}}"#,
+            // A success, written as a bare string.
+            r#"{"type":"user","uuid":"u2","parentUuid":"a1","timestamp":"2026-08-01T10:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"build ok"}]}}"#,
+            // A failure, written as an array of blocks.
+            r#"{"type":"user","uuid":"u3","parentUuid":"u2","timestamp":"2026-08-01T10:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t2","is_error":true,"content":[{"type":"text","text":"2 tests failed"}]}]}}"#,
+            r#"{"type":"assistant","uuid":"a2","parentUuid":"u3","timestamp":"2026-08-01T10:00:04Z","message":{"role":"assistant","model":"sonnet","content":[{"type":"text","text":"The build passed and the tests did not."}],"usage":{"input_tokens":10,"output_tokens":20}}}"#,
+        ];
+        let dir = corpus(SESSION, &lines, None);
+        let root = dir.path().to_string_lossy().into_owned();
+        let (c, p, f) = find_session_file(&[root], SESSION).expect("found");
+        let d = read_detail(&c, SESSION, &p, &f).expect("detail");
+
+        let got = String::from_utf8(crate::native::gojson::to_vec(&d.messages).expect("encode"))
+            .expect("utf8");
+        let want = include_str!("../../../../parity/session_detail_blocks_golden.json");
+        assert_eq!(
+            got, want,
+            "the session detail messages drifted from their golden"
+        );
     }
 
     #[test]

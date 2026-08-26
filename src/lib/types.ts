@@ -310,11 +310,15 @@ export interface ClaudeSessionSummary {
 
 /** One content block of an assistant turn, normalized by the scanner. */
 export interface NormalizedBlock {
-  type: string; // "thinking" | "text" | "tool_use"
+  type: string; // "thinking" | "text" | "tool_use" | "tool_result"
+  /** A tool_result's own text, capped at 2000 runes by the backend. */
   text?: string;
+  /** The call's id on a tool_use, and the call it answers on a tool_result. */
   id?: string;
   name?: string;
   input?: unknown;
+  /** Only ever present, and only ever `true`, on a failed tool_result. */
+  is_error?: boolean;
 }
 
 /** One conversation turn from a session transcript. */
