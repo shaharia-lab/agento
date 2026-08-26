@@ -406,6 +406,11 @@ export function ContextMenu({
       left: Math.max(m, Math.min(at.x, window.innerWidth - width - m)),
       top: Math.max(m, Math.min(at.y, window.innerHeight - height - m)),
     });
+    // Reopening does not always remount: right-clicking a second row while the
+    // menu is open closes and reopens it in one batch, so this component is
+    // reused and a stale `active` would carry over — leaving a highlighted item
+    // the user never chose, which Enter would then fire.
+    setActive(-1);
   }, [at.x, at.y]);
 
   // Focus only once `pos` has made the menu visible: a `visibility: hidden`
@@ -470,11 +475,19 @@ export function ContextMenu({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // A chorded key is somebody else's: this listener is at the window's
+      // capture phase, so claiming Ctrl+Enter or Cmd+ArrowDown here would take
+      // it from every other handler in the app while a menu happens to be open.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       switch (e.key) {
         case "Escape":
-        case "Tab":
           onClose();
           break;
+        // Tab closes and is then left alone, the way `Dropdown` treats it, so
+        // focus still moves on to the next control rather than being trapped.
+        case "Tab":
+          onClose();
+          return;
         case "ArrowDown":
           move(1);
           break;
