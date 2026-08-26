@@ -70,6 +70,7 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/gateway/models/{id}"),
     ("DELETE", "/api/gateway/models/{id}"),
     ("GET", "/api/gateway/status"),
+    ("GET", "/api/gateway/port-availability"),
     ("GET", "/api/gateway/usage"),
     ("GET", "/api/gateway/providers/{id}/models"),
     ("POST", "/api/gateway/providers/validate"),
@@ -466,6 +467,7 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
         ("POST", "/api/gateway/models") => writes::finish(create_alias(db, req.body)),
 
         ("GET", "/api/gateway/status") => read_status(),
+        ("GET", "/api/gateway/port-availability") => read_port_availability(req.query),
         ("GET", "/api/gateway/usage") => read_usage(db, req.query),
 
         ("PUT", path) => match (id_under(path, "providers"), id_under(path, "models")) {
@@ -976,6 +978,133 @@ fn status_body(status: registry::Status) -> StatusBody {
             port: None,
             error: Some(error),
         },
+    }
+}
+
+// ─── Port availability ────────────────────────────────────────────────────────
+
+/// How far above the requested port the walk looks for a free one.
+///
+/// A cap rather than a walk to 65535, because the walk is 65535 `bind` syscalls
+/// in the pathological case and it runs on the settings form while somebody is
+/// typing. 64 is plenty for the collision this exists for — a
+/// `~/.agento-desktop-dev` instance and an installed one sharing the machine's
+/// ports — and the body says how far it looked rather than reporting "no free
+/// port" as if it had asked the whole range.
+const PORT_SCAN_SPAN: u16 = 64;
+
+/// `GET /api/gateway/port-availability?port=N` (#474).
+///
+/// **Advisory, and deliberately so.** It is a TOCTOU check by nature: a port
+/// free at probe time can be taken before `registry::start` binds it, so
+/// `Status::BindFailed` stays the authority and the status strip stays where the
+/// real outcome shows up. What this buys is that the routine collision is
+/// reported *before* the save rather than after it, since
+/// `PUT /api/gateway/settings` spawns the reload without awaiting it and a `200`
+/// therefore means "stored", never "listening".
+///
+/// The answer is never applied for the user. The port is what they paste into
+/// `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`, so a silent rewrite would point
+/// every tool they had already configured at nothing.
+#[derive(Debug, Serialize)]
+struct PortAvailabilityBody {
+    port: u16,
+    available: bool,
+    /// The first free port **above** `port`, when `port` itself is taken.
+    ///
+    /// Absent when `port` is available (there is nothing to suggest) and also
+    /// when the capped walk found nothing — the two are told apart by
+    /// `available`, and by `scanned_to` being present in the second.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    suggested: Option<u16>,
+    /// The last port the walk looked at, so "no free port" is a bounded claim
+    /// rather than an unqualified one. Present only when a walk happened.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scanned_to: Option<u16>,
+}
+
+fn read_port_availability(query: &str) -> Result<Answer, String> {
+    let raw = super::query::value(query, "port");
+    let Some(port) = raw.parse::<u16>().ok().filter(|p| *p >= MIN_PORT) else {
+        // The same refusal `PUT /api/gateway/settings` gives the same value, so
+        // a form that got past its own check hears one story rather than two.
+        return writes::finish(Err(WriteError::validation(
+            "port",
+            format!(
+                "port must be a whole number between {MIN_PORT} and {}",
+                u16::MAX
+            ),
+        )));
+    };
+
+    let body = availability(port, own_port_of(registry::status()), port_is_bindable);
+    let encoded = super::gojson::to_vec(&body)
+        .map_err(|e| format!("encoding gateway port availability: {e}"))?;
+    Ok(Answer::json(encoded))
+}
+
+/// The port the listener currently holds, if it holds one.
+///
+/// **The running gateway's own port must read as available**, or the user can
+/// never re-save their own configuration: the probe would find the port taken by
+/// the very process being configured and offer to move it somewhere else on
+/// every visit to the form.
+///
+/// Split from the registry read for the reason [`status_body`] is — that state
+/// is a process-wide global, and a test that installed one would break tests in
+/// files it never touched.
+fn own_port_of(status: registry::Status) -> Option<u16> {
+    match status {
+        registry::Status::Running { port } => Some(port),
+        // `BindFailed` carries a port too, and it is precisely a port this
+        // process does *not* hold — so it must fall through to a real probe.
+        registry::Status::Stopped
+        | registry::Status::BindFailed { .. }
+        | registry::Status::StartFailed { .. } => None,
+    }
+}
+
+/// Can this process bind `127.0.0.1:port` right now?
+///
+/// The listener is dropped at the end of the expression, so nothing is held —
+/// which is also why the answer is advisory rather than a reservation.
+fn port_is_bindable(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
+/// The decision, with the prober injected.
+///
+/// Split from [`read_port_availability`] so the walk, the cap, the overflow at
+/// the top of the range and the own-port rule are all testable without binding
+/// real sockets — a test that raced the machine's actual port table would be
+/// exactly the flaky test this repository's fixtures go out of their way to
+/// avoid.
+fn availability(
+    port: u16,
+    own: Option<u16>,
+    bindable: impl Fn(u16) -> bool,
+) -> PortAvailabilityBody {
+    let free = |p: u16| own == Some(p) || bindable(p);
+
+    if free(port) {
+        return PortAvailabilityBody {
+            port,
+            available: true,
+            suggested: None,
+            scanned_to: None,
+        };
+    }
+
+    // `saturating_add` rather than `+`: a port near the top of the range would
+    // otherwise overflow, and the walk has to stop at 65535 either way.
+    let last = port.saturating_add(PORT_SCAN_SPAN);
+    let suggested = (port.saturating_add(1)..=last).find(|p| free(*p));
+
+    PortAvailabilityBody {
+        port,
+        available: false,
+        suggested,
+        scanned_to: Some(last),
     }
 }
 
@@ -2802,6 +2931,173 @@ mod tests {
         assert!(claims(&Method::GET, "/api/gateway/providers"));
         assert!(claims(&Method::POST, "/api/gateway/providers"));
         assert!(claims(&Method::PUT, "/api/gateway/providers/p1"));
+    }
+
+    // ── Port availability (#474) ──────────────────────────────────────────
+
+    /// A prober built from a set of ports that are *taken*; everything else is
+    /// free. The real one binds a socket, and a test that did would race the
+    /// machine's actual port table.
+    fn taken(ports: &[u16]) -> impl Fn(u16) -> bool + '_ {
+        move |p| !ports.contains(&p)
+    }
+
+    #[test]
+    fn a_free_port_is_available_and_suggests_nothing() {
+        let body = availability(8880, None, taken(&[]));
+        assert_eq!(body.port, 8880);
+        assert!(body.available);
+        assert_eq!(body.suggested, None);
+        // No walk happened, so there is nothing to say about how far it looked.
+        assert_eq!(body.scanned_to, None);
+    }
+
+    #[test]
+    fn a_taken_port_suggests_the_first_free_one_above_it() {
+        let body = availability(8880, None, taken(&[8880, 8881, 8882]));
+        assert!(!body.available);
+        assert_eq!(body.suggested, Some(8883));
+        assert_eq!(body.scanned_to, Some(8880 + PORT_SCAN_SPAN));
+    }
+
+    /// **The rule that locks a working install out of its own settings when it
+    /// is missing.** The gateway holds its configured port, so an honest probe
+    /// finds it taken — by the very process being configured — and would offer
+    /// to move it somewhere else every time the form is opened.
+    #[test]
+    fn the_running_gateways_own_port_reads_as_available() {
+        // Nothing is bindable, so the only way this can answer "available" is
+        // the own-port comparison.
+        let body = availability(8880, Some(8880), taken(&[8880]));
+        assert!(body.available);
+        assert_eq!(body.suggested, None);
+
+        // ...and a *different* running port does not launder this one.
+        let body = availability(8880, Some(8881), taken(&[8880]));
+        assert!(!body.available);
+    }
+
+    /// `BindFailed` carries a port and that port is precisely one this process
+    /// does **not** hold, so it must not be treated as the listener's own.
+    #[test]
+    fn only_a_running_listener_contributes_an_own_port() {
+        assert_eq!(
+            own_port_of(registry::Status::Running { port: 8880 }),
+            Some(8880)
+        );
+        assert_eq!(own_port_of(registry::Status::Stopped), None);
+        assert_eq!(
+            own_port_of(registry::Status::BindFailed {
+                port: 8880,
+                error: "address in use".into(),
+            }),
+            None,
+            "a bind failure names a port this process does NOT hold"
+        );
+        assert_eq!(
+            own_port_of(registry::Status::StartFailed {
+                error: "no adapter".into(),
+            }),
+            None
+        );
+    }
+
+    /// A walk that finds nothing says how far it looked, rather than reporting
+    /// "no free port" as though it had asked the whole range.
+    #[test]
+    fn a_walk_that_finds_nothing_reports_how_far_it_looked() {
+        let all: Vec<u16> = (8880..=9000).collect();
+        let body = availability(8880, None, taken(&all));
+        assert!(!body.available);
+        assert_eq!(body.suggested, None);
+        assert_eq!(body.scanned_to, Some(8944));
+    }
+
+    /// The walk stops at the top of the port range instead of overflowing.
+    #[test]
+    fn the_walk_saturates_at_the_top_of_the_port_range() {
+        let all: Vec<u16> = (65_500..=65_535).collect();
+        let body = availability(65_500, None, taken(&all));
+        assert_eq!(body.scanned_to, Some(u16::MAX));
+        assert_eq!(body.suggested, None);
+
+        // The last port in the range is reachable — an exclusive upper bound
+        // would silently skip 65535.
+        let body = availability(65_500, None, taken(&all[..all.len() - 1]));
+        assert_eq!(body.suggested, Some(u16::MAX));
+    }
+
+    /// The real prober, against a socket this test holds — the one thing the
+    /// injected one cannot say anything about.
+    #[test]
+    fn the_real_prober_sees_a_bound_port_as_taken() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = held.local_addr().expect("addr").port();
+        assert!(!port_is_bindable(port));
+        drop(held);
+        assert!(port_is_bindable(port));
+    }
+
+    #[test]
+    fn the_route_answers_the_three_fields_in_wire_order() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = held.local_addr().expect("addr").port();
+
+        let file = migrated();
+        let answer = call_query(
+            &ctx(&file),
+            "/api/gateway/port-availability",
+            &format!("port={port}"),
+        )
+        .expect("answered");
+        assert_eq!(answer.status, StatusCode::OK);
+
+        let body = body_of(&answer);
+        assert!(
+            body.starts_with(&format!(
+                "{{\"port\":{port},\"available\":false,\"suggested\":"
+            )),
+            "{body}"
+        );
+        assert!(body.contains("\"scanned_to\":"), "{body}");
+    }
+
+    /// An absent or unusable `port` is the route's own 422, worded exactly as
+    /// `PUT /api/gateway/settings` words the same refusal — not a panic, and not
+    /// a silent fallback to the default.
+    #[test]
+    fn a_missing_or_unusable_port_is_a_validation_error() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        for query in ["", "port=", "port=abc", "port=80", "port=70000", "port=-1"] {
+            let answer = call_query(&ctx, "/api/gateway/port-availability", query)
+                .unwrap_or_else(|e| panic!("{query}: {e}"));
+            assert_eq!(
+                answer.status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{query} → {}",
+                body_of(&answer)
+            );
+            assert!(
+                body_of(&answer).contains("port must be a whole number"),
+                "{query} → {}",
+                body_of(&answer)
+            );
+        }
+    }
+
+    /// The buffered registry claims it, and the async one does not — it opens no
+    /// socket to a third party and reads no database, so it belongs on
+    /// `spawn_blocking` with its thirteen siblings.
+    #[test]
+    fn the_port_availability_route_is_claimed_by_the_buffered_registry() {
+        assert!(claims(&Method::GET, "/api/gateway/port-availability"));
+        assert!(!claims_async(
+            &Method::GET,
+            "/api/gateway/port-availability"
+        ));
+        // A write on it is nobody's.
+        assert!(!claims(&Method::POST, "/api/gateway/port-availability"));
     }
 
     /// `validate` is a literal segment on a collection whose siblings capture an

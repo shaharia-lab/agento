@@ -68,14 +68,22 @@ export function Empty({
 export function Switch({
   on,
   onChange,
+  disabled,
+  title,
 }: {
   on: boolean;
   onChange(v: boolean): void;
+  /** Refuses the click *and* says so to assistive tech — `aria-disabled` alone
+      would leave a switch that reads as unavailable and still toggles. */
+  disabled?: boolean;
+  title?: string;
 }) {
   return (
     <button
       role="switch"
       aria-checked={on}
+      disabled={disabled}
+      title={title}
       className={`switch ${on ? "switch--on" : ""}`}
       onClick={() => onChange(!on)}
     >

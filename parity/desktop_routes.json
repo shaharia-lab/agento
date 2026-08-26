@@ -146,6 +146,13 @@
     },
     {
       "method": "GET",
+      "route": "/api/gateway/port-availability",
+      "status": "native",
+      "owner": "#474",
+      "reason": "is 127.0.0.1:N bindable, and if not what is the next port that is -- the one thing the settings form cannot answer for itself, because a webview cannot bind a socket. Advisory by nature (a port free at probe time can be taken before the bind), so Status::BindFailed stays the authority; what it buys is that the routine collision is reported BEFORE the save rather than after it. The running listener's own port reads as available, or the user could never re-save their own configuration"
+    },
+    {
+      "method": "GET",
       "route": "/api/gateway/providers/{id}/models",
       "status": "native",
       "owner": "#470",

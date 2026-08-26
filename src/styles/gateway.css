@@ -347,3 +347,20 @@
   font-size: var(--text-xs);
   color: var(--fg-quaternary);
 }
+
+/* --- The readiness gate and the port suggestion (#474) -------------------- */
+
+/* A `.msgline` is a two-column flex — icon, then one child. These carry a
+   sentence *and* the actions that resolve it, so the second column stacks
+   rather than the buttons joining the icon on the main axis. */
+.gw-gate__body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+.gw-gate__actions {
+  display: flex;
+  gap: var(--sp-3);
+  flex-wrap: wrap;
+}

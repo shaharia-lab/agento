@@ -278,6 +278,12 @@ still listed and its data is safe, but it cannot be edited or used.
 Something else already holds that port. Change it in **LLM Gateway → Gateway
 Settings → Port** and save; the listener rebinds immediately.
 
+The Settings form now checks the port as you type and offers a free one — "Port
+8880 is already in use by another process. Port 8881 is free." — so this state
+is usually avoidable. It is still only a check, not a reservation: something can
+take the port between the check and the bind, and *this* status is the
+authority on what actually happened.
+
 The usual culprit is a second Agento. A development build and an installed one
 read different databases but share the machine's ports, so both can be configured
 for 8880 and only the first to start gets it. The status carries the exact reason,
@@ -286,6 +292,27 @@ and the same line is in the log:
 ```
 binding the llm gateway on 127.0.0.1:8880: Address already in use (os error 98)
 ```
+
+### "Enable the gateway" is greyed out and will not turn on
+
+The gateway has nothing to route to. Both **Enable the gateway** and **Start
+with the app** stay shut until there is at least one provider *and* at least one
+model alias — without both, the listener would bind a port that fails to route
+every model name a client sends, which is the mismatch below with nothing to
+mismatch against.
+
+The message beside the switches says which of the two is missing and links to
+it. Add it, come back, and the switches are live; nothing needs restarting.
+
+Two things it is not. It never turns a gateway *off*: an install that was
+already enabled keeps its switch usable in the off direction, so deleting your
+last alias does not lock you out of stopping the listener. And it never blocks
+**Save** — a retention or port edit still saves while the switches are shut.
+
+If it instead says *"could not check whether the gateway has anything to
+route"*, the providers or aliases read failed rather than coming back empty. The
+switches are held for the same reason, and the message carries the underlying
+error.
 
 ### "Check these credentials" says the key is refused, or the provider is unreachable
 

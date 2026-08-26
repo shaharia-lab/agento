@@ -427,6 +427,13 @@ feature costs one database read at launch until you turn it on.
 
 ### Turning it on
 
+**Both switches need something to route first.** A gateway with no provider, or
+with a provider and no alias, binds a port that fails to route every model name
+a client sends — so **Enable the gateway** and **Start with the app** stay shut
+until **at least one provider and at least one alias exist**. Until they do, the
+view says which of the two is missing and links straight to it. Add them
+(below), come back, and the switches are live — no restart.
+
 **LLM Gateway → Gateway Settings**, under **Listener**:
 
 - **Enable the gateway.** Off by default. When off, no port is bound.
@@ -436,6 +443,14 @@ feature costs one database read at launch until you turn it on.
 - **Start with the app.** On by default, and only meaningful while the gateway is
   enabled. Without it the port dies with every restart, which is not much of a
   gateway.
+
+**If the port is already taken, the form says so before you save** — "Port 8880
+is already in use by another process. Port 8881 is free." — with a button that
+fills the free one in. It is never applied for you: the port is what you paste
+into `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL`, so a value that changed itself
+would point every tool you had already configured at nothing. The check is also
+advisory, not a reservation — something can still take the port between the
+check and the save, which is what **Overview** is for.
 
 Changing the port restarts the listener, and anything already configured against
 the old one stops working until you update it. The view says so before you save.
