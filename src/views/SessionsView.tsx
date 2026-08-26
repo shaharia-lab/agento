@@ -472,7 +472,14 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   /* --- Row actions -------------------------------------------------------- */
 
   const [busy, setBusy] = useState<"favorite" | "continue">();
-  const [actionError, setActionError] = useState<string>();
+  /**
+   * Which action failed, not just what it said. The two surfaces render it in
+   * different places — the inspector under its own three buttons, the full
+   * session view under its one — so a favourite failure must not surface as
+   * text under a "Continue in chat" button that was never pressed.
+   */
+  const [actionError, setActionError] =
+    useState<{ action: "favorite" | "continue"; message: string }>();
   const navigate = useNavigate();
 
   const applyPatch = useCallback(
@@ -502,7 +509,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
         applyPatch(s.session_id, { is_favorite: next });
         reloadFacets();
       } catch (err) {
-        setActionError(describeError(err));
+        setActionError({ action: "favorite", message: describeError(err) });
       } finally {
         setBusy(undefined);
       }
@@ -532,7 +539,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
         if (!res?.chat_id) throw new Error("the server returned no chat id");
         navigate("chats", { chatId: res.chat_id });
       } catch (err) {
-        setActionError(describeError(err));
+        setActionError({ action: "continue", message: describeError(err) });
       } finally {
         setBusy(undefined);
       }
@@ -612,7 +619,9 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
             onBack={() => setOpenId(undefined)}
             onContinue={continueInChat}
             continuing={busy === "continue"}
-            continueError={actionError}
+            continueError={
+              actionError?.action === "continue" ? actionError.message : undefined
+            }
           />
         ) : (
           <>
@@ -982,7 +991,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                 <Inspector
                   session={selected}
                   busy={busy}
-                  error={actionError}
+                  error={actionError?.message}
                   onOpen={(s) => setOpenId(s.session_id)}
                   onToggleFavorite={toggleFavorite}
                   onContinue={continueInChat}

@@ -79,11 +79,12 @@ pub fn continue_session(db_path: &std::path::Path, session_id: &str) -> Result<A
     //
     // This is a deliberate divergence from the inherited behaviour, which left
     // every continued chat titled "New Chat".
-    let title = crate::native::chat::persist::truncate_title(&detail.summary.display_title, 60);
-    let title = if title.is_empty() {
+    let from_source =
+        crate::native::chat::persist::truncate_title(&detail.summary.display_title, 60);
+    let title = if from_source.is_empty() {
         session.title.as_str()
     } else {
-        title.as_str()
+        from_source.as_str()
     };
 
     // `chatService.UpdateSession`, which stamps its own `updated_at` — so this

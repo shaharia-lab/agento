@@ -207,12 +207,17 @@ export function ChatsView({
   // "select the most recent conversation" effect cannot overwrite the hand-off
   // when that list lands.
   const seenOpenNonce = useRef(0);
+  const [composerFocus, setComposerFocus] = useState(0);
   useEffect(() => {
     if (openChatNonce === seenOpenNonce.current) return;
     seenOpenNonce.current = openChatNonce;
     if (!openChatId) return;
     autoSelected.current = true;
     select(openChatId);
+    // "Ready to type" is the point of the hand-off, so the caret goes to the
+    // composer — which mounts in this same commit, since `selected` is what
+    // renders it.
+    setComposerFocus((n) => n + 1);
   }, [openChatId, openChatNonce, select]);
 
   const send = useCallback(async () => {
@@ -628,6 +633,7 @@ export function ChatsView({
               stopping={stream.stopping}
               onStop={stream.stop}
               placeholder={`Message ${agentLabel}…`}
+              focusNonce={composerFocus}
               meta={
                 <span className="composer__meta">
                   {session?.model || stream.system?.model || "Default model"}
