@@ -349,6 +349,13 @@ textarea.field-area:focus {
 .switch--on .switch__knob {
   transform: translateX(14px);
 }
+/* A switch the current configuration cannot support (#474). Reads as
+   unavailable rather than as off — the two are different states, and the
+   gateway's `enabled` can legitimately be *on* while it is un-turn-on-able. */
+.switch:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 
 /* --- Checkbox ------------------------------------------------------------ */
 .checkbox {

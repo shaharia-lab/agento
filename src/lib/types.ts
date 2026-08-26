@@ -735,6 +735,26 @@ export interface GatewayStatus {
   error?: string;
 }
 
+/**
+ * `GET /api/gateway/port-availability?port=N` (#474).
+ *
+ * **Advisory.** A port free at probe time can be taken before the listener
+ * binds it, so `GatewayStatus.state === "bind_failed"` stays the authority —
+ * this only moves the routine collision to *before* the save, which a `200`
+ * from `PUT /gateway/settings` can never do (it means "stored", never
+ * "listening").
+ *
+ * `suggested` is absent both when `port` is available and when the capped walk
+ * found nothing; `available` tells the two apart, and `scanned_to` — present
+ * only when a walk happened — is what makes "no free port" a bounded claim.
+ */
+export interface GatewayPortAvailability {
+  port: number;
+  available: boolean;
+  suggested?: number;
+  scanned_to?: number;
+}
+
 /** A provider row as a read answers it: `has_api_key`, never the key. */
 export interface GatewayProviderSummary {
   id: string;

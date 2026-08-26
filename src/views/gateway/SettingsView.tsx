@@ -1,9 +1,21 @@
 import { useEffect, useState } from "react";
-import { api } from "../../lib/api";
+import { api, qs } from "../../lib/api";
 import { FormRow, Splitter, Switch } from "../../components/ui";
 import { Icon } from "../../lib/icons";
-import { describeError, usePoll, useResource } from "../../lib/hooks";
-import type { GatewaySettings, GatewayStatus } from "../../lib/types";
+import {
+  describeError,
+  useDebounced,
+  usePoll,
+  useResource,
+} from "../../lib/hooks";
+import type { ViewId } from "../../lib/nav";
+import type {
+  GatewayModelAlias,
+  GatewayPortAvailability,
+  GatewayProviderSummary,
+  GatewaySettings,
+  GatewayStatus,
+} from "../../lib/types";
 import "../../styles/gateway.css";
 
 /* ============================================================================
@@ -37,7 +49,27 @@ const MAX_PORT = 65535;
  */
 const MAX_RETENTION_DAYS = 3650;
 
-export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean }) {
+/**
+ * Whether the listener has anything to answer with (#474).
+ *
+ * Three states, not two, and the third is the point: a *failed* readiness read
+ * must disable the switches with an honest "could not check" rather than the
+ * "nothing configured" claim, because a failed request knows nothing about
+ * stored rows.
+ */
+type Readiness =
+  | { state: "loading" }
+  | { state: "unknown"; message: string }
+  | { state: "ready" }
+  | { state: "unroutable"; needsProvider: boolean; needsAlias: boolean };
+
+export function GatewaySettingsView({
+  inspectorOpen,
+  onNavigate,
+}: {
+  inspectorOpen: boolean;
+  onNavigate(view: ViewId): void;
+}) {
   const settings = useResource<GatewaySettings>(
     (signal) => api.get("/gateway/settings", signal),
     []
@@ -47,6 +79,22 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
     []
   );
   usePoll(status.reload, 4_000);
+
+  // The two reads the gate is derived from — the same lists the Providers and
+  // Models views load. Neither is polled and neither needs to be: `App.tsx`
+  // renders the gateway section conditionally, so this view **remounts** on
+  // every visit and both reads run again. That is what makes a provider added
+  // in a sibling view open these switches with no restart. Keeping the gateway
+  // views mounted across a section switch would stale the gate silently, so
+  // that change and a poll here have to arrive together.
+  const providers = useResource<GatewayProviderSummary[] | null>(
+    (signal) => api.get("/gateway/providers", signal),
+    []
+  );
+  const aliases = useResource<GatewayModelAlias[] | null>(
+    (signal) => api.get("/gateway/models", signal),
+    []
+  );
 
   const [enabled, setEnabled] = useState(false);
   const [startWithApp, setStartWithApp] = useState(true);
@@ -99,6 +147,58 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
   })();
 
   const canSave = changed && portValid && retentionValid;
+
+  // "Configured" is ≥1 provider row and ≥1 alias row, **regardless of the
+  // alias's own `enabled` flag**: gating on enabled aliases would make the
+  // gateway switch unusable the moment a user toggles their last alias off,
+  // which is a legitimate temporary state.
+  const readiness: Readiness = (() => {
+    if (providers.error || aliases.error) {
+      return {
+        state: "unknown",
+        message: providers.error ?? aliases.error ?? "",
+      };
+    }
+    if (providers.loading || aliases.loading) return { state: "loading" };
+    const needsProvider = (providers.data ?? []).length === 0;
+    const needsAlias = (aliases.data ?? []).length === 0;
+    if (!needsProvider && !needsAlias) return { state: "ready" };
+    return { state: "unroutable", needsProvider, needsAlias };
+  })();
+
+  // **Gate the turning-on, not the switch.** Turning a gateway *off* is always
+  // safe and is exactly what someone whose aliases were all deleted wants to
+  // do, so a switch that is simply `disabled` on an unroutable configuration
+  // would lock an existing `enabled: true` install out of its own listener.
+  // Nothing here ever writes a value the user did not ask for either: an
+  // upgrade that forced these to `false` would disable a working gateway on
+  // the next unrelated retention edit.
+  const canTurnOn = readiness.state === "ready";
+
+  // ── The port probe ────────────────────────────────────────────────────────
+  //
+  // Advisory, and never applied on its own: the port is what gets pasted into
+  // `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`, so a silent rewrite would point
+  // every already-configured tool at nothing. `PUT /gateway/settings` spawns
+  // the reload without awaiting it, so a `200` means "stored", never
+  // "listening" — without this, a collision first appears in the polled status
+  // strip *after* the save.
+  const debouncedPort = useDebounced(port, 400);
+  const probePort = portValid && debouncedPort.trim() === port.trim() ? portNumber : 0;
+  const availability = useResource<GatewayPortAvailability | undefined>(
+    async (signal) =>
+      probePort === 0
+        ? undefined
+        : api.get<GatewayPortAvailability>(
+            `/gateway/port-availability${qs({ port: probePort })}`,
+            signal
+          ),
+    [probePort]
+  );
+  const taken =
+    availability.data && !availability.data.available && availability.data.port === portNumber
+      ? availability.data
+      : undefined;
 
   async function save() {
     setBusy(true);
@@ -161,11 +261,87 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
             <div className="formsec">
               <div className="formsec__title">Listener</div>
 
+              {/* Why the switches are shut, and the two places that fixes it.
+                  Without a provider and an alias, `enabled` binds a port that
+                  answers a routing failure for every model name a client
+                  sends — the model-name mismatch `docs/troubleshooting.md`
+                  documents, with nothing to mismatch against. */}
+              {readiness.state === "unroutable" && (
+                <div className="msgline msgline--warn gw-gate">
+                  <Icon name="alert" size={13} className="msgline__icon" />
+                  <div className="gw-gate__body">
+                    <span>
+                      {readiness.needsProvider && readiness.needsAlias
+                        ? "The gateway has no provider and no model alias, so there is nothing for it to route to. "
+                        : readiness.needsProvider
+                          ? "The gateway has no provider, so there is nothing for it to route to. "
+                          : "The gateway has a provider but no model alias, so no model name a client sends can route. "}
+                      {/* An *enabled* gateway keeps a live switch (below), so
+                          this sentence is read beside a switch that is on —
+                          which is exactly the state someone whose last alias
+                          was just deleted is in. "It cannot be switched on" is
+                          false there, and it describes the wrong problem: the
+                          listener is up and answering nothing. */}
+                      {enabled
+                        ? "It is listening and every request is failing to route until that is fixed."
+                        : readiness.needsProvider && readiness.needsAlias
+                          ? "It cannot be switched on until both exist."
+                          : "It cannot be switched on until one exists."}
+                    </span>
+                    <div className="gw-gate__actions">
+                      {readiness.needsProvider && (
+                        <button
+                          className="btn"
+                          onClick={() => onNavigate("gateway-providers")}
+                        >
+                          Configure providers
+                        </button>
+                      )}
+                      {readiness.needsAlias && (
+                        <button
+                          className="btn"
+                          onClick={() => onNavigate("gateway-models")}
+                        >
+                          Configure models
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {/* A read that failed is not an empty configuration. It shuts the
+                  switches the same way — enabling on an unknown state is the
+                  thing this gate exists to prevent — but it must not claim the
+                  rows are absent. */}
+              {readiness.state === "unknown" && (
+                <div className="msgline msgline--warn gw-gate">
+                  <Icon name="alert" size={13} className="msgline__icon" />
+                  {/* `describeError` returns an unpunctuated message, so it is
+                      given a line of its own rather than embedded between two
+                      prose fragments — every other error site in this section
+                      renders it alone for the same reason. */}
+                  <div className="gw-gate__body">
+                    <span>
+                      Could not check whether the gateway has anything to route.
+                      Switching it on is held back until that read succeeds.
+                    </span>
+                    <span>{readiness.message}</span>
+                  </div>
+                </div>
+              )}
+
               <FormRow
                 label="Enable the gateway"
                 help="When off, no port is bound and the feature costs nothing."
               >
-                <Switch on={enabled} onChange={setEnabled} />
+                <Switch
+                  on={enabled}
+                  disabled={!canTurnOn && !enabled}
+                  onChange={(v) => {
+                    if (v && !canTurnOn) return;
+                    setEnabled(v);
+                  }}
+                />
               </FormRow>
 
               <FormRow
@@ -186,7 +362,14 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
                 label="Start with the app"
                 help="Bind the port at launch. Only takes effect while the gateway is enabled."
               >
-                <Switch on={startWithApp} onChange={setStartWithApp} />
+                <Switch
+                  on={startWithApp}
+                  disabled={!canTurnOn && !startWithApp}
+                  onChange={(v) => {
+                    if (v && !canTurnOn) return;
+                    setStartWithApp(v);
+                  }}
+                />
               </FormRow>
 
               {!portValid && port !== "" && (
@@ -196,6 +379,33 @@ export function GatewaySettingsView({ inspectorOpen }: { inspectorOpen: boolean 
                     The port must be a whole number between {MIN_PORT} and{" "}
                     {MAX_PORT}.
                   </span>
+                </div>
+              )}
+
+              {/* Offered, never applied. The suggestion is one explicit click
+                  away and the typed value is left exactly as typed until then;
+                  and because the probe is a TOCTOU check by nature, the status
+                  strip below stays the authority on what actually bound. */}
+              {taken && (
+                <div className="msgline msgline--warn gw-gate">
+                  <Icon name="alert" size={13} className="msgline__icon" />
+                  <div className="gw-gate__body">
+                    <span>
+                      {taken.suggested !== undefined
+                        ? `Port ${taken.port} is already in use by another process. Port ${taken.suggested} is free.`
+                        : `Port ${taken.port} is already in use by another process, and nothing up to ${taken.scanned_to} is free either.`}
+                    </span>
+                    {taken.suggested !== undefined && (
+                      <div className="gw-gate__actions">
+                        <button
+                          className="btn"
+                          onClick={() => setPort(String(taken.suggested))}
+                        >
+                          Use {taken.suggested}
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 

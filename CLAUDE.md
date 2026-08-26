@@ -332,12 +332,14 @@ src-tauri/src/
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
-    gateway_api.rs the LLM gateway's control plane (#426) — fourteen
+    gateway_api.rs the LLM gateway's control plane (#426) — fifteen
                  /api/gateway/* routes; under native/ because it IS the /api
                  seam, where gateway/'s listener is not. Two of them are
                  answered by the ASYNC registry, because they call an upstream:
                  the model catalog (#470) and the credential check (#472), which
-                 share one dialect table in gateway_api/catalog.rs
+                 share one dialect table in gateway_api/catalog.rs. The
+                 fifteenth is the port probe (#474) — buffered, because a
+                 `bind` is not an HTTPS call
     security/    what `/api` accepts as proof of identity (#405)
       keys.rs    the per-install Ed25519 keypair: create-if-absent, 0600, and
                  the one path that replaces it
@@ -3399,6 +3401,52 @@ provider.has_api_key)`, a stored key renders as `••• stored` behind an exp
 completions but no model list can never go green, so "Save anyway" is always one
 click away. A validation gate with no override is a lockout — do not remove it
 to simplify.
+
+**The enable gate is UI-only, and the port probe is advisory** (#474). Two
+guardrails over the same first-run path, and what makes each of them safe is the
+same thing: neither can refuse a save.
+
+- **`config::GatewaySettings::validate` was deliberately left alone.** A
+  server-side refusal of `enabled: true` with no aliases reads as the honest
+  one, and it would **422 an existing row whose aliases were later deleted** —
+  on a body the form posts *on every save*, so an unrelated retention edit would
+  start failing. A deleted provider is already a 409 when an alias references
+  it; nothing stops deleting every alias, and that has to stay a save-able
+  state. So the gate lives in `SettingsView.tsx` and gates the **switches**,
+  never Save.
+- **It gates turning-on, not the switch**, and that asymmetry is the whole of
+  it: `disabled={!canTurnOn && !enabled}`. A flat `disabled` would lock an
+  install that *is* enabled out of switching its own listener off, which is
+  exactly what someone whose last alias went away wants to do. Nothing rewrites
+  a stored value either — a forced `false` would disable a working gateway on
+  the next unrelated save, which is what "existing installs are unaffected by
+  the upgrade" means.
+- **A failed readiness read is a third state**, not "empty". `Readiness` is
+  `loading | unknown | ready | unroutable`, because a request that errored knows
+  nothing about stored rows — the rule `ModelsView`'s list column already
+  states. It shuts the switches the same way and says something different.
+- **"Configured" counts alias *rows*, not enabled ones.** Gating on
+  `alias.enabled` would make the gateway switch unusable the moment somebody
+  toggles their last alias off, which is a legitimate temporary state.
+- **`GET /api/gateway/port-availability?port=N` is the one thing a webview
+  cannot do** — bind a socket. Buffered, not async: it is a `bind`, so
+  `spawn_blocking` is right and the #470/#472 reasoning does not apply. Three
+  rules on it. The **running listener's own port reads as available**
+  (`own_port_of`), or the probe finds the port held by the very process being
+  configured and offers to move it on every visit — note `BindFailed` carries a
+  port too and that one is precisely *not* held, so only `Running` counts. The
+  walk is **capped** at `PORT_SCAN_SPAN` above the request and the body says how
+  far it looked (`scanned_to`), so "no free port" is a bounded claim rather than
+  65535 `bind` syscalls behind a form somebody is typing into. And the answer is
+  **never applied for the user**: the port is what gets pasted into
+  `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL`, so a silent rewrite points every
+  already-configured tool at nothing.
+- **The probe is a TOCTOU check by construction** — the listener is dropped
+  immediately, so nothing is reserved. `Status::BindFailed` stays the authority
+  and the status strip stays where the real outcome shows up; what this buys is
+  moving the *routine* collision (a `~/.agento-desktop-dev` instance and an
+  installed one share the machine's ports) to before the save, which a `200`
+  from `PUT /gateway/settings` can never do.
 
 **Usage recording is one row per served request, written off the request path**
 (#425, `gateway/usage.rs`, migration 34). Four things about it are decisions:

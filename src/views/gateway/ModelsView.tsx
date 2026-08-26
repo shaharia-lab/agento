@@ -11,6 +11,7 @@ import {
 } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
+import type { ViewId } from "../../lib/nav";
 import type {
   GatewayModelAlias,
   GatewayProviderModels,
@@ -105,7 +106,13 @@ function useProviderCatalogs() {
   return { catalogs, request };
 }
 
-export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean }) {
+export function GatewayModelsView({
+  inspectorOpen,
+  onNavigate,
+}: {
+  inspectorOpen: boolean;
+  onNavigate(view: ViewId): void;
+}) {
   const aliases = useResource<GatewayModelAlias[] | null>(
     (signal) => api.get("/gateway/models", signal),
     []
@@ -260,13 +267,40 @@ export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean })
             }}
           />
         )}
-        {!aliases.error && selection.kind === "none" && !aliases.loading && (
-          <Empty
-            icon="layers"
-            title="No alias selected"
-            text="Pick one on the left, or define a new model name."
-          />
-        )}
+        {/* Two empty states, and which one shows is the difference between a
+            dead end and a next step. With no providers there is nothing an
+            alias could route to — `POST /api/gateway/models` refuses a target
+            naming no configured provider — so "pick one on the left" is advice
+            that cannot be taken, and the list column's own prose says why with
+            no way to act on it. The provider read is included in the guard for
+            the reason the list column already states: a failed request knows
+            nothing about stored rows, so a fetch that errored must never
+            produce the "no providers" claim. */}
+        {!aliases.error &&
+          selection.kind === "none" &&
+          !aliases.loading &&
+          !providers.loading &&
+          (!providers.error && providerNames.length === 0 ? (
+            <Empty
+              icon="database"
+              title="No model provider configured"
+              text="An alias is a model name your tools ask for, and it has to route somewhere. Add a provider first."
+              action={
+                <button
+                  className="btn btn--primary"
+                  onClick={() => onNavigate("gateway-providers")}
+                >
+                  Configure a provider
+                </button>
+              }
+            />
+          ) : (
+            <Empty
+              icon="layers"
+              title="No alias selected"
+              text="Pick one on the left, or define a new model name."
+            />
+          ))}
       </div>
 
       {inspectorOpen && (

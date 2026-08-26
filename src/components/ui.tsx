@@ -68,14 +68,25 @@ export function Empty({
 export function Switch({
   on,
   onChange,
+  disabled,
 }: {
   on: boolean;
   onChange(v: boolean): void;
+  /**
+   * Refuses the click *and* says so to assistive tech — `aria-disabled` alone
+   * would leave a switch that reads as unavailable and still toggles.
+   *
+   * It carries no `title`, and that is deliberate rather than an omission: a
+   * `disabled` button receives no mouse events, so a tooltip on one never
+   * shows. A switch that is shut has to say why in something beside it.
+   */
+  disabled?: boolean;
 }) {
   return (
     <button
       role="switch"
       aria-checked={on}
+      disabled={disabled}
       className={`switch ${on ? "switch--on" : ""}`}
       onClick={() => onChange(!on)}
     >

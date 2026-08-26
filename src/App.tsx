@@ -374,9 +374,13 @@ export default function App() {
           {(view === "tokens" || view === "usage" || view === "insights") && (
             <AnalyticsView mode={view} inspectorOpen={inspectorOpen} />
           )}
-          {/* The Overview takes `navigate` because its bind-failure card has
-              exactly one useful action — change the port — and that lives in a
-              sibling view rather than a pane of its own. */}
+          {/* Three of the five gateway views take `navigate`, and all three for
+              the same reason: the useful action on what they are reporting
+              lives in a sibling view rather than a pane of their own — change
+              the port (Overview), add the provider an alias has to route to
+              (Models), and configure the two things the listener needs before
+              it can be switched on at all (Gateway Settings, #474). There is
+              still no nav context; the prop is the whole mechanism. */}
           {view === "gateway" && (
             <GatewayOverviewView
               inspectorOpen={inspectorOpen}
@@ -387,13 +391,19 @@ export default function App() {
             <GatewayProvidersView inspectorOpen={inspectorOpen} />
           )}
           {view === "gateway-models" && (
-            <GatewayModelsView inspectorOpen={inspectorOpen} />
+            <GatewayModelsView
+              inspectorOpen={inspectorOpen}
+              onNavigate={navigate}
+            />
           )}
           {view === "gateway-usage" && (
             <GatewayUsageView inspectorOpen={inspectorOpen} />
           )}
           {view === "gateway-settings" && (
-            <GatewaySettingsView inspectorOpen={inspectorOpen} />
+            <GatewaySettingsView
+              inspectorOpen={inspectorOpen}
+              onNavigate={navigate}
+            />
           )}
           {view === "settings" && (
             <SettingsView theme={theme} onThemeChange={setTheme} />
