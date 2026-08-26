@@ -181,11 +181,16 @@ fn the_journey_builds_over_the_real_corpus() {
             "{session_id}: total_turns disagrees with the turns it shipped"
         );
 
-        // The one bound that is actually an invariant: `durations()` is
-        // `Σ min(gap, cap)` over consecutive stamps, so absorbing more stamps
-        // can only subdivide gaps and never lower the total — and the scanner
-        // observed the same parent stamp set (both skip `file-history-snapshot`
-        // before observing). A regression in `absorb` breaks this.
+        // The one bound that is actually an invariant, and it is one-directional
+        // by construction: `durations()` is `Σ min(gap, cap)` over consecutive
+        // stamps, so absorbing more stamps can only subdivide gaps and never
+        // lower the total. That makes this sound because the journey's stamp set
+        // is a strict **superset** of the scanner's — `Builder::process_event`
+        // observes every timestamped event, while `read_summary_file` observes
+        // only those `bounds_session_time_range` admits (eight further denied
+        // types beyond `file-history-snapshot`). So a future change that
+        // *narrows* what the journey observes is the direction that breaks this,
+        // and it is the direction the assertion catches.
         //
         // There is deliberately **no upper bound against the sessions list's
         // sum**, and the reason is the trap this suite exists to avoid stating
@@ -260,9 +265,10 @@ fn the_journey_builds_over_the_real_corpus() {
     eprintln!("  with sub-agents        {with_subagents} (all rendered: {nested_or_appended})");
     eprintln!("  steps built            {total_steps}");
     eprintln!("  led by orphan steps    {orphan_headed} (one turn more than turn_count)");
+    // Over `built`, not `rows.len()`: a row whose transcript is gone never
+    // reaches the comparison, so the sampled total would understate the share.
     eprintln!(
-        "  active below list sum  {below_the_sum}/{} (concurrent delegation counted once)",
-        rows.len()
+        "  active below list sum  {below_the_sum}/{built} (concurrent delegation counted once)"
     );
     eprintln!(
         "  mean per journey       {} ms",

@@ -1218,6 +1218,10 @@ mod tests {
         assert!(err.contains("transcript"), "unexpected error: {err}");
     }
 
+    // `PermissionsExt` does not exist on Windows, and `release.yml` builds it —
+    // so without this gate `cargo test` would not compile there, and no CI job
+    // would say so. Every other `os::unix` site in the tree carries it.
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_subagent_transcript_costs_only_its_own_steps() {
         // Go's `buildSubagentSteps` returns empty on an open failure rather than
@@ -1820,16 +1824,24 @@ mod tests {
         assert_eq!(j.total_turns, j.turns.len() as i64);
     }
 
-    /// The relationship between this figure and the sessions list's, pinned
-    /// rather than left to prose — the claim it replaces was simply wrong.
+    /// The relationship between this figure and the sessions list's, pinned on a
+    /// concrete fixture rather than left to prose — the claim it replaces was
+    /// simply wrong.
     ///
     /// A `Task` is concurrent: the parent is parked while its agent works. The
     /// scanner caps each transcript alone and the list adds the parent's figure
     /// to `SUM(active_duration_ms)` over the sub-agent rows, so that minute is
-    /// counted **twice** there; this is one tracker over every stamp, so it is
-    /// counted **once**. Both bounds matter: without `absorb` the union
-    /// collapses to the parent's own figure and the lower bound fails, and if
-    /// the union ever reached the sum the upper bound fails.
+    /// counted **twice** there; this takes one `Σ min(gap, cap)` over every
+    /// stamp, so it is counted **once**.
+    ///
+    /// **These are this fixture's numbers, not a bound.** Absorbing a stamp
+    /// inside a gap already longer than the cap replaces one capped gap with
+    /// two, so on other shapes the merged figure comes out *above* the list's
+    /// sum — which is why `journey_live.rs` asserts only the lower side and the
+    /// header tells the reader not to read this as a union of intervals. What
+    /// generalizes is the direction on the ordinary shape (delegated work
+    /// filling a wait it is concurrent with), and that removing `absorb`
+    /// collapses this to the parent's own 11 minutes.
     #[test]
     fn a_delegated_run_is_counted_once_here_and_twice_by_the_list() {
         let (parent_lines, delegated) = delegating_fixture();
@@ -1852,7 +1864,7 @@ mod tests {
         assert_eq!(merged.active_duration_ms, 31 * 60_000);
         assert!(
             merged.active_duration_ms > parent_only.active_duration_ms,
-            "without the absorbed stamps the union is just the parent's figure"
+            "without the absorbed stamps this is just the parent's own figure"
         );
         assert!(
             merged.active_duration_ms < list,
