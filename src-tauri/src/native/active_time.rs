@@ -46,6 +46,14 @@ impl ActiveTimeTracker {
     /// `Task` wait to one capped gap. `durations()` sorts, so the order the
     /// stamps arrive in does not matter — only that they arrive before it runs.
     ///
+    /// **This produces a union, not the sum the sessions list shows.** The
+    /// scanner caps each transcript on its own and the list adds the parent's
+    /// figure to `SUM(active_duration_ms)` over the sub-agent rows, so a
+    /// wall-clock minute in which the parent waits and its agent works is
+    /// counted twice there and once here. Neither is derivable from the other,
+    /// and `sessions/journey.rs`'s header carries the whole argument — read it
+    /// before changing which stamps reach a tracker.
+    ///
     /// The threshold is this tracker's; a sub-builder is constructed with the
     /// same one, so there is no window in which two gaps of one session are
     /// capped differently.

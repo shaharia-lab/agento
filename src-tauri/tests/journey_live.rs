@@ -40,6 +40,14 @@ use agento_lib::native::insights::{index::DocAccumulator, processors};
 use agento_lib::native::sessions::{detail, journey};
 use agento_lib::native::settings;
 
+/// One cached session, and the two active figures the list would report for it.
+struct Row {
+    session_id: String,
+    subagents: i64,
+    cached_active_ms: i64,
+    cached_subagent_active_ms: i64,
+}
+
 /// How many sessions to walk. The whole corpus would take minutes; this is
 /// enough for the ratio and the drift check to mean something.
 const SAMPLE: usize = 60;
@@ -80,14 +88,25 @@ fn the_journey_builds_over_the_real_corpus() {
         .prepare(
             "SELECT c.session_id,
                     (SELECT COUNT(*) FROM claude_subagent_cache s
-                      WHERE s.parent_session_id = c.session_id) AS subagents
+                      WHERE s.parent_session_id = c.session_id) AS subagents,
+                    c.active_duration_ms,
+                    (SELECT COALESCE(SUM(s.active_duration_ms), 0)
+                       FROM claude_subagent_cache s
+                      WHERE s.parent_session_id = c.session_id) AS sub_active
              FROM claude_session_cache c
              ORDER BY subagents DESC, c.message_count DESC
              LIMIT ?1",
         )
         .expect("prepare");
-    let rows: Vec<(String, i64)> = stmt
-        .query_map([SAMPLE as i64], |r| Ok((r.get(0)?, r.get(1)?)))
+    let rows: Vec<Row> = stmt
+        .query_map([SAMPLE as i64], |r| {
+            Ok(Row {
+                session_id: r.get(0)?,
+                subagents: r.get(1)?,
+                cached_active_ms: r.get(2)?,
+                cached_subagent_active_ms: r.get(3)?,
+            })
+        })
         .expect("query")
         .filter_map(Result::ok)
         .collect();
@@ -106,10 +125,17 @@ fn the_journey_builds_over_the_real_corpus() {
     let mut nested_or_appended = 0usize;
     let mut total_steps = 0usize;
     let mut orphan_headed = 0usize;
+    let mut below_the_sum = 0usize;
     let mut slowest = (0u128, String::new());
     let mut elapsed_total = 0u128;
 
-    for (session_id, cached_subagents) in &rows {
+    for Row {
+        session_id,
+        subagents: cached_subagents,
+        cached_active_ms,
+        cached_subagent_active_ms,
+    } in &rows
+    {
         let start = Instant::now();
         let journey = journey::get(&db, session_id).expect("journey read");
         let took = start.elapsed().as_millis();
@@ -154,6 +180,28 @@ fn the_journey_builds_over_the_real_corpus() {
             journey.turns.len(),
             "{session_id}: total_turns disagrees with the turns it shipped"
         );
+
+        // The two active figures, bounded against each other at corpus scale.
+        // The journey is a union over every stamp; the sessions list adds the
+        // scanner's per-transcript figures. So the union can never be below the
+        // parent's own, and never above the sum — and the second bound is what a
+        // regression in `absorb` or in the cap would break.
+        assert!(
+            journey.active_duration_ms >= *cached_active_ms,
+            "{session_id}: the journey's active time ({}) is below the parent's \
+             own cached figure ({cached_active_ms}) — the union lost stamps",
+            journey.active_duration_ms
+        );
+        assert!(
+            journey.active_duration_ms <= cached_active_ms + cached_subagent_active_ms,
+            "{session_id}: the journey's active time ({}) exceeds the sessions \
+             list's sum ({}) — a union cannot be larger than the sum it unions",
+            journey.active_duration_ms,
+            cached_active_ms + cached_subagent_active_ms
+        );
+        if journey.active_duration_ms < cached_active_ms + cached_subagent_active_ms {
+            below_the_sum += 1;
+        }
 
         // The anti-drift check, over the same file in the same run: both sides
         // must resolve "is this a turn?" through the one predicate.
@@ -209,6 +257,7 @@ fn the_journey_builds_over_the_real_corpus() {
     eprintln!("  with sub-agents        {with_subagents} (all rendered: {nested_or_appended})");
     eprintln!("  steps built            {total_steps}");
     eprintln!("  led by orphan steps    {orphan_headed} (one turn more than turn_count)");
+    eprintln!("  active below list sum  {below_the_sum} (concurrent delegation counted once)");
     eprintln!(
         "  mean per journey       {} ms",
         elapsed_total / (rows.len() as u128).max(1)

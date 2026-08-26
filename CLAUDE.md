@@ -362,12 +362,18 @@ src-tauri/src/
     schedule/    when a task fires — pinned to parity/scheduler_vectors.json (#275)
       mod.rs     buildJobDefinition and gocron's four job types; claims no route
       cron.rs    robfig/cron's dialect, which is the one a cron task is written in
-    sessions/    GET /api/claude-sessions, /facets, /projects and /{id}, plus
-                 POST /{id}/continue (#308) and PATCH /{id} (#296)
+    sessions/    GET /api/claude-sessions, /facets, /projects, /{id} and
+                 /{id}/journey (#479), plus POST /{id}/continue (#308) and
+                 PATCH /{id} (#296)
       continue_chat.rs the two writes that resume a Claude session as a chat
       update.rs  the rename and the favourite — the only two columns here the
                  user typed, and the only ones the scanner never writes
       detail.rs  one session re-read from its transcript, patched from the cache
+      journey.rs the turn-segmented timeline (#479) — the one turn predicate,
+                 the `tool_use_id` join that nests a sub-agent's steps under the
+                 `Task` that spawned it, and the three places it deliberately
+                 does more than the deleted Go did. Read its header before
+                 touching either; two of them are the shape of a bug elsewhere
       projects.rs the project picker's list, derived from the same walk a scan is
       corpus.rs  loads the lot
       query.rs   the filter, the sort and the cursor — including `add_search`
@@ -2205,6 +2211,24 @@ busy timeout.
   silently price them at $0.
 - **Session list totals include sub-agents** (`usage + subagent_usage`,
   `cost + subagent_cost`). The facets bar and the rows must agree.
+- **The journey's `active_duration_ms` is a *union* and the sessions list's is a
+  *sum*, and neither is derivable from the other** (#479). The scanner caps each
+  transcript on its own, so the list's `active + subagent_active` counts a
+  wall-clock minute once per transcript running in it — and delegation is
+  concurrent, so that total can exceed the session's own span. The journey feeds
+  every stamp to one tracker and caps each gap once, which is bounded by the
+  span. Both are right about different questions; the view labels which it
+  shows, and `sessions/journey.rs`'s header carries the argument. Do not
+  "reconcile" them by changing which stamps reach a tracker.
+- **A journey can render one more turn than Insights counts, and only ever
+  one** (#479). `is_user_turn_content` decides both, so they cannot disagree
+  about any single event — but the journey's `ensure_turn` opens a leading turn
+  for the events *before* the first genuine prompt, because those steps have to
+  live somewhere, while the pipeline counts no turn for them. Every session a
+  slash command opened is that shape: the expansion and the skill preamble are
+  both injected wrappers and the model answers before the person types. The
+  extra turn always has no `user_input` step, which is what
+  `tests/journey_live.rs` asserts instead of a tolerance.
 - **Time bucketing happens in the request's timezone** (`tz` param), while
   storage stays UTC. Always send `tz`; omitting it falls the dashboard back to
   UTC silently.

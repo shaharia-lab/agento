@@ -88,13 +88,20 @@ function Timeline({ journey }: { journey: Journey }) {
   return (
     <>
       <div className="jrn-stats">
-        {/* Active time, with the raw span in the tooltip: a resumed session's
-            span includes every idle day between sittings, so showing that as
-            "duration" reported a 6-hour session as 678h. */}
+        {/* Active time rather than the span, with the span in the tooltip: a
+            resumed session's span includes every idle day between sittings, so
+            showing that as "duration" reported a 6-hour session as 678h.
+            The tooltip also has to say *which* active figure this is — the
+            sessions list adds a per-transcript sum, so a delegating session
+            reads higher there, and two unexplained numbers for one session is
+            the gap #479 was filed about. */}
         <span
-          title={`Active time — idle gaps are capped at the threshold in Settings. Raw span ${duration(
-            journey.total_duration_ms
-          )}.`}
+          title={
+            `Active time — idle gaps are capped at the threshold in Settings. ` +
+            `Delegated work counts once here, where the sessions list adds up ` +
+            `each transcript separately and so counts concurrent delegation ` +
+            `twice. Raw span ${duration(journey.total_duration_ms)}.`
+          }
         >
           <Icon name="clock" size={11} />
           {duration(journey.active_duration_ms)}
@@ -267,7 +274,8 @@ function StepContent({ step }: { step: JourneyStep }) {
       return (
         <Disclosure
           label={result.isError ? "error output" : "output"}
-          body={result.content}
+          body={() => result.content}
+          empty={!result.content}
           tone={result.isError ? "err" : ""}
         />
       );
@@ -345,21 +353,30 @@ function ThinkingBody({ step }: { step: JourneyStep }) {
 /**
  * A body behind a Show/Hide button.
  *
- * `body` is a string rather than a thunk: the server already caps a tool result
- * at 2000 characters, so there is no expensive `JSON.stringify` to defer the way
- * the web build had to for a raw tool input.
+ * **`body` is a thunk, and that is the whole point.** A `tool_result` arrives
+ * capped at 2000 characters by the server, but a `tool_call`'s `input` does not
+ * — it is the transcript's own bytes, verbatim, so a `Write` or a `MultiEdit`
+ * carries whole file contents. Stringifying it in the parent would run for every
+ * tool step of every open turn whether or not anyone looked, and re-run on each
+ * expand, on precisely the sessions the module header's collapse rules exist to
+ * keep responsive.
+ *
+ * `empty` is separate because a thunk cannot be tested for emptiness without
+ * paying for it.
  */
 function Disclosure({
   label,
   body,
   tone,
+  empty = false,
 }: {
   label: string;
-  body: string;
+  body: () => string;
   tone: "" | "err";
+  empty?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  if (!body) return <span className="jrn-note">no output</span>;
+  if (empty) return <span className="jrn-note">no output</span>;
   return (
     <>
       <button className="jrn-more" onClick={() => setOpen((o) => !o)}>
@@ -367,7 +384,7 @@ function Disclosure({
       </button>
       {open && (
         <pre className={`jrn-pre ${tone === "err" ? "jrn-pre--err" : ""}`}>
-          {body}
+          {body()}
         </pre>
       )}
     </>
@@ -395,7 +412,7 @@ function ToolCallBody({ step }: { step: JourneyStep }) {
       {call.input !== undefined && call.input !== null && (
         <Disclosure
           label="input"
-          body={JSON.stringify(call.input, null, 2)}
+          body={() => JSON.stringify(call.input, null, 2)}
           tone=""
         />
       )}

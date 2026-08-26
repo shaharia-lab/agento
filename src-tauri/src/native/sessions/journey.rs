@@ -36,9 +36,25 @@
 //!    it.
 //! 4. **Delegated timestamps are absorbed into the parent's active-time
 //!    tracker** before `durations()` is read, so a 40-minute delegated run fills
-//!    the parent's `Task` wait instead of collapsing to one capped gap. That is
-//!    what makes `active_duration_ms` here agree with the figure the sessions
-//!    list reports.
+//!    the parent's `Task` wait instead of collapsing to one capped gap.
+//!
+//!    **It does not make this agree with the sessions list, and the two figures
+//!    are different questions rather than one of them being wrong.** The list
+//!    reports `active_duration_ms + subagent_active_duration_ms`, where every
+//!    transcript was capped *on its own* by the scanner and the sub-agents'
+//!    results were then `SUM`-ed (`summary.rs::total_active_duration_ms`, over
+//!    the `SUM(active_duration_ms)` in `SUMMARY_SOURCE`). Delegation is
+//!    concurrent — the parent is parked on the `Task` while its agent works — so
+//!    that sum counts one wall-clock minute once per transcript running in it,
+//!    and can exceed the session's own span. This is a **union**: one tracker,
+//!    every stamp, each gap capped once, so it is bounded by the span and reads
+//!    as "how long was this session actually being worked on".
+//!
+//!    Both are defensible and neither can be derived from the other, so the view
+//!    labels what it shows. `a_delegated_run_is_counted_once_here_and_twice_by_the_list`
+//!    pins the relationship rather than leaving it to a comment; without the
+//!    absorb the union collapses to the parent's own figure and that test fails
+//!    on its lower bound.
 //!
 //! ## Where this deliberately does not reproduce the Go
 //!
@@ -298,6 +314,16 @@ fn payload(value: &impl Serialize) -> Box<RawValue> {
 /// at all — an empty file, or one whose every line was malformed. Go returned
 /// `nil, nil` there and the handler turned it into its 404; there is nothing to
 /// draw a timeline from either way.
+///
+/// **A transcript this process could not read is an `Err`, not a `None`.**
+/// `find_session_file` has already established that the file exists, so the only
+/// ways to fail past it are a permissions change, an unmounted drive or an I/O
+/// error — and "we could not look" is not "it does not exist", which is the rule
+/// the scanner's own delete pass is built on. Reporting it as the route's 404
+/// would also have the two tabs of one session disagree about the same file at
+/// the same instant, since `detail::get` propagates and answers 500. Only the
+/// **parent** read is fatal; an unreadable sub-agent transcript contributes no
+/// steps and is logged, which is what Go's `buildSubagentSteps` does.
 pub fn get(db_path: &Path, session_id: &str) -> Result<Option<Journey>, String> {
     let conn = crate::native::db::open_read_only(db_path)?;
     let data_settings = settings::load(&conn);
@@ -309,13 +335,13 @@ pub fn get(db_path: &Path, session_id: &str) -> Result<Option<Journey>, String> 
     };
 
     let labels = subagent_labels(&conn, session_id);
-    Ok(build(
+    build(
         session_id,
         &file,
         data_settings.idle_gap_ms,
         &labels,
         &processors::subagent_files(session_id, &file),
-    ))
+    )
 }
 
 /// The `{agent_id → label}` index, read from `claude_subagent_cache`.
@@ -374,18 +400,18 @@ fn build(
     idle_gap_ms: i64,
     labels: &HashMap<String, SubagentLabel>,
     subagent_files: &[PathBuf],
-) -> Option<Journey> {
+) -> Result<Option<Journey>, String> {
     let mut journey = Journey {
         session_id: session_id.to_string(),
         ..Default::default()
     };
     let mut builder = Builder::new(idle_gap_ms);
     builder.load_subagents(labels, subagent_files);
-    builder.walk(file, &mut journey);
+    builder.walk(file, &mut journey)?;
     builder.finalize(&mut journey);
 
     // Go: `if journey.StartTime.IsZero() { return nil, nil }`.
-    builder.range.start.is_some().then_some(journey)
+    Ok(builder.range.start.is_some().then_some(journey))
 }
 
 /// Accumulates state while scanning events.
@@ -457,14 +483,14 @@ impl Builder {
         }
     }
 
-    fn walk(&mut self, file: &Path, journey: &mut Journey) {
-        let events = match transcript::read(file) {
-            Ok(events) => events,
-            Err(e) => {
-                log::warn!("native session journey: {e}");
-                return;
-            }
-        };
+    /// Read one transcript into this builder.
+    ///
+    /// The error is propagated rather than logged: for the **parent** it is a
+    /// 500, because the file's existence was already established and a failure
+    /// past that point means this process could not read it. `walk_lenient` is
+    /// the sub-agent arm.
+    fn walk(&mut self, file: &Path, journey: &mut Journey) -> Result<(), String> {
+        let events = transcript::read(file)?;
         for ev in &events {
             // `file-history-snapshot` events carry whole file contents and
             // nothing the journey uses. Skipped before the time range and the
@@ -473,6 +499,18 @@ impl Builder {
                 continue;
             }
             self.process_event(ev, journey);
+        }
+        Ok(())
+    }
+
+    /// [`Self::walk`], with an unreadable file contributing nothing.
+    ///
+    /// This is the sub-agent arm, and it is Go's: `buildSubagentSteps` returns
+    /// empty on an open failure rather than failing the whole journey, so one
+    /// unreadable delegated transcript costs its own steps and not the page.
+    fn walk_lenient(&mut self, file: &Path, journey: &mut Journey) {
+        if let Err(e) = self.walk(file, journey) {
+            log::warn!("native session journey: skipping a sub-agent transcript: {e}");
         }
     }
 
@@ -823,7 +861,7 @@ impl Builder {
         let mut sub_journey = Journey::default();
         let mut sub = Builder::new(self.idle_gap_ms);
         sub.subagent_mode = true;
-        sub.walk(&file, &mut sub_journey);
+        sub.walk_lenient(&file, &mut sub_journey);
         sub.finalize(&mut sub_journey);
 
         let steps: Vec<JourneyStep> = sub_journey
@@ -1025,6 +1063,7 @@ mod tests {
                 &index,
                 &processors::subagent_files(SESSION, &self.parent),
             )
+            .expect("the fixture transcript is readable")
         }
 
         /// The insight pipeline's own reading of the same transcript.
@@ -1141,6 +1180,80 @@ mod tests {
         assert!(Corpus::new(&["not json at all {{{".to_string()], &[])
             .build(&[])
             .is_none());
+    }
+
+    #[test]
+    fn a_transcript_this_process_cannot_read_is_an_error_not_a_missing_session() {
+        // "We could not look" is not "it does not exist": `find_session_file`
+        // has already established the path is there, so a failure past it is a
+        // permissions change or an I/O error — a 500, the way `detail::get`
+        // answers for the same file. Answering the route's 404 instead would
+        // have the two tabs of one session disagree about it at one instant.
+        //
+        // A directory where the transcript should be, rather than a `chmod 000`
+        // file, so the test still fails for the right reason as root.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let project = dir.path().join("projects").join("-home-u-proj");
+        std::fs::create_dir_all(project.join(format!("{SESSION}.jsonl"))).expect("not a file");
+        let root = dir.path().to_string_lossy().into_owned();
+        let (_, _, file) = super::super::detail::find_session_file(&[root], SESSION)
+            .expect("the path exists, so it is found");
+
+        let err = super::build(SESSION, &file, IDLE_GAP_MS, &HashMap::new(), &[])
+            .expect_err("an unreadable transcript must not read as a missing session");
+        assert!(err.contains("transcript"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn an_unreadable_subagent_transcript_costs_only_its_own_steps() {
+        // Go's `buildSubagentSteps` returns empty on an open failure rather than
+        // failing the journey, and the parent's own read is the only fatal one.
+        let corpus = Corpus::new(
+            &[
+                user_event("u1", 0, json!("Do it")),
+                assistant_event(
+                    "a1",
+                    2,
+                    json!([{"type": "tool_use", "id": "toolu_1", "name": "Task", "input": {}}]),
+                ),
+            ],
+            &[],
+        );
+        // A real file `subagent_files` will list — it filters directories out —
+        // that this process then cannot open.
+        let sub_dir = corpus
+            .parent
+            .parent()
+            .expect("project dir")
+            .join(SESSION)
+            .join("subagents");
+        std::fs::create_dir_all(&sub_dir).expect("subagents dir");
+        let unreadable = sub_dir.join("agent-x.jsonl");
+        std::fs::write(&unreadable, "{}").expect("write");
+        std::fs::set_permissions(
+            &unreadable,
+            std::os::unix::fs::PermissionsExt::from_mode(0o000),
+        )
+        .expect("chmod");
+        if transcript::read(&unreadable).is_ok() {
+            // Running as root, where a mode of 000 is not a barrier.
+            eprintln!("skipping: this process can read a 0o000 file");
+            return;
+        }
+
+        let j = corpus
+            .build(&[("agent-x", "Explore", "explore", "toolu_1")])
+            .expect("the parent is readable, so the journey still builds");
+        assert_eq!(j.total_turns, 1);
+        let call = j.turns[0]
+            .steps
+            .iter()
+            .find(|s| s.step_type == "tool_call")
+            .expect("tool_call");
+        // Its identity still comes from the cache; only the steps are missing.
+        assert_eq!(data_of(call)["agent_type"], "Explore");
+        assert!(call.steps.is_empty());
+        assert_eq!(j.subagent_count, 1);
     }
 
     #[test]
@@ -1693,22 +1806,64 @@ mod tests {
         assert_eq!(j.total_turns, j.turns.len() as i64);
     }
 
+    /// The relationship between this figure and the sessions list's, pinned
+    /// rather than left to prose — the claim it replaces was simply wrong.
+    ///
+    /// A `Task` is concurrent: the parent is parked while its agent works. The
+    /// scanner caps each transcript alone and the list adds the parent's figure
+    /// to `SUM(active_duration_ms)` over the sub-agent rows, so that minute is
+    /// counted **twice** there; this is one tracker over every stamp, so it is
+    /// counted **once**. Both bounds matter: without `absorb` the union
+    /// collapses to the parent's own figure and the lower bound fails, and if
+    /// the union ever reached the sum the upper bound fails.
     #[test]
-    fn delegated_stamps_fill_the_parents_task_wait() {
-        // The parent's own events are 2s apart, then a 30-minute wait for the
-        // `Task` to come back. Capped alone that wait is one idle gap; with the
-        // delegated stamps absorbed it is credited minute by minute.
-        let long_ago = |m: i64| format!("2026-01-01T10:{m:02}:00Z");
+    fn a_delegated_run_is_counted_once_here_and_twice_by_the_list() {
+        let (parent_lines, delegated) = delegating_fixture();
+        let delegated_only = Corpus::new(&delegated, &[])
+            .build(&[])
+            .expect("the delegated transcript is a journey of its own");
+        let parent_only = Corpus::new(&parent_lines, &[]).build(&[]).expect("journey");
+        let merged = Corpus::new(&parent_lines, &[("agent-x", delegated)])
+            .build(&[("agent-x", "", "", "toolu_1")])
+            .expect("journey");
+
+        // What the sessions list would report for this session: each transcript
+        // capped on its own, then added.
+        let list = parent_only.active_duration_ms + delegated_only.active_duration_ms;
+        assert_eq!(parent_only.active_duration_ms, (1 + 10) * 60_000);
+        assert_eq!(delegated_only.active_duration_ms, 28 * 60_000);
+        assert_eq!(list, 39 * 60_000);
+
+        // What this reports: the same 31 minutes of wall clock, once.
+        assert_eq!(merged.active_duration_ms, 31 * 60_000);
+        assert!(
+            merged.active_duration_ms > parent_only.active_duration_ms,
+            "without the absorbed stamps the union is just the parent's figure"
+        );
+        assert!(
+            merged.active_duration_ms < list,
+            "the union must not reach the list's sum, which double-counts \
+             concurrent delegation"
+        );
+        // And it is bounded by the session's own span, which the sum is not.
+        assert_eq!(merged.active_duration_ms, merged.total_duration_ms);
+        assert!(list > merged.total_duration_ms);
+    }
+
+    /// A parent that delegates for 30 minutes, and the delegated transcript.
+    /// The parent's own events are a minute apart either side of the wait.
+    fn delegating_fixture() -> (Vec<String>, Vec<String>) {
+        let at_minute = |m: i64| format!("2026-01-01T10:{m:02}:00Z");
         let parent = vec![
-            json!({"type": "user", "uuid": "u1", "timestamp": long_ago(0),
+            json!({"type": "user", "uuid": "u1", "timestamp": at_minute(0),
                    "message": {"role": "user", "content": "delegate it"}})
             .to_string(),
-            json!({"type": "assistant", "uuid": "a1", "timestamp": long_ago(1),
+            json!({"type": "assistant", "uuid": "a1", "timestamp": at_minute(1),
                    "message": {"role": "assistant", "model": "m",
                                "content": [{"type": "tool_use", "id": "toolu_1",
                                             "name": "Task", "input": {}}]}})
             .to_string(),
-            json!({"type": "user", "uuid": "u2", "timestamp": long_ago(31),
+            json!({"type": "user", "uuid": "u2", "timestamp": at_minute(31),
                    "message": {"role": "user", "content":
                        [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}})
             .to_string(),
@@ -1716,13 +1871,21 @@ mod tests {
         let delegated: Vec<String> = (2..=30)
             .map(|m| {
                 json!({"type": "assistant", "uuid": format!("s{m}"), "isSidechain": true,
-                       "timestamp": long_ago(m),
+                       "timestamp": at_minute(m),
                        "message": {"role": "assistant",
                                    "content": [{"type": "text", "text": "working"}]}})
                 .to_string()
             })
             .collect();
+        (parent, delegated)
+    }
 
+    #[test]
+    fn delegated_stamps_fill_the_parents_task_wait() {
+        // The parent's own events are a minute apart, then a 30-minute wait for
+        // the `Task` to come back. Capped alone that wait is one idle gap; with
+        // the delegated stamps absorbed it is credited minute by minute.
+        let (parent, delegated) = delegating_fixture();
         let without = Corpus::new(&parent, &[]).build(&[]).expect("journey");
         let with = Corpus::new(&parent, &[("agent-x", delegated)])
             .build(&[("agent-x", "", "", "toolu_1")])

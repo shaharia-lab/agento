@@ -119,6 +119,13 @@
 .jrn-step__tag--plain {
   color: var(--fg-secondary);
 }
+/* `thinking`, `thinking_duration`, `compaction` and the unknown-type fallback.
+   Declared rather than left to inherit `.jrn-step__tag`'s own colour: relying
+   on the two agreeing is right by coincidence and silently wrong the moment
+   either moves. */
+.jrn-step__tag--muted {
+  color: var(--fg-tertiary);
+}
 
 .jrn-step__body {
   flex: 1 1 auto;
