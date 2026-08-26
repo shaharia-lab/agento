@@ -487,6 +487,14 @@ pub struct ContentBlock {
         deserialize_with = "crate::native::gojson::null_is_zero_value"
     )]
     pub tool_use_id: String,
+    /// A `tool_result`'s payload. The harness writes it either as a plain
+    /// string or as an array of content blocks, and the two shapes share no
+    /// type — so it is kept as a `Value` and read by
+    /// [`extract_text_content`], which already knows both. Anything else
+    /// reads as the empty string rather than failing the decode, which would
+    /// take the whole content array (`tool_use` blocks included) with it.
+    #[serde(default)]
+    pub content: serde_json::Value,
     #[serde(
         default,
         deserialize_with = "crate::native::gojson::null_is_zero_value"

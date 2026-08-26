@@ -52,17 +52,26 @@ git show 07b6212^:desktop/parity/
 git show 07b6212^:desktop/parity/github_parity_test.go
 ```
 
-Three files never had a generator and are hand-written beside the code:
-`desktop_routes.json`, `session_metric_vectors.json` and
-`claude_sessions_search_golden.json`.
+Four files never had a generator and are hand-written beside the code:
+`desktop_routes.json`, `session_metric_vectors.json`,
+`claude_sessions_search_golden.json` and `session_detail_blocks_golden.json`.
 
-The last is the newest and the only one recorded *after* the Go tree was
-deleted: `match_snippet` and the `relevance` sort (#437) have no Go ancestor, so
-there was never a second implementation to record it from. It pins one search
-response — where the field sits, that it is omitted where there is no index hit,
-and the ranked order. Two things it deliberately does **not** pin: SQLite's bm25
-*values*, which is why the fixture's page is exhausted and mints no cursor, and
-which column `snippet()` picks out of a tie.
+The last two were both authored *after* the Go tree was deleted, because
+neither has a Go ancestor to record from. `claude_sessions_search_golden.json`
+pins one search response — `match_snippet` and the `relevance` sort (#437) are
+Agento's own — recording where the field sits, that it is omitted where there is
+no index hit, and the ranked order. Two things it deliberately does **not** pin:
+SQLite's bm25 *values*, which is why the fixture's page is exhausted and mints
+no cursor, and which column `snippet()` picks out of a tie.
+
+`session_detail_blocks_golden.json` pins the rendered `messages` array of one
+fixture transcript through `sessions::detail::read_detail` (#482). A
+`tool_result` block reached no client before it, so the arm that would have
+emitted it never existed on either side. It records the block's position in the
+wire object — `is_error` **last**, after `input` — that a *successful* result
+carries no `is_error` key at all, that a `tool_use` input still ships with its
+own key order and number spelling, and that a tool-result carrier is a user
+message with `blocks` and no `content`.
 
 ## Who reads them
 

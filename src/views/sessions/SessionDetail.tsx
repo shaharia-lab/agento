@@ -1,16 +1,18 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { api } from "../../lib/api";
 import { useResource } from "../../lib/hooks";
-import { dateTime, integer, tildePath, usd } from "../../lib/format";
+import { compactNumber, dateTime, integer, tildePath, usd } from "../../lib/format";
 import { Icon } from "../../lib/icons";
 import type {
   ClaudeMessage,
   ClaudeSessionDetail,
   ClaudeSessionSummary,
+  ClaudeSubagent,
   ClaudeTodo,
 } from "../../lib/types";
 import { Empty } from "../../components/ui";
 import { Thinking, ToolCall } from "../chat/Transcript";
+import type { ToolState } from "../chat/useChatStream";
 import { Markdown } from "../chat/Markdown";
 
 /**
@@ -39,18 +41,42 @@ export function SessionDetail({
   // content opening with one of Claude Code's own injection wrappers is the
   // harness talking, not the user — the scanner's turn count excludes all
   // three, so showing them here would render turns the header does not count.
+  //
+  // A carrier does now arrive with `blocks`, and it is still not a turn: its
+  // results are read out below and rendered against the call each answers, so
+  // "has something to show" is any block that is *not* a tool_result.
   const messages = useMemo(
     () =>
       (detail.data?.messages ?? []).filter((m) => {
         if (m.is_sidechain) return false;
         if (m.type !== "user") return true;
         const text = m.content?.trim() ?? "";
-        if (!text && !m.blocks?.length) return false;
+        if (!text && !m.blocks?.some((b) => b.type !== "tool_result")) {
+          return false;
+        }
         return !INJECTED_MARKERS.some((w) => text.startsWith(w));
       }),
     [detail.data]
   );
+
+  // A tool call and its result are two messages apart in a transcript — the
+  // assistant's `tool_use`, then the user-role carrier answering it — so the
+  // results are collected once, keyed on the id both blocks publish, and read
+  // back where the call renders. This walks the *unfiltered* list on purpose:
+  // the carriers holding the results are exactly what the filter above drops.
+  const tools = useMemo(() => {
+    const byId: Record<string, ToolState> = {};
+    for (const m of detail.data?.messages ?? []) {
+      for (const b of m.blocks ?? []) {
+        if (b.type !== "tool_result" || !b.id) continue;
+        byId[b.id] = { result: b.text ?? "", isError: b.is_error ?? false };
+      }
+    }
+    return byId;
+  }, [detail.data]);
+
   const todos = detail.data?.todos ?? [];
+  const subagents = detail.data?.subagents ?? [];
   const title = detail.data?.display_title || session.display_title;
 
   return (
@@ -108,12 +134,15 @@ export function SessionDetail({
         <div className="transcript scroll">
           <div className="transcript__inner">
             {todos.length > 0 && <TodoList todos={todos} />}
+            {subagents.length > 0 && <SubagentList subagents={subagents} />}
             {messages.length === 0 ? (
               <div className="sess-note">
                 This transcript holds no conversation turns.
               </div>
             ) : (
-              messages.map((m, i) => <Message key={m.uuid || i} msg={m} />)
+              messages.map((m, i) => (
+                <Message key={m.uuid || i} msg={m} tools={tools} />
+              ))
             )}
           </div>
         </div>
@@ -147,9 +176,22 @@ const INJECTED_MARKERS = [
  */
 const ASSISTANT_LABEL = "Claude";
 
-function Message({ msg }: { msg: ClaudeMessage }) {
+function Message({
+  msg,
+  tools,
+}: {
+  msg: ClaudeMessage;
+  tools: Record<string, ToolState>;
+}) {
   const isUser = msg.type === "user";
-  const blocks = msg.blocks?.length ? msg.blocks : null;
+  // Blocks replace `content` as the body, so a message whose only blocks are
+  // tool_results must fall back to it rather than rendering nothing: those are
+  // shown against the call each answers, not here. No transcript in the local
+  // corpus writes text beside a tool_result (0 of 10,568 carriers), but the
+  // alternative to this line is a silently empty bubble if one ever does.
+  const blocks = msg.blocks?.some((b) => b.type !== "tool_result")
+    ? msg.blocks
+    : null;
 
   return (
     <div className={`msg ${isUser ? "msg--user" : ""}`}>
@@ -177,9 +219,16 @@ function Message({ msg }: { msg: ClaudeMessage }) {
                 key={b.id ?? i}
                 name={b.name ?? "tool"}
                 input={b.input}
-                state={undefined}
+                // The result of this call, if the transcript carried one.
+                // `undefined` now means genuinely unanswered — an interrupted
+                // session — rather than "never looked".
+                state={b.id ? tools[b.id] : undefined}
                 live={false}
               />
+            ) : b.type === "tool_result" ? (
+              // Rendered inside the call it answers, never on its own. Only a
+              // carrier holds one, and a carrier is not shown.
+              null
             ) : (
               <Markdown key={i} text={b.text ?? ""} />
             )
@@ -188,6 +237,65 @@ function Message({ msg }: { msg: ClaudeMessage }) {
           <Markdown text={msg.content ?? ""} />
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * The delegations this session spawned, as one collapsed block.
+ *
+ * The toolbar's figure is `cost + subagent_cost`, so without this the page
+ * charges for work it never shows. It is a *summary* and not a transcript:
+ * a sub-agent's own messages are sidechain events, and interleaving them into
+ * the parent's flat list reads as nonsense — nesting them under the `Task`
+ * call that spawned them is the journey view's job (#479).
+ */
+function SubagentList({ subagents }: { subagents: ClaudeSubagent[] }) {
+  const [open, setOpen] = useState(false);
+  const tokens = subagents.reduce(
+    (n, s) => n + s.usage.input_tokens + s.usage.output_tokens,
+    0
+  );
+
+  return (
+    <div className="toolcall">
+      <button className="toolcall__head" onClick={() => setOpen((o) => !o)}>
+        <Icon
+          name="chevronR"
+          size={12}
+          className={`chev ${open ? "chev--open" : ""}`}
+        />
+        <Icon name="users" size={13} />
+        <span className="toolcall__name">Sub-agents</span>
+        <span className="truncate">
+          {integer(subagents.length)} delegated ·{" "}
+          {compactNumber(tokens)} tokens
+        </span>
+      </button>
+      {open && (
+        <div className="toolcall__body sess-subagents">
+          {subagents.map((s) => (
+            <div key={s.agent_id} className="sess-subagent">
+              <div className="sess-subagent__head">
+                <span className="sess-subagent__type">
+                  {s.agent_type || "sub-agent"}
+                </span>
+                <span className="sess-subagent__meta tnum">
+                  {integer(s.message_count)} msgs ·{" "}
+                  {compactNumber(
+                    s.usage.input_tokens + s.usage.output_tokens
+                  )}{" "}
+                  tokens
+                  {s.model ? ` · ${s.model}` : ""}
+                </span>
+              </div>
+              {s.description && (
+                <div className="sess-subagent__desc">{s.description}</div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

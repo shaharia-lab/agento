@@ -232,3 +232,48 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* The sub-agent summary sits in a `.toolcall__body`, which is monospace and
+   pre-wrapped for command output; a delegation's description is prose. */
+.sess-subagents {
+  display: flex;
+  flex-direction: column;
+  font-family: var(--font-ui);
+  white-space: normal;
+}
+.sess-subagent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3) 0;
+  border-top: var(--hairline) solid var(--line);
+}
+.sess-subagent:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+.sess-subagent:last-child {
+  padding-bottom: 0;
+}
+.sess-subagent__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+.sess-subagent__type {
+  font-weight: var(--weight-medium);
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sess-subagent__meta {
+  margin-left: auto;
+  flex: none;
+  color: var(--fg-tertiary);
+}
+.sess-subagent__desc {
+  color: var(--fg-secondary);
+  line-height: var(--leading-normal);
+}
