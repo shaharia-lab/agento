@@ -104,7 +104,7 @@ export type MarkKey =
 
 interface Mark {
   /** The monogram drawn in the tile, unless `icon` names a glyph instead. */
-  label: string;
+  label?: string;
   /** An icon from the house set — used only where no vendor is named. */
   icon?: IconName;
   /** One of `views.css`' existing `.avatar--*` tones. No new CSS. */
@@ -125,11 +125,18 @@ const MARKS: Record<MarkKey, Mark> = {
   mistral: { label: "MS", tone: "amber", title: "Mistral AI" },
   xai: { label: "XA", tone: "purple", title: "xAI" },
   fireworks: { label: "FW", tone: "red", title: "Fireworks AI" },
-  selfhosted: { label: "", icon: "cpu", tone: "teal", title: "Self-hosted endpoint" },
+  selfhosted: { icon: "cpu", tone: "teal", title: "Self-hosted endpoint" },
 };
 
-/** Hosts that are this machine. `new URL().hostname` keeps IPv6 bracketed. */
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1"]);
+/**
+ * Hosts that mean "this machine". Two spellings to get right: `new URL()`
+ * serializes an IPv6 host **bracketed**, so `[::1]` is the only form that can
+ * ever reach here and a bare `::1` entry would be dead; and `0.0.0.0` is a
+ * bind-any address rather than a loopback one, but it is what a locally-run
+ * server's own printed URL often says, so it belongs in this set even though
+ * it makes the set wider than its name.
+ */
+const SELF_HOSTED_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "[::1]"]);
 
 /**
  * Suffixes that mean "somebody's own network". Note this is a *suffix* rule on
@@ -157,7 +164,7 @@ function hostOf(baseUrl: string): string | null {
 
 function isSelfHosted(host: string): boolean {
   return (
-    LOOPBACK_HOSTS.has(host) || SELF_HOSTED_SUFFIXES.some((s) => host.endsWith(s))
+    SELF_HOSTED_HOSTS.has(host) || SELF_HOSTED_SUFFIXES.some((s) => host.endsWith(s))
   );
 }
 
@@ -182,6 +189,8 @@ export function markFor(baseUrl: string, type: GatewayProviderType): MarkKey | n
   const host = hostOf(baseUrl);
   if (host === null) return typeMark(type);
   if (isSelfHosted(host)) return "selfhosted";
+  // First match wins; no two entries in the table can match one host today,
+  // and a new entry that overlaps an existing one has to be added above it.
   for (const domain of DOMAIN_KEYS) {
     if (host === domain || host.endsWith(`.${domain}`)) return DOMAIN_MARKS[domain];
   }
@@ -197,8 +206,8 @@ export function markFor(baseUrl: string, type: GatewayProviderType): MarkKey | n
    domains rather than hosts (which is the subdomain-collapse rule's table
    half), that GLM's type fallback is Z.AI's mark and not its own, and that
    `markFor` still answers `null` for the no-mark case rather than a default.
-   What they cannot cover is `new URL()` at runtime — that half is verified by
-   running the app.
+   What they cannot cover is `new URL()` at runtime, so that half is verified by
+   exercising `markFor` directly — see the PR for the cases and their answers.
    ------------------------------------------------------------------------- */
 
 /** A host, not a registrable domain, must never be a key — `api.openai.com`
@@ -223,23 +232,21 @@ export type PinNoMarkIsNull = Expect<Eq<ReturnType<typeof markFor>, MarkKey | nu
  */
 export function BrandMark({
   provider,
-  size = 14,
 }: {
   provider: Pick<GatewayProviderSummary, "base_url" | "type">;
-  size?: number;
 }) {
   const key = markFor(provider.base_url, provider.type);
   if (key === null) {
     return (
       <div className="avatar avatar--accent">
-        <Icon name="database" size={size} />
+        <Icon name="database" size={14} />
       </div>
     );
   }
   const mark = MARKS[key];
   return (
     <div className={`avatar avatar--${mark.tone}`} title={mark.title}>
-      {mark.icon ? <Icon name={mark.icon} size={size} /> : mark.label}
+      {mark.icon ? <Icon name={mark.icon} size={14} /> : mark.label}
     </div>
   );
 }
