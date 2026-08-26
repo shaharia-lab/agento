@@ -342,6 +342,218 @@ export function Dropdown({
   );
 }
 
+/* --- Context menu --------------------------------------------------------- */
+
+export interface ContextMenuItem {
+  label: string;
+  icon?: IconName;
+  danger?: boolean;
+  disabled?: boolean;
+  onSelect(): void;
+}
+
+/**
+ * A menu anchored to a **point** rather than to a control — what a right-click
+ * on a row opens.
+ *
+ * It is written beside `Dropdown` rather than by extracting a shared popover
+ * out of it. `Dropdown` is a working, keyboard-accessible listbox used across
+ * several views, and refactoring its internals is a larger and riskier change
+ * than the one consumer here justifies; extract the popover if a third one
+ * appears.
+ *
+ * Two things differ from `Dropdown`, and both follow from there being no
+ * trigger element:
+ *
+ * - **Placement is measured, not estimated.** `Dropdown` clamps against its
+ *   trigger's rect, which it has before the menu exists. Here the only input is
+ *   a pointer position, so the first pass renders at the origin, *hidden*, and
+ *   a layout effect clamps against the box the browser actually laid out —
+ *   before it paints, so there is no flash. Rendering that first pass at `at`
+ *   instead would measure a shrink-to-fit box squeezed by whatever room is left
+ *   to the right of the cursor, i.e. the wrong width near the edge this exists
+ *   to handle.
+ * - **Keys are taken from `window` in the capture phase, not from an
+ *   `onKeyDown` prop.** `Dropdown` can use the prop because its handler sits on
+ *   the trigger, which is inside the React root; this menu is portaled to
+ *   `<body>`, and a `keydown` there does not reach React's delegated listener —
+ *   measured in the running app, where Escape and the arrow keys did nothing
+ *   at all. Capturing at the window also puts this ahead of the sessions
+ *   list's own global Enter handler, so `stopPropagation` on a key the menu
+ *   claims is what stops Enter opening the session *and* picking the item. The
+ *   menu still takes focus on open, which is where a menu's focus belongs.
+ */
+export function ContextMenu({
+  at,
+  items,
+  onClose,
+}: {
+  /** Viewport coordinates — `clientX` / `clientY` of the opening event. */
+  at: { x: number; y: number };
+  items: ContextMenuItem[];
+  onClose(): void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number }>();
+  const [active, setActive] = useState(-1);
+
+  useLayoutEffect(() => {
+    const el = menuRef.current;
+    if (!el) return;
+    const { width, height } = el.getBoundingClientRect();
+    const m = 4;
+    setPos({
+      left: Math.max(m, Math.min(at.x, window.innerWidth - width - m)),
+      top: Math.max(m, Math.min(at.y, window.innerHeight - height - m)),
+    });
+    // Reopening does not always remount: right-clicking a second row while the
+    // menu is open closes and reopens it in one batch, so this component is
+    // reused and a stale `active` would carry over — leaving a highlighted item
+    // the user never chose, which Enter would then fire.
+    setActive(-1);
+  }, [at.x, at.y]);
+
+  // Focus only once `pos` has made the menu visible: a `visibility: hidden`
+  // element is not focusable, so focusing in the measuring effect above is
+  // silently a no-op — which is exactly what it did until the running app was
+  // asked what `document.activeElement` was.
+  useEffect(() => {
+    if (pos) menuRef.current?.focus({ preventScroll: true });
+  }, [pos]);
+
+  // "Outside" is outside the menu alone: the point it was opened at belongs to
+  // whatever the user right-clicked, which must not swallow the dismissal.
+  // Any scroll or resize under an open menu would strand it, so close.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      onClose();
+    };
+    const onScroll = (e: Event) => {
+      if (menuRef.current?.contains(e.target as Node)) return;
+      onClose();
+    };
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onClose);
+    window.addEventListener("blur", onClose);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onClose);
+      window.removeEventListener("blur", onClose);
+    };
+  }, [onClose]);
+
+  /** Walk to the next enabled item, wrapping; a menu of only disabled items stays put. */
+  const move = useCallback(
+    (dir: 1 | -1) => {
+      setActive((i) => {
+        const n = items.length;
+        if (n === 0) return -1;
+        let next = i < 0 && dir === 1 ? -1 : Math.max(0, i);
+        for (let k = 0; k < n; k++) {
+          next = (next + dir + n) % n;
+          if (!items[next].disabled) return next;
+        }
+        return i;
+      });
+    },
+    [items]
+  );
+
+  // Close first, then act: an item may navigate away and unmount this tree.
+  const fire = useCallback(
+    (i: number) => {
+      const item = items[i];
+      if (!item || item.disabled) return;
+      onClose();
+      item.onSelect();
+    },
+    [items, onClose]
+  );
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // A chorded key is somebody else's: this listener is at the window's
+      // capture phase, so claiming Ctrl+Enter or Cmd+ArrowDown here would take
+      // it from every other handler in the app while a menu happens to be open.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      switch (e.key) {
+        case "Escape":
+          onClose();
+          break;
+        // Tab closes and is then left alone, the way `Dropdown` treats it, so
+        // focus still moves on to the next control rather than being trapped.
+        case "Tab":
+          onClose();
+          return;
+        case "ArrowDown":
+          move(1);
+          break;
+        case "ArrowUp":
+          move(-1);
+          break;
+        case "Home":
+          setActive(-1);
+          move(1);
+          break;
+        case "End":
+          setActive(-1);
+          move(-1);
+          break;
+        case "Enter":
+        case " ":
+          if (active < 0) return;
+          fire(active);
+          break;
+        default:
+          return;
+      }
+      // Only the keys the menu claims are swallowed, and only while it is open.
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [active, move, fire, onClose]);
+
+  return createPortal(
+    <div
+      ref={menuRef}
+      className="menu ctxmenu"
+      role="menu"
+      tabIndex={-1}
+      style={
+        pos
+          ? { left: pos.left, top: pos.top }
+          : { left: 0, top: 0, visibility: "hidden" }
+      }
+    >
+      {items.map((item, i) => (
+        <button
+          key={item.label}
+          type="button"
+          role="menuitem"
+          data-index={i}
+          disabled={item.disabled}
+          className={`menu__item ${item.danger ? "menu__item--danger" : ""} ${
+            i === active ? "menu__item--active" : ""
+          }`}
+          onMouseEnter={() => setActive(i)}
+          onClick={() => fire(i)}
+        >
+          <span className="ctxmenu__icon">
+            {item.icon && <Icon name={item.icon} size={13} />}
+          </span>
+          <span className="truncate">{item.label}</span>
+        </button>
+      ))}
+    </div>,
+    document.body
+  );
+}
+
 /* --- Combobox ------------------------------------------------------------ */
 
 /**

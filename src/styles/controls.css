@@ -467,12 +467,18 @@ textarea.field-area:focus {
   text-align: left;
   transition: background var(--dur-fast), color var(--dur-fast);
 }
-.menu__item:hover {
+.menu__item:hover,
+.menu__item--active {
   background: var(--accent);
   color: var(--accent-fg);
 }
-.menu__item:hover .menu__hint {
+.menu__item:hover .menu__hint,
+.menu__item--active .menu__hint {
   color: rgba(255, 255, 255, 0.75);
+}
+.menu__item:disabled {
+  opacity: 0.4;
+  pointer-events: none;
 }
 .menu__item--danger {
   color: var(--red);
@@ -490,6 +496,27 @@ textarea.field-area:focus {
   height: var(--hairline);
   background: var(--line);
   margin: var(--sp-2) var(--sp-4);
+}
+
+/* The context menu — a portal to <body> anchored to a point, so it is fixed
+   like .dropdown__menu and sits at the same layer. It lives here rather than in
+   a per-view sheet because <ContextMenu> is a shared control: a rule in one
+   view's stylesheet would leave the next consumer unpositioned. */
+.ctxmenu {
+  position: fixed;
+  z-index: 300;
+  max-width: 320px;
+  outline: none;
+}
+.ctxmenu .menu__item {
+  gap: var(--sp-3);
+  padding-left: var(--sp-2);
+}
+.ctxmenu__icon {
+  width: 16px;
+  flex: none;
+  display: grid;
+  place-items: center;
 }
 
 /* --- Tooltip ------------------------------------------------------------- */

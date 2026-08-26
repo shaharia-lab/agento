@@ -33,7 +33,10 @@ import { useNavigate } from "../lib/nav";
 import { snippetParts, snippetText } from "../lib/snippet";
 import { sessionAgentName } from "../lib/sessionAgent";
 import { openExternal } from "../lib/tauri";
+import { copyText } from "../lib/clipboard";
 import {
+  ContextMenu,
+  type ContextMenuItem,
   Dropdown,
   Empty,
   InspGroup,
@@ -479,7 +482,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
    * text under a "Continue in chat" button that was never pressed.
    */
   const [actionError, setActionError] =
-    useState<{ action: "favorite" | "continue"; message: string }>();
+    useState<{ action: "favorite" | "continue" | "copy"; message: string }>();
   const navigate = useNavigate();
 
   const applyPatch = useCallback(
@@ -547,9 +550,73 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
     [navigate]
   );
 
+  /**
+   * Only a *failure* is reported. A successful copy is silent because that is
+   * what a right-click Copy does everywhere else, and the menu closing is the
+   * acknowledgement; a failure is not silent because `copyText` can genuinely
+   * refuse under WebKitGTK (see its own note), and a menu item that looks the
+   * same either way is one the user only finds out about by pasting.
+   */
+  const copyValue = useCallback(async (what: string, value: string) => {
+    if (await copyText(value)) return;
+    setActionError({
+      action: "copy",
+      message: `Could not copy the ${what} to the clipboard.`,
+    });
+  }, []);
+
   useEffect(() => {
     setActionError(undefined);
   }, [selectedId]);
+
+  /* --- Row context menu ---------------------------------------------------- */
+
+  /**
+   * The row is held by **id**, not by value: the list reloads on a poll and a
+   * favourite toggle patches it in place, so a captured row would let the
+   * menu's own "Add / Remove favourite" label go stale against the state it is
+   * about to flip.
+   */
+  const [menu, setMenu] = useState<{ at: { x: number; y: number }; id: string }>();
+  const closeMenu = useCallback(() => setMenu(undefined), []);
+  const menuSession = useMemo(
+    () => (menu ? items.find((s) => s.session_id === menu.id) : undefined),
+    [menu, items]
+  );
+
+  const menuItems = useMemo<ContextMenuItem[]>(() => {
+    const s = menuSession;
+    if (!s) return [];
+    return [
+      {
+        label: "View session",
+        icon: "chat",
+        onSelect: () => setOpenId(s.session_id),
+      },
+      {
+        label: s.is_favorite ? "Remove favourite" : "Add to favourites",
+        icon: "star",
+        disabled: busy !== undefined,
+        onSelect: () => toggleFavorite(s),
+      },
+      {
+        label: "Continue in chat",
+        icon: "play",
+        disabled: busy !== undefined,
+        onSelect: () => continueInChat(s),
+      },
+      {
+        label: "Copy session ID",
+        icon: "copy",
+        onSelect: () => copyValue("session ID", s.session_id),
+      },
+      {
+        label: "Copy project path",
+        icon: "copy",
+        onSelect: () => copyValue("project path", s.project_path),
+      },
+    ];
+  }, [menuSession, busy, toggleFavorite, continueInChat, copyValue]);
 
   /* --- Derived view data --------------------------------------------------- */
 
@@ -865,6 +932,21 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                             select(s);
                             setOpenId(s.session_id);
                           }}
+                          // Select first, so the inspector is showing the row
+                          // the menu is about to act on. `main.tsx` already
+                          // suppresses the webview's own menu on chrome, but
+                          // this preventDefault is what makes a row's menu
+                          // unconditional — it wins even where a selection
+                          // elsewhere on the page would have let the native one
+                          // through.
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            select(s);
+                            setMenu({
+                              at: { x: e.clientX, y: e.clientY },
+                              id: s.session_id,
+                            });
+                          }}
                         >
                           <td title={s.display_title}>
                             <span className="sess-title">
@@ -986,16 +1068,74 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
           <Splitter variable="--inspector-w" min={220} max={420} invert />
           <aside className="pane-inspector">
             <div className="inspector__head">Session</div>
+            {/* Outside `.inspector__scroll` on purpose: as the last group of a
+                scrolling pane these three were below the fold on any session
+                with a full metadata block, which is the whole of #486. */}
+            {selected && (
+              <div className="sess-strip">
+                <div className="sess-strip__row">
+                  <button
+                    className="btn btn--primary sess-strip__btn"
+                    title="View session"
+                    aria-label="View session"
+                    onClick={() => setOpenId(selected.session_id)}
+                  >
+                    <Icon name="chat" size={13} />
+                  </button>
+                  <button
+                    className="btn sess-strip__btn"
+                    disabled={busy !== undefined}
+                    // `!!` because the field is `omitempty`: a session that is
+                    // not a favourite has no `is_favorite` key at all, and
+                    // `undefined` makes React drop the attribute rather than
+                    // render "false" — a toggle that only announces its state
+                    // in one of its two states.
+                    aria-pressed={!!selected.is_favorite}
+                    title={
+                      selected.is_favorite
+                        ? "Remove favourite"
+                        : "Add to favourites"
+                    }
+                    aria-label={
+                      selected.is_favorite
+                        ? "Remove favourite"
+                        : "Add to favourites"
+                    }
+                    onClick={() => toggleFavorite(selected)}
+                  >
+                    <Icon
+                      name="star"
+                      size={13}
+                      className={
+                        selected.is_favorite ? "sess-fav--on" : undefined
+                      }
+                    />
+                  </button>
+                  <button
+                    className="btn sess-strip__btn"
+                    disabled={busy !== undefined}
+                    title={
+                      busy === "continue" ? "Starting…" : "Continue in chat"
+                    }
+                    aria-label="Continue in chat"
+                    onClick={() => continueInChat(selected)}
+                  >
+                    <Icon name="play" size={13} />
+                  </button>
+                </div>
+                {/* A successful continue navigates away and a successful copy
+                    is silent, so the only thing left to render is a failure —
+                    directly under the buttons, where it is now always in view. */}
+                {actionError && (
+                  <div className="sess-note sess-note--error">
+                    {actionError.message}
+                  </div>
+                )}
+              </div>
+            )}
             <div className="inspector__scroll scroll">
               {selected ? (
-                <Inspector
-                  session={selected}
-                  busy={busy}
-                  error={actionError?.message}
-                  onOpen={(s) => setOpenId(s.session_id)}
-                  onToggleFavorite={toggleFavorite}
-                  onContinue={continueInChat}
-                />
+                <Inspector session={selected} />
               ) : (
                 <div className="sess-note">No session selected.</div>
               )}
@@ -1003,27 +1143,21 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
           </aside>
         </>
       )}
+
+      {menu && menuSession && (
+        <ContextMenu at={menu.at} items={menuItems} onClose={closeMenu} />
+      )}
     </div>
   );
 }
 
 /* --- Inspector ------------------------------------------------------------ */
 
-function Inspector({
-  session,
-  busy,
-  error,
-  onOpen,
-  onToggleFavorite,
-  onContinue,
-}: {
-  session: ClaudeSessionSummary;
-  busy: "favorite" | "continue" | undefined;
-  error: string | undefined;
-  onOpen(s: ClaudeSessionSummary): void;
-  onToggleFavorite(s: ClaudeSessionSummary): void;
-  onContinue(s: ClaudeSessionSummary): void;
-}) {
+/**
+ * The metadata groups alone. The actions live in `.sess-strip` above the
+ * scrolling pane this renders into, so nothing here takes a handler.
+ */
+function Inspector({ session }: { session: ClaudeSessionSummary }) {
   const usage = usageOf(session.usage);
   const sub = usageOf(session.subagent_usage);
   const cost = costOf(session.cost);
@@ -1226,37 +1360,6 @@ function Inspector({
         </InspGroup>
       )}
 
-      <InspGroup title="Actions">
-        <div className="sess-actions">
-          <button className="btn btn--primary" onClick={() => onOpen(session)}>
-            <Icon name="chat" size={13} />
-            View session
-          </button>
-          <button
-            className="btn"
-            disabled={busy !== undefined}
-            onClick={() => onToggleFavorite(session)}
-          >
-            <Icon
-              name="star"
-              size={13}
-              className={session.is_favorite ? "sess-fav--on" : undefined}
-            />
-            {session.is_favorite ? "Remove favourite" : "Add to favourites"}
-          </button>
-          <button
-            className="btn"
-            disabled={busy !== undefined}
-            onClick={() => onContinue(session)}
-          >
-            <Icon name="play" size={13} />
-            {busy === "continue" ? "Starting…" : "Continue in chat"}
-          </button>
-          {/* Success navigates away, so the only thing left to render here is a
-              failure — directly under the button the user just pressed. */}
-          {error && <div className="sess-note sess-note--error">{error}</div>}
-        </div>
-      </InspGroup>
     </>
   );
 }
