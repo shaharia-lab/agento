@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ApiError } from "../../lib/api";
+import { BrandMark } from "../../components/BrandMark";
 import { Dropdown, Empty, FormRow, Search, Splitter, Switch } from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
@@ -124,9 +125,7 @@ export function GatewayProvidersView({ inspectorOpen }: { inspectorOpen: boolean
               }`}
               onClick={() => setSelection({ kind: "row", id: r.id })}
             >
-              <div className="avatar avatar--accent">
-                <Icon name="database" size={14} />
-              </div>
+              <BrandMark provider={r} />
               <div className="listrow__body">
                 <div className="listrow__top">
                   <span className="listrow__title truncate">{r.name}</span>
