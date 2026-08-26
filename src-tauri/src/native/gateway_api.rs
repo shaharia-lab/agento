@@ -1017,8 +1017,13 @@ struct PortAvailabilityBody {
     /// `available`, and by `scanned_to` being present in the second.
     #[serde(skip_serializing_if = "Option::is_none")]
     suggested: Option<u16>,
-    /// The last port the walk looked at, so "no free port" is a bounded claim
-    /// rather than an unqualified one. Present only when a walk happened.
+    /// How far the walk was **allowed** to look, so "no free port" is a bounded
+    /// claim rather than an unqualified one. Present only when a walk happened.
+    ///
+    /// Not the last port examined: the walk stops at the first free one, so a
+    /// found suggestion is normally well below this. It is the cap, and it
+    /// means the same thing in both arms — read it as the range that was on
+    /// offer, never as evidence that anything up here was tried.
     #[serde(skip_serializing_if = "Option::is_none")]
     scanned_to: Option<u16>,
 }
@@ -3070,9 +3075,14 @@ mod tests {
         assert!(body.contains("\"scanned_to\":"), "{body}");
     }
 
-    /// An absent or unusable `port` is the route's own 422, worded exactly as
-    /// `PUT /api/gateway/settings` words the same refusal — not a panic, and not
-    /// a silent fallback to the default.
+    /// An absent or unusable `port` is the route's own 422 — not a panic, and
+    /// not a silent fallback to `DEFAULT_PORT`.
+    ///
+    /// Its sentence is **wider** than the `PUT`'s, because this decodes a raw
+    /// query string and that decodes a `u16` serde has already accepted. The
+    /// assertion is therefore on the prefix the two genuinely share; see
+    /// [`read_port_availability`] for why unifying them would mean narrowing
+    /// this one.
     #[test]
     fn a_missing_or_unusable_port_is_a_validation_error() {
         let file = migrated();
