@@ -28,6 +28,7 @@
 pub mod continue_chat;
 pub mod corpus;
 pub mod detail;
+pub mod journey;
 pub mod page;
 pub mod projects;
 pub mod query;
@@ -45,17 +46,24 @@ pub const ENDPOINT: Endpoint = Endpoint {
     serve,
 };
 
-/// The four reads this area owns.
+/// The five reads this area owns.
 ///
 /// `{id}` is matched last and only as a **single** segment, so it cannot
 /// swallow `/facets`, `/projects`, `/insights/summary` (a different registry
-/// entry), `{id}/insights` or `{id}/journey`. `/status` and `/refresh` are
-/// deliberately absent — see [`serve`].
+/// entry) or `{id}/insights`. `/status` and `/refresh` are deliberately
+/// absent — see [`serve`].
 enum Route<'a> {
     List,
     Facets,
     Projects,
     Detail(&'a str),
+    /// `GET /api/claude-sessions/{id}/journey` (#479) — the turn-segmented
+    /// timeline. A sibling of the detail read rather than its own
+    /// `native::ENDPOINTS` entry, for the reason every other route in this
+    /// directory is: `journey.rs` is a submodule of the area that already
+    /// claims the prefix, exactly as `detail.rs`, `update.rs` and
+    /// `continue_chat.rs` are.
+    Journey(&'a str),
     /// `POST /api/claude-sessions/{id}/continue` (#308) — the one write this
     /// area owns, and the only two-segment route under the prefix that is not
     /// somebody else's.
@@ -72,6 +80,11 @@ fn route_of(path: &str) -> Option<Route<'_>> {
     let rest = path.strip_prefix("/api/claude-sessions/")?;
     if rest.is_empty() {
         return None;
+    }
+    if let Some(id) = rest.strip_suffix("/journey") {
+        // Still one segment before the suffix, for the same reason `/continue`
+        // insists on it.
+        return (!id.is_empty() && !id.contains('/')).then_some(Route::Journey(id));
     }
     if let Some(id) = rest.strip_suffix("/continue") {
         // Still one segment before the suffix: `{id}/journey/continue` is not
@@ -97,12 +110,15 @@ fn claims(method: &Method, path: &str) -> bool {
         // pairing is unrouted.
         Some(Route::Continue(_)) => method == Method::POST,
         Some(Route::Detail(_)) => method == Method::GET || method == Method::PATCH,
+        // Read-only, so no method shares this path — a `PATCH` on it stays
+        // unrouted rather than reaching the rename write below.
+        Some(Route::Journey(_)) => method == Method::GET,
         Some(_) => method == Method::GET,
         None => false,
     }
 }
 
-/// Answer one of the four reads, or one of the two writes.
+/// Answer one of the five reads, or one of the two writes.
 ///
 /// **`/status` and `/refresh` are not here, and that is a decision rather than
 /// an omission.** Both are about the *scan*, which since #289 the shell owns —
@@ -123,6 +139,18 @@ fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
                 crate::native::writes::finish(update::update(&ctx.db_path, id, req.body))
             }
             _ => Err(format!("PATCH {} is not ported", req.path)),
+        };
+    }
+
+    if let Some(Route::Journey(id)) = route_of(req.path) {
+        return match journey::get(&ctx.db_path, id)? {
+            // `handleGetClaudeSessionJourney`'s own 404: a session whose
+            // transcript no config dir holds, and equally one that holds no
+            // timestamped event to draw a timeline from.
+            None => Answer::error(axum::http::StatusCode::NOT_FOUND, "session not found"),
+            Some(j) => Ok(Answer::json(
+                gojson::to_vec(&j).map_err(|e| format!("encoding session journey: {e}"))?,
+            )),
         };
     }
 

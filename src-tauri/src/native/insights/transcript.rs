@@ -227,6 +227,17 @@ pub struct Event {
         deserialize_with = "crate::native::gojson::null_is_zero_value"
     )]
     pub compact_metadata: Option<CompactMetadata>,
+    /// How long the turn a `system`/`turn_duration` event closes took.
+    ///
+    /// Read only by the journey builder, which reports it as its own step
+    /// rather than estimating one from the gap to the next event. `Event` is
+    /// decode-only, so adding a field moves no response byte.
+    #[serde(
+        default,
+        rename = "durationMs",
+        deserialize_with = "crate::native::gojson::null_is_zero_value"
+    )]
+    pub duration_ms: i64,
 }
 
 /// The payload of a `worktree-state` event: the throwaway worktree a session

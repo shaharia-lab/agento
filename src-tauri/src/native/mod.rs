@@ -402,10 +402,11 @@ mod tests {
         assert!(!claims(&Method::DELETE, "/api/claude-sessions/abc-123"));
         assert!(!claims(&Method::PATCH, "/api/claude-sessions/"));
         assert!(!claims(&Method::PATCH, "/api/claude-sessions/abc/journey"));
-        assert!(!claims(
-            &Method::GET,
-            "/api/claude-sessions/abc-123/journey"
-        ));
+        // The journey timeline, claimed since #479 — and for `GET` alone, so
+        // the rename write cannot reach it through the shared prefix.
+        assert!(claims(&Method::GET, "/api/claude-sessions/abc-123/journey"));
+        assert!(!claims(&Method::GET, "/api/claude-sessions//journey"));
+        assert!(!claims(&Method::GET, "/api/claude-sessions/a/b/journey"));
         assert!(claims(
             &Method::GET,
             "/api/claude-sessions/insights/summary"

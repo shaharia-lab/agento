@@ -98,9 +98,9 @@
     {
       "method": "GET",
       "route": "/api/claude-sessions/{id}/journey",
-      "status": "dropped",
-      "owner": "#278",
-      "reason": "no desktop view renders the journey timeline; add with the view if one is built"
+      "status": "native",
+      "owner": "#479",
+      "reason": "the turn-segmented timeline, with the desktop view #278 was waiting for"
     },
     {
       "method": "GET",

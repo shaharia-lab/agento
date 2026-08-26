@@ -585,7 +585,7 @@ fn cached_costs(conn: &Connection, session_id: &str) -> Option<CachedCosts> {
 
 /// `ListSubagents`: every delegated run, oldest first. An unreadable table is
 /// an empty list rather than a failure, matching the Go accessor.
-fn list_subagents(conn: &Connection, session_id: &str) -> Vec<Subagent> {
+pub(super) fn list_subagents(conn: &Connection, session_id: &str) -> Vec<Subagent> {
     let sql = "SELECT agent_id, agent_type, description, tool_use_id,
                       start_time, last_activity, message_count, event_count,
                       input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
@@ -639,14 +639,18 @@ fn go_time(at: Option<chrono::DateTime<chrono::Utc>>) -> crate::native::gotime::
 }
 
 /// The start/last bounds of a transcript, as `timeRange` keeps them.
+///
+/// Visible to [`super::journey`], which keeps the same bounds over the same
+/// events: a second copy of "ignore an event with no timestamp, otherwise widen"
+/// is how the two would come to disagree about a session's span.
 #[derive(Default)]
-struct TimeRange {
-    start: Option<chrono::DateTime<chrono::Utc>>,
-    last: Option<chrono::DateTime<chrono::Utc>>,
+pub(super) struct TimeRange {
+    pub(super) start: Option<chrono::DateTime<chrono::Utc>>,
+    pub(super) last: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl TimeRange {
-    fn update(&mut self, at: Option<chrono::DateTime<chrono::Utc>>) {
+    pub(super) fn update(&mut self, at: Option<chrono::DateTime<chrono::Utc>>) {
         let Some(at) = at else { return };
         if self.start.is_none_or(|s| at < s) {
             self.start = Some(at);

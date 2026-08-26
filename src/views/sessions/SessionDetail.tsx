@@ -10,10 +10,11 @@ import type {
   ClaudeSubagent,
   ClaudeTodo,
 } from "../../lib/types";
-import { Empty } from "../../components/ui";
+import { Empty, Segmented } from "../../components/ui";
 import { Thinking, ToolCall } from "../chat/Transcript";
 import type { ToolState } from "../chat/useChatStream";
 import { Markdown } from "../chat/Markdown";
+import { SessionJourney } from "./SessionJourney";
 
 /**
  * Read-only transcript of one indexed Claude Code session, rendered with the
@@ -38,6 +39,16 @@ export function SessionDetail({
   continuing: boolean;
   continueError?: string;
 }) {
+  // Which of the two readings of this session fills the pane. The header, the
+  // meta row and the back button are shared, so this is a tab rather than a
+  // second screen — and `Segmented` is the repo's tab primitive.
+  //
+  // The journey mounts only while it is selected, so a session nobody opens the
+  // timeline for never pays for the extra whole-transcript read the endpoint
+  // does; switching back and forth re-fetches, which is the same trade every
+  // other view in the app makes.
+  const [tab, setTab] = useState<Tab>("transcript");
+
   const detail = useResource<ClaudeSessionDetail>(
     (signal) =>
       api.get<ClaudeSessionDetail>(
@@ -102,6 +113,8 @@ export function SessionDetail({
           {title || "Untitled session"}
         </div>
         <div className="spacer" />
+        <Segmented<Tab> value={tab} options={TABS} onChange={setTab} />
+        <div className="toolbar__sep" />
         <span className="toolbar__sub tnum">
           {integer(session.message_count)} msgs ·{" "}
           {usd(
@@ -140,7 +153,9 @@ export function SessionDetail({
         <span>{dateTime(session.start_time)}</span>
       </div>
 
-      {detail.error && !detail.data ? (
+      {tab === "journey" ? (
+        <SessionJourney sessionId={session.session_id} />
+      ) : detail.error && !detail.data ? (
         <Empty
           icon="alert"
           title="Couldn't load this session"
@@ -177,6 +192,14 @@ export function SessionDetail({
     </>
   );
 }
+
+/** The two readings of one session; see the `tab` state. */
+type Tab = "transcript" | "journey";
+
+const TABS: { value: Tab; label: string }[] = [
+  { value: "transcript", label: "Transcript" },
+  { value: "journey", label: "Journey" },
+];
 
 /**
  * The harness's injection wrappers — internal/claudesessions'
@@ -274,8 +297,9 @@ function Message({
  * The toolbar's figure is `cost + subagent_cost`, so without this the page
  * charges for work it never shows. It is a *summary* and not a transcript:
  * a sub-agent's own messages are sidechain events, and interleaving them into
- * the parent's flat list reads as nonsense — nesting them under the `Task`
- * call that spawned them is the journey view's job (#479).
+ * the parent's flat list reads as nonsense. Nesting them under the `Task` call
+ * that spawned them is the Journey tab's job, and since #479 that tab exists —
+ * this stays as the at-a-glance count beside the flat read.
  */
 function SubagentList({ subagents }: { subagents: ClaudeSubagent[] }) {
   const [open, setOpen] = useState(false);

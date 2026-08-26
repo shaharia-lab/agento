@@ -37,6 +37,22 @@ impl ActiveTimeTracker {
         self.stamps.push((ts, assistant));
     }
 
+    /// Take on another tracker's stamps, so its events count towards this
+    /// session's active time.
+    ///
+    /// The journey builder is the caller: a delegated sub-agent's timestamps
+    /// merge into its parent's before `durations()` is read, which is what
+    /// credits a 40-minute delegated run instead of collapsing the parent's
+    /// `Task` wait to one capped gap. `durations()` sorts, so the order the
+    /// stamps arrive in does not matter — only that they arrive before it runs.
+    ///
+    /// The threshold is this tracker's; a sub-builder is constructed with the
+    /// same one, so there is no window in which two gaps of one session are
+    /// capped differently.
+    pub fn absorb(&mut self, other: &ActiveTimeTracker) {
+        self.stamps.extend_from_slice(&other.stamps);
+    }
+
     /// The session's active time, in milliseconds.
     pub fn active_ms(&self) -> i64 {
         self.durations().0
