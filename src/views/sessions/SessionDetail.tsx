@@ -23,9 +23,20 @@ import { Markdown } from "../chat/Markdown";
 export function SessionDetail({
   session,
   onBack,
+  onContinue,
+  continuing,
+  continueError,
 }: {
   session: ClaudeSessionSummary;
   onBack(): void;
+  /**
+   * Shared with the list inspector's own button rather than duplicated: both
+   * surfaces must create the chat *and* navigate, and two copies is where one
+   * of them stops doing the second half (#485).
+   */
+  onContinue(s: ClaudeSessionSummary): void;
+  continuing: boolean;
+  continueError?: string;
 }) {
   const detail = useResource<ClaudeSessionDetail>(
     (signal) =>
@@ -98,7 +109,23 @@ export function SessionDetail({
               (session.subagent_cost?.total_usd ?? 0)
           )}
         </span>
+        <div className="toolbar__sep" />
+        <button
+          className="btn"
+          disabled={continuing}
+          onClick={() => onContinue(session)}
+        >
+          <Icon name="play" size={13} />
+          {continuing ? "Starting…" : "Continue in chat"}
+        </button>
       </div>
+
+      {/* A success leaves this view entirely, so this only ever renders a
+          failure — and it renders in the toolbar's own band rather than in a
+          pane the user would have to scroll. */}
+      {continueError && (
+        <div className="sess-detail__error">{continueError}</div>
+      )}
 
       <div className="sess-detail__meta">
         <span className="mono" title={session.project_path}>

@@ -1,3 +1,4 @@
+import { createContext, useContext } from "react";
 import type { IconName } from "./icons";
 
 export type ViewId =
@@ -91,3 +92,41 @@ export const VIEW_TITLES: Record<ViewId, string> = {
   settings: "Settings",
   about: "About Agento",
 };
+
+/* --- Cross-view navigation ------------------------------------------------ */
+
+/**
+ * What a view wants the *next* view to open, beyond the section itself.
+ *
+ * Deliberately one optional row id per destination: this is a hand-off, not a
+ * router, and it must not grow query state, filters or scroll positions. A
+ * second destination adds a second optional field here, and nothing else.
+ */
+export interface NavTarget {
+  /** A chat `chats` should preselect on arrival (#485). */
+  chatId?: string;
+}
+
+export type NavigateFn = (id: ViewId, target?: NavTarget) => void;
+
+/**
+ * `App`'s `navigate`, reachable from a nested view without threading a callback
+ * through every parent.
+ *
+ * The prop form is still the norm — three gateway views take `onNavigate`
+ * because they are rendered directly by `App` and have nothing to thread
+ * through. This exists for the other case: `SessionsView`'s inspector and
+ * `SessionDetail` are several levels down, and "Continue in chat" needs to land
+ * the user in the Chats view.
+ */
+const NavContext = createContext<NavigateFn>(() => {
+  // Not fatal — but a hand-off that silently does nothing is exactly the bug
+  // #485 was filed for, so it must not be invisible.
+  console.warn("navigate() called outside a NavProvider; nothing happened");
+});
+
+export const NavProvider = NavContext.Provider;
+
+export function useNavigate(): NavigateFn {
+  return useContext(NavContext);
+}

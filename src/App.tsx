@@ -17,7 +17,14 @@ import { GatewayProvidersView } from "./views/gateway/ProvidersView";
 import { GatewayModelsView } from "./views/gateway/ModelsView";
 import { GatewayUsageView } from "./views/gateway/UsageView";
 import { GatewaySettingsView } from "./views/gateway/SettingsView";
-import { SECTIONS, VIEW_TITLES, type ViewId } from "./lib/nav";
+import {
+  NavProvider,
+  SECTIONS,
+  VIEW_TITLES,
+  type NavTarget,
+  type NavigateFn,
+  type ViewId,
+} from "./lib/nav";
 import { useAppStats } from "./lib/stats";
 import { useHostInfo } from "./lib/host";
 import { useBackgroundUpdate } from "./lib/useBackgroundUpdate";
@@ -46,6 +53,11 @@ export default function App() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // Bumped by every "New Chat" entry point; ChatsView opens a draft on change.
   const [newChatNonce, setNewChatNonce] = useState(0);
+  // What the destination view should open on arrival, and a nonce so the same
+  // hand-off twice still fires. Cleared by any navigation that carries no
+  // target, or a stale chat id would be re-selected on every later visit.
+  const [navTarget, setNavTarget] = useState<NavTarget>();
+  const [navNonce, setNavNonce] = useState(0);
   const [focused, setFocused] = useState(true);
   const [theme, setTheme] = useState<Theme>(
     () => (localStorage.getItem("agento.theme") as Theme) || "system"
@@ -66,9 +78,11 @@ export default function App() {
   useEffect(() => onWindowFocus(setFocused), []);
 
   /* --- Navigation with history ------------------------------------------- */
-  const navigate = useCallback(
-    (id: ViewId) => {
+  const navigate = useCallback<NavigateFn>(
+    (id, target) => {
       setView(id);
+      setNavTarget(target);
+      if (target) setNavNonce((n) => n + 1);
       setHistory((h) => {
         const trimmed = h.slice(0, cursor + 1);
         if (trimmed[trimmed.length - 1] === id) return trimmed;
@@ -306,111 +320,123 @@ export default function App() {
         canForward={cursor < history.length - 1}
       />
 
-      <div className="body">
-        <Sidebar
-          open={sidebarOpen}
-          active={view}
-          onSelect={navigate}
-          counts={counts}
-          onNewChat={newChat}
-        />
+      {/* Everything below can navigate. The provider is what lets a view
+          nested several levels down — the Sessions inspector, the full session
+          view — hand the user to another section without a callback threaded
+          through every parent (#485). */}
+      <NavProvider value={navigate}>
+        <div className="body">
+          <Sidebar
+            open={sidebarOpen}
+            active={view}
+            onSelect={navigate}
+            counts={counts}
+            onNewChat={newChat}
+          />
 
-        <main className="main">
-          {update.available && (
-            <div className="banner">
-              <Icon name="sparkle" size={14} />
-              <span>
-                {update.installing
-                  ? `Installing version ${update.available.version} — Agento will restart.`
-                  : `Version ${update.available.version} is available.`}
-              </span>
-              {!update.installing && (
+          <main className="main">
+            {update.available && (
+              <div className="banner">
+                <Icon name="sparkle" size={14} />
+                <span>
+                  {update.installing
+                    ? `Installing version ${update.available.version} — Agento will restart.`
+                    : `Version ${update.available.version} is available.`}
+                </span>
+                {!update.installing && (
+                  <button
+                    className="btn"
+                    style={{ marginLeft: "auto", height: 20 }}
+                    onClick={() => navigate("about")}
+                  >
+                    Details
+                  </button>
+                )}
                 <button
-                  className="btn"
-                  style={{ marginLeft: "auto", height: 20 }}
-                  onClick={() => navigate("about")}
+                  className="iconbtn"
+                  style={update.installing ? { marginLeft: "auto" } : undefined}
+                  onClick={update.dismiss}
+                  title="Dismiss"
                 >
-                  Details
+                  <Icon name="close" size={13} />
                 </button>
-              )}
-              <button
-                className="iconbtn"
-                style={update.installing ? { marginLeft: "auto" } : undefined}
-                onClick={update.dismiss}
-                title="Dismiss"
-              >
-                <Icon name="close" size={13} />
-              </button>
-            </div>
-          )}
-          {claudeMissing && !claudeNoticeDismissed && (
-            <div className="banner">
-              <Icon name="alert" size={14} />
-              <span>
-                Claude Code is not installed, so agents cannot run. Install it
-                with <code>npm i -g @anthropic-ai/claude-code</code>, sign in
-                with <code>claude</code>, then restart Agento.
-              </span>
-              <button
-                className="iconbtn"
-                style={{ marginLeft: "auto" }}
-                onClick={() => setClaudeNoticeDismissed(true)}
-                title="Dismiss"
-              >
-                <Icon name="close" size={13} />
-              </button>
-            </div>
-          )}
-          {view === "chats" && (
-            <ChatsView inspectorOpen={inspectorOpen} newChatNonce={newChatNonce} />
-          )}
-          {view === "agents" && <AgentsView inspectorOpen={inspectorOpen} />}
-          {view === "integrations" && (
-            <IntegrationsView inspectorOpen={inspectorOpen} />
-          )}
-          {view === "tasks" && <TasksView inspectorOpen={inspectorOpen} />}
-          {view === "jobs" && <JobsView inspectorOpen={inspectorOpen} />}
-          {view === "sessions" && <SessionsView inspectorOpen={inspectorOpen} />}
-          {(view === "tokens" || view === "usage" || view === "insights") && (
-            <AnalyticsView mode={view} inspectorOpen={inspectorOpen} />
-          )}
-          {/* Three of the five gateway views take `navigate`, and all three for
-              the same reason: the useful action on what they are reporting
-              lives in a sibling view rather than a pane of their own — change
-              the port (Overview), add the provider an alias has to route to
-              (Models), and configure the two things the listener needs before
-              it can be switched on at all (Gateway Settings, #474). There is
-              still no nav context; the prop is the whole mechanism. */}
-          {view === "gateway" && (
-            <GatewayOverviewView
-              inspectorOpen={inspectorOpen}
-              onNavigate={navigate}
-            />
-          )}
-          {view === "gateway-providers" && (
-            <GatewayProvidersView inspectorOpen={inspectorOpen} />
-          )}
-          {view === "gateway-models" && (
-            <GatewayModelsView
-              inspectorOpen={inspectorOpen}
-              onNavigate={navigate}
-            />
-          )}
-          {view === "gateway-usage" && (
-            <GatewayUsageView inspectorOpen={inspectorOpen} />
-          )}
-          {view === "gateway-settings" && (
-            <GatewaySettingsView
-              inspectorOpen={inspectorOpen}
-              onNavigate={navigate}
-            />
-          )}
-          {view === "settings" && (
-            <SettingsView theme={theme} onThemeChange={setTheme} />
-          )}
-          {view === "about" && <AboutView />}
-        </main>
-      </div>
+              </div>
+            )}
+            {claudeMissing && !claudeNoticeDismissed && (
+              <div className="banner">
+                <Icon name="alert" size={14} />
+                <span>
+                  Claude Code is not installed, so agents cannot run. Install it
+                  with <code>npm i -g @anthropic-ai/claude-code</code>, sign in
+                  with <code>claude</code>, then restart Agento.
+                </span>
+                <button
+                  className="iconbtn"
+                  style={{ marginLeft: "auto" }}
+                  onClick={() => setClaudeNoticeDismissed(true)}
+                  title="Dismiss"
+                >
+                  <Icon name="close" size={13} />
+                </button>
+              </div>
+            )}
+            {view === "chats" && (
+              <ChatsView
+                inspectorOpen={inspectorOpen}
+                newChatNonce={newChatNonce}
+                openChatId={navTarget?.chatId}
+                openChatNonce={navNonce}
+              />
+            )}
+            {view === "agents" && <AgentsView inspectorOpen={inspectorOpen} />}
+            {view === "integrations" && (
+              <IntegrationsView inspectorOpen={inspectorOpen} />
+            )}
+            {view === "tasks" && <TasksView inspectorOpen={inspectorOpen} />}
+            {view === "jobs" && <JobsView inspectorOpen={inspectorOpen} />}
+            {view === "sessions" && <SessionsView inspectorOpen={inspectorOpen} />}
+            {(view === "tokens" || view === "usage" || view === "insights") && (
+              <AnalyticsView mode={view} inspectorOpen={inspectorOpen} />
+            )}
+            {/* Three of the five gateway views take `navigate`, and all three for
+                the same reason: the useful action on what they are reporting
+                lives in a sibling view rather than a pane of their own — change
+                the port (Overview), add the provider an alias has to route to
+                (Models), and configure the two things the listener needs before
+                it can be switched on at all (Gateway Settings, #474). All three
+                are rendered right here, so the prop stays the mechanism for them;
+                `NavProvider` above exists for views that are not. */}
+            {view === "gateway" && (
+              <GatewayOverviewView
+                inspectorOpen={inspectorOpen}
+                onNavigate={navigate}
+              />
+            )}
+            {view === "gateway-providers" && (
+              <GatewayProvidersView inspectorOpen={inspectorOpen} />
+            )}
+            {view === "gateway-models" && (
+              <GatewayModelsView
+                inspectorOpen={inspectorOpen}
+                onNavigate={navigate}
+              />
+            )}
+            {view === "gateway-usage" && (
+              <GatewayUsageView inspectorOpen={inspectorOpen} />
+            )}
+            {view === "gateway-settings" && (
+              <GatewaySettingsView
+                inspectorOpen={inspectorOpen}
+                onNavigate={navigate}
+              />
+            )}
+            {view === "settings" && (
+              <SettingsView theme={theme} onThemeChange={setTheme} />
+            )}
+            {view === "about" && <AboutView />}
+          </main>
+        </div>
+      </NavProvider>
 
       <StatusBar
         running={stats.runningJobs}

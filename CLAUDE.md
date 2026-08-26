@@ -176,7 +176,19 @@ src/
     hooks.ts     useResource / useDebounced / usePoll / describeError
     format.ts    compactNumber, usd, duration, relativeTime, toneFor, …
     stats.ts     cross-view counters for sidebar + status bar
-    nav.ts       sidebar sections, view ids, titles
+    nav.ts       sidebar sections, view ids, titles — and the cross-view
+                 hand-off (#485): `NavTarget`, `NavProvider` and `useNavigate`.
+                 **Two mechanisms, and which one to use is decided by where the
+                 caller is rendered.** A view `App.tsx` renders directly takes
+                 `onNavigate={navigate}` as a prop (the three gateway views);
+                 the context is for a caller several levels down, where the prop
+                 would have to be threaded through every parent — the Sessions
+                 inspector and `SessionDetail`. `NavTarget` is a view id plus
+                 *one optional row id*, and it must stay that: it is a hand-off,
+                 not a router, and query state, filters and scroll positions do
+                 not belong in it. `App` clears the target on any navigation
+                 that carries none, or a consumed chat id would be re-applied on
+                 every later visit to that section
     icons.tsx    16px / 1.5-stroke icon set
     tauri.ts     window + menu bridge; degrades to a plain browser tab
     clipboard.ts copyText, with the execCommand fallback WebKitGTK needs
@@ -3954,9 +3966,6 @@ because each one cost real time to find:
   serde's recursion limit, a site URL `url::Url` rejects. Each is documented at
   its site. They were invisible while something else could answer; they are
   user-visible 500s now, and each is a small piece of work to resolve properly.
-- Cross-view navigation: "Continue in chat" on a session can only report the
-  new `chat_id`; it cannot switch to the Chats view. Needs a nav context in
-  `App.tsx`.
 - `useAppStats` counters refresh on a 30s poll and on window focus, not on
   mutation, so a create in one view lags in the sidebar briefly.
 - Session table is not virtualised; 900+ rows render eagerly after "Load more".

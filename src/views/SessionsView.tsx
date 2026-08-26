@@ -29,6 +29,7 @@ import {
   usd,
 } from "../lib/format";
 import { Icon } from "../lib/icons";
+import { useNavigate } from "../lib/nav";
 import { snippetParts, snippetText } from "../lib/snippet";
 import { sessionAgentName } from "../lib/sessionAgent";
 import { openExternal } from "../lib/tauri";
@@ -472,7 +473,7 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
 
   const [busy, setBusy] = useState<"favorite" | "continue">();
   const [actionError, setActionError] = useState<string>();
-  const [continuedChat, setContinuedChat] = useState<string>();
+  const navigate = useNavigate();
 
   const applyPatch = useCallback(
     (id: string, patch: Partial<ClaudeSessionSummary>) => {
@@ -509,25 +510,38 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
     [applyPatch, reloadFacets]
   );
 
-  const continueInChat = useCallback(async (s: ClaudeSessionSummary) => {
-    setBusy("continue");
-    setActionError(undefined);
-    setContinuedChat(undefined);
-    try {
-      const res = await api.post<{ chat_id: string }>(
-        `/claude-sessions/${s.session_id}/continue`
-      );
-      setContinuedChat(res?.chat_id ?? "");
-    } catch (err) {
-      setActionError(describeError(err));
-    } finally {
-      setBusy(undefined);
-    }
-  }, []);
+  /**
+   * Create the resuming chat and **go to it**.
+   *
+   * Reporting the new `chat_id` in place was the whole defect (#485): the note
+   * rendered at the bottom of a scrolling inspector, so a success and a 404
+   * looked identical — like nothing happening. Navigating is also what guards
+   * a double-click: this view unmounts, so the second click has no button to
+   * land on, and `busy` covers the window before that.
+   */
+  const continueInChat = useCallback(
+    async (s: ClaudeSessionSummary) => {
+      setBusy("continue");
+      setActionError(undefined);
+      try {
+        const res = await api.post<{ chat_id: string }>(
+          `/claude-sessions/${s.session_id}/continue`
+        );
+        // A 201 with no id is not a success to navigate on — it would land on
+        // an empty Chats view, which is the symptom this issue is about.
+        if (!res?.chat_id) throw new Error("the server returned no chat id");
+        navigate("chats", { chatId: res.chat_id });
+      } catch (err) {
+        setActionError(describeError(err));
+      } finally {
+        setBusy(undefined);
+      }
+    },
+    [navigate]
+  );
 
   useEffect(() => {
     setActionError(undefined);
-    setContinuedChat(undefined);
   }, [selectedId]);
 
   /* --- Derived view data --------------------------------------------------- */
@@ -596,6 +610,9 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
           <SessionDetail
             session={openSession}
             onBack={() => setOpenId(undefined)}
+            onContinue={continueInChat}
+            continuing={busy === "continue"}
+            continueError={actionError}
           />
         ) : (
           <>
@@ -966,7 +983,6 @@ export function SessionsView({ inspectorOpen }: { inspectorOpen: boolean }) {
                   session={selected}
                   busy={busy}
                   error={actionError}
-                  continuedChat={continuedChat}
                   onOpen={(s) => setOpenId(s.session_id)}
                   onToggleFavorite={toggleFavorite}
                   onContinue={continueInChat}
@@ -988,7 +1004,6 @@ function Inspector({
   session,
   busy,
   error,
-  continuedChat,
   onOpen,
   onToggleFavorite,
   onContinue,
@@ -996,7 +1011,6 @@ function Inspector({
   session: ClaudeSessionSummary;
   busy: "favorite" | "continue" | undefined;
   error: string | undefined;
-  continuedChat: string | undefined;
   onOpen(s: ClaudeSessionSummary): void;
   onToggleFavorite(s: ClaudeSessionSummary): void;
   onContinue(s: ClaudeSessionSummary): void;
@@ -1229,12 +1243,8 @@ function Inspector({
             <Icon name="play" size={13} />
             {busy === "continue" ? "Starting…" : "Continue in chat"}
           </button>
-          {continuedChat !== undefined && (
-            <div className="sess-note">
-              Continued as chat <span className="mono">{continuedChat}</span> —
-              open Chats to resume it.
-            </div>
-          )}
+          {/* Success navigates away, so the only thing left to render here is a
+              failure — directly under the button the user just pressed. */}
           {error && <div className="sess-note sess-note--error">{error}</div>}
         </div>
       </InspGroup>

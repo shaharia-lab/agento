@@ -127,7 +127,7 @@ fn append_message(
 ///
 /// Runes, not bytes — a title of accented text would otherwise be cut mid
 /// character and stored as invalid UTF-8.
-fn truncate_title(content: &str, max: usize) -> String {
+pub(crate) fn truncate_title(content: &str, max: usize) -> String {
     let count = content.chars().count();
     if count <= max {
         return content.to_string();
