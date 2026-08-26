@@ -3080,9 +3080,10 @@ mod tests {
     ///
     /// Its sentence is **wider** than the `PUT`'s, because this decodes a raw
     /// query string and that decodes a `u16` serde has already accepted. The
-    /// assertion is therefore on the prefix the two genuinely share; see
-    /// [`read_port_availability`] for why unifying them would mean narrowing
-    /// this one.
+    /// assertion is therefore on the stable part of *this route's own*
+    /// sentence, excluding the interpolated bounds — it is not a claim about
+    /// anything the two share. See [`read_port_availability`] for why unifying
+    /// them would mean narrowing this one.
     #[test]
     fn a_missing_or_unusable_port_is_a_validation_error() {
         let file = migrated();

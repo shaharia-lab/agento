@@ -314,13 +314,19 @@ export function GatewaySettingsView({
                   thing this gate exists to prevent — but it must not claim the
                   rows are absent. */}
               {readiness.state === "unknown" && (
-                <div className="msgline msgline--warn">
+                <div className="msgline msgline--warn gw-gate">
                   <Icon name="alert" size={13} className="msgline__icon" />
-                  <span>
-                    Could not check whether the gateway has anything to route:{" "}
-                    {readiness.message} Switching it on is held back until that
-                    read succeeds.
-                  </span>
+                  {/* `describeError` returns an unpunctuated message, so it is
+                      given a line of its own rather than embedded between two
+                      prose fragments — every other error site in this section
+                      renders it alone for the same reason. */}
+                  <div className="gw-gate__body">
+                    <span>
+                      Could not check whether the gateway has anything to route.
+                      Switching it on is held back until that read succeeds.
+                    </span>
+                    <span>{readiness.message}</span>
+                  </div>
                 </div>
               )}
 
