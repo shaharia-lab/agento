@@ -452,13 +452,40 @@ the old one stops working until you update it. The view says so before you save.
 - **Type** — Anthropic, OpenAI, Google Gemini or Z.AI GLM. This picks the
   adapter.
 - **Base URL** — leave empty for the provider's own endpoint. GLM requires one.
-- **API key** — yours. It is sent only when you type one and is never returned by
-  any read, so the field is empty every time you open the form. That is
-  deliberate rather than a bug: no read can echo it, so nothing can leak it back
-  through the UI, and leaving the field alone keeps the stored key.
+- **API key** — yours. It is never returned by any read, so a provider that has
+  one shows `••••••••••• stored` rather than the value. That is deliberate
+  rather than a bug: no read can echo it, so nothing can leak it back through
+  the UI. **Editing anything else does not need it.** Leave the field alone and
+  the save sends no key at all, which the server reads as "keep the stored one";
+  use **Replace key** when you actually want to change it.
 - **Timeouts** — connect, first byte, and idle between tokens.
 
 A disabled provider stays configured and is not dispatched to.
+
+#### Checking the credentials before you save
+
+**Check these credentials** asks the provider to list its models. That
+authenticates exactly what an inference request would, costs nothing and
+generates no tokens — and it is the only way to tell a working provider from a
+broken one without routing a real request through the gateway and reading the
+failure inside whichever tool sent it.
+
+You do not have to re-type the key to run it: leave the field alone and it
+checks the one already stored.
+
+Four verdicts:
+
+| verdict | what it means | what to do |
+|---|---|---|
+| **Working** | the provider accepted the key, and lists these models | save |
+| **Key refused** | `401` or `403` — the key is wrong, revoked, or out of credit | re-issue the key |
+| **Unreachable** | nothing answered, or the base URL is not this provider's API root | check the Base URL |
+| **Unexpected** | it answered something else — the status is shown | check the provider's status page |
+
+**Save anyway** is always available beside Save, and it is there for a real
+case: a proxy, a self-hosted server or an OpenAI-compatible vendor may implement
+completions and no model list, so it can never produce a green verdict while
+working perfectly. A check is a help, not a gate you can be locked behind.
 
 ### Defining an alias
 

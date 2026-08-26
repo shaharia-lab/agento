@@ -287,6 +287,41 @@ and the same line is in the log:
 binding the llm gateway on 127.0.0.1:8880: Address already in use (os error 98)
 ```
 
+### "Check these credentials" says the key is refused, or the provider is unreachable
+
+**LLM Gateway → Providers → Check these credentials** asks the provider to list
+its models, which authenticates the same credential a real request would. What
+it answers means:
+
+- **Key refused** (`401`/`403`) — the key is wrong, revoked, or out of credit.
+  Some providers report an exhausted plan as `403` rather than `429`, so a
+  key that worked yesterday can land here. Re-issue it and use **Replace key**.
+- **Unreachable** — nothing answered at the Base URL, or it answered `404`. That
+  is the base URL rather than the key: a `404` means the address is not this
+  provider's API root. Leave it empty to use the provider's own endpoint, except
+  on GLM, which requires one.
+- **Unexpected** — the provider answered something else, and the status is shown
+  beside the verdict. A `5xx` is usually theirs rather than yours.
+
+The check never sends your key anywhere but the provider, and no answer, log
+line or error message carries it back.
+
+**It can be wrong in one direction, and Save anyway is the answer.** A base that
+serves completions but no model list — a proxy, something self-hosted, some
+OpenAI-compatible vendors — cannot produce a green verdict however correct the
+key is. Save anyway is beside Save for exactly that, and nothing is ever blocked
+behind a check.
+
+### Editing a provider asks for the API key I no longer have
+
+It no longer does. A provider with a key stored shows `••••••••••• stored` and
+saves without one — the save simply sends no `api_key` field, and the server
+keeps what it has. **Replace key** is what puts the input back on screen.
+
+On a build predating that change the form did require a re-typed key on every
+save. There is no way to recover the stored one — it is write-only by design —
+so either update, or issue a new key at the provider and paste that in.
+
 ### The model box on Models offers no list
 
 **LLM Gateway → Models** fills a target's model box from that provider's own

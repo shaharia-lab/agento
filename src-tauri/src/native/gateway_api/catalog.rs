@@ -1,4 +1,20 @@
-//! Asking one configured provider's own upstream which models it serves (#470).
+//! Asking one provider's own upstream which models it serves (#470), and — since
+//! #472 — whether a credential the user has just typed is one it accepts.
+//!
+//! # One dialect table, two callers
+//!
+//! `GET /api/gateway/providers/{id}/models` asks a **stored** row; `POST
+//! /api/gateway/providers/validate` asks an **unsaved** draft. They are the same
+//! request to the same endpoint with the same authentication, differing only in
+//! where the three inputs came from — so [`fetch`] takes those three rather than
+//! a [`ProviderRow`], and there is exactly one [`Shape::of`] in the tree.
+//!
+//! That is deliberate and it is what #472's spec asked to be done differently:
+//! it predates #470 and describes a second per-type table in
+//! `gateway/validate.rs`. Two tables of provider endpoints is two things to keep
+//! in step with four upstreams, and the failure when they drift is silent — one
+//! surface would validate a credential against an endpoint the other never
+//! calls.
 //!
 //! # Why this is new code rather than something reused
 //!
@@ -54,7 +70,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::gateway::config::{ProviderRow, ProviderType};
+use crate::gateway::config::ProviderType;
 use crate::native::integrations::base_url::Base;
 
 /// How long one catalog fetch may take, end to end.
@@ -108,43 +124,79 @@ fn client() -> Option<&'static reqwest::Client> {
 ///
 /// `message` is what the UI renders, so it names a cause and never a value:
 /// no key, no URL, no upstream body.
+///
+/// **Three variants rather than two, because #472 has to tell them apart.** The
+/// catalog route maps all three onto two statuses and could not care; a
+/// validation verdict is precisely the question "which of these happened" — a
+/// refused credential, a base URL nothing answers on, and an upstream that
+/// answered something unexpected are three different things for a user to fix.
+/// Splitting the old `Upstream` in two costs the catalog route nothing: its
+/// mapping is unchanged, because [`Self::Unreachable`] carries the message that
+/// arm already produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CatalogError {
     /// The provider is configured in a way that makes the question unaskable —
     /// no API key, or a `base_url` this build will not send a request through.
     /// `400`, because nothing was asked and retrying will not change it.
     Unaskable(String),
-    /// The provider was asked and the answer was not a catalog. `502`, because
+    /// The request could not be delivered at all: DNS, TLS, connect, or a body
+    /// that stopped arriving. Nobody answered, so there is no status to report.
+    Unreachable(String),
+    /// The provider answered, and the answer was not a catalog — either because
+    /// of its `status`, or because a `200` carried something else. `502`, since
     /// this build did its part and somebody else's did not.
-    Upstream(String),
+    Upstream {
+        message: String,
+        /// The upstream's status, when there was one. `None` means a `200`
+        /// whose body did not parse.
+        status: Option<u16>,
+    },
 }
 
 impl CatalogError {
     pub fn message(&self) -> &str {
         match self {
-            Self::Unaskable(m) | Self::Upstream(m) => m,
+            Self::Unaskable(m) | Self::Unreachable(m) => m,
+            Self::Upstream { message, .. } => message,
+        }
+    }
+
+    /// A `200` that did not carry a catalog.
+    fn unparseable(message: &str) -> Self {
+        Self::Upstream {
+            message: message.to_string(),
+            status: None,
         }
     }
 }
 
-/// Every model id `row`'s upstream reports, in the order the upstream gave them.
+/// Every model id this provider's upstream reports, in the order it gave them.
 ///
 /// Order is the upstream's own — OpenAI's is by creation, Anthropic's is newest
 /// first — and re-sorting it would bury the model a user most likely wants under
 /// an alphabetical accident. Duplicates are dropped, which costs nothing and
 /// stops a paginated answer that overlaps from listing an id twice.
-pub async fn fetch(row: &ProviderRow) -> Result<Vec<String>, CatalogError> {
-    let key = row.api_key();
+///
+/// The three arguments are the three things a request needs, rather than a
+/// `ProviderRow`, because #472's caller has no row: it validates a draft the
+/// user is still typing. `key` is borrowed and never stored — the same
+/// discipline `ProviderRow`'s private field enforces on the other side of the
+/// call.
+pub async fn fetch(
+    provider_type: ProviderType,
+    base_url: &str,
+    key: &str,
+) -> Result<Vec<String>, CatalogError> {
     if key.is_empty() {
         return Err(CatalogError::Unaskable(
             "this provider has no API key, so its model list cannot be fetched".into(),
         ));
     }
 
-    let shape = Shape::of(row.provider_type);
+    let shape = Shape::of(provider_type);
     // Trailing slashes trimmed before `Base::new`, which concatenates: see the
     // module header.
-    let raw = row.base_url.trim_end_matches('/');
+    let raw = base_url.trim_end_matches('/');
     let raw = if raw.is_empty() {
         shape.default_base
     } else {
@@ -182,7 +234,7 @@ pub async fn fetch(row: &ProviderRow) -> Result<Vec<String>, CatalogError> {
         .await
         // Deliberately not `{e}`: a `reqwest::Error`'s `Display` carries the URL
         // it was built from, which is the one thing this must not hand back.
-        .map_err(|_| CatalogError::Upstream("the provider could not be reached".into()))?;
+        .map_err(|_| CatalogError::Unreachable("the provider could not be reached".into()))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -190,10 +242,10 @@ pub async fn fetch(row: &ProviderRow) -> Result<Vec<String>, CatalogError> {
         // is wrong" far better than any wording here could. The body is not
         // read: it is the upstream's, and echoing it is what this module exists
         // not to do.
-        return Err(CatalogError::Upstream(format!(
-            "the provider answered {}",
-            status.as_u16()
-        )));
+        return Err(CatalogError::Upstream {
+            message: format!("the provider answered {}", status.as_u16()),
+            status: Some(status.as_u16()),
+        });
     }
 
     let body = read_capped(response).await?;
@@ -218,11 +270,11 @@ async fn read_capped(response: reqwest::Response) -> Result<Vec<u8>, CatalogErro
     let mut buf: Vec<u8> = Vec::new();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|_| {
-            CatalogError::Upstream("the provider's answer could not be read".into())
+            CatalogError::Unreachable("the provider's answer could not be read".into())
         })?;
         if buf.len() + chunk.len() > MAX_BYTES {
-            return Err(CatalogError::Upstream(
-                "the provider's model list is larger than Agento will read".into(),
+            return Err(CatalogError::unparseable(
+                "the provider's model list is larger than Agento will read",
             ));
         }
         buf.extend_from_slice(&chunk);
@@ -294,8 +346,8 @@ impl Shape {
 
     fn parse(&self, body: &[u8]) -> Result<Vec<String>, CatalogError> {
         let unparseable = || {
-            CatalogError::Upstream(
-                "the provider's answer was not a model list Agento understands".into(),
+            CatalogError::unparseable(
+                "the provider's answer was not a model list Agento understands",
             )
         };
         match self.body {
@@ -404,7 +456,10 @@ mod tests {
     #[test]
     fn a_body_that_is_not_a_catalog_is_an_upstream_error_naming_no_value() {
         let err = body_of(BodyShape::DataId, "<html>nope</html>").unwrap_err();
-        assert!(matches!(err, CatalogError::Upstream(_)));
+        // A `200` whose body is not a catalog: the provider answered, so it is
+        // `Upstream` — with **no** status, which is what tells #472's verdict
+        // that there is nothing about the status code to report.
+        assert!(matches!(err, CatalogError::Upstream { status: None, .. }));
         assert!(!err.message().contains("html"), "{}", err.message());
     }
 

@@ -173,6 +173,19 @@
   min-width: 0;
 }
 
+/* --- The stored-key row, and the credential verdict beside it (#472) ------- */
+
+/* One horizontal run inside a `.formrow__control`, which is a column flex: the
+   `••• stored` placeholder plus its Replace control, and the verdict badge plus
+   its status. Two callers, one shape. */
+.gw-storedkey {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-height: var(--control-h);
+  color: var(--fg-secondary);
+}
+
 /* --- Explanatory prose ---------------------------------------------------- */
 
 .gw-help {

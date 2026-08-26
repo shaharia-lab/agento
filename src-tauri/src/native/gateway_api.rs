@@ -6,7 +6,7 @@
 //! is the `/api` seam, with Agento's own shapes, Agento's own guard and
 //! Agento's own `read`/`write` scoping. The two are on opposite sides of that
 //! line, which is why the control plane is here and the data plane is there —
-//! and why `Scope::Llm` opens nothing on these twelve routes while a `read`
+//! and why `Scope::Llm` opens nothing on these fourteen routes while a `read`
 //! token opens every one of their GETs.
 //!
 //! # The one question the issue left open was already answered in the tree
@@ -72,12 +72,13 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/gateway/status"),
     ("GET", "/api/gateway/usage"),
     ("GET", "/api/gateway/providers/{id}/models"),
+    ("POST", "/api/gateway/providers/validate"),
 ];
 
-/// The one route in [`ROUTES`] the **streaming** registry answers (#470).
+/// The routes in [`ROUTES`] the **streaming** registry answers (#470, #472).
 ///
-/// It does not stream. `StreamEndpoint` is simply the only registry here that is
-/// `async`, and this route makes a network call: `Endpoint::serve` is a sync
+/// Neither streams. `StreamEndpoint` is simply the only registry here that is
+/// `async`, and both routes make a network call: `Endpoint::serve` is a sync
 /// `fn` the proxy runs on `spawn_blocking`, which is exactly right for thirteen
 /// areas that read SQLite and wrong for an outbound HTTPS request. Returning a
 /// buffered JSON `Response` from the async registry is a smaller change than
@@ -86,15 +87,33 @@ pub const ROUTES: &[(&str, &str)] = &[
 ///
 /// Consequences, both load-bearing:
 ///
-/// - It stays in [`ROUTES`], because that const is what
+/// - They stay in [`ROUTES`], because that const is what
 ///   `parity/desktop_routes.json` is asserted against as **set equality** and a
 ///   route recorded nowhere is the drift that file exists to stop.
-/// - [`claims`] must therefore *exclude* it, or both registries claim one path.
-///   `proxy.rs` checks `claims_stream` first, so the buffered handler would
-///   never run — it would merely sit there as a route claimed by a `serve` arm
-///   that answers "claimed but unhandled". `the_catalog_route_is_claimed_by_the
-///   _streaming_registry_alone` is the guard.
+/// - [`claims`] must therefore *exclude* them, or both registries claim one
+///   path. `proxy.rs` checks `claims_stream` first, so the buffered handler
+///   would never run — it would merely sit there as a route claimed by a `serve`
+///   arm that answers "claimed but unhandled".
+///   `the_async_routes_are_claimed_by_the_streaming_registry_alone` is the
+///   guard, and it is written over this const rather than over one literal so a
+///   third async route cannot be added without it.
+///
+/// #472's own spec said to use `trigger::block_on_result` from the buffered
+/// registry and *not* to add a stream endpoint. That predates #470, which
+/// settled the question the other way for exactly this shape; following it
+/// would have put a second answer to one question in the same module.
+const ASYNC_ROUTES: &[(&str, &str)] = &[CATALOG_ROUTE, VALIDATE_ROUTE];
+
 const CATALOG_ROUTE: (&str, &str) = ("GET", "/api/gateway/providers/{id}/models");
+
+/// `POST /api/gateway/providers/validate` (#472) — does this credential work?
+///
+/// A **literal** segment where its siblings capture an `{id}`, which is safe
+/// here only because no `POST /api/gateway/providers/{id}` route exists: the
+/// two `{id}` writes are `PUT` and `DELETE`, and the collection `POST` is the
+/// exact string one segment up. A future `POST /api/gateway/providers/{id}`
+/// would have to be ordered after this one.
+const VALIDATE_ROUTE: (&str, &str) = ("POST", "/api/gateway/providers/validate");
 
 pub const ENDPOINT: super::Endpoint = super::Endpoint {
     name: "gateway",
@@ -102,23 +121,24 @@ pub const ENDPOINT: super::Endpoint = super::Endpoint {
     serve,
 };
 
-/// The async half — [`CATALOG_ROUTE`] and nothing else.
+/// The async half — [`ASYNC_ROUTES`] and nothing else.
 pub const STREAM_ENDPOINT: super::StreamEndpoint = super::StreamEndpoint {
-    name: "gateway-catalog",
-    claims: claims_catalog,
-    serve: serve_catalog,
+    name: "gateway-upstream",
+    claims: claims_async,
+    serve: serve_async,
 };
 
 fn claims(method: &Method, path: &str) -> bool {
-    !claims_catalog(method, path)
+    !claims_async(method, path)
         && ROUTES
             .iter()
             .any(|(m, pattern)| method.as_str() == *m && path_matches(pattern, path))
 }
 
-fn claims_catalog(method: &Method, path: &str) -> bool {
-    let (m, pattern) = CATALOG_ROUTE;
-    method.as_str() == m && path_matches(pattern, path)
+fn claims_async(method: &Method, path: &str) -> bool {
+    ASYNC_ROUTES
+        .iter()
+        .any(|(m, pattern)| method.as_str() == *m && path_matches(pattern, path))
 }
 
 /// Match a chi-style pattern against a concrete path.
@@ -173,53 +193,64 @@ fn provider_id_for_catalog(path: &str) -> Option<String> {
     Some(id.to_string())
 }
 
+/// The async registry's dispatch, mirroring [`serve`]'s shape for
+/// [`ASYNC_ROUTES`].
+fn serve_async(req: super::StreamRequest) -> super::BoxFuture<'static, Result<Response, String>> {
+    Box::pin(async move {
+        if (req.method.as_str(), req.path.as_str()) == (VALIDATE_ROUTE.0, VALIDATE_ROUTE.1) {
+            return validate_provider(&req.db_path, &req.body).await;
+        }
+        serve_catalog(req).await
+    })
+}
+
 /// `GET /api/gateway/providers/{id}/models` (#470) — what that provider's own
 /// upstream says it serves.
 ///
 /// Async because it makes a network call; buffered because the answer is a
-/// finished document. See [`CATALOG_ROUTE`].
+/// finished document. See [`ASYNC_ROUTES`].
 ///
 /// The database read is on this runtime worker and stays there deliberately:
 /// it is `open_read_only`, and a WAL reader does not wait on a writer, which is
 /// the same reasoning that leaves `runner::load` and `TurnSettings::stored` off
 /// `db::blocking`. The unbounded part of this handler is the HTTPS call, which
 /// is `await`ed rather than blocked on.
-fn serve_catalog(req: super::StreamRequest) -> super::BoxFuture<'static, Result<Response, String>> {
-    Box::pin(async move {
-        let Some(id) = provider_id_for_catalog(&req.path) else {
-            return Err(format!(
-                "{} {} is claimed but has no id",
-                req.method, req.path
-            ));
-        };
+async fn serve_catalog(req: super::StreamRequest) -> Result<Response, String> {
+    let Some(id) = provider_id_for_catalog(&req.path) else {
+        return Err(format!(
+            "{} {} is claimed but has no id",
+            req.method, req.path
+        ));
+    };
 
-        let Some(row) = config::load_provider_secret(&req.db_path, &id)? else {
-            // The same 404 every other `{id}` route here answers for a row that
-            // is not there.
-            return answer(Answer::error(StatusCode::NOT_FOUND, "provider not found")?);
-        };
+    let Some(row) = config::load_provider_secret(&req.db_path, &id)? else {
+        // The same 404 every other `{id}` route here answers for a row that
+        // is not there.
+        return answer(Answer::error(StatusCode::NOT_FOUND, "provider not found")?);
+    };
 
-        // `row` holds the key. It goes no further than `catalog::fetch`, which
-        // puts it in one header and drops it with the request builder; nothing
-        // below this line can reach it, because only a `&str` ever leaves
-        // `ProviderRow` and the borrow ends here.
-        let body = match catalog::fetch(&row).await {
-            Ok(models) => super::gojson::to_vec(&CatalogBody { models })
-                .map_err(|e| format!("encoding gateway provider catalog: {e}"))?,
-            Err(e) => {
-                // Logged with the provider **id**, never its name, base URL or
-                // key: this line lands in a plain file on disk, and the id is
-                // already in the access line's path.
-                log::warn!("gateway model catalog for provider {id}: {}", e.message());
-                let status = match e {
-                    catalog::CatalogError::Unaskable(_) => StatusCode::BAD_REQUEST,
-                    catalog::CatalogError::Upstream(_) => StatusCode::BAD_GATEWAY,
-                };
-                return answer(Answer::error(status, e.message())?);
-            }
-        };
-        answer(Answer::json(body))
-    })
+    // `row` holds the key. It goes no further than `catalog::fetch`, which
+    // puts it in one header and drops it with the request builder; nothing
+    // below this line can reach it, because only a `&str` ever leaves
+    // `ProviderRow` and the borrow ends here.
+    let body = match catalog::fetch(row.provider_type, &row.base_url, row.api_key()).await {
+        Ok(models) => super::gojson::to_vec(&CatalogBody { models })
+            .map_err(|e| format!("encoding gateway provider catalog: {e}"))?,
+        Err(e) => {
+            // Logged with the provider **id**, never its name, base URL or
+            // key: this line lands in a plain file on disk, and the id is
+            // already in the access line's path.
+            log::warn!("gateway model catalog for provider {id}: {}", e.message());
+            let status = match e {
+                catalog::CatalogError::Unaskable(_) => StatusCode::BAD_REQUEST,
+                catalog::CatalogError::Unreachable(_) | catalog::CatalogError::Upstream { .. } => {
+                    StatusCode::BAD_GATEWAY
+                }
+            };
+            return answer(Answer::error(status, e.message())?);
+        }
+    };
+    answer(Answer::json(body))
 }
 
 /// Render a buffered [`Answer`] as the streaming registry's `Response`.
@@ -240,6 +271,168 @@ type Response = axum::http::Response<axum::body::Body>;
 #[derive(Serialize)]
 struct CatalogBody {
     models: Vec<String>,
+}
+
+// ─── Credential validation (#472) ─────────────────────────────────────────────
+
+/// The body of `POST /api/gateway/providers/validate`.
+///
+/// Deliberately the *provider* shape minus the fields a credential check cannot
+/// use, so a form can post what it already has. `api_key` is `Option<String>`
+/// with the same three meanings the `PUT` gives it, and the reason is the same:
+/// an edit form holds no key, because no read ever answered one. **Absent means
+/// "the one already stored for `id`"**, which is what lets a provider
+/// configured last month be re-tested without the user finding a secret their
+/// provider's dashboard will not show them again.
+#[derive(Debug, Deserialize)]
+struct ValidateRequest {
+    /// Which stored provider's key to fall back on. Empty when creating.
+    #[serde(default)]
+    id: String,
+    #[serde(default, rename = "type")]
+    provider_type: String,
+    #[serde(default)]
+    api_key: Option<String>,
+    #[serde(default)]
+    base_url: String,
+}
+
+/// What a credential check found.
+///
+/// **Answered with `200` whatever it found**, and that is a decision rather than
+/// laxity: the outcome of the check is the thing that was asked for, so a
+/// refused key is a successful answer to "is this key refused?". `ModelsView`
+/// already states the same doctrine for #470's catalog — *a failure is a value,
+/// not a throw* — and a form that has to unpack `err.body` to render its own
+/// result is the shape that gets it wrong. The 4xx statuses here are reserved
+/// for the *request* being wrong: a body that will not decode, a type this
+/// build cannot serve, an `id` naming no row, no key to check at all.
+///
+/// `models` is what the provider listed, so a green verdict shows the user the
+/// catalog their key actually reaches — and it is empty unless `ok`.
+#[derive(Serialize)]
+struct ValidationBody {
+    ok: bool,
+    /// `valid` · `unauthorized` · `unreachable` · `unexpected`.
+    outcome: &'static str,
+    /// The upstream's status, when one was received. Absent otherwise — a
+    /// connect failure has no status, and `0` would read as one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+    /// One sentence naming a **cause**. It comes from `catalog::CatalogError`
+    /// unchanged, which is what keeps the no-key/no-URL/no-upstream-body
+    /// discipline in one place rather than restated here where a second author
+    /// would eventually interpolate the thing under test.
+    message: String,
+    models: Vec<String>,
+}
+
+/// `POST /api/gateway/providers/validate` (#472) — is this credential one the
+/// provider accepts?
+///
+/// It asks the same free list-models endpoint #470 already asks, which
+/// authenticates exactly what an inference call would and spends nothing. That
+/// is the whole reason this is not a completions request.
+async fn validate_provider(db_path: &std::path::Path, body: &[u8]) -> Result<Response, String> {
+    let req: ValidateRequest = match writes::decode_body(body) {
+        Ok(req) => req,
+        Err(e) => return answer(writes::finish(Err(e))?),
+    };
+
+    let Some(provider_type) = config::ProviderType::parse(&req.provider_type) else {
+        // The caller's `type` value is not quoted back, exactly as
+        // `ProviderRequest::validated` does not quote it.
+        return refuse(WriteError::validation(
+            "type",
+            "type must be \"anthropic\", \"openai\", \"gemini\" or \"glm\"",
+        ));
+    };
+
+    let id = req.id.trim();
+    let key = match req.api_key {
+        Some(key) => key,
+        None => {
+            // No key supplied and no row to take one from: there is nothing to
+            // check. A verdict here would be a claim about a credential that
+            // does not exist.
+            if id.is_empty() {
+                return refuse(WriteError::validation(
+                    "api_key",
+                    "an api_key is required unless id names a provider whose stored key should be checked",
+                ));
+            }
+            let Some(row) = config::load_provider_secret(db_path, id)? else {
+                return answer(Answer::error(StatusCode::NOT_FOUND, "provider not found")?);
+            };
+            row.api_key().to_string()
+        }
+    };
+    if key.is_empty() {
+        return refuse(WriteError::validation(
+            "api_key",
+            "there is no API key to check",
+        ));
+    }
+
+    let verdict = match catalog::fetch(provider_type, &req.base_url, &key).await {
+        Ok(models) => ValidationBody {
+            ok: true,
+            outcome: "valid",
+            status: None,
+            message: "the provider accepted this API key".to_string(),
+            models,
+        },
+        Err(e) => {
+            let (outcome, status) = classify(&e);
+            // The **outcome** and the status, and neither the key, the base URL
+            // nor the provider's name: this line lands in a plain file on disk,
+            // and a user-typed base URL can carry a token in its path.
+            log::warn!(
+                "gateway provider validation: outcome={outcome} status={status:?} id={id:?}"
+            );
+            ValidationBody {
+                ok: false,
+                outcome,
+                status,
+                message: e.message().to_string(),
+                models: Vec::new(),
+            }
+        }
+    };
+
+    let body = super::gojson::to_vec(&verdict)
+        .map_err(|e| format!("encoding gateway provider validation: {e}"))?;
+    answer(Answer::json(body))
+}
+
+/// Which of the four outcomes a failure is, and the status behind it.
+///
+/// The `401`/`403` split from everything else is the one the issue names: some
+/// providers report an exhausted quota with `403` rather than `429`, and both
+/// mean "this credential will not serve a request", which is what the user is
+/// asking. A `404` is the *base URL* being wrong rather than the key, and is
+/// therefore grouped with the transport failures — that is the pair a user
+/// otherwise mixes up, since both present as "it does not work".
+fn classify(e: &catalog::CatalogError) -> (&'static str, Option<u16>) {
+    match e {
+        // Nothing was asked, because the configuration made it unaskable — a
+        // base URL this build will not send a request through, or no usable
+        // trust store. Nothing was reached, so this is `unreachable`.
+        catalog::CatalogError::Unaskable(_) | catalog::CatalogError::Unreachable(_) => {
+            ("unreachable", None)
+        }
+        catalog::CatalogError::Upstream { status, .. } => match status {
+            Some(401) | Some(403) => ("unauthorized", *status),
+            Some(404) => ("unreachable", *status),
+            _ => ("unexpected", *status),
+        },
+    }
+}
+
+/// Render a request-level refusal through `writes`' own envelope, so this route
+/// answers `{"error": …}` exactly like every buffered write on this surface.
+fn refuse(e: WriteError) -> Result<Response, String> {
+    answer(writes::finish(Err(e))?)
 }
 
 fn serve(ctx: &Ctx, req: &Request) -> Result<Answer, String> {
@@ -2570,17 +2763,47 @@ mod tests {
     /// streaming one first, so a route claimed by both would leave the buffered
     /// arm permanently unreachable — a latent "claimed but unhandled" nobody
     /// would trip over until the two disagreed.
+    ///
+    /// Written over [`ASYNC_ROUTES`] rather than over one literal path, so a
+    /// third async route inherits the check instead of needing to remember it.
     #[test]
-    fn the_catalog_route_is_claimed_by_the_streaming_registry_alone() {
-        let path = "/api/gateway/providers/p1/models";
-        assert!(claims_catalog(&Method::GET, path));
-        assert!(!claims(&Method::GET, path));
+    fn the_async_routes_are_claimed_by_the_streaming_registry_alone() {
+        for (method, pattern) in ASYNC_ROUTES {
+            let method = Method::from_bytes(method.as_bytes()).expect("method");
+            let path = pattern.replace("{id}", "p1");
+            assert!(claims_async(&method, &path), "{method} {path}");
+            assert!(!claims(&method, &path), "{method} {path}");
+            // Every async route is still in ROUTES, which is what
+            // `desktop_routes.json` is asserted against as set equality.
+            assert!(
+                ROUTES.iter().any(|r| r == &(method.as_str(), *pattern)),
+                "{method} {pattern} is not in ROUTES",
+            );
+        }
         // ...and the buffered half is untouched by the exclusion.
         assert!(claims(&Method::GET, "/api/gateway/providers"));
+        assert!(claims(&Method::POST, "/api/gateway/providers"));
         assert!(claims(&Method::PUT, "/api/gateway/providers/p1"));
-        // The route is still in ROUTES, which is what `desktop_routes.json` is
-        // asserted against.
-        assert!(ROUTES.contains(&CATALOG_ROUTE));
+    }
+
+    /// `validate` is a literal segment on a collection whose siblings capture an
+    /// `{id}`. Nothing shadows it today because no `POST
+    /// /api/gateway/providers/{id}` exists — this is what would fail if one were
+    /// added above it.
+    #[test]
+    fn the_validate_path_is_not_shadowed_by_a_sibling_provider_route() {
+        assert!(claims_async(
+            &Method::POST,
+            "/api/gateway/providers/validate"
+        ));
+        // The collection POST is one segment up and is still the buffered one.
+        assert!(!claims_async(&Method::POST, "/api/gateway/providers"));
+        // ...and no other method on the literal path is claimed by either half.
+        assert!(!claims_async(
+            &Method::GET,
+            "/api/gateway/providers/validate"
+        ));
+        assert!(!claims(&Method::GET, "/api/gateway/providers/validate"));
     }
 
     /// `id_under` refuses a remainder holding a `/`, which is what keeps a
@@ -2605,5 +2828,331 @@ mod tests {
             provider_id_for_catalog("/api/gateway/providers/p1/models/x"),
             None
         );
+    }
+
+    // ── Credential validation (#472) ──────────────────────────────────────
+
+    async fn validate(ctx: &Ctx, body: &str) -> Response {
+        serve_async(crate::native::StreamRequest {
+            method: Method::POST,
+            path: VALIDATE_ROUTE.1.to_string(),
+            body: body.as_bytes().to_vec(),
+            db_path: ctx.db_path.clone(),
+        })
+        .await
+        .expect("the handler answers its own 4xx rather than erroring")
+    }
+
+    fn verdict_of(body: &str) -> serde_json::Value {
+        serde_json::from_str(body).expect("json")
+    }
+
+    /// A key typed into the form is the one that reaches the upstream, and a
+    /// green answer carries the catalog it reached.
+    #[tokio::test]
+    async fn a_supplied_key_is_checked_against_the_upstream_and_reported_valid() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let (base, seen) =
+            fake_upstream(StatusCode::OK, r#"{"data":[{"id":"gpt-4o"},{"id":"o3"}]}"#).await;
+
+        let (status, body) = parts_of(
+            validate(
+                &ctx,
+                &format!(r#"{{"type":"openai","api_key":"sk-typed-now","base_url":"{base}"}}"#),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let v = verdict_of(&body);
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["outcome"], "valid");
+        assert_eq!(v["models"], serde_json::json!(["gpt-4o", "o3"]));
+        assert!(v.get("status").is_none(), "a success has no status: {body}");
+        // The dialect is `catalog`'s, so the request shape is already pinned by
+        // `every_provider_type_is_asked_the_way_its_own_api_expects`; what is
+        // this route's own is *which key* it sent.
+        assert_eq!(header_of(&seen, "authorization"), "Bearer sk-typed-now");
+        assert_eq!(seen.lock().expect("lock").target, "/models");
+    }
+
+    /// **The half of this issue the backend already supported.** An edit form
+    /// holds no key, because no read ever answered one — so an omitted
+    /// `api_key` checks the stored one, exactly as an omitted `api_key`
+    /// *preserves* the stored one on the `PUT`.
+    #[tokio::test]
+    async fn an_omitted_api_key_checks_the_stored_one() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let (base, seen) = fake_upstream(StatusCode::OK, r#"{"data":[{"id":"gpt-4o"}]}"#).await;
+        seed_provider(&ctx, "p1", "openai", "sk-secret-value", &base);
+
+        let (status, body) = parts_of(
+            validate(
+                &ctx,
+                &format!(r#"{{"id":"p1","type":"openai","base_url":"{base}"}}"#),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(verdict_of(&body)["outcome"], "valid");
+        assert_eq!(header_of(&seen, "authorization"), "Bearer sk-secret-value");
+    }
+
+    /// A key in the body is the one being asked about — it must win over the
+    /// stored one, or a user retyping a corrected key would be told about the
+    /// broken one they are replacing.
+    #[tokio::test]
+    async fn a_supplied_key_wins_over_the_stored_one() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let (base, seen) = fake_upstream(StatusCode::OK, r#"{"data":[]}"#).await;
+        seed_provider(&ctx, "p1", "openai", "sk-secret-value", &base);
+
+        let (status, _) = parts_of(
+            validate(
+                &ctx,
+                &format!(
+                    r#"{{"id":"p1","type":"openai","api_key":"sk-replacement","base_url":"{base}"}}"#
+                ),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header_of(&seen, "authorization"), "Bearer sk-replacement");
+    }
+
+    /// Nothing to check is a **request** problem, not a verdict: answering
+    /// `ok:false` would be a claim about a credential that does not exist.
+    #[tokio::test]
+    async fn nothing_to_check_is_refused_rather_than_given_a_verdict() {
+        let file = migrated();
+        let ctx = ctx(&file);
+
+        // Creating: no id to fall back on, and no key typed.
+        let (status, body) =
+            parts_of(validate(&ctx, r#"{"type":"openai","base_url":""}"#).await).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("api_key"), "{body}");
+
+        // An id whose row holds no key at all.
+        let (base, seen) = fake_upstream(StatusCode::OK, r#"{"data":[]}"#).await;
+        seed_provider(&ctx, "p1", "openai", "", &base);
+        let (status, body) = parts_of(
+            validate(
+                &ctx,
+                &format!(r#"{{"id":"p1","type":"openai","base_url":"{base}"}}"#),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("api_key"), "{body}");
+        assert!(
+            seen.lock().expect("lock").target.is_empty(),
+            "an unauthenticated request was made in the user's name"
+        );
+    }
+
+    /// An `id` naming no row is the same 404 every other `{id}` route on this
+    /// surface answers — distinct from "the key was refused", which is a 200.
+    #[tokio::test]
+    async fn an_unknown_id_with_no_key_is_a_404() {
+        let file = migrated();
+        let (status, body) = parts_of(
+            validate(
+                &ctx(&file),
+                r#"{"id":"nope","type":"openai","base_url":""}"#,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body, "{\"error\":\"provider not found\"}\n");
+    }
+
+    /// The same refusal `ProviderRequest::validated` gives, and it does not
+    /// quote the caller's value back.
+    #[tokio::test]
+    async fn a_type_this_build_cannot_serve_is_a_422() {
+        let file = migrated();
+        let (status, body) = parts_of(
+            validate(
+                &ctx(&file),
+                r#"{"type":"bedrock","api_key":"sk-x","base_url":""}"#,
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("type"), "{body}");
+        assert!(!body.contains("bedrock"), "{body}");
+    }
+
+    /// **The three outcomes the acceptance criteria ask to be distinguishable**,
+    /// each a `200` carrying a verdict rather than an HTTP error.
+    ///
+    /// A refused key and a wrong base URL are the pair a user otherwise mixes
+    /// up, because both present as "it does not work" — so they are asserted
+    /// side by side, from one table, rather than as three tests that could
+    /// drift into agreeing.
+    #[tokio::test]
+    async fn a_refused_key_a_wrong_base_url_and_a_surprise_are_told_apart() {
+        for (upstream, want_outcome, want_status) in [
+            (StatusCode::UNAUTHORIZED, "unauthorized", Some(401)),
+            // Some providers report an exhausted quota with 403 rather than
+            // 429, and both mean this credential will not serve a request.
+            (StatusCode::FORBIDDEN, "unauthorized", Some(403)),
+            // Not the key: the base URL is not this provider's API root.
+            (StatusCode::NOT_FOUND, "unreachable", Some(404)),
+            (StatusCode::INTERNAL_SERVER_ERROR, "unexpected", Some(500)),
+        ] {
+            let file = migrated();
+            let ctx = ctx(&file);
+            let (base, _) = fake_upstream(upstream, r#"{"error":"nope"}"#).await;
+
+            let (status, body) = parts_of(
+                validate(
+                    &ctx,
+                    &format!(r#"{{"type":"openai","api_key":"sk-x","base_url":"{base}"}}"#),
+                )
+                .await,
+            )
+            .await;
+
+            assert_eq!(status, StatusCode::OK, "{upstream}");
+            let v = verdict_of(&body);
+            assert_eq!(v["ok"], false, "{upstream}");
+            assert_eq!(v["outcome"], want_outcome, "{upstream}");
+            assert_eq!(v["status"], serde_json::json!(want_status), "{upstream}");
+            assert_eq!(v["models"], serde_json::json!([]), "{upstream}");
+        }
+
+        // ...and a base URL nothing answers on has no status at all, which is
+        // what `skip_serializing_if` is for — `0` would read as one.
+        //
+        // The address is one the OS *did* hand out and then took back, so the
+        // connect is refused rather than filtered: picking a number would risk
+        // hitting something else on the machine, and a hostname would need DNS.
+        let file = migrated();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let dead = format!("http://{}", listener.local_addr().expect("addr"));
+        drop(listener);
+
+        let (status, body) = parts_of(
+            validate(
+                &ctx(&file),
+                &format!(r#"{{"type":"openai","api_key":"sk-x","base_url":"{dead}"}}"#),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let v = verdict_of(&body);
+        assert_eq!(v["outcome"], "unreachable", "{body}");
+        assert!(v.get("status").is_none(), "{body}");
+    }
+
+    /// A base URL the guard refuses is reported as a verdict too — and no
+    /// request carrying the key is built, which is the guard's whole point.
+    #[tokio::test]
+    async fn a_base_url_that_resolves_elsewhere_is_a_verdict_not_a_request() {
+        let file = migrated();
+        let (base, seen) = fake_upstream(StatusCode::OK, r#"{"data":[]}"#).await;
+
+        let (status, body) = parts_of(
+            validate(
+                &ctx(&file),
+                &format!(r#"{{"type":"openai","api_key":"sk-x","base_url":"{base}/v1/.."}}"#),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(verdict_of(&body)["outcome"], "unreachable");
+        assert!(body.contains("base URL"), "{body}");
+        assert!(
+            seen.lock().expect("lock").target.is_empty(),
+            "a request was sent"
+        );
+    }
+
+    /// **The credential rule, asserted over the bytes**, on both the path that
+    /// supplies a key and the path that reads the stored one.
+    ///
+    /// A struct-level check only proves the field the test knows about is
+    /// absent. The upstream deliberately echoes the key back in its own body
+    /// and in its status line's company, which is the shape a forwarded
+    /// upstream document would leak.
+    #[tokio::test]
+    async fn no_validation_answer_carries_the_api_key_or_the_upstream_body() {
+        for (supplied, refuse) in [(true, false), (false, false), (false, true)] {
+            let file = migrated();
+            let ctx = ctx(&file);
+            let (base, _) = fake_upstream(
+                if refuse {
+                    StatusCode::UNAUTHORIZED
+                } else {
+                    StatusCode::OK
+                },
+                r#"{"data":[{"id":"gpt-4o","owned_by":"sk-secret-value"}],
+                    "error":"incorrect api key sk-secret-value"}"#,
+            )
+            .await;
+            seed_provider(&ctx, "p1", "openai", "sk-secret-value", &base);
+
+            let key = if supplied {
+                r#","api_key":"sk-secret-value""#
+            } else {
+                ""
+            };
+            let (_, body) = parts_of(
+                validate(
+                    &ctx,
+                    &format!(r#"{{"id":"p1","type":"openai"{key},"base_url":"{base}"}}"#),
+                )
+                .await,
+            )
+            .await;
+
+            assert!(!body.contains("sk-secret-value"), "{body}");
+            assert!(!body.contains("incorrect api key"), "{body}");
+            assert!(!body.contains("owned_by"), "{body}");
+            assert!(!body.contains("127.0.0.1"), "{body}");
+        }
+    }
+
+    /// The body goes through `writes::decode_body`, so it inherits every shape
+    /// rule the buffered writes have — including the positional-array form
+    /// serde would otherwise accept.
+    #[tokio::test]
+    async fn a_body_that_is_not_an_object_is_a_400() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        for body in ["", "[\"openai\"]", "\"openai\""] {
+            let (status, _) = parts_of(validate(&ctx, body).await).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body:?}");
+        }
+    }
+
+    /// `POST` is state-changing, so the guard requires `write` — and an `llm`
+    /// token, which is disjoint from both `read` and `write` (#423), opens
+    /// nothing on `/api` including this.
+    #[test]
+    fn the_validate_route_is_write_scoped_and_closed_to_an_llm_token() {
+        use crate::native::security::{required_scope, token::Scope};
+        let scope = required_scope(&Method::POST, VALIDATE_ROUTE.1);
+        assert_eq!(scope, Scope::Write);
+        assert!(!Scope::Llm.covers(scope));
+        assert!(Scope::Write.covers(scope));
     }
 }

@@ -779,6 +779,41 @@ export interface GatewayProviderRequest {
   enabled: boolean;
 }
 
+/**
+ * `POST /api/gateway/providers/validate` (#472) — the body of a credential
+ * check.
+ *
+ * `api_key` is three-valued in the same way `GatewayProviderRequest`'s is, and
+ * for the same reason: an edit form holds no key, because no read ever answered
+ * one. **Absent means "check the key already stored for `id`"**, which is what
+ * lets a provider configured months ago be re-tested. Creating a provider has
+ * no `id`, so it must supply one.
+ */
+export interface GatewayProviderValidateRequest {
+  id?: string;
+  type: GatewayProviderType;
+  api_key?: string;
+  base_url: string;
+}
+
+/**
+ * What the check found. **Answered with 200 whatever the verdict** — the
+ * outcome of the check is the thing that was asked for, so a refused key is a
+ * successful answer. Only a malformed request (an unknown `id`, a type this
+ * build cannot serve, nothing to check) is a 4xx, and that arrives as an
+ * `ApiError` like anywhere else.
+ */
+export interface GatewayProviderValidation {
+  ok: boolean;
+  outcome: "valid" | "unauthorized" | "unreachable" | "unexpected";
+  /** The upstream's status, when there was one — absent for a connect failure. */
+  status?: number;
+  /** One sentence naming a cause. Never carries the key or the base URL. */
+  message: string;
+  /** What the provider listed. Empty unless `ok`. */
+  models: string[];
+}
+
 export interface GatewayRouteTarget {
   /** The provider's **name**, not its id — that is what routing refers to. */
   provider: string;
