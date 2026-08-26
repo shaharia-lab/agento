@@ -203,14 +203,28 @@
   margin-bottom: var(--sp-3);
 }
 
-.sess-actions {
+/* The inspector's action strip. `flex: none` under `.pane-inspector`'s column,
+   between the head and `.inspector__scroll`, so it is pinned rather than being
+   the last thing in a scrolling pane. Icon-only because it has to survive the
+   220px `Splitter` minimum. */
+.sess-strip {
+  flex: none;
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: var(--hairline) solid var(--line);
 }
-.sess-actions .btn {
-  justify-content: flex-start;
+.sess-strip__row {
+  display: flex;
+  gap: var(--sp-3);
 }
+.sess-strip__btn {
+  width: var(--control-h);
+  padding: 0;
+  flex: none;
+}
+
 .sess-fav--on {
   color: var(--amber);
 }
