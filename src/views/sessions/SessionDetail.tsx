@@ -184,7 +184,14 @@ function Message({
   tools: Record<string, ToolState>;
 }) {
   const isUser = msg.type === "user";
-  const blocks = msg.blocks?.length ? msg.blocks : null;
+  // Blocks replace `content` as the body, so a message whose only blocks are
+  // tool_results must fall back to it rather than rendering nothing: those are
+  // shown against the call each answers, not here. No transcript in the local
+  // corpus writes text beside a tool_result (0 of 10,568 carriers), but the
+  // alternative to this line is a silently empty bubble if one ever does.
+  const blocks = msg.blocks?.some((b) => b.type !== "tool_result")
+    ? msg.blocks
+    : null;
 
   return (
     <div className={`msg ${isUser ? "msg--user" : ""}`}>
