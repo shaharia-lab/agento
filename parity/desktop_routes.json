@@ -152,6 +152,13 @@
       "reason": "the model ids that provider's own upstream reports, so an alias target is picked rather than typed; the only route here answered by the ASYNC registry, because it makes an outbound HTTPS call -- and the answer is ids alone, never the key and never the upstream body"
     },
     {
+      "method": "POST",
+      "route": "/api/gateway/providers/validate",
+      "status": "native",
+      "owner": "#472",
+      "reason": "asks a provider's own free list-models endpoint whether a credential is one it accepts, so a typo is caught at the form rather than as a 401 inside whichever tool was pointed at the gateway; an OMITTED api_key checks the stored one, so an existing provider is re-testable without a secret the user can no longer retrieve. Answered by the ASYNC registry, like the catalog route it shares its dialects with -- and with 200 whatever the verdict, because the outcome of the check is what was asked for"
+    },
+    {
       "method": "GET",
       "route": "/api/gateway/usage",
       "status": "native",

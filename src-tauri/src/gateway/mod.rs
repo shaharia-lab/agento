@@ -32,7 +32,7 @@
 //! | [`usage`] | one row per served request, the cost resolved at write time, and the retention prune |
 //!
 //! **Nothing of the epic is absent any more.** The control plane is not here but
-//! it does exist: `/api/gateway/*` is twelve routes in
+//! it does exist: `/api/gateway/*` is fourteen routes in
 //! [`crate::native::gateway_api`] (#426), under `native/` because it *is* the
 //! `/api` seam where this listener is not, and the **LLM Gateway** section in
 //! `src/views/gateway/` (#427) with its Usage dashboard (#428) is what drives

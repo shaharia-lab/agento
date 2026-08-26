@@ -318,14 +318,14 @@ So the parity machinery does not apply to the five routes it serves
 to, and the wire format that matters is somebody else's.
 
 Its **control plane is the opposite** and this is where the split gets confused.
-`/api/gateway/*` — twelve routes in `native/gateway_api.rs` — is ordinary `/api`
+`/api/gateway/*` — fourteen routes in `native/gateway_api.rs` — is ordinary `/api`
 surface, behind the ordinary guard with ordinary `read`/`write` scoping, and it
 is recorded in `parity/desktop_routes.json`. That file holds the routes with no
 Go ancestor, and its assertion is **set equality** against the union of every
 owning module's `ROUTES` const. Add a third owner and you must add it to that
 union, or the test silently weakens to a one-directional check and still passes.
 
-An `llm` token opens none of those twelve routes. That is the same disjointness
+An `llm` token opens none of those fourteen routes. That is the same disjointness
 seen from the other side: a credential issued to *spend* through the gateway must
 not be able to reconfigure which provider it spends with.
 

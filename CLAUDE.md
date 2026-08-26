@@ -332,9 +332,12 @@ src-tauri/src/
     agents.rs    GET /api/agents and /api/agents/{slug}
     chats.rs     GET /api/chats and /api/chats/{id}; compact() is Go's, byte for byte
     tasks.rs     GET /api/tasks, /api/job-history and the three reads between them
-    gateway_api.rs the LLM gateway's control plane (#426) — twelve
+    gateway_api.rs the LLM gateway's control plane (#426) — fourteen
                  /api/gateway/* routes; under native/ because it IS the /api
-                 seam, where gateway/'s listener is not
+                 seam, where gateway/'s listener is not. Two of them are
+                 answered by the ASYNC registry, because they call an upstream:
+                 the model catalog (#470) and the credential check (#472), which
+                 share one dialect table in gateway_api/catalog.rs
     security/    what `/api` accepts as proof of identity (#405)
       keys.rs    the per-install Ed25519 keypair: create-if-absent, 0600, and
                  the one path that replaces it
@@ -3294,7 +3297,7 @@ win that race to see anything.
 `gateway/`** (#426, `native/gateway_api.rs`). The split is the seam, not the
 feature: `gateway/` speaks somebody else's wire formats on its own port, this
 speaks Agento's, behind Agento's guard with ordinary `read`/`write` scoping —
-and `Scope::Llm` opens none of its twelve routes, which is the disjointness
+and `Scope::Llm` opens none of its fourteen routes, which is the disjointness
 #423 built seen from the other side (a credential issued to *spend* through the
 gateway must not be able to reconfigure which provider it spends with).
 
@@ -3336,6 +3339,66 @@ one place — and a `#335`-convention log line with a test. `reload` is not
 awaited: it is stop-then-start over a socket bind, and a save that blocked on it
 would feel like a hang. `a_provider_save_reloads_without_cutting_an_in_flight_stream`
 pins both halves at once, which is where they pull against each other.
+
+**Two of the fourteen routes call an upstream, and they share one dialect
+table** — `GET /api/gateway/providers/{id}/models` (#470) and `POST
+/api/gateway/providers/validate` (#472), both in `gateway_api::ASYNC_ROUTES` and
+both answered by `catalog::fetch`. Five things about that pair:
+
+- **`ASYNC_ROUTES` is a const rather than two literals**, because the property
+  that matters is per route and easy to forget on the second one: a route
+  claimed by *both* registries leaves the buffered arm permanently unreachable,
+  since `proxy.rs` asks `claims_stream` first. `claims` excludes the whole
+  const and the guard iterates it, so a third async route inherits the check.
+  Note `StreamEndpoint` is the **async** registry, not the long-lived one —
+  neither of these streams; `Endpoint::serve` is a sync `fn` on
+  `spawn_blocking`, which is right for reading SQLite and wrong for an outbound
+  HTTPS call.
+- **One dialect table, and #472's spec asked for a second.** That spec predates
+  #470 and describes a per-type table in a new `gateway/validate.rs`, sending
+  OpenAI to `{base}/v1/models` and putting the Gemini key in `?key=`. All three
+  are superseded: the stored OpenAI base is already the versioned root, a
+  credential in a URL is what an error string, a redirect and a proxy log all
+  see (hence `x-goog-api-key`), and there are **four** provider types, not
+  three. `catalog::fetch` therefore takes `(ProviderType, base_url, key)` rather
+  than a `ProviderRow`, because #472's caller validates a draft that has no row.
+- **A verdict is a `200`, whatever it says.** The outcome of the check is what
+  was asked for, so a refused key is a successful answer to "is this key
+  refused?" — the same doctrine `ModelsView` already states for the catalog: *a
+  failure is a value, not a throw*. The 4xx statuses are reserved for the
+  *request* being wrong (undecodable body, a type this build cannot serve, an
+  `id` naming no row, nothing to check at all). A route that 4xx'd its verdicts
+  would make the form unpack `err.body` to render its own result.
+- **The stored-key fallback compares the row's type against the request's**, and
+  it is not defensive padding: the form sends the Type dropdown's current value
+  with no `api_key`, because an untouched key field is the default for any
+  configured provider. Changing Type and pressing Check would otherwise put an
+  Anthropic key in an `Authorization: Bearer` header addressed to
+  `api.openai.com` — no attacker in it, and the credential lands in a third
+  party's request log. An empty `base_url` makes it worse rather than better,
+  since it resolves to the *requested* type's production default. A key supplied
+  in the body needs no such check.
+- **`CatalogError` has three variants because the verdict needs them.** The
+  catalog route maps all three onto 400/502 and could not care;
+  `unauthorized` / `unreachable` / `unexpected` *is* the question #472 asks, so
+  `Upstream` carries the status and a transport failure is its own
+  `Unreachable`. `401`/`403` are one bucket (some providers report an exhausted
+  quota as `403`) and `404` is grouped with the transport failures, because it
+  means the base URL rather than the key — the pair a user otherwise mixes up.
+
+**The form's key field is not a gate, and it was one until #472.** `canSave`
+required a freshly typed key on *every* save, described in `ProvidersView.tsx`
+as belt-and-braces over the server's `Option<String>`. It was not: the server
+has always preserved an omitted key, so what the rule actually did was block
+every edit to a timeout on a provider configured months ago — against a secret
+no provider dashboard shows twice. It is now `hasKey || (!creating &&
+provider.has_api_key)`, a stored key renders as `••• stored` behind an explicit
+*Replace key*, and an untouched field still sends **no** `api_key` rather than
+`""`, which is the whole distance between preserving a secret and clearing one.
+**The validation gate that replaced it is soft on purpose**: a base serving
+completions but no model list can never go green, so "Save anyway" is always one
+click away. A validation gate with no override is a lockout — do not remove it
+to simplify.
 
 **Usage recording is one row per served request, written off the request path**
 (#425, `gateway/usage.rs`, migration 34). Four things about it are decisions:
