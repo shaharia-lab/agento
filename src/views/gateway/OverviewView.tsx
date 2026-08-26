@@ -2,7 +2,14 @@ import { useCallback, useState } from "react";
 import { api } from "../../lib/api";
 import { CopyButton } from "../../components/CopyButton";
 import { TokenReveal } from "../../components/TokenReveal";
-import { Empty, FormRow, InspGroup, InspRow, Splitter } from "../../components/ui";
+import {
+  Empty,
+  FormRow,
+  InspGroup,
+  InspRow,
+  Segmented,
+  Splitter,
+} from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, usePoll, useResource } from "../../lib/hooks";
 import type { ViewId } from "../../lib/nav";
@@ -84,6 +91,12 @@ export function GatewayOverviewView({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
 
+  // Which snippet is on show. `curl` unconditionally, because "does it answer
+  // at all" is the first thing to try — even though it cannot succeed until a
+  // token exists, which is what the amber banner above the tabs already says.
+  // Deliberately not persisted: one view, one visit, no state worth carrying.
+  const [tab, setTab] = useState("curl");
+
   const mint = useCallback(async () => {
     setBusy(true);
     setError(undefined);
@@ -108,6 +121,10 @@ export function GatewayOverviewView({
   const copy = (state && STATE_COPY[state]) || UNKNOWN_STATE;
   const port = effectivePort(status.data, settings.data?.port ?? 0);
   const snippets = port > 0 ? snippetsFor(port, created?.token) : [];
+  // `tab` is a key rather than an index, so it survives the list being rebuilt
+  // on every mint. The fallback covers a key that is no longer in the list; it
+  // is never read when `snippets` is empty, which the `Empty` branch guards.
+  const active = snippets.find((s) => s.key === tab) ?? snippets[0];
 
   return (
     <div className="panes">
@@ -153,48 +170,60 @@ export function GatewayOverviewView({
               ) : null
             )}
 
-            {/* ── Status ──────────────────────────────────────────────────── */}
-            <div className="formsec">
-              <div className="formsec__title">Listener</div>
+            {/* ── Status ──────────────────────────────────────────────────────
+                Only when the listener is *not* running (#473). A running one is
+                already reported three times over — the toolbar dot and label
+                above, the inspector's Listener/Endpoints groups, and the port
+                printed inside every snippet — so in the state users spend all
+                their time in this card is pure duplication pushing the snippets
+                past the fold. What it uniquely carries is the failure
+                explanation, `status.error`, and the button to Gateway Settings,
+                and none of those exist while it runs. */}
+            {state !== "running" && (
+              <>
+                <div className="formsec">
+                  <div className="formsec__title">Listener</div>
 
-              <div className={`gw-status gw-status--${state ?? "unknown"}`}>
-                <div className="gw-status__head">
-                  <span className={`badge ${copy.badge}`}>{copy.label}</span>
-                  {status.data?.port !== undefined && (
-                    <span className="mono tnum gw-status__port">
-                      127.0.0.1:{status.data.port}
-                    </span>
-                  )}
+                  <div className={`gw-status gw-status--${state ?? "unknown"}`}>
+                    <div className="gw-status__head">
+                      <span className={`badge ${copy.badge}`}>{copy.label}</span>
+                      {status.data?.port !== undefined && (
+                        <span className="mono tnum gw-status__port">
+                          127.0.0.1:{status.data.port}
+                        </span>
+                      )}
+                    </div>
+
+                    <p className="gw-status__text">
+                      {explain(status.data, settings.data)}
+                    </p>
+
+                    {status.data?.error && (
+                      <code className="gw-status__error mono">
+                        {status.data.error}
+                      </code>
+                    )}
+
+                    {/* The one lever a failed or stopped listener leaves the
+                        user, so it is a link rather than a sentence telling
+                        them to go and find it. */}
+                    <div className="row">
+                      <button
+                        className="btn btn--primary"
+                        onClick={() => onNavigate("gateway-settings")}
+                      >
+                        <Icon name="gear" size={13} />
+                        {state === "bind_failed"
+                          ? "Change the port"
+                          : "Open gateway settings"}
+                      </button>
+                    </div>
+                  </div>
                 </div>
 
-                <p className="gw-status__text">{explain(status.data, settings.data)}</p>
-
-                {status.data?.error && (
-                  <code className="gw-status__error mono">
-                    {status.data.error}
-                  </code>
-                )}
-
-                {/* The one lever a failed or stopped listener leaves the user,
-                    so it is a link rather than a sentence telling them to go
-                    and find it. */}
-                {state !== "running" && (
-                  <div className="row">
-                    <button
-                      className="btn btn--primary"
-                      onClick={() => onNavigate("gateway-settings")}
-                    >
-                      <Icon name="gear" size={13} />
-                      {state === "bind_failed"
-                        ? "Change the port"
-                        : "Open gateway settings"}
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="divider" />
+                <div className="divider" />
+              </>
+            )}
 
             {/* ── The credential ──────────────────────────────────────────── */}
             <div className="formsec">
@@ -260,22 +289,33 @@ export function GatewayOverviewView({
                   }
                 />
               ) : (
-                snippets.map((s) => (
-                  <div className="gw-snippet" key={s.key}>
-                    <div className="gw-snippet__head">
-                      <span className="gw-snippet__title">{s.title}</span>
-                      <span className="gw-snippet__note">{s.note}</span>
-                      <div className="spacer" />
-                      <CopyButton
-                        text={s.body}
-                        title={`Copy the ${s.title} snippet`}
-                        className="btn"
-                        label="Copy"
-                      />
-                    </div>
-                    <pre className="codebox">{s.body}</pre>
+                /* One block, four tabs — the user reads exactly one of these,
+                   so stacking all four cost ~330px of scroll to show three
+                   snippets nobody was looking at. `Segmented` is the repo's tab
+                   primitive and brings role="tablist"/aria-selected with it. */
+                <div className="gw-snippet">
+                  <div className="gw-snippet__head">
+                    <Segmented
+                      value={active.key}
+                      options={snippets.map((s) => ({
+                        value: s.key,
+                        label: s.title,
+                      }))}
+                      onChange={setTab}
+                    />
+                    <div className="spacer" />
+                    {/* Straight from `snippetsFor()` — the clipboard text is
+                        the snippet's own bytes, never re-derived here. */}
+                    <CopyButton
+                      text={active.body}
+                      title={`Copy the ${active.title} snippet`}
+                      className="btn"
+                      label="Copy"
+                    />
                   </div>
-                ))
+                  <p className="gw-snippet__note">{active.note}</p>
+                  <pre className="codebox">{active.body}</pre>
+                </div>
               )}
             </div>
           </div>

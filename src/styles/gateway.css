@@ -94,34 +94,44 @@
 
 /* --- Copyable env snippets ------------------------------------------------ */
 
-.gw-snippet + .gw-snippet {
-  margin-top: var(--sp-5);
-}
+/* There is exactly one of these now: since #473 the four snippets are tabs
+   within one block rather than four stacked cards, so nothing sets a gap
+   between siblings. */
 
+/* The tab strip on the left, the Copy button on the right (#473). It wraps
+   rather than overflowing, because the strip is `flex: none` and a narrow
+   detail pane would otherwise push the button out of the column. */
 .gw-snippet__head {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-4);
   margin-bottom: var(--sp-3);
 }
 
-.gw-snippet__title {
-  font-size: var(--text-sm);
-  font-weight: var(--weight-medium);
-  color: var(--fg);
-}
-
+/* One line at the column width — `.form` caps at 620px and the longest note is
+   comfortably inside that — which is half of why switching tabs does not move
+   the page. The other half is the fixed body height below. */
 .gw-snippet__note {
   font-size: var(--text-xs);
+  line-height: var(--leading-normal);
   color: var(--fg-tertiary);
+  min-height: calc(var(--text-xs) * var(--leading-normal));
+  margin-bottom: var(--sp-3);
 }
 
 /* `.codebox` comes from integrations.css and already sets the mono face and
    the inset background; it does not preserve newlines, and these snippets are
-   two lines of shell. */
+   two or three lines of shell.
+
+   The `min-height` is the tallest snippet — three lines plus the box's own
+   padding — so the two-line ones do not shrink the block and reflow everything
+   under it when the user moves between tabs. It stays under `.codebox`'s own
+   90px `max-height`, so a longer snippet added later still scrolls. */
 .gw-snippet .codebox {
   white-space: pre;
   overflow-x: auto;
+  min-height: calc(3 * var(--text-xs) * var(--leading-normal) + 2 * var(--sp-4));
 }
 
 /* --- The ordered target rows on Models ------------------------------------ */
