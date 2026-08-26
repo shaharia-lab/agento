@@ -3343,7 +3343,7 @@ pins both halves at once, which is where they pull against each other.
 **Two of the fourteen routes call an upstream, and they share one dialect
 table** — `GET /api/gateway/providers/{id}/models` (#470) and `POST
 /api/gateway/providers/validate` (#472), both in `gateway_api::ASYNC_ROUTES` and
-both answered by `catalog::fetch`. Four things about that pair:
+both answered by `catalog::fetch`. Five things about that pair:
 
 - **`ASYNC_ROUTES` is a const rather than two literals**, because the property
   that matters is per route and easy to forget on the second one: a route
