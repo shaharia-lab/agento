@@ -80,10 +80,13 @@ export function GatewaySettingsView({
   );
   usePoll(status.reload, 4_000);
 
-  // The two reads the gate is derived from. Both are the same lists the
-  // Providers and Models views load, and both `reload()` on their own — so a
-  // provider added in a sibling view opens these switches on the next visit
-  // with no restart and no page reload.
+  // The two reads the gate is derived from — the same lists the Providers and
+  // Models views load. Neither is polled and neither needs to be: `App.tsx`
+  // renders the gateway section conditionally, so this view **remounts** on
+  // every visit and both reads run again. That is what makes a provider added
+  // in a sibling view open these switches with no restart. Keeping the gateway
+  // views mounted across a section switch would stale the gate silently, so
+  // that change and a poll here have to arrive together.
   const providers = useResource<GatewayProviderSummary[] | null>(
     (signal) => api.get("/gateway/providers", signal),
     []
@@ -269,10 +272,21 @@ export function GatewaySettingsView({
                   <div className="gw-gate__body">
                     <span>
                       {readiness.needsProvider && readiness.needsAlias
-                        ? "The gateway has no provider and no model alias, so there is nothing for it to route to. It cannot be switched on until both exist."
+                        ? "The gateway has no provider and no model alias, so there is nothing for it to route to. "
                         : readiness.needsProvider
-                          ? "The gateway has no provider, so there is nothing for it to route to. It cannot be switched on until one exists."
-                          : "The gateway has a provider but no model alias, so every model name a client sends would fail to route. It cannot be switched on until one exists."}
+                          ? "The gateway has no provider, so there is nothing for it to route to. "
+                          : "The gateway has a provider but no model alias, so no model name a client sends can route. "}
+                      {/* An *enabled* gateway keeps a live switch (below), so
+                          this sentence is read beside a switch that is on —
+                          which is exactly the state someone whose last alias
+                          was just deleted is in. "It cannot be switched on" is
+                          false there, and it describes the wrong problem: the
+                          listener is up and answering nothing. */}
+                      {enabled
+                        ? "It is listening and every request is failing to route until that is fixed."
+                        : readiness.needsProvider && readiness.needsAlias
+                          ? "It cannot be switched on until both exist."
+                          : "It cannot be switched on until one exists."}
                     </span>
                     <div className="gw-gate__actions">
                       {readiness.needsProvider && (

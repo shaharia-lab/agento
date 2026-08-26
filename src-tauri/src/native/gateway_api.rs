@@ -1026,8 +1026,16 @@ struct PortAvailabilityBody {
 fn read_port_availability(query: &str) -> Result<Answer, String> {
     let raw = super::query::value(query, "port");
     let Some(port) = raw.parse::<u16>().ok().filter(|p| *p >= MIN_PORT) else {
-        // The same refusal `PUT /api/gateway/settings` gives the same value, so
-        // a form that got past its own check hears one story rather than two.
+        // A refusal, never a fallback to `DEFAULT_PORT`: probing a port the
+        // caller did not ask about and answering as though they had is a wrong
+        // answer wearing a `200`.
+        //
+        // The wording is **wider** than the `PUT`'s `port must be {MIN_PORT} or
+        // above` and deliberately not shared with it. That one refuses a `u16`
+        // serde has already decoded, so the only thing left to say is the
+        // floor; this reads a raw query string and has to cover "not a number
+        // at all" and "past 65535" as well. Two routes, two decode positions,
+        // two sentences — do not "unify" them by narrowing this one.
         return writes::finish(Err(WriteError::validation(
             "port",
             format!(
