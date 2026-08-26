@@ -127,14 +127,30 @@
 /* --- The ordered target rows on Models ------------------------------------ */
 
 .gw-target {
+  padding: var(--sp-3) 0;
+}
+
+/* The controls are one row; the degraded-catalog note (#470) sits under them,
+   so the row keeps its 28px rhythm whether or not a note is present. */
+.gw-target__main {
   display: flex;
   align-items: center;
   gap: var(--sp-3);
-  padding: var(--sp-3) 0;
 }
 
 .gw-target + .gw-target {
   border-top: var(--hairline) solid var(--line);
+}
+
+/* A note, never an error: the model list is a suggestion and a provider that
+   could not be listed leaves the field exactly as usable as a plain one. So it
+   is styled like the section's own prose rather than like `.msgline--error`,
+   which would read as something the user has to fix before saving. */
+.gw-target__note {
+  margin: var(--sp-2) 0 0 calc(18px + var(--sp-3));
+  font-size: var(--text-xs);
+  line-height: var(--leading-relaxed);
+  color: var(--fg-quaternary);
 }
 
 /* The position, stated rather than implied — the order *is* the fallback

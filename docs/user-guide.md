@@ -471,6 +471,20 @@ A disabled provider stays configured and is not dispatched to.
   before fails.
 - **Fallbacks** — walked only after every target has failed.
 
+Pick a provider on a target row and the model box fills itself from **that
+provider's own catalog** — Agento asks the provider what it currently serves,
+using the key you configured for it. Start typing to filter the list. The
+strings are long and versioned (`gpt-4o-2024-11-20`, `claude-sonnet-4-6`,
+`glm-4.6`) and a typo is not caught when you save it, only by a 404 the first
+time something routes through the alias, so picking from the list is the way to
+get it right.
+
+**Typing an id by hand still works, always.** The list is a suggestion, not a
+constraint: a model released this morning, a fine-tune id, or anything the
+provider does not list is accepted and saved exactly as typed. If the catalog
+cannot be fetched the box falls back to a plain text field with a note saying
+so, and nothing about saving changes.
+
 Failure means a timeout, a connection error, a 429, or a 5xx. A provider
 answering **403** is failed over to the next target *without* being retried,
 because several providers report an exhausted plan that way and asking the same

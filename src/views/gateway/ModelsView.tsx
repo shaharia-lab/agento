@@ -1,10 +1,19 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../lib/api";
-import { Dropdown, Empty, FormRow, Search, Splitter, Switch } from "../../components/ui";
+import {
+  Combobox,
+  Dropdown,
+  Empty,
+  FormRow,
+  Search,
+  Splitter,
+  Switch,
+} from "../../components/ui";
 import { Icon } from "../../lib/icons";
 import { describeError, useResource } from "../../lib/hooks";
 import type {
   GatewayModelAlias,
+  GatewayProviderModels,
   GatewayProviderSummary,
   GatewayRouteTarget,
 } from "../../lib/types";
@@ -30,6 +39,72 @@ import "../../styles/gateway.css";
 
 type Selection = { kind: "none" } | { kind: "new" } | { kind: "row"; id: string };
 
+/** What is known about one provider's upstream model catalog (#470). */
+type Catalog =
+  | { state: "loading" }
+  | { state: "ready"; models: string[] }
+  | { state: "failed"; message: string };
+
+/**
+ * Fetch each provider's model catalog **once per view mount**, on demand.
+ *
+ * Three properties, each of them an acceptance criterion rather than a
+ * nicety:
+ *
+ * - **Never on the save path.** This is driven by rendering a target row, not
+ *   by submitting the form, so a slow upstream delays a suggestion list and
+ *   nothing else. Saving does not read it at all.
+ * - **Once per provider.** `asked` is a ref rather than state precisely because
+ *   it must not re-trigger a render — several target rows can name the same
+ *   provider, and each of them asks on every keystroke in a sibling field.
+ * - **A failure is a value, not a throw.** Every outcome lands in the map, so a
+ *   provider that could not be listed is a *known* empty rather than a request
+ *   retried forever.
+ *
+ * Nothing is cached beyond the mount, which is what the issue's "in-memory per
+ * session at most" asks for: a key or base URL edited in the Providers tab is
+ * picked up the next time this view is opened.
+ */
+function useProviderCatalogs() {
+  const [catalogs, setCatalogs] = useState<Record<string, Catalog>>({});
+  const asked = useRef<Set<string>>(new Set());
+  // A response arriving after the view closed must not set state on an
+  // unmounted tree.
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  const request = useCallback((providerId: string) => {
+    if (!providerId || asked.current.has(providerId)) return;
+    asked.current.add(providerId);
+    setCatalogs((c) => ({ ...c, [providerId]: { state: "loading" } }));
+    api
+      .get<GatewayProviderModels>(
+        `/gateway/providers/${encodeURIComponent(providerId)}/models`
+      )
+      .then((r) => {
+        if (!alive.current) return;
+        setCatalogs((c) => ({
+          ...c,
+          [providerId]: { state: "ready", models: r.models ?? [] },
+        }));
+      })
+      .catch((err) => {
+        if (!alive.current) return;
+        setCatalogs((c) => ({
+          ...c,
+          [providerId]: { state: "failed", message: describeError(err) },
+        }));
+      });
+  }, []);
+
+  return { catalogs, request };
+}
+
 export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean }) {
   const aliases = useResource<GatewayModelAlias[] | null>(
     (signal) => api.get("/gateway/models", signal),
@@ -41,10 +116,12 @@ export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean })
   );
 
   const rows = useMemo(() => aliases.data ?? [], [aliases.data]);
+  const providerRows = useMemo(() => providers.data ?? [], [providers.data]);
   const providerNames = useMemo(
-    () => (providers.data ?? []).map((p) => p.name),
-    [providers.data]
+    () => providerRows.map((p) => p.name),
+    [providerRows]
   );
+  const catalogs = useProviderCatalogs();
 
   const [query, setQuery] = useState("");
   const [selection, setSelection] = useState<Selection>({ kind: "none" });
@@ -161,7 +238,8 @@ export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean })
           <AliasForm
             key="new"
             alias={undefined}
-            providerNames={providerNames}
+            providers={providerRows}
+            catalogs={catalogs}
             onDone={(id) => {
               aliases.reload();
               setSelection({ kind: "row", id });
@@ -173,7 +251,8 @@ export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean })
           <AliasForm
             key={selected.id}
             alias={selected}
-            providerNames={providerNames}
+            providers={providerRows}
+            catalogs={catalogs}
             onDone={() => aliases.reload()}
             onDeleted={() => {
               setSelection({ kind: "none" });
@@ -216,13 +295,15 @@ export function GatewayModelsView({ inspectorOpen }: { inspectorOpen: boolean })
 
 function AliasForm({
   alias,
-  providerNames,
+  providers,
+  catalogs,
   onDone,
   onDeleted,
   onCancel,
 }: {
   alias: GatewayModelAlias | undefined;
-  providerNames: string[];
+  providers: GatewayProviderSummary[];
+  catalogs: ReturnType<typeof useProviderCatalogs>;
   onDone(id: string): void;
   onDeleted?(): void;
   onCancel?(): void;
@@ -397,7 +478,8 @@ function AliasForm({
             title="Targets"
             caption="Tried in order — the first is preferred, the rest are used when it fails."
             targets={targets}
-            providerNames={providerNames}
+            providers={providers}
+            catalogs={catalogs}
             onChange={setTargets}
           />
 
@@ -407,7 +489,8 @@ function AliasForm({
             title="Fallbacks"
             caption="Walked only after every target above has failed. Optional."
             targets={fallbacks}
-            providerNames={providerNames}
+            providers={providers}
+            catalogs={catalogs}
             onChange={setFallbacks}
           />
         </div>
@@ -450,15 +533,18 @@ function TargetList({
   title,
   caption,
   targets,
-  providerNames,
+  providers,
+  catalogs,
   onChange,
 }: {
   title: string;
   caption: string;
   targets: GatewayRouteTarget[];
-  providerNames: string[];
+  providers: GatewayProviderSummary[];
+  catalogs: ReturnType<typeof useProviderCatalogs>;
   onChange(next: GatewayRouteTarget[]): void;
 }) {
+  const providerNames = providers.map((p) => p.name);
   const options = providerNames.map((n) => ({ value: n, label: n }));
 
   function move(index: number, delta: number) {
@@ -479,53 +565,21 @@ function TargetList({
       )}
 
       {targets.map((t, i) => (
-        <div className="gw-target" key={i}>
-          <span className="gw-target__ord tnum">{i + 1}</span>
-          <Dropdown
-            value={t.provider}
-            options={options}
-            placeholder="Provider"
-            onChange={(v) =>
-              onChange(targets.map((x, j) => (j === i ? { ...x, provider: v } : x)))
-            }
-            className="gw-target__provider"
-          />
-          <input
-            className="field mono gw-target__model"
-            value={t.model_id}
-            placeholder="upstream model id"
-            onChange={(e) =>
-              onChange(
-                targets.map((x, j) =>
-                  j === i ? { ...x, model_id: e.target.value } : x
-                )
-              )
-            }
-          />
-          <button
-            className="iconbtn"
-            title="Move up"
-            disabled={i === 0}
-            onClick={() => move(i, -1)}
-          >
-            <Icon name="arrowUp" size={13} />
-          </button>
-          <button
-            className="iconbtn"
-            title="Move down"
-            disabled={i === targets.length - 1}
-            onClick={() => move(i, 1)}
-          >
-            <Icon name="arrowDown" size={13} />
-          </button>
-          <button
-            className="iconbtn"
-            title="Remove"
-            onClick={() => onChange(targets.filter((_, j) => j !== i))}
-          >
-            <Icon name="close" size={13} />
-          </button>
-        </div>
+        <TargetRow
+          key={i}
+          target={t}
+          providers={providers}
+          providerOptions={options}
+          catalogs={catalogs}
+          first={i === 0}
+          last={i === targets.length - 1}
+          ordinal={i + 1}
+          onChange={(next) =>
+            onChange(targets.map((x, j) => (j === i ? next : x)))
+          }
+          onMove={(delta) => move(i, delta)}
+          onRemove={() => onChange(targets.filter((_, j) => j !== i))}
+        />
       ))}
 
       <div className="row">
@@ -543,6 +597,112 @@ function TargetList({
           Add {title.toLowerCase().replace(/s$/, "")}
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * One routing target: which provider, and which of that provider's models.
+ *
+ * Its own component because the model field has to *ask* — a row that names a
+ * provider requests that provider's catalog on mount and whenever the provider
+ * changes, which needs an effect, and an effect cannot live inside a `.map`.
+ *
+ * **The model id is never constrained to the catalog.** The list is a
+ * suggestion: an id typed by hand is saved verbatim, whether or not the fetch
+ * succeeded, whether or not it returned anything, and whether or not the typed
+ * value appears in it. That is what `Combobox` is for, and it is why the
+ * failure path below is a *note* rather than an error — a provider whose list
+ * endpoint cannot be reached must leave the row exactly as usable as it was
+ * before this feature existed.
+ */
+function TargetRow({
+  target,
+  providers,
+  providerOptions,
+  catalogs,
+  first,
+  last,
+  ordinal,
+  onChange,
+  onMove,
+  onRemove,
+}: {
+  target: GatewayRouteTarget;
+  providers: GatewayProviderSummary[];
+  providerOptions: { value: string; label: string }[];
+  catalogs: ReturnType<typeof useProviderCatalogs>;
+  first: boolean;
+  last: boolean;
+  ordinal: number;
+  onChange(next: GatewayRouteTarget): void;
+  onMove(delta: number): void;
+  onRemove(): void;
+}) {
+  // A target names its provider by **name**; the catalog route is keyed by row
+  // id. A name with no matching row is possible — an alias stored before a
+  // provider was renamed — and simply has no catalog, which is the same
+  // degraded state a failed fetch produces.
+  const providerId = providers.find((p) => p.name === target.provider)?.id ?? "";
+  const { catalogs: known, request } = catalogs;
+
+  useEffect(() => {
+    request(providerId);
+  }, [providerId, request]);
+
+  const catalog = known[providerId];
+  const models = catalog?.state === "ready" ? catalog.models : [];
+
+  // Only ever a *note*, never an error: nothing here can stop a save.
+  const note =
+    catalog?.state === "failed"
+      ? `Could not list this provider's models — type the id. (${catalog.message})`
+      : catalog?.state === "ready" && catalog.models.length === 0
+        ? "This provider returned no models — type the id."
+        : undefined;
+
+  return (
+    <div className="gw-target">
+      <div className="gw-target__main">
+        <span className="gw-target__ord tnum">{ordinal}</span>
+        <Dropdown
+          value={target.provider}
+          options={providerOptions}
+          placeholder="Provider"
+          onChange={(v) => onChange({ ...target, provider: v })}
+          className="gw-target__provider"
+        />
+        <Combobox
+          value={target.model_id}
+          options={models}
+          ariaLabel="Upstream model id"
+          placeholder={
+            catalog?.state === "loading" ? "loading models…" : "upstream model id"
+          }
+          onChange={(v) => onChange({ ...target, model_id: v })}
+          className="gw-target__model"
+        />
+        <button
+          className="iconbtn"
+          title="Move up"
+          disabled={first}
+          onClick={() => onMove(-1)}
+        >
+          <Icon name="arrowUp" size={13} />
+        </button>
+        <button
+          className="iconbtn"
+          title="Move down"
+          disabled={last}
+          onClick={() => onMove(1)}
+        >
+          <Icon name="arrowDown" size={13} />
+        </button>
+        <button className="iconbtn" title="Remove" onClick={onRemove}>
+          <Icon name="close" size={13} />
+        </button>
+      </div>
+      {note && <p className="gw-target__note truncate" title={note}>{note}</p>}
     </div>
   );
 }
