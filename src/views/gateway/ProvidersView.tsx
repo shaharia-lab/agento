@@ -710,11 +710,21 @@ function ProviderForm({
             permanently unsaveable. It is offered whenever the check has not
             passed, including before it has been run at all: a user who knows
             their setup should not have to fail a check first.
+
+            It **saves**, rather than merely arming Save. Setting `overridden`
+            alone would make the button vanish on click — the condition below is
+            what renders it — leaving the user hunting for the Save it just
+            enabled, from a label that promised the save itself. `save()` reads
+            neither `overridden` nor `canSave`, so calling it here is the whole
+            of it; the flag is still set, so a failed save leaves Save armed.
           */}
           {!checked && !overridden && haveCredential && name.trim() !== "" && (
             <button
               className="btn"
-              onClick={() => setOverridden(true)}
+              onClick={() => {
+                setOverridden(true);
+                void save();
+              }}
               disabled={busy}
             >
               Save anyway

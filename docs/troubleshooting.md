@@ -304,7 +304,11 @@ it answers means:
   beside the verdict. A `5xx` is usually theirs rather than yours.
 
 The check never sends your key anywhere but the provider, and no answer, log
-line or error message carries it back.
+line or error message carries it back. That is also why changing **Type** on a
+provider that already has a key refuses with *"the stored key belongs to a
+different provider type"* rather than checking: the stored key is that vendor's,
+and the new type decides which vendor it would be sent to. Enter the key for the
+type you have selected.
 
 **It can be wrong in one direction, and Save anyway is the answer.** A base that
 serves completions but no model list — a proxy, something self-hosted, some

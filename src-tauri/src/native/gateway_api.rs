@@ -364,6 +364,24 @@ async fn validate_provider(db_path: &std::path::Path, body: &[u8]) -> Result<Res
             let Some(row) = config::load_provider_secret(db_path, id)? else {
                 return answer(Answer::error(StatusCode::NOT_FOUND, "provider not found")?);
             };
+            // **The stored key belongs to the stored type, and the request's
+            // type decides where it is sent.** Changing the Type dropdown on a
+            // configured provider and pressing Check would otherwise put an
+            // Anthropic key in an `Authorization: Bearer` header addressed to
+            // `api.openai.com` — reachable by ordinary use, with no attacker
+            // in it, and it would land the credential in a third party's
+            // request log. Whose base URL is used does not matter: an empty
+            // `base_url` resolves to the *requested* type's production default.
+            //
+            // A key supplied in the body has no such problem — it is the
+            // credential the user is asking about, for the type they are
+            // asking about.
+            if row.provider_type != provider_type {
+                return refuse(WriteError::validation(
+                    "api_key",
+                    "the stored key belongs to a different provider type; enter the key for this type",
+                ));
+            }
             row.api_key().to_string()
         }
     };
@@ -2958,6 +2976,56 @@ mod tests {
             seen.lock().expect("lock").target.is_empty(),
             "an unauthenticated request was made in the user's name"
         );
+    }
+
+    /// **A stored key is never sent to a different vendor's endpoint.**
+    ///
+    /// The reachable shape is ordinary use, not an attack: open a configured
+    /// Anthropic provider, change the Type dropdown to OpenAI, press Check. The
+    /// form sends the *new* type with no `api_key` — because the key field is
+    /// untouched by default — and an empty `base_url` resolves to the requested
+    /// type's production default, so the Anthropic key would arrive at
+    /// `api.openai.com` in an `Authorization: Bearer` header and stay in a third
+    /// party's request log.
+    ///
+    /// The assertion that matters is the second one: **nothing was sent**.
+    #[tokio::test]
+    async fn a_stored_key_is_not_checked_against_a_different_providers_endpoint() {
+        let file = migrated();
+        let ctx = ctx(&file);
+        let (base, seen) = fake_upstream(StatusCode::OK, r#"{"data":[]}"#).await;
+        seed_provider(&ctx, "p1", "anthropic", "sk-ant-secret", &base);
+
+        let (status, body) = parts_of(
+            validate(
+                &ctx,
+                &format!(r#"{{"id":"p1","type":"openai","base_url":"{base}"}}"#),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body.contains("different provider type"), "{body}");
+        assert!(
+            seen.lock().expect("lock").target.is_empty(),
+            "the stored key was sent to another provider type's endpoint"
+        );
+
+        // ...and a key supplied in the body is unaffected: it is the credential
+        // the user is asking about, for the type they are asking about.
+        let (status, _) = parts_of(
+            validate(
+                &ctx,
+                &format!(
+                    r#"{{"id":"p1","type":"openai","api_key":"sk-openai","base_url":"{base}"}}"#
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(header_of(&seen, "authorization"), "Bearer sk-openai");
     }
 
     /// An `id` naming no row is the same 404 every other `{id}` route on this

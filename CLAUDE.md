@@ -3369,6 +3369,15 @@ both answered by `catalog::fetch`. Four things about that pair:
   *request* being wrong (undecodable body, a type this build cannot serve, an
   `id` naming no row, nothing to check at all). A route that 4xx'd its verdicts
   would make the form unpack `err.body` to render its own result.
+- **The stored-key fallback compares the row's type against the request's**, and
+  it is not defensive padding: the form sends the Type dropdown's current value
+  with no `api_key`, because an untouched key field is the default for any
+  configured provider. Changing Type and pressing Check would otherwise put an
+  Anthropic key in an `Authorization: Bearer` header addressed to
+  `api.openai.com` — no attacker in it, and the credential lands in a third
+  party's request log. An empty `base_url` makes it worse rather than better,
+  since it resolves to the *requested* type's production default. A key supplied
+  in the body needs no such check.
 - **`CatalogError` has three variants because the verdict needs them.** The
   catalog route maps all three onto 400/502 and could not care;
   `unauthorized` / `unreachable` / `unexpected` *is* the question #472 asks, so
