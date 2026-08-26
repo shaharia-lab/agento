@@ -11,6 +11,7 @@ export function Composer({
   stopping,
   onStop,
   meta,
+  focusNonce = 0,
 }: {
   value: string;
   onChange(v: string): void;
@@ -20,8 +21,24 @@ export function Composer({
   stopping: boolean;
   onStop(): void;
   meta?: React.ReactNode;
+  /**
+   * Bumped by a caller that wants the cursor here. A nonce rather than
+   * `autoFocus`, which React only applies on mount — this textarea survives a
+   * change of chat, so the attribute would never fire again.
+   */
+  focusNonce?: number;
 }) {
   const box = useRef<HTMLTextAreaElement>(null);
+
+  // Deliberately not on mount: focus is only ever taken when somebody asked
+  // for it, so opening the app or clicking through the list does not steal the
+  // caret from wherever the user put it.
+  const seenFocus = useRef(0);
+  useEffect(() => {
+    if (focusNonce === seenFocus.current) return;
+    seenFocus.current = focusNonce;
+    box.current?.focus();
+  }, [focusNonce]);
 
   // Grow with the draft rather than scrolling a two-line box.
   useEffect(() => {

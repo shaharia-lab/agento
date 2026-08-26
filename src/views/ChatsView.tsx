@@ -51,9 +51,14 @@ async function fetchDetail(id: string, signal: AbortSignal): Promise<ChatDetail>
 export function ChatsView({
   inspectorOpen,
   newChatNonce = 0,
+  openChatId,
+  openChatNonce = 0,
 }: {
   inspectorOpen: boolean;
   newChatNonce?: number;
+  /** A chat another view handed over; applied when `openChatNonce` moves. */
+  openChatId?: string;
+  openChatNonce?: number;
 }) {
   const chats = useResource<ChatSession[]>(
     (signal) => api.get<ChatSession[]>("/chats", signal),
@@ -192,6 +197,28 @@ export function ChatsView({
     seenNonce.current = newChatNonce;
     startNew();
   }, [newChatNonce, startNew]);
+
+  // Sessions → "Continue in chat" hands a freshly created chat over (#485), the
+  // same way the nonce above hands over "open a draft".
+  //
+  // The id is applied without waiting for `/chats` to resolve: `detail` fetches
+  // by id, so the transcript and the composer are live immediately and the row
+  // simply highlights once the list arrives. `autoSelected` is claimed so the
+  // "select the most recent conversation" effect cannot overwrite the hand-off
+  // when that list lands.
+  const seenOpenNonce = useRef(0);
+  const [composerFocus, setComposerFocus] = useState(0);
+  useEffect(() => {
+    if (openChatNonce === seenOpenNonce.current) return;
+    seenOpenNonce.current = openChatNonce;
+    if (!openChatId) return;
+    autoSelected.current = true;
+    select(openChatId);
+    // "Ready to type" is the point of the hand-off, so the caret goes to the
+    // composer — which mounts in this same commit, since `selected` is what
+    // renders it.
+    setComposerFocus((n) => n + 1);
+  }, [openChatId, openChatNonce, select]);
 
   const send = useCallback(async () => {
     const content = draft.trim();
@@ -606,6 +633,7 @@ export function ChatsView({
               stopping={stream.stopping}
               onStop={stream.stop}
               placeholder={`Message ${agentLabel}…`}
+              focusNonce={composerFocus}
               meta={
                 <span className="composer__meta">
                   {session?.model || stream.system?.model || "Default model"}

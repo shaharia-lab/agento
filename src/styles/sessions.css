@@ -10,6 +10,16 @@
 }
 
 /* --- Session detail (read-only transcript) -------------------------------- */
+/* A failed "Continue in chat" from the full session view. Sits directly under
+   the toolbar that carries the button, so it needs no scrolling to see. */
+.sess-detail__error {
+  flex: none;
+  padding: var(--sp-3) var(--sp-7);
+  border-bottom: var(--hairline) solid var(--line);
+  font-size: var(--text-sm);
+  color: var(--red);
+}
+
 .sess-detail__meta {
   flex: none;
   display: flex;
