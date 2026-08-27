@@ -490,7 +490,11 @@ function ServiceEditor({
     <div>
       {provider.services.map((info) => {
         const svc = services[info.key] ?? { enabled: false, tools: [] };
-        const chosen = svc.tools ?? [];
+        // A disabled service exposes nothing whatever its stored list says, so
+        // the boxes read empty — otherwise a row saved as
+        // `{enabled: false, tools: [...]}` would render ticks for tools no agent
+        // can reach, and checking one more would silently restore the rest.
+        const chosen = svc.enabled ? (svc.tools ?? []) : [];
         return (
           <div
             key={info.key}
@@ -516,40 +520,45 @@ function ServiceEditor({
                 }
               />
             </div>
-            {svc.enabled && (
-              <div className="svcblock__tools">
-                {info.tools.map((t) => (
-                  <label className="svctool" key={t.name}>
-                    <Checkbox
-                      on={chosen.includes(t.name)}
-                      onChange={(on) => {
-                        const next = on
-                          ? [...chosen, t.name]
-                          : chosen.filter((x) => x !== t.name);
-                        onChange({
-                          ...services,
-                          // Unchecking the **last** tool turns the service off
-                          // rather than storing `{enabled: true, tools: []}`
-                          // (#501). The backend reads an empty tool list as
-                          // "host everything" — the semantics are ported and
-                          // pinned in all six integrations — so that shape means
-                          // the exact opposite of what the user just asked for,
-                          // and of what the copy above this editor promises.
-                          [info.key]: {
-                            enabled: next.length > 0,
-                            tools: next,
-                          },
-                        });
-                      }}
-                    />
-                    <span className="svctool__body">
-                      <span className="svctool__name">{t.name}</span>
-                      <span className="svctool__desc">{t.description}</span>
-                    </span>
-                  </label>
-                ))}
-              </div>
-            )}
+            {/* The checkboxes stay mounted when the service is off, and that is
+                not cosmetic (#501): unchecking the last tool now turns the
+                service off, so hiding them would make the state it lands in a
+                dead end — going from "only get_repo" to "only list_repos" would
+                mean re-enabling the service, which grants *every* tool. The
+                block is already greyed by `svcblock--off`. */}
+            <div className="svcblock__tools">
+              {info.tools.map((t) => (
+                <label className="svctool" key={t.name}>
+                  <Checkbox
+                    on={chosen.includes(t.name)}
+                    onChange={(on) => {
+                      const next = on
+                        ? [...chosen, t.name]
+                        : chosen.filter((x) => x !== t.name);
+                      onChange({
+                        ...services,
+                        // Unchecking the **last** tool turns the service off
+                        // rather than storing `{enabled: true, tools: []}`
+                        // (#501). The backend reads an empty tool list as
+                        // "host everything" — the semantics are ported and
+                        // pinned in all six integrations — so that shape means
+                        // the exact opposite of what the user just asked for,
+                        // and of what the copy above this editor promises.
+                        // Checking one is the way back on.
+                        [info.key]: {
+                          enabled: next.length > 0,
+                          tools: next,
+                        },
+                      });
+                    }}
+                  />
+                  <span className="svctool__body">
+                    <span className="svctool__name">{t.name}</span>
+                    <span className="svctool__desc">{t.description}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
           </div>
         );
       })}

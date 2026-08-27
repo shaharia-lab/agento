@@ -107,6 +107,20 @@ pub const JIRA_TOOL_NAMES: &[&str] = &[
     "transition_issue",
 ];
 
+/// Which service group registers each tool — the `push` table in
+/// [`jira_tools`] as data.
+///
+/// It exists for `filter_config_tools` (#501), which has to answer "what are
+/// *this service's* tools" for a service whose stored row names none of its
+/// own. Handing that service the caller's whole request instead was the first
+/// fix and it was wrong in a way that widens privilege: `build_allowed_set` is
+/// a union over **every** enabled service, so a name injected by a listless
+/// service satisfies the `allowed` half for a *sibling* whose own list
+/// deliberately excludes it — and the sibling's service gate passes, because it
+/// is enabled too. `the_service_table_matches_what_is_registered` pins this table against what
+/// [`jira_tools`] really registers, so the two cannot drift.
+pub const SERVICE_TOOLS: &[(&str, &[&str])] = &[("project_management", JIRA_TOOL_NAMES)];
+
 /// `fmt.Sprintf("jira-%s", cfg.ID)` — `mcp.NewServer`'s implementation name.
 ///
 /// **Not** the prefix on a qualified tool name: that is the bare integration id,
@@ -349,5 +363,45 @@ mod tests {
         ] {
             assert_eq!(names_for(&services, site), JIRA_TOOL_NAMES, "{site}");
         }
+    }
+    /// `SERVICE_TOOLS` is the `push` table as data, so it must be checked
+    /// against the `push` table itself rather than transcribed beside it —
+    /// enabling one service at a time makes the registration function report
+    /// exactly which tools that service contributes.
+    ///
+    /// It matters because `filter_config_tools` uses this table to bound a
+    /// service that stored no list of its own (#501). A tool listed under the
+    /// wrong service there would put its name into the integration-wide union
+    /// for an agent that never asked for it.
+    #[test]
+    fn the_service_table_matches_what_is_registered() {
+        for (group, tools) in SERVICE_TOOLS {
+            let only = BTreeMap::from([((*group).to_string(), service(true, &[]))]);
+            let want: Vec<String> = tools.iter().map(|t| (*t).to_string()).collect();
+            assert_eq!(names(&only), want, "service {group:?}");
+        }
+
+        // Every service group is present, in `SERVICES` order…
+        assert_eq!(
+            SERVICE_TOOLS
+                .iter()
+                .map(|(group, _)| *group)
+                .collect::<Vec<_>>(),
+            SERVICES
+        );
+        // …and the table partitions the tool set: no tool twice, none missing.
+        let flat: Vec<&str> = SERVICE_TOOLS
+            .iter()
+            .flat_map(|(_, tools)| tools.iter().copied())
+            .collect();
+        let mut unique = flat.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            flat.len(),
+            "a tool is listed under two services"
+        );
+        assert_eq!(flat, JIRA_TOOL_NAMES);
     }
 }

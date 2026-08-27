@@ -792,7 +792,11 @@ pub async fn start_filtered_server(
             "integration {id:?} is not enabled or not authenticated"
         ));
     }
-    let filtered = filter_config_tools(&row.services(), tools);
+    let filtered = filter_config_tools(
+        &row.services(),
+        tools,
+        service_tool_table(&row.integration_type),
+    );
     match row.integration_type.as_str() {
         "github" => start_github(&row.id, &filtered, &row.credentials).await,
         "confluence" => start_confluence(&row.id, &filtered, &row.credentials).await,
@@ -1036,15 +1040,30 @@ pub fn can_host(db_path: &Path, id: &str) -> Result<bool, String> {
 /// integration hosted **zero tools** — with `--allowedTools` still naming them,
 /// so the only symptom was a model that did not know about its own tools.
 ///
-/// A service naming no tools of its own means "every tool of this service", so
-/// it is given the whole requested set. That is sound for the same reason
-/// `buildAllowedSet`'s empty union is: every integration gates a tool on
-/// `service_enabled(services, group) && allowed.contains(name)`, so a name
-/// belonging to another group is still rejected by the *service* gate, and this
-/// map can only widen a service from "nothing" towards "what was asked for".
+/// A service naming no tools of its own means "every tool of **this** service",
+/// so it is given the request narrowed to its own tool set — `table`, which is
+/// the integration's `SERVICE_TOOLS`.
+///
+/// **Handing it the whole request instead is unsound, and that was the first
+/// attempt at this fix.** The tempting argument is that a name from another
+/// group is rejected by the service gate anyway, so the widening is harmless.
+/// It is not, because `build_allowed_set` is a union over *every* enabled
+/// service and `push` is `service_enabled(group) && allowed.contains(name)`:
+/// the union is integration-wide, so a name injected by a listless service
+/// satisfies the `allowed` half for a **sibling** service — and that sibling's
+/// gate passes too, since it is enabled. So
+/// `{"gmail":{"enabled":true},"drive":{"enabled":true,"tools":["list_files"]}}`
+/// with a request naming `create_file` would host `create_file`, a write tool
+/// the user's own Drive list deliberately excludes. Narrowing per service is
+/// what makes the widening argument true rather than nearly true.
+///
+/// An unknown integration type has an empty table, so a listless service under
+/// one contributes nothing — the same answer as before #501, and the starter
+/// refuses that row a few lines later regardless.
 fn filter_config_tools(
     services: &BTreeMap<String, ServiceConfig>,
     tools: &[String],
+    table: &[(&str, &[&str])],
 ) -> BTreeMap<String, ServiceConfig> {
     if tools.is_empty() {
         return services.clone();
@@ -1057,7 +1076,16 @@ fn filter_config_tools(
         }
         let listed: &[String] = service.tools.as_ref().map_or(&[], |list| list.as_slice());
         let kept: Vec<String> = if listed.is_empty() {
-            tools.to_vec()
+            let own: &[&str] = table
+                .iter()
+                .find(|(group, _)| group == name)
+                .map_or(&[], |(_, tools)| *tools);
+            // Request order, since the service supplied none of its own.
+            tools
+                .iter()
+                .filter(|tool| own.contains(&tool.as_str()))
+                .cloned()
+                .collect()
         } else {
             listed
                 .iter()
@@ -1077,6 +1105,25 @@ fn filter_config_tools(
         );
     }
     out
+}
+
+/// Which tools each of an integration type's service groups registers.
+///
+/// The one place the six `SERVICE_TOOLS` tables are dispatched on, so
+/// [`filter_config_tools`] stays type-agnostic. A type this build does not host
+/// has no table; [`start_filtered_server`]'s own `match` is what answers it.
+fn service_tool_table(
+    integration_type: &str,
+) -> &'static [(&'static str, &'static [&'static str])] {
+    match integration_type {
+        "github" => super::github::SERVICE_TOOLS,
+        "confluence" => super::confluence::SERVICE_TOOLS,
+        "jira" => super::jira::SERVICE_TOOLS,
+        "slack" => super::slack::SERVICE_TOOLS,
+        "telegram" => super::telegram::SERVICE_TOOLS,
+        "google" => super::google::SERVICE_TOOLS,
+        _ => &[],
+    }
 }
 
 // ─── Reads ────────────────────────────────────────────────────────────────────
@@ -1747,11 +1794,13 @@ mod tests {
         )
         .expect("services");
 
+        let github = service_tool_table("github");
+
         // An empty request list is a no-op — including on the disabled service,
         // which the starter skips on its own.
-        assert_eq!(filter_config_tools(&services, &[]), services);
+        assert_eq!(filter_config_tools(&services, &[], github), services);
 
-        let filtered = filter_config_tools(&services, &["get_repo".to_string()]);
+        let filtered = filter_config_tools(&services, &["get_repo".to_string()], github);
         assert_eq!(
             filtered.keys().collect::<Vec<_>>(),
             vec!["repos"],
@@ -1764,7 +1813,7 @@ mod tests {
         assert!(filtered["repos"].enabled);
 
         // A disabled service contributes nothing even when it names the tool.
-        let filtered = filter_config_tools(&services, &["list_workflows".to_string()]);
+        let filtered = filter_config_tools(&services, &["list_workflows".to_string()], github);
         assert!(filtered.is_empty());
     }
 
@@ -1778,14 +1827,15 @@ mod tests {
     /// saw an empty map, and the integration hosted nothing at all while
     /// `--allowedTools` still named the tools.
     #[test]
-    fn a_service_naming_no_tools_contributes_the_whole_request() {
+    fn a_service_naming_no_tools_contributes_its_own_tools() {
+        let google = service_tool_table("google");
         for spelling in [
             r#"{"gmail":{"enabled":true},"drive":{"enabled":true,"tools":["list_files"]}}"#,
             r#"{"gmail":{"enabled":true,"tools":[]},"drive":{"enabled":true,"tools":["list_files"]}}"#,
         ] {
             let services: BTreeMap<String, ServiceConfig> =
                 serde_json::from_str(spelling).expect("services");
-            let filtered = filter_config_tools(&services, &["read_email".to_string()]);
+            let filtered = filter_config_tools(&services, &["read_email".to_string()], google);
 
             assert_eq!(
                 filtered.keys().collect::<Vec<_>>(),
@@ -1796,7 +1846,32 @@ mod tests {
             assert_eq!(
                 filtered["gmail"].tools.as_ref().expect("tools").0,
                 vec!["read_email".to_string()],
-                "it is given the request, not its own (absent) list: {spelling}"
+                "it is given the request narrowed to its own tools: {spelling}"
+            );
+
+            // **The sibling case, and the reason this is per service rather
+            // than the whole request.** `build_allowed_set` unions every
+            // enabled service, so a name the listless `gmail` entry carried
+            // would satisfy `allowed` for `drive` — whose own list names only
+            // `list_files`. `create_file` must not survive into either entry.
+            let filtered = filter_config_tools(
+                &services,
+                &[
+                    "read_email".to_string(),
+                    "list_files".to_string(),
+                    "create_file".to_string(),
+                ],
+                google,
+            );
+            assert_eq!(
+                filtered["gmail"].tools.as_ref().expect("tools").0,
+                vec!["read_email".to_string()],
+                "a listless service takes no name belonging to a sibling: {spelling}"
+            );
+            assert_eq!(
+                filtered["drive"].tools.as_ref().expect("tools").0,
+                vec!["list_files".to_string()],
+                "the sibling's own list still bounds it: {spelling}"
             );
         }
     }
@@ -1805,11 +1880,14 @@ mod tests {
     ///
     /// `filter_config_tools` producing a sensible map is only half the claim —
     /// the tools are chosen by each integration's `push`, which gates on the
-    /// service **and** the union. Giving a listless service the whole request is
-    /// sound because a name belonging to another group is still rejected by the
-    /// service gate, and this is where that is asserted rather than argued.
+    /// service **and** on an integration-wide union. This is where the
+    /// interaction between those two is asserted rather than argued, because
+    /// arguing it is exactly what went wrong: the first version of this fix gave
+    /// a listless service the caller's *whole* request, and the union carried
+    /// the surplus names into every other enabled service.
     #[test]
     fn a_service_with_no_tool_list_hosts_exactly_what_was_asked_for() {
+        let google = service_tool_table("google");
         let tokens = std::sync::Arc::new(super::super::google::client::TokenSource::new(
             "CID",
             "CSECRET",
@@ -1832,21 +1910,43 @@ mod tests {
         // The reported symptom: two Gmail tools requested, zero hosted.
         let want = ["read_email".to_string(), "search_email".to_string()];
         assert_eq!(
-            hosted(&filter_config_tools(&services, &want)),
+            hosted(&filter_config_tools(&services, &want, google)),
             want,
             "an enabled service with no stored tool list hosts the requested tools"
         );
 
-        // A requested name that belongs to a *different* group is rejected by
-        // the service gate, which is what makes handing over the whole request
-        // safe.
+        // A requested name belonging to a group that is not enabled at all is
+        // rejected by the service gate.
         assert_eq!(
             hosted(&filter_config_tools(
                 &services,
-                &["read_email".to_string(), "list_files".to_string()]
+                &["read_email".to_string(), "list_files".to_string()],
+                google
             )),
             ["read_email".to_string()],
-            "the service gate still bounds the widened request"
+            "a name from a service that is not enabled reaches nothing"
+        );
+
+        // …and the case the service gate does **not** cover, which is why the
+        // narrowing above exists: `drive` is enabled, with its own list naming
+        // only `list_files`. Handing `gmail` the whole request would put
+        // `create_file` in the union, and `drive`'s gate would pass it.
+        let mixed: BTreeMap<String, ServiceConfig> = serde_json::from_str(
+            r#"{"gmail":{"enabled":true},"drive":{"enabled":true,"tools":["list_files"]}}"#,
+        )
+        .expect("services");
+        assert_eq!(
+            hosted(&filter_config_tools(
+                &mixed,
+                &[
+                    "read_email".to_string(),
+                    "list_files".to_string(),
+                    "create_file".to_string(),
+                ],
+                google
+            )),
+            ["read_email".to_string(), "list_files".to_string()],
+            "a write tool the user's own Drive list excludes is not hosted"
         );
     }
 
@@ -1885,7 +1985,7 @@ mod tests {
             // No agent-side request, so nothing narrows it — `filter_config_tools`
             // returns the map untouched and the union is empty.
             let hosted: Vec<String> = super::super::google::google_tools(
-                &filter_config_tools(&services, &[]),
+                &filter_config_tools(&services, &[], service_tool_table("google")),
                 tokens.clone(),
             )
             .iter()

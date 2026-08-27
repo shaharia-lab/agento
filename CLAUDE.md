@@ -1527,9 +1527,22 @@ asked for:
   integration row storing `{"enabled": true}` — what `POST /api/integrations`
   accepts, and what every row written before the per-service lists carries —
   hosted **zero** tools while `--allowedTools` still named them. A service with
-  no list of its own is now given the *whole* requested set, which is sound
-  because every integration gates on `service_enabled(group) && allowed(name)`,
-  so a name from another group is still rejected by the service gate.
+  no list of its own is now given the request **narrowed to its own tools**,
+  through the integration's `SERVICE_TOOLS` table.
+
+  **Handing it the whole request instead is unsound, and it is the obvious
+  thing to write.** The tempting argument — a name from another group is
+  rejected by the service gate anyway — is *nearly* true and fails exactly
+  where it matters: `build_allowed_set` unions **every** enabled service, so a
+  name injected by a listless service satisfies the `allowed` half for a
+  **sibling**, whose own gate passes because it is enabled too. A row of
+  `{"gmail":{"enabled":true},"drive":{"enabled":true,"tools":["list_files"]}}`
+  would then host `create_file` — a write tool the user's own Drive list
+  excludes — on an integration whose every tool result carries attacker-authored
+  third-party content. `SERVICE_TOOLS` is the `push` table as data, and each
+  integration's `the_service_table_matches_what_is_registered` derives the truth
+  from its own registration function (one service enabled at a time) rather than
+  transcribing it, so the two cannot drift.
 - **The Integrations UI could store `{"enabled": true, "tools": []}`** by
   unchecking a service's last tool, which hosts every tool of that service —
   the exact inverse of "Only the tools you leave on are exposed to agents".
