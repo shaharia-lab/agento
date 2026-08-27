@@ -522,17 +522,25 @@ function ServiceEditor({
                   <label className="svctool" key={t.name}>
                     <Checkbox
                       on={chosen.includes(t.name)}
-                      onChange={(on) =>
+                      onChange={(on) => {
+                        const next = on
+                          ? [...chosen, t.name]
+                          : chosen.filter((x) => x !== t.name);
                         onChange({
                           ...services,
+                          // Unchecking the **last** tool turns the service off
+                          // rather than storing `{enabled: true, tools: []}`
+                          // (#501). The backend reads an empty tool list as
+                          // "host everything" — the semantics are ported and
+                          // pinned in all six integrations — so that shape means
+                          // the exact opposite of what the user just asked for,
+                          // and of what the copy above this editor promises.
                           [info.key]: {
-                            enabled: true,
-                            tools: on
-                              ? [...chosen, t.name]
-                              : chosen.filter((x) => x !== t.name),
+                            enabled: next.length > 0,
+                            tools: next,
                           },
-                        })
-                      }
+                        });
+                      }}
                     />
                     <span className="svctool__body">
                       <span className="svctool__name">{t.name}</span>

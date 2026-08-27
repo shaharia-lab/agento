@@ -1026,6 +1026,22 @@ pub fn can_host(db_path: &Path, id: &str) -> Result<bool, String> {
 /// starters skip on their own), and a service left with no kept tools is dropped
 /// entirely rather than kept empty — which matters, because an empty `tools`
 /// list is what `buildAllowedSet` reads as "host everything".
+///
+/// The third half is the one that **was** an oversight (#501). A service stored
+/// as `{"enabled": true}` — no `tools` key at all, which is what
+/// `POST /api/integrations` accepts and what rows written before the per-service
+/// lists existed carry — has nothing to intersect the request against, so it
+/// came out empty and was dropped by the rule above. `build_allowed_set` then
+/// saw an **empty map**, every `service_enabled` answered false, and the
+/// integration hosted **zero tools** — with `--allowedTools` still naming them,
+/// so the only symptom was a model that did not know about its own tools.
+///
+/// A service naming no tools of its own means "every tool of this service", so
+/// it is given the whole requested set. That is sound for the same reason
+/// `buildAllowedSet`'s empty union is: every integration gates a tool on
+/// `service_enabled(services, group) && allowed.contains(name)`, so a name
+/// belonging to another group is still rejected by the *service* gate, and this
+/// map can only widen a service from "nothing" towards "what was asked for".
 fn filter_config_tools(
     services: &BTreeMap<String, ServiceConfig>,
     tools: &[String],
@@ -1039,13 +1055,16 @@ fn filter_config_tools(
         if !service.enabled {
             continue;
         }
-        let kept: Vec<String> = service
-            .tools
-            .iter()
-            .flat_map(|list| list.iter())
-            .filter(|tool| want.contains(tool.as_str()))
-            .cloned()
-            .collect();
+        let listed: &[String] = service.tools.as_ref().map_or(&[], |list| list.as_slice());
+        let kept: Vec<String> = if listed.is_empty() {
+            tools.to_vec()
+        } else {
+            listed
+                .iter()
+                .filter(|tool| want.contains(tool.as_str()))
+                .cloned()
+                .collect()
+        };
         if kept.is_empty() {
             continue;
         }
@@ -1747,6 +1766,137 @@ mod tests {
         // A disabled service contributes nothing even when it names the tool.
         let filtered = filter_config_tools(&services, &["list_workflows".to_string()]);
         assert!(filtered.is_empty());
+    }
+
+    /// The third half (#501): a service that names **no** tools of its own is
+    /// "every tool of this service", not "no tools".
+    ///
+    /// Both spellings reach it — `{"enabled":true}` with no key at all, which is
+    /// what `POST /api/integrations` accepts and what pre-list rows carry, and
+    /// `{"enabled":true,"tools":[]}`, which the Integrations UI could store
+    /// until this issue. Before the fix both were dropped, `build_allowed_set`
+    /// saw an empty map, and the integration hosted nothing at all while
+    /// `--allowedTools` still named the tools.
+    #[test]
+    fn a_service_naming_no_tools_contributes_the_whole_request() {
+        for spelling in [
+            r#"{"gmail":{"enabled":true},"drive":{"enabled":true,"tools":["list_files"]}}"#,
+            r#"{"gmail":{"enabled":true,"tools":[]},"drive":{"enabled":true,"tools":["list_files"]}}"#,
+        ] {
+            let services: BTreeMap<String, ServiceConfig> =
+                serde_json::from_str(spelling).expect("services");
+            let filtered = filter_config_tools(&services, &["read_email".to_string()]);
+
+            assert_eq!(
+                filtered.keys().collect::<Vec<_>>(),
+                vec!["gmail"],
+                "the listless service survives and the listed one that names \
+                 nothing requested is still dropped: {spelling}"
+            );
+            assert_eq!(
+                filtered["gmail"].tools.as_ref().expect("tools").0,
+                vec!["read_email".to_string()],
+                "it is given the request, not its own (absent) list: {spelling}"
+            );
+        }
+    }
+
+    /// The same thing one level out: what the *server* ends up hosting.
+    ///
+    /// `filter_config_tools` producing a sensible map is only half the claim —
+    /// the tools are chosen by each integration's `push`, which gates on the
+    /// service **and** the union. Giving a listless service the whole request is
+    /// sound because a name belonging to another group is still rejected by the
+    /// service gate, and this is where that is asserted rather than argued.
+    #[test]
+    fn a_service_with_no_tool_list_hosts_exactly_what_was_asked_for() {
+        let tokens = std::sync::Arc::new(super::super::google::client::TokenSource::new(
+            "CID",
+            "CSECRET",
+            super::super::google::client::Token {
+                access_token: "ACCESS".to_string(),
+                refresh_token: "REFRESH".to_string(),
+                expiry: None,
+            },
+        ));
+        let hosted = |services: &BTreeMap<String, ServiceConfig>| -> Vec<String> {
+            super::super::google::google_tools(services, tokens.clone())
+                .iter()
+                .map(|tool| tool.name().to_string())
+                .collect()
+        };
+
+        let services: BTreeMap<String, ServiceConfig> =
+            serde_json::from_str(r#"{"gmail":{"enabled":true}}"#).expect("services");
+
+        // The reported symptom: two Gmail tools requested, zero hosted.
+        let want = ["read_email".to_string(), "search_email".to_string()];
+        assert_eq!(
+            hosted(&filter_config_tools(&services, &want)),
+            want,
+            "an enabled service with no stored tool list hosts the requested tools"
+        );
+
+        // A requested name that belongs to a *different* group is rejected by
+        // the service gate, which is what makes handing over the whole request
+        // safe.
+        assert_eq!(
+            hosted(&filter_config_tools(
+                &services,
+                &["read_email".to_string(), "list_files".to_string()]
+            )),
+            ["read_email".to_string()],
+            "the service gate still bounds the widened request"
+        );
+    }
+
+    /// #501's second criterion, settled and pinned: an **empty union stays
+    /// "host everything"**.
+    ///
+    /// The alternative — an explicitly empty list meaning "no tools" — would
+    /// diverge from behaviour that is ported deliberately, identical in all six
+    /// integrations and asserted by each of their own suites. So the semantics
+    /// are kept and the *inverting shape* is closed one level up instead:
+    /// `IntegrationsView.tsx` turns a service **off** when its last tool is
+    /// unchecked, so "Only the tools you leave on are exposed to agents" is true
+    /// of everything the app can store.
+    ///
+    /// The gap that remains is the API's, and it is deliberate: `POST
+    /// /api/integrations` still accepts `{"enabled":true,"tools":[]}` and that
+    /// row hosts the service's whole tool set. Refusing it would be a wire
+    /// change on a byte-exact endpoint.
+    #[test]
+    fn an_enabled_service_with_an_empty_list_still_hosts_everything() {
+        let tokens = std::sync::Arc::new(super::super::google::client::TokenSource::new(
+            "CID",
+            "CSECRET",
+            super::super::google::client::Token {
+                access_token: "ACCESS".to_string(),
+                refresh_token: "REFRESH".to_string(),
+                expiry: None,
+            },
+        ));
+        for spelling in [
+            r#"{"gmail":{"enabled":true}}"#,
+            r#"{"gmail":{"enabled":true,"tools":[]}}"#,
+        ] {
+            let services: BTreeMap<String, ServiceConfig> =
+                serde_json::from_str(spelling).expect("services");
+            // No agent-side request, so nothing narrows it — `filter_config_tools`
+            // returns the map untouched and the union is empty.
+            let hosted: Vec<String> = super::super::google::google_tools(
+                &filter_config_tools(&services, &[]),
+                tokens.clone(),
+            )
+            .iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+            assert_eq!(
+                hosted,
+                ["send_email", "read_email", "search_email"],
+                "an empty union is 'host everything', bounded by the service gate: {spelling}"
+            );
+        }
     }
 
     /// The qualified name is built from the **bare id**, which is what every

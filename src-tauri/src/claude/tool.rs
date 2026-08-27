@@ -426,11 +426,21 @@ impl ServerHandler for ToolServer {
 /// The listener stops when the returned handle is dropped — the port's
 /// lifetime is the handle's, which is what stands in for Go's `ctx` throughout
 /// this SDK.
+///
+/// The names of the tools it registered travel back on the handle
+/// ([`InProcessMcpServer::tool_names`]): they are read off the assembled
+/// `ToolServer` rather than off the `tools` argument, so the handle reports what
+/// the *router* holds — `add_tool` replaces a duplicate name, so the two counts
+/// can differ.
 pub async fn tool_server(
     name: &str,
     tools: impl IntoIterator<Item = ToolDef>,
 ) -> Result<InProcessMcpServer> {
-    start_in_process_mcp_server(name, ToolServer::new(name).with_tools(tools)).await
+    let service = ToolServer::new(name).with_tools(tools);
+    let names = service.tool_names();
+    Ok(start_in_process_mcp_server(name, service)
+        .await?
+        .with_tool_names(names))
 }
 
 impl super::Options {
@@ -595,6 +605,27 @@ mod tests {
         }
 
         assert_eq!(server.tool_names(), vec!["add".to_string()]);
+    }
+
+    /// The handle reports what the router holds, which is what makes "how many
+    /// tools did this server actually register" answerable from outside (#501).
+    ///
+    /// The duplicate is the case that makes it worth reading off the assembled
+    /// server rather than off the argument: `add_tool` replaces a name, so the
+    /// two counts differ.
+    #[tokio::test]
+    async fn a_started_server_reports_the_tools_it_registered() {
+        let server = super::tool_server("calc", [add_tool()]).await.unwrap();
+        assert_eq!(server.tool_names(), ["add".to_string()]);
+
+        let duplicated = super::tool_server("calc", [add_tool(), add_tool()])
+            .await
+            .unwrap();
+        assert_eq!(
+            duplicated.tool_names(),
+            ["add".to_string()],
+            "two `ToolDef`s, one route — the handle reports the route"
+        );
     }
 
     #[test]

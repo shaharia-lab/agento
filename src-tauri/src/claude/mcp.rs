@@ -143,6 +143,7 @@ pub(crate) fn credentials_match(a: &str, b: &str) -> bool {
 pub struct InProcessMcpServer {
     config: McpHttpServer,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    tool_names: Vec<String>,
 }
 
 impl InProcessMcpServer {
@@ -154,6 +155,25 @@ impl InProcessMcpServer {
     /// The URL the CLI will dial.
     pub fn url(&self) -> &str {
         &self.config.url
+    }
+
+    /// The tools this listener actually registered, sorted — empty for a server
+    /// started through [`start_in_process_mcp_server`] with a handler that is
+    /// not a [`super::ToolServer`], which nothing in this app does.
+    ///
+    /// It exists because "the handshake succeeded" and "the model can see a
+    /// tool" are different facts and the log could not tell them apart (#501):
+    /// a filtered server that hosts nothing binds a port, serves `initialize`
+    /// and lists zero tools, which reads identically to a healthy one.
+    pub fn tool_names(&self) -> &[String] {
+        &self.tool_names
+    }
+
+    /// Records what the handler registered. Set by [`super::tool_server`],
+    /// which is the one constructor that knows.
+    pub(super) fn with_tool_names(mut self, names: Vec<String>) -> Self {
+        self.tool_names = names;
+        self
     }
 }
 
@@ -278,6 +298,7 @@ where
                 .into_iter()
                 .collect(),
         },
+        tool_names: Vec::new(),
         shutdown: Some(shutdown_tx),
     })
 }
