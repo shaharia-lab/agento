@@ -225,9 +225,26 @@ impl<'de> Deserialize<'de> for YamlString {
 /// structs, because that is the only thing any caller wants from them — the
 /// conversion happens once, at load, so a `transport` typo is reported when the
 /// file is read rather than when a turn happens to name that server.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Registry {
     servers: BTreeMap<String, serde_json::Value>,
+}
+
+/// **Hand-written, and it prints the server names without their configs** —
+/// `runner::McpSource`'s rule, applied to the type that holds the secret first.
+///
+/// [`convert`] runs [`interpolate_map`] before the value is stored, so every
+/// entry here holds the **resolved** `${ENV:…}` values: the live
+/// `Authorization: Bearer …` the file only pointed at. `integrations/registry.rs`
+/// states the rule twice — a `{row:?}` in a log line is the same leak as a
+/// response field, only later — and this struct is `pub`, so it is the one most
+/// likely to be formatted by something written later.
+impl std::fmt::Debug for Registry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Registry")
+            .field("servers", &self.servers.keys())
+            .finish()
+    }
 }
 
 impl Registry {
@@ -418,8 +435,8 @@ fn interpolate(value: &str) -> Result<String, String> {
     // is what the module's no-echo rule is about, and `interpolate_map` has
     // already named the server and the key it is under.
     Err(format!(
-        "more than {MAX_SUBSTITUTIONS} `${{ENV:…}}` substitutions, which means \
-         an environment variable expands to itself"
+        "more than {MAX_SUBSTITUTIONS} `${{ENV:…}}` substitutions, which almost \
+         certainly means an environment variable expands to itself"
     ))
 }
 
@@ -657,6 +674,29 @@ docs:
         .expect_err("unterminated quote");
         assert!(!err.contains(SECRET), "the value leaked: {err}");
         assert!(err.contains("at line"), "{err}");
+
+        // And the registry that succeeds is the one that actually holds the
+        // resolved token, so its own `Debug` must withhold it — the same rule as
+        // `runner::McpSource`, one struct earlier in the chain.
+        let _env = env_lock();
+        let _token = EnvVar::set("AGENTO_TEST_MCPS_REGISTRY_TOKEN", SECRET);
+        let registry = parse(
+            "mcps.yaml",
+            "weather:\n  transport: streamable_http\n  url: https://w.example\n  \
+             headers:\n    Authorization: \"Bearer ${ENV:AGENTO_TEST_MCPS_REGISTRY_TOKEN}\"\n",
+        )
+        .expect("resolvable");
+        assert_eq!(
+            registry.get("weather").expect("weather")["headers"]["Authorization"],
+            format!("Bearer {SECRET}"),
+            "the turn really does run with the resolved token"
+        );
+        let rendered = format!("{registry:?}");
+        assert!(!rendered.contains(SECRET), "Debug leaked it: {rendered}");
+        assert!(
+            rendered.contains("weather"),
+            "the names are still useful: {rendered}"
+        );
     }
 
     /// A file with nothing in it is an empty registry and **no** error. This is
