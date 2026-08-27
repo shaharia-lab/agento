@@ -3,8 +3,8 @@
 // It does NOT re-implement Go's Windows `path/filepath`; it vendors it. The
 // three sections below are copied verbatim from the Go distribution:
 //
-//	internal/filepathlite/path.go          — lazybuf, Clean, Split, Base, Dir,
-//	                                         VolumeName, FromSlash
+//	internal/filepathlite/path.go          — lazybuf, Clean, Base, Dir,
+//	                                         VolumeName, IsAbs, FromSlash
 //	internal/filepathlite/path_windows.go  — Separator, IsPathSeparator,
 //	                                         volumeNameLen, pathHasPrefixFold,
 //	                                         uncLen, cutPath, postClean, toUpper
@@ -478,6 +478,18 @@ type vectors struct {
 }
 
 func main() {
+	// The `unix_base` array is taken from the **host's own** path/filepath, so
+	// this generator is only correct on a Unix host: run on Windows it would
+	// silently fill that array with Windows answers, and the array exists
+	// precisely because `gopath_vectors.json` is frozen and cannot hold it.
+	// Loud rather than silent, per parity/README.md.
+	if runtime.GOOS == "windows" || runtime.GOOS == "plan9" {
+		fmt.Fprintf(os.Stderr,
+			"refusing to run on %s: unix_base is read from the host's path/filepath and needs the Unix rules\n",
+			runtime.GOOS)
+		os.Exit(1)
+	}
+
 	v := vectors{Comment: []string{
 		"Cross-language parity vectors for Go's path/filepath, WINDOWS rules.",
 		"Sibling of gopath_vectors.json (Unix). 'want' is what Go's own",
