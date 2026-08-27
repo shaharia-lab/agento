@@ -194,8 +194,11 @@ export function ChatsView({
   const resumedCount = session?.continued_from_message_count ?? 0;
   // `resumedPath` is in the deps even though the request does not carry it: two
   // chats can be continued from the same session id under *different* project
-  // paths, and without it the second reuses the first's answer and evaluates
-  // the mismatch below against a payload fetched for the other pair.
+  // paths, and each pair has to be evaluated against a payload fetched for it
+  // rather than against the other one's cached answer. Today the route resolves
+  // by id alone, so the refetch returns the same transcript and the verdict is
+  // the same either way — the dependency is what keeps that an implementation
+  // detail of the route instead of something this guard silently relies on.
   const resumed = useResource<ClaudeSessionDetail | null>(
     (signal) =>
       resumedFrom

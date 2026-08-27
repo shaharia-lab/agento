@@ -258,11 +258,21 @@
   color: var(--fg-tertiary);
 }
 
+/*
+ * `overflow-wrap` is load-bearing since #492: the mismatch note names two whole
+ * project paths, and a path has no spaces — an encoded project name is one
+ * unbreakable token — so the default `normal` would let it spill out of the
+ * inset panel rather than wrap. `anywhere` rather than `.pathwell`'s
+ * `break-all`, because the rest of these notes are prose and should still break
+ * on words first. It applies to the error note's message too, which is somebody
+ * else's string and equally unbounded.
+ */
 .resumed__note {
   padding: var(--sp-5) var(--sp-4);
   color: var(--fg-tertiary);
   font-size: var(--text-sm);
   text-align: center;
+  overflow-wrap: anywhere;
 }
 
 /* The boundary. Everything above is the session being resumed; everything
