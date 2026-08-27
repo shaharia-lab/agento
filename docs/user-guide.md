@@ -213,11 +213,13 @@ Three things worth knowing before you write one:
   put things there you would run yourself.
 - **A name in this file wins over an integration with the same id**, so you can
   deliberately point an agent at your own server instead of the built-in one.
-- **A broken file stops the agents that use it**, on purpose. An unknown
-  `transport`, YAML that will not parse, or a `${ENV:…}` variable that is unset
-  or empty makes a chat with one of those agents answer an error naming the
-  problem, rather than quietly running without the tools it asked for. An
-  *empty* or absent file is fine and affects nothing.
+- **A broken file stops every agent that names any MCP server** — not only the
+  ones with an entry in it — because the file is read whenever an agent's tools
+  have to be resolved. An unknown `transport`, YAML that will not parse, or a
+  `${ENV:…}` variable that is unset or empty makes those chats answer an error
+  naming the problem, rather than quietly running without the tools they asked
+  for. Agents that name no MCP server are unaffected, and so is an *empty* or
+  absent file.
 
 ### Template variables
 

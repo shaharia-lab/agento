@@ -137,20 +137,85 @@ pub fn path() -> Option<PathBuf> {
 #[derive(Debug, Default, Deserialize)]
 struct RawEntry {
     #[serde(default)]
-    transport: Option<String>,
+    transport: Option<YamlString>,
     #[serde(default)]
-    command: Option<String>,
+    command: Option<YamlString>,
     /// `Vec<Option<_>>` and **not** `GoList`: a null element is *dropped* by
     /// `yaml.v3`, where `GoList` would zero-fill it. See the module header —
     /// this is argv, so the difference is an extra empty argument.
     #[serde(default)]
-    args: Option<Vec<Option<String>>>,
+    args: Option<Vec<Option<YamlString>>>,
     #[serde(default)]
-    env: Option<GoMap<String>>,
+    env: Option<GoMap<YamlString>>,
     #[serde(default)]
-    url: Option<String>,
+    url: Option<YamlString>,
     #[serde(default)]
-    headers: Option<GoMap<String>>,
+    headers: Option<GoMap<YamlString>>,
+}
+
+/// A string field that accepts **any** scalar, because `yaml.v3` does.
+///
+/// `d.scalar` sets a `string` field from the node's own text whatever the node
+/// resolved to, so `env: {PORT: 8080}`, `command: 123` and `DEBUG: true` all
+/// decode with no error — measured against v3.0.1. `serde` type-checks instead
+/// and rejects every one of them.
+///
+/// **That is not a wording difference, it is Part A's regression re-entered
+/// through the parser.** [`super::runner::mcp_plan`] loads the registry for
+/// *any* agent naming *any* MCP server, so one unquoted port number in a
+/// leftover file would refuse every MCP-backed agent on the machine — including
+/// agents whose every name resolves to a hosted integration and which have no
+/// entry in that file at all. An unquoted scalar is the most ordinary thing
+/// there is to write in YAML.
+///
+/// **One residual divergence, measured and accepted.** `yaml.v3` keeps the
+/// node's *raw text*; this sees the value after `serde_norway` has resolved it,
+/// because [`serde_norway::Value::apply_merge`] forces a `Value` round trip
+/// before any field is read. So a spelling that does not survive that round trip
+/// does not survive here: `1.50` is `"1.5"` and `2.0` is `"2"` where Go says
+/// `"1.50"` and `"2.0"`. Integers, booleans and strings — which is everything
+/// anyone writes in this file — are exact, and the alternative is dropping merge
+/// keys, which breaks a whole valid idiom to fix a trailing zero. Pinned by
+/// `a_bare_scalar_is_read_as_its_text_the_way_yaml_v3_reads_one`.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct YamlString(String);
+
+impl<'de> Deserialize<'de> for YamlString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct AnyScalar;
+
+        impl serde::de::Visitor<'_> for AnyScalar {
+            type Value = YamlString;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a scalar")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<YamlString, E> {
+                Ok(YamlString(v.to_string()))
+            }
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<YamlString, E> {
+                Ok(YamlString(v))
+            }
+            fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<YamlString, E> {
+                Ok(YamlString(v.to_string()))
+            }
+            fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<YamlString, E> {
+                Ok(YamlString(v.to_string()))
+            }
+            fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<YamlString, E> {
+                Ok(YamlString(v.to_string()))
+            }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<YamlString, E> {
+                Ok(YamlString(v.to_string()))
+            }
+        }
+
+        deserializer.deserialize_any(AnyScalar)
+    }
 }
 
 /// The parsed registry: server name → the JSON the CLI is handed in
@@ -220,7 +285,12 @@ fn parse(label: &str, data: &str) -> Result<Registry, String> {
     // `yaml.v3` expands `<<: *anchor` during decode; this has to be asked. The
     // anchor's own entry stays in the map and is a server like any other, which
     // is also what Go does with it.
-    root.apply_merge().map_err(|e| syntax_error(label, &e))?;
+    root.apply_merge().map_err(|_| {
+        // Its own sentence has no position and no user content, but it is a
+        // serde message and this module does not forward those. `<<` is the only
+        // thing `apply_merge` can fail on, so naming it is the whole diagnosis.
+        format!("parsing MCP registry {label:?}: a merge key (`<<`) does not name a mapping")
+    })?;
 
     let raw: BTreeMap<String, serde_norway::Value> =
         serde_norway::from_value(root).map_err(|_| {
@@ -237,9 +307,8 @@ fn parse(label: &str, data: &str) -> Result<Registry, String> {
         // `Bearer` token. The server name is what a reader searches for.
         let entry: RawEntry = serde_norway::from_value(value).map_err(|_| {
             format!(
-                "MCP server {name:?}: the entry does not decode — transport, command and \
-                 url must be strings, args a list of strings, and env and headers \
-                 mappings of strings"
+                "MCP server {name:?}: the entry does not decode — it must be a mapping, \
+                 with args a list and env and headers mappings"
             )
         })?;
         let config = convert(&name, entry)?;
@@ -266,28 +335,29 @@ fn syntax_error(label: &str, e: &serde_norway::Error) -> String {
 
 /// `convertMCPEntry`: one raw entry to the SDK config its transport names.
 fn convert(name: &str, entry: RawEntry) -> Result<serde_json::Value, String> {
-    let transport = entry.transport.unwrap_or_default();
+    let transport = entry.transport.unwrap_or_default().0;
     let value = match transport.as_str() {
         "stdio" => serde_json::to_value(McpStdioServer {
             server_type: "stdio".to_string(),
-            command: entry.command.unwrap_or_default(),
+            command: entry.command.unwrap_or_default().0,
             // `flatten` is the null-element drop `d.sequence` performs.
             args: entry
                 .args
                 .unwrap_or_default()
                 .into_iter()
                 .flatten()
+                .map(|arg| arg.0)
                 .collect(),
             env: interpolate_map(name, entry.env)?,
         }),
         "streamable_http" => serde_json::to_value(McpHttpServer {
             server_type: "http".to_string(),
-            url: entry.url.unwrap_or_default(),
+            url: entry.url.unwrap_or_default().0,
             headers: interpolate_map(name, entry.headers)?,
         }),
         "sse" => serde_json::to_value(McpSseServer {
             server_type: "sse".to_string(),
-            url: entry.url.unwrap_or_default(),
+            url: entry.url.unwrap_or_default().0,
             headers: interpolate_map(name, entry.headers)?,
         }),
         other => {
@@ -303,12 +373,12 @@ fn convert(name: &str, entry: RawEntry) -> Result<serde_json::Value, String> {
 /// `interpolateEnvMap`: `${ENV:VAR}` substitution over every value of a map.
 fn interpolate_map(
     name: &str,
-    map: Option<GoMap<String>>,
+    map: Option<GoMap<YamlString>>,
 ) -> Result<BTreeMap<String, String>, String> {
     let mut out = BTreeMap::new();
     for (key, value) in map.map(|m| m.0).unwrap_or_default() {
         let expanded =
-            interpolate(&value).map_err(|e| format!("MCP server {name:?} key {key:?}: {e}"))?;
+            interpolate(&value.0).map_err(|e| format!("MCP server {name:?} key {key:?}: {e}"))?;
         out.insert(key, expanded);
     }
     Ok(out)
@@ -344,9 +414,12 @@ fn interpolate(value: &str) -> Result<String, String> {
         }
         result = format!("{}{replacement}{}", &result[..start], &result[end + 1..]);
     }
+    // The value is **not** interpolated into this: it is raw file content, which
+    // is what the module's no-echo rule is about, and `interpolate_map` has
+    // already named the server and the key it is under.
     Err(format!(
-        "expanding {value:?}: more than {MAX_SUBSTITUTIONS} substitutions, \
-         which means an environment variable expands to itself"
+        "more than {MAX_SUBSTITUTIONS} `${{ENV:…}}` substitutions, which means \
+         an environment variable expands to itself"
     ))
 }
 
@@ -459,6 +532,61 @@ holes:
                 "env": {"EMPTY": ""},
             }),
             "a null argument is dropped, not sent as an empty one"
+        );
+    }
+
+    /// An unquoted scalar is a **string**, because `yaml.v3` reads a `string`
+    /// field from the node's own text whatever it resolved to.
+    ///
+    /// Rejecting these would be Part A's regression re-entered through the
+    /// parser: the registry is loaded for *any* agent naming *any* MCP server,
+    /// so one unquoted port number in a leftover file would refuse every
+    /// MCP-backed agent on the machine. Every row here was measured against
+    /// `gopkg.in/yaml.v3` v3.0.1 — including the last two, which are the
+    /// accepted divergence: `serde_norway` has already resolved the scalar by
+    /// the time this sees it, because `apply_merge` forces a `Value` round trip.
+    #[test]
+    fn a_bare_scalar_is_read_as_its_text_the_way_yaml_v3_reads_one() {
+        let registry = parse(
+            "mcps.yaml",
+            r#"
+a:
+  transport: stdio
+  command: 123
+  args: [--port, 8080, --ratio, 1.5, --on, true]
+  env:
+    PORT: 8080
+    DEBUG: true
+    RATE: 1.5
+    YES: yes
+"#,
+        )
+        .expect("bare scalars are strings");
+        assert_eq!(
+            registry.get("a").expect("a"),
+            &serde_json::json!({
+                "type": "stdio",
+                "command": "123",
+                "args": ["--port", "8080", "--ratio", "1.5", "--on", "true"],
+                // `yes` is a string to both — `yaml.v3` dropped YAML 1.1's
+                // boolean spellings, and serde_norway never had them.
+                "env": {"DEBUG": "true", "PORT": "8080", "RATE": "1.5", "YES": "yes"},
+            })
+        );
+
+        // The residual divergence, pinned rather than reconciled: `yaml.v3`
+        // keeps the node's raw text (`"0x10"`, `"1.50"`, `"2.0"`), and a
+        // resolved scalar has lost it. Reconciling would mean giving up
+        // `apply_merge`, which breaks a whole valid idiom to fix a trailing
+        // zero.
+        let registry = parse(
+            "mcps.yaml",
+            "a:\n  transport: stdio\n  env:\n    H: 0x10\n    T: 1.50\n    Z: 2.0\n",
+        )
+        .expect("resolved scalars");
+        assert_eq!(
+            registry.get("a").expect("a")["env"],
+            serde_json::json!({"H": "16", "T": "1.5", "Z": "2"})
         );
     }
 

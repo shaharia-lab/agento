@@ -416,7 +416,6 @@ pub async fn build_options(
 /// genuinely different things — one is a document to pass along, the other is a
 /// listener this process has to bind — so the distinction is a type rather than
 /// a convention.
-#[derive(Debug)]
 enum McpSource {
     /// A `mcps.yaml` entry: the `--mcp-config` document the CLI dials or
     /// spawns. Nothing in this process hosts it, so there is no handle and
@@ -426,6 +425,25 @@ enum McpSource {
     /// [`start_integration_servers`], not here, because a refusal must leave no
     /// listener behind.
     Integration,
+}
+
+/// **Hand-written, and it prints `External(..)` without the document.**
+///
+/// The obvious `#[derive(Debug)]` would be a credential leak with a long fuse.
+/// By the time a config reaches [`McpSource::External`] its `${ENV:…}`
+/// placeholders have been *resolved* — `mcps_yaml::interpolate` runs at load —
+/// so the value holds live `Authorization` headers and API tokens that the file
+/// itself never contained. `registry::HostingRow` derives neither `Serialize`
+/// **nor `Debug`** for exactly this reason: a `{plan:?}` in a log line is the
+/// same leak as a response field, only later. Every test here asserts on the
+/// *variant*, never on the formatting.
+impl std::fmt::Debug for McpSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::External(_) => f.write_str("External(..)"),
+            Self::Integration => f.write_str("Integration"),
+        }
+    }
 }
 
 /// One entry of `capabilities.mcp`, resolved far enough to say "this build can
@@ -451,9 +469,12 @@ struct McpServerSpec {
 /// [`crate::native::gojson::GoMap`], so that order is already stable — Go ranges
 /// a map here and its own argument differs run to run.
 ///
-/// `Debug` is safe and deliberate here, unlike on `registry::HostingRow`: this
-/// carries ids, tool names, a path and the contents of a file the user wrote,
-/// and no credential is *read* into it that was not already in that file.
+/// **This carries live credentials**, and the `Debug` derive is only safe
+/// because [`McpSource`]'s is hand-written to withhold them. An external
+/// server's config arrives with its `${ENV:…}` placeholders already resolved, so
+/// it holds the very `Authorization` headers and tokens the file only pointed
+/// at. Read `McpSource`'s `Debug` impl before adding a field here, and do not
+/// add `Serialize`.
 #[derive(Debug)]
 struct McpPlan {
     db_path: Option<std::path::PathBuf>,
@@ -1398,6 +1419,48 @@ mod tests {
                 "command": "/usr/bin/docs-mcp",
                 "args": ["--root", "/srv"],
             })
+        );
+    }
+
+    /// **The plan holds live credentials and its `Debug` must not print them.**
+    ///
+    /// `${ENV:…}` is resolved at load, so an external config carries the actual
+    /// `Authorization` header — a value the file itself never contained, which
+    /// is what makes the derive dangerous rather than merely untidy. Same rule
+    /// as `registry::HostingRow`, which derives neither `Debug` nor `Serialize`;
+    /// the difference here is that the plan *is* formatted, in every panic
+    /// message in this module.
+    ///
+    /// Asserted on the token's absence, which is the form that survives the
+    /// message being reworded.
+    #[test]
+    fn the_plans_debug_does_not_carry_an_interpolated_secret() {
+        const SECRET: &str = "sk-live-NOTAREALTOKEN";
+        let _env = crate::paths::tests::env_lock();
+        let _token = crate::paths::tests::EnvVar::set("AGENTO_TEST_PLAN_TOKEN", SECRET);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = mcps_yaml(
+            dir.path(),
+            "weather:\n  transport: streamable_http\n  url: https://w.example/mcp\n  \
+             headers:\n    Authorization: \"Bearer ${ENV:AGENTO_TEST_PLAN_TOKEN}\"\n",
+        );
+        let plan = mcp_plan(Some(&caps_naming("weather", None)), None, Some(&path))
+            .expect("resolvable")
+            .expect("a plan");
+
+        // The turn really does run with the resolved token…
+        let McpSource::External(config) = &plan.servers[0].source else {
+            panic!("expected the yaml entry");
+        };
+        assert_eq!(
+            config["headers"]["Authorization"],
+            format!("Bearer {SECRET}")
+        );
+        // …and formatting the plan does not disclose it.
+        assert!(
+            !format!("{plan:?}").contains(SECRET),
+            "the plan's Debug leaked the token: {plan:?}"
         );
     }
 

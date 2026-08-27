@@ -2202,18 +2202,41 @@ unprefixed `MCPS_FILE` honoured behind it, because #375's acceptance criteria
 named that spelling), which is the only way to point a test at a fixture: a
 debug build's `paths::data_dir` ignores the environment by design.
 
-Three things in `mcps_yaml.rs` were **measured against `gopkg.in/yaml.v3`**
-rather than inferred from the JSON side, and each is wrong in a way nothing
-would report. A null *sequence element* is **dropped** where a null *map value*
-is `""` — so `args` is not a `GoList`, because `["--f", ~]` is
-`docs-mcp --f` and not `docs-mcp --f ""`. Merge keys (`<<: *anchor`) are
-expanded by `yaml.v3` during decode and need `Value::apply_merge` here, or a
-perfectly valid file refuses every MCP-backed agent with *"unknown transport"*.
-And **no decode failure quotes what it was decoding**: this file holds `Bearer`
-tokens and a refusal's text reaches a chat body, `job_history.error_message` and
-the exported log, so a syntax error reports its position and a shape error
-reports the server name — `native/integrations/registry.rs`'s rule, same
-reasoning.
+**Four things in `mcps_yaml.rs` were measured against `gopkg.in/yaml.v3` v3.0.1
+rather than inferred from the JSON side**, and each is wrong in a way nothing
+would report. Measure before changing any of them; the JSON intuition is wrong
+about three.
+
+- **Any scalar is a string.** `d.scalar` fills a `string` field from the node's
+  own text whatever it resolved to, so `env: {PORT: 8080}`, `command: 123` and
+  `DEBUG: true` all decode. `serde` type-checks and rejects them — which is
+  *Part A's regression re-entered through the parser*, because `mcp_plan` loads
+  the registry for **any** agent naming any MCP server, so one unquoted port
+  number would refuse every MCP-backed agent on the machine including ones with
+  no entry in the file. `YamlString` is the visitor that accepts them.
+- **A null *sequence element* is dropped where a null *map value* is `""`.** So
+  `args` is deliberately **not** a `GoList`: `["--f", ~]` is `docs-mcp --f`, not
+  `docs-mcp --f ""`. `env`/`headers` keep `GoMap`, which is right for maps.
+- **Merge keys (`<<: *anchor`) are expanded during decode** and need
+  `Value::apply_merge` here, or a perfectly valid file refuses every MCP-backed
+  agent with *"unknown transport"*.
+- **A duplicate server name is an error in Go and last-one-wins here** — the one
+  divergence left standing, as [#499](https://github.com/shaharia-lab/agento/issues/499),
+  because no `serde_yaml` fork exposes a flag for it.
+
+Two rules about what a failure here may *say*, both because this file holds
+credentials and a refusal's text reaches a chat body, `job_history.error_message`
+and the exported app log. **No decode failure quotes what it was decoding**: a
+syntax error reports its position and a shape error reports the server name —
+`native/integrations/registry.rs`'s rule, same reasoning. And **`McpSource`'s
+`Debug` is hand-written to withhold an external config**, because `${ENV:…}` is
+resolved at load, so the plan holds the live token the *file never contained*;
+`McpPlan` is formatted in every panic message in that module.
+
+The accepted cost of `apply_merge` is that a scalar is resolved before any field
+reads it, so a spelling that does not survive a `Value` round trip does not
+survive here: `1.50` is `"1.5"` and `0x10` is `"16"` where Go keeps the raw text.
+Integers, booleans and strings are exact. Pinned, not reconciled.
 
 **Reading a credential is this module's job and nobody else's.** The rule in
 `native/integrations.rs` — `credentials` is never selected, `auth` collapses to
