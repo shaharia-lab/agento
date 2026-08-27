@@ -2197,9 +2197,23 @@ the registry's **path**, not a loaded registry, and loads it only after
 establishing that the agent names at least one MCP server — so a typo in the
 file cannot refuse a turn that never consults it. And the database is opened
 only for a name the registry did not answer, so an all-external agent reads no
-`integrations` rows at all. `MCPS_FILE` overrides the path, which is the only
-way to point a test at a fixture: a debug build's `paths::data_dir` ignores the
-environment by design.
+`integrations` rows at all. `AGENTO_MCPS_FILE` overrides the path (with the
+unprefixed `MCPS_FILE` honoured behind it, because #375's acceptance criteria
+named that spelling), which is the only way to point a test at a fixture: a
+debug build's `paths::data_dir` ignores the environment by design.
+
+Three things in `mcps_yaml.rs` were **measured against `gopkg.in/yaml.v3`**
+rather than inferred from the JSON side, and each is wrong in a way nothing
+would report. A null *sequence element* is **dropped** where a null *map value*
+is `""` — so `args` is not a `GoList`, because `["--f", ~]` is
+`docs-mcp --f` and not `docs-mcp --f ""`. Merge keys (`<<: *anchor`) are
+expanded by `yaml.v3` during decode and need `Value::apply_merge` here, or a
+perfectly valid file refuses every MCP-backed agent with *"unknown transport"*.
+And **no decode failure quotes what it was decoding**: this file holds `Bearer`
+tokens and a refusal's text reaches a chat body, `job_history.error_message` and
+the exported log, so a syntax error reports its position and a shape error
+reports the server name — `native/integrations/registry.rs`'s rule, same
+reasoning.
 
 **Reading a credential is this module's job and nobody else's.** The rule in
 `native/integrations.rs` — `credentials` is never selected, `auth` collapses to

@@ -187,7 +187,7 @@ There is no screen for this one. If a file called `mcps.yaml` exists in Agento's
 data directory (`~/.agento`, or `~/.agento-desktop-dev` for a development
 build), Agento reads it and any server it names can be used by an agent — under
 whatever name you gave it, which is also the name you put in that agent's
-`capabilities.mcp`. Set `MCPS_FILE` to read it from somewhere else.
+`capabilities.mcp`. Set `AGENTO_MCPS_FILE` to read it from somewhere else.
 
 ```yaml
 docs-mcp:

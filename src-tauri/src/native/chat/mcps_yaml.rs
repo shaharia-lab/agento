@@ -37,17 +37,45 @@
 //! one answer, or a typo in a YAML file silently removes every external server
 //! an agent depends on.
 //!
-//! # `null` is the zero value here too
+//! # `null` is the zero value — except inside a sequence, where it is not
 //!
-//! `yaml.v3` decodes a null into the zero value for every type in this struct,
-//! exactly as `encoding/json` does — and a YAML key written with nothing under
-//! it (`env:`, `args:`) **is** a null, which is a far more ordinary thing to
-//! type than a literal `null` in JSON ever was. So the same rule
-//! [`crate::native::gojson::GoList`] / [`crate::native::gojson::GoMap`] carry
-//! for the JSON side is applied here, one level down as well as at the field:
-//! `args:` with nothing under it is an empty list, and `env: {A: }` is
-//! `A: ""`. Bare `Option` covers the field; the two wrapper types cover the
-//! elements.
+//! A YAML key written with nothing under it (`env:`, `args:`) **is** a null,
+//! which is a far more ordinary thing to type than a literal `null` in JSON ever
+//! was, so this file needs the rule [`crate::native::gojson::GoMap`] carries for
+//! the JSON side. But `yaml.v3` and `encoding/json` **disagree one level down**,
+//! and only measuring says which way:
+//!
+//! | | `env: {A: }` | `args: ["--f", ~]` |
+//! |---|---|---|
+//! | `encoding/json` / `GoList` | `A: ""` | `["--f", ""]` |
+//! | `yaml.v3` | `A: ""` | **`["--f"]`** |
+//!
+//! `d.sequence` only appends an element when `d.unmarshal` reports it decoded
+//! something, and a null reports nothing — so the element is **dropped**, not
+//! zero-filled. That is `args`, i.e. an external server's argv: getting it wrong
+//! spawns `docs-mcp --f ""` where Go spawned `docs-mcp --f`. So `env` and
+//! `headers` use `GoMap` and `args` deliberately does not use `GoList`.
+//!
+//! # Merge keys are resolved, because `yaml.v3` resolves them
+//!
+//! `<<: *defaults` is the natural way to share an `env` block across several
+//! entries, and `yaml.v3` expands it during decode. `serde_norway` has to be
+//! asked ([`serde_norway::Value::apply_merge`]) and otherwise treats `<<` as an
+//! unknown key — which would leave `transport` empty and refuse the turn with
+//! *"unknown transport"* over a file that is perfectly valid. That is the same
+//! user-visible failure Part A of #375 removed, so it is not a nicety.
+//!
+//! # No decode failure quotes what it was decoding
+//!
+//! `mcps.yaml` holds credentials — a `Bearer` token under `headers` is the
+//! ordinary case — and a refusal's text becomes a chat 500 body, a stored
+//! `job_history.error_message` and a line in the exported app log. So a serde
+//! message never reaches any of them: a syntax error reports its **location**
+//! and a shape error reports the **server name**, which is what a reader
+//! searches the file for anyway. `native/integrations/registry.rs` established
+//! this rule for integration credentials and the reasoning is identical. (Go's
+//! own message truncates the value to eight characters; dropping it entirely is
+//! strictly safer and loses nothing a line number does not supply.)
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -55,7 +83,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::claude::options::{McpHttpServer, McpSseServer, McpStdioServer};
-use crate::native::gojson::{GoList, GoMap};
+use crate::native::gojson::GoMap;
 
 /// How many `${ENV:…}` substitutions one value may take before the expansion is
 /// declared circular.
@@ -74,16 +102,30 @@ const MAX_SUBSTITUTIONS: usize = 1000;
 ///
 /// `AppConfig.MCPsFile()` is `<data dir>/mcps.yaml` and `cmd/web.go` passed it
 /// with no override — the `--mcps-file` flag existed only on `agento ask`. The
-/// `MCPS_FILE` variable is this build's equivalent of that flag: the same lever
+/// override here is this build's equivalent of that flag: the same lever
 /// `AGENTO_CLAUDE_EXECUTABLE` is for the CLI binary, and the only way to point a
 /// test at a fixture without writing into the developer's real data directory
 /// (a debug build's [`crate::paths::data_dir`] ignores the environment by
 /// design).
+///
+/// **Two spellings, and the prefixed one is the real name.** Every variable
+/// Agento *invents* is `AGENTO_`-prefixed — `AGENTO_DATA_DIR`,
+/// `AGENTO_CLAUDE_EXECUTABLE`, `AGENTO_PUBLIC_URL`; the unprefixed ones it reads
+/// (`CLAUDE_CONFIG_DIR`, `TZ`) are somebody else's. A bare `MCPS_FILE` would be
+/// a new claim on an unqualified name in every user's environment, so
+/// `AGENTO_MCPS_FILE` wins. `MCPS_FILE` is honoured behind it because #375's
+/// acceptance criteria name it and this file's documentation shipped with it;
+/// dropping it would be a change to a published lever rather than a rename
+/// before anyone could depend on it.
 pub fn path() -> Option<PathBuf> {
-    match std::env::var("MCPS_FILE") {
-        Ok(file) if !file.is_empty() => Some(PathBuf::from(file)),
-        _ => crate::paths::data_dir().map(|dir| dir.join("mcps.yaml")),
+    for name in ["AGENTO_MCPS_FILE", "MCPS_FILE"] {
+        if let Ok(file) = std::env::var(name) {
+            if !file.is_empty() {
+                return Some(PathBuf::from(file));
+            }
+        }
     }
+    crate::paths::data_dir().map(|dir| dir.join("mcps.yaml"))
 }
 
 /// One entry as it is written in the file, before the transport decides which
@@ -98,8 +140,11 @@ struct RawEntry {
     transport: Option<String>,
     #[serde(default)]
     command: Option<String>,
+    /// `Vec<Option<_>>` and **not** `GoList`: a null element is *dropped* by
+    /// `yaml.v3`, where `GoList` would zero-fill it. See the module header —
+    /// this is argv, so the difference is an extra empty argument.
     #[serde(default)]
-    args: Option<GoList<String>>,
+    args: Option<Vec<Option<String>>>,
     #[serde(default)]
     env: Option<GoMap<String>>,
     #[serde(default)]
@@ -161,20 +206,62 @@ pub fn load(path: Option<&Path>) -> Result<Registry, String> {
 /// `LoadMCPRegistry` unwrapped, naming the server rather than the file, because
 /// the server name is what a reader searches the file for.
 fn parse(label: &str, data: &str) -> Result<Registry, String> {
-    // `Option` around the map, not just around each entry: an **empty** file is
-    // a YAML null, and so is one holding nothing but `---` or a comment. Go's
-    // `yaml.Unmarshal` leaves the destination map nil for all three and returns
-    // no error, and an empty `mcps.yaml` left behind by an earlier experiment is
-    // exactly the kind of file this issue exists to stop breaking turns.
-    let raw: Option<BTreeMap<String, RawEntry>> =
-        serde_norway::from_str(data).map_err(|e| format!("parsing MCP registry {label:?}: {e}"))?;
+    let mut root: serde_norway::Value =
+        serde_norway::from_str(data).map_err(|e| syntax_error(label, &e))?;
+
+    // An **empty** file is a YAML null, and so is one holding nothing but `---`
+    // or a comment. Go's `yaml.Unmarshal` leaves the destination map nil for all
+    // three and returns no error, and an empty `mcps.yaml` left behind by an
+    // earlier experiment is exactly the kind of file #375 exists to stop
+    // breaking turns.
+    if root.is_null() {
+        return Ok(Registry::default());
+    }
+    // `yaml.v3` expands `<<: *anchor` during decode; this has to be asked. The
+    // anchor's own entry stays in the map and is a server like any other, which
+    // is also what Go does with it.
+    root.apply_merge().map_err(|e| syntax_error(label, &e))?;
+
+    let raw: BTreeMap<String, serde_norway::Value> =
+        serde_norway::from_value(root).map_err(|_| {
+            format!(
+                "parsing MCP registry {label:?}: the top level is not a mapping of \
+             server name to configuration"
+            )
+        })?;
 
     let mut servers = BTreeMap::new();
-    for (name, entry) in raw.unwrap_or_default() {
+    for (name, value) in raw {
+        // The serde message is deliberately dropped — it quotes the offending
+        // value, and a `headers` written as a string instead of a map is a
+        // `Bearer` token. The server name is what a reader searches for.
+        let entry: RawEntry = serde_norway::from_value(value).map_err(|_| {
+            format!(
+                "MCP server {name:?}: the entry does not decode — transport, command and \
+                 url must be strings, args a list of strings, and env and headers \
+                 mappings of strings"
+            )
+        })?;
         let config = convert(&name, entry)?;
         servers.insert(name, config);
     }
     Ok(Registry { servers })
+}
+
+/// A parse failure reported by **position**, never by content.
+///
+/// See the module header: this text reaches a chat body, a stored
+/// `job_history.error_message` and the app log, and `serde_norway` prints the
+/// whole offending scalar.
+fn syntax_error(label: &str, e: &serde_norway::Error) -> String {
+    match e.location() {
+        Some(at) => format!(
+            "parsing MCP registry {label:?}: does not decode at line {} column {}",
+            at.line(),
+            at.column()
+        ),
+        None => format!("parsing MCP registry {label:?}: does not decode"),
+    }
 }
 
 /// `convertMCPEntry`: one raw entry to the SDK config its transport names.
@@ -184,7 +271,13 @@ fn convert(name: &str, entry: RawEntry) -> Result<serde_json::Value, String> {
         "stdio" => serde_json::to_value(McpStdioServer {
             server_type: "stdio".to_string(),
             command: entry.command.unwrap_or_default(),
-            args: entry.args.map(|a| a.0).unwrap_or_default(),
+            // `flatten` is the null-element drop `d.sequence` performs.
+            args: entry
+                .args
+                .unwrap_or_default()
+                .into_iter()
+                .flatten()
+                .collect(),
             env: interpolate_map(name, entry.env)?,
         }),
         "streamable_http" => serde_json::to_value(McpHttpServer {
@@ -326,7 +419,13 @@ ticker:
 
     /// A key written with nothing under it is a YAML null, which is how a person
     /// actually leaves a section empty — and it is the zero value, not a type
-    /// error. Elements too: `GoList`/`GoMap` are on the fields for that.
+    /// error.
+    ///
+    /// **One level down the two encodings part company, and this pins the
+    /// difference**: a null *map value* is `""` and a null *sequence element* is
+    /// **dropped**. Both measured against `gopkg.in/yaml.v3` v3.0.1 rather than
+    /// inferred from `encoding/json`, which zero-fills both — using `GoList`
+    /// here would put an extra empty argument in an external server's argv.
     #[test]
     fn a_null_is_the_zero_value_at_the_field_and_one_level_down() {
         let registry = parse(
@@ -356,10 +455,80 @@ holes:
             &serde_json::json!({
                 "type": "stdio",
                 "command": "run-me-too",
-                "args": ["--first", ""],
+                "args": ["--first"],
                 "env": {"EMPTY": ""},
+            }),
+            "a null argument is dropped, not sent as an empty one"
+        );
+    }
+
+    /// `<<: *anchor` is how a person shares an `env` block across entries, and
+    /// `yaml.v3` expands it during decode.
+    ///
+    /// Without `apply_merge` this file decodes with `transport` unset and the
+    /// turn is refused with *"unknown transport"* — a valid registry breaking
+    /// every MCP-backed agent, which is the failure #375 exists to remove.
+    #[test]
+    fn a_merge_key_is_expanded_the_way_yaml_v3_expands_it() {
+        let registry = parse(
+            "mcps.yaml",
+            r#"
+base: &base
+  transport: stdio
+  command: /usr/bin/shared
+docs:
+  <<: *base
+  args: ["--docs"]
+"#,
+        )
+        .expect("merge keys resolve");
+        assert_eq!(
+            registry.get("docs").expect("docs"),
+            &serde_json::json!({
+                "type": "stdio",
+                "command": "/usr/bin/shared",
+                "args": ["--docs"],
             })
         );
+        // The anchor's own entry stays and is a server like any other — Go's
+        // map holds it too, so it is not filtered out here either.
+        assert_eq!(
+            registry.get("base").expect("base"),
+            &serde_json::json!({"type": "stdio", "command": "/usr/bin/shared"})
+        );
+    }
+
+    /// **No refusal quotes what it was decoding.** A `Bearer` token under
+    /// `headers` is the ordinary content of this file, and a refusal's text
+    /// becomes a chat body, a stored `job_history.error_message` and a line in
+    /// the app log the docs tell users to attach to a bug report.
+    ///
+    /// Asserted on the token's *absence* rather than on the wording, which is
+    /// the only form that keeps holding when a message is reworded.
+    #[test]
+    fn a_decode_failure_never_echoes_the_value_it_failed_on() {
+        const SECRET: &str = "sk-live-NOTAREALTOKEN";
+
+        // A shape error: `headers` written as a string rather than a mapping.
+        let err = parse(
+            "mcps.yaml",
+            &format!(
+                "weather:\n  transport: streamable_http\n  url: https://w.example\n  \
+                 headers: \"Bearer {SECRET}\"\n"
+            ),
+        )
+        .expect_err("headers is not a mapping");
+        assert!(!err.contains(SECRET), "the value leaked: {err}");
+        assert!(err.contains(r#"MCP server "weather""#), "{err}");
+
+        // A syntax error, which is reported by position instead.
+        let err = parse(
+            "mcps.yaml",
+            &format!("weather:\n  url: \"Bearer {SECRET}\n"),
+        )
+        .expect_err("unterminated quote");
+        assert!(!err.contains(SECRET), "the value leaked: {err}");
+        assert!(err.contains("at line"), "{err}");
     }
 
     /// A file with nothing in it is an empty registry and **no** error. This is
@@ -386,6 +555,10 @@ holes:
 
         std::fs::write(&missing, "docs: [not, a, mapping]\n").expect("write");
         let err = load(Some(&missing)).expect_err("malformed");
+        assert!(err.contains(r#"MCP server "docs""#), "{err}");
+
+        std::fs::write(&missing, "- not\n- a\n- mapping\n").expect("write");
+        let err = load(Some(&missing)).expect_err("not a mapping at all");
         assert!(err.contains("parsing MCP registry"), "{err}");
         assert!(
             err.contains(&missing.display().to_string()),
@@ -471,24 +644,29 @@ holes:
         assert!(err.contains("is not set"), "{err}");
     }
 
-    /// `MCPS_FILE` wins over the data directory, and an empty value does not.
+    /// The override selects the file, the prefixed spelling wins the tie, and an
+    /// empty value is not a path.
     #[test]
     fn the_environment_override_selects_the_file() {
         let _env = env_lock();
+        let default = crate::paths::data_dir().map(|dir| dir.join("mcps.yaml"));
+
         {
-            let _set = EnvVar::set("MCPS_FILE", "/tmp/somewhere/else.yaml");
-            assert_eq!(path(), Some(PathBuf::from("/tmp/somewhere/else.yaml")));
+            let _unprefixed = EnvVar::set("MCPS_FILE", "/tmp/legacy.yaml");
+            let _none = EnvVar::unset("AGENTO_MCPS_FILE");
+            assert_eq!(path(), Some(PathBuf::from("/tmp/legacy.yaml")));
+
+            // #375's own spelling still works, but `AGENTO_`-prefixed is the
+            // name and takes precedence when both are set.
+            let _prefixed = EnvVar::set("AGENTO_MCPS_FILE", "/tmp/current.yaml");
+            assert_eq!(path(), Some(PathBuf::from("/tmp/current.yaml")));
         }
-        let _unset = EnvVar::unset("MCPS_FILE");
-        assert_eq!(
-            path(),
-            crate::paths::data_dir().map(|dir| dir.join("mcps.yaml"))
-        );
-        let _empty = EnvVar::set("MCPS_FILE", "");
-        assert_eq!(
-            path(),
-            crate::paths::data_dir().map(|dir| dir.join("mcps.yaml")),
-            "an empty value is not a path"
-        );
+
+        let _a = EnvVar::unset("AGENTO_MCPS_FILE");
+        let _b = EnvVar::unset("MCPS_FILE");
+        assert_eq!(path(), default);
+
+        let _empty = EnvVar::set("AGENTO_MCPS_FILE", "");
+        assert_eq!(path(), default, "an empty value is not a path");
     }
 }

@@ -274,8 +274,9 @@ async fn an_error_result_is_a_failed_job_with_gos_wording() {
 /// With the sidecar started `AGENTO_SCHEDULER=off` there is no second
 /// implementation behind a fire, so a job history with no row would be
 /// indistinguishable from a task that was not due. `build_options` still
-/// refuses an agent naming an MCP server this build cannot host — here one with
-/// no integration row at all, which Go would still resolve from `mcps.yaml`.
+/// refuses an agent naming an MCP server nothing resolves — here one with no
+/// integration row and no `mcps.yaml` entry (#375 made the second half of that
+/// resolvable; a name in neither is still a refusal).
 #[tokio::test]
 async fn an_agent_whose_tools_this_build_cannot_host_is_a_recorded_failure() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -1203,14 +1203,25 @@ async fn collect_with_timeout(
 ///
 /// [`run_turn`] makes its own agent-less chat; this is the same thing for the
 /// tests whose whole subject is *which agent* the chat names.
+///
+/// `mcps` points `build_options` at an `mcps.yaml` fixture. It is set **inside**
+/// the lock and removed before the lock is released, for the reason the lock's
+/// own doc gives: the variable is process-global and `build_options` reads it on
+/// every turn, so a `set_var` outside the guard races the sixteen other tests'
+/// `getenv`.
 async fn run_turn_on(
     cli: &Path,
     file: &tempfile::NamedTempFile,
     chat_id: &str,
     content: &str,
+    mcps: Option<&Path>,
 ) -> String {
     let _env = env_lock().lock().await;
     std::env::set_var("AGENTO_CLAUDE_EXECUTABLE", cli);
+    match mcps {
+        Some(path) => std::env::set_var("AGENTO_MCPS_FILE", path),
+        None => std::env::remove_var("AGENTO_MCPS_FILE"),
+    }
 
     let response = agento_lib::native::chat::turn::run(
         file.path().to_path_buf(),
@@ -1222,7 +1233,11 @@ async fn run_turn_on(
 
     assert_eq!(response.status(), 200);
     let collected = collect_with_timeout(response).await;
-    String::from_utf8(collected.to_bytes().to_vec()).expect("utf8")
+    let body = String::from_utf8(collected.to_bytes().to_vec()).expect("utf8");
+    // Still holding the guard: a fixture left behind would outlive its TempDir
+    // and be read by whichever test ran next.
+    std::env::remove_var("AGENTO_MCPS_FILE");
+    body
 }
 
 /// The acceptance criterion of #310, end to end: an agent whose only tool is
@@ -1283,7 +1298,7 @@ async fn a_chat_using_a_local_tool_runs_natively_end_to_end() {
 
     let id = unique_id("localtool");
     let file = migrated_with_local_tool_agent(&id);
-    let body = run_turn_on(&cli, &file, &id, "what time is it in Tokyo?").await;
+    let body = run_turn_on(&cli, &file, &id, "what time is it in Tokyo?", None).await;
 
     // The tool really ran in this process: only the local server could have
     // produced this sentence, and only from Go's format string.
@@ -1342,11 +1357,6 @@ async fn a_chat_using_an_mcps_yaml_server_reaches_the_cli_with_it() {
          args: [\"--root\", \"/srv/docs\"]\n  env:\n    LOG_LEVEL: debug\n",
     )
     .expect("write mcps.yaml");
-    // The one lever that points this process at a fixture: a debug build's
-    // `paths::data_dir` ignores `AGENTO_DATA_DIR` by design, so `MCPS_FILE` is
-    // how a test reads a registry that is not the developer's own. No other
-    // test in this binary names an MCP server, so nothing else consults it.
-    std::env::set_var("MCPS_FILE", &registry);
 
     let cli = fake_cli(
         dir.path(),
@@ -1371,7 +1381,10 @@ async fn a_chat_using_an_mcps_yaml_server_reaches_the_cli_with_it() {
 
     let id = unique_id("mcpsyaml");
     let file = migrated_with_mcp_agent(&id, "docs-mcp");
-    let body = run_turn_on(&cli, &file, &id, "search the docs").await;
+    // `AGENTO_MCPS_FILE` is the one lever that points this process at a fixture
+    // — a debug build's `paths::data_dir` ignores the environment by design —
+    // and `run_turn_on` sets it under the same lock it sets the fake CLI under.
+    let body = run_turn_on(&cli, &file, &id, "search the docs", Some(&registry)).await;
 
     // The entry travels verbatim: the transport's *wire* spelling, the argv and
     // the environment the file declared. Asserted as one substring rather than
