@@ -476,6 +476,42 @@ mod tests {
         assert!(count > 0, "the fixture transcript has turns to inherit");
     }
 
+    /// The three columns have to survive the **read**, and nothing else asserts
+    /// that: every other test here goes straight at the columns with SQL.
+    ///
+    /// `chats::get` and `chats::get_session_tx` select them in two differently
+    /// ordered statements and both address them positionally, so a swapped index
+    /// compiles, passes every column-level assertion, and ships — putting the
+    /// project path in `continued_from_session_id`, which the view would then
+    /// `GET /api/claude-sessions/<path>` and be told, honestly enough, that the
+    /// earlier conversation could not be read.
+    #[test]
+    fn the_continuation_survives_the_read_path() {
+        let f = Fixture::new("66666666-7777-8888-9999-aaaaaaaaaaaa");
+
+        let chat_id = chat_id_of(continue_session(&f.db, &f.session_id).expect("continue"));
+
+        let detail = crate::native::chats::get(&f.db, &chat_id)
+            .expect("read the chat")
+            .expect("the chat exists");
+
+        assert_eq!(detail.session.continued_from_session_id, f.session_id);
+        assert_eq!(
+            detail.session.continued_from_project_path,
+            detail::get(&f.db, &f.session_id)
+                .expect("detail")
+                .expect("the session")
+                .summary
+                .project_path,
+        );
+        assert!(detail.session.continued_from_message_count > 0);
+        assert!(
+            detail.messages.is_empty(),
+            "the inherited history stays in the transcript — importing it would \
+             duplicate megabytes and corrupt this chat's own stored usage"
+        );
+    }
+
     /// Continue means *resume*: one Claude session, one chat. A second call
     /// reopens the first chat and writes nothing.
     ///

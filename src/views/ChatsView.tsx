@@ -199,6 +199,17 @@ export function ChatsView({
     [resumedFrom]
   );
 
+  // `useResource` keeps the previous payload while the next one loads — the same
+  // reason `loaded` above ignores `detail.data` until the ids agree. Continue is
+  // idempotent per source session now, so moving between two continued chats is
+  // ordinary, and without this the *previous* source's transcript renders under
+  // the new chat's header, cut at the new chat's boundary. `error` is stale on
+  // the same terms: a failed read for one chat would otherwise be reported as
+  // the next one's.
+  const resumedData =
+    resumed.data?.session_id === resumedFrom ? resumed.data : null;
+  const resumedError = resumedData ? undefined : resumed.error;
+
   // **A fixed prefix, and that is the whole guard against a double render.**
   // The CLI appends a resumed turn to the *same* transcript file, so once this
   // chat has taken a turn the source session contains those messages too —
@@ -209,11 +220,8 @@ export function ChatsView({
   // `slice` clamps on its own, so a transcript that was compacted or rewritten
   // to fewer messages renders what is left rather than indexing past the end.
   const inherited = useMemo<ClaudeMessage[]>(
-    () =>
-      resumedFrom && resumed.data
-        ? (resumed.data.messages ?? []).slice(0, resumedCount)
-        : [],
-    [resumedFrom, resumed.data, resumedCount]
+    () => (resumedData ? (resumedData.messages ?? []).slice(0, resumedCount) : []),
+    [resumedData, resumedCount]
   );
 
   const select = useCallback((id: string) => {
@@ -661,8 +669,8 @@ export function ChatsView({
                       sessionId={resumedFrom}
                       projectPath={session?.continued_from_project_path ?? ""}
                       messages={inherited}
-                      loading={resumed.loading && !resumed.data}
-                      error={resumed.error}
+                      loading={resumed.loading && !resumedData}
+                      error={resumedError}
                     />
                   ) : null
                 }
