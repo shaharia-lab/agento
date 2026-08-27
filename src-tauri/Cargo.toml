@@ -41,6 +41,22 @@ serde = { version = "1", features = ["derive"] }
 # numbers (`{"z":1.50,"a":1}` → `{"a":1,"z":1.5}`), so the value is carried as a
 # `RawValue` and written back as a raw fragment.
 serde_json = { version = "1", features = ["float_roundtrip", "raw_value"] }
+# `<data dir>/mcps.yaml` is the one YAML this app reads (#375) — a
+# hand-authored registry of external MCP servers, ported from Go's
+# `gopkg.in/yaml.v3`. One module (`native/chat/mcps_yaml.rs`) is the only
+# caller and there must not be a second.
+#
+# **`serde_norway` rather than the obvious `serde_yaml`, which its author
+# archived**, and rather than the two other live forks. All three are the same
+# dtolnay code; the difference is who is behind them. `serde_yml` has the most
+# downloads and is rejected anyway: its maintainer relicensed and bulk-published
+# generated churn over the fork, which is precisely the supply-chain shape a
+# shipped desktop app should not take on. `serde_yaml_ng` is credible but MIT
+# only and last published May 2024; `serde_norway` is dual MIT/Apache-2.0 like
+# the rest of this tree, was published more recently (Dec 2024), carries its own
+# maintained `unsafe-libyaml-norway` parser rather than depending on the
+# archived one, and is what the Nix/Zellij ecosystem settled on.
+serde_norway = "0.9"
 log = "0.4"
 
 # Local reverse proxy in front of the Go sidecar. No TLS backend: every hop is

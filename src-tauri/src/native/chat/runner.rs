@@ -18,23 +18,46 @@
 //! life is the handle's — see [`crate::native::tools`]. That is what makes this
 //! function `async`.
 //!
-//! **#311 narrowed the `mcp` half rather than removing it.** An agent is served
-//! natively when *every* name in `capabilities.mcp` is an integration this build
-//! can host — `registry::HOSTED_TYPES`, which since #313 means **all six**:
-//! `github` (#312), `confluence` (#317), `jira` (#316), `slack` (#315),
-//! `telegram` (#314) and `google` (#313). Three things are still refused, and
-//! [`mcp_plan`] is where each is decided:
+//! **#311 narrowed the `mcp` half and #375 closed it.** [`mcp_plan`] now
+//! resolves a `capabilities.mcp` name exactly as `resolveServerConfig` does, in
+//! its order:
 //!
-//! - **A name whose type is not hosted.** A `whatsapp` row has no Rust starter
-//!   and will not get one; running the turn here would drop its tools.
-//! - **A name with no integration row at all.** Go would still resolve it if
-//!   `mcps.yaml` names it, and this build reads no `mcps.yaml`.
-//! - **Any `mcp` capability at all when `<data dir>/mcps.yaml` exists.** That
-//!   file is what `resolveServerConfig` consults *before* the integrations, so
-//!   with one on disk a name could resolve to a different server in each
-//!   implementation. It is the one check that is broader than it needs to be,
-//!   and it is deliberate: the file is opt-in, the desktop app has no UI for it,
-//!   and a wrong answer here is a turn run against the wrong tool server.
+//! 1. the **`mcps.yaml` registry** ([`super::mcps_yaml`]) — an external server,
+//!    somebody else's subprocess or URL, handed to the CLI in `--mcp-config`;
+//! 2. then the **integrations**, hosted in this process as a filtered
+//!    in-process MCP server — `registry::HOSTED_TYPES`, which since #313 means
+//!    **all six**: `github` (#312), `confluence` (#317), `jira` (#316), `slack`
+//!    (#315), `telegram` (#314) and `google` (#313).
+//!
+//! **The order is load-bearing and it is Go's, not a preference.** A name in
+//! *both* is the yaml entry, because `resolveServerConfig` returns the registry
+//! hit before it ever looks at the integrations — so a user who shadows an
+//! integration id in their own file gets their own server, which is the only
+//! answer that keeps a config authored for `agento web` meaning the same thing
+//! here.
+//!
+//! One shape is still refused, and it is the honest one: **a name in neither**.
+//! `whatsapp` reaches it by construction — the type is dropped rather than
+//! deferred (#273), so a `whatsapp` row is not hostable and nothing else can
+//! resolve the name unless the user's own `mcps.yaml` does. Running the turn
+//! anyway would silently drop that server's tools, and an agent that quietly
+//! loses a tool set gives a worse answer than one that says it cannot run.
+//!
+//! **What #375 removed is the check that was broader than it needed to be**: the
+//! mere *presence* of `<data dir>/mcps.yaml` used to refuse every `mcp`
+//! capability, including names that resolved perfectly to hosted integrations.
+//! Its stated reason was that a name could resolve to a different server in the
+//! Go server than in this port — a hazard that required both to exist, and #391
+//! deleted the Go tree. Until it went, one leftover file broke every MCP-backed
+//! agent on the machine, which is the state anyone who ever ran `agento web`
+//! against the same data directory was in.
+//!
+//! A **malformed or unreadable** registry is still an error, and it refuses only
+//! the turns that would have consulted it: [`mcp_plan`] loads the file after
+//! establishing that the agent names at least one MCP server, so an agent that
+//! names none is untouched by a typo in it. That ordering is Part A's own
+//! lesson applied to Part B, and it is why the file's *path* rather than a
+//! pre-loaded registry is what this function takes.
 
 use rusqlite::OptionalExtension;
 
@@ -243,7 +266,7 @@ pub async fn build_options(
     let mcp_plan = mcp_plan(
         caps,
         crate::paths::database_path().as_deref(),
-        mcps_yaml_exists(),
+        super::mcps_yaml::path().as_deref(),
     )?;
 
     // `--include-partial-messages` is unconditional in Go, and it is what makes
@@ -386,61 +409,126 @@ pub async fn build_options(
     Ok((opts, tool_servers))
 }
 
+/// Where one `capabilities.mcp` name resolved to.
+///
+/// `resolveServerConfig` returns a bare `any` and the caller cannot tell the two
+/// apart, because in Go both are already a finished SDK config. Here they are
+/// genuinely different things — one is a document to pass along, the other is a
+/// listener this process has to bind — so the distinction is a type rather than
+/// a convention.
+enum McpSource {
+    /// A `mcps.yaml` entry: the `--mcp-config` document the CLI dials or
+    /// spawns. Nothing in this process hosts it, so there is no handle and
+    /// nothing to shut down.
+    External(serde_json::Value),
+    /// An integration row this build can host. The listener is bound in
+    /// [`start_integration_servers`], not here, because a refusal must leave no
+    /// listener behind.
+    Integration,
+}
+
+/// **Hand-written, and it prints `External(..)` without the document.**
+///
+/// The obvious `#[derive(Debug)]` would be a credential leak with a long fuse.
+/// By the time a config reaches [`McpSource::External`] its `${ENV:…}`
+/// placeholders have been *resolved* — `mcps_yaml::interpolate` runs at load —
+/// so the value holds live `Authorization` headers and API tokens that the file
+/// itself never contained. `registry::HostingRow` derives neither `Serialize`
+/// **nor `Debug`** for exactly this reason: a `{plan:?}` in a log line is the
+/// same leak as a response field, only later. Every test here asserts on the
+/// *variant*, never on the formatting.
+impl std::fmt::Debug for McpSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::External(_) => f.write_str("External(..)"),
+            Self::Integration => f.write_str("Integration"),
+        }
+    }
+}
+
 /// One entry of `capabilities.mcp`, resolved far enough to say "this build can
 /// run this turn".
 #[derive(Debug)]
 struct McpServerSpec {
-    /// The integration id, which is both the `mcpServers` key and the prefix
-    /// the CLI puts on every tool that server hosts.
+    /// The server name — which is both the `mcpServers` key and the prefix the
+    /// CLI puts on every tool that server hosts. For an integration it is the
+    /// bare integration id; for an external server it is whatever the user
+    /// called it in `mcps.yaml`.
     id: String,
     tools: Vec<String>,
+    source: McpSource,
 }
 
-/// What this turn will host, and the database the rows came from.
+/// What this turn will run with, and the database the integration rows came
+/// from.
 ///
-/// `Debug` is safe and deliberate here, unlike on `registry::HostingRow`: this
-/// carries ids, tool names and a path, and no credential ever reaches it.
+/// One `Vec` in the capabilities' own order rather than a collection per source:
+/// `--allowedTools` is built by walking it, and its order is part of the command
+/// line, so splitting the walk in two would group every integration's tools
+/// ahead of every external one for no reason. `capabilities.mcp` is a
+/// [`crate::native::gojson::GoMap`], so that order is already stable — Go ranges
+/// a map here and its own argument differs run to run.
+///
+/// **This carries live credentials**, and the `Debug` derive is only safe
+/// because [`McpSource`]'s is hand-written to withhold them. An external
+/// server's config arrives with its `${ENV:…}` placeholders already resolved, so
+/// it holds the very `Authorization` headers and tokens the file only pointed
+/// at. Read `McpSource`'s `Debug` impl before adding a field here, and do not
+/// add `Serialize`.
 #[derive(Debug)]
 struct McpPlan {
-    db_path: std::path::PathBuf,
+    db_path: Option<std::path::PathBuf>,
     servers: Vec<McpServerSpec>,
 }
 
 /// `resolveExternalMCP`'s inputs, checked before any of them is acted on.
 ///
 /// `Ok(None)` is an agent that names no MCP server — the overwhelmingly common
-/// case, and one that must not open the database. `Err` refuses the whole
-/// turn; see the module header for the three shapes that take that path and why
-/// the third is broader than it strictly has to be.
+/// case, and one that must open **neither** the database nor `mcps.yaml`. `Err`
+/// refuses the whole turn: a name that resolves to nothing, or a registry file
+/// that exists and cannot be read.
 ///
-/// `db_path` and `mcps_yaml_present` are parameters rather than reads so the
-/// decision can be driven over a scratch database instead of the machine's own.
+/// `db_path` and `mcps_path` are parameters rather than reads so the decision
+/// can be driven over a scratch database and a fixture file instead of the
+/// machine's own. Note the second is a **path**, not a loaded registry: loading
+/// it in the caller would make a broken file refuse turns that never name an
+/// external server, which is the exact shape of the bug #375 removed.
+///
+/// The database is opened lazily too — only for a name the registry did not
+/// answer — so an agent whose every MCP server comes from `mcps.yaml` runs with
+/// no `integrations` read at all, exactly as `resolveServerConfig` short-circuits.
 fn mcp_plan(
     caps: Option<&Capabilities>,
     db_path: Option<&std::path::Path>,
-    mcps_yaml_present: bool,
+    mcps_path: Option<&std::path::Path>,
 ) -> Result<Option<McpPlan>, String> {
     let Some(mcp) = caps.and_then(|c| c.mcp.as_ref()).filter(|m| !m.is_empty()) else {
         return Ok(None);
     };
 
-    if mcps_yaml_present {
-        return Err(
-            "an mcps.yaml is present, and `resolveServerConfig` consults it before the \
-             integrations; this build reads none, so the turn goes to Go"
-                .to_string(),
-        );
-    }
-    let db_path = db_path.ok_or("no home directory to resolve the data dir".to_string())?;
+    let registry = super::mcps_yaml::load(mcps_path)?;
 
     let mut servers = Vec::with_capacity(mcp.len());
+    let mut needs_db = false;
     for (id, capability) in mcp.iter() {
-        if !crate::native::integrations::registry::can_host(db_path, id)? {
-            return Err(format!(
-                "agent uses MCP server {id:?}, which is not an integration this build \
-                 can host (#313)"
-            ));
-        }
+        // `resolveServerConfig` asks the registry first and returns on a hit,
+        // so a name in both is the yaml entry and the integrations are never
+        // consulted for it.
+        let source = match registry.get(id) {
+            Some(config) => McpSource::External(config.clone()),
+            None => {
+                let db_path =
+                    db_path.ok_or("no home directory to resolve the data dir".to_string())?;
+                if !crate::native::integrations::registry::can_host(db_path, id)? {
+                    return Err(format!(
+                        "agent uses MCP server {id:?}, which is named by no mcps.yaml entry \
+                         and is not an integration this build can host (#375)"
+                    ));
+                }
+                needs_db = true;
+                McpSource::Integration
+            }
+        };
         servers.push(McpServerSpec {
             id: id.clone(),
             tools: capability
@@ -449,24 +537,22 @@ fn mcp_plan(
                 .flat_map(|list| list.iter())
                 .cloned()
                 .collect(),
+            source,
         });
     }
     Ok(Some(McpPlan {
-        db_path: db_path.to_path_buf(),
+        // `Some` exactly when an integration has to be started from it. A plan
+        // made entirely of external servers carries no path, which is what makes
+        // "this turn read no database" assertable rather than assumed.
+        db_path: needs_db
+            .then(|| db_path.map(std::path::Path::to_path_buf))
+            .flatten(),
         servers,
     }))
 }
 
-/// `<data dir>/mcps.yaml` — `AppConfig.MCPsFile()`, which `cmd/web.go` passes to
-/// `LoadMCPRegistry` and which has no environment override on the `web` path.
-fn mcps_yaml_exists() -> bool {
-    crate::paths::data_dir()
-        .map(|dir| dir.join("mcps.yaml"))
-        .is_some_and(|path| path.is_file())
-}
-
-/// `resolveExternalMCP` over the integrations, once [`mcp_plan`] has
-/// said every one of them is hostable.
+/// `resolveExternalMCP`: register every resolved server and qualify the tool
+/// names the agent asked for, once [`mcp_plan`] has said each one resolves.
 ///
 /// Registered under the **bare integration id**, because that is the
 /// `mcpServers` key Go uses (`StartInProcessMCPServer(ctx, cfg.ID, …)`) and so
@@ -474,14 +560,21 @@ fn mcps_yaml_exists() -> bool {
 /// integration's *MCP implementation* name is `github-<id>`, a different string
 /// that never appears on a tool.
 ///
-/// Two departures from Go, both deliberate:
+/// An **external** server is registered under whatever the user named it in
+/// `mcps.yaml`, for the same reason: that key is the prefix the CLI puts on its
+/// tools, so it is already the string in the agent's stored allowlist.
+///
+/// Two departures from Go, both deliberate, and #375 extends the first to the
+/// external half:
 ///
 /// - **A start failure refuses the turn rather than being skipped.** The
 ///   reference `resolveServerConfig` discards the error and returns `nil`, so
 ///   the turn runs without that server's tools — silently, which is the
 ///   behaviour worth diverging from: an agent that quietly loses a tool set
 ///   gives a worse answer than one that says it cannot run. `start_local_tools`
-///   already follows this rule.
+///   already follows this rule, and an `mcps.yaml` entry that cannot be
+///   converted refuses in [`super::mcps_yaml`] rather than being dropped from
+///   the registry.
 /// - **The map is a `BTreeMap`, so the order is stable.** Go ranges a map, so
 ///   its own `--allowedTools` order for two MCP servers differs between runs.
 ///   Strictly better, and it matches one of the orders Go produces.
@@ -496,25 +589,39 @@ async fn start_integration_servers(
     };
 
     for spec in &plan.servers {
-        let server = crate::native::integrations::registry::start_filtered_server(
-            &plan.db_path,
-            &spec.id,
-            &spec.tools,
-        )
-        .await?;
-        opts = opts
-            .with_mcp_server(&spec.id, server.config())
-            .map_err(|e| format!("registering the MCP server for {:?}: {e}", spec.id))?
-            // `appendToolOpts` adds `--strict-mcp-config` whenever it registers
-            // any server at all, so the CLI does not also load the user's own
-            // `.mcp.json`. Setting a bool, so saying it once per server is the
-            // same as saying it once.
-            .with_strict_mcp_config();
+        opts = match &spec.source {
+            // Somebody else's server: the document goes on the command line and
+            // nothing is bound here, so there is no handle to push.
+            McpSource::External(config) => opts.with_mcp_server(&spec.id, config),
+            McpSource::Integration => {
+                // `Some` by construction — `mcp_plan` records the path exactly
+                // when it resolved a name against the database — but a plan is
+                // a value and this is the one place that would misbehave
+                // silently if that ever stopped being true.
+                let db_path = plan.db_path.as_deref().ok_or_else(|| {
+                    format!("no database to start the MCP server for {:?}", spec.id)
+                })?;
+                let server = crate::native::integrations::registry::start_filtered_server(
+                    db_path,
+                    &spec.id,
+                    &spec.tools,
+                )
+                .await?;
+                let registered = opts.with_mcp_server(&spec.id, server.config());
+                servers.push(server);
+                registered
+            }
+        }
+        .map_err(|e| format!("registering the MCP server for {:?}: {e}", spec.id))?
+        // `appendToolOpts` adds `--strict-mcp-config` whenever it registers
+        // any server at all, so the CLI does not also load the user's own
+        // `.mcp.json`. Setting a bool, so saying it once per server is the
+        // same as saying it once.
+        .with_strict_mcp_config();
         allowed.extend(crate::native::integrations::registry::allowed_tool_names(
             &spec.id,
             &spec.tools,
         ));
-        servers.push(server);
     }
     Ok(opts)
 }
@@ -1182,8 +1289,8 @@ mod tests {
     /// overwhelmingly common case, and the reason the plan is an `Option`.
     #[test]
     fn no_mcp_capability_is_no_plan_and_no_database_read() {
-        assert!(mcp_plan(None, None, false).expect("no caps").is_none());
-        assert!(mcp_plan(Some(&Capabilities::default()), None, false)
+        assert!(mcp_plan(None, None, None).expect("no caps").is_none());
+        assert!(mcp_plan(Some(&Capabilities::default()), None, None)
             .expect("no mcp")
             .is_none());
         // Present but empty is the same as absent, exactly as `local: []` is.
@@ -1192,43 +1299,48 @@ mod tests {
             local: None,
             mcp: Some(BTreeMap::new().into()),
         };
-        assert!(mcp_plan(Some(&empty), None, false)
-            .expect("empty")
-            .is_none());
+        assert!(mcp_plan(Some(&empty), None, None).expect("empty").is_none());
     }
 
-    /// The three shapes that are still refused, each for its own reason.
+    /// A `mcps.yaml` file holding these entries, at a path a test can pass.
+    fn mcps_yaml(dir: &std::path::Path, contents: &str) -> std::path::PathBuf {
+        let path = dir.join("mcps.yaml");
+        std::fs::write(&path, contents).expect("write mcps.yaml");
+        path
+    }
+
+    /// The refusal that survives #375: a name that resolves to **nothing**.
+    ///
+    /// The two that did not are pinned separately below — a name with no
+    /// integration row is now answered by `mcps.yaml`, and the presence of that
+    /// file no longer refuses anything on its own.
     #[test]
-    fn an_mcp_name_this_build_cannot_host_is_refused() {
+    fn an_mcp_name_that_resolves_to_nothing_is_refused() {
         let file = db_with_integration("gh-1", "github");
 
-        // A type with no Rust starter. The stand-in has to be a type that is
-        // genuinely unported, so it moved with each landing — and with #313 it
-        // has arrived at `whatsapp`, which is where it stays: whatsapp is not
-        // deferred but dropped, because its starter opens a live whatsmeow
-        // connection registered in a package global rather than merely a port.
+        // A type with no Rust starter, and the reason `whatsapp` is the
+        // stand-in: it is not deferred but dropped, because its starter opens a
+        // live whatsmeow connection registered in a package global rather than
+        // merely a port. With no `mcps.yaml` entry naming it, nothing resolves
+        // it.
         let whatsapp = db_with_integration("wa-1", "whatsapp");
         let err = mcp_plan(
             Some(&caps_naming("wa-1", None)),
             Some(whatsapp.path()),
-            false,
+            None,
         )
         .expect_err("whatsapp cannot be hosted");
         assert!(err.contains(r#"MCP server "wa-1""#), "{err}");
 
-        // A name with no integration row: `mcps.yaml` could still name it.
+        // A name with no integration row and no yaml entry.
         assert!(mcp_plan(
             Some(&caps_naming("not-an-integration", None)),
             Some(file.path()),
-            false
+            None
         )
         .is_err());
 
-        // An `mcps.yaml` on disk takes precedence over the integrations in Go,
-        // and this build reads none — so any MCP capability is refused.
-        assert!(mcp_plan(Some(&caps_naming("gh-1", None)), Some(file.path()), true).is_err());
-
-        // One unhostable name among several refuses the whole turn: a partial
+        // One unresolvable name among several refuses the whole turn: a partial
         // tool set is the failure the refusal exists to prevent.
         let mut mixed = caps_naming("gh-1", None);
         if let Some(mcp) = mixed.mcp.as_mut() {
@@ -1237,7 +1349,172 @@ mod tests {
                 crate::native::agents::McpCapability { tools: None }.into(),
             );
         }
-        assert!(mcp_plan(Some(&mixed), Some(file.path()), false).is_err());
+        assert!(mcp_plan(Some(&mixed), Some(file.path()), None).is_err());
+    }
+
+    /// **Part A of #375, and the whole of the regression it names.** An
+    /// `mcps.yaml` on disk that has nothing to say about this agent's servers
+    /// must not refuse it.
+    ///
+    /// Before #375 the mere existence of the file was an early `Err`, so one
+    /// leftover from an `agento web` install disabled every MCP-backed agent on
+    /// the machine — including the six integration types that are fully
+    /// implemented here and would have worked. Reverting the deleted arm fails
+    /// this test on its first assertion.
+    #[test]
+    fn a_registry_that_names_none_of_the_agents_servers_does_not_refuse_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = db_with_integration("gh-1", "github");
+        let caps = caps_naming("gh-1", Some(vec!["get_repo".into()]));
+
+        for contents in [
+            "",
+            "# left over from `agento web`\n",
+            "something-else:\n  transport: stdio\n  command: /usr/bin/other\n",
+        ] {
+            let path = mcps_yaml(dir.path(), contents);
+            let plan = mcp_plan(Some(&caps), Some(file.path()), Some(&path))
+                .unwrap_or_else(|e| panic!("{contents:?} must not refuse the turn: {e}"))
+                .expect("a plan");
+            let [spec] = &plan.servers[..] else {
+                panic!("one server");
+            };
+            assert!(
+                matches!(spec.source, McpSource::Integration),
+                "{contents:?} resolved somewhere unexpected: {:?}",
+                spec.source
+            );
+        }
+    }
+
+    /// Part B: a name the registry answers is an **external** server, resolved
+    /// without opening the database at all — `resolveServerConfig` returns on
+    /// the registry hit and never reaches the integrations.
+    #[test]
+    fn a_yaml_name_resolves_externally_and_reads_no_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = mcps_yaml(
+            dir.path(),
+            "docs:\n  transport: stdio\n  command: /usr/bin/docs-mcp\n  args: [--root, /srv]\n",
+        );
+        let caps = caps_naming("docs", Some(vec!["search".into()]));
+
+        // `db_path: None` is what makes "no database was read" an assertion
+        // rather than an assumption: any fall-through to the integrations is
+        // the `no home directory` error.
+        let plan = mcp_plan(Some(&caps), None, Some(&path))
+            .expect("the registry answers")
+            .expect("a plan");
+        assert!(plan.db_path.is_none(), "no integration, no database");
+        let [spec] = &plan.servers[..] else {
+            panic!("one server");
+        };
+        let McpSource::External(config) = &spec.source else {
+            panic!("expected the yaml entry, got {:?}", spec.source);
+        };
+        assert_eq!(
+            config,
+            &serde_json::json!({
+                "type": "stdio",
+                "command": "/usr/bin/docs-mcp",
+                "args": ["--root", "/srv"],
+            })
+        );
+    }
+
+    /// **The plan holds live credentials and its `Debug` must not print them.**
+    ///
+    /// `${ENV:…}` is resolved at load, so an external config carries the actual
+    /// `Authorization` header — a value the file itself never contained, which
+    /// is what makes the derive dangerous rather than merely untidy. Same rule
+    /// as `registry::HostingRow`, which derives neither `Debug` nor `Serialize`;
+    /// the difference here is that the plan *is* formatted, in every panic
+    /// message in this module.
+    ///
+    /// Asserted on the token's absence, which is the form that survives the
+    /// message being reworded.
+    #[test]
+    fn the_plans_debug_does_not_carry_an_interpolated_secret() {
+        const SECRET: &str = "sk-live-NOTAREALTOKEN";
+        let _env = crate::paths::tests::env_lock();
+        let _token = crate::paths::tests::EnvVar::set("AGENTO_TEST_PLAN_TOKEN", SECRET);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = mcps_yaml(
+            dir.path(),
+            "weather:\n  transport: streamable_http\n  url: https://w.example/mcp\n  \
+             headers:\n    Authorization: \"Bearer ${ENV:AGENTO_TEST_PLAN_TOKEN}\"\n",
+        );
+        let plan = mcp_plan(Some(&caps_naming("weather", None)), None, Some(&path))
+            .expect("resolvable")
+            .expect("a plan");
+
+        // The turn really does run with the resolved token…
+        let McpSource::External(config) = &plan.servers[0].source else {
+            panic!("expected the yaml entry");
+        };
+        assert_eq!(
+            config["headers"]["Authorization"],
+            format!("Bearer {SECRET}")
+        );
+        // …and formatting the plan does not disclose it.
+        assert!(
+            !format!("{plan:?}").contains(SECRET),
+            "the plan's Debug leaked the token: {plan:?}"
+        );
+    }
+
+    /// `resolveServerConfig` asks the registry **first**, so a name in both is
+    /// the yaml entry. Getting this backwards would run a turn against a
+    /// different tool server than the config the user wrote asks for.
+    #[test]
+    fn a_name_in_both_resolves_to_the_yaml_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = db_with_integration("gh-1", "github");
+        let path = mcps_yaml(
+            dir.path(),
+            "gh-1:\n  transport: sse\n  url: https://mine.example/sse\n",
+        );
+
+        let plan = mcp_plan(
+            Some(&caps_naming("gh-1", Some(vec!["get_repo".into()]))),
+            Some(file.path()),
+            Some(&path),
+        )
+        .expect("resolvable")
+        .expect("a plan");
+        let [spec] = &plan.servers[..] else {
+            panic!("one server");
+        };
+        let McpSource::External(config) = &spec.source else {
+            panic!("the registry has to win: {:?}", spec.source);
+        };
+        assert_eq!(config["url"], "https://mine.example/sse");
+    }
+
+    /// A registry that exists and cannot be parsed refuses the turn, naming the
+    /// file — the one thing that must **not** be silently treated as "no
+    /// external servers", because that would drop a tool set without saying so.
+    #[test]
+    fn an_unreadable_registry_refuses_and_names_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = mcps_yaml(dir.path(), "docs:\n  transport: carrier-pigeon\n");
+        let err = mcp_plan(
+            Some(&caps_naming("docs", None)),
+            None,
+            Some(dir.path().join("mcps.yaml").as_path()),
+        )
+        .expect_err("a broken registry is not an empty one");
+        assert!(err.contains(r#"MCP server "docs""#), "{err}");
+        assert!(err.contains("unknown transport"), "{err}");
+
+        // …and it refuses **only** turns that reach it. An agent naming no MCP
+        // server is untouched by a typo in a file it never consults, which is
+        // Part A's lesson applied to the parser.
+        std::fs::write(&path, "\t not: [even, yaml\n").expect("write");
+        assert!(mcp_plan(Some(&Capabilities::default()), None, Some(&path))
+            .expect("no mcp capability, no registry read")
+            .is_none());
     }
 
     /// The whole of #311's runner half: a github-only agent runs natively, with
@@ -1250,7 +1527,7 @@ mod tests {
         let file = db_with_integration("gh-1", "github");
         let caps = caps_naming("gh-1", Some(vec!["get_repo".into()]));
 
-        let plan = mcp_plan(Some(&caps), Some(file.path()), false)
+        let plan = mcp_plan(Some(&caps), Some(file.path()), None)
             .expect("hostable")
             .expect("a plan");
         let mut allowed = allowed_tools(Some(&caps));
@@ -1284,7 +1561,7 @@ mod tests {
     async fn an_unhosted_tool_name_is_still_qualified() {
         let file = db_with_integration("gh-1", "github");
         let caps = caps_naming("gh-1", Some(vec!["get_repo".into(), "gone".into()]));
-        let plan = mcp_plan(Some(&caps), Some(file.path()), false)
+        let plan = mcp_plan(Some(&caps), Some(file.path()), None)
             .expect("hostable")
             .expect("a plan");
 
@@ -1298,6 +1575,66 @@ mod tests {
             vec![
                 "mcp__gh-1__get_repo".to_string(),
                 "mcp__gh-1__gone".to_string()
+            ]
+        );
+    }
+
+    /// An external server reaches `--mcp-config` verbatim, binds nothing, and is
+    /// walked in the **same** pass as an integration — so `--allowedTools` stays
+    /// in the capabilities' order rather than grouping by source.
+    ///
+    /// The three transports are pinned in `mcps_yaml`'s own tests, at the bytes.
+    /// What this adds is the half that is `runner`'s: registration under the
+    /// user's own name, no listener handle, and `--strict-mcp-config` set by an
+    /// external server alone (without it the CLI would also load the user's
+    /// `.mcp.json`, so the agent's allowlist would stop being the whole story).
+    #[tokio::test]
+    async fn an_external_server_is_registered_without_binding_anything() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = db_with_integration("gh-1", "github");
+        let path = mcps_yaml(
+            dir.path(),
+            "zz-docs:\n  transport: streamable_http\n  url: https://docs.example/mcp\n",
+        );
+        // `zz-` sorts after `gh-1`, so the order below is the map's and not an
+        // artefact of which source was walked first.
+        let mut caps = caps_naming("gh-1", Some(vec!["get_repo".into()]));
+        if let Some(mcp) = caps.mcp.as_mut() {
+            mcp.0.insert(
+                "zz-docs".to_string(),
+                crate::native::agents::McpCapability {
+                    tools: Some(vec!["search".to_string()].into()),
+                }
+                .into(),
+            );
+        }
+
+        let plan = mcp_plan(Some(&caps), Some(file.path()), Some(&path))
+            .expect("resolvable")
+            .expect("a plan");
+        let mut allowed = Vec::new();
+        let mut servers = Vec::new();
+        let opts =
+            start_integration_servers(Options::new(), Some(&plan), &mut allowed, &mut servers)
+                .await
+                .expect("started");
+
+        assert_eq!(
+            servers.len(),
+            1,
+            "only the integration binds a listener; an external server is somebody else's"
+        );
+        assert_eq!(
+            opts.mcp_servers.get("zz-docs"),
+            Some(&serde_json::json!({"type": "http", "url": "https://docs.example/mcp"})),
+            "the yaml document is handed over verbatim, under the user's own name"
+        );
+        assert!(opts.strict_mcp_config);
+        assert_eq!(
+            allowed,
+            vec![
+                "mcp__gh-1__get_repo".to_string(),
+                "mcp__zz-docs__search".to_string()
             ]
         );
     }

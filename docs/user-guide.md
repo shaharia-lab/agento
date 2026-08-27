@@ -181,6 +181,46 @@ Tools are an allowlist. An agent can use only what you tick.
 - **Integration tools**: individual tools from the integrations you have
   connected, for example "send a Slack message" or "create a GitHub issue".
 
+### External MCP servers (`mcps.yaml`)
+
+There is no screen for this one. If a file called `mcps.yaml` exists in Agento's
+data directory (`~/.agento`, or `~/.agento-desktop-dev` for a development
+build), Agento reads it and any server it names can be used by an agent — under
+whatever name you gave it, which is also the name you put in that agent's
+`capabilities.mcp`. Set `AGENTO_MCPS_FILE` to read it from somewhere else.
+
+```yaml
+docs-mcp:
+  transport: stdio            # or: streamable_http, sse
+  command: /usr/local/bin/docs-mcp
+  args: ["--root", "/srv/docs"]
+  env:
+    API_TOKEN: "${ENV:DOCS_TOKEN}"   # taken from Agento's own environment
+
+weather:
+  transport: streamable_http
+  url: https://weather.example/mcp
+  headers:
+    Authorization: "Bearer ${ENV:WEATHER_TOKEN}"
+```
+
+Three things worth knowing before you write one:
+
+- **A server here is a program Agento does not control.** A `stdio` entry is a
+  command the Claude Code CLI launches with your user account and your
+  environment; an `http`/`sse` entry is a URL it calls. Agento passes the entry
+  along and nothing more — it does not sandbox, supervise or restart it. Only
+  put things there you would run yourself.
+- **A name in this file wins over an integration with the same id**, so you can
+  deliberately point an agent at your own server instead of the built-in one.
+- **A broken file stops every agent that names any MCP server** — not only the
+  ones with an entry in it — because the file is read whenever an agent's tools
+  have to be resolved. An unknown `transport`, YAML that will not parse, or a
+  `${ENV:…}` variable that is unset or empty makes those chats answer an error
+  naming the problem, rather than quietly running without the tools they asked
+  for. Agents that name no MCP server are unaffected, and so is an *empty* or
+  absent file.
+
 ### Template variables
 
 System prompts support `{{current_date}}` and `{{current_time}}`, filled in at the

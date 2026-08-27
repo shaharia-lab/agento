@@ -294,8 +294,12 @@ src-tauri/src/
     chat/        the SSE turn and the three routes that steer it (#276)
       live.rs    the process-local live-session registry — why the four move together
       runner.rs  an agent's config as SDK options; starts the local tools
-                 server (#310) and one per github integration (#311), and
-                 refuses only what it still cannot supply
+                 server (#310) and one per github integration (#311), passes
+                 an mcps.yaml server through (#375), and refuses only a name
+                 that resolves to neither
+      mcps_yaml.rs `<data dir>/mcps.yaml` — LoadMCPRegistry, the three
+                 transports and the `${ENV:…}` substitution (#375). The one
+                 YAML this app reads and the only caller of `serde_norway`
       turn.rs    spawn, stream, and the AskUserQuestion continuation
       persist.rs what a finished turn writes, and what an interrupted one does not
       sse.rs     the frame bytes: raw pass-through vs the two synthetic events
@@ -2160,20 +2164,79 @@ means a model mid-`create_issue` when the user hits Save is the ordinary case.
 `a_tool_call_in_flight_survives_the_handles_drop` pins it, and it fails with the
 two lines swapped.
 
-**What the runner still refuses.** `chat/runner.rs::build_options` serves an
-agent whose `capabilities.mcp` names hosted integrations, starting one filtered
-server per name and handing the handles to the turn beside the local-tools one.
-Three things it cannot serve, and each is a *refusal* rather than a fallback —
-a chat reports it, and a scheduled run records a failed `job_history` row: a
-name whose row is a type this build does not host (i.e. `whatsapp`), a name
-with **no** integration row at all, and — broader than it strictly needs to be
-— *any* `mcp` capability when `<data dir>/mcps.yaml` exists, because the
-original resolution order consults that file **before** the integrations and
-this build reads none. The server is registered under the **bare integration id**,
-not `github::server_name`'s `github-<id>`: the latter is `mcp.NewServer`'s
-implementation name and never appears on a tool, while the id is the
-`mcpServers` key and so the prefix on every qualified name already in an agent's
+**How the runner resolves an MCP name, and the one thing it still refuses**
+(#375). `chat/runner.rs::mcp_plan` walks `capabilities.mcp` in
+`resolveServerConfig`'s order: **the `mcps.yaml` registry first**
+(`native/chat/mcps_yaml.rs`), then the integrations. A registry hit is an
+*external* server — somebody else's subprocess or URL, handed to the CLI in
+`--mcp-config` with nothing bound here; an integration is a filtered in-process
+server started per turn. Either is registered under **the name the agent
+wrote** — the bare integration id, not `github::server_name`'s `github-<id>`:
+the latter is `mcp.NewServer`'s implementation name and never appears on a tool,
+while the key is the prefix on every qualified name already in an agent's
 allowlist.
+
+The order is Go's and it decides a real case: **a name in both is the yaml
+entry**, so a user who shadows an integration id in their own file gets their
+own server. One shape is refused, and it is a *refusal* rather than a fallback —
+a chat reports it, a scheduled run records a failed `job_history` row: **a name
+in neither**, which `whatsapp` reaches by construction since the type is dropped
+(#273). A malformed or unreadable `mcps.yaml` refuses too, rather than reading
+as "no external servers" and silently dropping a tool set.
+
+**What #375 removed is the check that was broader than it needed to be:** the
+mere *presence* of `<data dir>/mcps.yaml` used to refuse every `mcp` capability,
+including names that resolved perfectly to hosted integrations. It was guarding
+against a name resolving differently in the Go server than here — a hazard that
+needed both to exist, and #391 deleted the Go tree. Until it went, one leftover
+file (the normal state for anyone who ever ran `agento web` against the same
+data directory) disabled every MCP-backed agent on the machine.
+
+Two ordering rules keep that fix from being undone by accident. `mcp_plan` takes
+the registry's **path**, not a loaded registry, and loads it only after
+establishing that the agent names at least one MCP server — so a typo in the
+file cannot refuse a turn that never consults it. And the database is opened
+only for a name the registry did not answer, so an all-external agent reads no
+`integrations` rows at all. `AGENTO_MCPS_FILE` overrides the path (with the
+unprefixed `MCPS_FILE` honoured behind it, because #375's acceptance criteria
+named that spelling), which is the only way to point a test at a fixture: a
+debug build's `paths::data_dir` ignores the environment by design.
+
+**Four things in `mcps_yaml.rs` were measured against `gopkg.in/yaml.v3` v3.0.1
+rather than inferred from the JSON side**, and each is wrong in a way nothing
+would report. Measure before changing any of them; the JSON intuition is wrong
+about three.
+
+- **Any scalar is a string.** `d.scalar` fills a `string` field from the node's
+  own text whatever it resolved to, so `env: {PORT: 8080}`, `command: 123` and
+  `DEBUG: true` all decode. `serde` type-checks and rejects them — which is
+  *Part A's regression re-entered through the parser*, because `mcp_plan` loads
+  the registry for **any** agent naming any MCP server, so one unquoted port
+  number would refuse every MCP-backed agent on the machine including ones with
+  no entry in the file. `YamlString` is the visitor that accepts them.
+- **A null *sequence element* is dropped where a null *map value* is `""`.** So
+  `args` is deliberately **not** a `GoList`: `["--f", ~]` is `docs-mcp --f`, not
+  `docs-mcp --f ""`. `env`/`headers` keep `GoMap`, which is right for maps.
+- **Merge keys (`<<: *anchor`) are expanded during decode** and need
+  `Value::apply_merge` here, or a perfectly valid file refuses every MCP-backed
+  agent with *"unknown transport"*.
+- **A duplicate server name is an error in Go and last-one-wins here** — the one
+  divergence left standing, as [#499](https://github.com/shaharia-lab/agento/issues/499),
+  because no `serde_yaml` fork exposes a flag for it.
+
+Two rules about what a failure here may *say*, both because this file holds
+credentials and a refusal's text reaches a chat body, `job_history.error_message`
+and the exported app log. **No decode failure quotes what it was decoding**: a
+syntax error reports its position and a shape error reports the server name —
+`native/integrations/registry.rs`'s rule, same reasoning. And **`McpSource`'s
+`Debug` is hand-written to withhold an external config**, because `${ENV:…}` is
+resolved at load, so the plan holds the live token the *file never contained*;
+`McpPlan` is formatted in every panic message in that module.
+
+The accepted cost of `apply_merge` is that a scalar is resolved before any field
+reads it, so a spelling that does not survive a `Value` round trip does not
+survive here: `1.50` is `"1.5"` and `0x10` is `"16"` where Go keeps the raw text.
+Integers, booleans and strings are exact. Pinned, not reconciled.
 
 **Reading a credential is this module's job and nobody else's.** The rule in
 `native/integrations.rs` — `credentials` is never selected, `auth` collapses to
@@ -2992,7 +3055,9 @@ database".
 `Err` and let Go answer" is not available, because there is no request. So every
 path ends in a `job_history` row. That includes the one case Go has no
 equivalent for: `chat/runner.rs::build_options` can still refuse an agent whose
-tools this build cannot host (a name in `mcps.yaml`, or a `whatsapp` row), and
+tools this build cannot supply (a `capabilities.mcp` name that neither
+`mcps.yaml` nor a hostable integration resolves — a `whatsapp` row reaches that
+by construction — or one whose `mcps.yaml` could not be read), and
 where a chat forwards, a scheduled run records a **failed** row reading
 `agent tools unavailable in this build: …` and publishes the failed event.
 Silence is the one outcome that is not allowed, because a job history with no row
