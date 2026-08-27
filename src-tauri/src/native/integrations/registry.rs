@@ -1492,6 +1492,30 @@ mod tests {
         }
     }
 
+    /// The same coverage question for the *second* dispatch on `HOSTED_TYPES`,
+    /// and it is the one that fails silently.
+    ///
+    /// `service_tool_table`'s `_ => &[]` arm is the right answer for a type this
+    /// build does not host — the starter refuses that row anyway. For a type
+    /// that **is** hosted it is #501 reintroduced with nothing to report it:
+    /// every service storing no tool list of its own goes back to being dropped,
+    /// so the integration hosts zero tools while `--allowedTools` names them.
+    /// A missing `match` arm is exactly how that lands.
+    #[test]
+    fn a_hosted_type_always_has_a_service_tool_table() {
+        for integration_type in HOSTED_TYPES {
+            let table = service_tool_table(integration_type);
+            assert!(
+                !table.is_empty(),
+                "{integration_type} is in HOSTED_TYPES with no SERVICE_TOOLS table"
+            );
+            assert!(
+                table.iter().all(|(_, tools)| !tools.is_empty()),
+                "{integration_type} has a service group naming no tools"
+            );
+        }
+    }
+
     /// The race `reload` opens by design, and the guard that closes it: a
     /// `DELETE` between the row read and the handle being recorded must not
     /// leave a bound port holding the credential of a row that is gone.

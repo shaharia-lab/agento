@@ -1561,6 +1561,7 @@ mod tests {
     /// (`github-<id>`) must not appear anywhere on a tool.
     #[tokio::test]
     async fn a_github_agent_runs_natively_under_the_integration_id() {
+        crate::native::writes::testlog::install();
         let file = db_with_integration("gh-1", "github");
         let caps = caps_naming("gh-1", Some(vec!["get_repo".into()]));
 
@@ -1590,12 +1591,27 @@ mod tests {
         // `appendToolOpts` adds it whenever any MCP server is registered.
         assert!(opts.strict_mcp_config);
         assert_eq!(allowed, vec!["mcp__gh-1__get_repo".to_string()]);
+
+        // #501's line at the call site the bug was *reported* through. The
+        // local-tools tests cover the other one, and neither covers this,
+        // so the assertion lives here rather than in a third fixture.
+        let logged = crate::native::writes::testlog::matching(
+            r#"mcp server started server="gh-1" tools=["get_repo"]"#,
+        );
+        assert!(
+            !logged.is_empty(),
+            "an integration server logs what it hosts"
+        );
+        for line in &logged {
+            assert!(line.starts_with("INFO "), "a start logs at info: {line:?}");
+        }
     }
 
     /// Go appends a qualified name for whatever the agent asked for, registered
     /// or not — the same rule the local tools follow.
     #[tokio::test]
     async fn an_unhosted_tool_name_is_still_qualified() {
+        crate::native::writes::testlog::install();
         let file = db_with_integration("gh-1", "github");
         let caps = caps_naming("gh-1", Some(vec!["get_repo".into(), "gone".into()]));
         let plan = mcp_plan(Some(&caps), Some(file.path()), None)
@@ -1613,6 +1629,23 @@ mod tests {
                 "mcp__gh-1__get_repo".to_string(),
                 "mcp__gh-1__gone".to_string()
             ]
+        );
+
+        // …and #501's other line, on the integration path: the name travels
+        // anyway, and the log is the only thing that says it will not resolve.
+        let logged = crate::native::writes::testlog::matching(
+            r#"mcp tool not hosted server="gh-1" tool="gone""#,
+        );
+        assert!(!logged.is_empty(), "an unhosted integration tool warns");
+        for line in &logged {
+            assert!(line.starts_with("WARN "), "a mismatch warns: {line:?}");
+        }
+        assert!(
+            crate::native::writes::testlog::matching(
+                r#"mcp tool not hosted server="gh-1" tool="get_repo""#
+            )
+            .is_empty(),
+            "a tool the server does host must not warn"
         );
     }
 

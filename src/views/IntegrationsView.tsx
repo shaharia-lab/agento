@@ -490,11 +490,26 @@ function ServiceEditor({
     <div>
       {provider.services.map((info) => {
         const svc = services[info.key] ?? { enabled: false, tools: [] };
-        // A disabled service exposes nothing whatever its stored list says, so
-        // the boxes read empty — otherwise a row saved as
-        // `{enabled: false, tools: [...]}` would render ticks for tools no agent
-        // can reach, and checking one more would silently restore the rest.
-        const chosen = svc.enabled ? (svc.tools ?? []) : [];
+        const stored = svc.tools ?? [];
+        // What this service actually exposes today, which is not the same as
+        // what it stores (#501). Two shapes have to be translated:
+        //
+        // - **disabled** exposes nothing whatever its list says, so the boxes
+        //   read empty — otherwise a row saved as
+        //   `{enabled: false, tools: [...]}` shows ticks for tools no agent can
+        //   reach, and checking one more silently restores the rest.
+        // - **enabled with no list** exposes *every* tool of the group, because
+        //   the backend reads an empty union as "host everything". Rendering
+        //   that as nothing ticked is the exact inverse of the truth, and it is
+        //   the shape `POST /api/integrations` and every pre-list row carry —
+        //   so it is what a user is most likely to be looking at. Showing it
+        //   ticked is also self-healing: unchecking one then stores the rest by
+        //   name, and the row stops being ambiguous.
+        const chosen = !svc.enabled
+          ? []
+          : stored.length
+            ? stored
+            : info.tools.map((t) => t.name);
         return (
           <div
             key={info.key}
